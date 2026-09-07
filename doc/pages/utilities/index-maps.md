@@ -14,6 +14,12 @@ All three are ordinary Fortran containers over plain integer arrays. Nothing her
 Parquet file, and `use parquet_index` never reaches the C++ bindings — see
 [Choosing a module](../operating/choosing-a-module.html) for what that does and does not buy you.
 
+Two things in the library are built on them, and use nothing else to answer a lookup: the table's
+[`%build_index`](../tables/table-mutate.html#looking-a-value-up-build_index), which wraps a map or
+a multimap over one column's keys with a staleness check, and the row filter's
+[`in`/`not_in` clause](../io/filter-sort-sample.html#membership-in-a-set-in-and-not_in), which
+holds a bound set in a map and probes each row group through `%get_many`.
+
 ## Stored values are index values, and 0 means "not found"
 
 **Every value a map stores is an integer >= 1, and every lookup answers 0 when the key is

@@ -47,7 +47,7 @@ which module each name lives in, for when you want that.
 
 | you write | its own module |
 |---|---|
-| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_table_col`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `PARQUET_ROW_INDEX`, `RES_EMPTY`/`RES_FULL` (and `RES_PARTIAL`, reserved and never returned today) | `parquet_tables` |
+| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_table_col`, `parquet_table_index`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `PARQUET_ROW_INDEX`, `RES_EMPTY`/`RES_FULL` (and `RES_PARTIAL`, reserved and never returned today) | `parquet_tables` |
 | the `PK_*` kind constants, `parquet_kind_name` | `parquet_columns` |
 | `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `parquet_io` (a facade over the internal `parquet_core`) |
 | `parquet_string_column` | `parquet_strings` |

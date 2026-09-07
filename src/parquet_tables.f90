@@ -66,6 +66,10 @@ module parquet_tables
     use parquet_list, only : parquet_list_column
     use parquet_map, only : parquet_map_column
     use parquet_struct, only : parquet_struct_column
+    ! The two lookup engines `parquet_table_index` wraps. Already in this module's footprint
+    ! through parquet_core, which imports pf_index_map for the filter's `in` leaf, so a namespace
+    ! import rather than a new dependency (tools/check_module_footprints.sh keeps that true).
+    use parquet_index, only : pf_index_map, pf_index_multimap
     use parquet_core, only : parquet_reader, parquet_writer, parquet_schema, &
         parquet_open_reader, parquet_close_reader, parquet_get_nrows, parquet_get_col_size, &
         parquet_get_column_names, parquet_get_column_type, parquet_column_exists, &
@@ -105,6 +109,7 @@ module parquet_tables
     public :: parquet_table
     public :: parquet_table_row
     public :: parquet_table_col
+    public :: parquet_table_index
     public :: parquet_slice
     public :: parquet_slice_range
     public :: parquet_slice_list
@@ -1106,6 +1111,9 @@ module parquet_tables
         procedure, private :: table_is_sorted_by_string !! %is_sorted_by specific, key string.
         !> Whether the rows are already in that order.
         generic :: is_sorted_by => table_is_sorted_by, table_is_sorted_by_string
+        !> Builds a lookup index over one column into a `parquet_table_index`: "which row holds
+        !! this key?" in a few nanoseconds, without reordering anything. A read; never detaches.
+        procedure :: build_index => table_build_index
         procedure, private :: table_delete_rows_i32   !! %delete_rows specific, int32 indices.
         procedure, private :: table_delete_rows_i64   !! %delete_rows specific, int64 indices.
         !> Removes the listed rows. A thin convenience over %filter_rows, and like it, detaching.
@@ -1547,6 +1555,126 @@ module parquet_tables
         procedure :: is_user_populated => col_is_user_populated !! Whether this column is claimed as holding the caller's values.
         ! NO `final` -- see the type's own doc-comment. This is a decision, not an omission.
     end type parquet_table_col
+    !
+    !> A lookup index over ONE column of a table -- "which row holds this key?" -- built by
+    !! `call t%build_index(name, ix)` and answered by `%find`, `%find_all`, `%find_many` and
+    !! `%count`. The table is NOT reordered: this is the sorted-table lookup of
+    !! doc/pages/tables/table-mutate.md without the sort, and it keeps the file attached.
+    !!
+    !! **A wrapper and nothing more.** Underneath is one of `parquet_index`'s own engines -- a
+    !! `pf_index_map` under `unique=.true.` (the default; a repeated key aborts at build, naming
+    !! it), a `pf_index_multimap` under `unique=.false.` -- holding the table's ROW NUMBERS
+    !! `1 .. nrows` as its values. The key is converted exactly as the filter's `in` leaf converts
+    !! it (parquet_core's key helpers, feature_risks.md Risk-211): an integer column as it is, a
+    !! real column by its normalised bit pattern with EVERY NaN one key and -0.0 equal to +0.0, a
+    !! date or time column by its raw storage, a timestamp column by its unit-free (seconds,
+    !! nanoseconds) pair. A NULL row is never indexed, so no key finds it and two null rows are
+    !! not a repeat. String and boolean columns are refused (string keys arrive with the map's own
+    !! string forms in a later release).
+    !!
+    !! **It goes stale LOUDLY.** The index stamps the table's `%generation()` when it is built and
+    !! re-checks it on EVERY query -- never a cached "still valid" flag (Risk-210) -- so after any
+    !! row-structural change (`%filter_rows`, `%sort_by`, `%delete_rows`, `%append`, ...) a query
+    !! aborts naming the table and both generations instead of answering in-range row numbers that
+    !! name the wrong rows; `%is_current()` is the non-aborting way to ask. A change that moves no
+    !! row (`%set`, `%fillna`, `%add_column`) leaves it usable. It points at the table's column
+    !! STORE, like the row and column handles, so the caller need not declare the table `target`;
+    !! like them it does not survive the table itself.
+    !!
+    !! Every query is lock-free and may run from any number of threads at once; `%find_many`
+    !! threads internally over a large key array and stands down inside a parallel region, exactly
+    !! as the engine's own bulk lookups do. A build inherits `parquet_set_index_threads` and the
+    !! optional `threads=`.
+    type :: parquet_table_index
+        private
+        type(parquet_table_cache), pointer :: cache => null() !! the table's column store.
+        integer(int64) :: gen = -1_int64          !! cache%generation when the index was built.
+        integer :: colkind = PK_NONE              !! the key column's PK_* kind.
+        logical :: uniq = .true.                  !! .true.: `map` is the engine; .false.: `mmap` is.
+        logical :: built = .false.                !! .true. once %build_index has filled it.
+        character(len=:), allocatable :: colname  !! the key column's name, for every message.
+        type(pf_index_map) :: map                 !! the engine under unique=.true.
+        type(pf_index_multimap) :: mmap           !! the engine under unique=.false.
+    contains
+
+        procedure, private :: tix_find_i32_i32 !! %find specific, int32 key, int32 row.
+        procedure, private :: tix_find_i32_i64 !! %find specific, int32 key, int64 row.
+        procedure, private :: tix_find_i64_i32 !! %find specific, int64 key, int32 row.
+        procedure, private :: tix_find_i64_i64 !! %find specific, int64 key, int64 row.
+        procedure, private :: tix_find_r32_i32 !! %find specific, real32 key, int32 row.
+        procedure, private :: tix_find_r32_i64 !! %find specific, real32 key, int64 row.
+        procedure, private :: tix_find_r64_i32 !! %find specific, real64 key, int32 row.
+        procedure, private :: tix_find_r64_i64 !! %find specific, real64 key, int64 row.
+        procedure, private :: tix_find_date_i32 !! %find specific, parquet_date key, int32 row.
+        procedure, private :: tix_find_date_i64 !! %find specific, parquet_date key, int64 row.
+        procedure, private :: tix_find_time_i32 !! %find specific, parquet_time key, int32 row.
+        procedure, private :: tix_find_time_i64 !! %find specific, parquet_time key, int64 row.
+        procedure, private :: tix_find_ts_i32 !! %find specific, parquet_timestamp key, int32 row.
+        procedure, private :: tix_find_ts_i64 !! %find specific, parquet_timestamp key, int64 row.
+        !> The FIRST table row holding `key` -- the lowest index, `pf_match`'s rule -- or 0
+        !! when no row does. The key's kind must match the column's family (an integer key on
+        !! an integer column, whichever width; a real key on a real column; a temporal element
+        !! on a column of that type), or the call aborts naming both.
+        generic :: find => tix_find_i32_i32, tix_find_i32_i64, tix_find_i64_i32, tix_find_i64_i64, tix_find_r32_i32, &
+            tix_find_r32_i64, tix_find_r64_i32, tix_find_r64_i64, tix_find_date_i32, tix_find_date_i64, tix_find_time_i32, &
+            tix_find_time_i64, tix_find_ts_i32, tix_find_ts_i64
+        procedure, private :: tix_all_i32_i32 !! %find_all specific, int32 key, int32 rows.
+        procedure, private :: tix_all_i32_i64 !! %find_all specific, int32 key, int64 rows.
+        procedure, private :: tix_all_i64_i32 !! %find_all specific, int64 key, int32 rows.
+        procedure, private :: tix_all_i64_i64 !! %find_all specific, int64 key, int64 rows.
+        procedure, private :: tix_all_r32_i32 !! %find_all specific, real32 key, int32 rows.
+        procedure, private :: tix_all_r32_i64 !! %find_all specific, real32 key, int64 rows.
+        procedure, private :: tix_all_r64_i32 !! %find_all specific, real64 key, int32 rows.
+        procedure, private :: tix_all_r64_i64 !! %find_all specific, real64 key, int64 rows.
+        procedure, private :: tix_all_date_i32 !! %find_all specific, parquet_date key, int32 rows.
+        procedure, private :: tix_all_date_i64 !! %find_all specific, parquet_date key, int64 rows.
+        procedure, private :: tix_all_time_i32 !! %find_all specific, parquet_time key, int32 rows.
+        procedure, private :: tix_all_time_i64 !! %find_all specific, parquet_time key, int64 rows.
+        procedure, private :: tix_all_ts_i32 !! %find_all specific, parquet_timestamp key, int32 rows.
+        procedure, private :: tix_all_ts_i64 !! %find_all specific, parquet_timestamp key, int64 rows.
+        !> EVERY table row holding `key`, ascending, as a freshly allocated array -- zero-length
+        !! when no row does. On a `unique=.true.` index that is one row or none.
+        generic :: find_all => tix_all_i32_i32, tix_all_i32_i64, tix_all_i64_i32, tix_all_i64_i64, tix_all_r32_i32, &
+            tix_all_r32_i64, tix_all_r64_i32, tix_all_r64_i64, tix_all_date_i32, tix_all_date_i64, tix_all_time_i32, &
+            tix_all_time_i64, tix_all_ts_i32, tix_all_ts_i64
+        procedure, private :: tix_many_i32_i32 !! %find_many specific, int32 keys, int32 rows.
+        procedure, private :: tix_many_i32_i64 !! %find_many specific, int32 keys, int64 rows.
+        procedure, private :: tix_many_i64_i32 !! %find_many specific, int64 keys, int32 rows.
+        procedure, private :: tix_many_i64_i64 !! %find_many specific, int64 keys, int64 rows.
+        procedure, private :: tix_many_r32_i32 !! %find_many specific, real32 keys, int32 rows.
+        procedure, private :: tix_many_r32_i64 !! %find_many specific, real32 keys, int64 rows.
+        procedure, private :: tix_many_r64_i32 !! %find_many specific, real64 keys, int32 rows.
+        procedure, private :: tix_many_r64_i64 !! %find_many specific, real64 keys, int64 rows.
+        procedure, private :: tix_many_date_i32 !! %find_many specific, parquet_date keys, int32 rows.
+        procedure, private :: tix_many_date_i64 !! %find_many specific, parquet_date keys, int64 rows.
+        procedure, private :: tix_many_time_i32 !! %find_many specific, parquet_time keys, int32 rows.
+        procedure, private :: tix_many_time_i64 !! %find_many specific, parquet_time keys, int64 rows.
+        procedure, private :: tix_many_ts_i32 !! %find_many specific, parquet_timestamp keys, int32 rows.
+        procedure, private :: tix_many_ts_i64 !! %find_many specific, parquet_timestamp keys, int64 rows.
+        !> `%find` for a whole array of keys in one call: one row per key, 0 where absent, into
+        !! an array the caller sized. Threads internally; `n_found=` counts the non-zero answers.
+        generic :: find_many => tix_many_i32_i32, tix_many_i32_i64, tix_many_i64_i32, tix_many_i64_i64, tix_many_r32_i32, &
+            tix_many_r32_i64, tix_many_r64_i32, tix_many_r64_i64, tix_many_date_i32, tix_many_date_i64, tix_many_time_i32, &
+            tix_many_time_i64, tix_many_ts_i32, tix_many_ts_i64
+        procedure, private :: tix_count_i32 !! %count specific, int32 key.
+        procedure, private :: tix_count_i64 !! %count specific, int64 key.
+        procedure, private :: tix_count_r32 !! %count specific, real32 key.
+        procedure, private :: tix_count_r64 !! %count specific, real64 key.
+        procedure, private :: tix_count_date !! %count specific, parquet_date key.
+        procedure, private :: tix_count_time !! %count specific, parquet_time key.
+        procedure, private :: tix_count_ts !! %count specific, parquet_timestamp key.
+        !> How many table rows hold `key`: 0 or 1 on a unique index, any count on a multimap.
+        generic :: count => tix_count_i32, tix_count_i64, tix_count_r32, tix_count_r64, tix_count_date, tix_count_time, &
+            tix_count_ts
+        procedure :: is_current => tix_is_current !! Whether the index is built AND the table has not changed since.
+        procedure :: is_unique => tix_is_unique   !! Whether this is a unique index (a map) rather than a multimap.
+        procedure :: nkeys => tix_nkeys           !! How many DISTINCT keys the index holds.
+        procedure :: kind => tix_kind             !! The key column's PK_* kind.
+        procedure :: name => tix_name             !! The key column's name.
+        procedure :: clear => tix_clear           !! Releases the engine and detaches from the table.
+        ! NO `final` -- the same decision as parquet_table_row and parquet_table_col, for the
+        ! same reasons; the two engines free their own arrays at scope exit.
+    end type parquet_table_index
     !
     ! ---- Lifecycle (parquet_tables_lifecycle) ----
     interface
@@ -8611,6 +8739,385 @@ module parquet_tables
         end subroutine table_lookup_sort_key
     end interface
     !
+    ! ---- The lookup index (parquet_tables_index -- HAND-WRITTEN, not generated) ----
+    interface
+        !> Builds a lookup index over column `name` into `ix`: "which row holds this key?",
+        !! answered afterwards by `ix%find`, `%find_all`, `%find_many` and `%count`. See
+        !! `parquet_table_index` for the whole contract; in one paragraph:
+        !!
+        !! The table is not reordered and stays attached; this is a READ, and it materializes
+        !! `name` if the table has not read it yet, as every accessor does. `unique=.true.` (the
+        !! default) builds a `pf_index_map`, whose own duplicate refusal aborts naming a key that
+        !! repeats; `unique=.false.` builds a `pf_index_multimap` and `%find_all` then lists every
+        !! row of a key. The stored values are the table's row numbers. A null row is skipped. An
+        !! integer, real, date, time or timestamp column may be indexed; a string, boolean, vector
+        !! or container column is refused naming the column. `ix` is `intent(out)`, so building
+        !! into an object that already holds an index replaces it. `threads=` reaches the engine's
+        !! build exactly as `pf_index_map%build`'s does; absent means automatic.
+        module subroutine table_build_index(self, name, ix, unique, threads)
+            class(parquet_table), intent(in) :: self       !! the table.
+            character(len=*), intent(in) :: name           !! the key column.
+            type(parquet_table_index), intent(out) :: ix   !! receives the index.
+            logical, intent(in), optional :: unique        !! .false. allows a repeated key; default .true.
+            integer, intent(in), optional :: threads       !! threads the build may use; absent = automatic.
+        end subroutine table_build_index
+        !> %find specific, int32 key, int32 row; see the generic.
+        module subroutine tix_find_i32_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_i32_i32
+        !> %find specific, int32 key, int64 row; see the generic.
+        module subroutine tix_find_i32_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_i32_i64
+        !> %find specific, int64 key, int32 row; see the generic.
+        module subroutine tix_find_i64_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_i64_i32
+        !> %find specific, int64 key, int64 row; see the generic.
+        module subroutine tix_find_i64_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_i64_i64
+        !> %find specific, real32 key, int32 row; see the generic.
+        module subroutine tix_find_r32_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_r32_i32
+        !> %find specific, real32 key, int64 row; see the generic.
+        module subroutine tix_find_r32_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_r32_i64
+        !> %find specific, real64 key, int32 row; see the generic.
+        module subroutine tix_find_r64_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_r64_i32
+        !> %find specific, real64 key, int64 row; see the generic.
+        module subroutine tix_find_r64_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_r64_i64
+        !> %find specific, parquet_date key, int32 row; see the generic.
+        module subroutine tix_find_date_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_date_i32
+        !> %find specific, parquet_date key, int64 row; see the generic.
+        module subroutine tix_find_date_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_date_i64
+        !> %find specific, parquet_time key, int32 row; see the generic.
+        module subroutine tix_find_time_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_time_i32
+        !> %find specific, parquet_time key, int64 row; see the generic.
+        module subroutine tix_find_time_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_time_i64
+        !> %find specific, parquet_timestamp key, int32 row; see the generic.
+        module subroutine tix_find_ts_i32(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: key !! the key to look up.
+            integer(int32), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_ts_i32
+        !> %find specific, parquet_timestamp key, int64 row; see the generic.
+        module subroutine tix_find_ts_i64(self, key, row)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: row !! the first (lowest) table row holding `key`, or 0.
+        end subroutine tix_find_ts_i64
+        !> %find_all specific, int32 key, int32 rows; see the generic.
+        module subroutine tix_all_i32_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_i32_i32
+        !> %find_all specific, int32 key, int64 rows; see the generic.
+        module subroutine tix_all_i32_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_i32_i64
+        !> %find_all specific, int64 key, int32 rows; see the generic.
+        module subroutine tix_all_i64_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_i64_i32
+        !> %find_all specific, int64 key, int64 rows; see the generic.
+        module subroutine tix_all_i64_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_i64_i64
+        !> %find_all specific, real32 key, int32 rows; see the generic.
+        module subroutine tix_all_r32_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_r32_i32
+        !> %find_all specific, real32 key, int64 rows; see the generic.
+        module subroutine tix_all_r32_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_r32_i64
+        !> %find_all specific, real64 key, int32 rows; see the generic.
+        module subroutine tix_all_r64_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_r64_i32
+        !> %find_all specific, real64 key, int64 rows; see the generic.
+        module subroutine tix_all_r64_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_r64_i64
+        !> %find_all specific, parquet_date key, int32 rows; see the generic.
+        module subroutine tix_all_date_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_date_i32
+        !> %find_all specific, parquet_date key, int64 rows; see the generic.
+        module subroutine tix_all_date_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_date_i64
+        !> %find_all specific, parquet_time key, int32 rows; see the generic.
+        module subroutine tix_all_time_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_time_i32
+        !> %find_all specific, parquet_time key, int64 rows; see the generic.
+        module subroutine tix_all_time_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_time_i64
+        !> %find_all specific, parquet_timestamp key, int32 rows; see the generic.
+        module subroutine tix_all_ts_i32(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_ts_i32
+        !> %find_all specific, parquet_timestamp key, int64 rows; see the generic.
+        module subroutine tix_all_ts_i64(self, key, rows)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
+        end subroutine tix_all_ts_i64
+        !> %find_many specific, int32 keys, int32 rows; see the generic.
+        module subroutine tix_many_i32_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_i32_i32
+        !> %find_many specific, int32 keys, int64 rows; see the generic.
+        module subroutine tix_many_i32_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_i32_i64
+        !> %find_many specific, int64 keys, int32 rows; see the generic.
+        module subroutine tix_many_i64_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_i64_i32
+        !> %find_many specific, int64 keys, int64 rows; see the generic.
+        module subroutine tix_many_i64_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_i64_i64
+        !> %find_many specific, real32 keys, int32 rows; see the generic.
+        module subroutine tix_many_r32_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_r32_i32
+        !> %find_many specific, real32 keys, int64 rows; see the generic.
+        module subroutine tix_many_r32_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_r32_i64
+        !> %find_many specific, real64 keys, int32 rows; see the generic.
+        module subroutine tix_many_r64_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_r64_i32
+        !> %find_many specific, real64 keys, int64 rows; see the generic.
+        module subroutine tix_many_r64_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_r64_i64
+        !> %find_many specific, parquet_date keys, int32 rows; see the generic.
+        module subroutine tix_many_date_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_date_i32
+        !> %find_many specific, parquet_date keys, int64 rows; see the generic.
+        module subroutine tix_many_date_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_date_i64
+        !> %find_many specific, parquet_time keys, int32 rows; see the generic.
+        module subroutine tix_many_time_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_time_i32
+        !> %find_many specific, parquet_time keys, int64 rows; see the generic.
+        module subroutine tix_many_time_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_time_i64
+        !> %find_many specific, parquet_timestamp keys, int32 rows; see the generic.
+        module subroutine tix_many_ts_i32(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_ts_i32
+        !> %find_many specific, parquet_timestamp keys, int64 rows; see the generic.
+        module subroutine tix_many_ts_i64(self, keys, rows, threads, n_found)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
+            integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
+            integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).
+        end subroutine tix_many_ts_i64
+        !> %count specific, int32 key; see the generic.
+        module function tix_count_i32(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int32), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_i32
+        !> %count specific, int64 key; see the generic.
+        module function tix_count_i64(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_i64
+        !> %count specific, real32 key; see the generic.
+        module function tix_count_r32(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real32), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_r32
+        !> %count specific, real64 key; see the generic.
+        module function tix_count_r64(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            real(real64), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_r64
+        !> %count specific, parquet_date key; see the generic.
+        module function tix_count_date(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_date), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_date
+        !> %count specific, parquet_time key; see the generic.
+        module function tix_count_time(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_time), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_time
+        !> %count specific, parquet_timestamp key; see the generic.
+        module function tix_count_ts(self, key) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            type(parquet_timestamp), intent(in) :: key !! the key to count.
+            integer(int64) :: n !! table rows holding `key`; 0 when none does.
+        end function tix_count_ts
+        !> Whether the index is built AND the table has not changed structurally since -- one
+        !! predicate, because a caller can do nothing useful with an index that is one and not
+        !! the other. The non-aborting twin of the check every query runs.
+        module function tix_is_current(self) result(ok)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            logical :: ok                                  !! .true. when every query would answer.
+        end function tix_is_current
+        !> Whether this index was built with `unique=.true.` (a map) rather than as a multimap.
+        module function tix_is_unique(self) result(u)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            logical :: u                                   !! .true. for a unique index.
+        end function tix_is_unique
+        !> How many DISTINCT keys the index holds -- the indexed rows on a unique index, the
+        !! groups on a multimap. Null rows are not counted, since they were never indexed.
+        module function tix_nkeys(self) result(n)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer(int64) :: n                            !! distinct keys; 0 before a build.
+        end function tix_nkeys
+        !> The key column's PK_* kind, as it was when the index was built; PK_NONE before a build.
+        module function tix_kind(self) result(k)
+            class(parquet_table_index), intent(in) :: self !! the index.
+            integer :: k                                   !! the PK_* constant.
+        end function tix_kind
+        !> The key column's name; "" before a build.
+        module subroutine tix_name(self, nm)
+            class(parquet_table_index), intent(in) :: self   !! the index.
+            character(len=:), allocatable, intent(out) :: nm !! receives the name.
+        end subroutine tix_name
+        !> Releases the engine's arrays and detaches from the table, so that `%is_current()`
+        !! answers .false. and every query aborts as on a never-built index. A scope exit does
+        !! the same without being asked; this is for an index a long-lived caller wants gone.
+        module subroutine tix_clear(self)
+            class(parquet_table_index), intent(inout) :: self !! the index.
+        end subroutine tix_clear
+    end interface
     ! ---- The join (parquet_tables_join -- HAND-WRITTEN, not generated) ----
     interface
         !> Matches `other`'s rows against this table's on one or more key columns, keeps the rows

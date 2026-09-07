@@ -97,7 +97,7 @@ RESERVED = {
     "add_column_i64v", "add_column_listcol", "add_column_mapcol", "add_column_strcol",
     "add_column_structcol", "add_column_time", "add_column_timev", "add_column_ts",
     "add_column_tsv", "append", "append_null_rows", "argsort_by", "argsort_by_values",
-    "argsort_partial", "assign_guard", "bfill", "bind_predefined", "cast", "clear_null",
+    "argsort_partial", "assign_guard", "bfill", "bind_predefined", "build_index", "cast", "clear_null",
     "clear_null_e32", "clear_null_e64", "clear_null_i32", "clear_null_i64", "clone", "clone_extra",
     "clone_structure", "col", "col_ptr_bool", "col_ptr_boolv", "col_ptr_date", "col_ptr_datev",
     "col_ptr_f32", "col_ptr_f32v", "col_ptr_f64", "col_ptr_f64v", "col_ptr_i32", "col_ptr_i32v",

@@ -558,6 +558,40 @@ contains
         end if
     end procedure parquet_filter_real_key
 
+    !> The canonicalising twin of parquet_filter_real_key, for a table index and the join; see the
+    !> interface in parquet_core.f90 for why the two split on NaN and nowhere else.
+    !>
+    !> The one NaN key is the positive quiet NaN with an empty payload, written as a constant
+    !> rather than as `transfer(ieee_value(...))` so that it is the same bit pattern on every
+    !> compiler and never depends on how a NaN was produced. Detected with ieee_is_nan rather
+    !> than `v /= v`, which -ffast-math would fold away (CLAUDE.md).
+    module procedure parquet_index_real_key
+        integer(int64), parameter :: canonical_nan = int(z'7FF8000000000000', int64)
+        if (ieee_is_nan(v)) then
+            key = canonical_nan
+        else
+            key = parquet_filter_real_key(v)
+        end if
+    end procedure parquet_index_real_key
+
+    !> A date's key is its raw day count, widened; see the interface in parquet_core.f90.
+    module procedure parquet_date_key
+        key = int(d%raw(), int64)
+    end procedure parquet_date_key
+
+    !> A time's key is its raw nanoseconds since midnight; see the interface in parquet_core.f90.
+    module procedure parquet_time_key
+        key = t%raw()
+    end procedure parquet_time_key
+
+    !> A timestamp's key is its raw (seconds, nanoseconds) pair, both widened to int64 so that
+    !> the two components share one array; see the interface in parquet_core.f90.
+    module procedure parquet_timestamp_key
+        integer(int32) :: ns
+        call ts%get_raw(seconds, ns)
+        nanoseconds = int(ns, int64)
+    end procedure parquet_timestamp_key
+
     !> Prepares every set-valued (`in`/`not_in`) leaf of an already-parsed filter for the boundary:
     !> marks which leaves are pre-evaluated, and fills the packed verdict and screen-flag arrays
     !> the C++ stack machine and screen read in place of calling eval_filter_clause.
@@ -829,7 +863,11 @@ contains
         ! What the empty set then means falls out of the ordinary rules -- every non-null row is
         ! false under `in` and true under `not_in`, and every row group prunes -- which is exactly
         ! the behaviour test_in_empty_set and test_empty_set_prunes_everything pin.
-        if (fam /= FSET_STRING) then
+        if (fam == FSET_TIMESTAMP) then
+            ! The pairs were stored column-major by parquet_filter_store_pair_keys, so the reshape
+            ! recovers exactly the `(n, 2)` tuples %get_or_add_many deduplicated at %bind.
+            call keys%build(reshape(filter%set_keys(lo:hi), [(hi - lo + 1_int64) / 2_int64, 2_int64]))
+        else if (fam /= FSET_STRING) then
             call keys%build(filter%set_keys(lo:hi))
         else
             ! The string set's own column, built ONCE for the whole leaf rather than per row group.
@@ -882,6 +920,17 @@ contains
             errmsg = "the list in the filter clause on column '" // trim(column) // &
                 "' cannot be compared against that column, whose values are read as '" // &
                 trim(col_type) // "'"
+            return
+        end if
+        ! A temporal set is bound from ELEMENTS (%bind over a parquet_date/parquet_time/
+        ! parquet_timestamp array), not written out: a literal member would need the column's
+        ! stored unit to convert, which is the text path's job and not this list's. Refused with
+        ! the route named rather than half-supported.
+        if (fam == FSET_DATE .or. fam == FSET_TIME .or. fam == FSET_TIMESTAMP) then
+            errmsg = "the list in the filter clause on column '" // trim(column) // &
+                "' is not supported on a " // trim(col_type) // " column -- bind the members as " // &
+                "an array of parquet_" // trim(col_type) // " elements with %bind and write '" // &
+                trim(column) // " in @name' instead"
             return
         end if
         call keys%init()
@@ -1204,11 +1253,13 @@ contains
     !> same reasoning the text path applies to a mistyped literal.
     !>
     !> An integer set is accepted against any integer column (widened to int64); a real set against
-    !> the families the text path also compares as doubles; a string set against a string column. A
-    !> boolean column is refused because a boolean set is `==` with extra steps; temporal columns
-    !> arrive at P8a with the temporal index key; a vector, list, map or struct column is refused
-    !> for the reason every filter column is -- there is no single value per row to compare, which
-    !> parquet_reader_set_filter also refuses from the schema.
+    !> the families the text path also compares as doubles; a string set against a string column; a
+    !> date, time or timestamp set against a column of exactly that temporal type (a date set
+    !> against a timestamp column is refused, as a too-imprecise literal would not be -- the set's
+    !> members are elements, not text, and an element of the wrong type has no instant to convert).
+    !> A boolean column is refused because a boolean set is `==` with extra steps; a vector, list,
+    !> map or struct column is refused for the reason every filter column is -- there is no single
+    !> value per row to compare, which parquet_reader_set_filter also refuses from the schema.
     subroutine parquet_check_set_column_type(column, col_type, family, errmsg)
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for that column.
@@ -1226,15 +1277,9 @@ contains
             "against that column, whose values are read as '" // trim(col_type) // "'"
     end subroutine parquet_check_set_column_type
 
-    !> The one FSET_* family a column of type `col_type` can hold a set clause on, or FSET_NONE.
-    !>
-    !> The SINGLE definition of which column types a set clause accepts, read from both directions:
-    !> a bound set is checked against it, and a literal list takes its element family FROM it. Two
-    !> copies of this rule would let `x in @s` and `x in (...)` accept different columns, and the
-    !> difference would show up as one of them refusing a column the other filters happily.
-    pure subroutine parquet_set_family_for_column(col_type, family)
-        character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for the column.
-        integer(int8), intent(out) :: family !! FSET_INT, FSET_REAL, FSET_STRING, or FSET_NONE.
+    !> The one FSET_* family a column of type `col_type` can hold a set clause on, or FSET_NONE;
+    !> see the interface in parquet_core.f90 for why this is the SINGLE definition of the rule.
+    module procedure parquet_set_family_for_column
         select case (trim(col_type))
         case ("int32", "int64")
             family = FSET_INT
@@ -1242,14 +1287,20 @@ contains
             family = FSET_REAL
         case ("string")
             family = FSET_STRING
+        case ("date")
+            family = FSET_DATE
+        case ("time")
+            family = FSET_TIME
+        case ("timestamp")
+            family = FSET_TIMESTAMP
         case default
-            ! Boolean is refused because a boolean set is `==` with extra steps; a temporal column
-            ! arrives at P8a with the temporal index key; a vector, list, map or struct column is
-            ! refused for the reason every filter column is -- there is no single value per row to
-            ! compare, which parquet_reader_set_filter also refuses from the schema.
+            ! Boolean is refused because a boolean set is `==` with extra steps; a vector, list,
+            ! map or struct column is refused for the reason every filter column is -- there is no
+            ! single value per row to compare, which parquet_reader_set_filter also refuses from
+            ! the schema.
             family = FSET_NONE
         end select
-    end subroutine parquet_set_family_for_column
+    end procedure parquet_set_family_for_column
 
     !> The word an error message uses for a bound set's element family. A subroutine for the same
     !> reason parquet_lower_op is.
@@ -1261,6 +1312,12 @@ contains
             word = "integer"
         case (FSET_REAL)
             word = "floating-point"
+        case (FSET_DATE)
+            word = "date"
+        case (FSET_TIME)
+            word = "time"
+        case (FSET_TIMESTAMP)
+            word = "timestamp"
         case default
             word = "string"
         end select
@@ -1285,9 +1342,12 @@ contains
         type(parquet_string_column), intent(in) :: str_set !! the string set's members; empty for another family.
         logical, intent(in) :: negate !! .true. for a `not_in` leaf: true and false are exchanged.
         integer(int8), intent(out) :: out(:) !! this row group's Kleene verdicts, one per row.
-        integer(int64), allocatable :: ivals(:), found(:)
+        integer(int64), allocatable :: ivals(:), found(:), pairs(:, :)
         real(real64), allocatable :: rvals(:)
         type(parquet_string_column) :: svals
+        type(parquet_date), allocatable :: dvals(:)
+        type(parquet_time), allocatable :: tvals(:)
+        type(parquet_timestamp), allocatable :: tsvals(:)
         logical, allocatable :: valid(:), hit(:)
         integer(int64) :: i
 
@@ -1303,6 +1363,37 @@ contains
             allocate(rvals(rows), valid(rows), found(rows))
             call parquet_read_column_chunk(rdr, column, row_group, rvals, null_value=0.0_real64, is_valid=valid)
             call keys%get_many(parquet_filter_real_key(rvals), found)
+            do i = 1_int64, rows
+                out(i) = parquet_set_verdict(valid(i), found(i) > 0_int64, negate)
+            end do
+        case (FSET_DATE)
+            ! A temporal element carries its own null, so the mask is read off the elements rather
+            ! than through an is_valid= argument; a null keys as 0 and is masked before the lookup,
+            ! so it can never meet a genuine 1970-01-01 in the set.
+            allocate(dvals(rows), valid(rows), found(rows))
+            call parquet_read_column_chunk(rdr, column, row_group, dvals)
+            valid = .not. dvals%is_null()
+            call keys%get_many(parquet_date_key(dvals), found, valid=valid)
+            do i = 1_int64, rows
+                out(i) = parquet_set_verdict(valid(i), found(i) > 0_int64, negate)
+            end do
+        case (FSET_TIME)
+            allocate(tvals(rows), valid(rows), found(rows))
+            call parquet_read_column_chunk(rdr, column, row_group, tvals)
+            valid = .not. tvals%is_null()
+            call keys%get_many(parquet_time_key(tvals), found, valid=valid)
+            do i = 1_int64, rows
+                out(i) = parquet_set_verdict(valid(i), found(i) > 0_int64, negate)
+            end do
+        case (FSET_TIMESTAMP)
+            ! The (seconds, nanoseconds) pair is unit-free, so a set bound from elements at one
+            ! unit matches this column at another by instant -- S7's F4 property, held here by
+            ! the element normalising the unit away before the key is ever taken.
+            allocate(tsvals(rows), valid(rows), found(rows), pairs(rows, 2))
+            call parquet_read_column_chunk(rdr, column, row_group, tsvals)
+            valid = .not. tsvals%is_null()
+            call parquet_timestamp_key(tsvals, pairs(:, 1), pairs(:, 2))
+            call keys%get_many(pairs, found, valid=valid)
             do i = 1_int64, rows
                 out(i) = parquet_set_verdict(valid(i), found(i) > 0_int64, negate)
             end do

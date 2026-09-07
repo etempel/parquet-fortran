@@ -74,6 +74,15 @@ module parquet_io
     private :: parquet_eval_filter_leaf
     private :: parquet_eval_filter_program
     private :: filter_leaf_name_len, filter_leaf_op_len, filter_leaf_value_len
+    ! And the KEY CONVERSION, public from parquet_core for parquet_tables' %build_index: a table
+    ! index must key a real or temporal column exactly as the filter's `in` leaf does, or the two
+    ! would disagree about a row (feature_risks.md Risk-211), so the seven helpers live in
+    ! parquet_core once and the table layer imports them. Plumbing again: a user keys nothing by
+    ! hand, and hiding them here hides them from `use parquet` too.
+    private :: parquet_filter_real_key, parquet_index_real_key
+    private :: parquet_date_key, parquet_time_key, parquet_timestamp_key
+    private :: parquet_set_family_for_column, parquet_filter_column_tokens
+    private :: FSET_NONE, FSET_INT, FSET_REAL, FSET_STRING, FSET_DATE, FSET_TIME, FSET_TIMESTAMP
     ! parquet_settings has to make these public so the write path (a submodule of parquet_core, a
     ! different module) can resolve a compression token, and so every module that emits can reach
     ! the output channels. Same case again: public for want of package scope, hidden here.

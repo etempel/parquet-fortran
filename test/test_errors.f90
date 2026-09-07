@@ -2317,7 +2317,41 @@ contains
             new_unittest("a bounded qc violation aborts at first touch, not at open", &
                 test_bounded_qc_hard_at_first_touch), &
             new_unittest("a bounded soft qc violation warns and returns every row", &
-                test_bounded_qc_soft_warns) &
+                test_bounded_qc_soft_warns), &
+            new_unittest("build_index on a string column aborts", &
+                test_table_index_string_column_aborts), &
+            new_unittest("build_index on a boolean column aborts", &
+                test_table_index_bool_column_aborts), &
+            new_unittest("build_index on a vector column aborts", &
+                test_table_index_vector_column_aborts), &
+            new_unittest("build_index on a repeated key under unique=.true. aborts", &
+                test_table_index_duplicate_unique_aborts), &
+            new_unittest("build_index on a missing column aborts", &
+                test_table_index_missing_column_aborts), &
+            new_unittest("find on a stale index aborts", &
+                test_table_index_stale_find_aborts), &
+            new_unittest("find_all on a stale index aborts", &
+                test_table_index_stale_find_all_aborts), &
+            new_unittest("find_many on a stale index aborts", &
+                test_table_index_stale_find_many_aborts), &
+            new_unittest("count on a stale index aborts", &
+                test_table_index_stale_count_aborts), &
+            new_unittest("a query on a never-built index aborts", &
+                test_table_index_never_built_aborts), &
+            new_unittest("a real key on an integer index aborts", &
+                test_table_index_kind_mismatch_aborts), &
+            new_unittest("a timestamp key on a date index aborts", &
+                test_table_index_kind_mismatch_temporal_aborts), &
+            new_unittest("find_many with too few answer slots aborts", &
+                test_table_index_find_many_length_aborts), &
+            new_unittest("threads=0 on build_index aborts", &
+                test_table_index_threads_zero_aborts), &
+            new_unittest("every legal build_index and parquet_table_index path completes", &
+                test_table_index_control_completes), &
+            new_unittest("a date set against a timestamp column aborts", &
+                test_filter_temporal_set_mismatch_aborts), &
+            new_unittest("a literal list on a temporal column aborts", &
+                test_filter_temporal_literal_list_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
@@ -14252,5 +14286,146 @@ contains
             failure_message="the parquet_toml control scenario was expected to exit cleanly", &
             required_stderr="every legal parquet_toml path completed")
     end subroutine test_toml_control_completes
+
+    ! ---- %build_index and parquet_table_index ---------------------------------------------------
+    !
+    !> See `scenario_table_index_string_column` (test/error_scenarios.f90), which also says what
+    !! to assert once string keys ship and this refusal lifts.
+    subroutine test_table_index_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_string_column", expect_abort=.true., &
+            failure_message="build_index over a string column was expected to abort", &
+            required_stderr="string keys are not supported by the lookup index in this version")
+    end subroutine test_table_index_string_column_aborts
+    !
+    !> See `scenario_table_index_bool_column` (test/error_scenarios.f90).
+    subroutine test_table_index_bool_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_bool_column", expect_abort=.true., &
+            failure_message="build_index over a boolean column was expected to abort", &
+            required_stderr="is a boolean column, which cannot be indexed")
+    end subroutine test_table_index_bool_column_aborts
+    !
+    !> See `scenario_table_index_vector_column` (test/error_scenarios.f90).
+    subroutine test_table_index_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_vector_column", expect_abort=.true., &
+            failure_message="build_index over a vector column was expected to abort", &
+            required_stderr="is a vector column; an index needs one value per row")
+    end subroutine test_table_index_vector_column_aborts
+    !
+    !> See `scenario_table_index_duplicate_unique` (test/error_scenarios.f90): the engine's own
+    !! refusal, naming the key.
+    subroutine test_table_index_duplicate_unique_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_duplicate_unique", expect_abort=.true., &
+            failure_message="a repeated key under unique=.true. was expected to abort", &
+            required_stderr="duplicate key 7")
+    end subroutine test_table_index_duplicate_unique_aborts
+    !
+    !> See `scenario_table_index_missing_column` (test/error_scenarios.f90).
+    subroutine test_table_index_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_missing_column", expect_abort=.true., &
+            failure_message="build_index over a missing column was expected to abort", &
+            required_stderr="build_index: no column of this name")
+    end subroutine test_table_index_missing_column_aborts
+    !
+    !> See `scenario_table_index_stale_find` (test/error_scenarios.f90): the generation check on
+    !! every query (feature_risks.md Risk-210), one scenario per query family.
+    subroutine test_table_index_stale_find_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_stale_find", expect_abort=.true., &
+            failure_message="find on a stale index was expected to abort", &
+            required_stderr="parquet_table_index: find: this table has changed structurally since the index was built")
+    end subroutine test_table_index_stale_find_aborts
+    !
+    !> See `scenario_table_index_stale_find_all` (test/error_scenarios.f90).
+    subroutine test_table_index_stale_find_all_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_stale_find_all", expect_abort=.true., &
+            failure_message="find_all on a stale index was expected to abort", &
+            required_stderr="parquet_table_index: find_all: this table has changed structurally")
+    end subroutine test_table_index_stale_find_all_aborts
+    !
+    !> See `scenario_table_index_stale_find_many` (test/error_scenarios.f90).
+    subroutine test_table_index_stale_find_many_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_stale_find_many", expect_abort=.true., &
+            failure_message="find_many on a stale index was expected to abort", &
+            required_stderr="parquet_table_index: find_many: this table has changed structurally")
+    end subroutine test_table_index_stale_find_many_aborts
+    !
+    !> See `scenario_table_index_stale_count` (test/error_scenarios.f90).
+    subroutine test_table_index_stale_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_stale_count", expect_abort=.true., &
+            failure_message="count on a stale index was expected to abort", &
+            required_stderr="parquet_table_index: count: this table has changed structurally")
+    end subroutine test_table_index_stale_count_aborts
+    !
+    !> See `scenario_table_index_never_built` (test/error_scenarios.f90).
+    subroutine test_table_index_never_built_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_never_built", expect_abort=.true., &
+            failure_message="a query on a never-built index was expected to abort", &
+            required_stderr="no index has been built into this object")
+    end subroutine test_table_index_never_built_aborts
+    !
+    !> See `scenario_table_index_kind_mismatch` (test/error_scenarios.f90).
+    subroutine test_table_index_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_kind_mismatch", expect_abort=.true., &
+            failure_message="a real key on an integer index was expected to abort", &
+            required_stderr="this index is over int32 column 'id', and was asked for a real key")
+    end subroutine test_table_index_kind_mismatch_aborts
+    !
+    !> See `scenario_table_index_kind_mismatch_temporal` (test/error_scenarios.f90).
+    subroutine test_table_index_kind_mismatch_temporal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_kind_mismatch_temporal", expect_abort=.true., &
+            failure_message="a timestamp key on a date index was expected to abort", &
+            required_stderr="this index is over date column 'd', and was asked for a parquet_timestamp key")
+    end subroutine test_table_index_kind_mismatch_temporal_aborts
+    !
+    !> See `scenario_table_index_find_many_length` (test/error_scenarios.f90).
+    subroutine test_table_index_find_many_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_find_many_length", expect_abort=.true., &
+            failure_message="find_many with too few answer slots was expected to abort", &
+            required_stderr="find_many: rows has 2 entries but keys has 3")
+    end subroutine test_table_index_find_many_length_aborts
+    !
+    !> See `scenario_table_index_threads_zero` (test/error_scenarios.f90): the engine's own guard.
+    subroutine test_table_index_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_threads_zero", expect_abort=.true., &
+            failure_message="threads=0 on build_index was expected to abort", &
+            required_stderr="threads= must be at least 1")
+    end subroutine test_table_index_threads_zero_aborts
+    !
+    !> THE NEGATIVE CONTROL for every table-index guard above: every legal path completes.
+    subroutine test_table_index_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_index_control", expect_abort=.false., &
+            failure_message="every legal build_index and parquet_table_index call was expected to complete", &
+            required_stderr="table index control finished")
+    end subroutine test_table_index_control_completes
+    !
+    !> See `scenario_filter_temporal_set_mismatch` (test/error_scenarios.f90).
+    subroutine test_filter_temporal_set_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "filter_temporal_set_mismatch", expect_abort=.true., &
+            failure_message="a date set against a timestamp column was expected to abort", &
+            required_stderr="the 'date' set in the filter clause on column 'ts' cannot be compared")
+    end subroutine test_filter_temporal_set_mismatch_aborts
+    !
+    !> See `scenario_filter_temporal_literal_list` (test/error_scenarios.f90).
+    subroutine test_filter_temporal_literal_list_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "filter_temporal_literal_list", expect_abort=.true., &
+            failure_message="a literal list on a date column was expected to abort", &
+            required_stderr="is not supported on a date column -- bind the members as an array of parquet_date")
+    end subroutine test_filter_temporal_literal_list_aborts
 
 end module test_errors

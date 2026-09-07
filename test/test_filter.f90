@@ -28,6 +28,11 @@
 !> another is reading it.
 module test_filter
     use parquet
+    ! The key-conversion helpers are parquet_core plumbing that both facades hide (they are
+    ! how the filter's `in` leaf and the table's %build_index agree about a row), so the one
+    ! test that pins their contract names the module directly.
+    use parquet_core, only : parquet_filter_real_key, parquet_index_real_key, parquet_date_key, &
+        parquet_time_key, parquet_timestamp_key
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan, &
         ieee_positive_inf, ieee_negative_inf
@@ -144,6 +149,13 @@ contains
                 test_literal_list_matches_bound_set), &
             new_unittest("in: list spacing is free, and a list nests inside a group", &
                 test_literal_list_spacing_and_grouping), &
+            new_unittest("in: date and time sets, bound from elements", test_in_temporal_sets), &
+            new_unittest("in: a timestamp set matches a timestamp[ms] column by instant", &
+                test_in_timestamp_set_across_units), &
+            new_unittest("in: row_mask agrees with the reader on temporal sets", &
+                test_in_temporal_row_mask_agrees), &
+            new_unittest("the two real-key helpers split on NaN and nowhere else", &
+                test_real_key_helpers_split_on_nan_only), &
             new_unittest("not_in: a literal list complements in, and not () agrees", &
                 test_literal_list_not_in), &
             new_unittest("in: a quoted list member may contain a comma, paren or keyword", &
@@ -1027,6 +1039,21 @@ contains
         call parquet_write_column(writer, "ts", ts)
         call parquet_close_writer(writer)
     end subroutine write_temporal_fixture
+    !
+    !> Three dates, the middle one 1970-01-01 -- the day whose raw storage is 0, which is what a
+    !> null element keys as -- so a test can tell a null that was dropped from one that was keyed.
+    subroutine write_epoch_date_fixture(file)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        type(parquet_writer) :: writer
+        type(parquet_date) :: d(3)
+
+        call d(1)%set(2024, 1, 5)
+        call d(2)%set(1970, 1, 1)
+        call d(3)%set(2024, 1, 2)
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "d", d)
+        call parquet_close_writer(writer)
+    end subroutine write_epoch_date_fixture
     !
     !> A date column compares against a quoted ISO date, converted Fortran-side into the day
     !> count the column actually stores.
@@ -2772,5 +2799,199 @@ contains
         call check(error, all(from_bind == from_list), &
             "a bound set and a literal list on a float32 column disagree")
     end subroutine test_set_on_float32_column
+
+    ! ---- Temporal sets (S7 answer F4) --------------------------------------------------------
+    !
+    !> A date set through %add_in and a time set through %bind plus rule text keep exactly their
+    !> members' rows; `not_in` complements; a repeat in the set collapses; a NULL member is
+    !> simply not in the set. The fixture is write_temporal_fixture's: d = 2024-01-01 .. 06,
+    !> t = 12:00:00 .. 12:00:05 at [us], one per row.
+    subroutine test_in_temporal_sets(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: f_date, f_time, f_not, f_null
+        type(parquet_date) :: dset(2), dnull(2)
+        type(parquet_time) :: tset(3)
+        type(parquet_date), allocatable :: got_d(:)
+        integer(int64) :: nrows
+        integer(int32) :: y, m, dd
+        character(len=*), parameter :: file = "test_run/filter_in_temporal.parquet"
+        character(len=*), parameter :: file_null = "test_run/filter_in_temporal_null.parquet"
+
+        call write_temporal_fixture(file)
+        call dset(1)%set(2024, 1, 5)
+        call dset(2)%set(2024, 1, 2)
+        call f_date%add_in("d", dset)
+        call parquet_open_reader(reader, file, filter=f_date)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got_d(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "d", got_d)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a date set keeps its two members' rows")
+        if (allocated(error)) return
+        call got_d(1)%get(y, m, dd)
+        call check(error, y == 2024 .and. m == 1 .and. dd == 2, "the survivors come in file order: 2024-01-02 first")
+        if (allocated(error)) return
+        call got_d(2)%get(y, m, dd)
+        call check(error, dd == 5, "then 2024-01-05")
+        if (allocated(error)) return
+
+        ! A time set, bound under a name and used from rule text; the repeat collapses.
+        call tset(1)%set(12, 0, 4)
+        call tset(2)%set(12, 0, 0)
+        call tset(3)%set(12, 0, 4)
+        call f_time%bind("wanted", tset)
+        call f_time%add("t in @wanted")
+        call parquet_open_reader(reader, file, filter=f_time)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a time set bound under a name keeps rows 12:00:00 and 12:00:04")
+        if (allocated(error)) return
+
+        call f_not%add_in("d", dset, negate=.true.)
+        call parquet_open_reader(reader, file, filter=f_not)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4, "not_in on a date set keeps the other four rows")
+        if (allocated(error)) return
+
+        ! A null member is not in the set. This arm's fixture carries a genuine 1970-01-01 row --
+        ! the day whose raw key is 0, which is exactly what a null element keys as -- so a set that
+        ! let the null through would select TWO rows here, and the assertion could tell.
+        call write_epoch_date_fixture(file_null)
+        call dnull(1)%set(2024, 1, 5)
+        call dnull(2)%set_null()
+        call f_null%add_in("d", dnull)
+        call parquet_open_reader(reader, file_null, filter=f_null)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 1, "a null member of a date set is not in the set, and does not select 1970-01-01")
+    end subroutine test_in_temporal_sets
+    !
+    !> A timestamp set is keyed by the instant's (seconds, nanoseconds) pair, so a set built from
+    !> elements matches a `timestamp[ms]` column with no unit arithmetic; a member 500 us off any
+    !> stored instant matches nothing rather than rounding onto one; `is_valid=` drops a member.
+    subroutine test_in_timestamp_set_across_units(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt, f_masked
+        type(parquet_timestamp) :: tsset(3)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_timestamp_units.parquet"
+
+        call write_temporal_fixture(file)   ! ts = 2024-01-31T12:30:00 .. :05 at [ms]
+        call tsset(1)%set(2024, 1, 31, 12, 30, 3)
+        call tsset(2)%set(2024, 1, 31, 12, 30, 1)
+        call tsset(3)%set(2024, 1, 31, 12, 30, 2, 500000)   ! +500 us: no [ms] instant is this
+        call filt%add_in("ts", tsset)
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "two members are stored instants; the third is 500 us off and matches nothing")
+        if (allocated(error)) return
+        call f_masked%add_in("ts", tsset, is_valid=[.false., .true., .true.])
+        call parquet_open_reader(reader, file, filter=f_masked)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 1, "is_valid= drops a timestamp member")
+    end subroutine test_in_timestamp_set_across_units
+    !
+    !> The two engines, one answer: %row_mask over the materialized table selects the rows the
+    !> reader's own pre-evaluated leaf selected, for a date set and a timestamp set together.
+    subroutine test_in_temporal_row_mask_agrees(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        type(parquet_date) :: dset(3)
+        type(parquet_timestamp) :: tsset(2)
+        integer(int64), allocatable :: phys(:), mine(:)
+        logical, allocatable :: keep(:)
+        integer(int64) :: i
+        character(len=*), parameter :: file = "test_run/filter_in_temporal_rowmask.parquet"
+
+        call write_temporal_fixture(file)
+        call dset(1)%set(2024, 1, 1)
+        call dset(2)%set(2024, 1, 3)
+        call dset(3)%set(2024, 1, 6)
+        call tsset(1)%set(2024, 1, 31, 12, 30, 1)
+        call tsset(2)%set(2024, 1, 31, 12, 30, 5)
+        call filt%bind("days", dset)
+        call filt%bind("instants", tsset)
+        call filt%add("d in @days or ts in @instants")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_physical_row_indices(reader, phys)
+        call parquet_close_reader(reader)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        allocate(keep(t%nrows()))
+        call t%row_mask(filt, keep)
+        mine = pack([(i, i = 1_int64, t%nrows())], keep)
+        call check(error, size(phys) == 4, "the rule selects four of the six rows (vacuity guard)")
+        if (allocated(error)) return
+        call check(error, size(mine) == size(phys), "row_mask selects as many rows as the reader")
+        if (allocated(error)) return
+        call check(error, all(mine == phys), "and the same rows")
+    end subroutine test_in_temporal_row_mask_agrees
+    !
+    !> parquet_filter_real_key (the filter's) and parquet_index_real_key (the index's) agree on
+    !> every value but NaN, where the filter keeps the bit pattern -- it never keys a NaN, so any
+    !> pattern is as good as another -- and the index maps every NaN onto ONE key, the sort
+    !> comparator's equality (feature_pf_index.md question 6, feature_risks.md Risk-211). The
+    !> temporal helpers are the elements' raw storage, and a null element keys as 0.
+    subroutine test_real_key_helpers_split_on_nan_only(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: vals(5), nan_a, nan_b
+        integer(int64) :: k_filter(5), k_index(5), s, ns
+        integer(int64) :: s_raw
+        integer(int32) :: ns_raw
+        type(parquet_date) :: d
+        type(parquet_time) :: tm
+        type(parquet_timestamp) :: ts
+
+        vals = [1.5_real64, -0.0_real64, 0.0_real64, 2.5e300_real64, -7.25_real64]
+        k_filter = parquet_filter_real_key(vals)
+        k_index = parquet_index_real_key(vals)
+        call check(error, all(k_filter == k_index), "the two helpers agree on every finite value")
+        if (allocated(error)) return
+        call check(error, k_filter(2) == k_filter(3) .and. k_filter(2) == 0_int64, "-0.0 and +0.0 are one key, under both")
+        if (allocated(error)) return
+        call check(error, k_filter(1) /= k_filter(4) .and. k_filter(4) /= k_filter(5), "distinct values are distinct keys")
+        if (allocated(error)) return
+        ! Two NaNs with different payloads: two keys to the filter, one key to the index.
+        nan_a = ieee_value(0.0_real64, ieee_quiet_nan)
+        nan_b = transfer(transfer(nan_a, 0_int64) + 1_int64, 0.0_real64)
+        call check(error, ieee_is_nan(nan_b), "the second NaN is a NaN (its payload differs by one bit)")
+        if (allocated(error)) return
+        call check(error, parquet_filter_real_key(nan_a) /= parquet_filter_real_key(nan_b), &
+            "the filter's key keeps the NaN's own pattern, so two payloads are two keys")
+        if (allocated(error)) return
+        call check(error, parquet_index_real_key(nan_a) == parquet_index_real_key(nan_b), &
+            "the index's key canonicalises: every NaN is one key")
+        if (allocated(error)) return
+        call check(error, parquet_index_real_key(-nan_a) == parquet_index_real_key(nan_a), "a negated NaN is that key too")
+        if (allocated(error)) return
+        call check(error, all(parquet_index_real_key(nan_a) /= k_index), "the NaN key is no finite value's key")
+        if (allocated(error)) return
+        call check(error, parquet_index_real_key(real(1.5_real32, real64)) == k_index(1), &
+            "a float32 value widened to real64 keys as the real64 literal does")
+        if (allocated(error)) return
+        ! The temporal helpers are the raw storage, and null keys as 0.
+        call d%set(2024, 1, 31)
+        call tm%set(12, 30, 0, 7)
+        call ts%set(2024, 1, 31, 12, 30, 0, 500)
+        call check(error, parquet_date_key(d) == int(d%raw(), int64), "a date's key is its raw day count")
+        if (allocated(error)) return
+        call check(error, parquet_time_key(tm) == tm%raw() .and. parquet_time_key(tm) == 45000000000007_int64, &
+            "a time's key is its raw nanoseconds since midnight")
+        if (allocated(error)) return
+        call parquet_timestamp_key(ts, s, ns)
+        call ts%get_raw(s_raw, ns_raw)
+        call check(error, s == s_raw .and. ns == int(ns_raw, int64) .and. ns == 500_int64, &
+            "a timestamp's key is its raw (seconds, nanoseconds) pair")
+        if (allocated(error)) return
+        call d%set_null()
+        call check(error, parquet_date_key(d) == 0_int64, "a null element keys as 0 (every caller masks it)")
+    end subroutine test_real_key_helpers_split_on_nan_only
 
 end module test_filter

@@ -2803,6 +2803,40 @@ program error_scenarios
         call scenario_multimap_probe_shape_mismatch()
     case ("multimap_control")
         call scenario_multimap_control()
+    case ("table_index_string_column")
+        call scenario_table_index_string_column()
+    case ("table_index_bool_column")
+        call scenario_table_index_bool_column()
+    case ("table_index_vector_column")
+        call scenario_table_index_vector_column()
+    case ("table_index_duplicate_unique")
+        call scenario_table_index_duplicate_unique()
+    case ("table_index_missing_column")
+        call scenario_table_index_missing_column()
+    case ("table_index_stale_find")
+        call scenario_table_index_stale_find()
+    case ("table_index_stale_find_all")
+        call scenario_table_index_stale_find_all()
+    case ("table_index_stale_find_many")
+        call scenario_table_index_stale_find_many()
+    case ("table_index_stale_count")
+        call scenario_table_index_stale_count()
+    case ("table_index_never_built")
+        call scenario_table_index_never_built()
+    case ("table_index_kind_mismatch")
+        call scenario_table_index_kind_mismatch()
+    case ("table_index_kind_mismatch_temporal")
+        call scenario_table_index_kind_mismatch_temporal()
+    case ("table_index_find_many_length")
+        call scenario_table_index_find_many_length()
+    case ("table_index_threads_zero")
+        call scenario_table_index_threads_zero()
+    case ("table_index_control")
+        call scenario_table_index_control()
+    case ("filter_temporal_set_mismatch")
+        call scenario_filter_temporal_set_mismatch()
+    case ("filter_temporal_literal_list")
+        call scenario_filter_temporal_literal_list()
     case ("pool_double_free")
         call scenario_pool_double_free()
     case ("pool_free_never_issued")
@@ -24495,5 +24529,310 @@ contains
         if (.not. all(a == b)) error stop "the two engines disagreed on the surviving rows"
         print '(a)', "a bounded open left less than one column resident, below the default's, same rows"
     end subroutine scenario_bounded_arrow_pool
+
+    ! ---- %build_index and parquet_table_index ---------------------------------------------------
+    !
+    !> A five-row in-memory table for the table-index scenarios: `id` (int32, distinct), `x`
+    !! (real64), `d` (date), `s` (string), `b` (logical) and `v` (a 2-wide int32 vector).
+    subroutine table_index_scenario_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table.
+        type(parquet_date) :: d(5)
+        integer(int32) :: v(2, 5)
+        character(len=3) :: s(5)
+        integer :: i
+        do i = 1, 5
+            call d(i)%set(2024, 6, i)
+        end do
+        v(1, :) = [1, 2, 3, 4, 5]
+        v(2, :) = [6, 7, 8, 9, 10]
+        s = ["aa ", "bb ", "cc ", "dd ", "ee "]
+        call parquet_new_table(t)
+        call t%add_column("id", [40_int32, 10_int32, 30_int32, 20_int32, 50_int32])
+        call t%add_column("x", [4.0_real64, 1.0_real64, 3.0_real64, 2.0_real64, 5.0_real64])
+        call t%add_column("d", d)
+        call t%add_column("s", s)
+        call t%add_column("b", [.true., .false., .true., .false., .true.])
+        call t%add_column("v", v)
+    end subroutine table_index_scenario_fixture
+    !
+    !> String keys are not held by the index yet, so a string column is refused naming the route
+    !! that does work. **When the map gains its string forms this scenario becomes a control**:
+    !! flip its expectation to a clean completion asserting `ix%count("cc") == 1`, rather than
+    !! deleting it (CLAUDE.md, "A test that asserts a REFUSAL must say what to assert when the
+    !! refusal lifts").
+    subroutine scenario_table_index_string_column()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call table_index_scenario_fixture(t)
+        call t%build_index("s", ix)
+        print '(a,i0)', "a string column was indexed, nkeys=", ix%nkeys()
+    end subroutine scenario_table_index_string_column
+    !
+    !> A boolean key is `==` with extra steps, the filter's rule for a boolean set, applied here.
+    subroutine scenario_table_index_bool_column()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call table_index_scenario_fixture(t)
+        call t%build_index("b", ix)
+        print '(a,i0)', "a boolean column was indexed, nkeys=", ix%nkeys()
+    end subroutine scenario_table_index_bool_column
+    !
+    !> A vector column has no single value per row to key.
+    subroutine scenario_table_index_vector_column()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call table_index_scenario_fixture(t)
+        call t%build_index("v", ix)
+        print '(a,i0)', "a vector column was indexed, nkeys=", ix%nkeys()
+    end subroutine scenario_table_index_vector_column
+    !
+    !> A repeated key under `unique=.true.` is the map's own duplicate refusal, which names the
+    !! key and both of its positions -- table rows here.
+    subroutine scenario_table_index_duplicate_unique()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call parquet_new_table(t)
+        call t%add_column("k", [7_int64, 3_int64, 7_int64])
+        call t%build_index("k", ix)
+        print '(a,i0)', "a repeated key was indexed as unique, nkeys=", ix%nkeys()
+    end subroutine scenario_table_index_duplicate_unique
+    !
+    !> A column the table does not have is refused by the ordinary name lookup.
+    subroutine scenario_table_index_missing_column()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call table_index_scenario_fixture(t)
+        call t%build_index("nope", ix)
+        print '(a,i0)', "a missing column was indexed, nkeys=", ix%nkeys()
+    end subroutine scenario_table_index_missing_column
+    !
+    !> The stale index, one scenario per query family: after a row change every query aborts
+    !! naming the table and both generations (feature_risks.md Risk-210). The row change is a
+    !! %filter_rows that keeps every row but one -- the answers would stay in range, which is
+    !! exactly the case a cached flag would answer wrongly.
+    subroutine scenario_table_index_stale_find()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64) :: row
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call ix%find(30_int32, row)
+        print '(a,i0)', "a stale index answered find, row=", row
+    end subroutine scenario_table_index_stale_find
+    !
+    !> See `scenario_table_index_stale_find`.
+    subroutine scenario_table_index_stale_find_all()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64), allocatable :: rows(:)
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix, unique=.false.)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call ix%find_all(30_int32, rows)
+        print '(a,i0)', "a stale index answered find_all, rows=", size(rows)
+    end subroutine scenario_table_index_stale_find_all
+    !
+    !> See `scenario_table_index_stale_find`.
+    subroutine scenario_table_index_stale_find_many()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64) :: rows(2)
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call ix%find_many([30_int32, 10_int32], rows)
+        print '(a,i0)', "a stale index answered find_many, rows(1)=", rows(1)
+    end subroutine scenario_table_index_stale_find_many
+    !
+    !> See `scenario_table_index_stale_find`.
+    subroutine scenario_table_index_stale_count()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        print '(a,i0)', "a stale index answered count, n=", ix%count(30_int32)
+    end subroutine scenario_table_index_stale_count
+    !
+    !> A query on an object nothing has built into yet is refused rather than answering 0 for
+    !! everything -- which is what a default-initialised engine would silently do.
+    subroutine scenario_table_index_never_built()
+        type(parquet_table_index) :: ix
+        integer(int64) :: row
+        call ix%find(1_int64, row)
+        print '(a,i0)', "a never-built index answered find, row=", row
+    end subroutine scenario_table_index_never_built
+    !
+    !> A real key against an integer column is refused naming both, rather than being rounded or
+    !! widened into a key that quietly matches nothing.
+    subroutine scenario_table_index_kind_mismatch()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64) :: row
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call ix%find(30.0_real64, row)
+        print '(a,i0)', "a real key was accepted on an integer index, row=", row
+    end subroutine scenario_table_index_kind_mismatch
+    !
+    !> A timestamp key against a date column is refused, exactly as a timestamp SET against a
+    !! date column is by the filter: two temporal types are two families, not one widened.
+    subroutine scenario_table_index_kind_mismatch_temporal()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_timestamp) :: ts
+        call table_index_scenario_fixture(t)
+        call t%build_index("d", ix)
+        call ts%set(2024, 6, 3, 0, 0, 0)
+        print '(a,i0)', "a timestamp key was accepted on a date index, n=", ix%count(ts)
+    end subroutine scenario_table_index_kind_mismatch_temporal
+    !
+    !> `rows` must have one slot per key; a shorter array would be an out-of-bounds write.
+    subroutine scenario_table_index_find_many_length()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64) :: rows(2)
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call ix%find_many([30_int32, 10_int32, 50_int32], rows)
+        print '(a,i0)', "find_many accepted a short rows array, rows(1)=", rows(1)
+    end subroutine scenario_table_index_find_many_length
+    !
+    !> `threads=0` reaches the engine's own build and is refused there, exactly as on the map.
+    subroutine scenario_table_index_threads_zero()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix, threads=0)
+        print '(a,i0)', "threads=0 was accepted by build_index, nkeys=", ix%nkeys()
+    end subroutine scenario_table_index_threads_zero
+    !
+    !> The negative control for every table-index guard above: each legal shape of every call
+    !! completes, so a guard that fired on a legal call would fail here.
+    subroutine scenario_table_index_control()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_date) :: d
+        type(parquet_time) :: tm(5), tq
+        type(parquet_timestamp) :: ts(5), tsq
+        integer(int64) :: row, rows(3), nf
+        integer(int32) :: row32, rows32(3)
+        integer(int64), allocatable :: all64(:)
+        integer(int32), allocatable :: all32(:)
+        character(len=:), allocatable :: nm
+        call table_index_scenario_fixture(t)
+        call tm(1)%set(1, 2, 3)
+        call tm(2)%set(4, 5, 6)
+        call tm(3)%set(1, 2, 3)
+        call tm(4)%set(7, 8, 9)
+        call tm(5)%set(10, 11, 12)
+        call ts(1)%set(2024, 6, 1, 1, 2, 3)
+        call ts(2)%set(2024, 6, 1, 4, 5, 6)
+        call ts(3)%set(2024, 6, 1, 1, 2, 3)
+        call ts(4)%set(2024, 6, 1, 7, 8, 9)
+        call ts(5)%set(2024, 6, 1, 10, 11, 12)
+        call t%add_column("tm", tm)
+        call t%add_column("ts", ts)
+        ! Every key family, unique and not, every query form and both row kinds.
+        call t%build_index("id", ix)
+        call ix%find(30_int32, row)
+        call ix%find(30_int64, row32)
+        call ix%find_all(30_int32, all64)
+        call ix%find_all(30_int64, all32)
+        call ix%find_many([30_int32, 10_int32, 99_int32], rows, n_found=nf)
+        call ix%find_many([30_int64, 10_int64, 99_int64], rows32, threads=1)
+        if (row /= 3_int64 .or. row32 /= 3 .or. size(all64) /= 1 .or. size(all32) /= 1 .or. nf /= 2_int64) &
+            error stop "integer index: wrong answers"
+        if (ix%count(30_int32) /= 1_int64 .or. ix%count(30_int64) /= 1_int64) error stop "integer count"
+        call t%build_index("x", ix, unique=.false., threads=2)
+        call ix%find(3.0_real32, row)
+        call ix%find(3.0_real64, row32)
+        call ix%find_all(3.0_real32, all64)
+        call ix%find_all(3.0_real64, all32)
+        call ix%find_many([3.0_real32, 9.0_real32], rows(1:2))
+        call ix%find_many([3.0_real64, 9.0_real64], rows32(1:2), threads=2, n_found=nf)
+        if (row /= 3_int64 .or. row32 /= 3 .or. ix%count(3.0_real32) /= 1_int64 .or. ix%count(3.0_real64) /= 1_int64) &
+            error stop "real index: wrong answers"
+        call t%build_index("d", ix)
+        call d%set(2024, 6, 4)
+        call ix%find(d, row)
+        call ix%find(d, row32)
+        call ix%find_all(d, all64)
+        call ix%find_all(d, all32)
+        call ix%find_many([d, d], rows(1:2))
+        call ix%find_many([d, d], rows32(1:2))
+        if (row /= 4_int64 .or. ix%count(d) /= 1_int64) error stop "date index: wrong answers"
+        call t%build_index("tm", ix, unique=.false.)
+        call tq%set(1, 2, 3)
+        call ix%find(tq, row)
+        call ix%find(tq, row32)
+        call ix%find_all(tq, all64)
+        call ix%find_all(tq, all32)
+        call ix%find_many([tq, tq], rows(1:2))
+        call ix%find_many([tq, tq], rows32(1:2))
+        if (row /= 1_int64 .or. ix%count(tq) /= 2_int64 .or. size(all64) /= 2) error stop "time index: wrong answers"
+        call t%build_index("ts", ix, unique=.false.)
+        call tsq%set(2024, 6, 1, 1, 2, 3)
+        call ix%find(tsq, row)
+        call ix%find(tsq, row32)
+        call ix%find_all(tsq, all64)
+        call ix%find_all(tsq, all32)
+        call ix%find_many([tsq, tsq], rows(1:2))
+        call ix%find_many([tsq, tsq], rows32(1:2))
+        if (row /= 1_int64 .or. ix%count(tsq) /= 2_int64 .or. size(all32) /= 2) error stop "timestamp index: wrong answers"
+        call ix%name(nm)
+        if (nm /= "ts" .or. ix%kind() /= PK_TIMESTAMP .or. ix%is_unique() .or. ix%nkeys() /= 4_int64) &
+            error stop "introspection: wrong answers"
+        ! A value write and a fill leave it current; a clear leaves it unbuilt without an abort.
+        call t%set_element("x", 2_int64, 11.0_real64)
+        if (.not. ix%is_current()) error stop "a value write staled the index"
+        call ix%clear()
+        if (ix%is_current()) error stop "clear left the index current"
+        print '(a)', "table index control finished"
+    end subroutine scenario_table_index_control
+    !
+    !> A date set against a timestamp column is refused at apply, naming both -- two temporal
+    !! types are two families, and an element of the wrong type has no instant to convert.
+    subroutine scenario_filter_temporal_set_mismatch()
+        type(parquet_writer) :: w
+        type(parquet_schema) :: schema
+        type(parquet_reader) :: r
+        type(parquet_filter) :: filt
+        type(parquet_timestamp) :: ts(2)
+        type(parquet_date) :: d(1)
+        integer(int64) :: n
+        call ts(1)%set(2024, 1, 31, 12, 30, 0)
+        call ts(2)%set(2024, 1, 31, 12, 30, 1)
+        call d(1)%set(2024, 1, 31)
+        call schema%init("es_temporal_set")
+        call schema%add_field("ts", "timestamp[ms]")
+        call parquet_open_writer(w, "test_run/es_filter_temporal_set.parquet", schema=schema)
+        call parquet_write_column(w, "ts", ts)
+        call parquet_close_writer(w)
+        call filt%add_in("ts", d)
+        call parquet_open_reader(r, "test_run/es_filter_temporal_set.parquet", filter=filt)
+        call parquet_get_nrows(r, n)
+        print '(a,i0)', "a date set was applied to a timestamp column, nrows=", n
+    end subroutine scenario_filter_temporal_set_mismatch
+    !
+    !> A literal list on a temporal column is refused naming the %bind route: a member would need
+    !! the column's stored unit to convert, which is the text path's job and not a list's.
+    subroutine scenario_filter_temporal_literal_list()
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_filter) :: filt
+        type(parquet_date) :: d(2)
+        integer(int64) :: n
+        call d(1)%set(2024, 1, 1)
+        call d(2)%set(2024, 1, 2)
+        call parquet_open_writer(w, "test_run/es_filter_temporal_list.parquet")
+        call parquet_write_column(w, "d", d)
+        call parquet_close_writer(w)
+        call filt%add('d in ("2024-01-01", "2024-01-02")')
+        call parquet_open_reader(r, "test_run/es_filter_temporal_list.parquet", filter=filt)
+        call parquet_get_nrows(r, n)
+        print '(a,i0)', "a literal list was applied to a date column, nrows=", n
+    end subroutine scenario_filter_temporal_literal_list
 
 end program error_scenarios

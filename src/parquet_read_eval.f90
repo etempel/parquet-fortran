@@ -295,12 +295,7 @@ contains
     !> A refusal is loud, so the in-memory-versus-reader A/B tests over every column type -- which
     !> cover all nine -- report it immediately; there is no way for a missing entry to become a
     !> wrong answer.
-    pure subroutine parquet_filter_column_tokens(kind, width, type_token, shape_token)
-        integer, intent(in) :: kind !! the column's PK_* kind.
-        integer, intent(in) :: width !! values per row; > 1 means a vector column whatever the kind.
-        character(len=:), allocatable, intent(out) :: type_token !! the element type token, "" if unsupported.
-        character(len=:), allocatable, intent(out) :: shape_token !! "scalar", "vector", "list", "map" or "struct".
-
+    module procedure parquet_filter_column_tokens
         shape_token = "scalar"
         select case (kind)
         case (PK_INT32)
@@ -342,7 +337,7 @@ contains
             type_token = ""
             shape_token = "vector"
         end if
-    end subroutine parquet_filter_column_tokens
+    end procedure parquet_filter_column_tokens
 
     !> KL_TRUE / KL_FALSE from a plain comparison result -- the twin of C++'s kleene_of.
     pure integer(int8) function parquet_kleene_of(b) result(res)
@@ -731,8 +726,11 @@ contains
         integer(int64), pointer :: p64(:)
         real(real32), pointer :: r32(:)
         real(real64), pointer :: r64(:)
+        type(parquet_date), pointer :: pd(:)
+        type(parquet_time), pointer :: pt(:)
+        type(parquet_timestamp), pointer :: pts(:)
         type(parquet_string_column), pointer :: sc
-        integer(int64), allocatable :: lookup(:), found(:)
+        integer(int64), allocatable :: lookup(:), found(:), pairs(:, :)
         logical, allocatable :: hit(:)
         integer(int64) :: i
 
@@ -740,6 +738,9 @@ contains
         nullify(p64)
         nullify(r32)
         nullify(r64)
+        nullify(pd)
+        nullify(pt)
+        nullify(pts)
         nullify(sc)
         if (fam == FSET_STRING) then
             call parquet_column_string_column(col, sc)
@@ -750,23 +751,48 @@ contains
             return
         end if
         ! One %get_many for the whole column rather than a lookup per row: the map's own bulk form,
-        ! and the same call the read-side pre-evaluator makes once per row group.
-        allocate(lookup(nrows), found(nrows))
+        ! and the same call the read-side pre-evaluator makes once per row group. The temporal
+        ! kinds key exactly as parquet_answer_set_chunk keys them -- through the same three
+        ! helpers -- and a null element, whose key is 0, is masked before the lookup so that it
+        ! can never meet a genuine 1970-01-01 or midnight in the set. A timestamp column looks up
+        ! `(n, 2)` tuples in a composite map.
+        allocate(found(nrows))
         select case (kind)
-        case (PK_INT32)
-            call parquet_column_data_ptr(col, p32)
-            lookup = int(p32(1_int64:nrows), int64)
-        case (PK_INT64)
-            call parquet_column_data_ptr(col, p64)
-            lookup = p64(1_int64:nrows)
-        case (PK_FLOAT32)
-            call parquet_column_data_ptr(col, r32)
-            lookup = parquet_filter_real_key(real(r32(1_int64:nrows), real64))
+        case (PK_TIMESTAMP)
+            call parquet_column_data_ptr(col, pts)
+            allocate(pairs(nrows, 2))
+            call parquet_timestamp_key(pts(1_int64:nrows), pairs(:, 1), pairs(:, 2))
+            call keys%get_many(pairs, found, valid=.not. pts(1_int64:nrows)%is_null())
         case default
-            call parquet_column_data_ptr(col, r64)
-            lookup = parquet_filter_real_key(r64(1_int64:nrows))
+            allocate(lookup(nrows))
+            select case (kind)
+            case (PK_INT32)
+                call parquet_column_data_ptr(col, p32)
+                lookup = int(p32(1_int64:nrows), int64)
+            case (PK_INT64)
+                call parquet_column_data_ptr(col, p64)
+                lookup = p64(1_int64:nrows)
+            case (PK_FLOAT32)
+                call parquet_column_data_ptr(col, r32)
+                lookup = parquet_filter_real_key(real(r32(1_int64:nrows), real64))
+            case (PK_DATE)
+                call parquet_column_data_ptr(col, pd)
+                lookup = parquet_date_key(pd(1_int64:nrows))
+            case (PK_TIME)
+                call parquet_column_data_ptr(col, pt)
+                lookup = parquet_time_key(pt(1_int64:nrows))
+            case default
+                call parquet_column_data_ptr(col, r64)
+                lookup = parquet_filter_real_key(r64(1_int64:nrows))
+            end select
+            if (kind == PK_DATE) then
+                call keys%get_many(lookup, found, valid=.not. pd(1_int64:nrows)%is_null())
+            else if (kind == PK_TIME) then
+                call keys%get_many(lookup, found, valid=.not. pt(1_int64:nrows)%is_null())
+            else
+                call keys%get_many(lookup, found)
+            end if
         end select
-        call keys%get_many(lookup, found)
         do i = 1_int64, nrows
             out(i) = parquet_set_verdict(.not. parquet_column_is_null(col, i), found(i) > 0_int64, negate)
         end do

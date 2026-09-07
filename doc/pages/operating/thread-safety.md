@@ -38,6 +38,8 @@ reallocating the storage you are reading. Everything else is arranged around not
 | Read a resident column: `%get`, `%col`, `%get_slice`, `%row`, `%get_element`, `%is_null` | **yes**, unrestricted | — |
 | Read through a `%col`/`%ref` pointer you already hold | **yes**, unrestricted | — |
 | Metadata: `%nrows`, `%ncols`, `%column_names`, `%kind`, `%width`, `%unit`, `%residency`, `%has_nulls` | **yes** | — |
+| Query a `parquet_table_index` you already built: `%find`, `%find_all`, `%find_many`, `%count` | **yes**, unrestricted — lock-free, like the engine's own lookups; `%find_many` also threads internally | — |
+| `%build_index` on a table whose key column is resident | **yes** — a read; each thread builds its own index object | — |
 | First read of a column not yet resident, on a table **another** thread opened | no | hard error; `%prefetch` before the region |
 | First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
 | `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |
@@ -352,7 +354,10 @@ said about it.
   several threads streaming keys through one map's `%get_or_add` is a supported pattern, and each
   thread's returned index is unique and stable. `pf_index_multimap` follows the same rules: its
   bulk lookups thread internally and stand down inside your region, and a build or `%clear` is
-  serialised on a lock of its own. See
+  serialised on a lock of its own. A `parquet_table_index` is one of those two engines behind a
+  staleness check, so its queries inherit the lock-free rule and `%build_index` the build's;
+  the check reads the table's generation counter, which a row-structural change on another
+  thread would be moving — and that is the shared-table rule above, not a new one. See
   [Threading](../utilities/index-maps.html#threading).
 - **`pf_toml`: every public procedure is safe inside a parallel region**, because each takes one
   module-wide lock on entry. What that does not cover is a document's lifetime: closing one while

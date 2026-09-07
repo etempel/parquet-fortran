@@ -951,7 +951,8 @@ contains
         ! writes test_run/module_surface_io.parquet.
         character(len=*), parameter :: out_file = "test_run/module_surface_tables.parquet"
         type(parquet_table) :: t, back
-        integer(int64) :: ids(3)
+        type(parquet_table_index) :: ix
+        integer(int64) :: ids(3), row
         real(real64) :: mass(3)
         real(real64), allocatable :: got(:)
 
@@ -964,6 +965,12 @@ contains
         call t%add_column("mass", mass)
         if (t%nrows() /= 3_int64) what = "%nrows on a table built in memory"
         if (what == "" .and. t%ncols() /= 2) what = "%ncols on a table built in memory"
+        ! The lookup index is a parquet_tables type over parquet_index's engines, and the key
+        ! conversion it runs is parquet_core's: all three reachable through this one import.
+        call t%build_index("id", ix)
+        call ix%find(2_int64, row)
+        if (what == "" .and. row /= 2_int64) what = "%build_index/%find on a table built in memory"
+        if (what == "" .and. ix%count(9_int64) /= 0_int64) what = "%count on an absent key"
 
         call parquet_write_table(t, out_file, overwrite=.true.)
 

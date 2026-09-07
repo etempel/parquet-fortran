@@ -97,12 +97,20 @@ module parquet_core
     !> against and how its keys were formed. An integer set widens to int64 and is accepted
     !> against any integer column; a real set is keyed by real64 bit pattern and is accepted
     !> against the families the text path compares as doubles; a string set is accepted against a
-    !> string column. Boolean, temporal and container columns are refused -- see the element-family
-    !> rules in doc/pages/io/filter-sort-sample.md.
+    !> string column; a date, time or timestamp set is keyed by the element's raw storage
+    !> (parquet_date_key, parquet_time_key, parquet_timestamp_key) and is accepted against a
+    !> column of exactly that temporal type. Boolean and container columns are refused -- see the
+    !> element-family rules in doc/pages/io/filter-sort-sample.md. The same families decide which
+    !> columns `parquet_table%build_index` accepts, through parquet_set_family_for_column.
     integer(int8), parameter :: FSET_NONE = 0_int8 !! no family suits this column: it can hold no set clause.
     integer(int8), parameter :: FSET_INT = 1_int8
     integer(int8), parameter :: FSET_REAL = 2_int8
     integer(int8), parameter :: FSET_STRING = 3_int8
+    integer(int8), parameter :: FSET_DATE = 4_int8
+    integer(int8), parameter :: FSET_TIME = 5_int8
+    !> A timestamp is a TWO-component key (see parquet_timestamp_key), so a set of this family
+    !! holds two entries of `set_keys` per member and builds a composite pf_index_map.
+    integer(int8), parameter :: FSET_TIMESTAMP = 6_int8
 
     ! ---- Bound-set key conversion (implemented in parquet_read) ----
     !> The int64 key a real64 value is stored under in a bound set, and the same key every lookup
@@ -127,6 +135,88 @@ module parquet_core
             real(real64), intent(in) :: v !! the value to key.
             integer(int64) :: key !! that value's set key.
         end function parquet_filter_real_key
+    end interface
+    !> The int64 key a real64 value is stored under in a TABLE INDEX (`parquet_table%build_index`)
+    !> and, later, in the join's hash path -- the CANONICALISING twin of parquet_filter_real_key.
+    !>
+    !> The two agree on every value but NaN, and the split is deliberate (feature_pf_index.md,
+    !> question 6): a filter compares as IEEE does, where a NaN equals nothing, so it refuses a NaN
+    !> in a set and never keys one; an index answers the SORT COMPARATOR's question -- "which row
+    !> holds this value", where every NaN is one value, the equality pf_match, %duplicated and
+    !> %drop_duplicates already use -- so here every NaN, whatever its payload or sign, maps onto
+    !> ONE key. Without that a real column holding two NaN rows would be two keys or one by
+    !> accident of payload, and would abort under `unique=.true.` for a reason nobody could see in
+    !> the data. Every other value, -0.0 included, takes exactly the filter's key.
+    !>
+    !> A caller building a filter must NOT use this function, and a caller building an index must
+    !> not use the other; which callers take which is feature_risks.md Risk-211, and
+    !> test_real_key_helpers_split_on_nan_only pins the difference.
+    interface
+        elemental module function parquet_index_real_key(v) result(key)
+            real(real64), intent(in) :: v !! the value to key.
+            integer(int64) :: key !! that value's index key.
+        end function parquet_index_real_key
+    end interface
+    !> The int64 key a `parquet_date` is stored under, in a bound set and in a table index alike:
+    !> its `%raw()` day count since 1970-01-01, widened. A NULL element keys as 0 and is never
+    !> stored -- every caller masks it out (a set drops it at %bind, an index skips the row
+    !> through `valid=`, a lookup answers 0 for it).
+    interface
+        elemental module function parquet_date_key(d) result(key)
+            type(parquet_date), intent(in) :: d !! the element to key.
+            integer(int64) :: key !! its day count since 1970-01-01; 0 for a null element.
+        end function parquet_date_key
+    end interface
+    !> The int64 key a `parquet_time` is stored under: its `%raw()` nanoseconds since midnight,
+    !> whatever unit the file stored it at. A null element keys as 0 and is masked out by every
+    !> caller, as for parquet_date_key.
+    interface
+        elemental module function parquet_time_key(t) result(key)
+            type(parquet_time), intent(in) :: t !! the element to key.
+            integer(int64) :: key !! its nanoseconds since midnight; 0 for a null element.
+        end function parquet_time_key
+    end interface
+    !> The TWO-component key a `parquet_timestamp` is stored under: its `%get_raw()` (seconds,
+    !> nanoseconds) pair, which the element normalises out of whatever unit the file used -- so a
+    !> set taken from a millisecond file matches a microsecond column by instant, exactly and with
+    !> no unit arithmetic (S7 answer F4). Two components rather than one folded int64 because
+    !> `seconds * 10**9 + nanoseconds` overflows outside about +-292 years of 1970; the fold is a
+    !> later, internal optimisation (feature_pf_index.md, question 8). A set or an index over a
+    !> timestamp column is therefore a composite pf_index_map, with the tuples shaped `(n, 2)`. A
+    !> null element gives (0, 0) and is masked out by every caller.
+    interface
+        elemental module subroutine parquet_timestamp_key(ts, seconds, nanoseconds)
+            type(parquet_timestamp), intent(in) :: ts !! the element to key.
+            integer(int64), intent(out) :: seconds !! the first key component; 0 for a null element.
+            integer(int64), intent(out) :: nanoseconds !! the second key component; 0 for a null element.
+        end subroutine parquet_timestamp_key
+    end interface
+    !> The one FSET_* family a column of type `col_type` (parquet_get_column_type's token for a
+    !> file column, parquet_filter_column_tokens' for a resident one) can hold a set clause on, or
+    !> FSET_NONE.
+    !>
+    !> The SINGLE definition of which column types a key can be taken from, read from three
+    !> directions: a bound set is checked against it, a literal list takes its element family
+    !> FROM it, and `parquet_table%build_index` accepts or refuses a column by it. Two copies of
+    !> this rule would let `x in @s`, `x in (...)` and an index accept different columns, and the
+    !> difference would show up as one of them refusing a column the others accept happily.
+    interface
+        pure module subroutine parquet_set_family_for_column(col_type, family)
+            character(len=*), intent(in) :: col_type !! the column's type token: "int32", "float64", "date", ...
+            integer(int8), intent(out) :: family !! one of the FSET_* families, or FSET_NONE.
+        end subroutine parquet_set_family_for_column
+    end interface
+    !> The type and shape tokens of a RESIDENT column -- what parquet_get_column_type and
+    !> parquet_get_column_shape would report for the same column in a file -- from its PK_* kind
+    !> and width, so that the in-memory evaluator and `parquet_table%build_index` put a resident
+    !> column through exactly the acceptance rules the reader applies to a file column.
+    interface
+        pure module subroutine parquet_filter_column_tokens(kind, width, type_token, shape_token)
+            integer, intent(in) :: kind !! the column's PK_* kind.
+            integer, intent(in) :: width !! values per row; > 1 means a vector column whatever the kind.
+            character(len=:), allocatable, intent(out) :: type_token !! the element type token, "" if unsupported.
+            character(len=:), allocatable, intent(out) :: shape_token !! "scalar", "vector", "list", "map" or "struct".
+        end subroutine parquet_filter_column_tokens
     end interface
     integer, parameter :: sortkey_max_key_len = parquet_max_sort_key_len
     integer, parameter :: sortkey_max_keys = parquet_max_sort_keys
@@ -645,14 +735,18 @@ module parquet_core
         !! rebuilding the map costs one O(m) pass beside a pass over a file. A set is COPIED at
         !! %bind, never referenced -- the caller's array may change or vanish afterwards.
         character(len=filter_set_name_len), allocatable :: set_name(:) !! each set's name, without the '@'.
-        integer(int8), allocatable :: set_family(:) !! FSET_INT / FSET_REAL / FSET_STRING per set.
-        !> Each set's inclusive slice of `set_keys` (integer and real families) or of `set_text`
+        integer(int8), allocatable :: set_family(:) !! one FSET_* family per set.
+        !> Each set's inclusive slice of `set_keys` (every family but string) or of `set_text`
         !! (string family). `set_hi < set_lo` marks an EMPTY set, which is legal and matches
-        !! nothing -- see the screen rule in doc/pages/io/filter-sort-sample.md.
+        !! nothing -- see the screen rule in doc/pages/io/filter-sort-sample.md. A timestamp set's
+        !! slice holds TWO entries per member (its `(n, 2)` key tuples, column-major), so its
+        !! length is twice its member count.
         integer(int64), allocatable :: set_lo(:), set_hi(:)
-        !> Every integer/real set's keys, concatenated. A real key is the bit pattern of its
-        !! real64 value with -0.0 normalised to +0.0 (parquet_filter_real_key), which makes exact
-        !! IEEE equality an integer comparison and lets one pf_index_map serve both families.
+        !> Every non-string set's keys, concatenated. A real key is the bit pattern of its real64
+        !! value with -0.0 normalised to +0.0 (parquet_filter_real_key), which makes exact IEEE
+        !! equality an integer comparison and lets one pf_index_map serve the integer and real
+        !! families; a date or time key is the element's raw storage, and a timestamp key its
+        !! (seconds, nanoseconds) pair (parquet_date_key, parquet_time_key, parquet_timestamp_key).
         integer(int64), allocatable :: set_keys(:)
         type(parquet_string_column), allocatable :: set_text !! every string set's keys, concatenated.
         integer :: nsets = 0 !! Number of sets actually bound.
@@ -667,18 +761,26 @@ module parquet_core
         procedure, private :: bind_r64 !! %bind specific taking a real64 array.
         procedure, private :: bind_chr !! %bind specific taking a character array.
         procedure, private :: bind_str !! %bind specific taking a parquet_string_column.
+        procedure, private :: bind_date !! %bind specific taking a parquet_date array.
+        procedure, private :: bind_time !! %bind specific taking a parquet_time array.
+        procedure, private :: bind_ts !! %bind specific taking a parquet_timestamp array.
         !> Attaches `values` to this filter under `name`, so that an `in`/`not_in` clause can
         !! refer to the set as `@name`. See parquet_filter's own doc-comment.
-        generic :: bind => bind_i32, bind_i64, bind_r32, bind_r64, bind_chr, bind_str
+        generic :: bind => bind_i32, bind_i64, bind_r32, bind_r64, bind_chr, bind_str, &
+            bind_date, bind_time, bind_ts
         procedure, private :: add_in_i32 !! %add_in specific taking an int32 array.
         procedure, private :: add_in_i64 !! %add_in specific taking an int64 array.
         procedure, private :: add_in_r32 !! %add_in specific taking a real32 array.
         procedure, private :: add_in_r64 !! %add_in specific taking a real64 array.
         procedure, private :: add_in_chr !! %add_in specific taking a character array.
         procedure, private :: add_in_str !! %add_in specific taking a parquet_string_column.
+        procedure, private :: add_in_date !! %add_in specific taking a parquet_date array.
+        procedure, private :: add_in_time !! %add_in specific taking a parquet_time array.
+        procedure, private :: add_in_ts !! %add_in specific taking a parquet_timestamp array.
         !> Binds `values` under a generated name and adds the one clause `<column> in @<that name>`
         !! (or `not_in`, with `negate=.true.`). Sugar over %bind plus %add.
-        generic :: add_in => add_in_i32, add_in_i64, add_in_r32, add_in_r64, add_in_chr, add_in_str
+        generic :: add_in => add_in_i32, add_in_i64, add_in_r32, add_in_r64, add_in_chr, add_in_str, &
+            add_in_date, add_in_time, add_in_ts
     end type parquet_filter
 
     ! ---- Filter expression parsing and IN-MEMORY evaluation (parquet_read_filter, parquet_read_eval) ----
@@ -1448,6 +1550,16 @@ module parquet_core
     public :: parquet_eval_filter_leaf
     public :: parquet_eval_filter_program
     public :: filter_leaf_name_len, filter_leaf_op_len, filter_leaf_value_len
+    !> The KEY CONVERSION, public for the same reason again and hidden by both facades: a
+    !! parquet_table's %build_index (parquet_tables_index) must key a real or temporal column
+    !! exactly as the filter's `in` leaf does, or a table's `in` filter and its index would
+    !! disagree about a row (feature_risks.md Risk-211) -- so the helpers live here, once, and the
+    !! table layer imports them. parquet_set_family_for_column is the matching "which columns can
+    !! be keyed" rule, for the same reason. Not user API: a user keys nothing by hand.
+    public :: parquet_filter_real_key, parquet_index_real_key
+    public :: parquet_date_key, parquet_time_key, parquet_timestamp_key
+    public :: parquet_set_family_for_column, parquet_filter_column_tokens
+    public :: FSET_NONE, FSET_INT, FSET_REAL, FSET_STRING, FSET_DATE, FSET_TIME, FSET_TIMESTAMP
     public :: parquet_filter
     public :: parquet_sortkey
     public :: parquet_read_qc
@@ -4838,7 +4950,7 @@ contains
     subroutine parquet_filter_new_set(this, name, family)
         class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.
-        integer(int8), intent(in) :: family !! FSET_INT, FSET_REAL or FSET_STRING.
+        integer(int8), intent(in) :: family !! the set's FSET_* family.
         character(len=filter_set_name_len), allocatable :: tmp_name(:)
         integer(int8), allocatable :: tmp_family(:)
         integer(int64), allocatable :: tmp_lo(:), tmp_hi(:)
@@ -4878,7 +4990,7 @@ contains
     subroutine parquet_filter_store_keys(this, name, family, keys, is_valid)
         class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.
-        integer(int8), intent(in) :: family !! FSET_INT or FSET_REAL.
+        integer(int8), intent(in) :: family !! FSET_INT, FSET_REAL, FSET_DATE or FSET_TIME.
         integer(int64), intent(in) :: keys(:) !! one key per element of the caller's array, masked entries included.
         logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
         type(pf_index_map) :: seen
@@ -5144,6 +5256,142 @@ contains
         call bind_str(this, name, values, is_valid)
         call parquet_filter_add_in_rule(this, column, name, negate)
     end subroutine add_in_str
+
+    !> Deduplicates the `(n, 2)` key tuples of a timestamp set and appends the distinct ones to
+    !> this filter's concatenated key store, column-major, recording the new set's slice -- the
+    !> two-component twin of parquet_filter_store_keys, through the map's own rank-2
+    !> %get_or_add_many. A set of n distinct instants occupies 2n entries of `set_keys`, and
+    !> parquet_resolve_set_payload reshapes them back to `(n, 2)` when it builds the leaf's map.
+    subroutine parquet_filter_store_pair_keys(this, name, keys, is_valid)
+        class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        integer(int64), intent(in) :: keys(:, :) !! one (seconds, nanoseconds) tuple per element, shaped (n, 2).
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        type(pf_index_map) :: seen
+        integer(int64), allocatable :: distinct(:, :), tmp(:), codes(:)
+        integer(int64) :: base, ndist, held
+
+        ! A two-component scratch map: %get_or_add_many over `(n, 2)` tuples refuses a map whose
+        ! component count differs, which a bare %init() (one component) would be.
+        call seen%init(ncomp=2)
+        allocate(codes(size(keys, 1, kind=int64)))
+        call seen%get_or_add_many(keys, codes, valid=is_valid)
+        ndist = seen%nkeys()
+        if (ndist > 0_int64) then
+            call seen%keys(distinct)
+        else
+            allocate(distinct(0, 2))
+        end if
+
+        held = 0_int64
+        if (allocated(this%set_keys)) held = size(this%set_keys, kind=int64)
+        allocate(tmp(held + 2_int64 * ndist))
+        if (held > 0_int64) tmp(1:held) = this%set_keys(1:held)
+        if (ndist > 0_int64) tmp(held + 1:held + 2_int64 * ndist) = reshape(distinct, [2_int64 * ndist])
+        call move_alloc(tmp, this%set_keys)
+
+        base = held
+        call parquet_filter_new_set(this, name, FSET_TIMESTAMP)
+        this%set_lo(this%nsets) = base + 1_int64
+        this%set_hi(this%nsets) = base + 2_int64 * ndist
+    end subroutine parquet_filter_store_pair_keys
+
+    !> The caller's optional mask with every NULL element of a temporal array masked off as well:
+    !> a null is in no set, exactly as a null element of a parquet_string_column is not (bind_str),
+    !> and its key (0) must never reach the store as if it were 1970-01-01 or midnight.
+    subroutine parquet_filter_temporal_mask(is_null, is_valid, mask)
+        logical, intent(in) :: is_null(:) !! .true. on each null element of the caller's array.
+        logical, intent(in), optional :: is_valid(:) !! the caller's own mask, if any.
+        logical, allocatable, intent(out) :: mask(:) !! .true. on each element that enters the set.
+        allocate(mask(size(is_null, kind=int64)))
+        mask = .not. is_null
+        if (present(is_valid)) mask = mask .and. is_valid
+    end subroutine parquet_filter_temporal_mask
+
+    !> %bind specific taking a parquet_date array; see the %bind generic. Keyed by
+    !> parquet_date_key; a null element is simply not in the set.
+    subroutine bind_date(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        type(parquet_date), intent(in) :: values(:) !! the set's members; repeats are collapsed, nulls dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, allocatable :: mask(:)
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call parquet_filter_temporal_mask(values%is_null(), is_valid, mask)
+        call parquet_filter_store_keys(this, name, FSET_DATE, parquet_date_key(values), mask)
+    end subroutine bind_date
+
+    !> %bind specific taking a parquet_time array; see the %bind generic. Keyed by
+    !> parquet_time_key; a null element is simply not in the set.
+    subroutine bind_time(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        type(parquet_time), intent(in) :: values(:) !! the set's members; repeats are collapsed, nulls dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, allocatable :: mask(:)
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call parquet_filter_temporal_mask(values%is_null(), is_valid, mask)
+        call parquet_filter_store_keys(this, name, FSET_TIME, parquet_time_key(values), mask)
+    end subroutine bind_time
+
+    !> %bind specific taking a parquet_timestamp array; see the %bind generic. Keyed by
+    !> parquet_timestamp_key as `(n, 2)` tuples, so the set matches a timestamp column of ANY
+    !> stored unit by instant; a null element is simply not in the set.
+    subroutine bind_ts(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        type(parquet_timestamp), intent(in) :: values(:) !! the set's members; repeats are collapsed, nulls dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, allocatable :: mask(:)
+        integer(int64), allocatable :: keys(:, :)
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call parquet_filter_temporal_mask(values%is_null(), is_valid, mask)
+        allocate(keys(size(values, kind=int64), 2))
+        call parquet_timestamp_key(values, keys(:, 1), keys(:, 2))
+        call parquet_filter_store_pair_keys(this, name, keys, mask)
+    end subroutine bind_ts
+
+    !> %add_in specific taking a parquet_date array; see the %add_in generic.
+    subroutine add_in_date(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        type(parquet_date), intent(in) :: values(:) !! the set's members; repeats are collapsed, nulls dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_date(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_date
+
+    !> %add_in specific taking a parquet_time array; see the %add_in generic.
+    subroutine add_in_time(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        type(parquet_time), intent(in) :: values(:) !! the set's members; repeats are collapsed, nulls dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_time(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_time
+
+    !> %add_in specific taking a parquet_timestamp array; see the %add_in generic.
+    subroutine add_in_ts(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        type(parquet_timestamp), intent(in) :: values(:) !! the set's members; repeats are collapsed, nulls dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_ts(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_ts
 
     !> Appends one AND-combined filter expression; see parquet_filter's own doc
     !> comment for the rule grammar. Unvalidated here -- the reader parses and

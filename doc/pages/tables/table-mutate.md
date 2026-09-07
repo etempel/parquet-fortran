@@ -888,11 +888,72 @@ of them. `before` must be declared as the same concrete table type as `t`.
 > points at freed memory afterwards. Fortran cannot detect this. Take the pointer again after the
 > mutation.
 
-## Looking a value up in a sorted table
+## Looking a value up: `%build_index`
 
-There is no table-level binary search, and it is not missing: `%col` hands back a plain pointer to a
-column's storage, and [`parquet_sorting`](../utilities/sorting.html)'s searches work on that
-directly.
+"Which row holds this key?" is answered by an **index over one column**, built once and queried
+any number of times, without sorting or otherwise reordering the table:
+
+```fortran
+type(parquet_table_index) :: ix
+integer(int64) :: row
+integer(int64), allocatable :: rows(:)
+
+call t%build_index("id", ix)              ! reads "id" if needed; the table is NOT reordered
+call ix%find(4711_int64, row)             ! the row holding 4711, or 0 when no row does
+call ix%find_many(wanted, rows_of_wanted) ! one row per key, 0 where absent, threaded
+n = ix%count(4711_int64)                  ! 0 or 1 on a unique index
+```
+
+Underneath is [`parquet_index`](../utilities/index-maps.html)'s own engine — a `pf_index_map` by
+default, holding the table's row numbers — so a lookup costs a few nanoseconds and `%find_many`
+over a large key array threads internally. The key is an `integer` (either width), a `real`
+(either width), or a `parquet_date`, `parquet_time` or `parquet_timestamp` element, and it must be
+of the column's own family: an integer key on an integer column, a real key on a real column, a
+temporal element on a column of exactly that type. A string or boolean column cannot be indexed in
+this version (string keys arrive with the map's own string forms); a vector or container column
+never can, having no single value per row.
+
+**A key that repeats needs `unique=.false.`.** The default builds a unique index and refuses a
+repeated key at build time, naming it — the engine's own duplicate rule, which is what makes a
+`%find` answer *the* row rather than *a* row. With `unique=.false.` the engine is a
+`pf_index_multimap`, and `%find_all` lists every row of a key, ascending:
+
+```fortran
+call pairs%build_index("id_group", gx, unique=.false.)
+call gx%find_all(g, member_rows)          ! every row of group g, in file order; empty when absent
+call gx%find(g, row)                      ! the FIRST of them (lowest row), or 0
+n = gx%count(g)                           ! how many
+```
+
+**Three rules worth knowing before relying on it.**
+
+- **It goes stale loudly.** The index records the table's `%generation()` when it is built and
+  checks it on **every** query, so after any row-structural change (`%filter_rows`, `%sort_by`,
+  `%delete_rows`, `%append`, …) a query aborts naming the table and both generations, instead of
+  answering in-range row numbers that name the wrong rows. `ix%is_current()` is the non-aborting
+  way to ask; `%build_index` again is the remedy. A value write (`%set_element`, `%fillna`) does
+  not stale it. This is the one thing the wrapper type exists for — everything else is the
+  engine's — and it is the reason the guide does not suggest keeping a "still sorted" flag by hand.
+- **A null row is never indexed**, so no key finds it, `%count` never counts it, and two null rows
+  are not a repeat under the default. A null temporal *element* offered as a key answers 0.
+- **A real column is keyed by exact value, with every NaN one key and `-0.0` equal to `+0.0`** —
+  the sort comparator's equality, the same one `%duplicated` and `%drop_duplicates` use — so
+  `%find(nan)` finds a NaN row, and a column with two NaN rows is a repeat. A `timestamp` column is
+  keyed by the instant, whatever unit the file stored it at, so a `parquet_timestamp` set at the
+  same civil time finds it from any unit. The conversion is the filter's `in` clause's own, so a
+  table's `in` filter and its index cannot disagree about a row.
+
+`%build_index` is a read: it materializes the key column if the table has not read it yet, as
+every accessor does, and it never detaches. `threads=` reaches the engine's build exactly as
+`pf_index_map%build`'s does; `parquet_set_index_threads` caps both the build and `%find_many`.
+Both `ix` and every `rows` argument may be declared `integer(int32)` or `integer(int64)`, and
+`%find_many` takes `n_found=` to count the keys it found.
+
+### Searching a sorted column through a `%col` pointer
+
+When the table is already sorted by the column — or you want a range rather than an equality —
+`%col` hands back a plain pointer to the column's storage, and
+[`parquet_sorting`](../utilities/sorting.html)'s searches work on that directly:
 
 ```fortran
 real(real64), pointer :: ra(:)
@@ -971,5 +1032,6 @@ gives `3 4 2 4 1` where the call with it gives `3 0 2 0 1` — plausible ranks e
 one of them right. Pass the mask, or be sure the column holds no nulls.
 
 The same applies to every `pf_*` operation reached through a `%col` pointer, including the searches
-[above](#looking-a-value-up-in-a-sorted-table): each takes its own optional `is_valid=`, and without
+[above](#searching-a-sorted-column-through-a-col-pointer): each takes its own optional `is_valid=`,
+and without
 it a null row participates as whatever its value slot happens to hold.

@@ -94,6 +94,8 @@ something a reader is expected to have.
 | [Risk-207](#risk-207--pf_remaps-found-reports-what-matched-never-what-was-filled) | `pf_remap`'s `found` reports what MATCHED, never what was FILLED | 4 — covered |
 | [Risk-208](#risk-208--value_counts-must-gather-a-copy-and-must-ask-the-column-which-group-is-the-null-one) | `%value_counts` must gather a COPY, and must ask the column which group is the null one | 4 — covered |
 | [Risk-209](#risk-209--a-multimaps-rows-must-stay-ascending-by-position-within-a-group-and-only-that-order-is-a-contract) | A multimap's rows must stay ascending by POSITION within a group, and only that order is a contract | 4 — covered |
+| [Risk-210](#risk-210--a-parquet_table_index-checks-generation-on-every-query-and-never-caches-the-answer) | A `parquet_table_index` checks `%generation()` on EVERY query, and never caches the answer | 4 — covered |
+| [Risk-211](#risk-211--build_index-and-the-filters-in-leaf-convert-a-key-through-one-helper-and-the-nan-split-is-the-one-deliberate-difference) | `%build_index` and the filter's `in` leaf convert a key through ONE helper, and the NaN split is the one deliberate difference | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8120,3 +8122,61 @@ strictly ascending range in every multi-row group and, with values that DESCEND 
 the order is by position and not by value — the arm a scatter that sorted by value would pass —
 and by `test_mm_csr_equals_match_all`, whose element-for-element equality with `pf_match_all`
 fails on any reordering. Verified by control: reversing one group's scatter fails both.
+
+### Risk-210 — A `parquet_table_index` checks `%generation()` on EVERY query, and never caches the answer
+
+`parquet_table_index` (`src/parquet_tables_index.f90`) exists for one job: to refuse, loudly, once
+the table it was built over has changed underneath it. It stamps `cache%generation` at build and
+`tix_resolve` compares the stamp on every `%find`, `%find_all`, `%find_many` and `%count`. The way
+this breaks is the stale-flag hazard `doc/pages/tables/table-mutate.md` refuses for sortedness: a
+contributor caches the comparison's answer in a "still valid" logical, or checks it only in
+`%find_many` "because that is the hot one", or skips it on a `unique=.true.` index "because the map
+cannot change". Every one of those ships an index that answers **in-range row numbers naming the
+wrong rows** after a `%filter_rows`, `%sort_by` or `%append` — a perfectly plausible answer, since
+the rows exist, and nothing else compares the index to the table. The check costs one `integer(int64)`
+comparison per query, which is not a reason.
+
+**The stamp is on the CACHE, deliberately.** The index holds a pointer to `parquet_table_cache`,
+like the row and column handles, so that the caller need not declare the table `target`; the
+counter it compares lives there too, bumped by every row-structural (and column-structural)
+change. An index does not survive the table itself — a cache freed with its table leaves
+`associated()` answering `.true.` — and that is documented as the caller's responsibility, exactly
+as for `parquet_table_col`.
+
+**Covered by** the four `table_index_stale_*` scenarios (`test/error_scenarios.f90`,
+`test/test_errors.f90`), one per query family, each of which makes a row change that keeps every
+answer *in range* — a `%filter_rows` dropping one row of five — so a cached or skipped check would
+answer plausibly rather than crash; and by `test_stale_and_current` (`test/test_table_index.f90`),
+the negative control proving a value write (`%set_element`, `%fillna`) does NOT stale it, so the
+guard cannot pass by firing on everything.
+
+### Risk-211 — `%build_index` and the filter's `in` leaf convert a key through ONE helper, and the NaN split is the one deliberate difference
+
+Three callers turn a column's values into `parquet_index` keys: the reader's pre-evaluated `in`
+leaf (`parquet_answer_set_chunk`, `src/parquet_read.f90`), the in-memory evaluator's
+(`parquet_eval_set_leaf_column`, `src/parquet_read_eval.f90`) and the table's `%build_index`
+(`src/parquet_tables_index.f90`); the join's hash path will be a fourth. Two conversions of a real
+or temporal column — one normalising `-0.0`, one not; one taking `%raw()`, one an MJD; one
+widening `int32` first, one hashing it as is — give a table whose `in` filter and whose index
+**disagree about the same row**, and both answers are individually plausible. So every caller
+keys through parquet_core's helpers and nothing of its own: `parquet_date_key`,
+`parquet_time_key`, `parquet_timestamp_key` (the unit-free (seconds, nanoseconds) pair), and for a
+real column `parquet_filter_real_key` or `parquet_index_real_key`.
+
+**Those last two split on NaN, and only on NaN, by design** (feature_pf_index.md, question 6). The
+filter compares as IEEE does — a NaN equals nothing, so a NaN is refused inside a set and a NaN row
+matches nothing — and keeps the value's own bit pattern. An index answers the sort comparator's
+question, "which row holds this value", under which every NaN is one value (the equality
+`pf_match`, `%duplicated` and `%drop_duplicates` already use), so `parquet_index_real_key` maps
+every NaN onto one pattern. The way this breaks: someone "simplifies" the two into one — either
+way, a real column holding two NaN rows becomes two keys or one by accident of payload, and a
+`unique=.true.` index either aborts on a duplicate nobody can see in the data or silently answers
+one of the two rows for `%find(nan)`.
+
+**Covered by** `test_real_key_helpers_split_on_nan_only` (`test/test_filter.f90`), which asserts
+the two helpers agree on every finite value including both zeros, disagree on two NaNs of
+different payload, and that the temporal helpers are the elements' raw storage; by
+`test_real_nan_is_one_key` (`test/test_table_index.f90`), which indexes two NaN rows as one key;
+by `test_in_timestamp_set_across_units` (`test/test_filter.f90`) and `test_timestamp_across_units`
+(`test/test_table_index.f90`), which hold the unit-free timestamp key on both paths; and by
+`test_in_temporal_row_mask_agrees`, the two-engine A/B over temporal sets.

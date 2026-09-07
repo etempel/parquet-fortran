@@ -89,8 +89,9 @@ call filt%add("src not_in @bad or src is_null")
 ```
 
 The spelling is pandas' `query("ID in @ids")`. `%bind` accepts `integer(int32)`, `integer(int64)`,
-`real(real32)`, `real(real64)`, a `character` array, or a `parquet_string_column`, each with an
-optional `is_valid=` mask marking the elements to leave out of the set.
+`real(real32)`, `real(real64)`, a `character` array, a `parquet_string_column`, or an array of
+`parquet_date`, `parquet_time` or `parquet_timestamp` elements, each with an optional `is_valid=`
+mask marking the elements to leave out of the set (a null temporal element is left out on its own).
 
 **A short set can be written out in the rule instead**, as a parenthesised, comma-separated list:
 
@@ -108,7 +109,8 @@ unchanged. Four points are specific to the written-out form:
   integer list against an integer column and a floating-point one against a `float32`/`float64`
   column, exactly as the bare literal in `x == 1` is. A member for a `string` column must be
   double-quoted, and one for a numeric column must not be; either mistake is reported naming the
-  element's position.
+  element's position. A list against a `date`, `time` or `timestamp` column is refused: a
+  temporal set is bound from elements with `%bind` (below), never written out.
 - **A quoted member may contain a comma, a parenthesis or a keyword** — `name in ("a,b", "c)d")` is
   two members — because a quoted run is read as one token before the list is split.
 - **`inf` and `-inf` are accepted; `nan` is not**, for the reason a bare `nan` literal is not: it
@@ -123,10 +125,19 @@ unchanged. Four points are specific to the written-out form:
   at all.
 
 **What the set is compared against.** An integer set matches any integer column; a real set matches
-a `float32`/`float64` column; a string set matches a `string` column. Anything else is refused
-naming the column, exactly as a mistyped literal is. A `boolean` column is refused because a set of
-booleans is `==` with extra steps, and a vector, `list`, `map` or `struct` column is refused for the
-reason every filter column is — there is no single value per row to compare.
+a `float32`/`float64` column; a string set matches a `string` column; a `parquet_date`,
+`parquet_time` or `parquet_timestamp` set matches a column of exactly that temporal type (a date set
+against a `timestamp` column is refused — the members are elements, not text, so there is no
+midnight to assume). Anything else is refused naming the column, exactly as a mistyped literal is. A
+`boolean` column is refused because a set of booleans is `==` with extra steps, and a vector, `list`,
+`map` or `struct` column is refused for the reason every filter column is — there is no single value
+per row to compare.
+
+**A temporal set is compared by the element's own storage, not by the file's unit.** A
+`parquet_timestamp` set is keyed by each instant's (seconds, nanoseconds) pair, so a set built at
+one resolution selects the same instants in a `timestamp[ms]` column as in a `timestamp[us]` one —
+exactly, with no rounding: a member 500 µs off every stored instant matches nothing. A date set is
+keyed by the day, a time set by the nanoseconds since midnight.
 
 **The set is copied, and deduplicated, at `%bind`.** Your array may change or go out of scope
 afterwards. Repeats are collapsed rather than rejected, which matters because an identifier list
@@ -160,8 +171,9 @@ file written with **no statistics at all**, and on a scattered set whose values 
 between row groups' ranges. On a file clustered or sorted by the key, most of it is skipped without
 being read.
 
-**What it costs.** The distinct keys, once per copy of the filter (about 8 bytes each for a numeric
-set), plus one byte per row of the file per `in` clause while the filter is being installed — the
+**What it costs.** The distinct keys, once per copy of the filter (about 8 bytes each for a numeric,
+date or time set, 16 for a timestamp set), plus one byte per row of the file per `in` clause while
+the filter is being installed — the
 same shape and size as the mask `sample_fraction=` already builds. Under `bounded=.true.` that array
 is, like the filter's own row mask, one of the things that still scale with the file's row count.
 `bench/benchmark_filter_set.sh` measures the evaluation against the row-group decode it precedes.
@@ -260,6 +272,10 @@ call filt%add('obs_ts == "2024-01-31T12:30:00"')
 - **Timezones are not interpreted.** A `parquet_timestamp` holds the stored epoch offset verbatim
   (see [Dates and times](../types/date-time.html)), so a literal is read as a civil date/time and
   compared against the same stored instants a read returns.
+- **A set of dates, times or instants is bound as elements**, not written as literals:
+  `filt%add_in("obs_date", wanted_days)` with a `parquet_date` array, or `%bind` plus
+  `obs_ts in @instants`. See [Membership in a set](#membership-in-a-set-in-and-not_in) for the
+  rules, including that the set must match the column's temporal type exactly.
 
 ### Validation and cost
 

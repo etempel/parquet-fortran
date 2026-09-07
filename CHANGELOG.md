@@ -11,7 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Row filters accept a bound set: `in` and `not_in`.** `filt%add_in("ID", ids)` keeps the rows
   whose value appears in an array you attach, and `filt%bind("wanted", ids)` plus
   `filt%add("ID in @wanted or flag == 7")` puts the same set inside an ordinary expression. Integer,
-  floating-point and string sets are accepted, with an optional `is_valid=` mask. The membership
+  floating-point, string, date, time and timestamp sets are accepted, with an optional `is_valid=`
+  mask; a timestamp set matches a column of any stored unit by instant. The membership
   test is evaluated before the file's data columns are read, so a set clause prunes row groups where
   a min/max rule cannot — on a string column, on a file written without statistics, and on a
   scattered set — which is what lets `parquet_open_table(..., bounded=.true.)` restrict one file by
@@ -101,6 +102,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pf_match_all` returns, on a hash engine and on a team. Tuple keys, `values=`, `valid=` masks and
   the three backends are the map's. See
   [A key that repeats](doc/pages/utilities/index-maps.md#a-key-that-repeats-pf_index_multimap).
+- **`parquet_table%build_index` and `parquet_table_index`: a lookup index over one column.**
+  `call t%build_index("id", ix)` then `call ix%find(key, row)`, `%find_all`, `%find_many` and
+  `%count` answer "which row holds this key?" in a few nanoseconds without reordering the table,
+  over an integer, real, date, time or timestamp column; `unique=.false.` indexes a key that
+  repeats. The index checks the table's `%generation()` on every query and refuses once the rows
+  have changed. See
+  [Looking a value up](doc/pages/tables/table-mutate.md#looking-a-value-up-build_index).
 
 ### Changed
 

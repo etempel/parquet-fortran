@@ -113,7 +113,12 @@ module parquet
     ! tokenizer and its one sort-key direction grammar rather than keeping second copies, and
     ! `parquet_io` -- the facade this one now re-exports in place of parquet_core -- already hides
     ! them. Adding a `private ::` for either here is an ERROR, not a redundancy: the name is not
-    ! accessible in this scope at all, and nagfor reports it as an implicitly-typed local.
+    ! accessible in this scope at all, and nagfor reports it as an implicitly-typed local. The
+    ! same holds for the seven key-conversion helpers parquet_core publishes for parquet_tables'
+    ! %build_index (parquet_filter_real_key, parquet_index_real_key, parquet_date_key,
+    ! parquet_time_key, parquet_timestamp_key, parquet_set_family_for_column,
+    ! parquet_filter_column_tokens) and the FSET_* family codes they speak in: parquet_io hides
+    ! them, so they need -- and may have -- no statement here.
     ! parquet_settings has to make these two public so the write path (a submodule of parquet_core,
     ! a different module) can reach them -- Fortran has no package scope. They are plumbing, not
     ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as the

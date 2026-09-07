@@ -115,11 +115,6 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: n !! new floor, or 0 to restore.
         end subroutine parquet_debug_set_colread_min_elements
-        !> Forces the join's pair-list engine: 0 automatic, 1 the sort engine, 2 the hash engine.
-        subroutine parquet_debug_set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
-            import :: c_int64_t
-            integer(c_int64_t), value :: mode !! 0, 1 or 2.
-        end subroutine parquet_debug_set_join_engine
     end interface
     !
 contains
@@ -2020,16 +2015,30 @@ contains
     !! bite (arm 2 against arm 1), and `threads=` must NOT bite on the same observable (arm 3) --
     !! without arm 3 an implementation in which `threads=` drove the column work too would pass.
     !!
-    !! **The fourth arm is the sort half, and it is what closes the split in both directions.**
-    !! `%join` asks `pf_argsort` for `group_offsets=`, and on that path `engine_build_runs`
-    !! (`src/parquet_argsort_kernel.f90`) used to resolve the thread count and then call the SERIAL
-    !! builder, so `threads=` changed nothing at all -- measured here at 1 for `threads=4` with the
-    !! engine floor lowered, while the ungrouped path's own test (`a selection's ordering route
-    !! really opens a team`, `test/test_sorting.f90`) opened 4 on the same machine. The builder now
-    !! receives that count (`feature_risks.md` Risk-189), so arm 4 asserts the sort team really is
+    !! **Arms 4 and 5 are the match half, one per engine, and they close the split in both
+    !! directions.** `join_choose_engine` (`src/parquet_tables_join.f90`) takes the hash engine for
+    !! this fixture's integer key under the default `order="left"`, and the sort engine under
+    !! `order="key"`; a pair list is identical at every team size, so each engine's own thread
+    !! record is the only observation that `threads=` reached it. Arm 4 reads the hash engine's
+    !! two records -- `parquet_debug_index_threads_used` for the multimap's build over the right
+    !! keys, `parquet_debug_index_get_many_threads_used` for its probe with the left ones -- and
+    !! arm 5 the sort engine's `parquet_debug_sort_threads_used`. Each asserts the team really is
     !! what `threads=` asked for, AND that `parquet_set_table_threads` does not move it -- the
-    !! mirror of arm 3, which asserts `threads=` does not move the column team. Together the four
-    !! arms pin each knob to its own half and to nothing else.
+    !! mirror of arm 3, which asserts `threads=` does not move the column team. Together the arms
+    !! pin each knob to its own half and to nothing else.
+    !!
+    !! Arm 5 is the older of the two and carries a history: on the `group_offsets=` path
+    !! `engine_build_runs` (`src/parquet_argsort_kernel.f90`) used to resolve the thread count and
+    !! then call the SERIAL builder, so `threads=` changed nothing at all -- measured here at 1 for
+    !! `threads=4` with the engine floor lowered, while the ungrouped path's own test (`a
+    !! selection's ordering route really opens a team`, `test/test_sorting.f90`) opened 4 on the
+    !! same machine. The builder now receives that count (`feature_risks.md` Risk-189).
+    !!
+    !! **Neither engine's record can be reset, so every request is preceded by an explicit
+    !! `threads=1` join that pins the record to 1.** An `== nt` read against a record an earlier
+    !! automatic join had already left at nt would hold for the wrong reason; the priming join
+    !! makes each later read discriminating. The suite runs serialised
+    !! (`suite_is_safe_to_parallelize`), so nothing else writes the records in between.
     !!
     !! The join is made to DETACH so the column work is a real gather over all five columns rather
     !! than a no-op, which is what clears `colwork_threads`' floor (the Risk-49 trap).
@@ -2038,7 +2047,9 @@ contains
         type(parquet_table) :: a, b, c, d, e
         integer(int32) :: k(NROW), rk(NROW + 1)
         integer :: nt, tab_free, tab_capped, tab_threads1
-        integer(int64) :: sort_asked, sort_under_cap !! the SORT teams arm 4 observes.
+        !> The HASH engine's teams arm 4 observes: build and probe, primed, asked, and under the cap.
+        integer :: hash_build1, hash_probe1, hash_build, hash_probe, hash_build_cap, hash_probe_cap
+        integer(int64) :: sort_one, sort_asked, sort_under_cap !! the SORT teams arm 5 observes.
         !
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: table_colwork opens its team inside #ifdef _OPENMP, " // &
@@ -2106,31 +2117,74 @@ contains
             "match, and the two knobs are separate")
         if (allocated(error)) return
         !
-        ! ---- Arm 4: the sort half, the mirror of arm 3. The join is forced onto the SORT engine
-        ! for this arm: an integer key under order="left" takes the hash engine by default, whose
-        ! multimap resolves its team through the index rule without recording it, so the sort's
-        ! `parquet_debug_sort_threads_used` is the one observation of `threads=` reaching the match
-        ! engine that exists. The engine hook and the engine floor are both set around the two
-        ! calls and restored before the assertions, because every `check` can return early and a
-        ! leaked setting would change the engine, or rethread, every later test in this suite.
+        ! ---- Arm 4: the match half on the DEFAULT engine, the mirror of arm 3. This key under
+        ! order="left" takes the hash engine: its multimap is built over the right keys through
+        ! `pf_index_map%get_or_add_many`, which records the team it resolved in
+        ! `parquet_debug_index_threads_used`, and probed with the left keys through `%probe_many`,
+        ! which records its own in `parquet_debug_index_get_many_threads_used`. The threads=1 join
+        ! first pins both records to 1 (see the doc-comment above). `nt` rather than a flat 4: both
+        ! engines clamp an explicit request to `omp_get_num_procs()`, so the expectation carries the
+        ! clamp rather than the test demanding a machine wide enough to avoid it.
         call build_fixture(e)
-        call parquet_debug_set_join_engine(1_c_int64_t)
-        call parquet_debug_set_sort_engine_min_rows(1_int64)
-        call e%join(b, "k", how="left", threads=4)
-        sort_asked = parquet_debug_sort_threads_used()
-        call e%clone(c)
+        call e%join(b, "k", how="left", threads=1)
+        hash_build1 = parquet_debug_index_threads_used()
+        hash_probe1 = parquet_debug_index_get_many_threads_used()
+        call build_fixture(e)
+        call e%join(b, "k", how="left", threads=nt)
+        hash_build = parquet_debug_index_threads_used()
+        hash_probe = parquet_debug_index_get_many_threads_used()
+        call build_fixture(c)
         call parquet_set_table_threads(1)
-        call c%join(b, "k", how="left", threads=4)
+        call c%join(b, "k", how="left", threads=nt)
+        hash_build_cap = parquet_debug_index_threads_used()
+        hash_probe_cap = parquet_debug_index_get_many_threads_used()
+        call parquet_reset_settings()
+        !
+        call check(error, hash_build1 == 1 .and. hash_probe1 == 1, &
+            "threads=1 must run the hash engine's build and probe serially, pinning both records " // &
+            "to 1 -- or the assertions that follow could read a team an earlier join left behind")
+        if (allocated(error)) return
+        call check(error, hash_build == nt, &
+            "threads= must reach the hash engine's build: the join hands the multimap over the " // &
+            "right keys the resolved count, and its record has to show that count")
+        if (allocated(error)) return
+        call check(error, hash_probe == nt, &
+            "threads= must reach the hash engine's probe: the multimap's probe_many over the " // &
+            "left keys is handed the same count as the build")
+        if (allocated(error)) return
+        call check(error, hash_build_cap == nt .and. hash_probe_cap == nt, &
+            "parquet_set_table_threads must NOT move the hash engine's build or probe team -- " // &
+            "it caps the column work, and this is the mirror of arm 3")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 5: the same three joins on the SORT engine, which order="key" selects. The
+        ! engine floor is lowered so a fixture of NROW rows reaches the engine at all, and restored
+        ! before the assertions, because every `check` can return early and a leaked floor would
+        ! rethread every later sort in this suite. The record is written in the engine's one
+        ! shared body (`sort_build_permutation_impl`), so the threads=1 join pins it to 1.
+        call parquet_debug_set_sort_engine_min_rows(1_int64)
+        call build_fixture(e)
+        call e%join(b, "k", how="left", order="key", threads=1)
+        sort_one = parquet_debug_sort_threads_used()
+        call build_fixture(e)
+        call e%join(b, "k", how="left", order="key", threads=nt)
+        sort_asked = parquet_debug_sort_threads_used()
+        call build_fixture(c)
+        call parquet_set_table_threads(1)
+        call c%join(b, "k", how="left", order="key", threads=nt)
         sort_under_cap = parquet_debug_sort_threads_used()
         call parquet_reset_settings()
         call parquet_debug_set_sort_engine_min_rows(-1_int64)
-        call parquet_debug_set_join_engine(0_c_int64_t)
         !
-        call check(error, sort_asked == 4_int64, &
+        call check(error, sort_one == 1_int64, &
+            "threads=1 must run the pair-list sort serially, pinning its record to 1 -- or the " // &
+            "assertions that follow could read a team an earlier sort left behind")
+        if (allocated(error)) return
+        call check(error, sort_asked == int(nt, int64), &
             "threads= must reach the pair-list sort: the join asks pf_argsort for group_offsets=, " // &
             "and that path has to be handed the resolved thread count, not merely resolve one")
         if (allocated(error)) return
-        call check(error, sort_under_cap == 4_int64, &
+        call check(error, sort_under_cap == int(nt, int64), &
             "parquet_set_table_threads must NOT move the sort team -- it caps the column work, " // &
             "and this is the mirror of arm 3")
 #endif

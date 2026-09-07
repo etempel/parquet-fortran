@@ -28,7 +28,7 @@
 !!
 !! This suite touches no file; its one piece of process-global state is the hook above.
 module test_index_strings
-    use testdrive, only: new_unittest, unittest_type, error_type, check
+    use testdrive, only: new_unittest, unittest_type, error_type, check, skip_test
     use parquet_index
     use parquet_strings, only: parquet_string_column
     use parquet_sorting, only: pf_match_all
@@ -70,7 +70,13 @@ contains
                 test_str_multimap_bulk_forms), &
             new_unittest("a heavily repeated key set takes the right-sized rebuild and keeps its ids", &
                 test_str_rightsize_rebuild), &
-            new_unittest("edge cases: no keys, one empty key, all keys equal", test_str_edges) &
+            new_unittest("edge cases: no keys, one empty key, all keys equal", test_str_edges), &
+            new_unittest("a partitioned string build answers every key, from an array and a column", &
+                test_str_partitioned_build), &
+            new_unittest("a threaded string get_or_add_many codes densely and lists keys in code order", &
+                test_str_partitioned_get_or_add_many), &
+            new_unittest("colliding strings send the threaded passes to the serial loop, which answers", &
+                test_str_collision_threaded) &
             ]
     end subroutine collect_tests_index_strings
 
@@ -758,5 +764,332 @@ contains
         call mm%build(none)
         call check(error, mm%ngroups() == 0_int64 .and. mm%count("x") == 0_int64, "an empty multimap build is valid")
     end subroutine test_str_edges
+
+    !> Whether two codings of one stream agree on which rows share a key -- `a(i) == a(j)` exactly
+    !! when `b(i) == b(j)` -- with both dense in `1 .. k`; a row coded 0 in both is a masked row
+    !! and is skipped, a row coded 0 in one only is a disagreement.
+    pure function codes_consistent(a, b, k) result(ok)
+        integer(int64), intent(in) :: a(:) !! one coding.
+        integer(int64), intent(in) :: b(:) !! the other.
+        integer(int64), intent(in) :: k    !! the distinct-key count both must be dense over.
+        logical :: ok                      !! `.true.` when the two are relabellings of each other.
+        integer(int64), allocatable :: ab(:), ba(:)
+        integer(int64) :: i
+
+        ok = .false.
+        if (size(a) /= size(b)) return
+        if (minval(a) < 0_int64 .or. minval(b) < 0_int64) return
+        if (maxval(a) /= k .or. maxval(b) /= k) return
+        allocate(ab(k), ba(k))
+        ab = 0_int64
+        ba = 0_int64
+        do i = 1_int64, size(a, kind=int64)
+            if (a(i) == 0_int64 .and. b(i) == 0_int64) cycle
+            if (a(i) == 0_int64 .or. b(i) == 0_int64) return
+            if (ab(a(i)) == 0_int64) ab(a(i)) = b(i)
+            if (ab(a(i)) /= b(i)) return
+            if (ba(b(i)) == 0_int64) ba(b(i)) = a(i)
+            if (ba(b(i)) /= a(i)) return
+        end do
+        ok = all(ab /= 0_int64) .and. all(ba /= 0_int64)
+    end function codes_consistent
+
+    !> The partitioned string build -- every key hashed on the team, the store filled on the
+    !! team, the tuples through the partitioned insert -- answers every key and every miss as the
+    !! serial build does, from a character array and from a column with nulls, under a mask and
+    !! with values; and it did partition, which the spill count says (-1 is the serial loop).
+    subroutine test_str_partitioned_build(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, s
+        type(parquet_string_column) :: sc, list
+        character(len=12), allocatable :: keys(:)
+        integer(int64), allocatable :: vals(:)
+        logical, allocatable :: mask(:)
+        integer(int64), parameter :: n = 50000_int64
+        integer(int64) :: i, bad, kept, want
+        integer :: nt
+        character(len=16) :: txt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it a string build never partitions")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no build " // &
+                "ever partitions")
+            return
+        end if
+        allocate(keys(n), vals(n), mask(n))
+        call sc%clear()
+        do i = 1_int64, n
+            write (txt, "(a,i0)") "obj_", i * 7_int64
+            keys(i) = txt
+            if (mod(i, 97_int64) == 0_int64) then
+                call sc%append_null()
+            else
+                call sc%append_string(trim(txt))
+            end if
+            vals(i) = i + 1000_int64
+            mask(i) = mod(i, 5_int64) /= 0_int64
+        end do
+        call m%build(keys)
+        call check(error, parquet_debug_index_threads_used() == nt, "a string build over 50000 keys resolves the team")
+        if (allocated(error)) return
+        call check(error, parquet_debug_index_spills() >= 0_int64, &
+            "the string build ran its partitioned pass (a spill count of -1 is the serial loop)")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == n, "every key is stored")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (m%get(trim(keys(i))) /= i) bad = bad + 1_int64
+            if (m%get(trim(keys(i)) // "x") /= 0_int64) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every key answers its row and every absent key 0")
+        if (allocated(error)) return
+        call s%build(keys, threads=1)
+        call check(error, parquet_debug_index_spills() == -1_int64, "threads=1 is the serial loop")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n, 13_int64
+            if (s%get(trim(keys(i))) /= m%get(trim(keys(i)))) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "the partitioned build answers as the serial one")
+        if (allocated(error)) return
+        call m%keys(list)
+        call s%build(list, threads=1)
+        call check(error, list%size() == n .and. s%nkeys() == n, "keys() lists every stored string, once")
+        if (allocated(error)) return
+        ! The column: nulls skipped, then a mask and values on top.
+        call m%build(sc)
+        call check(error, parquet_debug_index_spills() >= 0_int64, "the column build ran its partitioned pass")
+        if (allocated(error)) return
+        want = n - n / 97_int64
+        call check(error, m%nkeys() == want, "a null element is neither stored nor counted")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (mod(i, 97_int64) == 0_int64) then
+                if (m%get(trim(keys(i))) /= 0_int64) bad = bad + 1_int64
+            else
+                if (m%get(trim(keys(i))) /= i) bad = bad + 1_int64
+            end if
+        end do
+        call check(error, bad == 0_int64, "every non-null element answers its row and a null one's text answers 0")
+        if (allocated(error)) return
+        call m%build(sc, vals, valid=mask)
+        kept = 0_int64
+        bad = 0_int64
+        do i = 1_int64, n
+            if (mask(i) .and. mod(i, 97_int64) /= 0_int64) then
+                kept = kept + 1_int64
+                if (m%get(trim(keys(i))) /= vals(i)) bad = bad + 1_int64
+            else
+                if (m%get(trim(keys(i))) /= 0_int64) bad = bad + 1_int64
+            end if
+        end do
+        call check(error, m%nkeys() == kept .and. bad == 0_int64, &
+            "under a mask and values, an unmasked non-null element answers its value and the rest 0")
+    end subroutine test_str_partitioned_build
+
+    !> A threaded string `%get_or_add_many` on a fresh map numbers the distinct strings densely
+    !! and consistently with the serial pass, lists them through `%keys` in code order (a code is
+    !! its store position, as on the serial pass), takes a column's nulls and a mask as code 0,
+    !! and on a map already holding keys looks them up on the team and adds the new ones.
+    subroutine test_str_partitioned_get_or_add_many(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: s, p, q
+        type(parquet_string_column) :: sc, list
+        character(len=12), allocatable :: stream(:), more(:)
+        integer(int64), allocatable :: c1(:), c2(:), c3(:), cm1(:), cm2(:)
+        integer(int32), allocatable :: c32(:)
+        logical, allocatable :: mask(:)
+        character(len=:), allocatable :: tok
+        integer(int64), parameter :: n = 60000_int64, k = 20000_int64, nmore = 10000_int64
+        integer(int64) :: i, bad, c
+        integer :: nt
+        character(len=16) :: txt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it every string get_or_add_many is the serial pass")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no call " // &
+                "ever partitions")
+            return
+        end if
+        allocate(stream(n), more(nmore), c1(n), c2(n), c3(nmore), cm1(n), cm2(n), c32(n), mask(n))
+        call sc%clear()
+        do i = 1_int64, n
+            write (txt, "(a,i0)") "s", 1_int64 + mod(i * 7919_int64, k)
+            stream(i) = txt
+            mask(i) = mod(i, 4_int64) /= 0_int64
+            if (mod(i, 101_int64) == 0_int64) then
+                call sc%append_null()
+            else
+                call sc%append_string(trim(txt))
+            end if
+        end do
+        call s%init(strings=.true.)
+        call s%get_or_add_many(stream, c1, threads=1)
+        call p%init(strings=.true.)
+        call p%get_or_add_many(stream, c2)
+        call check(error, parquet_debug_index_threads_used() == nt, "a string get_or_add_many over 60000 rows resolves the team")
+        if (allocated(error)) return
+        call check(error, parquet_debug_index_spills() >= 0_int64, "the fresh map took the partitioned pass")
+        if (allocated(error)) return
+        call check(error, p%nkeys() == k .and. s%nkeys() == k, "both passes store exactly the distinct strings")
+        if (allocated(error)) return
+        call check(error, codes_consistent(c1, c2, k), &
+            "the threaded codes are a relabelling of the serial ones: dense in 1..k, equal strings equal codes")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (p%get(trim(stream(i))) /= c2(i)) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every row's code is what %get answers for its string afterwards")
+        if (allocated(error)) return
+        call p%keys(list)
+        call check(error, list%size() == k, "keys() lists one entry per code")
+        if (allocated(error)) return
+        bad = 0_int64
+        do c = 1_int64, k, 7_int64
+            call list%get(c, tok)
+            if (p%get(tok) /= c) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "keys() lists the strings in code order: element c has code c")
+        if (allocated(error)) return
+        ! The filled map: half old strings, half new -- old codes kept, new ones above k.
+        do i = 1_int64, nmore
+            if (mod(i, 2_int64) == 0_int64) then
+                more(i) = stream(i)
+            else
+                write (txt, "(a,i0)") "t", i
+                more(i) = txt
+            end if
+        end do
+        call p%get_or_add_many(more, c3)
+        bad = 0_int64
+        do i = 1_int64, nmore
+            if (mod(i, 2_int64) == 0_int64) then
+                if (c3(i) /= c2(i)) bad = bad + 1_int64
+            else
+                if (c3(i) <= k) bad = bad + 1_int64
+            end if
+        end do
+        call check(error, bad == 0_int64 .and. p%nkeys() == k + nmore / 2_int64, &
+            "on a filled map an old string keeps its code and a new one is added above the watermark")
+        if (allocated(error)) return
+        ! The column with nulls, under a mask: null and masked rows are 0 and add nothing.
+        call s%clear()
+        call s%init(strings=.true.)
+        call s%get_or_add_many(sc, cm1, valid=mask, threads=1)
+        call q%init(strings=.true.)
+        call q%get_or_add_many(sc, cm2, valid=mask)
+        call check(error, q%nkeys() == s%nkeys() .and. all(pack(cm2, .not. mask) == 0_int64), &
+            "a masked row gets 0 and adds nothing under the threaded pass")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 101_int64, n, 101_int64
+            if (cm2(i) /= 0_int64) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64 .and. codes_consistent(cm1, cm2, s%nkeys()), &
+            "a null element gets 0, and the rest are coded consistently with the serial pass")
+        if (allocated(error)) return
+        call q%clear()
+        call q%init(strings=.true.)
+        call q%get_or_add_many(stream, c32)
+        call check(error, codes_consistent(c1, int(c32, int64), k), "the int32 form codes consistently")
+        if (allocated(error)) return
+        ! Fewer new strings than the threading floor, on a team asked for explicitly: the tuple
+        ! pass adds them serially inside the threaded call, and the string map must take that
+        ! path as any map does (its guard-only workers would refuse a string map).
+        call s%clear()
+        call s%init(strings=.true.)
+        call s%get_or_add_many(stream(1:1500), cm1(1:1500), threads=1)
+        call q%clear()
+        call q%init(strings=.true.)
+        call q%get_or_add_many(stream(1:1500), cm2(1:1500), threads=4)
+        call check(error, parquet_debug_index_spills() == -1_int64 .and. q%nkeys() == s%nkeys(), &
+            "a small fresh string get_or_add_many on a team adds its strings serially")
+        if (allocated(error)) return
+        call check(error, codes_consistent(cm1(1:1500), cm2(1:1500), s%nkeys()), &
+            "the serially added strings are coded consistently with the serial pass")
+        if (allocated(error)) return
+        call q%keys(list)
+        call list%get(1_int64, tok)
+        call check(error, list%size() == s%nkeys() .and. q%get(tok) == 1_int64, &
+            "keys() of the serially filled map lists the strings in code order")
+    end subroutine test_str_partitioned_get_or_add_many
+
+    !> Under the collision hook the partitioned string passes meet equal tuples for distinct
+    !! strings and hand the whole call to the serial loop, which walks the occurrence chain:
+    !! every key still answers, on a build and on a fresh-map `%get_or_add_many`, and the spill
+    !! count says the fallback happened (-1 is the serial loop's mark). The same build with the
+    !! hook off partitions, which is what shows the hook forced the fallback.
+    subroutine test_str_collision_threaded(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+
+        call parquet_debug_set_index_string_hash_bits(6)
+        call collision_threaded_body(error)
+        call parquet_debug_set_index_string_hash_bits(0)
+    end subroutine test_str_collision_threaded
+
+    !> The checked body of `test_str_collision_threaded`, run with the hook set.
+    subroutine collision_threaded_body(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, p
+        type(parquet_string_column) :: keys
+        integer(int64), allocatable :: codes(:)
+        integer(int64), parameter :: n = 20000_int64
+        integer(int64) :: i, bad
+        integer :: nt
+        character(len=16) :: txt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the build is the serial loop whether or not it collides")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no build " // &
+                "ever partitions and none can fall back")
+            return
+        end if
+        call ident_column(n, keys)
+        allocate(codes(n))
+        call m%build(keys)
+        call check(error, parquet_debug_index_threads_used() == nt, "the colliding build resolved its team")
+        if (allocated(error)) return
+        call check(error, parquet_debug_index_spills() == -1_int64, &
+            "with colliding hashes the partitioned pass met equal tuples and the serial loop took over")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == n, "every colliding key is stored")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            write (txt, "(a,i0)") "k", i
+            if (m%get(trim(txt)) /= i) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every colliding key answers its row after the fallback")
+        if (allocated(error)) return
+        call p%init(strings=.true.)
+        call p%get_or_add_many(keys, codes)
+        call check(error, parquet_debug_index_spills() == -1_int64 .and. p%nkeys() == n, &
+            "the fresh-map pass found the collision, and the serial pass stored every key")
+        if (allocated(error)) return
+        call check(error, all(codes == [(i, i = 1_int64, n)]), &
+            "the serial pass numbered the distinct colliding strings by first appearance")
+        if (allocated(error)) return
+        ! Vacuity guard: without the hook the same build partitions.
+        call parquet_debug_set_index_string_hash_bits(0)
+        call m%build(keys)
+        call check(error, parquet_debug_index_spills() >= 0_int64, &
+            "the hook is what forced the fallback: with the full hash the build partitions")
+        call parquet_debug_set_index_string_hash_bits(6)
+    end subroutine collision_threaded_body
 
 end module test_index_strings

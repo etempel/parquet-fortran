@@ -30,6 +30,16 @@
 !! reporter) restores for every impure abort of these submodules, guarded or not; the pure checks
 !! of the lock-free lookups keep their bare `error stop`, as they always had.
 !!
+!! **The hash build and `%get_or_add_many` thread through a partitioned insert.** On a team of
+!! two or more, the hash arm of a build hands its keys to `ix_hash_build_part_1`/`_n`
+!! (`parquet_index_hash.f90`): every key's home slot is computed on the team, the keys are
+!! scattered into partition order, and each thread fills its own slot ranges, deferring the few
+!! chains that reach a range boundary to a serial pass at the end. `%get_or_add_many` looks its
+!! keys up lock-free on the team and inserts the ones not found the same way, numbered partition
+!! by partition. The plan of that insert -- the partition size, the histogram and the write
+!! cursors -- is `ix_part_shift`/`ix_partition_plan` below, contained here so that the string
+!! submodule reaches them too; `feature_pf_index.md` section 6 item 3 is the design.
+!!
 !! **The typed tier, from the first line rather than as a later optimisation.** Every binding is a
 !! thin forwarder onto a worker taking a `type(pf_index_map)` dummy. A `class` actual passed to a
 !! `type` dummy is free; the reverse makes ifx build a runtime class descriptor in the caller's
@@ -79,6 +89,14 @@ submodule (parquet_index) parquet_index_map
     !! the two loops' overhead, at 512 bytes of stack for the home slots. Never a setting: it
     !! changes speed and no answer.
     integer, parameter :: IX_PROBE_BLOCK = 64
+
+    !> Fewest slots a partition of the partitioned insert may hold, as a power of two. With
+    !! chains averaging under two slots, one key in about a hundred and fifty reaches the end
+    !! of a 256-slot partition and is deferred to the serial spill pass, which keeps that pass
+    !! negligible while still letting a small table be cut across a whole team; a larger table
+    !! gets larger partitions (`ix_part_shift`). Never a setting: it changes where keys sit and
+    !! no answer.
+    integer, parameter :: IX_PART_MIN_LG = 8
 
     !> First multiplicative constant of the 32-bit mixing step: murmur3's `0x85ebca6b` with its
     !! top bit cleared, so it is below 2**31 and every product stays below 2**63.
@@ -577,7 +595,7 @@ contains
 
     module procedure goam_r1_k64_i64
         !$omp critical (pf_index_map_guard)
-        call ix_goam_1(self, keys, codes, valid, .false.)
+        call ix_goam_1(self, keys, codes, valid, .false., threads)
         !$omp end critical (pf_index_map_guard)
     end procedure goam_r1_k64_i64
 
@@ -586,7 +604,7 @@ contains
 
         allocate(c(size(codes, kind=int64)))
         !$omp critical (pf_index_map_guard)
-        call ix_goam_1(self, keys, c, valid, .true.)
+        call ix_goam_1(self, keys, c, valid, .true., threads)
         !$omp end critical (pf_index_map_guard)
         codes = int(c, int32)
     end procedure goam_r1_k64_i32
@@ -596,7 +614,7 @@ contains
 
         call ix_widen_keys_1(keys, k)
         !$omp critical (pf_index_map_guard)
-        call ix_goam_1(self, k, codes, valid, .false.)
+        call ix_goam_1(self, k, codes, valid, .false., threads)
         !$omp end critical (pf_index_map_guard)
     end procedure goam_r1_k32_i64
 
@@ -606,14 +624,14 @@ contains
         call ix_widen_keys_1(keys, k)
         allocate(c(size(codes, kind=int64)))
         !$omp critical (pf_index_map_guard)
-        call ix_goam_1(self, k, c, valid, .true.)
+        call ix_goam_1(self, k, c, valid, .true., threads)
         !$omp end critical (pf_index_map_guard)
         codes = int(c, int32)
     end procedure goam_r1_k32_i32
 
     module procedure goam_r2_k64_i64
         !$omp critical (pf_index_map_guard)
-        call ix_goam_n(self, keys, codes, valid, .false.)
+        call ix_goam_n(self, keys, codes, valid, .false., threads)
         !$omp end critical (pf_index_map_guard)
     end procedure goam_r2_k64_i64
 
@@ -622,7 +640,7 @@ contains
 
         allocate(c(size(codes, kind=int64)))
         !$omp critical (pf_index_map_guard)
-        call ix_goam_n(self, keys, c, valid, .true.)
+        call ix_goam_n(self, keys, c, valid, .true., threads)
         !$omp end critical (pf_index_map_guard)
         codes = int(c, int32)
     end procedure goam_r2_k64_i32
@@ -632,7 +650,7 @@ contains
 
         call ix_widen_keys_n(keys, k)
         !$omp critical (pf_index_map_guard)
-        call ix_goam_n(self, k, codes, valid, .false.)
+        call ix_goam_n(self, k, codes, valid, .false., threads)
         !$omp end critical (pf_index_map_guard)
     end procedure goam_r2_k32_i64
 
@@ -642,7 +660,7 @@ contains
         call ix_widen_keys_n(keys, k)
         allocate(c(size(codes, kind=int64)))
         !$omp critical (pf_index_map_guard)
-        call ix_goam_n(self, k, c, valid, .true.)
+        call ix_goam_n(self, k, c, valid, .true., threads)
         !$omp end critical (pf_index_map_guard)
         codes = int(c, int32)
     end procedure goam_r2_k32_i32
@@ -990,6 +1008,85 @@ contains
         lo = 1_int64 + (n * int(c - 1, int64)) / int(nchunk, int64)
         hi = (n * int(c, int64)) / int(nchunk, int64)
     end subroutine ix_chunk_bounds
+
+    ! ---- The partitioned insert's plan, shared by the hash and string submodules ----
+
+    !> Slots per partition of a partitioned insert, as a shift: a partition holds
+    !! `2**ix_part_shift(cap, nt)` slots.
+    !!
+    !! As large as leaves at least four partitions per thread -- enough for `schedule(dynamic)`
+    !! to balance a team beside other load -- and never below `2**IX_PART_MIN_LG` slots, so
+    !! that the share of probe chains reaching a boundary (about the mean chain length over the
+    !! partition size) stays negligible and the serial spill pass stays short. A table smaller
+    !! than that minimum is one partition, whose one boundary is the wrap at the table's end.
+    pure function ix_part_shift(cap, nt) result(lg)
+        integer(int64), intent(in) :: cap !! the table's slot count; a power of two.
+        integer, intent(in) :: nt        !! the team.
+        integer :: lg                    !! log2 of the slots per partition.
+        integer(int64) :: want
+
+        lg = trailz(cap)
+        want = 4_int64 * int(nt, int64)
+        do while (lg > IX_PART_MIN_LG .and. shiftr(cap, lg) < want)
+            lg = lg - 1
+        end do
+    end function ix_part_shift
+
+    !> Lays out a partitioned insert: from every row's partition (or -1 for a row the pass
+    !! skips), where each partition's rows start and where each chunk of the row array writes
+    !! its rows of each partition, so that the caller's scatter needs no synchronisation.
+    !!
+    !! One histogram per chunk on the team, then a prefix sum in partition-major, chunk-minor
+    !! order: `pstart(p)` is where partition `p`'s rows start (0-based; `pstart(np)` is the
+    !! total) and `cursor(p, c)` is where chunk `c` writes its first row of partition `p`. The
+    !! rows of one partition therefore keep the caller's order -- chunk `c`'s rows precede chunk
+    !! `c + 1`'s and each chunk walks in order -- which is what makes a pass deterministic for a
+    !! given team. Chunks are `ix_chunk_bounds`'s, indexed by chunk rather than by thread, so
+    !! a runtime that grants fewer threads than asked changes nothing.
+    subroutine ix_partition_plan(pid, n, np, nt, pstart, cursor)
+        integer(int32), intent(in) :: pid(:)         !! partition per row, or -1 to skip the row.
+        integer(int64), intent(in) :: n              !! rows.
+        integer, intent(in) :: np                    !! partitions: the table's slots over `2**lg`.
+        integer, intent(in) :: nt                    !! the team; also the chunk count.
+        integer(int64), intent(out) :: pstart(0:)    !! `(0:np)`; receives the partition starts.
+        integer(int64), intent(out) :: cursor(0:, :) !! `(0:np-1, nt)`; receives the write cursors.
+        integer(int64) :: i, lo, hi, run, cnt
+        integer :: c, p
+
+        cursor = 0_int64
+        !$omp parallel do default(shared) private(c, lo, hi, i, p) schedule(static) num_threads(nt)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            do i = lo, hi
+                if (pid(i) < 0_int32) cycle
+                p = int(pid(i))
+                cursor(p, c) = cursor(p, c) + 1_int64
+            end do
+        end do
+        run = 0_int64
+        do p = 0, np - 1
+            pstart(p) = run
+            do c = 1, nt
+                cnt = cursor(p, c)
+                cursor(p, c) = run
+                run = run + cnt
+            end do
+        end do
+        pstart(np) = run
+    end subroutine ix_partition_plan
+
+    !> Aborts, with the narrowing check's own message, when a code of a threaded
+    !! `%get_or_add_many` will not fit `int32`; the serial pass checks each row as it goes.
+    subroutine ix_check_codes_fit(codes)
+        integer(int64), intent(inout) :: codes(:) !! the finished codes; unchanged on return.
+        integer(int64) :: i
+
+        if (size(codes, kind=int64) == 0_int64) return
+        if (maxval(codes) <= int(huge(0_int32), int64)) return
+        do i = 1_int64, size(codes, kind=int64)
+            codes(i) = ix_narrow_check(codes(i))
+        end do
+    end subroutine ix_check_codes_fit
 
     !> Narrows an index value to `int32`, aborting rather than truncating.
     pure function ix_narrow(v) result(out)
@@ -1414,15 +1511,21 @@ contains
     !! `pf_index_threads` -- a public query a user may call at any time, and from any thread --
     !! takes the rule without the record, so it cannot clobber what a build just reported.
     !!
-    !! Reached only from the build workers, which run OUTSIDE `pf_index_map_guard` (see
-    !! `ix_adopt`), so the store below is atomic: two builds resolving at once cannot tear it, and
-    !! the record is then the last to resolve.
-    function ix_threads_for(n, threads) result(nt)
+    !! Reached from the build workers, which run OUTSIDE `pf_index_map_guard` (see `ix_adopt`),
+    !! and from `%get_or_add_many`, a build of the keys it does not find; so the store below is
+    !! atomic: two builds resolving at once cannot tear it, and the record is then the last to
+    !! resolve.
+    function ix_threads_for(n, threads, what) result(nt)
         integer(int64), intent(in) :: n              !! keys the build will process.
         integer, intent(in), optional :: threads     !! the caller's request, or absent.
+        character(len=*), intent(in), optional :: what !! procedure name for the message; `build` by default.
         integer :: nt                                !! threads to use; 1 means serial.
 
-        nt = ix_threads_rule(n, threads, "build")
+        if (present(what)) then
+            nt = ix_threads_rule(n, threads, what)
+        else
+            nt = ix_threads_rule(n, threads, "build")
+        end if
         !$omp atomic write
         dbg_index_threads_used = nt
     end function ix_threads_for
@@ -2920,15 +3023,20 @@ contains
     !! insert -- so what this saves over a loop of `%get_or_add` is the guard, taken once here
     !! rather than once per key. The `int32` narrowing happens per row inside the guard, as the
     !! scalar form does, so the abort for an oversized code fires with at most one thread on the
-    !! fatal path. Serial by construction in this version: the codes are assigned in
-    !! first-appearance order, which the doc-comment on the specifics says not to rely on.
-    subroutine ix_goam_1(self, keys, codes, valid, want32)
+    !! fatal path. This serial pass assigns the codes in first-appearance order, which the
+    !! doc-comment on the specifics says not to rely on: on a hash map and a team of two or more
+    !! the rows go to `ix_hash_goam_part_1` instead -- a lock-free lookup of every key on the
+    !! team, the keys not found inserted by the partitioned pass the hash build uses and numbered
+    !! partition by partition -- and the `int32` check then runs once over the finished codes.
+    subroutine ix_goam_1(self, keys, codes, valid, want32, threads)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:)     !! the keys, already widened.
         integer(int64), intent(out) :: codes(:)   !! one code per key; 0 for a masked row.
         logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
         logical, intent(in) :: want32             !! whether every code must fit `int32`.
+        integer, intent(in), optional :: threads  !! the caller's thread request, or absent.
         integer(int64) :: i, n, idx
+        integer :: nt
         logical :: hv
 
         call ix_check_scalar_shape(self, "get_or_add_many")
@@ -2936,6 +3044,14 @@ contains
         n = ix_many_rows(self, size(keys, kind=int64), size(codes, kind=int64), 1, "get_or_add_many")
         hv = present(valid)
         if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_or_add_many")
+        nt = ix_threads_for(n, threads, "get_or_add_many")
+        if (nt > 1 .and. self%backend == IX_HASH) then
+            call ix_hash_goam_part_1(self, keys, codes, valid, nt)
+            if (want32) call ix_check_codes_fit(codes)
+            return
+        end if
+        !$omp atomic write
+        dbg_index_spills = -1_int64
         do i = 1_int64, n
             if (hv) then
                 if (.not. valid(i)) then
@@ -2949,15 +3065,16 @@ contains
     end subroutine ix_goam_1
 
     !> `%get_or_add_many` for rank-2 keys, one tuple per row. See `ix_goam_1`.
-    subroutine ix_goam_n(self, keys, codes, valid, want32)
+    subroutine ix_goam_n(self, keys, codes, valid, want32, threads)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)   !! the tuples, already widened, shaped `(n, ncomp)`.
         integer(int64), intent(out) :: codes(:)   !! one code per row; 0 for a masked row.
         logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
         logical, intent(in) :: want32             !! whether every code must fit `int32`.
+        integer, intent(in), optional :: threads  !! the caller's thread request, or absent.
         integer(int64) :: kb(pf_index_max_components)
         integer(int64) :: i, n, idx
-        integer :: nc, j
+        integer :: nc, j, nt
         logical :: hv
 
         nc = int(size(keys, 2))
@@ -2966,6 +3083,19 @@ contains
         n = ix_many_rows(self, size(keys, 1, kind=int64), size(codes, kind=int64), nc, "get_or_add_many")
         hv = present(valid)
         if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_or_add_many")
+        nt = ix_threads_for(n, threads, "get_or_add_many")
+        if (nt > 1 .and. self%backend == IX_HASH .and. nc > 1) then
+            call ix_hash_goam_part_n(self, keys, codes, valid, nt)
+            if (want32) call ix_check_codes_fit(codes)
+            return
+        else if (nt > 1 .and. self%backend == IX_HASH) then
+            ! A 1-tuple map is the scalar table underneath, and takes the scalar pass.
+            call ix_hash_goam_part_1(self, keys(:, 1), codes, valid, nt)
+            if (want32) call ix_check_codes_fit(codes)
+            return
+        end if
+        !$omp atomic write
+        dbg_index_spills = -1_int64
         do i = 1_int64, n
             if (hv) then
                 if (.not. valid(i)) then
@@ -3343,7 +3473,7 @@ contains
         logical, intent(in), optional :: valid(:)         !! per row; `.false.` skips the row.
         integer(int64) :: n, nv, first, last, lo, hi, span, budget, i, off, cnt
         integer :: want, nt
-        logical :: has_v, hv, is_new, fits
+        logical :: has_v, hv, is_new, fits, dup
 
         call ix_build_begin()
         n = size(keys, kind=int64)
@@ -3433,7 +3563,19 @@ contains
         case (IX_HASH)
             self%backend = IX_HASH
             self%nk = 0_int64
-            call ix_hash_reserve(self, nv)
+            if (nt > 1) then
+                call ix_hash_build_part_1(self, keys, values, valid, nv, nt, dup)
+                if (.not. dup) return
+                ! The partitioned pass met a duplicate but cannot say which copy is the later one
+                ! in the caller's order. The serial loop below, over the emptied table, meets the
+                ! same pair at its canonical position and names it exactly as a serial build does.
+                self%slots(:)%val = 0_int64
+                self%nk = 0_int64
+            else
+                call ix_hash_reserve(self, nv)
+            end if
+            !$omp atomic write
+            dbg_index_spills = -1_int64
             do i = 1_int64, n
                 if (hv) then
                     if (.not. valid(i)) cycle
@@ -3445,6 +3587,8 @@ contains
                 end if
                 if (.not. is_new) call ix_report_duplicate_1(keys(i), i)
             end do
+            if (nt > 1) call ix_abort("pf_index_map%build: duplicate keys were detected but " // &
+                "could not be named")
         case (IX_SORTED)
             self%backend = IX_SORTED
             if (hv) then
@@ -3494,7 +3638,7 @@ contains
         integer(int64) :: sp(pf_index_max_components), kb(pf_index_max_components)
         integer(int64) :: n, nv, first, last, budget, total, grown_total, i, off, cnt, l, h, span
         integer :: want, nt, nc, j
-        logical :: has_v, hv, is_new, fits
+        logical :: has_v, hv, is_new, fits, dup
 
         call ix_build_begin()
         n = size(keys, 1, kind=int64)
@@ -3631,7 +3775,23 @@ contains
         case (IX_HASH)
             self%backend = IX_HASH
             self%nk = 0_int64
-            call ix_hash_reserve(self, nv)
+            if (nt > 1 .and. nc > 1) then
+                call ix_hash_build_part_n(self, keys, values, valid, nv, nt, dup)
+                if (.not. dup) return
+                ! As in `ix_build_1`: the serial loop names the duplicate at its canonical position.
+                self%hrec = 0_int64
+                self%nk = 0_int64
+            else if (nt > 1) then
+                ! A 1-tuple map is the scalar table underneath, and takes the scalar pass.
+                call ix_hash_build_part_1(self, keys(:, 1), values, valid, nv, nt, dup)
+                if (.not. dup) return
+                self%slots(:)%val = 0_int64
+                self%nk = 0_int64
+            else
+                call ix_hash_reserve(self, nv)
+            end if
+            !$omp atomic write
+            dbg_index_spills = -1_int64
             ! The row is gathered into a contiguous buffer first: `keys(i, :)` is a strided
             ! section, and the insert's tuple hash takes an explicit-shape array, so passing the
             ! section directly would have the compiler pack it into a temporary per key anyway.
@@ -3649,6 +3809,8 @@ contains
                 end if
                 if (.not. is_new) call ix_report_duplicate_n(kb(1:nc), i)
             end do
+            if (nt > 1) call ix_abort("pf_index_map%build: duplicate keys were detected but " // &
+                "could not be named")
         case (IX_SORTED)
             self%backend = IX_SORTED
             ! `keys(:, 1)` is a contiguous column, so this passes the caller's own storage.

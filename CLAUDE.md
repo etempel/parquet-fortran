@@ -1193,7 +1193,9 @@ parquet_index                   (module — pf_index_map / pf_index_multimap / p
 │                                mixer and the lookup probes, the map's guard, the build's swap-in
 │                                and the serialised abort reporter)
 │   ├─ parquet_index_hash       (sub-submodule — the hash backend's mutation side: insertion,
-│   │                            growth, backward-shift delete; reaches the mixer by host association)
+│   │                            growth, backward-shift delete, and the partitioned insert that
+│   │                            threads a build and %get_or_add_many; reaches the mixer by host
+│   │                            association)
 │   └─ parquet_index_multi      (sub-submodule — pf_index_multimap over the map's chunk loops)
 │       └─ parquet_index_str    (sub-sub-submodule — the string keys of BOTH types and the string
 │                                store; descends from the multimap to reach both sets of helpers)
@@ -4908,6 +4910,14 @@ before being noticed:**
   off that: `%probe_stats` is what separates a hash defect from a memory-parallelism one, and the
   plan's earlier verdict that batching buys 8–15% was a verdict about the *scalar* probe on a
   *different* loop shape — re-measure a "not worth it" before applying it to a heavier kernel.
+- **A multiplicative walk modulo n is NOT a shuffle, and the row-group statistics screen finds
+  the structure it leaves.** `id = 1 + mod((i - 1) * m, n)` with `m` coprime to `n` is a bijection
+  on `1 .. n`, so it reads as a permutation; but consecutive `i` differ by `m mod n`, so a block of
+  consecutive rows holds two interleaved arithmetic progressions covering two narrow ranges of
+  ids. A "shuffled" fixture built that way had 12 of 20 row groups pruned by a dense `in` set --
+  the pruning the fixture existed to rule out -- and would have reported the leaf as cheap on a
+  shape it never met. Use `pf_random_permutation` (`parquet_sampling`) for a fixture that must be
+  unordered, and read the pruned count the benchmark prints before believing a "no pruning" arm.
 - **A sweep must ENGAGE the mechanism it is testing, and one that does not looks exactly like one
   that does.** Work out the condition under which the thing being studied is even active, and pick
   the sweep point from that — never from whatever size the previous measurement happened to use,
@@ -5414,6 +5424,17 @@ n = n + mut                  ! n >= 1 here, so bit-for-bit a no-op -- but not re
   reading 0 cannot distinguish "the code ran and did nothing" from "the code never ran".** Pair it
   with a counter for the other branch and assert both, which is the same negative-control rule this
   file applies to settings and to guards.
+- **A "which path ran" observable must be written by EVERY path, the fallback included, or a test
+  reads the previous call's value and passes.** `parquet_debug_index_spills` reports -1 when the
+  last hash build took the serial insert loop and a count when it took the partitioned pass; the
+  first version wrote the -1 in the `else` arm only, so a partitioned pass that met equal tuples
+  and fell back to the serial loop left the count from an EARLIER build in place, and the test
+  asserting "the collision forced the fallback" read that stale count and reported the fallback
+  as not having happened -- against code that was correct. The write belongs at the top of the
+  serial loop itself, where every route to it passes. The general shape: a test-only counter that
+  distinguishes routes is only evidence about the LAST call if every route writes it, so put the
+  store in the route's body rather than at the call sites that select it, and mutate a fallback
+  path as deliberately as the main one.
 - **If a mutation cannot be caught by any fixture this repository can build, the branch is
   defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
   unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own

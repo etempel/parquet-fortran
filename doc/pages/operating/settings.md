@@ -384,23 +384,26 @@ for what the bulk forms are and what omitting `threads=` costs you.
 
 ## Threads for an index build or a bulk lookup
 
-`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build` or one bulk lookup —
-`pf_index_map%get_many`, or `pf_index_multimap`'s `%get_first_many`, `%get_many` and
-`%probe_many` — may use, and with them a table's `%build_index` and a `parquet_table_index`'s
+`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build`, one `%get_or_add_many`
+or one bulk lookup — `pf_index_map%get_many`, or `pf_index_multimap`'s `%get_first_many`,
+`%get_many` and `%probe_many` — may use, and with them a table's `%build_index` and a `parquet_table_index`'s
 `%find_many`, which are those calls behind a wrapper. Like every other per-area cap it is a cap
 rather than a request,
 read per call, with `0` meaning automatic, `1` forcing serial, and an explicit `threads=` on the
 call itself still winning.
 
-**It bounds the build's key scan and scatter, and the bulk lookup's probe, and nothing else.** A
-scalar `%get` is a few nanoseconds of straight-line code with no team to open, so there is nothing
-there for this knob to govern. A `method="sorted"` build sorts through `pf_argsort`, so *that*
-phase answers to `sort_threads` instead — a sorted build reads both knobs, each for the phase it
-owns.
+**It bounds the build's key scan, scatter and hash insert, the bulk lookup's probe, and
+`%get_or_add_many`'s lookup and insert, and nothing else.** A scalar `%get` is a few nanoseconds
+of straight-line code with no team to open, so there is nothing there for this knob to govern. A
+`method="sorted"` build sorts through `pf_argsort`, so *that* phase answers to `sort_threads`
+instead — a sorted build reads both knobs, each for the phase it owns.
 
 **The answer does not depend on the thread count.** The scan is a min/max reduction, the scatter
-writes one distinct slot per unique key, and a bulk lookup's chunks read a map nobody is writing,
-so a threaded build produces the same map as a serial one and a threaded lookup the same answers.
+writes one distinct slot per unique key, the partitioned hash insert places a key where a lookup
+finds it whatever order filled the table, and a bulk lookup's chunks read a map nobody is
+writing, so a threaded build produces the same answers as a serial one and a threaded lookup the
+same answers; a threaded `%get_or_add_many` numbers its new keys in another order, and that order
+is documented as unspecified.
 
 `parquet_get_index_threads()` reports the raw setting (`0` when automatic), and
 `pf_index_threads(n)` reports what an automatic build over `n` keys, or lookup over `n` rows,

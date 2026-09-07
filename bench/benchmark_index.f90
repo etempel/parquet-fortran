@@ -9,19 +9,20 @@
 !!                 pay; the pair reads as the speed-up), and the two baselines every figure is
 !!                 read against: a raw array read (the floor the direct backend should sit on)
 !!                 and `findloc` (the naive alternative this module replaces).
-!! * `build`    -- ns per key to build, per backend, serial and threaded.
+!! * `build`    -- ns per key to build, per backend, serial and threaded; the hash backend's
+!!                 threaded arm is the partitioned insert, with its spill count printed.
 !! * `tuple`    -- the same lookup sweep over composite keys at ncomp = 1, 2 and 4: `%get` per
 !!                 probe, and the serial `%get_many` over the whole probe array.
 !! * `mutate`   -- `%set`, `%get_or_add` and `%get_or_add_many` throughput, one thread and several
-!!                 sharing one map: what the named critical costs when it is contended, and what
-!!                 the bulk form saves by taking it once per call.
+!!                 sharing one map: what the named critical costs when it is contended, what the
+!!                 bulk form saves by taking it once per call, and what its team saves on top.
 !! * `pool`     -- `%get_index`/`%free_index` throughput, private and shared, and `%compact`.
 !! * `multimap` -- `pf_index_multimap` on the join's shapes: the build over keys that repeat
 !!                 `REPEAT` times on average, `%get_first_many` and `%probe_many` serial and on a
 !!                 team, and `pf_match_all` over the same arrays as the sort-engine baseline the
 !!                 hash engine is read against.
 !! * `strings`  -- string keys: the build of a string map from a `parquet_string_column` of
-!!                 `NKEYS` distinct identifiers, `%get` per key, `%get_many` over a probe column
+!!                 `NKEYS` distinct identifiers, serial and on a team, `%get` per key, `%get_many` over a probe column
 !!                 (half hits, half misses) serial and on a team, and `pf_in` over the same two
 !!                 columns -- the sort-merge the filter's string leaf used to run once per row
 !!                 group, and the baseline the map's figure is read against.
@@ -345,6 +346,9 @@ contains
         if (nt < 1) nt = pf_index_threads(nkeys)
         write (output_unit, "(a,i0,a,i0)") "# serial arm threads=1, threaded arm threads=", nt, &
             "; pf_index_threads(nkeys)=", pf_index_threads(nkeys)
+        ! The hash backend's threaded arm is the partitioned insert (feature_pf_index.md section
+        ! 6 item 3): the serial arm beside it is the insert loop it replaces, and the spill
+        ! count printed after it is how many keys the pass deferred to its serial tail.
         do b = 1, 3
             best = huge(1.0_real64)
             do r = 1, rounds
@@ -363,6 +367,9 @@ contains
                     checksum = checksum + m%nkeys()
                 end do
                 call report(trim(backends(b)) // ": build, threaded", best, nkeys)
+                if (trim(backends(b)) == "hash") write (output_unit, "(a,i0)") &
+                    "# hash: keys the partitioned build deferred to its spill pass: ", &
+                    parquet_debug_index_spills()
             end if
             write (output_unit, "(a,a,i0,a)") "# ", trim(backends(b)) // " memory: ", &
                 m%memory_bytes(), " bytes"
@@ -391,9 +398,14 @@ contains
             pairs = 0_int64
             probe = 0_int64
             answers = 0_int64
-            ! A lattice whose per-component span is the nc-th root of n, so the product of the
-            ! spans stays near n and the direct backend remains admissible at every nc.
-            side = max(2_int64, nint(real(n, real64) ** (1.0_real64 / real(nc, real64)), int64))
+            ! A lattice whose per-component span is the nc-th root of n, rounded UP and then
+            ! checked in exact integer arithmetic, so that `side**nc >= n` and every tuple is
+            ! distinct at any NKEYS: the product of the spans stays within a factor of about
+            ! `(1 + 1/side)**nc` of n, so the direct backend remains admissible at every nc.
+            side = max(2_int64, ceiling(real(n, real64) ** (1.0_real64 / real(nc, real64)), int64))
+            do while (side ** nc < n)
+                side = side + 1_int64
+            end do
             do i = 1_int64, n
                 do j = 1, nc
                     pairs(i, j) = 1_int64 + mod_wrap((i - 1_int64) / side ** (j - 1), side)
@@ -412,8 +424,8 @@ contains
             do b = 1, 2
                 call m%build(pairs, method=trim(backends(b)), threads=threads_req_or_absent())
                 if (m%nkeys() /= n) then
-                    ! The lattice repeated a tuple, which only happens when `side**nc` is below n;
-                    ! say so rather than reporting a figure for a map that was never built.
+                    ! Unreachable now that `side**nc >= n` is checked above; kept so that a lattice
+                    ! that somehow repeats is reported rather than measured.
                     write (output_unit, "(a,i0,a)") "# ncomp=", nc, &
                         ": lattice was not unique, skipped"
                     exit
@@ -469,6 +481,7 @@ contains
         integer(int64) :: i, idx, acc
         integer :: r, team, t
         real(real64) :: t0, best
+        character(len=48) :: tag
 
         write (output_unit, "(a)") "## mutate"
         allocate(keys(nkeys))
@@ -505,16 +518,31 @@ contains
         do r = 1, rounds
             call m%init()
             t0 = now()
-            call m%get_or_add_many(keys, codes)
+            call m%get_or_add_many(keys, codes, threads=1)
             best = min(best, now() - t0)
             checksum = checksum + m%nkeys() + codes(nkeys)
         end do
-        call report("get_or_add_many: one thread, growing", best, nkeys)
+        call report("get_or_add_many: threads=1, growing", best, nkeys)
         team = 1
 #ifdef _OPENMP
         team = omp_get_max_threads()
         if (threads_req > 0) team = threads_req
 #endif
+        ! The same call on a team: every key looked up lock-free on the team, the ones not found
+        ! inserted by the partitioned pass the hash build uses. Read against the arm above; the
+        ! codes differ in order only.
+        if (team > 1) then
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                call m%init()
+                t0 = now()
+                call m%get_or_add_many(keys, codes, threads=team)
+                best = min(best, now() - t0)
+                checksum = checksum + m%nkeys() + codes(nkeys)
+            end do
+            write (tag, "(a,i0,a)") "get_or_add_many: threads=", team, ", growing"
+            call report(trim(tag), best, nkeys)
+        end if
         if (team > 1) then
             best = huge(1.0_real64)
             do r = 1, rounds
@@ -819,15 +847,28 @@ contains
         if (nt < 1) nt = pf_index_threads(naccess)
         write (output_unit, "(a,i0,a,i0,a,f6.2)") "# keys=", nkeys, " probes=", naccess, &
             " mean key bytes=", real(nchar, real64) / real(nkeys, real64)
-        ! The build: the hash of every key plus one copy of its bytes.
+        ! The build: the hash of every key plus one copy of its bytes, serial; then on the
+        ! team, where the hashing and the copy are threaded and the tuples take the partitioned
+        ! insert (the pair reads as the speed-up).
         best = huge(1.0_real64)
         do r = 1, rounds
             t0 = now()
-            call m%build(keys)
+            call m%build(keys, threads=1)
             best = min(best, now() - t0)
             checksum = checksum + m%nkeys()
         end do
-        call report("strings: build from a string column", best, nkeys)
+        call report("strings: build from a string column, threads=1", best, nkeys)
+        if (nt > 1) then
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call m%build(keys, threads=nt)
+                best = min(best, now() - t0)
+                checksum = checksum + m%nkeys()
+            end do
+            write (tag, "(a,i0)") "strings: build from a string column, threads=", nt
+            call report(trim(tag), best, nkeys)
+        end if
         write (output_unit, "(a,i0,a)") "# string map memory: ", m%memory_bytes(), " bytes"
         ! The scalar lookup, one key at a time, through the map's own stored keys.
         best = huge(1.0_real64)

@@ -56,7 +56,12 @@ contains
             new_unittest("threads= is honoured and bounded", test_threads_argument), &
             new_unittest("pf_index_threads reports the rule the build follows", test_index_threads_rule), &
             new_unittest("a per-thread map and pool work inside a region", test_per_thread_containers), &
-            new_unittest("two builds on two threads run at the same time", test_concurrent_builds_overlap) &
+            new_unittest("two builds on two threads run at the same time", test_concurrent_builds_overlap), &
+            new_unittest("a partitioned hash build answers every key and every miss, and spills", &
+                test_partitioned_build_answers), &
+            new_unittest("a threaded get_or_add_many codes densely and consistently", &
+                test_partitioned_get_or_add_many), &
+            new_unittest("a multimap grouped on a team answers as the serial one", test_mm_threaded_grouping) &
             ]
     end subroutine collect_tests_index_omp
 
@@ -701,6 +706,14 @@ contains
             call check(error, threaded_map%nkeys() == serial_map%nkeys(), &
                 "a threaded build stored a different number of keys on " // trim(methods(k)))
             if (allocated(error)) return
+            ! The hash arm is vacuous unless the threaded build really took the partitioned pass:
+            ! a serial insert loop under a threaded scan answers identically. The spill count is
+            ! -1 for the serial loop and 0 or more for the partitioned pass.
+            if (k == 2) then
+                call check(error, parquet_debug_index_spills() >= 0_int64, &
+                    "the threaded hash build must have run the partitioned insert, not the serial loop")
+                if (allocated(error)) return
+            end if
             do i = 1_int64, 200_int64
                 a = serial_map%get(probes(i))
                 b = threaded_map%get(probes(i))
@@ -749,6 +762,11 @@ contains
             call check(error, threaded_map%nkeys() == serial_map%nkeys(), &
                 "a threaded composite build stored a different key count on " // trim(methods(k)))
             if (allocated(error)) return
+            if (k == 2) then
+                call check(error, parquet_debug_index_spills() >= 0_int64, &
+                    "the threaded composite hash build must have run the partitioned insert")
+                if (allocated(error)) return
+            end if
             do i = 1_int64, 20000_int64, 61_int64
                 a = serial_map%get(pairs(i, :))
                 b = threaded_map%get(pairs(i, :))
@@ -1005,6 +1023,390 @@ contains
             "at least two builds must have been in flight at once -- a build that holds the " // &
             "map's lock for its whole duration keeps the high-water mark at 1")
     end subroutine test_concurrent_builds_overlap
+
+    !> Two keys above `above` whose home slots are the last slot of their partition, for a hash
+    !! build of `ntot` keys on `nt` threads: what makes a deferral to the spill pass certain when
+    !! they are inserted last. Both come from the library's own hash and partition rule through
+    !! `parquet_debug_index_partition`, never from a copy of either. `a` and `k` are 0 when such
+    !! a build would not partition, and `k` stays 0 when no pair was found among 2**20 candidates.
+    subroutine craft_boundary_pair(ntot, nt, above, a, k)
+        integer(int64), intent(in) :: ntot   !! keys the build stores.
+        integer, intent(in) :: nt            !! the build's `threads=`.
+        integer(int64), intent(in) :: above  !! the largest key the fixture already holds.
+        integer(int64), intent(out) :: a     !! the first crafted key.
+        integer(int64), intent(out) :: k     !! the second.
+        integer(int64) :: c, home, part, cap
+
+        a = 0_int64
+        k = 0_int64
+        do c = above + 1_int64, above + 1048576_int64
+            call parquet_debug_index_partition(c, ntot, home, part, cap, threads=nt)
+            if (part == 0_int64) return
+            if (mod(home, part) /= part - 1_int64) cycle
+            if (a == 0_int64) then
+                a = c
+            else
+                k = c
+                return
+            end if
+        end do
+    end subroutine craft_boundary_pair
+
+    !> Whether two codings of one stream agree on which rows share a key -- `a(i) == a(j)` exactly
+    !! when `b(i) == b(j)` -- with both dense in `1 .. k`; a row coded 0 in both is a masked row
+    !! and is skipped, a row coded 0 in one only is a disagreement.
+    pure function codes_consistent(a, b, k) result(ok)
+        integer(int64), intent(in) :: a(:) !! one coding.
+        integer(int64), intent(in) :: b(:) !! the other.
+        integer(int64), intent(in) :: k    !! the distinct-key count both must be dense over.
+        logical :: ok                      !! `.true.` when the two are relabellings of each other.
+        integer(int64), allocatable :: ab(:), ba(:)
+        integer(int64) :: i, hi_a, hi_b
+
+        ok = .false.
+        if (size(a) /= size(b)) return
+        if (minval(a) < 0_int64 .or. minval(b) < 0_int64) return
+        hi_a = maxval(a)
+        hi_b = maxval(b)
+        if (hi_a /= k .or. hi_b /= k) return
+        allocate(ab(k), ba(k))
+        ab = 0_int64
+        ba = 0_int64
+        do i = 1_int64, size(a, kind=int64)
+            if (a(i) == 0_int64 .and. b(i) == 0_int64) cycle
+            if (a(i) == 0_int64 .or. b(i) == 0_int64) return
+            if (ab(a(i)) == 0_int64) ab(a(i)) = b(i)
+            if (ab(a(i)) /= b(i)) return
+            if (ba(b(i)) == 0_int64) ba(b(i)) = a(i)
+            if (ba(b(i)) /= a(i)) return
+        end do
+        ok = all(ab /= 0_int64) .and. all(ba /= 0_int64)
+    end function codes_consistent
+
+    !> The partitioned hash build answers every key and every miss -- for dense, strided and
+    !! sparse keys, with values, under a mask, and for tuples -- with the hash backend forced
+    !! and the team `pf_index_threads` reports; and it did partition and did defer at least one
+    !! key, which the spill count says.
+    !!
+    !! Asserts on ANSWERS only: the partitioned pass places keys in different slots than the
+    !! serial loop, so `%keys()` order and `%probe_stats` may legitimately differ, and neither
+    !! is compared. Two keys crafted through `parquet_debug_index_partition` to sit on the last
+    !! slot of one partition, and placed LAST in the key array, make the spill pass certain to
+    !! run: by the time the second is inserted that slot is taken, so its walk meets the
+    !! partition boundary at once and is deferred.
+    subroutine test_partitioned_build_answers(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:), vals(:), pairs(:,:)
+        logical, allocatable :: mask(:)
+        integer(int64), parameter :: n = 200000_int64
+        integer(int64) :: i, a, k, cmax, bad, kept
+        integer :: p, nt
+        character(len=7) :: patterns(3)
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the hash build never partitions, and the " // &
+            "spill assertion below would have nothing to see")
+        return
+#endif
+        nt = pf_index_threads(n + 2_int64)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no build " // &
+                "ever partitions")
+            return
+        end if
+        patterns = ["dense  ", "strided", "sparse "]
+        allocate(keys(n + 2_int64), vals(n + 2_int64), mask(n + 2_int64), pairs(n + 2_int64, 2))
+        do p = 1, 3
+            do i = 1_int64, n
+                select case (p)
+                case (1)
+                    keys(i) = i
+                case (2)
+                    keys(i) = i * 11_int64
+                case default
+                    ! An odd multiplier modulo 2**48 is a bijection, so these are distinct.
+                    keys(i) = iand(i * 2654435761_int64, 281474976710655_int64)
+                end select
+            end do
+            cmax = maxval(keys(1:n))
+            call craft_boundary_pair(n + 2_int64, nt, cmax, a, k)
+            call check(error, a > cmax .and. k > a, &
+                "fixture: two boundary keys were crafted above the pattern's own keys on " // trim(patterns(p)))
+            if (allocated(error)) return
+            keys(n + 1_int64) = a
+            keys(n + 2_int64) = k
+            call m%build(keys, method="hash", threads=nt)
+            call check(error, parquet_debug_index_threads_used() == nt, &
+                "the build resolved the requested team on " // trim(patterns(p)))
+            if (allocated(error)) return
+            call check(error, parquet_debug_index_spills() >= 1_int64, &
+                "the crafted key must reach the spill pass -- the build partitioned and deferred it -- on " // &
+                trim(patterns(p)))
+            if (allocated(error)) return
+            call check(error, m%nkeys() == n + 2_int64, "every key is stored on " // trim(patterns(p)))
+            if (allocated(error)) return
+            bad = 0_int64
+            do i = 1_int64, n + 2_int64
+                if (m%get(keys(i)) /= i) bad = bad + 1_int64
+            end do
+            call check(error, bad == 0_int64, "every key answers its row on " // trim(patterns(p)))
+            if (allocated(error)) return
+            bad = 0_int64
+            do i = 1_int64, n
+                if (m%get(-keys(i)) /= 0_int64) bad = bad + 1_int64
+            end do
+            call check(error, bad == 0_int64, "every absent key answers 0 on " // trim(patterns(p)))
+            if (allocated(error)) return
+        end do
+        ! Values, and a mask, over the sparse pattern the loop left in `keys`.
+        do i = 1_int64, n + 2_int64
+            vals(i) = 2_int64 * i + 5_int64
+            mask(i) = mod(i, 3_int64) /= 0_int64
+        end do
+        call m%build(keys, vals, method="hash", threads=nt)
+        bad = 0_int64
+        do i = 1_int64, n + 2_int64
+            if (m%get(keys(i)) /= vals(i)) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every key answers its value under the partitioned build")
+        if (allocated(error)) return
+        call m%build(keys, method="hash", threads=nt, valid=mask)
+        kept = count(mask, kind=int64)
+        call check(error, m%nkeys() == kept, "a masked partitioned build stores the unmasked keys only")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n + 2_int64
+            if (mask(i)) then
+                if (m%get(keys(i)) /= i) bad = bad + 1_int64
+            else
+                if (m%get(keys(i)) /= 0_int64) bad = bad + 1_int64
+            end if
+        end do
+        call check(error, bad == 0_int64, &
+            "a masked partitioned build answers the row for an unmasked key and 0 for a masked one")
+        if (allocated(error)) return
+        ! Tuples: first every pair sharing its first component, so a walk comparing the first
+        ! component alone would accept a neighbour; then pairs distinct in the first.
+        do i = 1_int64, n + 2_int64
+            pairs(i, 1) = 7_int64
+            pairs(i, 2) = keys(i)
+        end do
+        call m%build(pairs, method="hash", threads=nt)
+        call check(error, parquet_debug_index_spills() >= 0_int64, "the composite build ran the partitioned pass")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n + 2_int64
+            if (m%get(pairs(i, :)) /= i) bad = bad + 1_int64
+            if (m%get([7_int64, -keys(i)]) /= 0_int64) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every shared-first tuple answers its row and every absent one 0")
+        if (allocated(error)) return
+        do i = 1_int64, n + 2_int64
+            pairs(i, 1) = keys(i)
+            pairs(i, 2) = mod(i, 5_int64)
+        end do
+        call m%build(pairs, method="hash", threads=nt)
+        bad = 0_int64
+        do i = 1_int64, n + 2_int64
+            if (m%get(pairs(i, :)) /= i) bad = bad + 1_int64
+            if (m%get([keys(i), pairs(i, 2) + 5_int64]) /= 0_int64) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every distinct-first tuple answers its row and every absent one 0")
+    end subroutine test_partitioned_build_answers
+
+    !> A threaded `%get_or_add_many` numbers the distinct keys densely and consistently: equal
+    !! keys share a code, distinct keys do not, and the codes are exactly `1 .. k` -- on a fresh
+    !! map, on a map already holding keys (old codes kept, new ones continuing above them, and a
+    !! handful of new keys taking the serial path the pass keeps for them), under a mask, as
+    !! `int32`, and for tuples. `threads=1` is the serial pass and numbers by first appearance;
+    !! the team record and the spill count say the other calls did not take it.
+    subroutine test_partitioned_get_or_add_many(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: s, p, q
+        integer(int64), allocatable :: distinct(:), stream(:), c1(:), c2(:), c3(:), old(:), more(:), pairs(:,:)
+        integer(int64), allocatable :: cm1(:), cm2(:)
+        integer(int32), allocatable :: c32(:)
+        logical, allocatable :: mask(:)
+        integer(int64), parameter :: n = 120000_int64, k = 40000_int64, nnew = 12500_int64
+        integer(int64) :: i, j, bad, mx, kt
+        integer :: nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it every get_or_add_many is the serial pass, " // &
+            "and the comparison below would compare that pass with itself")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no call " // &
+                "ever partitions")
+            return
+        end if
+        allocate(distinct(k), stream(n), c1(n), c2(n), c3(n), old(k), more(2_int64 * nnew), c32(n), mask(n))
+        allocate(cm1(n), cm2(n), pairs(n, 2))
+        do j = 1_int64, k
+            distinct(j) = j * 1000003_int64 + 17_int64
+        end do
+        do i = 1_int64, n
+            stream(i) = distinct(1_int64 + mod(i * 7919_int64, k))
+            mask(i) = mod(i, 4_int64) /= 0_int64
+            ! Squares modulo 3 are 0 or 1, and the three rows sharing a stream key (i, i + k,
+            ! i + 2k) take exactly two distinct residues, so every key yields two tuples.
+            pairs(i, 1) = stream(i)
+            pairs(i, 2) = mod(i * i, 3_int64)
+        end do
+        call s%init()
+        call s%get_or_add_many(stream, c1, threads=1)
+        call check(error, parquet_debug_index_threads_used() == 1, "threads=1 forces the serial pass")
+        if (allocated(error)) return
+        mx = 0_int64
+        bad = 0_int64
+        do i = 1_int64, n
+            if (c1(i) > mx) then
+                if (c1(i) /= mx + 1_int64) bad = bad + 1_int64
+                mx = c1(i)
+            end if
+        end do
+        call check(error, bad == 0_int64 .and. mx == k, "the serial pass numbers by first appearance")
+        if (allocated(error)) return
+        call p%init()
+        call p%get_or_add_many(stream, c2)
+        call check(error, parquet_debug_index_threads_used() == nt, &
+            "an automatic get_or_add_many over 120000 rows resolves the team pf_index_threads reports")
+        if (allocated(error)) return
+        call check(error, parquet_debug_index_spills() >= 0_int64, &
+            "the new keys were inserted by the partitioned pass (a spill count of -1 is the serial pass)")
+        if (allocated(error)) return
+        call check(error, p%nkeys() == k .and. s%nkeys() == k, "both passes store exactly the distinct keys")
+        if (allocated(error)) return
+        call check(error, codes_consistent(c1, c2, k), &
+            "the threaded codes are a relabelling of the serial ones: dense in 1..k, equal keys equal codes")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (p%get(stream(i)) /= c2(i)) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every row's code is what %get answers for its key afterwards")
+        if (allocated(error)) return
+        ! A second call on the filled map: the first half old keys, the second half new ones,
+        ! each new key twice. Old codes are kept; the new keys continue densely above k.
+        do j = 1_int64, k
+            old(j) = p%get(distinct(j))
+        end do
+        do j = 1_int64, nnew
+            more(j) = distinct(j)
+            more(nnew + j) = distinct(j) + 1_int64
+        end do
+        call p%get_or_add_many(more, c3(1:2_int64 * nnew))
+        call check(error, parquet_debug_index_spills() >= 0_int64, "the second call's 12500 new keys partitioned")
+        if (allocated(error)) return
+        call check(error, all(c3(1:nnew) == old(1:nnew)), "a key already in the map keeps its code")
+        if (allocated(error)) return
+        call check(error, p%nkeys() == k + nnew, "the new keys were added once each")
+        if (allocated(error)) return
+        call check(error, minval(c3(nnew + 1:2_int64 * nnew)) == k + 1_int64 .and. &
+            maxval(c3(nnew + 1:2_int64 * nnew)) == k + nnew, "the new codes continue densely above the watermark")
+        if (allocated(error)) return
+        ! Fewer new keys than the threading floor take the serial path inside the threaded call.
+        do j = 1_int64, 100_int64
+            more(j) = distinct(j) + 2_int64
+        end do
+        call p%get_or_add_many(more(1:100), c3(1:100))
+        call check(error, parquet_debug_index_spills() == -1_int64 .and. p%nkeys() == k + nnew + 100_int64, &
+            "a hundred new keys are added serially inside the threaded call")
+        if (allocated(error)) return
+        call check(error, all(c3(1:100) == [(k + nnew + i, i = 1_int64, 100_int64)]), &
+            "a hundred new keys take the next hundred codes in the caller's order")
+        if (allocated(error)) return
+        ! A mask: masked rows answer 0 and add nothing; the rest are consistent with the serial pass.
+        call s%clear()
+        call s%init()
+        call s%get_or_add_many(stream, cm1, valid=mask, threads=1)
+        call q%init()
+        call q%get_or_add_many(stream, cm2, valid=mask)
+        call check(error, q%nkeys() == s%nkeys() .and. all(pack(cm2, .not. mask) == 0_int64), &
+            "a masked row gets 0 and adds nothing under the threaded pass")
+        if (allocated(error)) return
+        call check(error, codes_consistent(cm1, cm2, s%nkeys()), &
+            "the unmasked rows are coded consistently with the serial pass")
+        if (allocated(error)) return
+        ! The int32 answer form.
+        call q%clear()
+        call q%init()
+        call q%get_or_add_many(stream, c32)
+        call check(error, codes_consistent(c1, int(c32, int64), k), "the int32 form codes consistently")
+        if (allocated(error)) return
+        ! Tuples.
+        call s%clear()
+        call s%init(ncomp=2)
+        call s%get_or_add_many(pairs, c1, threads=1)
+        kt = s%nkeys()
+        call q%clear()
+        call q%init(ncomp=2)
+        call q%get_or_add_many(pairs, c2)
+        call check(error, parquet_debug_index_threads_used() == nt .and. parquet_debug_index_spills() >= 0_int64, &
+            "a composite get_or_add_many resolves the team and partitions")
+        if (allocated(error)) return
+        call check(error, q%nkeys() == kt .and. kt > k .and. kt < n, &
+            "fixture: the tuples repeat and are more numerous than the scalar keys")
+        if (allocated(error)) return
+        call check(error, codes_consistent(c1, c2, kt), "the composite codes are a relabelling of the serial ones")
+    end subroutine test_partitioned_get_or_add_many
+
+    !> A multimap built on a team -- its grouping pass is the map's threaded `%get_or_add_many`
+    !! -- answers every count, every first row and every `%probe_many` range as the serial build
+    !! does; only the group ids may differ, and nothing here reads them.
+    subroutine test_mm_threaded_grouping(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_multimap) :: ms, mp
+        integer(int64), allocatable :: distinct(:), keys(:), probes(:), off1(:), m1(:), off2(:), m2(:)
+        integer(int64), parameter :: n = 100000_int64, k = 25000_int64, np = 30000_int64
+        integer(int64) :: i, j, bad
+        integer :: nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the grouping pass is serial on both arms")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so the " // &
+                "grouping pass never threads")
+            return
+        end if
+        allocate(distinct(k), keys(n), probes(np))
+        do j = 1_int64, k
+            distinct(j) = j * 999983_int64 + 5_int64
+        end do
+        do i = 1_int64, n
+            keys(i) = distinct(1_int64 + mod(i * 7919_int64, k))
+        end do
+        do i = 1_int64, np
+            probes(i) = distinct(1_int64 + mod(i * 104729_int64, k)) + mod(i, 2_int64)
+        end do
+        call ms%build(keys, method="hash", threads=1)
+        call mp%build(keys, method="hash")
+        call check(error, parquet_debug_index_threads_used() == nt, "the multimap's grouping pass resolved the team")
+        if (allocated(error)) return
+        call check(error, mp%ngroups() == k .and. ms%ngroups() == k, "both builds found every distinct key")
+        if (allocated(error)) return
+        bad = 0_int64
+        do j = 1_int64, k
+            if (mp%count(distinct(j)) /= ms%count(distinct(j))) bad = bad + 1_int64
+            if (mp%get_first(distinct(j)) /= ms%get_first(distinct(j))) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every key's count and first row agree between the two builds")
+        if (allocated(error)) return
+        call ms%probe_many(probes, off1, m1, threads=1)
+        call mp%probe_many(probes, off2, m2, threads=1)
+        call check(error, size(off1) == size(off2) .and. size(m1) == size(m2), "probe_many answers the same shape")
+        if (allocated(error)) return
+        call check(error, all(off1 == off2) .and. all(m1 == m2), "probe_many answers the same ranges and rows")
+        if (allocated(error)) return
+        call check(error, size(m1, kind=int64) > np .and. count(off1(2:np + 1) == off1(1:np)) > 1000, &
+            "fixture: the probes both repeat and miss in the thousands")
+    end subroutine test_mm_threaded_grouping
 
     ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.
 end module test_index_omp ! GCOVR_EXCL_LINE

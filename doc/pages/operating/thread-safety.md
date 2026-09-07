@@ -353,7 +353,9 @@ said about it.
   a single lock per type — so several threads streaming keys through one map's `%get_or_add` is a
   supported pattern, and each thread's returned index is unique and stable — and a `%build` takes
   that lock only to swap its finished result in, so builds of different maps on different threads
-  run side by side. `pf_index_multimap` follows the same rules: its
+  run side by side. A `%build` and a `%get_or_add_many` over a large enough key array each open a
+  team of their own and stand down inside your region, as `%get_many` does. `pf_index_multimap`
+  follows the same rules: its
   bulk lookups thread internally and stand down inside your region, and a build or `%clear` is
   serialised on a lock of its own. A string key changes none of this: it is hashed on the
   calling thread and verified against the map's own copy of the strings, which nothing writes

@@ -23,6 +23,7 @@ program error_scenarios
     ! and this import is the documented route rather than a workaround.
     use parquet_healpix, only : pf_query_disc_runs
     use parquet_index, only : pf_index_map, pf_index_pool, pf_index_max_components, pf_index_multimap, &
+        parquet_debug_index_partition, parquet_debug_index_spills, &
         parquet_debug_set_index_pair_limit
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
@@ -2765,6 +2766,18 @@ program error_scenarios
         call scenario_index_control()
     case ("index_concurrent_abort")
         call scenario_index_concurrent_abort()
+    case ("index_spill_duplicate")
+        call scenario_index_spill_duplicate()
+    case ("index_partitioned_duplicate")
+        call scenario_index_partitioned_duplicate()
+    case ("index_partitioned_duplicate_tuple")
+        call scenario_index_partitioned_duplicate_tuple()
+    case ("index_str_partitioned_duplicate")
+        call scenario_index_str_partitioned_duplicate()
+    case ("index_get_or_add_many_threads_zero")
+        call scenario_index_get_or_add_many_threads_zero()
+    case ("index_partition_control")
+        call scenario_index_partition_control()
     case ("multimap_build_values_length")
         call scenario_multimap_build_values_length()
     case ("multimap_build_value_zero")
@@ -23968,6 +23981,165 @@ contains
         end do
         print '(a)', "two concurrent builds with duplicate keys were accepted"
     end subroutine scenario_index_concurrent_abort
+    !
+    !> A duplicate key whose second copy is DEFERRED to the partitioned build's spill pass is
+    !> still named at its position. The two keys are crafted through
+    !> `parquet_debug_index_partition` to sit on the last slot of the one partition a three-key
+    !> table has, so the second and third keys' walks meet the range boundary at once and both
+    !> are deferred; the serial spill pass places the first copy and meets it again with the
+    !> second. A control build without the repeat comes first and proves the crafted keys reached
+    !> the spill pass at all -- it prints and exits 0 otherwise, which the test reads as a
+    !> failure. On a one-processor machine, where no build partitions, the serial loop names the
+    !> same duplicate, so the message holds there too.
+    subroutine scenario_index_spill_duplicate()
+        type(pf_index_map) :: m
+        integer(int64) :: c, home, part, cap, a, k
+        integer :: found
+
+        found = 0
+        a = 1_int64
+        k = 2_int64
+        part = 0_int64
+        do c = 1_int64, 100000_int64
+            call parquet_debug_index_partition(c, 3_int64, home, part, cap, threads=2)
+            if (part == 0_int64) exit
+            if (mod(home, part) /= part - 1_int64) cycle
+            found = found + 1
+            if (found == 1) a = c
+            if (found == 2) then
+                k = c
+                exit
+            end if
+        end do
+        if (part > 0_int64) then
+            if (found < 2) then
+                print '(a)', "crafting: no two keys on a partition's last slot among 100000 candidates"
+                stop
+            end if
+            call m%build([a, k], method="hash", threads=2)
+            if (parquet_debug_index_spills() < 1_int64) then
+                print '(a)', "control: the crafted keys did not reach the spill pass"
+                stop
+            end if
+            print '(a,i0,a,i0)', "control: keys deferred to the spill pass: ", parquet_debug_index_spills(), &
+                "; table slots: ", cap
+        else
+            print '(a)', "one processor: the serial loop names the duplicate instead"
+        end if
+        call m%build([a, k, k], method="hash", threads=2)   ! -> aborts, naming k at position 3
+        print '(a)', "a duplicate deferred to the spill pass was accepted"
+    end subroutine scenario_index_spill_duplicate
+    !
+    !> A duplicate in a build large enough to partition on the team is named at its position:
+    !> the partitioned pass detects it and the serial loop, re-run over the emptied table, names
+    !> it exactly as a serial build would.
+    subroutine scenario_index_partitioned_duplicate()
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:)
+        integer(int64) :: i
+
+        allocate(keys(20001))
+        do i = 1_int64, 20000_int64
+            keys(i) = i * 3_int64
+        end do
+        keys(20001) = 30_int64
+        call m%build(keys(1:20000), method="hash", threads=64)   ! control: no duplicate
+        print '(a,i0)', "control: 20000 keys built, nkeys=", m%nkeys()
+        call m%build(keys, method="hash", threads=64)   ! -> aborts, naming 30 at position 20001
+        print '(a)', "a duplicate in a partitioned build was accepted"
+    end subroutine scenario_index_partitioned_duplicate
+    !
+    !> `scenario_index_partitioned_duplicate` for key tuples.
+    subroutine scenario_index_partitioned_duplicate_tuple()
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:,:)
+        integer(int64) :: i
+
+        allocate(keys(20001, 2))
+        do i = 1_int64, 20000_int64
+            keys(i, 1) = 7_int64
+            keys(i, 2) = i * 3_int64
+        end do
+        keys(20001, 1) = 7_int64
+        keys(20001, 2) = 30_int64
+        call m%build(keys(1:20000, :), method="hash", threads=64)   ! control: no duplicate
+        print '(a,i0)', "control: 20000 tuples built, nkeys=", m%nkeys()
+        call m%build(keys, method="hash", threads=64)   ! -> aborts, naming [7, 30] at position 20001
+        print '(a)', "a duplicate tuple in a partitioned build was accepted"
+    end subroutine scenario_index_partitioned_duplicate_tuple
+    !
+    !> A repeated string in a build large enough to partition is named at its position: the
+    !> tuple pass reports equal tuples, the build falls back to the serial loop, and that loop
+    !> names the duplicate as it always has.
+    subroutine scenario_index_str_partitioned_duplicate()
+        type(pf_index_map) :: m
+        type(parquet_string_column) :: keys
+        integer(int64) :: i
+        character(len=16) :: txt
+
+        do i = 1_int64, 20000_int64
+            write (txt, "(a,i0)") "obj_", i
+            call keys%append_string(trim(txt))
+        end do
+        call m%build(keys, threads=64)   ! control: no duplicate
+        print '(a,i0)', "control: 20000 strings built, nkeys=", m%nkeys()
+        call keys%append_string("obj_5")
+        call m%build(keys, threads=64)   ! -> aborts, naming "obj_5" at position 20001
+        print '(a)', "a duplicate string in a partitioned build was accepted"
+    end subroutine scenario_index_str_partitioned_duplicate
+    !
+    !> `threads=0` on `%get_or_add_many` is refused for the reason `scenario_index_build_threads_zero`
+    !> gives, and the message names the call rather than the build.
+    subroutine scenario_index_get_or_add_many_threads_zero()
+        type(pf_index_map) :: m
+        integer(int64) :: codes(2)
+
+        call m%init()
+        call m%get_or_add_many([1_int64, 2_int64], codes, threads=1)   ! control
+        print '(a,i0)', "threads=1 was accepted, codes(2)=", codes(2)
+        call m%get_or_add_many([1_int64, 2_int64], codes, threads=0)   ! -> aborts
+        print '(a)', "threads=0 was accepted on get_or_add_many"
+    end subroutine scenario_index_get_or_add_many_threads_zero
+    !
+    !> Every legal shape of the partitioned passes completes: a threaded hash build of scalar
+    !> keys, of tuples and of strings, a threaded `%get_or_add_many` of each, and the two debug
+    !> hooks. A guard in those passes that fired unconditionally would satisfy the abort scenarios
+    !> above while breaking every threaded build.
+    subroutine scenario_index_partition_control()
+        type(pf_index_map) :: m
+        type(parquet_string_column) :: sc
+        integer(int64), allocatable :: keys(:), pairs(:,:), codes(:)
+        integer(int64) :: i, home, part, cap
+        character(len=16) :: txt
+
+        allocate(keys(30000), pairs(30000, 2), codes(30000))
+        do i = 1_int64, 30000_int64
+            keys(i) = i * 5_int64
+            pairs(i, 1) = 3_int64
+            pairs(i, 2) = i * 5_int64
+            write (txt, "(a,i0)") "s", i
+            call sc%append_string(trim(txt))
+        end do
+        call m%build(keys, method="hash", threads=64)
+        if (m%get(150_int64) /= 30_int64) error stop "control: partitioned scalar build"
+        call m%build(pairs, method="hash", threads=64)
+        if (m%get([3_int64, 150_int64]) /= 30_int64) error stop "control: partitioned tuple build"
+        call m%build(sc, threads=64)
+        if (m%get("s30") /= 30_int64) error stop "control: partitioned string build"
+        call m%init()
+        call m%get_or_add_many(keys, codes, threads=64)
+        if (m%nkeys() /= 30000_int64 .or. minval(codes) /= 1_int64 .or. maxval(codes) /= 30000_int64) &
+            error stop "control: threaded get_or_add_many"
+        call m%init(ncomp=2)
+        call m%get_or_add_many(pairs, codes, threads=64)
+        if (m%nkeys() /= 30000_int64) error stop "control: threaded composite get_or_add_many"
+        call m%init(strings=.true.)
+        call m%get_or_add_many(sc, codes, threads=64)
+        if (m%nkeys() /= 30000_int64 .or. m%get("s7") /= codes(7)) error stop "control: threaded string get_or_add_many"
+        call parquet_debug_index_partition(150_int64, 30000_int64, home, part, cap, threads=64)
+        if (cap < 30000_int64 .or. home < 0_int64 .or. home >= cap) error stop "control: partition hook"
+        print '(a,i0,a,i0)', "index partition control finished; spills=", parquet_debug_index_spills(), " part=", part
+    end subroutine scenario_index_partition_control
 
     ! ---- parquet_index: pf_index_multimap ----
     !

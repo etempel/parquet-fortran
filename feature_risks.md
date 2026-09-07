@@ -98,6 +98,7 @@ something a reader is expected to have.
 | [Risk-211](#risk-211--build_index-and-the-filters-in-leaf-convert-a-key-through-one-helper-and-the-nan-split-is-the-one-deliberate-difference) | `%build_index` and the filter's `in` leaf convert a key through ONE helper, and the NaN split is the one deliberate difference | 4 — covered |
 | [Risk-212](#risk-212--a-string-maps-occurrence-chain-must-stay-dense-and-a-hit-must-be-verified-against-the-stored-bytes) | A string map's occurrence chain must stay DENSE, and a hit must be verified against the stored bytes | 4 — covered |
 | [Risk-213](#risk-213--a-build-swaps-every-component-of-pf_index_map-in-under-the-guard-and-a-forgotten-one-is-silently-lost) | A build swaps EVERY component of `pf_index_map` in under the guard, and a forgotten one is silently lost | 4 — covered |
+| [Risk-214](#risk-214--a-partitioned-hash-insert-must-never-write-outside-its-own-slot-range-and-a-deferred-key-is-placed-only-after-every-range-is-done) | A partitioned hash insert must never write outside its own slot range, and a deferred key is placed only after every range is done | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8251,3 +8252,34 @@ Verified by negative control: deleting one `move_alloc` from `ix_adopt` fails th
 concurrency it buys is pinned by `test_concurrent_builds_overlap` (`test/test_index_omp.f90`)
 through `parquet_debug_index_concurrent_builds`, the high-water mark of builds in flight, which a
 build that held the guard throughout keeps at 1.
+
+### Risk-214 — A partitioned hash insert must never write outside its own slot range, and a deferred key is placed only after every range is done
+
+The hash build's threaded arm and the insert side of `%get_or_add_many`
+(`ix_hash_build_part_1`/`_n`, `ix_hash_goam_part_1`/`_n` in `src/parquet_index_hash.f90`) cut the
+table into contiguous slot ranges, scatter the keys by the partition their home slot falls in, and
+let each thread fill its own ranges with no lock. The correctness of that rests on two rules, and
+both fail SILENTLY when broken. **A probe chain that reaches the last slot of its range is deferred
+to the spill pass, never followed into the next range**: the next range belongs to another thread,
+which may at that moment have read the slot as empty and be about to write it, so a key placed
+across the boundary is a lost update — a key the map then answers 0 for, on a run that reports
+nothing, and only on the runs where the two threads happened to meet. **The deferred keys are
+inserted serially, and only once every range is finished** (and, for `%get_or_add_many`, only
+after the renumbering pass has made every in-range value final): a spill placed earlier walks a
+table other threads are still writing, and a spill numbered before the renumbering takes a
+provisional value the renumbering then shifts twice. Neither race reproduces on demand — the
+crossing key meets its neighbour's write a few times in a thousand builds — which is why the rule
+is held by construction (`if (s == pu)` in the four kernels, and the pass order in the two
+drivers) rather than by a test that waits for the race.
+
+**Covered by** `test_partitioned_build_answers` (`test/test_index_omp.f90`), which crafts two keys
+through `parquet_debug_index_partition` onto the last slot of one partition, places them last, and
+asserts through `parquet_debug_index_spills` that the second one WAS deferred — so the spill pass
+is exercised on every run rather than by luck of the hash — beside every key and every miss
+answering correctly; by `index_spill_duplicate` (`test/error_scenarios.f90`), where the deferred
+key is a repeat and must still be named at its position; and by `test_partitioned_get_or_add_many`,
+which pins the codes as dense and consistent with the serial pass, which a spill numbered before
+the renumbering breaks. Verified by negative control: skipping the spill pass fails the first two,
+and renumbering after the spill pass fails the third. What it forbids: "optimising" the range
+test into a wrap, moving the spill pass into the parallel region, and reordering the
+`%get_or_add_many` driver's passes.

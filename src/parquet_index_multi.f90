@@ -17,9 +17,10 @@
 !! `goff`. Pass 3 scatters each row's value into its group's range with a per-group cursor,
 !! walking the rows in order, which is what makes every group's values ascending by position
 !! without a sort. The cursors are `goff` itself, shifted back afterwards, so the layout allocates
-!! nothing beyond the pair it keeps. Pass 1 is serial in this version, for the reason the spec
-!! gives on the group ids; passes 2 and 3 are serial because they cost a few nanoseconds per row
-!! against the hash pass's tens, and a threaded stable scatter is the partitioned build's business.
+!! nothing beyond the pair it keeps. Pass 1 threads through the map's `%get_or_add_many` -- on a
+!! team, its partitioned pass, which numbers the groups partition by partition rather than by
+!! first appearance, as the spec's note on the group ids allows; passes 2 and 3 are serial because
+!! they cost a few nanoseconds per row against the hash pass's tens.
 !!
 !! **The automatic backend is the map's own rule, applied to the DISTINCT keys.** A rule applied
 !! to the rows presented would take a 320 MB direct table for ten thousand keys spread over a
@@ -1522,15 +1523,17 @@ contains
 
     ! ---- Pass 1: grouping, per backend ----
 
-    !> Groups through the map's hash backend: `%get_or_add_many` over the rows, first-appearance
-    !! numbered, then a rebuild from the distinct keys when the repeats left the reserved table
-    !! mostly empty.
+    !> Groups through the map's hash backend: `%get_or_add_many` over the rows -- numbered by
+    !! first appearance on its serial pass, partition by partition on its threaded one -- then a
+    !! rebuild from the distinct keys when the repeats left the reserved table mostly empty.
     !!
     !! The table is reserved for every row, since the distinct count is what the pass finds
     !! out; a build side of ten million rows over ten thousand keys would otherwise be left
     !! holding a table a thousand times larger than it needs, and would report it through
     !! `%memory_bytes`. Rebuilding from the distinct keys costs one insert per DISTINCT key --
-    !! by construction under a quarter of what the pass just spent -- and right-sizes it.
+    !! by construction under a quarter of what the pass just spent -- and right-sizes it. The
+    !! reservation is made only ahead of the SERIAL pass: the threaded one allocates its table
+    !! on the team, and a serial reservation of it first would cost more than the pass.
     subroutine mm_group_hash_1(map, keys, valid, nv, threads, g, ng)
         type(pf_index_map), intent(inout) :: map     !! the distinct-key map; rebuilt.
         integer(int64), intent(in) :: keys(:)        !! the keys, already widened.
@@ -1542,8 +1545,8 @@ contains
         integer(int64), allocatable :: dkeys(:)
 
         call map%init()
-        call map%reserve(nv)
-        call map%get_or_add_many(keys, g, valid=valid)
+        if (ix_threads_rule(size(keys, kind=int64), threads, "build") == 1) call map%reserve(nv)
+        call map%get_or_add_many(keys, g, valid=valid, threads=threads)
         ng = map%nkeys()
         if (ng < nv / 4_int64) then
             call mm_distinct_1(keys, g, ng, dkeys)
@@ -1563,8 +1566,8 @@ contains
         integer(int64), allocatable :: dkeys(:,:)
 
         call map%init(ncomp=int(size(keys, 2)))
-        call map%reserve(nv)
-        call map%get_or_add_many(keys, g, valid=valid)
+        if (ix_threads_rule(size(keys, 1, kind=int64), threads, "build") == 1) call map%reserve(nv)
+        call map%get_or_add_many(keys, g, valid=valid, threads=threads)
         ng = map%nkeys()
         if (ng < nv / 4_int64) then
             call mm_distinct_n(keys, g, ng, dkeys)
@@ -1586,8 +1589,8 @@ contains
         integer(int64), allocatable :: dkeys(:)
 
         call scratch%init()
-        call scratch%reserve(nv)
-        call scratch%get_or_add_many(keys, g, valid=valid)
+        if (ix_threads_rule(size(keys, kind=int64), threads, "build") == 1) call scratch%reserve(nv)
+        call scratch%get_or_add_many(keys, g, valid=valid, threads=threads)
         ng = scratch%nkeys()
         call scratch%clear()
         call mm_distinct_1(keys, g, ng, dkeys)

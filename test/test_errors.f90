@@ -2395,7 +2395,19 @@ contains
             new_unittest("a literal list on a temporal column aborts", &
                 test_filter_temporal_literal_list_aborts), &
             new_unittest("two concurrent duplicate-key builds abort once, cleanly", &
-                test_index_concurrent_abort_aborts) &
+                test_index_concurrent_abort_aborts), &
+            new_unittest("a duplicate deferred to the spill pass aborts naming its position", &
+                test_index_spill_duplicate_aborts), &
+            new_unittest("a duplicate in a partitioned build aborts naming its position", &
+                test_index_partitioned_duplicate_aborts), &
+            new_unittest("a duplicate tuple in a partitioned build aborts naming its position", &
+                test_index_partitioned_duplicate_tuple_aborts), &
+            new_unittest("a duplicate string in a partitioned build aborts naming its position", &
+                test_index_str_partitioned_duplicate_aborts), &
+            new_unittest("threads=0 on get_or_add_many aborts", &
+                test_index_get_or_add_many_threads_zero_aborts), &
+            new_unittest("every partitioned pass completes on its legal inputs", &
+                test_index_partition_control_completes) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
@@ -2993,6 +3005,60 @@ contains
             failure_message="two concurrent builds with a duplicate key were expected to abort", &
             required_stderr="duplicate key 20")
     end subroutine test_index_concurrent_abort_aborts
+    !
+    !> See `scenario_index_spill_duplicate` (test/error_scenarios.f90): the second copy of a key
+    !> crafted onto a partition's last slot is deferred to the spill pass and still named.
+    subroutine test_index_spill_duplicate_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_spill_duplicate", expect_abort=.true., &
+            failure_message="a duplicate deferred to the spill pass was expected to abort (a clean exit " // &
+            "also means the crafted keys never reached the spill pass -- read the scenario's stdout)", &
+            required_stderr="at position 3 (every key must be unique)")
+    end subroutine test_index_spill_duplicate_aborts
+    !
+    !> See `scenario_index_partitioned_duplicate` (test/error_scenarios.f90).
+    subroutine test_index_partitioned_duplicate_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_partitioned_duplicate", expect_abort=.true., &
+            failure_message="a duplicate in a partitioned build was expected to abort", &
+            required_stderr="duplicate key 30 at position 20001")
+    end subroutine test_index_partitioned_duplicate_aborts
+    !
+    !> See `scenario_index_partitioned_duplicate_tuple` (test/error_scenarios.f90).
+    subroutine test_index_partitioned_duplicate_tuple_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_partitioned_duplicate_tuple", &
+            expect_abort=.true., &
+            failure_message="a duplicate tuple in a partitioned build was expected to abort", &
+            required_stderr="duplicate key [7, 30] at position 20001")
+    end subroutine test_index_partitioned_duplicate_tuple_aborts
+    !
+    !> See `scenario_index_str_partitioned_duplicate` (test/error_scenarios.f90).
+    subroutine test_index_str_partitioned_duplicate_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_str_partitioned_duplicate", &
+            expect_abort=.true., &
+            failure_message="a duplicate string in a partitioned build was expected to abort", &
+            required_stderr="duplicate key ""obj_5"" at position 20001")
+    end subroutine test_index_str_partitioned_duplicate_aborts
+    !
+    !> See `scenario_index_get_or_add_many_threads_zero` (test/error_scenarios.f90).
+    subroutine test_index_get_or_add_many_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_or_add_many_threads_zero", &
+            expect_abort=.true., &
+            failure_message="threads=0 on %get_or_add_many was expected to abort", &
+            required_stderr="get_or_add_many: threads= must be at least 1")
+    end subroutine test_index_get_or_add_many_threads_zero_aborts
+    !
+    !> See `scenario_index_partition_control` (test/error_scenarios.f90): the positive control
+    !> of the partitioned passes.
+    subroutine test_index_partition_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_partition_control", expect_abort=.false., &
+            failure_message="every threaded index build and get_or_add_many was expected to complete", &
+            required_stderr="index partition control finished")
+    end subroutine test_index_partition_control_completes
     !
     !> See `scenario_multimap_build_values_length` (test/error_scenarios.f90).
     subroutine test_multimap_build_values_length_aborts(error)

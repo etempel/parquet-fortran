@@ -247,14 +247,14 @@ contains
 
         allocate(c(size(codes, kind=int64)))
         !$omp critical (pf_index_map_guard)
-        call ix_str_goam_chr(self, keys, c, valid, .true.)
+        call ix_str_goam_chr(self, keys, c, valid, .true., threads)
         !$omp end critical (pf_index_map_guard)
         codes = int(c, int32)
     end procedure goam_s1_i32
 
     module procedure goam_s1_i64
         !$omp critical (pf_index_map_guard)
-        call ix_str_goam_chr(self, keys, codes, valid, .false.)
+        call ix_str_goam_chr(self, keys, codes, valid, .false., threads)
         !$omp end critical (pf_index_map_guard)
     end procedure goam_s1_i64
 
@@ -263,14 +263,14 @@ contains
 
         allocate(c(size(codes, kind=int64)))
         !$omp critical (pf_index_map_guard)
-        call ix_str_goam_col(self, keys, c, valid, .true.)
+        call ix_str_goam_col(self, keys, c, valid, .true., threads)
         !$omp end critical (pf_index_map_guard)
         codes = int(c, int32)
     end procedure goam_sc_i32
 
     module procedure goam_sc_i64
         !$omp critical (pf_index_map_guard)
-        call ix_str_goam_col(self, keys, codes, valid, .false.)
+        call ix_str_goam_col(self, keys, codes, valid, .false., threads)
         !$omp end critical (pf_index_map_guard)
     end procedure goam_sc_i64
 
@@ -1144,21 +1144,55 @@ contains
     end subroutine ix_str_goa
 
     !> `%get_or_add_many` over a character array: `ix_str_goa` per row, each row trimmed, with
-    !! the guard already held. See `ix_goam_1` for the contract.
-    subroutine ix_str_goam_chr(self, keys, codes, valid, want32)
+    !! the guard already held. See `ix_goam_1` for the contract. On a team of two or more an
+    !! EMPTY map takes the partitioned pass (`ix_str_goam_fresh`), and a map already holding
+    !! keys looks every row up on the team and adds the ones not found serially.
+    subroutine ix_str_goam_chr(self, keys, codes, valid, want32, threads)
         type(pf_index_map), intent(inout) :: self !! the map.
         character(len=*), intent(in) :: keys(:)   !! the keys.
         integer(int64), intent(out) :: codes(:)   !! one code per key; 0 for a masked row.
         logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
         logical, intent(in) :: want32             !! whether every code must fit `int32`.
-        integer(int64) :: i, n, idx
-        logical :: hv
+        integer, intent(in), optional :: threads  !! the caller's thread request, or absent.
+        integer(int64) :: i, n, idx, lo, hi
+        integer :: nt, c
+        logical :: hv, ok
 
         call ix_str_check_mutate(self, "get_or_add_many")
         call ix_str_autoinit(self)
         n = ix_str_many_rows(self, size(keys, kind=int64), size(codes, kind=int64), "get_or_add_many")
         hv = present(valid)
         if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_or_add_many")
+        nt = ix_threads_for(n, threads, "get_or_add_many")
+        if (nt > 1) then
+            if (self%nk == 0_int64 .and. self%nstr == 0_int64) then
+                call ix_str_goam_fresh(self, n, valid, nt, codes, ok, keys=keys)
+                if (ok) then
+                    if (want32) call ix_check_codes_fit(codes)
+                    return
+                end if
+                call ix_do_reset(self)
+            else
+                !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt)
+                do c = 1, nt
+                    call ix_chunk_bounds(n, nt, c, lo, hi)
+                    call ix_str_many_chr_i64(self, keys, codes, valid, hv, lo, hi)
+                end do
+                !$omp atomic write
+                dbg_index_spills = -1_int64
+                do i = 1_int64, n
+                    if (codes(i) /= 0_int64) cycle
+                    if (hv) then
+                        if (.not. valid(i)) cycle
+                    end if
+                    call ix_str_goa(self, keys(i), len_trim(keys(i), kind=int64), idx, want32)
+                    codes(i) = idx
+                end do
+                return
+            end if
+        end if
+        !$omp atomic write
+        dbg_index_spills = -1_int64
         do i = 1_int64, n
             if (hv) then
                 if (.not. valid(i)) then
@@ -1172,16 +1206,19 @@ contains
     end subroutine ix_str_goam_chr
 
     !> `%get_or_add_many` over a parquet_string_column: a null element gets the code 0 and is
-    !! neither looked up nor added, exactly as a masked row.
-    subroutine ix_str_goam_col(self, sc, codes, valid, want32)
+    !! neither looked up nor added, exactly as a masked row. Threads as `ix_str_goam_chr` does.
+    subroutine ix_str_goam_col(self, sc, codes, valid, want32, threads)
         type(pf_index_map), intent(inout) :: self             !! the map.
         type(parquet_string_column), intent(in), target :: sc !! the keys.
         integer(int64), intent(out) :: codes(:)               !! one code per element; 0 when masked or null.
         logical, intent(in), optional :: valid(:)             !! the caller's mask, or absent.
         logical, intent(in) :: want32                         !! whether every code must fit `int32`.
+        integer, intent(in), optional :: threads              !! the caller's thread request, or absent.
         type(ix_str_view) :: v
-        integer(int64) :: i, n, idx, a, nb
-        logical :: hv
+        logical, allocatable :: eff(:)
+        integer(int64) :: i, n, idx, a, nb, lo, hi
+        integer :: nt, c
+        logical :: hv, ok
 
         call ix_str_check_mutate(self, "get_or_add_many")
         call ix_str_autoinit(self)
@@ -1189,6 +1226,46 @@ contains
         n = ix_str_many_rows(self, v%n, size(codes, kind=int64), "get_or_add_many")
         hv = present(valid)
         if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_or_add_many")
+        nt = ix_threads_for(n, threads, "get_or_add_many")
+        if (nt > 1) then
+            if (self%nk == 0_int64 .and. self%nstr == 0_int64) then
+                call ix_str_effective_mask(sc, v, valid, eff)
+                call ix_str_goam_fresh(self, n, eff, nt, codes, ok, v=v)
+                if (ok) then
+                    if (want32) call ix_check_codes_fit(codes)
+                    return
+                end if
+                call ix_do_reset(self)
+            else
+                !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt)
+                do c = 1, nt
+                    call ix_chunk_bounds(n, nt, c, lo, hi)
+                    call ix_str_many_col_i64(self, sc, v, codes, valid, hv, lo, hi)
+                end do
+                !$omp atomic write
+                dbg_index_spills = -1_int64
+                do i = 1_int64, n
+                    if (codes(i) /= 0_int64) cycle
+                    if (hv) then
+                        if (.not. valid(i)) cycle
+                    end if
+                    if (v%nulls) then
+                        if (parquet_string_column_is_null(sc, i)) cycle
+                    end if
+                    a = v%off(i)
+                    nb = v%off(i + 1_int64) - a
+                    if (nb > 0_int64) then
+                        call ix_str_goa(self, v%dat(a + 1_int64 : a + nb), nb, idx, want32)
+                    else
+                        call ix_str_goa(self, IX_NO_BYTES, 0_int64, idx, want32)
+                    end if
+                    codes(i) = idx
+                end do
+                return
+            end if
+        end if
+        !$omp atomic write
+        dbg_index_spills = -1_int64
         do i = 1_int64, n
             codes(i) = 0_int64
             if (hv) then
@@ -1224,7 +1301,9 @@ contains
     ! ---- The builds ----
 
     !> Builds a string map from a character array, each element trimmed: `ix_build_1`'s contract
-    !! on the hash backend, with the insert loop serial.
+    !! on the hash backend. On a team of two or more the strings are hashed and copied into the
+    !! store on the team and their tuples inserted by the partitioned pass (`ix_str_build_part`);
+    !! otherwise, or when that pass meets equal tuples, the serial insert loop runs.
     subroutine ix_str_build_chr(self, keys, values, method, threads, valid)
         type(pf_index_map), intent(inout) :: self         !! the map; rebuilt from scratch.
         character(len=*), intent(in) :: keys(:)           !! the keys; must be unique where unmasked.
@@ -1232,9 +1311,9 @@ contains
         character(len=*), intent(in), optional :: method  !! backend token; auto or hash only.
         integer, intent(in), optional :: threads          !! the caller's thread request.
         logical, intent(in), optional :: valid(:)         !! per row; `.false.` skips the row.
-        integer(int64) :: n, nv, first, last, i, nb, p, val
+        integer(int64) :: n, nv, first, last
         integer :: nt
-        logical :: hv, has_v, is_new
+        logical :: hv, has_v, dup
 
         call ix_build_begin()
         n = size(keys, kind=int64)
@@ -1246,34 +1325,29 @@ contains
             call ix_check_values_range(values, valid)
         end if
         call ix_str_resolve_method(method, "build")
-        ! The thread rule runs for its two side effects -- refusing `threads=0` and recording the
-        ! decision for the debug counter -- although this build's insert loop is serial, as the
-        ! integer hash build's is; a partitioned string build is stage 6's business.
         nt = ix_threads_for(n, threads)
         if (nt < 1) call ix_abort(SP // "build: the thread rule answered below 1")
         call ix_reset_storage(self)
         call ix_mask_extent(n, valid, nv, first, last)
-        call ix_str_start(self, nv)
-        if (nv == 0_int64) return
-        if (has_v) then
-            if (hv) then
-                self%snext = maxval(values, mask=valid)
-            else
-                self%snext = maxval(values)
-            end if
+        ! On a team the tuple table is allocated by the partitioned pass itself, zeroed on the
+        ! team; the store's rows and payload are grown there too.
+        if (nt > 1) then
+            call ix_str_start(self, 0_int64)
         else
-            self%snext = last
+            call ix_str_start(self, nv)
         end if
-        do i = 1_int64, n
-            if (hv) then
-                if (.not. valid(i)) cycle
-            end if
-            nb = len_trim(keys(i), kind=int64)
-            val = i
-            if (has_v) val = values(i)
-            call ix_str_insert(self, keys(i), nb, val, .false., p, is_new)
-            if (.not. is_new) call ix_str_report_duplicate(keys(i), nb, i)
-        end do
+        if (nv == 0_int64) return
+        call ix_str_set_watermark(self, values, valid, last)
+        if (nt > 1) then
+            call ix_str_build_part(self, n, nv, valid, values, nt, dup, keys=keys)
+            if (.not. dup) return
+            ! Equal tuples: a repeated key, or two keys sharing a hash. The serial loop, over a
+            ! freshly started map, walks the occurrence chain and names a real duplicate.
+            call ix_reset_storage(self)
+            call ix_str_start(self, nv)
+            call ix_str_set_watermark(self, values, valid, last)
+        end if
+        call ix_str_insert_chr(self, keys, values, valid)
     end subroutine ix_str_build_chr
 
     !> Builds a string map from a parquet_string_column, verbatim, a null element skipped as a
@@ -1287,9 +1361,9 @@ contains
         logical, intent(in), optional :: valid(:)             !! per row; `.false.` skips the row.
         type(ix_str_view) :: v
         logical, allocatable :: eff(:)
-        integer(int64) :: n, nv, first, last, i, a, nb, p, val
+        integer(int64) :: n, nv, first, last
         integer :: nt
-        logical :: has_v, is_new
+        logical :: has_v, dup
 
         call ix_build_begin()
         call ix_str_open_view(sc, v)
@@ -1306,20 +1380,84 @@ contains
         if (nt < 1) call ix_abort(SP // "build: the thread rule answered below 1")
         call ix_reset_storage(self)
         call ix_mask_extent(n, eff, nv, first, last)
-        call ix_str_start(self, nv)
+        if (nt > 1) then
+            call ix_str_start(self, 0_int64)
+        else
+            call ix_str_start(self, nv)
+        end if
         if (nv == 0_int64) return
-        if (has_v) then
-            if (allocated(eff)) then
-                self%snext = maxval(values, mask=eff)
+        call ix_str_set_watermark(self, values, eff, last)
+        if (nt > 1) then
+            call ix_str_build_part(self, n, nv, eff, values, nt, dup, v=v)
+            if (.not. dup) return
+            call ix_reset_storage(self)
+            call ix_str_start(self, nv)
+            call ix_str_set_watermark(self, values, eff, last)
+        end if
+        call ix_str_insert_col(self, v, values, eff)
+    end subroutine ix_str_build_col
+
+    !> Sets the `%get_or_add` watermark a build leaves: the largest value it stores.
+    subroutine ix_str_set_watermark(self, values, valid, last)
+        type(pf_index_map), intent(inout) :: self         !! the map.
+        integer(int64), intent(in), optional :: values(:) !! the build's values, or absent.
+        logical, intent(in), optional :: valid(:)         !! its effective mask, or absent.
+        integer(int64), intent(in) :: last                !! the last stored row: the default values' maximum.
+
+        if (present(values)) then
+            if (present(valid)) then
+                self%snext = maxval(values, mask=valid)
             else
                 self%snext = maxval(values)
             end if
         else
             self%snext = last
         end if
-        do i = 1_int64, n
-            if (allocated(eff)) then
-                if (.not. eff(i)) cycle
+    end subroutine ix_str_set_watermark
+
+    !> The serial insert loop of a build from a character array: every unmasked element through
+    !! `ix_str_insert`, a repeated key named at its position. Marks the spill count -1, the
+    !! serial loop's mark, whether it runs as the serial arm or as the fallback of the threaded one.
+    subroutine ix_str_insert_chr(self, keys, values, valid)
+        type(pf_index_map), intent(inout) :: self         !! the map, started and empty.
+        character(len=*), intent(in) :: keys(:)           !! the keys.
+        integer(int64), intent(in), optional :: values(:) !! values, or absent for the row numbers.
+        logical, intent(in), optional :: valid(:)         !! the mask, or absent.
+        integer(int64) :: i, nb, p, val
+        logical :: hv, has_v, is_new
+
+        !$omp atomic write
+        dbg_index_spills = -1_int64
+        hv = present(valid)
+        has_v = present(values)
+        do i = 1_int64, size(keys, kind=int64)
+            if (hv) then
+                if (.not. valid(i)) cycle
+            end if
+            nb = len_trim(keys(i), kind=int64)
+            val = i
+            if (has_v) val = values(i)
+            call ix_str_insert(self, keys(i), nb, val, .false., p, is_new)
+            if (.not. is_new) call ix_str_report_duplicate(keys(i), nb, i)
+        end do
+    end subroutine ix_str_insert_chr
+
+    !> The serial insert loop of a build from a viewed column. See `ix_str_insert_chr`.
+    subroutine ix_str_insert_col(self, v, values, valid)
+        type(pf_index_map), intent(inout) :: self         !! the map, started and empty.
+        type(ix_str_view), intent(in) :: v                !! the column's aliases.
+        integer(int64), intent(in), optional :: values(:) !! values, or absent for the row numbers.
+        logical, intent(in), optional :: valid(:)         !! the effective mask, or absent.
+        integer(int64) :: i, a, nb, p, val
+        logical :: hv, has_v, is_new
+
+        !$omp atomic write
+        dbg_index_spills = -1_int64
+        hv = present(valid)
+        has_v = present(values)
+        do i = 1_int64, v%n
+            if (hv) then
+                if (.not. valid(i)) cycle
             end if
             a = v%off(i)
             nb = v%off(i + 1_int64) - a
@@ -1333,7 +1471,274 @@ contains
                 if (.not. is_new) call ix_str_report_duplicate(IX_NO_BYTES, 0_int64, i)
             end if
         end do
-    end subroutine ix_str_build_col
+    end subroutine ix_str_insert_col
+
+    ! ---- The threaded arm: the string hash on the team, the tuples through the partitioned insert ----
+
+    !> The bytes of row `i` of the build's or grouping's source, as a length.
+    pure function ix_str_row_len(i, keys, v) result(nb)
+        integer(int64), intent(in) :: i                        !! the row.
+        character(len=*), intent(in), optional :: keys(:)      !! the source as a character array, or
+        type(ix_str_view), intent(in), optional :: v           !! as a viewed column.
+        integer(int64) :: nb                                   !! bytes in the key.
+
+        if (present(keys)) then
+            nb = len_trim(keys(i), kind=int64)
+        else
+            nb = v%off(i + 1_int64) - v%off(i)
+        end if
+    end function ix_str_row_len
+
+    !> Whether rows `i` and `j` of the source hold the same bytes.
+    pure function ix_str_rows_equal(i, j, keys, v) result(eq)
+        integer(int64), intent(in) :: i                        !! one row.
+        integer(int64), intent(in) :: j                        !! the other.
+        character(len=*), intent(in), optional :: keys(:)      !! the source as a character array, or
+        type(ix_str_view), intent(in), optional :: v           !! as a viewed column.
+        logical :: eq                                          !! `.true.` when the bytes match, length included.
+        integer(int64) :: ni, nj, ai, aj, k
+
+        eq = .false.
+        if (present(keys)) then
+            ni = len_trim(keys(i), kind=int64)
+            nj = len_trim(keys(j), kind=int64)
+            if (ni /= nj) return
+            eq = keys(i)(1:ni) == keys(j)(1:nj)
+        else
+            ai = v%off(i)
+            aj = v%off(j)
+            ni = v%off(i + 1_int64) - ai
+            nj = v%off(j + 1_int64) - aj
+            if (ni /= nj) return
+            do k = 1_int64, ni
+                if (v%dat(ai + k) /= v%dat(aj + k)) return
+            end do
+            eq = .true.
+        end if
+    end function ix_str_rows_equal
+
+    !> Copies the bytes `b(1:n)` into the store at `cur + 1 .. cur + n`; takes a scalar string
+    !! by sequence association, as `ix_hash_str` does.
+    subroutine ix_str_put(sdat, cur, b, n)
+        character(len=1), intent(inout) :: sdat(:) !! the store's payload.
+        integer(int64), intent(in) :: cur          !! bytes already in use before this string.
+        integer(int64), intent(in) :: n            !! bytes to copy.
+        character(len=1), intent(in) :: b(n)       !! the string.
+
+        sdat(cur + 1_int64 : cur + n) = b(1:n)
+    end subroutine ix_str_put
+
+    !> The threaded arm of a string build: the string hash of every row on the team, the store
+    !! laid out in ROW order and filled on the team, and the `(hash, 0)` tuples inserted by the
+    !! partitioned pass the integer builds use (`ix_hash_build_part_n`), their values the store
+    !! positions.
+    !!
+    !! **Positions are row numbers.** A masked row (or a null element) keeps its position as a
+    !! zero-length string with `sval = 0`, exactly the shape a removed string has, so that the
+    !! store is laid out from per-chunk byte counts alone -- no compaction pass and no per-row
+    !! position array -- and `%keys` and the key count skip such rows as they skip a removed one.
+    !! Two distinct strings sharing a 64-bit hash would be two equal TUPLES here, which the
+    !! partitioned pass reports as a duplicate, exactly as it reports two copies of one string;
+    !! either way `dup` comes back `.true.` and the caller falls back to the serial insert loop,
+    !! which walks the occurrence chain and names a real duplicate at its position. That fallback
+    !! is the whole of the collision handling on this path, and the debug hook that narrows the
+    !! string hash is what exercises it.
+    subroutine ix_str_build_part(self, n, nv, valid, values, nt, dup, keys, v)
+        type(pf_index_map), intent(inout) :: self             !! the map, started by `ix_str_start`.
+        integer(int64), intent(in) :: n                       !! rows presented.
+        integer(int64), intent(in) :: nv                      !! rows the mask keeps; sizes the table.
+        logical, intent(in), optional :: valid(:)             !! the effective mask, or absent.
+        integer(int64), intent(in), optional :: values(:)     !! values, or absent for the row numbers.
+        integer, intent(in) :: nt                             !! the resolved team; at least 2.
+        logical, intent(out) :: dup                           !! `.true.` when the tuple pass met equal tuples.
+        character(len=*), intent(in), optional :: keys(:)     !! the keys as a character array, or
+        type(ix_str_view), intent(in), optional :: v          !! as a viewed column.
+        integer(int64), allocatable :: hs(:), cb(:), tk(:,:)
+        integer(int64) :: i, lo, hi, a, nb, cur, total, val
+        integer :: c
+        logical :: hv, has_v, chr
+
+        hv = present(valid)
+        has_v = present(values)
+        chr = present(keys)
+        allocate(hs(n), cb(nt))
+        !$omp parallel do default(shared) private(c, lo, hi, i, a, nb, cur) schedule(static) num_threads(nt)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            cur = 0_int64
+            do i = lo, hi
+                hs(i) = 0_int64
+                if (hv) then
+                    if (.not. valid(i)) cycle
+                end if
+                if (chr) then
+                    nb = len_trim(keys(i), kind=int64)
+                    hs(i) = ix_hash_str(keys(i), nb)
+                else
+                    a = v%off(i)
+                    nb = v%off(i + 1_int64) - a
+                    if (nb > 0_int64) then
+                        hs(i) = ix_hash_str(v%dat(a + 1_int64 : a + nb), nb)
+                    else
+                        hs(i) = ix_hash_str(IX_NO_BYTES, 0_int64)
+                    end if
+                end if
+                cur = cur + nb
+            end do
+            cb(c) = cur
+        end do
+        ! Chunk c's bytes start after every earlier chunk's.
+        total = 0_int64
+        do c = 1, nt
+            cur = cb(c)
+            cb(c) = total
+            total = total + cur
+        end do
+        call ix_str_grow_rows(self, n)
+        call ix_str_grow_bytes(self, total)
+        !$omp parallel do default(shared) private(c, lo, hi, i, a, nb, cur, val) schedule(static) num_threads(nt)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            cur = cb(c)
+            do i = lo, hi
+                self%sval(i) = 0_int64
+                self%soff(i + 1_int64) = cur
+                if (hv) then
+                    if (.not. valid(i)) cycle
+                end if
+                val = i
+                if (has_v) val = values(i)
+                if (chr) then
+                    nb = len_trim(keys(i), kind=int64)
+                    if (nb > 0_int64) call ix_str_put(self%sdat, cur, keys(i), nb)
+                else
+                    a = v%off(i)
+                    nb = v%off(i + 1_int64) - a
+                    if (nb > 0_int64) self%sdat(cur + 1_int64 : cur + nb) = v%dat(a + 1_int64 : a + nb)
+                end if
+                cur = cur + nb
+                self%soff(i + 1_int64) = cur
+                self%sval(i) = val
+            end do
+        end do
+        self%nstr = n
+        self%nchr = total
+        allocate(tk(n, 2))
+        tk(:, 1) = hs
+        tk(:, 2) = 0_int64
+        deallocate(hs)
+        call ix_hash_build_part_n(self, tk, valid=valid, nv=nv, nt=nt, dup=dup)
+    end subroutine ix_str_build_part
+
+    !> The threaded `%get_or_add_many` over an EMPTY string map: the string hash of every
+    !! unmasked row on the team, the `(hash, 0)` tuples through the partitioned
+    !! `ix_hash_goam_part_n`, which numbers the distinct tuples densely and returns each row's
+    !! code, and then the store laid out in CODE order and filled on the team -- so the code of a
+    !! string is its store position, as on the serial pass (what `mm_str_rightsize` relies on).
+    !!
+    !! Two distinct strings sharing a hash would share a code here, so every row is compared
+    !! against the first row of its code before the store is touched; one mismatch makes `ok`
+    !! false, and the caller empties the map and runs the serial pass instead. The tuple table
+    !! is the map's own, so on success nothing is copied twice.
+    subroutine ix_str_goam_fresh(self, n, valid, nt, codes, ok, keys, v)
+        type(pf_index_map), intent(inout) :: self             !! the map; empty.
+        integer(int64), intent(in) :: n                       !! rows presented.
+        logical, intent(in), optional :: valid(:)             !! the effective mask, or absent.
+        integer, intent(in) :: nt                             !! the resolved team; at least 2.
+        integer(int64), intent(out) :: codes(:)               !! one code per row; 0 for a masked one.
+        logical, intent(out) :: ok                            !! `.false.` when two strings shared a hash.
+        character(len=*), intent(in), optional :: keys(:)     !! the keys as a character array, or
+        type(ix_str_view), intent(in), optional :: v          !! as a viewed column.
+        integer(int64), allocatable :: hs(:), tk(:,:), rowof(:)
+        integer(int64) :: i, r, k, lo, hi, a, nb, bad, cur
+        integer :: c
+        logical :: hv, chr
+
+        hv = present(valid)
+        chr = present(keys)
+        ok = .true.
+        allocate(hs(n))
+        !$omp parallel do default(shared) private(c, lo, hi, i, a, nb) schedule(static) num_threads(nt)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            do i = lo, hi
+                hs(i) = 0_int64
+                if (hv) then
+                    if (.not. valid(i)) cycle
+                end if
+                if (chr) then
+                    hs(i) = ix_hash_str(keys(i), len_trim(keys(i), kind=int64))
+                else
+                    a = v%off(i)
+                    nb = v%off(i + 1_int64) - a
+                    if (nb > 0_int64) then
+                        hs(i) = ix_hash_str(v%dat(a + 1_int64 : a + nb), nb)
+                    else
+                        hs(i) = ix_hash_str(IX_NO_BYTES, 0_int64)
+                    end if
+                end if
+            end do
+        end do
+        allocate(tk(n, 2))
+        tk(:, 1) = hs
+        tk(:, 2) = 0_int64
+        deallocate(hs)
+        call ix_hash_goam_part_n(self, tk, codes, valid, nt)
+        deallocate(tk)
+        k = self%nk
+        if (k == 0_int64) return
+        ! The first row of every code, in one serial scan: the row whose bytes the store takes.
+        allocate(rowof(k))
+        rowof = 0_int64
+        do i = 1_int64, n
+            r = codes(i)
+            if (r <= 0_int64) cycle
+            if (rowof(r) == 0_int64) rowof(r) = i
+        end do
+        bad = 0_int64
+        !$omp parallel do default(shared) private(c, lo, hi, i, r) reduction(+:bad) schedule(static) &
+        !$omp     num_threads(nt)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            do i = lo, hi
+                r = codes(i)
+                if (r <= 0_int64) cycle
+                if (rowof(r) == i) cycle
+                if (.not. ix_str_rows_equal(i, rowof(r), keys, v)) bad = bad + 1_int64
+            end do
+        end do
+        if (bad > 0_int64) then
+            ok = .false.
+            return
+        end if
+        call ix_str_grow_rows(self, k)
+        self%soff(1) = 0_int64
+        do r = 1_int64, k
+            self%soff(r + 1_int64) = self%soff(r) + ix_str_row_len(rowof(r), keys, v)
+        end do
+        call ix_str_grow_bytes(self, self%soff(k + 1_int64))
+        !$omp parallel do default(shared) private(c, lo, hi, r, i, a, nb, cur) schedule(static) num_threads(nt)
+        do c = 1, nt
+            call ix_chunk_bounds(k, nt, c, lo, hi)
+            do r = lo, hi
+                i = rowof(r)
+                cur = self%soff(r)
+                nb = self%soff(r + 1_int64) - cur
+                if (nb > 0_int64) then
+                    if (chr) then
+                        call ix_str_put(self%sdat, cur, keys(i), nb)
+                    else
+                        a = v%off(i)
+                        self%sdat(cur + 1_int64 : cur + nb) = v%dat(a + 1_int64 : a + nb)
+                    end if
+                end if
+                self%sval(r) = r
+            end do
+        end do
+        self%nstr = k
+        self%nchr = self%soff(k + 1_int64)
+        self%snext = k
+    end subroutine ix_str_goam_fresh
 
     !> The mask a string-column build or grouping actually applies: the caller's `valid=`, with
     !! every null element masked off too. Left UNALLOCATED when there is nothing to mask, which
@@ -1471,8 +1876,8 @@ contains
         call mm_release(self)
         allocate(g(n))
         call self%map%init(strings=.true.)
-        call self%map%reserve(n)
-        call self%map%get_or_add_many(keys, g, valid=valid)
+        if (ix_threads_rule(n, threads, "build") == 1) call self%map%reserve(n)
+        call self%map%get_or_add_many(keys, g, valid=valid, threads=threads)
         ng = self%map%nkeys()
         nv = count(g > 0_int64, kind=int64)
         call mm_str_rightsize(self%map, nv, ng, threads)
@@ -1506,8 +1911,8 @@ contains
         call mm_release(self)
         allocate(g(n))
         call self%map%init(strings=.true.)
-        call self%map%reserve(n)
-        call self%map%get_or_add_many(sc, g, valid=valid)
+        if (ix_threads_rule(n, threads, "build") == 1) call self%map%reserve(n)
+        call self%map%get_or_add_many(sc, g, valid=valid, threads=threads)
         ng = self%map%nkeys()
         nv = count(g > 0_int64, kind=int64)
         call mm_str_rightsize(self%map, nv, ng, threads)

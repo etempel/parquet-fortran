@@ -261,9 +261,11 @@ call m%get_or_add_many(raw_key, code, valid=ok)  ! a masked row gets code 0 and 
 ```
 
 The codes of one call are dense — the keys new to the map take the next values above its
-watermark — and are assigned in first-appearance order on the serial path this runs today. Rely
-on a code being stable within the call rather than on that order: a later, partitioned build may
-number the same keys in another order and still be correct. Keys, like everywhere else, may be
+watermark. On the serial pass (`threads=1`, a small array, or a call from inside your own parallel
+region) they are assigned in first-appearance order; on a team the keys are looked up lock-free
+and the ones not found are inserted by the same partitioned pass a hash build uses, numbered
+partition by partition. Rely on a code being stable within the call rather than on its order.
+`threads=` takes the three spellings a build takes. Keys, like everywhere else, may be
 `int32` or `int64`, scalar or a tuple per row, and the codes may be taken as either kind — an
 `int32` code array aborts rather than truncating when a code will not fit.
 
@@ -348,14 +350,14 @@ row numbers of the rows that were kept — which is how a nullable key column is
 The backend is the map's automatic choice, applied to the **distinct** keys: a dense id column
 that repeats takes the direct backend, a sparse one the hash table, and `method=` overrides as on
 the map. The choice is made in two steps, so ten thousand keys spread over a billion and repeated
-a thousand times each still go to a 0.5 MB hash table rather than a 320 MB direct array. In this
-version the grouping pass is serial; `threads=` reaches the map built over the distinct keys and
-is honoured there.
+a thousand times each still go to a 0.5 MB hash table rather than a 320 MB direct array. The
+grouping pass is the map's `%get_or_add_many`, and threads as it does; `threads=` reaches it and
+the map built over the distinct keys alike.
 
 **Group ids are dense in `1 .. ngroups` and rows are ascending within a group; nothing else about
-the ids is a contract.** On this version's serial pass they follow first appearance among the
-unmasked rows, which a later partitioned pass will change. Rely on an id being stable for the
-life of one build, never on its order.
+the ids is a contract.** On the serial pass (`threads=1`, or a small build) they follow first
+appearance among the unmasked rows; on a team they are numbered partition by partition. Rely on
+an id being stable for the life of one build, never on its order.
 
 ### Looking up a key that repeats
 
@@ -584,16 +586,21 @@ segfaults on for any type with allocatable components. The per-thread array sati
 
 ## Threads a build or a bulk lookup uses
 
-A `%build` threads its key scan and, on the direct backend, its scatter; a `%get_many` threads
-its probe, one contiguous chunk of the keys per thread. Both resolve their team by the same rule,
-over the rows they are handed, and so do the multimap's `%get_first_many`, `%get_many` and
-`%probe_many`.
+A `%build` threads its key scan, the direct backend's scatter and the hash backend's insert — a
+partitioned pass in which each thread fills its own range of the table, and the few keys whose
+probe chains reach the end of a range are placed once every range is done; a `%get_many` threads
+its probe, one contiguous chunk of the keys per thread; a `%get_or_add_many` looks its keys up on
+the team and inserts the ones not found by that same partitioned pass. All resolve their team by
+the same rule, over the rows they are handed, and so do the multimap's build, `%get_first_many`,
+`%get_many` and `%probe_many`. A string build threads the same way: the hash of every key and the
+copy into the store on the team, then the partitioned insert.
 
 ```fortran
 call m%build(keys)                   ! automatic
 call m%build(keys, threads=4)        ! an explicit request, honoured
 call m%build(keys, threads=1)        ! forced serial
 call m%get_many(probes, rows, threads=4)         ! the same three spellings on a lookup
+call m%get_or_add_many(keys, codes, threads=4)   ! and on the bulk insert
 nt = pf_index_threads(size(keys, kind=int64))   ! what an automatic build or lookup would open
 ```
 
@@ -645,8 +652,15 @@ your own hardware.
   together where a loop of `%get` waits for each one -- and on a team it is the fastest probe
   there is: the chunks share nothing and a hash probe is one cache miss, so the speed-up tracks
   the thread count until memory bandwidth saturates.
-- **`%get_or_add_many` beats a loop of `%get_or_add`** by the lock it does not take per key;
-  the hashing and the inserts cost the same either way.
+- **A hash build threads, and so does the insert side of `%get_or_add_many`.** On a team the
+  table is filled by a partitioned pass — every key's home slot computed on the team, the keys
+  scattered into partition order, each thread filling its own range of slots — so a build of
+  millions of keys costs a few nanoseconds per key rather than the serial insert's tens, and the
+  answers are the same: a lookup finds a key wherever any order of insertion put it. Only the
+  order `%keys()` lists a hash map in can differ, and that was never specified.
+  `--mode=build` of `bench/benchmark_index.sh` prints the serial and threaded arms side by side.
+- **`%get_or_add_many` beats a loop of `%get_or_add`** by the lock it does not take per key, and
+  on a team by the lock-free lookup of every key and the partitioned insert of the new ones.
 - **A string probe is a hash over the key's bytes, one table probe and one byte compare on a
   hit**, so it costs about a nanosecond per byte of key on top of an integer probe, and a build
   copies the key strings once. `%get_many` over a `parquet_string_column` reads the column's own

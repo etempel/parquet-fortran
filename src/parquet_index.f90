@@ -85,6 +85,8 @@ module parquet_index
     public :: parquet_debug_index_threads_used
     public :: parquet_debug_index_get_many_threads_used
     public :: parquet_debug_index_concurrent_builds
+    public :: parquet_debug_index_partition
+    public :: parquet_debug_index_spills
     public :: parquet_debug_set_index_pair_limit
     public :: parquet_debug_set_index_string_hash_bits
     !
@@ -219,6 +221,20 @@ module parquet_index
     integer, save :: dbg_index_builds_in_flight = 0
     integer, save :: dbg_index_concurrent_builds = 0 !! see `dbg_index_builds_in_flight`.
 
+    !> Keys the LAST partitioned insert pass deferred to its serial spill pass, or -1 when the
+    !! last hash build or bulk insert did not partition (a serial pass, or the direct or sorted
+    !! backend). What `parquet_debug_index_spills` reports.
+    !!
+    !! Test-only, and the only observable of the partitioned insert's one delicate invariant: a
+    !! probe chain that reaches the end of its thread's slot range is DEFERRED rather than
+    !! followed across the boundary into another thread's range, and the deferred keys are
+    !! inserted serially once every range is done. A build answers identically whether a key was
+    !! placed in range or deferred, so nothing about the map can show that the deferral happened;
+    !! this count can, which is what lets a test that crafts a boundary-straddling key assert that
+    !! it reached the spill pass rather than passing by luck of the hash. Written with an atomic
+    !! store by the pass that finishes last, so a test builds one map at a time when it reads it.
+    integer(int64), save :: dbg_index_spills = -1_int64
+
     !> Pair count above which `pf_index_multimap%probe_many` refuses to answer: `huge(int64)`
     !! unless a test has lowered it through `parquet_debug_set_index_pair_limit`.
     !!
@@ -263,9 +279,16 @@ module parquet_index
     !! expressible as a derived type -- so it keeps the same shape as one column of
     !! `hrec(ncomp + 1, cap)`: the tuple, then its value, one contiguous record per slot, for the
     !! same one-cache-line probe. See `parquet_index_hash.f90` for the two layouts side by side.
+    !!
+    !! **No default initialisers, deliberately.** An `allocate` of a type that has them initialises
+    !! every element serially before the caller sees the array, and a 10M-key table is 268 MB:
+    !! measured at 95 ms of a 128 ms partitioned build, with the team's own zeroing of the same
+    !! table costing a few. So every allocation of this type zeroes it explicitly instead --
+    !! `ix_hash_rehash` serially, `ix_hash_alloc_team` on the team -- and the two are the only
+    !! allocation sites (`grep "allocate(.*slots\|allocate(fresh" src/parquet_index_hash.f90`).
     type :: ix_slot
-        integer(int64) :: key = 0_int64 !! the stored key; meaningless unless `val > 0`.
-        integer(int64) :: val = 0_int64 !! the stored index value; **0 marks the slot empty**.
+        integer(int64) :: key !! the stored key; meaningless unless `val > 0`.
+        integer(int64) :: val !! the stored index value; **0 marks the slot empty**.
     end type ix_slot
 
     ! ---- pf_index_map ----
@@ -1528,10 +1551,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r1_k32_i32(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r1_k32_i32(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:) !! the keys to look up or add, one per element.
             integer(int32), intent(out) :: codes(:)
@@ -1540,6 +1565,9 @@ module parquet_index
             !! truncating; take the codes as `int64` if the map's values can exceed it.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r1_k32_i32
     end interface
     interface
@@ -1550,10 +1578,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r1_k32_i64(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r1_k32_i64(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:) !! the keys to look up or add, one per element.
             integer(int64), intent(out) :: codes(:)
@@ -1561,6 +1591,9 @@ module parquet_index
             !! `keys` has rows.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r1_k32_i64
     end interface
     interface
@@ -1571,10 +1604,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r1_k64_i32(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r1_k64_i32(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:) !! the keys to look up or add, one per element.
             integer(int32), intent(out) :: codes(:)
@@ -1583,6 +1618,9 @@ module parquet_index
             !! truncating; take the codes as `int64` if the map's values can exceed it.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r1_k64_i32
     end interface
     interface
@@ -1593,10 +1631,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r1_k64_i64(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r1_k64_i64(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:) !! the keys to look up or add, one per element.
             integer(int64), intent(out) :: codes(:)
@@ -1604,6 +1644,9 @@ module parquet_index
             !! `keys` has rows.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r1_k64_i64
     end interface
     interface
@@ -1614,10 +1657,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r2_k32_i32(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r2_k32_i32(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
             !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
@@ -1627,6 +1672,9 @@ module parquet_index
             !! truncating; take the codes as `int64` if the map's values can exceed it.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r2_k32_i32
     end interface
     interface
@@ -1637,10 +1685,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r2_k32_i64(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r2_k32_i64(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
             !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
@@ -1649,6 +1699,9 @@ module parquet_index
             !! `keys` has rows.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r2_k32_i64
     end interface
     interface
@@ -1659,10 +1712,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r2_k64_i32(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r2_k64_i32(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
             !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
@@ -1672,6 +1727,9 @@ module parquet_index
             !! truncating; take the codes as `int64` if the map's values can exceed it.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r2_k64_i32
     end interface
     interface
@@ -1682,10 +1740,12 @@ module parquet_index
         !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
         !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
         !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
-        !! its watermark -- and on this serial path they are assigned in first-appearance order;
-        !! rely on a code being stable within the call rather than on that order, which a
-        !! partitioned build may later change.
-        module subroutine goam_r2_k64_i64(self, keys, codes, valid)
+        !! its watermark. On the serial pass (`threads=1`, a small array, or a call from inside a
+        !! parallel region) they are assigned in first-appearance order; on a hash map and a team
+        !! of two or more the keys are looked up lock-free on the team and the ones not found are
+        !! inserted by the partitioned pass the hash build uses, numbered partition by partition
+        !! -- so rely on a code being stable within the call, never on its order.
+        module subroutine goam_r2_k64_i64(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
             !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
@@ -1694,6 +1754,9 @@ module parquet_index
             !! `keys` has rows.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_r2_k64_i64
     end interface
     interface
@@ -2031,10 +2094,13 @@ module parquet_index
         !> for each key that is new.
         !!
         !! `goam_r1_k32_i32` over strings: `%get_or_add` per element under the map's guard once,
-        !! each element trimmed of trailing blanks, the codes of one call dense and in
-        !! first-appearance order on this serial path. A row masked off by `valid` gets the code
-        !! 0 and is neither looked up nor added.
-        module subroutine goam_s1_i32(self, keys, codes, valid)
+        !! each element trimmed of trailing blanks, the codes of one call dense and, on the serial
+        !! pass, in first-appearance order. On a team of two or more an EMPTY map is filled by the
+        !! partitioned pass the string build uses, its codes numbered partition by partition, and
+        !! a map already holding keys looks the array up on the team and adds the new keys
+        !! serially; rely on a code being stable within the call, never on its order. A row masked
+        !! off by `valid` gets the code 0 and is neither looked up nor added.
+        module subroutine goam_s1_i32(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         character(len=*), intent(in) :: keys(:) !! the keys to look up or add, one per element, each trimmed.
             integer(int32), intent(out) :: codes(:)
@@ -2042,21 +2108,27 @@ module parquet_index
             !! A code above `huge(int32)` aborts rather than truncating.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_s1_i32
         !> The `int64` form of `goam_s1_i32`.
-        module subroutine goam_s1_i64(self, keys, codes, valid)
+        module subroutine goam_s1_i64(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         character(len=*), intent(in) :: keys(:) !! the keys to look up or add, one per element, each trimmed.
             integer(int64), intent(out) :: codes(:)
             !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as `keys`.
             logical, intent(in), optional :: valid(:)
             !! one entry per key; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_s1_i64
     end interface
     interface
         !> `goam_s1_i32` over the elements of a parquet_string_column, taken verbatim: a null
         !! element gets the code 0 and is neither looked up nor added, exactly as a masked row.
-        module subroutine goam_sc_i32(self, keys, codes, valid)
+        module subroutine goam_sc_i32(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         type(parquet_string_column), intent(in), target :: keys !! the keys to look up or add, verbatim.
             integer(int32), intent(out) :: codes(:)
@@ -2064,9 +2136,12 @@ module parquet_index
             !! as `keys`. A code above `huge(int32)` aborts rather than truncating.
             logical, intent(in), optional :: valid(:)
             !! one entry per element; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_sc_i32
         !> The `int64` form of `goam_sc_i32`.
-        module subroutine goam_sc_i64(self, keys, codes, valid)
+        module subroutine goam_sc_i64(self, keys, codes, valid, threads)
         class(pf_index_map), intent(inout) :: self !! the map.
         type(parquet_string_column), intent(in), target :: keys !! the keys to look up or add, verbatim.
             integer(int64), intent(out) :: codes(:)
@@ -2074,6 +2149,9 @@ module parquet_index
             !! as `keys`.
             logical, intent(in), optional :: valid(:)
             !! one entry per element; a `.false.` entry is neither looked up nor added.
+            integer, intent(in), optional :: threads
+            !! threads the call may use: ABSENT means automatic, exactly as on `%build`;
+            !! `threads=1` forces the serial pass, whose codes follow first appearance.
         end subroutine goam_sc_i64
     end interface
     interface
@@ -3720,6 +3798,34 @@ module parquet_index
     end interface
 
     interface
+        !> Test-only. Where a single-component key sits in the hash table a `%build` over `n`
+        !! such keys reserves, and how a build on a team would cut that table into partitions.
+        !!
+        !! `home` is the key's home slot, 0-based, in the `cap`-slot table `n` keys reserve;
+        !! `part` is the slots per partition of the partitioned insert a build on `threads`
+        !! threads runs (the build's own thread rule, affinity-clamped as the build's is), or 0
+        !! when such a build runs the serial insert loop instead. A key whose home is `part - 1`
+        !! modulo `part` sits on the last slot of its partition, which is what a test needs to
+        !! craft a probe chain that reaches a boundary and so the spill pass;
+        !! `parquet_debug_index_spills` then says whether it did. Both answers come from the
+        !! build's own hash and its own partition rule, never from a copy of either.
+        module subroutine parquet_debug_index_partition(key, n, home, part, cap, threads)
+            integer(int64), intent(in) :: key !! the key.
+            integer(int64), intent(in) :: n !! keys the build would store.
+            integer(int64), intent(out) :: home !! the key's home slot, 0-based.
+            integer(int64), intent(out) :: part !! slots per partition, or 0 for a serial insert.
+            integer(int64), intent(out) :: cap !! slots in the table `n` keys reserve.
+            integer, intent(in), optional :: threads !! the build's `threads=`, or absent for automatic.
+        end subroutine parquet_debug_index_partition
+        !> Test-only. Keys the last partitioned insert pass deferred to its serial spill pass,
+        !! or -1 when the last hash build or `%get_or_add_many` did not partition. See
+        !! `dbg_index_spills` for why this exists.
+        module function parquet_debug_index_spills() result(n)
+            integer(int64) :: n !! deferred keys, or -1.
+        end function parquet_debug_index_spills
+    end interface
+
+    interface
         !> Test-only. Lowers the pair count `pf_index_multimap%probe_many` refuses at, so that
         !! the overflow guard can be reached by an error scenario; 0 (or any value below 1)
         !! restores `huge(int64)`.
@@ -3815,6 +3921,65 @@ module parquet_index
             integer(int64), intent(in), contiguous :: key(:) !! the tuple, `size == self%ncomp`; contiguous, as the hash needs.
             logical, intent(out) :: found !! `.true.` when the key was there to remove.
         end subroutine ix_hash_remove
+        !> The partitioned, threaded insert of a whole key array into an EMPTY hash table already
+        !! reserved for it: the hash build's threaded arm.
+        !!
+        !! Every key's home slot is computed on the team and the keys are scattered into
+        !! partition order -- one partition per contiguous range of slots -- so that each thread
+        !! then inserts its partitions into its own slot ranges with no other thread writing
+        !! there. A probe chain that reaches the end of its range is DEFERRED to a spill list
+        !! rather than followed into the next thread's range, and the deferred keys are inserted
+        !! serially once every range is done. A duplicate met on either walk is reported through
+        !! `dup` rather than named here: the caller re-runs the serial loop over an emptied table,
+        !! which meets the same pair at its canonical position and names it with the message a
+        !! serial build gives. Correct because a linear-probe lookup does not depend on insertion
+        !! order -- a key is found by walking from its home to the first empty slot, whichever
+        !! order filled the slots in between -- and because a slot, once filled, stays filled for
+        !! the rest of the pass. The table is allocated here, for `nv` keys, and zeroed on the
+        !! team: whatever table the map had is released.
+        module subroutine ix_hash_build_part_1(self, keys, values, valid, nv, nt, dup)
+            type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`, with `ncomp` set.
+            integer(int64), intent(in) :: keys(:) !! the keys, already widened.
+            integer(int64), intent(in), optional :: values(:) !! one value per key; absent means the row number.
+            logical, intent(in), optional :: valid(:) !! the build's mask, or absent.
+            integer(int64), intent(in) :: nv !! keys the mask keeps: what the table is sized for.
+            integer, intent(in) :: nt !! the resolved team; at least 2.
+            logical, intent(out) :: dup !! `.true.` when two unmasked keys were equal; the table is then unusable.
+        end subroutine ix_hash_build_part_1
+        !> `ix_hash_build_part_1` for key tuples, one per row of `keys`.
+        module subroutine ix_hash_build_part_n(self, keys, values, valid, nv, nt, dup)
+            type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`, with `ncomp` set.
+            integer(int64), intent(in) :: keys(:,:) !! the tuples, `(n, ncomp)`, already widened.
+            integer(int64), intent(in), optional :: values(:) !! one value per row; absent means the row number.
+            logical, intent(in), optional :: valid(:) !! the build's mask, or absent.
+            integer(int64), intent(in) :: nv !! rows the mask keeps: what the table is sized for.
+            integer, intent(in) :: nt !! the resolved team; at least 2.
+            logical, intent(out) :: dup !! `.true.` when two unmasked tuples were equal; the table is then unusable.
+        end subroutine ix_hash_build_part_n
+        !> The threaded `%get_or_add_many` over a hash map: a lock-free lookup of every key on
+        !! the team, then the keys not found inserted by the partitioned pass of
+        !! `ix_hash_build_part_1`, numbered partition by partition above the map's watermark,
+        !! then a second lookup of those rows for their codes.
+        !!
+        !! The map's guard is held by the caller for the whole call, as on the serial pass; the
+        !! team this opens inside it never touches the guard. Fewer new keys than the threading
+        !! floor are added serially, in the caller's order, rather than through a pass whose
+        !! set-up would cost more than they do.
+        module subroutine ix_hash_goam_part_1(self, keys, codes, valid, nt)
+            type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`.
+            integer(int64), intent(in) :: keys(:) !! the keys, already widened.
+            integer(int64), intent(out) :: codes(:) !! one code per key; 0 for a masked row.
+            logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
+            integer, intent(in) :: nt !! the resolved team; at least 2.
+        end subroutine ix_hash_goam_part_1
+        !> `ix_hash_goam_part_1` for key tuples, one per row of `keys`.
+        module subroutine ix_hash_goam_part_n(self, keys, codes, valid, nt)
+            type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`.
+            integer(int64), intent(in) :: keys(:,:) !! the tuples, `(n, ncomp)`, already widened.
+            integer(int64), intent(out) :: codes(:) !! one code per row; 0 for a masked row.
+            logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
+            integer, intent(in) :: nt !! the resolved team; at least 2.
+        end subroutine ix_hash_goam_part_n
         !> Sizes the hash table so `want` keys fit under the load factor, rehashing if needed.
         module subroutine ix_hash_reserve(self, want)
             type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`.

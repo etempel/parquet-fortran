@@ -94,8 +94,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`pf_index_map` gains string keys, bulk dictionary encoding and validity masks.** `%build`,
   `%get`, `%get_many`, `%set`, `%get_or_add`, `%remove` and `%keys` take a string — a `character`
   array, a `character` scalar or a `parquet_string_column` — keyed by its exact bytes and verified
-  on every hit. `m%get_or_add_many(keys, codes)` is `%get_or_add` over a whole array under one
-  lock, the way to factorise a key column; `valid=` on `%build`, `%get_many` and
+  on every hit. `m%get_or_add_many(keys, codes, [threads])` is `%get_or_add` over a whole array
+  under one lock and on a team, the way to factorise a key column; `valid=` on `%build`, `%get_many` and
   `%get_or_add_many` skips the rows a mask marks `.false.`, so a nullable key column can be
   indexed or probed without compacting it first. See
   [String keys](doc/pages/utilities/index-maps.md#string-keys) and
@@ -122,6 +122,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses).
 - **`pf_index_map` builds run outside the type's lock**, which a `%build` now takes only to swap
   its finished result in, so builds of different maps on different threads no longer take turns.
+  A hash build threads: on a team the table is filled by a partitioned insert, so a build of
+  millions of keys costs a few nanoseconds per key rather than the serial insert's tens.
   Hash lookups are faster: `%get_many` probes a block of keys at a time, about twice as fast on a
   map larger than the cache; a composite key's tuple and value sit in one record per slot, and the
   tuple hash costs about a third of what it did. The order `%keys()` lists a composite hash map in

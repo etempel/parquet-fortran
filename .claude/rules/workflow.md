@@ -32,6 +32,7 @@ Rules for how work is done in this repository. Read before any change.
 - `feature_*.md` files in the repo root are design/planning scratch documents, git-ignored
   (`.gitignore`: `feature_*.md`). `feature_risks.md` is the one **tracked** exception
   (`!feature_risks.md`); adding another negation is a decision to publish a document.
+- The `/feature-request` skill writes a new design document in the expected shape.
 - **Every feature document carries a settings analysis**: does the feature add a process-global
   parameter, does it pass the admission test in `api-conventions.md`, and if so its knob name,
   default, validation and environment variable. Write "none" explicitly when there is none.

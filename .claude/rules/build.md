@@ -1,7 +1,7 @@
 # Build and toolchain
 
 Machine-specific facts (what each machine is, how to activate a toolchain, what each activation
-leaves in `FPM_*`) live in `tools/developer_environments.md` only. This file carries what is true
+leaves in `FPM_*`) live in `developer-environments.md` only. This file carries what is true
 of the toolchains wherever they are installed.
 
 ## Local verification
@@ -18,7 +18,7 @@ of the toolchains wherever they are installed.
 - Never assign `FPM_FFLAGS`/`FPM_CXXFLAGS`/`FPM_LDFLAGS` to CI's values locally (that drops Arrow's
   paths: `fatal error: 'arrow/api.h' file not found`). Append, never assign.
 - Profiles in `fpm.toml`: fpm's `debug`/`release`, plus `nag`, `nagdeb`, `nagundef`
-  (`nagfor-builds.md`), `flangopt` (`-O3`) and `flangdeb`.
+  (the `/nag-build` skill), `flangopt` (`-O3`) and `flangdeb`.
 - To verify a no-OpenMP build, comment out `openmp = "*"`, build into a throwaway
   `FPM_BUILD_DIR`, confirm from `--show-model` that no `-fopenmp` is present, restore. Every skip
   in that run should name a threading assertion.

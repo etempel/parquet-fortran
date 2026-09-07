@@ -4,7 +4,6 @@ paths:
   - "tools/benchmark_random_kernels.f90"
   - "tools/machine_report.sh"
   - "tools/fpm_lto.sh"
-  - "tools/developer_environments.md"
   - "feature_benchmark*.md"
 ---
 # Benchmarking and measurement
@@ -22,25 +21,15 @@ paths:
 
 ## Cross-machine campaigns
 
-- Start from `bench/benchmark_template.md`; never write a run sheet from scratch or edit the
-  template with one campaign's details.
-- Instructions go in a `feature_*.md` named for the question, one copy per machine suffixed with
-  the machine's name (`..._A.md`); each machine writes its report into its copy; the analysis
-  happens once with every copy back. Each report carries full provenance
-  (`tools/machine_report.sh` run inside the activated shell, built-and-passed before timing,
-  deviations, verbatim output, what the run does not settle).
+- The `/plan-benchmark` skill writes the run sheet (`feature_benchmark_<name>.md`, one copy per
+  machine, carried by hand) and carries the runner's steps and the rules every run follows; never
+  write a run sheet from scratch. Machine facts are in `developer-environments.md`.
 - Everything the run EXECUTES lives in the repository under `bench/`, committed and pushed first
   (the one case where work is committed rather than left for the maintainer); never paste code into
   the instruction file.
-- A run compared against an earlier commit first records
-  `git diff --stat <old>..<new> -- app src tools`.
 - Verdicts can agree everywhere while magnitudes span 3–6x and a sub-conclusion inverts; a
-  single-machine run does not size work. Measure the noise floor with the campaign's own harness
-  (never a proxy), and let the measured floor decide — a loaded machine is not a noisy one until
-  measured.
-- A run sheet verifies the compiler version rather than assuming an activation script took (some do
-  not survive non-interactive sourcing). A wrapper cannot engage its configuration → exit nonzero.
-  Tooling fixed mid-campaign invalidates every figure taken before the fix.
+  single-machine run does not size work. Read every returned copy side by side, once.
+- Tooling fixed mid-campaign invalidates every figure taken before the fix.
 
 ## Measurement rules
 

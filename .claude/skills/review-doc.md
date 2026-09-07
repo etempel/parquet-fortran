@@ -1,11 +1,12 @@
 ---
-description: Initialise a documentation review campaign over everything under CHANGELOG.md's [Unreleased] section. Writes feature_doc.md (boundary, page map, tiers, order, report aliases, baseline, opening questions) and stops. Reviews no page.
-argument-hint: [boundary tag or commit]
+name: review-doc
+description: "Initialise a documentation review campaign over everything under CHANGELOG.md's [Unreleased] section. Writes feature_doc.md (boundary, page map, tiers, order, report aliases, baseline, opening questions) and stops. Reviews no page."
+argument-hint: "[boundary tag or commit]"
 allowed-tools: Bash(git:*), Bash(grep:*), Bash(awk:*), Bash(sed:*), Bash(find:*), Bash(ls:*), Bash(wc:*), Bash(cat:*), Bash(python3:*), Bash(ford:*), Bash(tools/:*)
 disable-model-invocation: true
 ---
 
-# /review_doc — initialise a documentation review
+# /review-doc — initialise a documentation review
 
 **This command initialises a review campaign and then stops. It reviews no page, edits no page and
 commits nothing.** Part A is what to do now. Part B is the procedure the per-page review sessions

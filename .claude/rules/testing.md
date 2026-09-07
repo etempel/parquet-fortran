@@ -12,12 +12,18 @@ paths:
 
 - One suite: `fpm test run_tester -- <suite>`; one test: `fpm test run_tester -- <suite> "<name>"`.
   Prefer these while iterating; a full `fpm test` runs every OpenMP/error-scenario subprocess.
-- `fpm test --profile debug` for bounds checks (`build.md`); the nagfor profiles are in
-  `nagfor-builds.md`.
+- `fpm test --profile debug` for bounds checks (`build.md`); the NAG profiles run through the
+  `/nag-build` skill.
+- The suites are split across five runner programs (`tools/count_tests.sh` prints the map).
+  `run_tester_noundef` holds Arrow-free suites that cannot run under `-C=undefined`; its
+  membership is decided by a person after reading why a result changed, never moved by a tool
+  (`check_test_runner_partition` keeps the split honest).
 - A fixture a test WRITES goes under `test_run/`, never the repository root
   (`check_test_fixtures_live_under_test_run`).
 
 ## Error scenarios
+
+Procedure for adding one: the `/add-error-scenario` skill.
 
 - An abort path is tested out of process: a `case` in `test/error_scenarios.f90`, a wrapper in
   `test/test_errors.f90` (`check_scenario_exit_status_and_stderr` asserting the library's own
@@ -133,14 +139,10 @@ void *malloc(size_t n) {
 ## Mutation testing
 
 Break the code deliberately and confirm the test fails, for anything whose failure is silent (a
-fast path, a short-circuit, a cache, a guard).
+fast path, a short-circuit, a cache, a guard). The `/mutation-test` skill carries the procedure
+(snapshot to the scratch directory, never `git checkout` to restore, clean build, an abort counts
+as caught). Rules for reading a result:
 
-- **NEVER restore a mutation with `git checkout`** — the tree is normally uncommitted, so that
-  discards the feature. Snapshot the files to the scratch directory and restore from the copy;
-  verify the harness's restore before its first round. A generated file is mutated in its output,
-  never in the generator.
-- Detect an abort, not only a failed check: `error stop` → nonzero, SIGABRT → 134, SIGSEGV →
-  139/11.
 - Check which path the test reaches: a comparator mutation survives when both sides use the same
   comparator or a counting fast path never calls it (`feature_risks.md` Risk-35); a size threshold
   is the same trap (Risk-49) — give every gating constant a `parquet_debug_set_*` override and lower

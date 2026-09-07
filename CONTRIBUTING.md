@@ -6,7 +6,7 @@ This file covers developing, testing, and extending this repository itself. If y
 **Scope.** This file holds *project-wide* workflow: the conventions everyone follows, and how to
 build, test, lint, release and publish. It deliberately does **not** describe how any individual
 tool or program works — that lives in each file's own header comment, next to the code it describes.
-See [CLAUDE.md](CLAUDE.md#contributingmd-is-project-wide-workflow-only--a-tools-own-detail-goes-in-its-header) for the rule and why it exists.
+The rule is in `.claude/rules/documentation.md`.
 
 ## Contents
 
@@ -30,66 +30,16 @@ See [CLAUDE.md](CLAUDE.md#contributingmd-is-project-wide-workflow-only--a-tools-
 ## AI assistance
 
 Portions of this codebase, including its documentation, were developed with AI assistance (Claude
-Code).
+Code). The instructions Claude Code works from live in [CLAUDE.md](CLAUDE.md) and under `.claude/`
+(rules and skills); they are not part of the contributor workflow described here.
 
 ## Conventions
 
-Project conventions worth knowing before contributing. All are applied in day-to-day development and
-enforced in review; [CLAUDE.md](CLAUDE.md) carries the full reasoning behind each.
-
-**Naming.** Public module-level API — everything in `src/parquet_core.f90`'s `public ::` list, re-
-exported by the `parquet` facade in `src/parquet.f90` — carries the `parquet_` prefix (e.g.
-`parquet_open_reader`, `parquet_get_metadata`). Library-wide *utility* modules whose subject is not
-a parquet file use `pf_` instead (`pf_sort`, `pf_random_at`). Type-bound procedures (`schema%init`,
-`reader%...`) are namespaced by their type and take no prefix. The `maml_` prefix is reserved for
-MAML-parsing/building internal helpers. When in doubt, grep for an existing analogous name before
-inventing a new one. See [CLAUDE.md](CLAUDE.md#naming-conventions).
-
-**Line length.** Every line in `src/*.f90`, `test/*.f90` and `app/*.f90` — code and comments alike,
-including trailing end-of-line comments — must stay at or under 132 columns, the standard Fortran
-free-form limit. Wrap with `&` continuations and split long comments across multiple `!`-prefixed
-lines; don't reach for a compiler flag to paper over it. Nothing in CI passes `-ffree-line-length-
-none`, so an over-long line is a build failure on a stricter compiler.
-
-**New features need tests and docs.** A new feature lands together with (1) unit-test coverage in
-the relevant `test/*.f90` suite — plus error-path coverage via `test/error_scenarios.f90` +
-`test/test_errors.f90` + `tools/run_error_scenarios.sh` if it has failure modes that `error stop` —
-and (2) documentation: a `!>`/`!!` doc-comment on the new public API (picked up automatically by the
-FORD-generated reference), the relevant [user guide page](doc/pages/index.md), the
-[README](README.md) if the landing-page story changes, and this file if it affects contributor
-workflow. **A `CHANGELOG.md` entry is part of that too** — every new feature gets a bullet under
-`[Unreleased]`'s `### Added`. `### Changed` and `### Fixed` are deliberately narrower: they record
-only what differs from the **released** version, so a change or fix to a feature that itself landed
-after the last release gets no entry of its own. See
-[CLAUDE.md](CLAUDE.md#new-features-require-tests-and-docs).
-
-**Documentation describes the current state, not a former one.** When you change behaviour and
-update the [user guide](doc/pages/index.md), README.md or a doc-comment to match, write what the
-library does — not what changed. A sentence a reader cannot evaluate without having seen a version
-they never saw is a defect, however true it is; the change itself belongs in `CHANGELOG.md` and the
-commit message. Comments in `src/` are exempt, since their reader is a maintainer. See
-[CLAUDE.md](CLAUDE.md#a-guide-page-describes-the-current-state-never-a-former-one) for the three
-shapes this takes and why sweeping it mechanically is not safe.
-
-**Don't write out a count or a list the repository owns.** Point at the source instead — "the
-`new_testsuite(...)` array in `test/run_tester.f90`", not a copy of it. A written-out count drifts
-silently and nothing notices; several in this file had done exactly that before it was last
-reviewed.
-
-**Read `feature_risks.md` before editing an area it covers.** It is this repository's standing-risks
-register: numbered `Risk-N` entries recording properties of the shipped code that a future change
-can break with **no test failing and no abort** — a wrong answer, a stale pointer, a corrupted heap,
-a silently skipped row group — each with whether a test would catch it today and, where none can,
-how to check or avoid it instead. It has four sections (new / proposed test / not testable /
-covered-but-still-forbidding-something), and a risk keeps its number when it moves between them, so
-`Risk-13` means the same thing in a code comment a year from now. If you implement a proposed test,
-update its entry in the same change; if you find a new silent-failure property while fixing a bug,
-add a new entry rather than only writing a code comment.
-
-**Checking doc-comment coverage.** A plain `ford docs.md` run does **not** verify that a new doc-
-comment was added — FORD's undocumented-entity warnings are opt-in and off by default here. Run
-`ford --warn docs.md` instead; see CLAUDE.md's "FORD doc-comment conventions" for what to expect in
-its (noisy) output and which warning categories are already-accepted noise.
+Project conventions are recorded in `.claude/rules/` and indexed by [CLAUDE.md](CLAUDE.md). Read
+`workflow.md`, `code-style.md`, `api-conventions.md` and `documentation.md` there before a first
+change, and `feature_risks.md` (this repository's standing-risks register) before editing an area it
+covers. The mechanical conventions are enforced by `tools/run_lint_check.sh`, the same checks CI's
+lint stage runs.
 
 ## Building and testing this repository
 
@@ -132,32 +82,15 @@ standalone drivers that must be built by a bare compiler with forced flags
 (`tools/check_random_kernels.f90`, `tools/check_exp_key.f90`, `tools/check_argsort_standalone.f90`,
 `tools/benchmark_random_kernels.f90`) stay in `tools/`, outside any source-dir.
 
-**If `fpm test` behaves unexpectedly right after a source change** — a test seems to still run old
-code, or `error_scenarios` reports a scenario name as unrecognized even though it is clearly in
-`test/error_scenarios.f90` — run `fpm clean --skip` before spending time debugging further. fpm's
-build cache can serve a stale binary, and building with several different `FPM_FFLAGS` values
-creates multiple `build/gfortran_<hash>/` directories, one of which a binary lookup may pick up
-instead of the current one. Prefer `--skip` over `fpm clean --all`, which also discards external
-dependencies and forces a `test-drive` re-download that is never the cause of this symptom. Note
-`fpm build` does **not** build anything under `test/`; use `fpm build --tests`.
+**If `fpm test` seems to run old code after a source change**, run `fpm clean --skip` before
+debugging; `.claude/rules/build.md` covers the build cache and the flag rules. Note `fpm build`
+does **not** build anything under `test/`; use `fpm build --tests`.
 
 ### Building with link-time optimisation
 
-**No fpm profile enables it.** `--profile release` supplies `-O3 -Wimplicit-interface -fPIC -fmax-
-errors=1 -funroll-loops -fcoarray=single` and nothing more, so `-flto` (gfortran/flang) or `-ipo`
-(ifx) has to be added by hand. fpm *appends* `FPM_FFLAGS` and friends to the profile flags rather
-than replacing them, so `FPM_FFLAGS="${FPM_FFLAGS:-} -flto"` works — note the `${VAR:-}` prefix,
-since a bare assignment would discard the Arrow include and link paths those variables normally
-carry.
-
-**Use `tools/fpm_lto.sh` rather than doing it by hand.** Two companion tools matter as much as the
-flag itself and getting either wrong is silent: LTO needs a plugin-capable **archiver** (without one
-the build succeeds, passes its tests and does no interprocedural optimisation at all, with no error
-and no warning), and on ifx it needs oneAPI's own **`ld.lld`**, which the usual environment scripts
-do not put on `PATH`. The wrapper handles both, adds the flags only for `--profile release`, and
-**refuses to build** rather than hand back a silently LTO-less measurement. Read its header before
-changing it — it carries the full rationale, the measurements, and the reason a macOS mixed-family
-build may gain nothing however carefully it is set up.
+No fpm profile enables it. Use `tools/fpm_lto.sh` (sourced, not executed): it adds the LTO flag for
+`--profile release`, selects the plugin-capable archiver and the linker LTO needs, and refuses to
+build rather than hand back a silently LTO-less binary. Its header carries the details.
 
 ### Running a single test suite/test
 
@@ -189,20 +122,6 @@ write aborts is a test about writing, and it now lives in `writing_errors` rathe
 That is deliberate: it is what makes every runner except `run_tester_errors` a program that forks
 nothing, which is what lets the two undef-safe runners exist at all.
 
-**`run_tester_noundef`'s membership is decided by a person, never by a tool.** It holds suites that
-reach no C++ and still cannot run under `-C=undefined` — today just `sorting`, which segfaults
-inside NAG's own instrumentation on a character key; the comment at its registration carries the
-whole diagnosis, including the measurement that only three of its 117 tests are affected.
-`tools/check_nag_undefined.sh` re-tries the list and *reports* any suite that now passes, but moving
-one out is an edit someone makes after looking at why the result changed — which is how `columns`
-left it.
-
-**Run that profile through the wrapper, or export `OMP_STACKSIZE` yourself.** `-C=undefined` inflates
-every stack frame, and `healpix_tier_b` then needs about 1 MB of OpenMP *worker* stack — which is
-`OMP_STACKSIZE`, not the process limit, and is above nagfor's default. Without it the run dies with
-no message at all, and fpm reports the signal as `exit code 10`, which reads like an ordinary status.
-No other profile needs it.
-
 `tools/check_source_conventions.py`'s `check_test_runner_partition` enforces the split in CI: every
 suite in exactly one runner, no undef-safe runner reaching `parquet_bindings` or declaring its own
 `bind(C)`, and no runner but `run_tester_errors` driving a scenario.
@@ -228,14 +147,6 @@ The scenario names are the `select case` at the top of `test/error_scenarios.f90
 scenario list a complete mirror of the `select case`** — `tools/check_source_conventions.py` fails
 when it is not, and the list also drives the parallel pre-run that makes `fpm test` roughly three
 times faster. See the script's own header for the priming, timeout and dispatch details.
-
-**The `ERROR STOP` prefix and the exit status are your compiler's, not this library's**, and a test
-must not assert either: gfortran prints `ERROR STOP <message>` and exits 1, NAG prints `ERROR STOP:
-<message>` and exits **2**, flang prints `Fortran ERROR STOP: <message>` and exits 1. Assert the
-library's own message text, and — where the point is distinguishing a Fortran abort from a C++-level
-one — assert `/= 0` and `/= 134` rather than a particular value. The C++ side is exactly 134 on
-every compiler, because that path ends in an explicit `_Exit(134)`. See [Telling them
-apart](doc/pages/operating/error-handling.md#telling-them-apart).
 
 ### Regenerating the test fixtures
 
@@ -349,7 +260,6 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `count_lines.py` | Code/comment/blank counts per source group, Markdown counts, and a code-vs-documentation summary. |
 | `count_tests.sh` | Unit tests per suite, read from source without building. |
 | `check_nag_undefined.sh` | Runs the undef-safe test runners under nagfor's `-C=undefined`. |
-| `doc_review_process.md` | The procedure for reviewing the `doc/pages/` user guide one page at a time: the passes, the report, and what a review may change. Prose, not a script. |
 
 #### `bench/` — benchmarks and probes
 
@@ -381,7 +291,6 @@ drives a `.f90` program of the same name in the same directory.
 | `run_practrand.sh` | Runs the PractRand battery over one axis of `parquet_random`. |
 | `large_scale.sh` | Manual large-scale check — genuinely exceeding `huge(1)` rows. Never run by `fpm test` or CI. |
 | `random_large_fill.sh` | The same, for the bulk random fills. |
-| `benchmark_template.md` | The machine-agnostic run-sheet template. **Start here** for any cross-machine campaign. |
 
 ### Testing genuine OpenMP concurrency
 
@@ -397,7 +306,7 @@ serial.
 *threading* skips when no team can be opened, which is correct — the alternative is an assertion
 that holds for the wrong reason — but it means a serial build reports success while testing none of
 the parallel paths. Read the skip count, not just the pass count: on a threaded build it should be
-zero. See [CLAUDE.md](CLAUDE.md#a-test-that-asserts-threading-must-skip-without-openmp).
+zero. See `.claude/rules/testing.md`.
 
 ### Continuous integration (GitLab CI)
 
@@ -427,11 +336,11 @@ preserve them if you touch it:
   `arrow/compute/*.h`.
 - **`FPM_FFLAGS="--coverage"`, and deliberately no `-fopenmp`.** Coverage instrumentation is not
   something any fpm metapackage supplies, so it must be explicit; the OpenMP flag is already
-  injected by the metapackage and passing it again is redundant. See [CLAUDE.md](CLAUDE.md#dont-run-the-gitlab-ci-pipeline-yourself).
+  injected by the metapackage and passing it again is redundant. See `.claude/rules/build.md`.
 - **A pinned `gcovr` version range.** Two independent gcovr regressions bracket it — one below the
   floor cannot parse a 10,000+ line file's gcov output, one at or above the ceiling silently drops
   coverage for every Fortran module subroutine. Both symptoms look like a problem in this project
-  and are not. See CLAUDE.md's two `gcovr` sections before widening either bound.
+  and are not. See `.claude/rules/coverage.md` before widening either bound.
 
 Coverage is computed by `gcovr` over `src/` and surfaced through GitLab's `coverage:` regex,
 including `src/parquet_wrapper.cpp` alongside the Fortran sources — CI's `gfortran`/`gcc`/`g++` are
@@ -543,18 +452,10 @@ if you extend MAML structure in this library, update `allowed_maml_sections` and
 
 ## Error-handling conventions in `parquet_wrapper.cpp`
 
-Prefer reporting a fatal condition directly — print a diagnostic to stderr and terminate — over
-`throw`ing and `catch`ing within the same function. **Use `report_fatal_error(...)` for that, and
-never call `std::abort()` or `exit()` yourself.** A new fatal path must go through
-`claim_fatal_path_or_park()` and `fatal_exit()`, because a fatal error here can be reached by
-several threads at once and `std::abort()` takes a lock inside glibc — threads arriving together
-pile up on it and the process hangs forever instead of dying.
-
-`try`/`catch` is also unreliable across one specific toolchain combination here (a `gfortran`-linked
-executable on macOS breaks libc++abi's unwinding for `clang++`-compiled objects), which is the other
-half of why the direct-report convention exists. Both are written up in full at the top of
-`src/parquet_wrapper.cpp`, beside `claim_fatal_path_or_park` — read that before adding a fatal path.
-See also `feature_risks.md` Risk-99.
+Report a fatal condition through `report_fatal_error(...)`; never call `std::abort()` or `exit()`
+yourself, and route any new fatal path through `claim_fatal_path_or_park()` and `fatal_exit()`. The
+rules for the C++ side are in `.claude/rules/cpp-wrapper.md` and at the top of
+`src/parquet_wrapper.cpp` beside `claim_fatal_path_or_park`; see also `feature_risks.md` Risk-99.
 
 ## Features considered but not implemented
 
@@ -566,8 +467,7 @@ needs them, rather than adding speculatively.
 
 - **Per-column writer properties** (e.g. `disable_statistics()` for write-heavy throwaway files) —
   small, additive, doesn't touch the type system. One instance already exists but is automatic and
-  type-based rather than caller-facing: see [Automatic BYTE_STREAM_SPLIT for float
-  columns](CLAUDE.md#automatic-byte_stream_split-for-float-columns-in-the-writer). A manual
+  type-based rather than caller-facing: see the BYTE_STREAM_SPLIT rule in `.claude/rules/reader-writer.md`. A manual
   per-column override for other types remains unimplemented.
 - **`qc: min:`/`max:` bounds for `date`/`time`/`timestamp`** — a field declaring one fails
   `parquet_validate_maml` rather than being silently ignored; see [Quality
@@ -618,9 +518,7 @@ needs them, rather than adding speculatively.
   links, and breaks with no diagnostic anywhere; ~90 `static` helpers would need their linkage
   reworked; the coverage tooling is keyed to this one filename; and the large Arrow include preamble
   would be duplicated, so compile time would likely *increase*. Instead the file gained `// ==== ...
-  ====` section banners, which give most of the navigational benefit at none of the cost. **Read
-  [CLAUDE.md](CLAUDE.md#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
-  before revisiting this** — it enumerates every global that would have to become a genuine `extern`
+  ====` section banners, which give most of the navigational benefit at none of the cost. **Read `.claude/rules/cpp-wrapper.md` before revisiting this** — it enumerates every global that would have to become a genuine `extern`
   first, and what each one breaks if it is missed. Revisit only on a concrete trigger: compile time
   becoming a real irritant, or a genuinely independent new subsystem with no shared helpers, which
   is the one case where a second `.cpp` is cheap.

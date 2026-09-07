@@ -122,7 +122,7 @@ grep -nE "\bnow\b" doc/pages/<page>
 ```
 
 - On an already-reviewed page fix the sentences and nothing else; rewrap only on the round that
-  first reviews a page (`.claude/commands/review_doc.md`, Pass 4).
+  first reviews a page (the `/review-doc` skill, Pass 4).
 
 ## Checking documentation links
 

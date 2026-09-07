@@ -29,6 +29,8 @@ paths:
 
 ## Closing gaps
 
+Procedure: the `/coverage-gaps` skill.
+
 - An `error stop`/abort line is covered only by an out-of-process scenario (`testing.md`); a normal
   branch by extending a test.
 - Not worth chasing: `end module`/`end submodule` lines, implicit finalizers, interface-only files

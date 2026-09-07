@@ -98,5 +98,5 @@ in `api-conventions.md`; module placement in `module-structure.md`; language and
   (`check_random_kernels.f90`, `check_exp_key.f90`, `check_argsort_standalone.f90`,
   `benchmark_random_kernels.f90`), because `bench/` is an fpm source dir and everything in it is
   built by fpm.
-- `tools/developer_environments.md` is a maintainer note; `.claude/rules/*.md` hold the working
-  rules; `.claude/commands/review_doc.md` holds the documentation review procedure.
+- `.claude/rules/*.md` hold the working rules (`developer-environments.md` the machine notes);
+  `.claude/skills/*.md` hold the on-demand procedures.

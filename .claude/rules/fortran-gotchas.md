@@ -250,7 +250,7 @@ flang builds here are serial only and `--profile release` does not link (`build.
 `--profile release` is the only nagfor configuration with optimisation on (`nag`, `nagdeb`,
 `nagundef` are all `-O0`); it is the only one that can see a codegen defect, so run it as its own
 check and read a hang there as a possible miscompilation (`sample <pid>` names the procedure).
-Running and triaging NAG builds: `nagfor-builds.md`.
+Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-build.md`).
 
 - **nagfor unmasks the IEEE traps by default (`-ieee=stop`) for the whole process.** `anint(NaN)`
   and `int(NaN)` trap (test `ieee_is_nan` first, as its own statement); `arrow::compute::MinMax`

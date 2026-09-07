@@ -70,8 +70,9 @@ addition:
 | `.claude/rules/benchmarking.md` | `bench/` layout, cross-machine campaigns, measurement rules, memory, phase instrumentation | when anything under `bench/`, the machine/LTO scripts, `tools/developer_environments.md` or a `feature_benchmark*.md` is read |
 
 Maintainer notes outside the rules: `tools/developer_environments.md` (machines and toolchain
-activation), `tools/doc_review_process.md` (documentation review passes),
-`bench/benchmark_template.md` (run-sheet template).
+activation), `bench/benchmark_template.md` (run-sheet template). `/review_doc`
+(`.claude/commands/review_doc.md`) initialises a documentation review campaign and carries the
+review procedure its per-page sessions follow.
 
 If this repository is checked out inside a larger workspace, `../../fortran/CLAUDE.md` may hold
 conventions shared across sibling Fortran projects; read it when present. This repository's rules

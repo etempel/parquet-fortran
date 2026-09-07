@@ -1440,6 +1440,7 @@ scenarios=(
     "index_build_valid_length:1"
     "index_keys_rank1_on_composite:1"
     "index_control:0"
+    "index_concurrent_abort:1"
     "multimap_build_values_length:1"
     "multimap_build_value_zero:1"
     "multimap_build_valid_length:1"

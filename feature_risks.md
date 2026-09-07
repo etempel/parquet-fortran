@@ -97,6 +97,7 @@ something a reader is expected to have.
 | [Risk-210](#risk-210--a-parquet_table_index-checks-generation-on-every-query-and-never-caches-the-answer) | A `parquet_table_index` checks `%generation()` on EVERY query, and never caches the answer | 4 — covered |
 | [Risk-211](#risk-211--build_index-and-the-filters-in-leaf-convert-a-key-through-one-helper-and-the-nan-split-is-the-one-deliberate-difference) | `%build_index` and the filter's `in` leaf convert a key through ONE helper, and the NaN split is the one deliberate difference | 4 — covered |
 | [Risk-212](#risk-212--a-string-maps-occurrence-chain-must-stay-dense-and-a-hit-must-be-verified-against-the-stored-bytes) | A string map's occurrence chain must stay DENSE, and a hit must be verified against the stored bytes | 4 — covered |
+| [Risk-213](#risk-213--a-build-swaps-every-component-of-pf_index_map-in-under-the-guard-and-a-forgotten-one-is-silently-lost) | A build swaps EVERY component of `pf_index_map` in under the guard, and a forgotten one is silently lost | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -462,10 +463,13 @@ guard's absence fails on one thread. That hook does not exist and was deliberate
 every other state this module has is reachable from an ordinary test and a hook is public surface.
 
 **What it forbids meanwhile.** A worker below the guard must never call a public entry (a named
-critical is not recursive, so that deadlocks rather than failing to build); every argument check of a
-guarded procedure runs INSIDE the region, so at most one thread can reach an `error stop` from these
-types; and a new mutating public procedure inherits the guard by copying its neighbour's shape rather
-than by remembering to.
+critical is not recursive, so that deadlocks rather than failing to build); every impure abort of the
+index submodules goes through `ix_abort`, the module's serialised reporter, so at most one thread can
+reach an `error stop` from these types even though a `%build` now runs OUTSIDE the region and takes
+it only to swap its result in (`tools/check_source_conventions.py` holds that no impure procedure of
+those submodules aborts directly, and `scenario_index_concurrent_abort` races two aborts through the
+reporter); and a new mutating public procedure inherits the guard by copying its neighbour's shape
+rather than by remembering to.
 
 ## 3. Risks not testable
 
@@ -8225,3 +8229,25 @@ found, every removed key absent, `%keys` listing the survivors only and a remove
 (the compaction); and a vacuity guard that the hook narrowed the hash, by showing the narrow-built
 map misses at full width. The `%build`-from-column and `%get_many` forms share `ix_str_find` and
 `ix_str_insert` with the scalar ones, so the same test covers them.
+
+### Risk-213 — A build swaps EVERY component of `pf_index_map` in under the guard, and a forgotten one is silently lost
+
+A `%build` no longer holds `pf_index_map_guard` for its duration: each forwarder fills a LOCAL map
+on the calling thread and `ix_adopt` (`src/parquet_index_map.f90`) takes the guard only to move that
+map's storage into the caller's object — one `move_alloc` per allocatable component and one
+assignment per scalar. That is what lets two threads build two maps side by side, and it rests on a
+list that nothing in the language checks: **every component of the type must appear in `ix_adopt`**,
+and every one must be released by `ix_reset_storage` beside it. A component added to the type and
+forgotten in the swap leaves every built map with that component at its default. Nothing aborts;
+the map answers as if the state were never built — a string store without its strings, a direct
+range without its bounds — and no run-based test can see a component that is not there, because
+every assertion reads the map through the same object.
+
+**Covered by** `tools/check_source_conventions.py` (`pf_index_map components are adopted and
+reset`), a source-parsing check rather than a test, because the invariant is a property of the
+source: it lists the type's components from `src/parquet_index.f90` and requires each allocatable
+one to be `move_alloc`ed and deallocated, and each scalar to be assigned and reset, by name.
+Verified by negative control: deleting one `move_alloc` from `ix_adopt` fails the check. The
+concurrency it buys is pinned by `test_concurrent_builds_overlap` (`test/test_index_omp.f90`)
+through `parquet_debug_index_concurrent_builds`, the high-water mark of builds in flight, which a
+build that held the guard throughout keeps at 1.

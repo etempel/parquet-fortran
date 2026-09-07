@@ -1,21 +1,34 @@
-!> `pf_index_map`: lifecycle, backend dispatch, the direct backend, and the map's OpenMP guard.
+!> `pf_index_map`: lifecycle, backend dispatch, the direct backend, the hash mixer and probes,
+!> and the map's OpenMP guard.
 !!
 !! **Where the hot path is.** `%get` reaches storage through `ix_get_scalar`/`ix_get_tuple`, which
 !! are `pure`, allocate nothing, write nothing and take no lock. That last property is not a
 !! coincidence to be preserved by care -- it is what makes concurrent lookups safe at all, so a
 !! lazy allocation or a cached anything on a read path would silently withdraw the module's
-!! thread-safety contract. There is nothing on these paths to make lazy. `%get_many` runs those
-!! same functions over contiguous chunks of the rows it is given, one chunk per thread of a team
-!! it resolves by the build's own rule (`ix_lookup_threads_for`); it is the one lookup that is
-!! not `pure`, because an OpenMP directive may not appear in a pure procedure, and it is still
-!! lock-free and allocation-free at every team size.
+!! thread-safety contract. There is nothing on these paths to make lazy. `%get_many` dispatches on
+!! the backend ONCE per chunk and then runs a typed loop over the chunk's rows -- the hash probe
+!! with the slot mask and the table's base in locals -- one chunk per thread of a team it resolves
+!! by the build's own rule (`ix_lookup_threads_for`); it is the one lookup that is not `pure`,
+!! because an OpenMP directive may not appear in a pure procedure, and it is still lock-free and
+!! allocation-free at every team size. The hash mixer and the two probes are contained in THIS
+!! file, below the lookup workers, so that the compiler inlines them into those loops: a probe
+!! that calls across a submodule boundary pays about three nanoseconds per key, a third of a
+!! small-map probe (feature_pf_index.md, section 4.6). `parquet_index_hash.f90`, the backend's
+!! mutation side, descends from this submodule and reaches the same functions by host
+!! association, so both sides hash identically by construction.
 !!
 !! **Every mutation takes one process-wide named critical, `pf_index_map_guard`**, in the same
 !! wrapper-plus-worker shape the pool uses: the public body is the guard and one call, and no
 !! worker calls a public entry. A named critical is not recursive, so a nested acquisition would
 !! deadlock; and branching out of a `critical` region is not conforming, so a worker that returns
-!! early cannot be inlined into the guarded body. Argument validation happens inside the region,
-!! which also means at most one thread can ever reach an `error stop` from this type.
+!! early cannot be inlined into the guarded body. **A `%build` holds the guard for its swap
+!! alone**: each forwarder builds into a LOCAL map on the calling thread -- the scan, the choice
+!! of backend, the table -- and `ix_adopt` takes the guard only to move that storage into the
+!! caller's object, so two threads building two maps run side by side instead of taking turns,
+!! and a program preparing several maps in a parallel loop gets the team it opened. What that
+!! gives up is the guard's side effect of serialising aborts, which `ix_abort` (the spec's
+!! reporter) restores for every impure abort of these submodules, guarded or not; the pure checks
+!! of the lock-free lookups keep their bare `error stop`, as they always had.
 !!
 !! **The typed tier, from the first line rather than as a later optimisation.** Every binding is a
 !! thin forwarder onto a worker taking a `type(pf_index_map)` dummy. A `class` actual passed to a
@@ -32,14 +45,15 @@
 !! thing this path must not do. The component count is validated BEFORE the widening loop, so only
 !! the elements that are about to be read are ever written.
 !!
-!! **`parquet_index_multi.f90` is a DESCENDANT of this submodule**, not a sibling, so that the
-!! multimap can reach the private helpers below by host association -- the chunk loops, the
-!! thread rule, the mask and value checks, the automatic choice -- rather than each being
-!! re-declared in the spec as a cross-submodule interface. Anything here that a message names
-!! the type in takes an optional `owner` prefix for that reason (`ix_owner_of`).
-!! `parquet_index_str.f90`, the string keys of both types, descends from THAT one in turn and
-!! reaches both sets of helpers the same way; the string store's lifecycle (`ix_str_start` and
-!! the two growth helpers) lives here beside the other storage lifecycle because `%init`,
+!! **`parquet_index_multi.f90` and `parquet_index_hash.f90` are DESCENDANTS of this submodule**,
+!! not siblings, so that the multimap can reach the private helpers below by host association --
+!! the chunk loops, the thread rule, the mask and value checks, the automatic choice -- and the
+!! hash backend's mutation side can reach the mixer, rather than each being re-declared in the
+!! spec as a cross-submodule interface. Anything here that a message names the type in takes an
+!! optional `owner` prefix for that reason (`ix_owner_of`). `parquet_index_str.f90`, the string
+!! keys of both types, descends from the multimap's in turn and reaches every helper here the
+!! same way, `ix_hash_str` and the probes included; the string store's lifecycle (`ix_str_start`
+!! and the two growth helpers) lives here beside the other storage lifecycle because `%init`,
 !! `%reserve`, `%reset` and `%clear` need it and are implemented here.
 submodule (parquet_index) parquet_index_map
     use parquet_utils, only: pf_to_lower
@@ -59,110 +73,148 @@ submodule (parquet_index) parquet_index_map
     !! many reallocations a build of average-length keys pays.
     integer(int64), parameter :: IX_STR_BYTES_PER_KEY = 16_int64
 
+    !> Keys one call of a bulk probe kernel takes: the home slots of a whole block are computed
+    !! first and the walks follow, which is what lets a block's DRAM misses overlap
+    !! (`ix_probe_1_block`). Sixteen would do for the overlap; sixty-four amortises the call and
+    !! the two loops' overhead, at 512 bytes of stack for the home slots. Never a setting: it
+    !! changes speed and no answer.
+    integer, parameter :: IX_PROBE_BLOCK = 64
+
+    !> First multiplicative constant of the 32-bit mixing step: murmur3's `0x85ebca6b` with its
+    !! top bit cleared, so it is below 2**31 and every product stays below 2**63.
+    !!
+    !! **Odd, which is what matters about it.** Multiplication by an odd constant modulo 2**32 is a
+    !! bijection, so the step loses no information; the exact value only has to avalanche well, and
+    !! the clustering tests in `test/test_index.f90` are what hold it to that.
+    integer(int64), parameter :: IX_C1 = 99244651_int64
+    !> Second multiplicative constant: murmur3's `0xc2b2ae35` with its top bit cleared. Odd, for
+    !! the reason given on `IX_C1`.
+    integer(int64), parameter :: IX_C2 = 1119548469_int64
+    !> Seed the scalar key hash starts from, so that a hash of zero is not zero. The golden ratio
+    !! constant `0x9E3779B9`; only ever XOR-ed, never multiplied, so its width is free.
+    integer(int64), parameter :: IX_SEED = 2654435769_int64
+    !> Seed of the scalar key hash's tuple step and of a tuple hash's first chain, distinct from
+    !! `IX_SEED` so that the per-half mixing and the per-component chaining are not the same
+    !! transformation applied twice. `0x9E3779B97F4A7C15`'s low 31 bits; XOR-ed only.
+    integer(int64), parameter :: IX_SEED_T = 2135587861_int64
+    !> Seed of a tuple hash's SECOND chain (the components' high halves), distinct from the
+    !! first chain's so that the two chains start apart. `0x3C6EF35F`; XOR-ed only.
+    integer(int64), parameter :: IX_SEED_U = 1013904223_int64
+    !> Seed of the STRING hash's first chain, distinct from the tuple seeds so that a string's
+    !! word chain and a tuple's component chain are not one transformation. `0x61C88647`, the
+    !! negated golden-ratio constant; XOR-ed only.
+    integer(int64), parameter :: IX_SEED_S = 1640531527_int64
+
 contains
 
     ! ============================================================================================
     ! Bulk build. Twelve forwarders onto two workers -- one for rank-1 keys, one for rank-2 -- so
     ! that an `int64` caller's key array is never copied. The `int32` forwarders must widen, which
-    ! is a cost the kind conversion imposes rather than one this split introduces.
+    ! is a cost the kind conversion imposes rather than one this split introduces. Each builds
+    ! into a LOCAL map on the calling thread and adopts it under the guard (`ix_adopt`), so the
+    ! guard is held for the swap alone and two builds on two threads run side by side.
     ! ============================================================================================
 
     module procedure build_r1_k64_nov
-        !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, keys, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_build_1(fresh, keys, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r1_k64_nov
 
     module procedure build_r1_k64_v64
-        !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, keys, values=values, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_build_1(fresh, keys, values=values, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r1_k64_v64
 
     module procedure build_r1_k64_v32
         integer(int64), allocatable :: v(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_values(values, v)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, keys, values=v, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_1(fresh, keys, values=v, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r1_k64_v32
 
     module procedure build_r1_k32_nov
         integer(int64), allocatable :: k(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_keys_1(keys, k)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, k, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_1(fresh, k, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r1_k32_nov
 
     module procedure build_r1_k32_v64
         integer(int64), allocatable :: k(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_keys_1(keys, k)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, k, values=values, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_1(fresh, k, values=values, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r1_k32_v64
 
     module procedure build_r1_k32_v32
         integer(int64), allocatable :: k(:), v(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_keys_1(keys, k)
         call ix_widen_values(values, v)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, k, values=v, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_1(fresh, k, values=v, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r1_k32_v32
 
     module procedure build_r2_k64_nov
-        !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, keys, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_build_n(fresh, keys, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r2_k64_nov
 
     module procedure build_r2_k64_v64
-        !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, keys, values=values, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_build_n(fresh, keys, values=values, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r2_k64_v64
 
     module procedure build_r2_k64_v32
         integer(int64), allocatable :: v(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_values(values, v)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, keys, values=v, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_n(fresh, keys, values=v, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r2_k64_v32
 
     module procedure build_r2_k32_nov
         integer(int64), allocatable :: k(:,:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_keys_n(keys, k)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, k, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_n(fresh, k, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r2_k32_nov
 
     module procedure build_r2_k32_v64
         integer(int64), allocatable :: k(:,:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_keys_n(keys, k)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, k, values=values, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_n(fresh, k, values=values, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r2_k32_v64
 
     module procedure build_r2_k32_v32
         integer(int64), allocatable :: k(:,:), v(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_keys_n(keys, k)
         call ix_widen_values(values, v)
-        !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, k, values=v, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_build_n(fresh, k, values=v, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_r2_k32_v32
 
     ! ============================================================================================
@@ -201,16 +253,19 @@ contains
 
     ! ============================================================================================
     ! Lookup. Lock-free and allocation-free; the scalar forms `pure`, the bulk form threaded over
-    ! contiguous chunks, each chunk the serial typed loop the bulk form used to be.
+    ! contiguous chunks, each chunk the serial typed loop the bulk form used to be. The scalar
+    ! forms test the two shape conditions inline and call the aborting checker only when one
+    ! holds: under -fPIC the checker is an out-of-line call per key (CLAUDE.md, "-fPIC blocks
+    ! inlining on ELF"), and the common case now makes none.
     ! ============================================================================================
 
     module procedure get_k32
-        call ix_check_scalar_shape(self, "get")
+        if (self%is_str .or. self%ncomp > 1) call ix_check_scalar_shape(self, "get")
         idx = ix_get_scalar(self, int(key, int64))
     end procedure get_k32
 
     module procedure get_k64
-        call ix_check_scalar_shape(self, "get")
+        if (self%is_str .or. self%ncomp > 1) call ix_check_scalar_shape(self, "get")
         idx = ix_get_scalar(self, key)
     end procedure get_k64
 
@@ -237,12 +292,12 @@ contains
     end procedure get_t64
 
     module procedure has_k32
-        call ix_check_scalar_shape(self, "contains")
+        if (self%is_str .or. self%ncomp > 1) call ix_check_scalar_shape(self, "contains")
         ok = ix_get_scalar(self, int(key, int64)) > 0_int64
     end procedure has_k32
 
     module procedure has_k64
-        call ix_check_scalar_shape(self, "contains")
+        if (self%is_str .or. self%ncomp > 1) call ix_check_scalar_shape(self, "contains")
         ok = ix_get_scalar(self, key) > 0_int64
     end procedure has_k64
 
@@ -668,8 +723,7 @@ contains
         if (allocated(self%drange)) b = b + 8_int64 * size(self%drange, kind=int64)
         if (allocated(self%dstride)) b = b + 8_int64 * size(self%dstride, kind=int64)
         if (allocated(self%slots)) b = b + 16_int64 * size(self%slots, kind=int64)
-        if (allocated(self%hkeys)) b = b + 8_int64 * size(self%hkeys, kind=int64)
-        if (allocated(self%hvals)) b = b + 8_int64 * size(self%hvals, kind=int64)
+        if (allocated(self%hrec)) b = b + 8_int64 * size(self%hrec, kind=int64)
         if (allocated(self%skeys)) b = b + 8_int64 * size(self%skeys, kind=int64)
         if (allocated(self%svals)) b = b + 8_int64 * size(self%svals, kind=int64)
         if (allocated(self%soff)) b = b + 8_int64 * size(self%soff, kind=int64)
@@ -758,6 +812,89 @@ contains
         n = dbg_index_get_many_threads_used
     end procedure parquet_debug_index_get_many_threads_used
 
+    module procedure parquet_debug_index_concurrent_builds
+        logical :: do_reset
+
+        do_reset = .false.
+        if (present(reset)) do_reset = reset
+        !$omp atomic read
+        n = dbg_index_concurrent_builds
+        if (do_reset) then
+            !$omp atomic write
+            dbg_index_concurrent_builds = dbg_index_builds_in_flight
+        end if
+    end procedure parquet_debug_index_concurrent_builds
+
+    ! ============================================================================================
+    ! The serialised abort, and what a build does under the guard
+    ! ============================================================================================
+
+    module procedure ix_abort
+        !$omp critical (pf_index_abort_guard)
+        error stop msg
+        !$omp end critical (pf_index_abort_guard)
+    end procedure ix_abort
+
+    !> Records that one more build is running outside the guard, for
+    !! `parquet_debug_index_concurrent_builds`; `ix_adopt` records its end.
+    subroutine ix_build_begin()
+        integer :: now
+
+        !$omp atomic capture
+        dbg_index_builds_in_flight = dbg_index_builds_in_flight + 1
+        now = dbg_index_builds_in_flight
+        !$omp end atomic
+        !$omp atomic update
+        dbg_index_concurrent_builds = max(dbg_index_concurrent_builds, now)
+    end subroutine ix_build_begin
+
+    !> Moves a freshly built map's storage into `self` under the guard, releasing what `self` held.
+    !!
+    !! **This is the whole of what a `%build` does under the lock**, and the reason a build no
+    !! longer serialises with every other mutation in the process: the scan, the choice of backend
+    !! and the filling of the table all happen on a local object the calling thread owns, and only
+    !! this swap -- a dozen `move_alloc`s and the scalars, microseconds -- takes
+    !! `pf_index_map_guard`. Two threads building two maps run at full speed side by side; a build
+    !! and a lookup of the SAME map are as unsupported as they always were (the spec's threading
+    !! paragraph), the window in which the lookup could see half a map now being this swap.
+    !!
+    !! **Every component of `pf_index_map` appears below, and `tools/check_source_conventions.py`
+    !! holds that** (`pf_index_map components are adopted and reset`): a component added to the
+    !! type and forgotten here would leave the built map without it, silently, on every `%build`.
+    subroutine ix_adopt(self, fresh)
+        type(pf_index_map), intent(inout) :: self  !! the caller's map; whatever it held is released.
+        type(pf_index_map), intent(inout) :: fresh !! the built map; empty on return.
+
+        !$omp critical (pf_index_map_guard)
+        call ix_reset_storage(self)
+        call move_alloc(fresh%dvals, self%dvals)
+        call move_alloc(fresh%dkmin, self%dkmin)
+        call move_alloc(fresh%dkmax, self%dkmax)
+        call move_alloc(fresh%drange, self%drange)
+        call move_alloc(fresh%dstride, self%dstride)
+        call move_alloc(fresh%slots, self%slots)
+        call move_alloc(fresh%hrec, self%hrec)
+        call move_alloc(fresh%skeys, self%skeys)
+        call move_alloc(fresh%svals, self%svals)
+        call move_alloc(fresh%soff, self%soff)
+        call move_alloc(fresh%sdat, self%sdat)
+        call move_alloc(fresh%sval, self%sval)
+        self%backend = fresh%backend
+        self%ncomp = fresh%ncomp
+        self%nk = fresh%nk
+        self%next_auto = fresh%next_auto
+        self%kmin1 = fresh%kmin1
+        self%kmax1 = fresh%kmax1
+        self%hcap = fresh%hcap
+        self%is_str = fresh%is_str
+        self%nstr = fresh%nstr
+        self%nchr = fresh%nchr
+        self%snext = fresh%snext
+        !$omp end critical (pf_index_map_guard)
+        !$omp atomic update
+        dbg_index_builds_in_flight = dbg_index_builds_in_flight - 1
+    end subroutine ix_adopt
+
     ! ============================================================================================
     ! Private workers. Everything below takes a `type(pf_index_map)` dummy, and nothing below
     ! calls a public entry above -- the named critical is not recursive, so doing so would
@@ -834,8 +971,8 @@ contains
         integer(int64), intent(in) :: n        !! keys presented.
         character(len=*), intent(in) :: what   !! procedure name, for the message.
 
-        if (nmask /= n) error stop "pf_index_map%" // what // &
-            ": valid= must have exactly one element per key"
+        if (nmask /= n) call ix_abort("pf_index_map%" // what // &
+            ": valid= must have exactly one element per key")
     end subroutine ix_check_mask_len
 
     !> The contiguous slice of rows `1 .. n` that chunk `c` of `nchunk` owns.
@@ -935,8 +1072,7 @@ contains
         if (allocated(self%drange)) deallocate(self%drange)
         if (allocated(self%dstride)) deallocate(self%dstride)
         if (allocated(self%slots)) deallocate(self%slots)
-        if (allocated(self%hkeys)) deallocate(self%hkeys)
-        if (allocated(self%hvals)) deallocate(self%hvals)
+        if (allocated(self%hrec)) deallocate(self%hrec)
         if (allocated(self%skeys)) deallocate(self%skeys)
         if (allocated(self%svals)) deallocate(self%svals)
         if (allocated(self%soff)) deallocate(self%soff)
@@ -965,7 +1101,7 @@ contains
             if (allocated(self%dvals)) self%dvals = 0_int64
         case (IX_HASH)
             if (allocated(self%slots)) self%slots(:)%val = 0_int64
-            if (allocated(self%hvals)) self%hvals = 0_int64
+            if (allocated(self%hrec)) self%hrec = 0_int64
         case (IX_SORTED)
             ! Nothing to zero: a sorted map is read through `1 .. nk`, so dropping the count is
             ! what empties it, and the arrays stay for a rebuild that will overwrite them.
@@ -1057,12 +1193,12 @@ contains
         if (present(ncomp)) nc = ncomp
         ! A string key has exactly one component from the caller's side, whatever the tuple
         ! underneath is, so the two arguments cannot both be meant.
-        if (str .and. nc /= 1) error stop "pf_index_map%init: a string key has one component; " // &
-            "leave ncomp= absent (or 1) with strings=.true."
+        if (str .and. nc /= 1) call ix_abort("pf_index_map%init: a string key has one component; " // &
+            "leave ncomp= absent (or 1) with strings=.true.")
         call ix_check_ncomp(nc, "init")
         cap = 0_int64
         if (present(capacity)) then
-            if (capacity < 0) error stop "pf_index_map%init: capacity must be >= 0"
+            if (capacity < 0) call ix_abort("pf_index_map%init: capacity must be >= 0")
             cap = int(capacity, int64)
         end if
         call ix_reset_storage(self)
@@ -1080,7 +1216,7 @@ contains
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: n           !! keys to make room for.
 
-        if (n < 0_int64) error stop "pf_index_map%reserve: n must be >= 0"
+        if (n < 0_int64) call ix_abort("pf_index_map%reserve: n must be >= 0")
         if (self%ncomp == 0) call ix_do_init(self, ncomp=1)
         if (self%backend /= IX_HASH) return
         call ix_hash_reserve(self, n)
@@ -1102,11 +1238,11 @@ contains
         character(len=:), allocatable :: pfx
 
         call ix_owner_of(owner, pfx)
-        if (nc < 1) error stop pfx // what // ": a key must have at least one component"
+        if (nc < 1) call ix_abort(pfx // what // ": a key must have at least one component")
         if (nc > pf_index_max_components) then
             write (t, "(i0)") pf_index_max_components
-            error stop pfx // what // ": a key may have at most " // trim(t) // &
-                " components (pf_index_max_components)"
+            call ix_abort(pfx // what // ": a key may have at most " // trim(t) // &
+                " components (pf_index_max_components)")
         end if
     end subroutine ix_check_ncomp
 
@@ -1139,8 +1275,8 @@ contains
         want = IX_WANT_AUTO
         if (.not. present(method)) return
         call ix_owner_of(owner, pfx)
-        if (len_trim(method) > len(tok)) error stop pfx // what // &
-            ": unknown method (accepted: ""auto"", ""direct"", ""hash"", ""sorted"")"
+        if (len_trim(method) > len(tok)) call ix_abort(pfx // what // &
+            ": unknown method (accepted: ""auto"", ""direct"", ""hash"", ""sorted"")")
         tok = method
         call pf_to_lower(tok)
         select case (trim(tok))
@@ -1149,18 +1285,18 @@ contains
         case ("hash")
             want = IX_HASH
         case ("direct")
-            if (.not. allow_frozen) error stop pfx // what // &
+            if (.not. allow_frozen) call ix_abort(pfx // what // &
                 ": method=""direct"" needs the key range up front, so it is only available " // &
-                "on %build; use ""hash"" for an incremental map"
+                "on %build; use ""hash"" for an incremental map")
             want = IX_DIRECT
         case ("sorted")
-            if (.not. allow_frozen) error stop pfx // what // &
+            if (.not. allow_frozen) call ix_abort(pfx // what // &
                 ": method=""sorted"" is frozen once built, so it is only available on %build; " // &
-                "use ""hash"" for an incremental map"
+                "use ""hash"" for an incremental map")
             want = IX_SORTED
         case default
-            error stop pfx // what // ": unknown method """ // trim(tok) // &
-                """ (accepted: ""auto"", ""direct"", ""hash"", ""sorted"")"
+            call ix_abort(pfx // what // ": unknown method """ // trim(tok) // &
+                """ (accepted: ""auto"", ""direct"", ""hash"", ""sorted"")")
         end select
     end subroutine ix_resolve_method
 
@@ -1257,7 +1393,7 @@ contains
         integer(int64) :: nt_work
 
         if (present(threads)) then
-            if (threads < 1) error stop "pf_index_map%" // what // ": threads= must be at least 1"
+            if (threads < 1) call ix_abort("pf_index_map%" // what // ": threads= must be at least 1")
             nt = parquet_clamp_to_affinity(threads, "index")
             return
         end if
@@ -1278,14 +1414,16 @@ contains
     !! `pf_index_threads` -- a public query a user may call at any time, and from any thread --
     !! takes the rule without the record, so it cannot clobber what a build just reported.
     !!
-    !! Reached only from the two build workers, which run inside `pf_index_map_guard`, so the write
-    !! below is serialized with every other build.
+    !! Reached only from the build workers, which run OUTSIDE `pf_index_map_guard` (see
+    !! `ix_adopt`), so the store below is atomic: two builds resolving at once cannot tear it, and
+    !! the record is then the last to resolve.
     function ix_threads_for(n, threads) result(nt)
         integer(int64), intent(in) :: n              !! keys the build will process.
         integer, intent(in), optional :: threads     !! the caller's request, or absent.
         integer :: nt                                !! threads to use; 1 means serial.
 
         nt = ix_threads_rule(n, threads, "build")
+        !$omp atomic write
         dbg_index_threads_used = nt
     end function ix_threads_for
 
@@ -1318,8 +1456,8 @@ contains
         character(len=:), allocatable :: pfx
 
         call ix_owner_of(owner, pfx)
-        if (nv /= n) error stop pfx // "build: " // &
-            "values= must have exactly one element per key"
+        if (nv /= n) call ix_abort(pfx // "build: " // &
+            "values= must have exactly one element per key")
     end subroutine ix_check_values_len
 
     !> Checks that every value is a Fortran index value, naming the first that is not.
@@ -1343,8 +1481,8 @@ contains
             if (values(i) < 1_int64) then
                 write (t, "(i0)") values(i)
                 write (p, "(i0)") i
-                error stop pfx // "build: values(" // trim(p) // ") is " // trim(t) // &
-                    "; stored values must be >= 1 because 0 is how a lookup reports ""not found"""
+                call ix_abort(pfx // "build: values(" // trim(p) // ") is " // trim(t) // &
+                    "; stored values must be >= 1 because 0 is how a lookup reports ""not found""")
             end if
         end do
     end subroutine ix_check_values_range
@@ -1357,10 +1495,540 @@ contains
 
         if (v < 1_int64) then
             write (t, "(i0)") v
-            error stop "pf_index_map%" // what // ": value is " // trim(t) // &
-                "; stored values must be >= 1 because 0 is how a lookup reports ""not found"""
+            call ix_abort("pf_index_map%" // what // ": value is " // trim(t) // &
+                "; stored values must be >= 1 because 0 is how a lookup reports ""not found""")
         end if
     end subroutine ix_check_value
+
+    ! ============================================================================================
+    ! The hash mixer and the lookup probes. Here, beside `%get` and the chunk loops of
+    ! `%get_many`, so that the compiler inlines them into the lookup loops -- a probe that calls
+    ! across a submodule boundary pays about three nanoseconds per key, a third of a small-map
+    ! probe (feature_pf_index.md, section 4.6). `parquet_index_hash.f90`, the mutation side,
+    ! descends from this submodule and reaches the same functions by host association, so both
+    ! sides hash identically by construction; `parquet_index_str.f90` reaches `ix_hash_str` and
+    ! the tuple probe the same way.
+    !
+    ! THE MIXER IS OVERFLOW-FREE BY CONSTRUCTION, and that is a design constraint rather than an
+    ! accident of the constants. A conventional 64-bit multiplicative mixer wraps a signed
+    ! multiply, which this project treats as the hazard it is: a compiler may wrap the arithmetic
+    ! and STILL use the overflow's undefinedness to delete a branch somewhere else -- the confirmed
+    ! ifx incident behind feature_risks.md Risk-94, which cost parquet_random a three-arm
+    ! preprocessor fork and two standalone check scripts to own exactly one such site. This module
+    ! avoids the entire class instead: a key is split into 32-bit halves and mixed with 32-bit x
+    ! 31-bit multiplies, so every product is provably below 2**63 and no wrapping site exists at
+    ! all. There is therefore nothing here to fork, nothing to check with a separate script, and
+    ! the module is clean under -ftrapv, nagfor's -C=intovf and UBSan on every compiler in the
+    ! fleet. A lookup is memory-bound; the few extra ALU operations disappear next to one miss.
+    ! ============================================================================================
+
+    !> Avalanches the low 32 bits of `v` into a value in `0 .. 2**32 - 1`.
+    !!
+    !! Murmur3's 32-bit finalizer shape: shift-xor, multiply, shift-xor, multiply, shift-xor. Each
+    !! multiplicand is masked to 32 bits and each constant is below 2**31, so **every product is
+    !! below 2**63** and this function cannot overflow for any input. Read the masks as part of the
+    !! algorithm rather than as tidying: removing one reintroduces exactly the undefined-behaviour
+    !! class the banner above is about.
+    pure function ix_mix32(v) result(r)
+        integer(int64), intent(in) :: v !! any value; only its low 32 bits are read.
+        integer(int64) :: r             !! mixed value in `0 .. 2**32 - 1`.
+
+        r = iand(v, IX_MASK32)
+        r = ieor(r, ishft(r, -16))
+        r = iand(r * IX_C1, IX_MASK32)
+        r = ieor(r, ishft(r, -13))
+        r = iand(r * IX_C2, IX_MASK32)
+        r = ieor(r, ishft(r, -16))
+    end function ix_mix32
+
+    !> Hashes one 64-bit key into a full-width bit pattern.
+    !!
+    !! Both 32-bit halves are mixed and then cross-fed, so the LOW half of the result -- which is
+    !! all the slot index reads -- depends on every bit of the key. That is what stops a key set
+    !! that varies only in its high word (a stride of 2**32, say) from collapsing onto one slot:
+    !! the final `ix_mix32(ieor(lo, hi))` is what carries the high word down.
+    !!
+    !! `ishft` is a bit-model intrinsic, not arithmetic, so shifting a value into the sign bit is
+    !! defined and raises nothing. A negative result is an ordinary bit pattern here and `iand`
+    !! with the capacity mask still yields a slot in range.
+    pure function ix_hash_bits(k) result(h)
+        integer(int64), intent(in) :: k !! the key to hash.
+        integer(int64) :: h             !! a mixed bit pattern; only its low bits are used.
+        integer(int64) :: lo, hi
+
+        lo = iand(k, IX_MASK32)
+        hi = iand(ishft(k, -32), IX_MASK32)
+        lo = ix_mix32(ieor(lo, IX_SEED))
+        hi = ix_mix32(ieor(hi, lo))
+        lo = ix_mix32(ieor(lo, hi))
+        h = ior(ishft(hi, 32), lo)
+    end function ix_hash_bits
+
+    !> The hash of a single-component key: the only hash a single-component TABLE ever uses.
+    !!
+    !! A single-component map may be looked up with a scalar key or with a 1-tuple, and both
+    !! spellings have to find the same slot. That is guaranteed structurally rather than by two
+    !! hashes agreeing: every tuple entry of the hash backend routes `ncomp <= 1` to the scalar
+    !! table and this function, and `ix_hash_tuple` is never applied to a 1-tuple.
+    pure function ix_hash_one(k) result(h)
+        integer(int64), intent(in) :: k !! the key.
+        integer(int64) :: h             !! its hash.
+
+        h = ix_hash_bits(ieor(IX_SEED_T, k))
+    end function ix_hash_one
+
+    !> One component's step of the two-chain hash: folds a 64-bit value into both accumulators.
+    !!
+    !! **Two chains of one 32-bit mix each, instead of one chain of three.** The value's low half
+    !! goes through the first chain and its high half through the second, each step one `ix_mix32`
+    !! of the accumulator XOR the half -- so the two chains are independent and a core runs them
+    !! side by side, and a component costs one mix of latency where `ix_hash_bits` per component
+    !! cost three. Position-sensitive by the same argument as any chain: each step's input is the
+    !! accumulated state, so `[1, 2]` and `[2, 1]` take different paths
+    !! (`test_composite_order_matters` pins it).
+    !!
+    !! **The second chain also takes the low half, rotated.** With the halves kept apart a tuple
+    !! whose components all fit 32 bits -- the common one -- would feed the second chain nothing,
+    !! and two such tuples would then share the whole 64-bit state about once in 2**32 pairs
+    !! rather than 2**64: a probe-length cost only (the compare still tells them apart), but a
+    !! needless one for one rotate and one XOR on the chain that is not the critical path.
+    !! Overflow-free like everything here: the halves are below 2**32 and only `ix_mix32`
+    !! multiplies.
+    pure subroutine ix_chain_step(a, b, k)
+        integer(int64), intent(inout) :: a !! the low-half chain; in `0 .. 2**32 - 1`.
+        integer(int64), intent(inout) :: b !! the high-half chain; in `0 .. 2**32 - 1`.
+        integer(int64), intent(in) :: k    !! the component.
+        integer(int64) :: lo, hi
+
+        lo = iand(k, IX_MASK32)
+        hi = iand(ishft(k, -32), IX_MASK32)
+        a = ix_mix32(ieor(a, lo))
+        b = ix_mix32(ieor(b, ieor(hi, ior(ishft(iand(lo, 65535_int64), 16), ishft(lo, -16)))))
+    end subroutine ix_chain_step
+
+    !> The two chains combined into one bit pattern whose low half depends on both.
+    pure function ix_chain_finish(a, b) result(h)
+        integer(int64), intent(in) :: a !! the low-half chain.
+        integer(int64), intent(in) :: b !! the high-half chain.
+        integer(int64) :: h             !! a mixed bit pattern; only its low bits are used.
+
+        h = ior(ishft(b, 32), ix_mix32(ieor(a, b)))
+    end function ix_chain_finish
+
+    !> The hash of a key tuple of two or more components: the two chains over the components.
+    !!
+    !! `key` is EXPLICIT-SHAPE so that the probe hands over a stack buffer's address and nothing
+    !! else; a caller holding a section gathers it first (`ix_get_tuple`, the chunk loops, the
+    !! composite build).
+    pure function ix_hash_tuple(key, nc) result(h)
+        integer, intent(in) :: nc             !! components; at least 2.
+        integer(int64), intent(in) :: key(nc) !! the tuple.
+        integer(int64) :: h                   !! its hash.
+        integer(int64) :: a, b
+        integer :: j
+
+        a = IX_SEED_T
+        b = IX_SEED_U
+        do j = 1, nc
+            call ix_chain_step(a, b, key(j))
+        end do
+        h = ix_chain_finish(a, b)
+    end function ix_hash_tuple
+
+    !> The hash of a string's bytes: the tuple hash's two chains over the string's 8-byte words,
+    !! with the length as the first component, so that no second hash family enters the module,
+    !! a string and its own zero-padded extension never share a hash, and the clustering tests
+    !! hold it to the integer mixer's standard. Each word is assembled little-endian from the
+    !! bytes, read as unsigned, so the result is the same on every platform. Narrowed by the debug
+    !! hook `parquet_debug_set_index_string_hash_bits`, which is read here and nowhere else.
+    !!
+    !! **`bytes` is an EXPLICIT-SHAPE dummy on purpose.** A scalar `character` actual associates
+    !! with an explicit-shape `character(len=1)` array dummy by character sequence association
+    !! (F2018 15.5.2.11), so this one function hashes a scalar key, an element of a `character`
+    !! array and a slice of a packed payload alike, with no copy and no `transfer`. An
+    !! assumed-shape dummy would refuse the scalar.
+    pure function ix_hash_str(bytes, n) result(h)
+        integer(int64), intent(in) :: n              !! bytes to hash; may be 0.
+        character(len=1), intent(in) :: bytes(n)     !! the bytes.
+        integer(int64) :: h                          !! a mixed bit pattern; only its low bits are used.
+        integer(int64) :: a, b, w, i, nb
+        integer :: k
+
+        a = IX_SEED_S
+        b = IX_SEED_U
+        call ix_chain_step(a, b, n)
+        do i = 0_int64, n - 1_int64, 8_int64
+            nb = min(8_int64, n - i)
+            w = 0_int64
+            do k = 1, int(nb)
+                w = ior(w, ishft(int(iand(iachar(bytes(i + k)), 255), int64), 8 * (k - 1)))
+            end do
+            call ix_chain_step(a, b, w)
+        end do
+        h = ix_chain_finish(a, b)
+        ! The hook narrows the RESULT rather than the mixer's input, so the narrowed hashes are
+        ! as evenly spread over their few bits as the full ones are over 64 -- which is what
+        ! makes a test at 2 bits a test of the collision chain and not of a degenerate mixer.
+        if (dbg_index_string_hash_bits > 0) then
+            h = iand(h, ishft(1_int64, dbg_index_string_hash_bits) - 1_int64)
+        end if
+    end function ix_hash_str
+
+    module procedure parquet_debug_set_index_string_hash_bits
+        if (nbits < 1) then
+            dbg_index_string_hash_bits = 0
+        else
+            dbg_index_string_hash_bits = min(nbits, 62)
+        end if
+    end procedure parquet_debug_set_index_string_hash_bits
+
+    !> The bulk probe of a single-component table over one block of keys: every key's home slot
+    !! first, then every walk.
+    !!
+    !! **Two passes rather than one, and the split is what halves a ten-million-key probe.** A
+    !! probe at that size is a DRAM miss, and a core hides one only by having the next probes'
+    !! misses in flight beside it -- which it can do for as many iterations as fit in its reorder
+    !! window. One pass that hashes and walks per key puts the whole hash (some thirty
+    !! instructions for a scalar key, twice that for a pair, four times for a quadruple) between
+    !! one load and the next, so few iterations fit and few misses overlap: measured on the
+    !! single-pass form at ten million keys, a two-component probe cost twice a scalar one and a
+    !! four-component one four times, with the same probe statistics (mean 1.7) on all three.
+    !! Hashing a whole block into `home` first leaves the walking pass with a few instructions per
+    !! key, so its loads overlap up to the window. In cache the two shapes cost the same.
+    !!
+    !! `slots` is EXPLICIT-SHAPE and 0-based: the caller hands over the array's base address and
+    !! `iand(h, m)` is the subscript with no correction. The walk is unbounded on purpose; see
+    !! `ix_hash_table_full` in `parquet_index_hash.f90`.
+    !!
+    !! **The hash is written out in full here rather than reached through `ix_hash_one`, and that
+    !! copy is deliberate.** Under `-fPIC` -- fpm's release profile on Linux -- gfortran inlines NO
+    !! module procedure, not even one in the same file (semantic interposition: CLAUDE.md, "-fPIC
+    !! blocks inlining on ELF"), so a probe spelled over `ix_hash_one` -> `ix_hash_bits` -> three
+    !! `ix_mix32` paid six out-of-line calls per key, a third of a small-map probe. This copy is
+    !! the same arithmetic in the same order, statement for statement; the mutation side keeps
+    !! calling the named functions, so a divergence between the two would make every lookup miss
+    !! every key -- which is what the whole hash-backend test suite asserts against. Keep the two
+    !! in step by editing `ix_mix32`/`ix_hash_bits` first and then this, never the reverse. The
+    !! one-command check that the kernel makes no call is CLAUDE.md's `objdump -dr ... | grep
+    !! R_X86_64` on this file's object, restricted to the kernel's symbol.
+    pure subroutine ix_probe_1_block(slots, m, n, keys, v)
+        integer(int64), intent(in) :: m         !! `hcap - 1`, the slot mask.
+        type(ix_slot), intent(in) :: slots(0:m) !! the table.
+        integer, intent(in) :: n                !! keys in the block, `1 .. IX_PROBE_BLOCK`.
+        integer(int64), intent(in) :: keys(n)   !! the keys.
+        integer(int64), intent(out) :: v(n)     !! the stored value per key, or 0 when absent.
+        integer(int64) :: home(IX_PROBE_BLOCK)
+        integer(int64) :: s, x, lo, hi, r, k
+        integer :: j
+
+        ! Pass 1: ix_hash_one(key) = ix_hash_bits(ieor(IX_SEED_T, key)), expanded, per key.
+        do j = 1, n
+            x = ieor(IX_SEED_T, keys(j))
+            lo = iand(x, IX_MASK32)
+            hi = iand(ishft(x, -32), IX_MASK32)
+            r = ieor(lo, IX_SEED)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            lo = ieor(r, ishft(r, -16))
+            r = ieor(hi, lo)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            hi = ieor(r, ishft(r, -16))
+            r = ieor(lo, hi)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            lo = ieor(r, ishft(r, -16))
+            home(j) = iand(ior(ishft(hi, 32), lo), m)
+        end do
+        ! Pass 2: the walks, each from its home slot to the key or to the first empty slot.
+        do j = 1, n
+            s = home(j)
+            k = keys(j)
+            do
+                if (slots(s)%val == 0_int64) then
+                    v(j) = 0_int64
+                    exit
+                end if
+                if (slots(s)%key == k) then
+                    v(j) = slots(s)%val
+                    exit
+                end if
+                s = iand(s + 1_int64, m)
+            end do
+        end do
+    end subroutine ix_probe_1_block
+
+    !> The bulk probe of a composite table over one block of tuples: `ix_probe_1_block`'s two
+    !! passes over `hrec`, with `ix_hash_tuple` -- the two chains of `ix_chain_step` and their
+    !! `ix_chain_finish` -- written out in the first for the reason given there; keep it in step
+    !! with those three functions the same way.
+    pure subroutine ix_probe_n_block(hrec, nc, m, n, keys, v)
+        integer, intent(in) :: nc                        !! components; at least 2.
+        integer(int64), intent(in) :: m                  !! `hcap - 1`, the slot mask.
+        integer(int64), intent(in) :: hrec(nc + 1, 0:m)  !! the records: the tuple, then its value.
+        integer, intent(in) :: n                         !! tuples in the block, `1 .. IX_PROBE_BLOCK`.
+        integer(int64), intent(in) :: keys(nc, n)        !! the tuples, one per column.
+        integer(int64), intent(out) :: v(n)              !! the stored value per tuple, or 0 when absent.
+        integer(int64) :: home(IX_PROBE_BLOCK)
+        integer(int64) :: s, a, b, k, lo, hi, r
+        integer :: j, c
+        logical :: hit
+
+        if (nc == 2) then
+            call ix_probe_2_block(hrec, m, n, keys, v)
+            return
+        end if
+        do j = 1, n
+            a = IX_SEED_T
+            b = IX_SEED_U
+            do c = 1, nc
+                k = keys(c, j)
+                lo = iand(k, IX_MASK32)
+                hi = iand(ishft(k, -32), IX_MASK32)
+                r = ieor(a, lo)
+                r = ieor(r, ishft(r, -16))
+                r = iand(r * IX_C1, IX_MASK32)
+                r = ieor(r, ishft(r, -13))
+                r = iand(r * IX_C2, IX_MASK32)
+                a = ieor(r, ishft(r, -16))
+                r = ieor(b, ieor(hi, ior(ishft(iand(lo, 65535_int64), 16), ishft(lo, -16))))
+                r = ieor(r, ishft(r, -16))
+                r = iand(r * IX_C1, IX_MASK32)
+                r = ieor(r, ishft(r, -13))
+                r = iand(r * IX_C2, IX_MASK32)
+                b = ieor(r, ishft(r, -16))
+            end do
+            r = ieor(a, b)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            r = ieor(r, ishft(r, -16))
+            home(j) = iand(ior(ishft(b, 32), r), m)
+        end do
+        do j = 1, n
+            s = home(j)
+            do
+                if (hrec(nc + 1, s) == 0_int64) then
+                    v(j) = 0_int64
+                    exit
+                end if
+                hit = .true.
+                do c = 1, nc
+                    if (hrec(c, s) /= keys(c, j)) then
+                        hit = .false.
+                        exit
+                    end if
+                end do
+                if (hit) then
+                    v(j) = hrec(nc + 1, s)
+                    exit
+                end if
+                s = iand(s + 1_int64, m)
+            end do
+        end do
+    end subroutine ix_probe_n_block
+
+    !> `ix_probe_n_block` for PAIRS -- the timestamp key's `(seconds, nanoseconds)` and the
+    !! string map's `(hash, occurrence)`, so the composite case that is common -- with the record
+    !! stride and the two chain steps fixed at compile time: no loop over components in either
+    !! pass, and `hrec(3, s)` a constant offset rather than a multiply by a runtime width. The
+    !! general kernel dispatches here on `nc == 2`; the hash is the same two chains, written out
+    !! a third time for the reason `ix_probe_1_block` gives.
+    pure subroutine ix_probe_2_block(hrec, m, n, keys, v)
+        integer(int64), intent(in) :: m               !! `hcap - 1`, the slot mask.
+        integer(int64), intent(in) :: hrec(3, 0:m)    !! the records: the pair, then its value.
+        integer, intent(in) :: n                      !! pairs in the block, `1 .. IX_PROBE_BLOCK`.
+        integer(int64), intent(in) :: keys(2, n)      !! the pairs, one per column.
+        integer(int64), intent(out) :: v(n)           !! the stored value per pair, or 0 when absent.
+        integer(int64) :: home(IX_PROBE_BLOCK)
+        integer(int64) :: s, a, b, k, k1, k2, lo, hi, r
+        integer :: j
+
+        do j = 1, n
+            a = IX_SEED_T
+            b = IX_SEED_U
+            k = keys(1, j)
+            lo = iand(k, IX_MASK32)
+            hi = iand(ishft(k, -32), IX_MASK32)
+            r = ieor(a, lo)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            a = ieor(r, ishft(r, -16))
+            r = ieor(b, ieor(hi, ior(ishft(iand(lo, 65535_int64), 16), ishft(lo, -16))))
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            b = ieor(r, ishft(r, -16))
+            k = keys(2, j)
+            lo = iand(k, IX_MASK32)
+            hi = iand(ishft(k, -32), IX_MASK32)
+            r = ieor(a, lo)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            a = ieor(r, ishft(r, -16))
+            r = ieor(b, ieor(hi, ior(ishft(iand(lo, 65535_int64), 16), ishft(lo, -16))))
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            b = ieor(r, ishft(r, -16))
+            r = ieor(a, b)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            r = ieor(r, ishft(r, -16))
+            home(j) = iand(ior(ishft(b, 32), r), m)
+        end do
+        do j = 1, n
+            s = home(j)
+            k1 = keys(1, j)
+            k2 = keys(2, j)
+            do
+                if (hrec(3, s) == 0_int64) then
+                    v(j) = 0_int64
+                    exit
+                end if
+                if (hrec(1, s) == k1 .and. hrec(2, s) == k2) then
+                    v(j) = hrec(3, s)
+                    exit
+                end if
+                s = iand(s + 1_int64, m)
+            end do
+        end do
+    end subroutine ix_probe_2_block
+
+    !> The probe of one single-component key: `ix_probe_1_block`'s two passes collapsed to one,
+    !! with the same written-out hash. A block of one through the kernel measured three
+    !! nanoseconds dearer on a scalar `%get` (the call, two loops of one, the block arrays), which
+    !! is a third of that probe in cache; this copy is the price of not paying it.
+    pure function ix_probe_1(slots, m, key) result(v)
+        integer(int64), intent(in) :: m         !! `hcap - 1`, the slot mask.
+        type(ix_slot), intent(in) :: slots(0:m) !! the table.
+        integer(int64), intent(in) :: key       !! the key.
+        integer(int64) :: v                     !! the stored value, or 0 when absent.
+        integer(int64) :: s, x, lo, hi, r
+
+        x = ieor(IX_SEED_T, key)
+        lo = iand(x, IX_MASK32)
+        hi = iand(ishft(x, -32), IX_MASK32)
+        r = ieor(lo, IX_SEED)
+        r = ieor(r, ishft(r, -16))
+        r = iand(r * IX_C1, IX_MASK32)
+        r = ieor(r, ishft(r, -13))
+        r = iand(r * IX_C2, IX_MASK32)
+        lo = ieor(r, ishft(r, -16))
+        r = ieor(hi, lo)
+        r = ieor(r, ishft(r, -16))
+        r = iand(r * IX_C1, IX_MASK32)
+        r = ieor(r, ishft(r, -13))
+        r = iand(r * IX_C2, IX_MASK32)
+        hi = ieor(r, ishft(r, -16))
+        r = ieor(lo, hi)
+        r = ieor(r, ishft(r, -16))
+        r = iand(r * IX_C1, IX_MASK32)
+        r = ieor(r, ishft(r, -13))
+        r = iand(r * IX_C2, IX_MASK32)
+        lo = ieor(r, ishft(r, -16))
+        s = iand(ior(ishft(hi, 32), lo), m)
+        do
+            if (slots(s)%val == 0_int64) then
+                v = 0_int64
+                return
+            end if
+            if (slots(s)%key == key) then
+                v = slots(s)%val
+                return
+            end if
+            s = iand(s + 1_int64, m)
+        end do
+    end function ix_probe_1
+
+    !> The probe of one tuple: `ix_probe_n_block`'s two passes collapsed to one, with the same
+    !! written-out two-chain hash, for the reason `ix_probe_1` gives. The string map's per-key
+    !! probe (`ix_str_find`) comes through here with its `(hash, occurrence)` pair.
+    pure function ix_probe_n(hrec, nc, m, key) result(v)
+        integer, intent(in) :: nc                        !! components; at least 2.
+        integer(int64), intent(in) :: m                  !! `hcap - 1`, the slot mask.
+        integer(int64), intent(in) :: hrec(nc + 1, 0:m)  !! the records: the tuple, then its value.
+        integer(int64), intent(in) :: key(nc)            !! the tuple.
+        integer(int64) :: v                              !! the stored value, or 0 when absent.
+        integer(int64) :: s, a, b, k, lo, hi, r
+        integer :: j
+        logical :: hit
+
+        a = IX_SEED_T
+        b = IX_SEED_U
+        do j = 1, nc
+            k = key(j)
+            lo = iand(k, IX_MASK32)
+            hi = iand(ishft(k, -32), IX_MASK32)
+            r = ieor(a, lo)
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            a = ieor(r, ishft(r, -16))
+            r = ieor(b, ieor(hi, ior(ishft(iand(lo, 65535_int64), 16), ishft(lo, -16))))
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            b = ieor(r, ishft(r, -16))
+        end do
+        r = ieor(a, b)
+        r = ieor(r, ishft(r, -16))
+        r = iand(r * IX_C1, IX_MASK32)
+        r = ieor(r, ishft(r, -13))
+        r = iand(r * IX_C2, IX_MASK32)
+        r = ieor(r, ishft(r, -16))
+        s = iand(ior(ishft(b, 32), r), m)
+        do
+            if (hrec(nc + 1, s) == 0_int64) then
+                v = 0_int64
+                return
+            end if
+            hit = .true.
+            do j = 1, nc
+                if (hrec(j, s) /= key(j)) then
+                    hit = .false.
+                    exit
+                end if
+            end do
+            if (hit) then
+                v = hrec(nc + 1, s)
+                return
+            end if
+            s = iand(s + 1_int64, m)
+        end do
+    end function ix_probe_n
+
+    !> The index stored for a key tuple in the hash backend, or 0; a 1-tuple is the scalar lookup.
+    pure function ix_hash_find_tuple(self, key) result(v)
+        type(pf_index_map), intent(in) :: self           !! a map whose backend is `IX_HASH`.
+        integer(int64), intent(in), contiguous :: key(:) !! the tuple, already widened, `size == self%ncomp`.
+        integer(int64) :: v                              !! the stored value, or 0 when absent.
+
+        v = 0_int64
+        if (self%hcap <= 0_int64) return
+        if (self%ncomp <= 1) then
+            v = ix_probe_1(self%slots, self%hcap - 1_int64, key(1))
+        else
+            v = ix_probe_n(self%hrec, self%ncomp, self%hcap - 1_int64, key)
+        end if
+    end function ix_hash_find_tuple
 
     ! ---- Lookup workers ----
 
@@ -1381,7 +2049,11 @@ contains
                 idx = self%dvals(key - self%kmin1 + 1_int64)
             end if
         case (IX_HASH)
-            idx = ix_hash_find_scalar(self, key)
+            if (self%hcap > 0_int64) then
+                idx = ix_probe_1(self%slots, self%hcap - 1_int64, key)
+            else
+                idx = 0_int64
+            end if
         case (IX_SORTED)
             idx = ix_sorted_find(self, key)
         case default
@@ -1399,21 +2071,33 @@ contains
         type(pf_index_map), intent(in) :: self !! the map.
         integer(int64), intent(in) :: key(:)   !! the tuple, already widened and width-checked.
         integer(int64) :: idx                  !! the stored value, or 0.
+        integer(int64) :: kb(pf_index_max_components)
         integer(int64) :: off
-        integer :: j
+        integer :: j, nc
 
         idx = 0_int64
-        if (self%ncomp == 0) return
+        nc = self%ncomp
+        if (nc == 0) return
         select case (self%backend)
         case (IX_DIRECT)
             off = 1_int64
-            do j = 1, self%ncomp
+            do j = 1, nc
                 if (key(j) < self%dkmin(j) .or. key(j) > self%dkmax(j)) return
                 off = off + (key(j) - self%dkmin(j)) * self%dstride(j)
             end do
             idx = self%dvals(off)
         case (IX_HASH)
-            idx = ix_hash_find_tuple(self, key)
+            if (self%hcap <= 0_int64) return
+            if (nc == 1) then
+                idx = ix_probe_1(self%slots, self%hcap - 1_int64, key(1))
+            else
+                ! Gathered into the stack buffer, so the probe's explicit-shape dummy takes it
+                ! without a contiguity check; `key` is assumed-shape and may be a section.
+                do j = 1, nc
+                    kb(j) = key(j)
+                end do
+                idx = ix_probe_n(self%hrec, nc, self%hcap - 1_int64, kb)
+            end if
         case (IX_SORTED)
             idx = ix_sorted_find(self, key(1))
         end select
@@ -1453,208 +2137,642 @@ contains
     !!
     !! One of eight, one per key kind x key rank x answer kind, each the typed loop its `%get_many`
     !! specific ran serially before the bulk form was threaded; the driver cuts the rows into
-    !! chunks and calls one of these per chunk. `indexes` is `intent(inout)` rather than
+    !! chunks and calls one of these per chunk. **The backend is dispatched once per chunk, not
+    !! once per key**: the hash arm probes with the slot mask and the table in locals through
+    !! `ix_probe_1`/`ix_probe_n`, which are contained in this file so the compiler inlines them;
+    !! the direct arm is the range test and one load with the bounds in locals; anything else --
+    !! the sorted backend, an unbuilt map -- takes the general `ix_get_scalar`/`ix_get_tuple`
+    !! per key, which is where the dispatch used to happen for every key of every backend
+    !! (feature_pf_index.md, section 6 item 2). `indexes` is `intent(inout)` rather than
     !! `intent(out)` because each chunk of a threaded call writes only its own slice of the
     !! caller's array, and an `intent(out)` dummy would let the compiler treat the whole array as
     !! undefined on entry. `hv` is `present(valid)` hoisted by the driver, so the masked branch
     !! costs one well-predicted test per row and `valid` is never touched when it is absent.
     subroutine ix_many_1_k32_i32(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int32), intent(in) :: keys(:)          !! the caller's keys.
-        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int32), intent(in) :: keys(:)       !! the caller's keys.
+        integer(int32), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: i
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, k, m, kmin, kmax
+        integer :: j, nb
 
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64) then
+            ! Blocks of keys through the two-pass kernel; a masked row is probed like any other
+            ! (its key is whatever the caller's array holds, and a probe of anything is harmless)
+            ! and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = int(keys(i0 + j - 1), int64)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = ix_narrow(vb(j))
+                end do
+            end do
+        else if (self%backend == IX_DIRECT) then
+            kmin = self%kmin1
+            kmax = self%kmax1
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int32
                     cycle
                 end if
             end if
-            indexes(i) = ix_narrow(ix_get_scalar(self, int(keys(i), int64)))
-        end do
+                k = int(keys(i), int64)
+                if (k < kmin .or. k > kmax) then
+                    indexes(i) = 0_int32
+                else
+                    indexes(i) = ix_narrow(self%dvals(k - kmin + 1_int64))
+                end if
+            end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+                indexes(i) = ix_narrow(ix_get_scalar(self, int(keys(i), int64)))
+            end do
+        end if
     end subroutine ix_many_1_k32_i32
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int32` keys, `int64` answers.
     subroutine ix_many_1_k32_i64(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int32), intent(in) :: keys(:)          !! the caller's keys.
-        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int32), intent(in) :: keys(:)       !! the caller's keys.
+        integer(int64), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: i
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, k, m, kmin, kmax
+        integer :: j, nb
 
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64) then
+            ! Blocks of keys through the two-pass kernel; a masked row is probed like any other
+            ! (its key is whatever the caller's array holds, and a probe of anything is harmless)
+            ! and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = int(keys(i0 + j - 1), int64)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = vb(j)
+                end do
+            end do
+        else if (self%backend == IX_DIRECT) then
+            kmin = self%kmin1
+            kmax = self%kmax1
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int64
                     cycle
                 end if
             end if
-            indexes(i) = ix_get_scalar(self, int(keys(i), int64))
-        end do
+                k = int(keys(i), int64)
+                if (k < kmin .or. k > kmax) then
+                    indexes(i) = 0_int64
+                else
+                    indexes(i) = self%dvals(k - kmin + 1_int64)
+                end if
+            end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+                indexes(i) = ix_get_scalar(self, int(keys(i), int64))
+            end do
+        end if
     end subroutine ix_many_1_k32_i64
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int64` keys, `int32` answers.
     subroutine ix_many_1_k64_i32(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int64), intent(in) :: keys(:)          !! the caller's keys.
-        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int64), intent(in) :: keys(:)       !! the caller's keys.
+        integer(int32), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: i
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, k, m, kmin, kmax
+        integer :: j, nb
 
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64) then
+            ! Blocks of keys through the two-pass kernel; a masked row is probed like any other
+            ! (its key is whatever the caller's array holds, and a probe of anything is harmless)
+            ! and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = keys(i0 + j - 1)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = ix_narrow(vb(j))
+                end do
+            end do
+        else if (self%backend == IX_DIRECT) then
+            kmin = self%kmin1
+            kmax = self%kmax1
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int32
                     cycle
                 end if
             end if
-            indexes(i) = ix_narrow(ix_get_scalar(self, keys(i)))
-        end do
+                k = keys(i)
+                if (k < kmin .or. k > kmax) then
+                    indexes(i) = 0_int32
+                else
+                    indexes(i) = ix_narrow(self%dvals(k - kmin + 1_int64))
+                end if
+            end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+                indexes(i) = ix_narrow(ix_get_scalar(self, keys(i)))
+            end do
+        end if
     end subroutine ix_many_1_k64_i32
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int64` keys, `int64` answers.
     subroutine ix_many_1_k64_i64(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int64), intent(in) :: keys(:)          !! the caller's keys.
-        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int64), intent(in) :: keys(:)       !! the caller's keys.
+        integer(int64), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: i
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, k, m, kmin, kmax
+        integer :: j, nb
 
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64) then
+            ! Blocks of keys through the two-pass kernel; a masked row is probed like any other
+            ! (its key is whatever the caller's array holds, and a probe of anything is harmless)
+            ! and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = keys(i0 + j - 1)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = vb(j)
+                end do
+            end do
+        else if (self%backend == IX_DIRECT) then
+            kmin = self%kmin1
+            kmax = self%kmax1
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int64
                     cycle
                 end if
             end if
-            indexes(i) = ix_get_scalar(self, keys(i))
-        end do
+                k = keys(i)
+                if (k < kmin .or. k > kmax) then
+                    indexes(i) = 0_int64
+                else
+                    indexes(i) = self%dvals(k - kmin + 1_int64)
+                end if
+            end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+                indexes(i) = ix_get_scalar(self, keys(i))
+            end do
+        end if
     end subroutine ix_many_1_k64_i64
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int32` tuples, `int32` answers.
     subroutine ix_many_n_k32_i32(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int32), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
-        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int32), intent(in) :: keys(:,:)     !! the caller's tuples, one per row.
+        integer(int32), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i
-        integer :: nc, j
+        integer(int64) :: tb(pf_index_max_components * IX_PROBE_BLOCK)
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, m, off
+        integer :: nc, j, c, nb
 
         nc = self%ncomp
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc > 1) then
+            ! Blocks of tuples, gathered into `tb` one tuple per `nc` entries -- the `(nc, nb)`
+            ! layout the kernel takes -- then the two-pass kernel; a masked row is probed like
+            ! any other and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do c = 1, nc
+                    do j = 1, nb
+                        tb((j - 1) * nc + c) = int(keys(i0 + j - 1, c), int64)
+                    end do
+                end do
+                call ix_probe_n_block(self%hrec, nc, m, nb, tb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = ix_narrow(vb(j))
+                end do
+            end do
+        else if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc == 1) then
+            ! A single-component map probed with 1-tuples: the scalar table, so the scalar kernel.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = int(keys(i0 + j - 1, 1), int64)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = ix_narrow(vb(j))
+                end do
+            end do
+        else if (self%backend == IX_DIRECT .and. nc >= 1) then
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int32
                     cycle
                 end if
             end if
-            do j = 1, nc
-                kb(j) = int(keys(i, j), int64)
+                off = 1_int64
+                do j = 1, nc
+                    kb(j) = int(keys(i, j), int64)
+                    if (kb(j) < self%dkmin(j) .or. kb(j) > self%dkmax(j)) then
+                        off = 0_int64
+                        exit
+                    end if
+                    off = off + (kb(j) - self%dkmin(j)) * self%dstride(j)
+                end do
+                if (off == 0_int64) then
+                    indexes(i) = 0_int32
+                else
+                    indexes(i) = ix_narrow(self%dvals(off))
+                end if
             end do
-            indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
-        end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+                do j = 1, nc
+                    kb(j) = int(keys(i, j), int64)
+                end do
+                indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
+            end do
+        end if
     end subroutine ix_many_n_k32_i32
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int32` tuples, `int64` answers.
     subroutine ix_many_n_k32_i64(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int32), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
-        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int32), intent(in) :: keys(:,:)     !! the caller's tuples, one per row.
+        integer(int64), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i
-        integer :: nc, j
+        integer(int64) :: tb(pf_index_max_components * IX_PROBE_BLOCK)
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, m, off
+        integer :: nc, j, c, nb
 
         nc = self%ncomp
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc > 1) then
+            ! Blocks of tuples, gathered into `tb` one tuple per `nc` entries -- the `(nc, nb)`
+            ! layout the kernel takes -- then the two-pass kernel; a masked row is probed like
+            ! any other and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do c = 1, nc
+                    do j = 1, nb
+                        tb((j - 1) * nc + c) = int(keys(i0 + j - 1, c), int64)
+                    end do
+                end do
+                call ix_probe_n_block(self%hrec, nc, m, nb, tb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = vb(j)
+                end do
+            end do
+        else if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc == 1) then
+            ! A single-component map probed with 1-tuples: the scalar table, so the scalar kernel.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = int(keys(i0 + j - 1, 1), int64)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = vb(j)
+                end do
+            end do
+        else if (self%backend == IX_DIRECT .and. nc >= 1) then
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int64
                     cycle
                 end if
             end if
-            do j = 1, nc
-                kb(j) = int(keys(i, j), int64)
+                off = 1_int64
+                do j = 1, nc
+                    kb(j) = int(keys(i, j), int64)
+                    if (kb(j) < self%dkmin(j) .or. kb(j) > self%dkmax(j)) then
+                        off = 0_int64
+                        exit
+                    end if
+                    off = off + (kb(j) - self%dkmin(j)) * self%dstride(j)
+                end do
+                if (off == 0_int64) then
+                    indexes(i) = 0_int64
+                else
+                    indexes(i) = self%dvals(off)
+                end if
             end do
-            indexes(i) = ix_get_tuple(self, kb(1:nc))
-        end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+                do j = 1, nc
+                    kb(j) = int(keys(i, j), int64)
+                end do
+                indexes(i) = ix_get_tuple(self, kb(1:nc))
+            end do
+        end if
     end subroutine ix_many_n_k32_i64
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int64` tuples, `int32` answers.
     subroutine ix_many_n_k64_i32(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int64), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
-        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int64), intent(in) :: keys(:,:)     !! the caller's tuples, one per row.
+        integer(int32), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i
-        integer :: nc, j
+        integer(int64) :: tb(pf_index_max_components * IX_PROBE_BLOCK)
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, m, off
+        integer :: nc, j, c, nb
 
         nc = self%ncomp
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc > 1) then
+            ! Blocks of tuples, gathered into `tb` one tuple per `nc` entries -- the `(nc, nb)`
+            ! layout the kernel takes -- then the two-pass kernel; a masked row is probed like
+            ! any other and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do c = 1, nc
+                    do j = 1, nb
+                        tb((j - 1) * nc + c) = keys(i0 + j - 1, c)
+                    end do
+                end do
+                call ix_probe_n_block(self%hrec, nc, m, nb, tb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = ix_narrow(vb(j))
+                end do
+            end do
+        else if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc == 1) then
+            ! A single-component map probed with 1-tuples: the scalar table, so the scalar kernel.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = keys(i0 + j - 1, 1)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = ix_narrow(vb(j))
+                end do
+            end do
+        else if (self%backend == IX_DIRECT .and. nc >= 1) then
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int32
                     cycle
                 end if
             end if
-            do j = 1, nc
-                kb(j) = keys(i, j)
+                off = 1_int64
+                do j = 1, nc
+                    kb(j) = keys(i, j)
+                    if (kb(j) < self%dkmin(j) .or. kb(j) > self%dkmax(j)) then
+                        off = 0_int64
+                        exit
+                    end if
+                    off = off + (kb(j) - self%dkmin(j)) * self%dstride(j)
+                end do
+                if (off == 0_int64) then
+                    indexes(i) = 0_int32
+                else
+                    indexes(i) = ix_narrow(self%dvals(off))
+                end if
             end do
-            indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
-        end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+                do j = 1, nc
+                    kb(j) = keys(i, j)
+                end do
+                indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
+            end do
+        end if
     end subroutine ix_many_n_k64_i32
 
     !> The serial `%get_many` loop over rows `lo .. hi`: `int64` tuples, `int64` answers.
     subroutine ix_many_n_k64_i64(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
-        integer(int64), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
-        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        integer(int64), intent(in) :: keys(:,:)     !! the caller's tuples, one per row.
+        integer(int64), intent(inout) :: indexes(:) !! the caller's answers; rows `lo .. hi` written.
         logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
         logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
         integer(int64), intent(in) :: lo             !! first row this call owns.
         integer(int64), intent(in) :: hi             !! last row this call owns.
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i
-        integer :: nc, j
+        integer(int64) :: tb(pf_index_max_components * IX_PROBE_BLOCK)
+        integer(int64) :: kb(IX_PROBE_BLOCK), vb(IX_PROBE_BLOCK)
+        integer(int64) :: i, i0, m, off
+        integer :: nc, j, c, nb
 
         nc = self%ncomp
-        do i = lo, hi
+        if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc > 1) then
+            ! Blocks of tuples, gathered into `tb` one tuple per `nc` entries -- the `(nc, nb)`
+            ! layout the kernel takes -- then the two-pass kernel; a masked row is probed like
+            ! any other and its answer zeroed afterwards, before any narrowing.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do c = 1, nc
+                    do j = 1, nb
+                        tb((j - 1) * nc + c) = keys(i0 + j - 1, c)
+                    end do
+                end do
+                call ix_probe_n_block(self%hrec, nc, m, nb, tb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = vb(j)
+                end do
+            end do
+        else if (self%backend == IX_HASH .and. self%hcap > 0_int64 .and. nc == 1) then
+            ! A single-component map probed with 1-tuples: the scalar table, so the scalar kernel.
+            m = self%hcap - 1_int64
+            do i0 = lo, hi, int(IX_PROBE_BLOCK, int64)
+                nb = int(min(int(IX_PROBE_BLOCK, int64), hi - i0 + 1_int64))
+                do j = 1, nb
+                    kb(j) = keys(i0 + j - 1, 1)
+                end do
+                call ix_probe_1_block(self%slots, m, nb, kb, vb)
+                if (hv) then
+                    do j = 1, nb
+                        if (.not. valid(i0 + j - 1)) vb(j) = 0_int64
+                    end do
+                end if
+                do j = 1, nb
+                    indexes(i0 + j - 1) = vb(j)
+                end do
+            end do
+        else if (self%backend == IX_DIRECT .and. nc >= 1) then
+            do i = lo, hi
             if (hv) then
                 if (.not. valid(i)) then
                     indexes(i) = 0_int64
                     cycle
                 end if
             end if
-            do j = 1, nc
-                kb(j) = keys(i, j)
+                off = 1_int64
+                do j = 1, nc
+                    kb(j) = keys(i, j)
+                    if (kb(j) < self%dkmin(j) .or. kb(j) > self%dkmax(j)) then
+                        off = 0_int64
+                        exit
+                    end if
+                    off = off + (kb(j) - self%dkmin(j)) * self%dstride(j)
+                end do
+                if (off == 0_int64) then
+                    indexes(i) = 0_int64
+                else
+                    indexes(i) = self%dvals(off)
+                end if
             end do
-            indexes(i) = ix_get_tuple(self, kb(1:nc))
-        end do
+        else
+            do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+                do j = 1, nc
+                    kb(j) = keys(i, j)
+                end do
+                indexes(i) = ix_get_tuple(self, kb(1:nc))
+            end do
+        end if
     end subroutine ix_many_n_k64_i64
 
     ! ---- Mutation workers. Every one of these runs with the map's guard held. ----
@@ -1665,11 +2783,11 @@ contains
         integer(int64), intent(in) :: off      !! the resolved direct slot, or 0 when out of range.
         character(len=*), intent(in) :: what   !! procedure name, for the message.
 
-        if (self%backend == IX_SORTED) error stop "pf_index_map%" // what // &
-            ": a sorted map is frozen once built; rebuild it, or build with method=""hash"""
-        if (self%backend == IX_DIRECT .and. off == 0_int64) error stop "pf_index_map%" // what // &
+        if (self%backend == IX_SORTED) call ix_abort("pf_index_map%" // what // &
+            ": a sorted map is frozen once built; rebuild it, or build with method=""hash""")
+        if (self%backend == IX_DIRECT .and. off == 0_int64) call ix_abort("pf_index_map%" // what // &
             ": this key is outside the range the direct backend was built for; rebuild the map " // &
-            "with this key included, or build with method=""hash"""
+            "with this key included, or build with method=""hash""")
     end subroutine ix_check_mutable
 
     !> Ensures a map reached by `%set`/`%get_or_add` before any build has somewhere to put a key.
@@ -1710,6 +2828,7 @@ contains
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: key(:)      !! the tuple, already widened.
         integer(int64), intent(in) :: value       !! the value to store.
+        integer(int64) :: kb(pf_index_max_components)
         integer(int64) :: off
         integer :: nc
         logical :: is_new
@@ -1724,7 +2843,11 @@ contains
             self%dvals(off) = value
         else
             call ix_check_mutable(self, 1_int64, "set")
-            call ix_hash_insert(self, key(1:nc), value, is_new)
+            ! Gathered into the stack buffer: the caller's tuple may be a strided section, and
+            ! the insert's dummy is `contiguous` (its hash takes an explicit-shape array), so
+            ! the copy is made here, once, rather than by a temporary at the call.
+            kb(1:nc) = key(1:nc)
+            call ix_hash_insert(self, kb(1:nc), value, is_new)
         end if
         if (value > self%next_auto) self%next_auto = value
     end subroutine ix_set_tuple
@@ -1894,6 +3017,7 @@ contains
         integer(int64), intent(in) :: key(:)      !! the tuple, already widened.
         logical, intent(out) :: hit               !! `.true.` when the key was there.
         logical, intent(in) :: has_found          !! whether the caller passed `found=`.
+        integer(int64) :: kb(pf_index_max_components)
         integer(int64) :: off
         integer :: nc
 
@@ -1914,7 +3038,9 @@ contains
                 end if
             end if
         else
-            call ix_hash_remove(self, key(1:nc), hit)
+            ! Gathered for the reason `ix_set_tuple` gives.
+            kb(1:nc) = key(1:nc)
+            call ix_hash_remove(self, kb(1:nc), hit)
         end if
         call ix_removal_report(hit, has_found)
     end subroutine ix_remove_tuple
@@ -1943,8 +3069,8 @@ contains
         logical, intent(in) :: has_found !! whether the caller passed `found=`.
 
         if (hit .or. has_found) return
-        error stop "pf_index_map%remove: this key is not in the map; pass found= if an absent " // &
-            "key is acceptable"
+        call ix_abort("pf_index_map%remove: this key is not in the map; pass found= if an absent " // &
+            "key is acceptable")
     end subroutine ix_removal_report
 
     ! ---- Key enumeration ----
@@ -2049,8 +3175,8 @@ contains
         allocate(self%dvals(total), stat=ios)
         if (ios /= 0) then
             write (t, "(i0)") total
-            error stop "pf_index_map%build: could not allocate " // trim(t) // &
-                " slots for the direct backend; use method=""hash"" for keys this widely spread"
+            call ix_abort("pf_index_map%build: could not allocate " // trim(t) // &
+                " slots for the direct backend; use method=""hash"" for keys this widely spread")
         end if
         self%dvals = 0_int64
     end subroutine ix_alloc_direct
@@ -2078,12 +3204,12 @@ contains
             if (self%dvals(off) /= 0_int64) then
                 write (t, "(i0)") keys(i)
                 write (p, "(i0)") i
-                error stop "pf_index_map%build: duplicate key " // trim(t) // " at position " // &
-                    trim(p) // " (every key must be unique)"
+                call ix_abort("pf_index_map%build: duplicate key " // trim(t) // " at position " // &
+                    trim(p) // " (every key must be unique)")
             end if
             self%dvals(off) = 1_int64
         end do
-        error stop "pf_index_map%build: duplicate keys were detected but could not be named"
+        call ix_abort("pf_index_map%build: duplicate keys were detected but could not be named")
     end subroutine ix_name_duplicate_1
 
     !> Names the duplicate tuple a threaded composite direct scatter detected. See
@@ -2109,12 +3235,12 @@ contains
             if (self%dvals(off) /= 0_int64) then
                 call ix_tuple_text(keys(i, :), txt)
                 write (p, "(i0)") i
-                error stop "pf_index_map%build: duplicate key " // txt // " at position " // &
-                    trim(p) // " (every key tuple must be unique)"
+                call ix_abort("pf_index_map%build: duplicate key " // txt // " at position " // &
+                    trim(p) // " (every key tuple must be unique)")
             end if
             self%dvals(off) = 1_int64
         end do
-        error stop "pf_index_map%build: duplicate keys were detected but could not be named"
+        call ix_abort("pf_index_map%build: duplicate keys were detected but could not be named")
     end subroutine ix_name_duplicate_n
 
     !> Renders a key tuple as `[a, b, c]` for an error message.
@@ -2219,6 +3345,7 @@ contains
         integer :: want, nt
         logical :: has_v, hv, is_new, fits
 
+        call ix_build_begin()
         n = size(keys, kind=int64)
         hv = present(valid)
         if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "build")
@@ -2267,9 +3394,9 @@ contains
             end if
         else if (want == IX_DIRECT) then
             call ix_span_ok(lo, hi, huge(0_int64), span, fits)
-            if (.not. fits) error stop &
+            if (.not. fits) call ix_abort(&
                 "pf_index_map%build: method=""direct"" cannot cover this key range; " // &
-                "it exceeds the whole int64 domain. Use method=""hash""."
+                "it exceeds the whole int64 domain. Use method=""hash"".")
         end if
         select case (want)
         case (IX_DIRECT)
@@ -2336,8 +3463,8 @@ contains
 
         write (t, "(i0)") key
         write (p, "(i0)") at
-        error stop "pf_index_map%build: duplicate key " // trim(t) // " at position " // &
-            trim(p) // " (every key must be unique)"
+        call ix_abort("pf_index_map%build: duplicate key " // trim(t) // " at position " // &
+            trim(p) // " (every key must be unique)")
     end subroutine ix_report_duplicate_1
 
     !> Reports a duplicate key tuple the serial hash insert loop met.
@@ -2349,8 +3476,8 @@ contains
 
         call ix_tuple_text(key, txt)
         write (p, "(i0)") at
-        error stop "pf_index_map%build: duplicate key " // txt // " at position " // &
-            trim(p) // " (every key tuple must be unique)"
+        call ix_abort("pf_index_map%build: duplicate key " // txt // " at position " // &
+            trim(p) // " (every key tuple must be unique)")
     end subroutine ix_report_duplicate_n
 
     !> Builds a map with `ncomp` components from a rank-2 key array shaped `(n, ncomp)`.
@@ -2364,11 +3491,12 @@ contains
         integer, intent(in), optional :: threads          !! threads to build with.
         logical, intent(in), optional :: valid(:)         !! per row; `.false.` skips the row.
         integer(int64) :: lo(pf_index_max_components), hi(pf_index_max_components)
-        integer(int64) :: sp(pf_index_max_components)
+        integer(int64) :: sp(pf_index_max_components), kb(pf_index_max_components)
         integer(int64) :: n, nv, first, last, budget, total, grown_total, i, off, cnt, l, h, span
         integer :: want, nt, nc, j
         logical :: has_v, hv, is_new, fits
 
+        call ix_build_begin()
         n = size(keys, 1, kind=int64)
         nc = int(size(keys, 2))
         call ix_check_ncomp(nc, "build")
@@ -2380,9 +3508,9 @@ contains
             call ix_check_values_range(values, valid)
         end if
         call ix_resolve_method(method, want, .true., "build")
-        if (want == IX_SORTED .and. nc > 1) error stop "pf_index_map%build: " // &
+        if (want == IX_SORTED .and. nc > 1) call ix_abort("pf_index_map%build: " // &
             "method=""sorted"" supports single-component keys only; use ""hash"" or ""direct"" " // &
-            "for composite keys"
+            "for composite keys")
         call ix_reset_storage(self)
         self%ncomp = nc
         call ix_mask_extent(n, valid, nv, first, last)
@@ -2445,8 +3573,8 @@ contains
                 want = IX_HASH
             end if
         else if (want == IX_DIRECT .and. .not. fits) then
-            error stop "pf_index_map%build: method=""direct"" cannot cover these key ranges; " // &
-                "their product exceeds the int64 domain. Use method=""hash""."
+            call ix_abort("pf_index_map%build: method=""direct"" cannot cover these key ranges; " // &
+                "their product exceeds the int64 domain. Use method=""hash"".")
         end if
         select case (want)
         case (IX_DIRECT)
@@ -2504,16 +3632,22 @@ contains
             self%backend = IX_HASH
             self%nk = 0_int64
             call ix_hash_reserve(self, nv)
+            ! The row is gathered into a contiguous buffer first: `keys(i, :)` is a strided
+            ! section, and the insert's tuple hash takes an explicit-shape array, so passing the
+            ! section directly would have the compiler pack it into a temporary per key anyway.
             do i = 1_int64, n
                 if (hv) then
                     if (.not. valid(i)) cycle
                 end if
+                do j = 1, nc
+                    kb(j) = keys(i, j)
+                end do
                 if (has_v) then
-                    call ix_hash_insert(self, keys(i, :), values(i), is_new)
+                    call ix_hash_insert(self, kb(1:nc), values(i), is_new)
                 else
-                    call ix_hash_insert(self, keys(i, :), i, is_new)
+                    call ix_hash_insert(self, kb(1:nc), i, is_new)
                 end if
-                if (.not. is_new) call ix_report_duplicate_n(keys(i, :), i)
+                if (.not. is_new) call ix_report_duplicate_n(kb(1:nc), i)
             end do
         case (IX_SORTED)
             self%backend = IX_SORTED

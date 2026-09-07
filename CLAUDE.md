@@ -1185,11 +1185,18 @@ parquet_spatial                 (module — pf_spatial_index over plain coordina
                                  + four submodules: _build, _bulk, _query, _tune)
 parquet_healpix                 (module — the HEALPix sphere pixelisation; Arrow-free, + five
                                  submodules: _core, _arith, _bulk, _grid, _query)
-parquet_index                   (module — pf_index_map / pf_index_pool: key-to-index lookup and a
-                                 recycling index allocator. Arrow-free; reaches parquet_argsort
-                                 (sorted backend), parquet_utils and settings_base only)
-├─ parquet_index_map            (submodule — lifecycle, dispatch, direct backend, the map's guard)
-├─ parquet_index_hash           (submodule — mixer, tuple combine, probing, backward-shift delete)
+parquet_index                   (module — pf_index_map / pf_index_multimap / pf_index_pool:
+                                 key-to-index lookup, keys with repeats, and a recycling index
+                                 allocator. Arrow-free; reaches parquet_argsort (sorted backend),
+                                 parquet_strings (string keys), parquet_utils and settings_base only)
+├─ parquet_index_map            (submodule — lifecycle, dispatch, the direct backend, the hash
+│                                mixer and the lookup probes, the map's guard, the build's swap-in
+│                                and the serialised abort reporter)
+│   ├─ parquet_index_hash       (sub-submodule — the hash backend's mutation side: insertion,
+│   │                            growth, backward-shift delete; reaches the mixer by host association)
+│   └─ parquet_index_multi      (sub-submodule — pf_index_multimap over the map's chunk loops)
+│       └─ parquet_index_str    (sub-sub-submodule — the string keys of BOTH types and the string
+│                                store; descends from the multimap to reach both sets of helpers)
 ├─ parquet_index_sorted         (submodule — pf_argsort build + binary search)
 └─ parquet_index_pool           (submodule — the pool, its guard, %compact's bitmap walk)
 parquet_toml                    (module — pf_toml: TOML configuration files. Arrow-free; the ONLY
@@ -3543,7 +3550,12 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   therefore wraps its whole body in `!$omp critical (pf_log_fatal)`: the first thread to arrive
   aborts and the rest block on a lock it never releases, which also collapses N interleaved copies
   of the fatal record down to one. Any *new* `error stop` that a parallel region can reach needs
-  the same treatment — reached through `pf_log_fatal`, it already has it.
+  the same treatment — reached through `pf_log_fatal`, it already has it. `parquet_index` takes
+  the same shape one level up: every impure abort of its submodules goes through `ix_abort`
+  (`src/parquet_index.f90`), one critical around one `error stop`, because a `%build` runs outside
+  the map's guard and two builds on two threads can fail at once; `check_source_conventions.py`
+  holds that no impure procedure there aborts directly, since a bare `error stop` written the
+  natural way compiles and passes every scenario.
 
 - **The same transcendental expression can differ by 1-2 ulp between a bulk loop and a scalar
   evaluation, at `-O0` but not at `-O2`.** So two textually identical conversions of the same input
@@ -4502,6 +4514,17 @@ Three consequences worth carrying to any future hot-path work:
   yes, both `module procedure` and a private submodule-contained procedure are still global — did
   remove every out-of-line call, and made macOS **77-119% slower**. Do not re-attempt it without
   measuring on both platforms.
+- **A "same translation unit" argument for inlining is void under `-fPIC`, and the trap is that a
+  standalone replica does inline.** `parquet_index`'s hash probe was moved into the same submodule
+  as the loops that call it on exactly that argument, and the object showed the loop calling the
+  probe, which called the hash, which called the mixer three times -- six calls per key, unchanged
+  -- because every one of them is a module procedure. The replica the plan had measured against ran
+  at the target speed only because it was a single program whose helpers were *internal*. What
+  finally met the target was **writing the mixer out inside the probe kernel** (`ix_probe_1_block`
+  in `src/parquet_index_map.f90`): a deliberate copy of `ix_mix32`/`ix_hash_bits` with the rule for
+  keeping it in step in its doc-comment, and a divergence caught by every lookup test, since the
+  insert side keeps calling the named functions. ifx does not honour semantic interposition and had
+  been inlining all along, so a gfortran-only or ifx-only measurement each tells half the story.
 
 **The one-command check for whether a call was inlined**, which belongs beside any claim that it was:
 
@@ -4873,6 +4896,18 @@ before being noticed:**
   reversal is simultaneously the best case for the seen-set's locality and the worst case for the
   bit-set's store-to-load forwarding, while the byte-set's 8x memory only bites once it misses cache.
   Both were needed to reach the right conclusion, which was to change nothing.
+- **On a table larger than the cache, a per-key loop that HASHES then LOADS hides far fewer
+  misses than one that hashes a block first and loads afterwards — and the effect scales with the
+  hash's length.** A core overlaps DRAM misses only across the iterations that fit in its reorder
+  window, so every instruction between one load and the next costs overlap. `pf_index_map`'s
+  composite probe, with two hash chains per key, measured **twice** the scalar probe at ten million
+  keys and a four-component one **four times**, with the same probe statistics (mean 1.7) on all
+  three — no clustering, just a longer hash in front of each miss. Splitting each block of 64 keys
+  into a hashing pass (into a `home` array) and a walking pass (`ix_probe_1_block`) took the scalar
+  probe from 48 to 28 ns and the pair from 101 to 34, and cost nothing in cache. Two things to read
+  off that: `%probe_stats` is what separates a hash defect from a memory-parallelism one, and the
+  plan's earlier verdict that batching buys 8–15% was a verdict about the *scalar* probe on a
+  *different* loop shape — re-measure a "not worth it" before applying it to a heavier kernel.
 - **A sweep must ENGAGE the mechanism it is testing, and one that does not looks exactly like one
   that does.** Work out the condition under which the thing being studied is even active, and pick
   the sweep point from that — never from whatever size the previous measurement happened to use,

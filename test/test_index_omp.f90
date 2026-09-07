@@ -55,7 +55,8 @@ contains
             new_unittest("a threaded composite build equals a serial one", test_threaded_composite_build), &
             new_unittest("threads= is honoured and bounded", test_threads_argument), &
             new_unittest("pf_index_threads reports the rule the build follows", test_index_threads_rule), &
-            new_unittest("a per-thread map and pool work inside a region", test_per_thread_containers) &
+            new_unittest("a per-thread map and pool work inside a region", test_per_thread_containers), &
+            new_unittest("two builds on two threads run at the same time", test_concurrent_builds_overlap) &
             ]
     end subroutine collect_tests_index_omp
 
@@ -949,6 +950,61 @@ contains
             "a thread-private map and pool must work inside a parallel region -- if this " // &
             "fails, a guard is refusing the permitted case rather than the shared one")
     end subroutine test_per_thread_containers
+
+    !> Two builds on two threads run at the same time: a `%build` scans and fills a LOCAL map on
+    !! the calling thread and takes the map's lock only to swap the result in, so builds of
+    !! different maps no longer take turns.
+    !!
+    !! A build answers identically whether it ran beside another or waited for it, so the maps
+    !! themselves cannot show which happened; `parquet_debug_index_concurrent_builds` -- the most
+    !! builds ever in flight at once -- is the one observable that can, and it is read after its
+    !! own reset so that an earlier test's builds are not what is measured. Each thread builds
+    !! twenty 30000-key hash maps in a row, so that the builds overlap in practice however the
+    !! threads are scheduled. The negative control -- the builds back under the guard for their
+    !! whole duration -- holds the mark at 1.
+    subroutine test_concurrent_builds_overlap(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map), allocatable :: maps(:)
+        integer(int64), allocatable :: keys(:)
+        integer :: t, team, bad, r, mark
+        integer(int64) :: i
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without a parallel region no two builds can " // &
+            "overlap, and the high-water mark below would be 1 for the wrong reason")
+        return
+#endif
+        team = 1
+#ifdef _OPENMP
+        team = min(4, omp_get_max_threads(), omp_get_num_procs())
+#endif
+        if (team < 2) then
+            call skip_test(error, "needs 2+ processors: a one-processor team cannot overlap two builds")
+            return
+        end if
+        allocate(maps(team), keys(30000))
+        do i = 1_int64, 30000_int64
+            keys(i) = i * 7_int64
+        end do
+        mark = parquet_debug_index_concurrent_builds(reset=.true.)
+        bad = 0
+        !$omp parallel do default(shared) private(t, r, i) reduction(+:bad) num_threads(team) &
+        !$omp     schedule(static)
+        do t = 1, team
+            do r = 1, 20
+                call maps(t)%build(keys, method="hash", threads=1)
+                do i = 1_int64, 30000_int64, 997_int64
+                    if (maps(t)%get(keys(i)) /= i) bad = bad + 1
+                end do
+            end do
+        end do
+        call check(error, bad == 0, "every map built beside another answers every key")
+        if (allocated(error)) return
+        mark = parquet_debug_index_concurrent_builds()
+        call check(error, mark >= 2, &
+            "at least two builds must have been in flight at once -- a build that holds the " // &
+            "map's lock for its whole duration keeps the high-water mark at 1")
+    end subroutine test_concurrent_builds_overlap
 
     ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.
 end module test_index_omp ! GCOVR_EXCL_LINE

@@ -10,7 +10,8 @@
 !!                 read against: a raw array read (the floor the direct backend should sit on)
 !!                 and `findloc` (the naive alternative this module replaces).
 !! * `build`    -- ns per key to build, per backend, serial and threaded.
-!! * `tuple`    -- the same lookup sweep over composite keys at ncomp = 1, 2 and 4.
+!! * `tuple`    -- the same lookup sweep over composite keys at ncomp = 1, 2 and 4: `%get` per
+!!                 probe, and the serial `%get_many` over the whole probe array.
 !! * `mutate`   -- `%set`, `%get_or_add` and `%get_or_add_many` throughput, one thread and several
 !!                 sharing one map: what the named critical costs when it is contended, and what
 !!                 the bulk form saves by taking it once per call.
@@ -373,22 +374,23 @@ contains
 
     !> The lookup sweep over composite keys, at each component count.
     subroutine mode_tuple()
-        integer(int64), allocatable :: pairs(:,:), probe(:)
+        integer(int64), allocatable :: pairs(:,:), probe(:), probes(:,:), probes_t(:,:), answers(:)
         type(pf_index_map) :: m
         integer :: nc, b, r, j
-        integer(int64) :: i, acc, n, side
-        real(real64) :: t0, best
+        integer(int64) :: i, acc, n, side, maxp
+        real(real64) :: t0, best, meanp
         character(len=6) :: backends(2)
-        character(len=24) :: tag
+        character(len=48) :: tag
 
         write (output_unit, "(a)") "## tuple"
         backends = ["direct", "hash  "]
         n = nkeys
         do nc = 1, ncomp_max
             if (nc /= 1 .and. nc /= 2 .and. nc /= 4) cycle
-            allocate(pairs(n, nc), probe(nc))
+            allocate(pairs(n, nc), probe(nc), probes(naccess, nc), probes_t(nc, naccess), answers(naccess))
             pairs = 0_int64
             probe = 0_int64
+            answers = 0_int64
             ! A lattice whose per-component span is the nc-th root of n, so the product of the
             ! spans stays near n and the direct backend remains admissible at every nc.
             side = max(2_int64, nint(real(n, real64) ** (1.0_real64 / real(nc, real64)), int64))
@@ -396,6 +398,16 @@ contains
                 do j = 1, nc
                     pairs(i, j) = 1_int64 + mod_wrap((i - 1_int64) / side ** (j - 1), side)
                 end do
+            end do
+            ! The probes are laid out once, OUTSIDE the timed loops, in both shapes the two arms
+            ! read: `(nc, naccess)` for the scalar arm, so its per-probe gather is one contiguous
+            ! read whatever nc is -- a `(naccess, nc)` row is nc strided loads, each a DRAM miss
+            ! at ten million keys, which would charge the composite arms one miss per component
+            ! that the probe itself never pays -- and `(naccess, nc)` for the bulk arm, which is
+            ! the shape `%get_many` takes.
+            do i = 1_int64, naccess
+                probes(i, :) = pairs(1_int64 + mod_wrap(i * 7919_int64, n), :)
+                probes_t(:, i) = probes(i, :)
             end do
             do b = 1, 2
                 call m%build(pairs, method=trim(backends(b)), threads=threads_req_or_absent())
@@ -406,12 +418,19 @@ contains
                         ": lattice was not unique, skipped"
                     exit
                 end if
+                ! The table's own clustering, so a composite figure is read against it: a mean
+                ! probe well above one says the hash is at fault, not the layout.
+                if (trim(backends(b)) == "hash") then
+                    call m%probe_stats(maxp, meanp)
+                    write (output_unit, "(a,i0,a,i0,a,f0.3)") "# ncomp=", nc, &
+                        " hash: probe_stats max=", maxp, " mean=", meanp
+                end if
                 best = huge(1.0_real64)
                 do r = 1, rounds
                     t0 = now()
                     acc = 0_int64
                     do i = 1_int64, naccess
-                        probe = pairs(1_int64 + mod_wrap(i * 7919_int64, n), :)
+                        probe = probes_t(:, i)
                         acc = acc + m%get(probe)
                     end do
                     best = min(best, now() - t0)
@@ -419,8 +438,20 @@ contains
                 end do
                 write (tag, "(a,i0,a)") "ncomp=", nc, " " // trim(backends(b)) // ": get, hit"
                 call report(trim(tag), best, naccess)
+                ! The bulk form over the same probes, serial: what the filter's temporal leaf and
+                ! the join's tuple path actually pay per key, without the harness's own gather.
+                best = huge(1.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call m%get_many(probes, answers, threads=1)
+                    best = min(best, now() - t0)
+                    checksum = checksum + answers(1) + answers(naccess)
+                end do
+                write (tag, "(a,i0,a)") "ncomp=", nc, " " // trim(backends(b)) // &
+                    ": get_many, threads=1"
+                call report(trim(tag), best, naccess)
             end do
-            deallocate(pairs, probe)
+            deallocate(pairs, probe, probes, probes_t, answers)
         end do
         write (output_unit, "(a)") ""
     end subroutine mode_tuple

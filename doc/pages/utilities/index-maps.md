@@ -89,9 +89,9 @@ reports the choice.
 | `%set` / `%get_or_add` | inside the built key range | yes | aborts |
 | `%remove` | yes | yes | aborts |
 
-The hash row is for a single-component key. A composite one stores its components alongside,
-costing `8 * (ncomponents + 1)` bytes per slot — 24 for a pair, 32 for a triple — with the same
-1.7-3.3x table size.
+The hash row is for a single-component key. A composite one keeps each tuple and its value as one
+record per slot, costing `8 * (ncomponents + 1)` bytes — 24 for a pair, 32 for a triple — with the
+same 1.7-3.3x table size, and a probe still touches one cache line for up to seven components.
 
 **direct** is an array indexed by the key: the fastest lookup there is, with no hashing and no
 probing at all. It is chosen automatically when your keys are dense enough that the array is no
@@ -521,6 +521,12 @@ mutated from several threads at once. One thread taking an index from a pool whi
 one back is a supported pattern, and so is several threads streaming keys through one map's
 `%get_or_add` — each thread's returned index is unique and stable.
 
+**A `%build` is not serialised with the rest.** It scans the keys and fills a map of its own on the
+calling thread, and takes the lock only to swap that result into your object — microseconds — so
+two threads building two maps run side by side, and a program preparing several maps in a parallel
+loop gets the team it opened. The rule below, that a lookup must not race a mutation of the same
+map, applies to the swap as it does to any mutation.
+
 **Lookups on a map are lock-free.** Any number of threads may `%get`, `%contains` or `%get_many` a
 map nobody is mutating, at full speed. `%get_many` also opens a team of its own for a large
 enough probe (see [Threads a build or a bulk lookup uses](#threads-a-build-or-a-bulk-lookup-uses))
@@ -549,8 +555,9 @@ would cost it the few nanoseconds it exists for, so it is not guarded. Two patte
   direct map refuses a key outside its built range.
 
 The serialization is a single lock per type across the whole process, so two unrelated shared maps
-take turns with each other as well. That is a deliberate trade: it is what keeps both types free of
-lock-handle lifecycle, and so free of finalizers.
+take turns with each other as well — for their inserts, removals and `%get_or_add`s; a `%build`, as
+above, holds the lock for its swap alone. That is a deliberate trade: it is what keeps both types
+free of lock-handle lifecycle, and so free of finalizers.
 
 ### A per-thread map or pool
 
@@ -627,9 +634,17 @@ your own hardware.
   your keys are dense, which the automatic choice already does for you.
 - **A hash lookup is memory-bound**, so it costs about one cache miss. Keeping the load factor at
   0.6 is what keeps the first probe usually the hit.
-- **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for, and
-  on a team it is the fastest probe there is: the chunks share nothing and a hash probe is one
-  cache miss, so the speed-up tracks the thread count until memory bandwidth saturates.
+- **A bulk composite lookup costs about what a scalar one does.** Each slot holds the tuple and
+  its value as one record, so a probe touches one cache line for up to seven components; the tuple
+  hash runs one 32-bit mixing step per component on two independent chains; and pairs — a
+  timestamp key, a string key underneath — have a kernel of their own. `--mode=tuple` of
+  `bench/benchmark_index.sh` prints the two side by side, with each table's probe statistics.
+- **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for --
+  on a map larger than the cache it is about twice as fast even on one thread, because it hashes
+  a block of keys first and walks the table afterwards, so a block's cache misses are in flight
+  together where a loop of `%get` waits for each one -- and on a team it is the fastest probe
+  there is: the chunks share nothing and a hash probe is one cache miss, so the speed-up tracks
+  the thread count until memory bandwidth saturates.
 - **`%get_or_add_many` beats a loop of `%get_or_add`** by the lock it does not take per key;
   the hashing and the inserts cost the same either way.
 - **A string probe is a hash over the key's bytes, one table probe and one byte compare on a

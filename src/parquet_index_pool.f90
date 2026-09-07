@@ -21,9 +21,12 @@
 !! the workers are separate procedures.
 !!
 !! A consequence worth having: because at most one thread is ever inside the region, at most one
-!! thread can reach an `error stop` from this type. Several threads terminating at once leaves the
+!! thread can reach an abort from this type. Several threads terminating at once leaves the
 !! process exit status undefined under ifx (CLAUDE.md's ifx gotchas), and this shape rules it out
-!! without a second mechanism.
+!! for the pool on its own. The module's serialised reporter `ix_abort` (declared in the spec)
+!! holds the same property for every index type -- the map's builds included, which run outside
+!! the map's guard -- so the pool's aborts go through it too: one rule across the module rather
+!! than two, and the one `tools/check_source_conventions.py` can hold.
 !!
 !! Every worker takes a `type(pf_index_pool)` dummy, never `class`: a `class` actual passed to a
 !! `type` dummy is free, while the reverse builds a runtime class descriptor in the caller's
@@ -227,7 +230,7 @@ contains
             self%nfree = self%nfree - 1_int64
         else
             if (self%max_used == huge(0_int64)) &
-                error stop "pf_index_pool%get_index: the index space is exhausted"
+                call ix_abort("pf_index_pool%get_index: the index space is exhausted")
             idx = self%max_used + 1_int64
             self%max_used = idx
             call pool_ensure_bits(self, idx)
@@ -247,12 +250,12 @@ contains
 
         if (idx < 1_int64 .or. idx > self%max_used) then
             write (t, "(i0)") idx
-            error stop "pf_index_pool%free_index: index " // trim(t) // &
-                " was never handed out by this pool"
+            call ix_abort("pf_index_pool%free_index: index " // trim(t) // &
+                " was never handed out by this pool")
         end if
         if (.not. btest(self%bits(pool_blk(idx)), pool_pos(idx))) then
             write (t, "(i0)") idx
-            error stop "pf_index_pool%free_index: index " // trim(t) // " is already free"
+            call ix_abort("pf_index_pool%free_index: index " // trim(t) // " is already free")
         end if
         self%bits(pool_blk(idx)) = ibclr(self%bits(pool_blk(idx)), pool_pos(idx))
         self%n_used = self%n_used - 1_int64

@@ -2393,7 +2393,9 @@ contains
             new_unittest("a date set against a timestamp column aborts", &
                 test_filter_temporal_set_mismatch_aborts), &
             new_unittest("a literal list on a temporal column aborts", &
-                test_filter_temporal_literal_list_aborts) &
+                test_filter_temporal_literal_list_aborts), &
+            new_unittest("two concurrent duplicate-key builds abort once, cleanly", &
+                test_index_concurrent_abort_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
@@ -2982,6 +2984,15 @@ contains
             failure_message="every legal pf_index_map call was expected to complete", &
             required_stderr="index control finished")
     end subroutine test_index_control_completes
+    !
+    !> See `scenario_index_concurrent_abort` (test/error_scenarios.f90): two builds abort at once
+    !> and the serialised reporter lets one through, with the duplicate named.
+    subroutine test_index_concurrent_abort_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_concurrent_abort", expect_abort=.true., &
+            failure_message="two concurrent builds with a duplicate key were expected to abort", &
+            required_stderr="duplicate key 20")
+    end subroutine test_index_concurrent_abort_aborts
     !
     !> See `scenario_multimap_build_values_length` (test/error_scenarios.f90).
     subroutine test_multimap_build_values_length_aborts(error)

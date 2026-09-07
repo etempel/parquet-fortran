@@ -80,6 +80,10 @@ contains
             new_unittest("a composite map reports its component count", test_composite_ncomponents), &
             new_unittest("composite direct and hash agree on the same fixture", test_composite_backends_agree), &
             new_unittest("three components work as well as two", test_composite_three), &
+            new_unittest("a composite hash map survives doublings and removals", &
+                test_composite_growth_remove), &
+            new_unittest("bulk composite lookups compare every component, in blocks", &
+                test_composite_bulk_shared_first), &
             new_unittest("set inserts, replaces, and raises the watermark", test_set_upsert), &
             new_unittest("set on a fresh map starts a hash map", test_set_autoinit), &
             new_unittest("get_or_add numbers distinct keys densely", test_get_or_add_dense), &
@@ -1080,6 +1084,138 @@ contains
         end do
     end subroutine test_composite_three
 
+    !> A composite hash map keeps every tuple through table doublings and backward-shift
+    !! removals: the interleaved record layout's insert, rehash, remove and enumerate paths, on
+    !! integer tuples rather than only through the string map that shares them.
+    subroutine test_composite_growth_remove(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: listed(:,:)
+        integer(int64) :: i, a, b, v
+        integer :: kept
+
+        ! 6000 tuples through %set on a map that starts at the minimum capacity, so the table
+        ! doubles many times; the first component walks a prime modulus, the second is a
+        ! multiple of 4096, which is the shape a weak per-half mixer would cluster on.
+        call m%init(ncomp=2)
+        do i = 1_int64, 6000_int64
+            a = mod(i * 7919_int64, 1000003_int64)
+            b = i * 4096_int64
+            call m%set([a, b], i)
+        end do
+        call check(error, m%nkeys() == 6000_int64, "every tuple set is stored through the doublings")
+        if (allocated(error)) return
+        ! Remove every third tuple; every survivor must still be found and every removed one
+        ! absent -- the backward shift must move exactly the entries whose chain it broke.
+        do i = 3_int64, 6000_int64, 3_int64
+            a = mod(i * 7919_int64, 1000003_int64)
+            b = i * 4096_int64
+            call m%remove([a, b])
+        end do
+        call check(error, m%nkeys() == 4000_int64, "removal lowers the count by the removed tuples")
+        if (allocated(error)) return
+        do i = 1_int64, 6000_int64
+            a = mod(i * 7919_int64, 1000003_int64)
+            b = i * 4096_int64
+            v = m%get([a, b])
+            if (mod(i, 3_int64) == 0_int64) then
+                call check(error, v == 0_int64, "a removed tuple must answer 0")
+            else
+                call check(error, v == i, "a surviving tuple must keep its value through the removals")
+            end if
+            if (allocated(error)) return
+        end do
+        ! And %keys lists exactly the survivors, each of which the map still answers.
+        call m%keys(listed)
+        call check(error, size(listed, 1, kind=int64) == 4000_int64 .and. size(listed, 2) == 2, &
+            "keys() is shaped (survivors, 2)")
+        if (allocated(error)) return
+        kept = 0
+        do i = 1_int64, 4000_int64
+            v = m%get(listed(i, :))
+            if (v > 0_int64 .and. mod(v, 3_int64) /= 0_int64) kept = kept + 1
+        end do
+        call check(error, kept == 4000, "every listed tuple is a stored survivor")
+    end subroutine test_composite_growth_remove
+
+    !> The bulk composite lookup compares EVERY component of a record, for pairs and for wider
+    !! tuples alike, and gets every block boundary right.
+    !!
+    !! Every tuple here shares its first component with EVERY other -- `(7, i)`, and `(7, i, 11)`
+    !! -- so a probe that matched a record on its first component alone answers wrongly whenever
+    !! its walk meets any other record before its own, which at a load of 0.6 is a fifth of the
+    !! lookups. (A fixture sharing the first component among three tuples only let exactly that
+    !! defect survive in the general kernel: a walk rarely met one of two neighbours.) Pairs and
+    !! triples take different kernels underneath (`ix_probe_2_block` and `ix_probe_n_block`), so
+    !! both are built; 3000 rows is 46 full probe blocks and a partial one; and the `int32` key
+    !! form goes through its own chunk loop. The scalar `%get` is the oracle for every row.
+    subroutine test_composite_bulk_shared_first(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m2, m3
+        integer(int64), parameter :: n = 3000_int64
+        integer(int64) :: pairs(n, 2), triples(n, 3), got(n), i
+        integer(int32) :: pairs32(n, 2), got32(n)
+        integer :: bad
+
+        do i = 1_int64, n
+            pairs(i, 1) = 7_int64
+            pairs(i, 2) = i
+            triples(i, 1) = 7_int64
+            triples(i, 2) = i
+            triples(i, 3) = 11_int64
+        end do
+        pairs32 = int(pairs, int32)
+        call m2%build(pairs, method="hash")
+        call m3%build(triples, method="hash")
+        call check(error, m2%nkeys() == n .and. m3%nkeys() == n, "every tuple is distinct and stored")
+        if (allocated(error)) return
+        call m2%get_many(pairs, got, threads=1)
+        bad = 0
+        do i = 1_int64, n
+            if (got(i) /= i) bad = bad + 1
+        end do
+        call check(error, bad == 0, "a bulk pair lookup must compare both components: " // &
+            "every tuple shares its first one")
+        if (allocated(error)) return
+        call m2%get_many(pairs32, got32, threads=1)
+        bad = 0
+        do i = 1_int64, n
+            if (int(got32(i), int64) /= i) bad = bad + 1
+        end do
+        call check(error, bad == 0, "the int32 pair form answers the same rows")
+        if (allocated(error)) return
+        call m3%get_many(triples, got, threads=1)
+        bad = 0
+        do i = 1_int64, n
+            if (got(i) /= i) bad = bad + 1
+        end do
+        call check(error, bad == 0, "a bulk triple lookup must compare every component")
+        if (allocated(error)) return
+        do i = 1_int64, n, 7_int64
+            call check(error, m2%get(pairs(i, :)) == i .and. m3%get(triples(i, :)) == i, &
+                "the scalar lookups agree with the bulk ones")
+            if (allocated(error)) return
+        end do
+        ! And a tuple whose first component is stored but whose later ones are not is a miss,
+        ! through the bulk kernels as well as the scalar probe.
+        call check(error, m2%get([7_int64, n + 1_int64]) == 0_int64 .and. &
+            m3%get([7_int64, 5_int64, 8_int64]) == 0_int64, &
+            "a tuple differing only in a later component is absent")
+        if (allocated(error)) return
+        do i = 1_int64, n
+            pairs(i, 2) = n + i
+            triples(i, 3) = 12_int64
+        end do
+        call m2%get_many(pairs, got, threads=1)
+        call m3%get_many(triples(:, :), got32, threads=1)
+        bad = 0
+        do i = 1_int64, n
+            if (got(i) /= 0_int64 .or. got32(i) /= 0_int32) bad = bad + 1
+        end do
+        call check(error, bad == 0, "bulk lookups of tuples differing only in a later " // &
+            "component must all miss")
+    end subroutine test_composite_bulk_shared_first
+
     ! ---- Mutation ----
 
     !> `%set` inserts a new key, replaces an existing one, and tracks the watermark.
@@ -1423,6 +1559,29 @@ contains
         if (allocated(error)) return
         do r = 1_int64, 2500_int64
             call check(error, m%get(pairs(r, :)) == r, "every lattice tuple is findable")
+            if (allocated(error)) return
+        end do
+        ! And a lattice that varies only in the HIGH words: the tuple hash runs one chain over
+        ! the components' low halves and another over their high halves, so this is the case
+        ! the second chain exists for -- a hash reading the low halves alone would send all 2500
+        ! tuples to one slot.
+        r = 0_int64
+        do a = 1_int64, 50_int64
+            do b = 1_int64, 50_int64
+                r = r + 1_int64
+                pairs(r, 1) = a * 4294967296_int64
+                pairs(r, 2) = b * 4294967296_int64
+            end do
+        end do
+        call m%build(pairs, method="hash")
+        call m%probe_stats(maxp, meanp)
+        call check(error, maxp <= 40_int64, &
+            "a composite lattice varying only in the high words must not cluster")
+        if (allocated(error)) return
+        call check(error, meanp < 3.0_real64, "and must average close to one probe too")
+        if (allocated(error)) return
+        do r = 1_int64, 2500_int64, 7_int64
+            call check(error, m%get(pairs(r, :)) == r, "every high-word lattice tuple is findable")
             if (allocated(error)) return
         end do
     end subroutine test_clustering_composite

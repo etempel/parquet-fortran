@@ -2763,6 +2763,8 @@ program error_scenarios
         call scenario_index_keys_rank1_on_composite()
     case ("index_control")
         call scenario_index_control()
+    case ("index_concurrent_abort")
+        call scenario_index_concurrent_abort()
     case ("multimap_build_values_length")
         call scenario_multimap_build_values_length()
     case ("multimap_build_value_zero")
@@ -23950,6 +23952,22 @@ contains
         if (m%nkeys() /= 2_int64) error stop "control: masked build"
         print '(a)', "index control finished"
     end subroutine scenario_index_control
+    !
+    !> Two threads each build a map with a duplicate key at the same moment, so that two aborts
+    !> race. A `%build` runs outside the map's lock, and `ix_abort` -- the module's serialised
+    !> reporter -- is what lets exactly one thread reach `error stop`, so the run exits 1 with the
+    !> message intact rather than with two threads terminating at once (an undefined exit status
+    !> under ifx). Without OpenMP the region is one thread and the first build aborts alone.
+    subroutine scenario_index_concurrent_abort()
+        type(pf_index_map) :: maps(2)
+        integer :: t
+
+        !$omp parallel do num_threads(2) default(shared) private(t)
+        do t = 1, 2
+            call maps(t)%build([10_int64, 20_int64, 30_int64, 20_int64], method="hash")
+        end do
+        print '(a)', "two concurrent builds with duplicate keys were accepted"
+    end subroutine scenario_index_concurrent_abort
 
     ! ---- parquet_index: pf_index_multimap ----
     !

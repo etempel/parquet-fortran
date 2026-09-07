@@ -84,6 +84,7 @@ module parquet_index
     public :: pf_index_max_components
     public :: parquet_debug_index_threads_used
     public :: parquet_debug_index_get_many_threads_used
+    public :: parquet_debug_index_concurrent_builds
     public :: parquet_debug_set_index_pair_limit
     public :: parquet_debug_set_index_string_hash_bits
     !
@@ -184,11 +185,13 @@ module parquet_index
     !! Records what `ix_threads_for` RESOLVED, not `omp_get_num_threads()` from inside the region:
     !! the decision is what is under test, not the runtime's response to it.
     !!
-    !! **Written only by `ix_threads_for`, which is reached only from the two build workers, which
-    !! run inside `pf_index_map_guard`** -- so the write is serialized and a concurrent build cannot
-    !! interleave with one. `pf_index_threads` deliberately does NOT record: it is a public query a
-    !! user may call at any time, and letting it write here would let an unrelated call clobber what
-    !! a build had just reported. That is why the rule is split into `ix_threads_rule` (decides) and
+    !! **Written only by `ix_threads_for`, which is reached only from the build workers**, with an
+    !! atomic store: a build runs OUTSIDE `pf_index_map_guard` (see `ix_adopt`), so two builds on
+    !! two threads may resolve at once, and the record is then simply the last to resolve -- which
+    !! is all a test may rely on, and why the threading tests build one map at a time.
+    !! `pf_index_threads` deliberately does NOT record: it is a public query a user may call at any
+    !! time, and letting it write here would let an unrelated call clobber what a build had just
+    !! reported. That is why the rule is split into `ix_threads_rule` (decides) and
     !! `ix_threads_for` (decides and records).
     integer, save :: dbg_index_threads_used = 1
 
@@ -198,13 +201,23 @@ module parquet_index
     !! lookup answers identically at every team size, so nothing about its answers can tell an
     !! honoured `threads=` from one that was ignored, or a team that was opened from one that
     !! silently collapsed to a single thread. Kept apart from the build's counter because the two
-    !! are written on different paths -- the build's under `pf_index_map_guard`, this one lock-free
+    !! are written on different paths -- the build's from the thread that is building, this one
     !! from whichever thread called `%get_many` -- so one counter for both would let a probe clobber
     !! what a build had just reported under a test's feet, or the reverse. Written with an atomic
     !! store, so concurrent bulk lookups cannot tear it; which of them is reported is then simply
     !! the last to resolve its team, which is all a test may rely on. Written only by
     !! `ix_lookup_threads_for`, which every `%get_many` specific reaches.
     integer, save :: dbg_index_get_many_threads_used = 1
+
+    !> Builds running right now outside `pf_index_map_guard`, and the most that were ever running
+    !! at once -- the second is what `parquet_debug_index_concurrent_builds` reports.
+    !!
+    !! Test-only, and the only observable a test of "a build does not hold the lock" has: a build
+    !! answers identically whether it ran beside another or waited for it, so nothing about the
+    !! maps can tell the two apart. `ix_build_begin` raises both atomically on entry to a build
+    !! worker and `ix_adopt` lowers the first once the result is swapped in.
+    integer, save :: dbg_index_builds_in_flight = 0
+    integer, save :: dbg_index_concurrent_builds = 0 !! see `dbg_index_builds_in_flight`.
 
     !> Pair count above which `pf_index_multimap%probe_many` refuses to answer: `huge(int64)`
     !! unless a test has lowered it through `parquet_debug_set_index_pair_limit`.
@@ -246,11 +259,10 @@ module parquet_index
     !> One `(key, value)` pair of a single-component hash table, kept as one 16-byte record so
     !! that a probe touches one cache line rather than two.
     !!
-    !! A composite map cannot use this -- an AoS slot whose width is a runtime `ncomp` is not
-    !! expressible without allocating per slot -- so it stores `hkeys(ncomp, cap)` beside
-    !! `hvals(cap)` and pays the second cache line per probe. At a load factor of 0.6 the first
-    !! probe is usually the hit, which is what makes that acceptable for arbitrary `ncomp` and not
-    !! acceptable for the common single-component case.
+    !! A composite map cannot use this type -- a record whose width is a runtime `ncomp` is not
+    !! expressible as a derived type -- so it keeps the same shape as one column of
+    !! `hrec(ncomp + 1, cap)`: the tuple, then its value, one contiguous record per slot, for the
+    !! same one-cache-line probe. See `parquet_index_hash.f90` for the two layouts side by side.
     type :: ix_slot
         integer(int64) :: key = 0_int64 !! the stored key; meaningless unless `val > 0`.
         integer(int64) :: val = 0_int64 !! the stored index value; **0 marks the slot empty**.
@@ -328,10 +340,12 @@ module parquet_index
         integer(int64), allocatable :: dstride(:) !! see `dkmin`.
         !> Hash backend, single component: the table. Always a power of two in size.
         type(ix_slot), allocatable :: slots(:)
-        !> Hash backend, composite keys: the tuples, one column per slot, beside their values.
-        integer(int64), allocatable :: hkeys(:,:)
-        integer(int64), allocatable :: hvals(:) !! see `hkeys`. **0 marks the slot empty.**
-        !> Slots in the hash table, i.e. `size(slots)` or `size(hvals)`. A power of two, so the
+        !> Hash backend, composite keys: one record per slot, `hrec(1:ncomp, s)` the tuple and
+        !! `hrec(ncomp + 1, s)` its value, **0 marking the slot empty** -- interleaved, so that a
+        !! probe touches one cache line for `ncomp <= 7` rather than a line of keys and a line of
+        !! values.
+        integer(int64), allocatable :: hrec(:,:)
+        !> Slots in the hash table, i.e. `size(slots)` or `size(hrec, 2)`. A power of two, so the
         !! slot index is `iand(h, hcap - 1)` and never a runtime-divisor `mod`.
         integer(int64) :: hcap = 0_int64
         !> Sorted backend: ascending keys and their values, exact-fit, no slack.
@@ -3678,14 +3692,31 @@ module parquet_index
         !> Test-only. Threads the last `%get_many` resolved for itself; 1 means it ran serial.
         !!
         !! The lookup twin of `parquet_debug_index_threads_used`, kept separate because the two
-        !! are written from different places -- a build records under the map's guard, a bulk
-        !! lookup records lock-free from whichever thread called it -- and one counter for both
+        !! are written from different places -- a build records from the thread building it, a
+        !! bulk lookup from whichever thread called it -- and one counter for both
         !! would let a probe overwrite what a build had just reported, or the reverse, under a
         !! test that reads it. Reports what the rule RESOLVED, not the team the runtime granted,
         !! because the decision is what a threading test of the bulk lookup is about.
         module function parquet_debug_index_get_many_threads_used() result(n)
             integer :: n !! threads the last bulk lookup resolved; 1 means it ran serial.
         end function parquet_debug_index_get_many_threads_used
+    end interface
+
+    interface
+        !> Test-only. The largest number of `%build`s that have run at the same time, on any maps,
+        !! since the program started or since the last call with `reset=.true.`.
+        !!
+        !! A build runs outside the map's lock and takes it only to swap its result in
+        !! (`ix_adopt`), so two threads building two maps run side by side. Nothing about the maps
+        !! can show that they did -- a build answers identically whether it ran beside another or
+        !! waited for it -- and this high-water mark is the one observable that can, which is what
+        !! makes a test of the property non-vacuous. `reset=.true.` sets the mark back to the
+        !! number of builds running now (0 from a serial test) after reading it, so that a test's
+        !! own builds are what it measures rather than an earlier test's.
+        module function parquet_debug_index_concurrent_builds(reset) result(n)
+            logical, intent(in), optional :: reset !! `.true.` to reset the mark after reading it.
+            integer :: n !! the high-water mark.
+        end function parquet_debug_index_concurrent_builds
     end interface
 
     interface
@@ -3717,26 +3748,39 @@ module parquet_index
 
     ! ---- Cross-submodule private helpers ----
     !
-    ! Declared here rather than contained in a submodule because their callers live in a SIBLING
-    ! submodule: a private procedure contained directly in the module and called only from a
-    ! submodule compiles and then fails to LINK under gfortran, and host association does not
-    ! reach sideways. Every one takes a `type(pf_index_map)` dummy rather than `class` -- a `class`
-    ! actual passed to a `type` dummy is free, while the reverse builds a runtime class descriptor
-    ! in the caller's prologue on every call (see CLAUDE.md's typed-accessor-tier section).
+    ! Declared here rather than contained in a submodule because their callers live in ANOTHER
+    ! submodule -- a sibling, or the parent of the one holding the body: a private procedure
+    ! contained directly in the module and called only from a submodule compiles and then fails
+    ! to LINK under gfortran, and host association reaches an ancestor's helpers but never a
+    ! sibling's or a descendant's. The hash backend's mutation side (`parquet_index_hash.f90`)
+    ! descends from `parquet_index_map`, which calls it, so its entries are declared here; the
+    ! mixer and the lookup probes go the other way (the descendant calls the parent) and are
+    ! plain contained procedures of `parquet_index_map.f90`. Every one takes a
+    ! `type(pf_index_map)` dummy rather than `class` -- a `class` actual passed to a `type` dummy
+    ! is free, while the reverse builds a runtime class descriptor in the caller's prologue on
+    ! every call (see CLAUDE.md's typed-accessor-tier section).
 
     interface
-        !> The index stored for a single-component key in the hash backend, or 0.
-        pure module function ix_hash_find_scalar(self, key) result(v)
-            type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_HASH`.
-            integer(int64), intent(in) :: key !! the key, already widened.
-            integer(int64) :: v !! the stored value, or 0 when absent.
-        end function ix_hash_find_scalar
-        !> The index stored for a key tuple in the hash backend, or 0.
-        pure module function ix_hash_find_tuple(self, key) result(v)
-            type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_HASH`.
-            integer(int64), intent(in) :: key(:) !! the tuple, already widened, `size == self%ncomp`.
-            integer(int64) :: v !! the stored value, or 0 when absent.
-        end function ix_hash_find_tuple
+        !> Every abort of the index types goes through here: one process-wide critical around
+        !! the `error stop`, so that at most one thread ever reaches it.
+        !!
+        !! A `%build` runs OUTSIDE `pf_index_map_guard` (`ix_adopt` takes it only for the swap),
+        !! so two threads building two maps can fail at the same moment -- and several threads
+        !! terminating at once leaves the process exit status undefined under ifx (CLAUDE.md's
+        !! ifx gotchas) and interleaves the messages. The guard used to rule that out for the
+        !! mutation surface by holding every check inside the region; this rules it out for every
+        !! impure abort of every index type, guarded or not, with one mechanism. The critical is
+        !! named apart from both type guards, so an abort from inside either region is a nested
+        !! critical of a DIFFERENT name, which is conforming; the thread that takes it never
+        !! releases it, and every other thread that reaches an abort waits behind it until the
+        !! process exits. What it cannot cover is the `pure` checks the lock-free lookups run
+        !! (`ix_check_scalar_shape` and its kin): an OpenMP directive may not appear in a pure
+        !! procedure, so those keep a bare `error stop` -- as they always had, a lookup never
+        !! having held a lock. `tools/check_source_conventions.py` holds the rule that no other
+        !! impure procedure of these submodules aborts directly.
+        module subroutine ix_abort(msg)
+            character(len=*), intent(in) :: msg !! the message, fully assembled by the caller.
+        end subroutine ix_abort
         !> Inserts or replaces one single-component key in the hash backend.
         !!
         !! Separate from the tuple form rather than reached through it, because the build's insert
@@ -3757,7 +3801,7 @@ module parquet_index
         !> Inserts or replaces one key in the hash backend, growing the table when it must.
         module subroutine ix_hash_insert(self, key, value, is_new)
             type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`.
-            integer(int64), intent(in) :: key(:) !! the tuple, `size == self%ncomp`.
+            integer(int64), intent(in), contiguous :: key(:) !! the tuple, `size == self%ncomp`; contiguous, as the hash needs.
             integer(int64), intent(in) :: value !! the value to store; caller has checked `>= 1`.
             logical, intent(out) :: is_new !! `.true.` when the key was not already present.
         end subroutine ix_hash_insert
@@ -3768,7 +3812,7 @@ module parquet_index
         !! would otherwise pay for in an ever-growing rehash policy.
         module subroutine ix_hash_remove(self, key, found)
             type(pf_index_map), intent(inout) :: self !! a map whose backend is `IX_HASH`.
-            integer(int64), intent(in) :: key(:) !! the tuple, `size == self%ncomp`.
+            integer(int64), intent(in), contiguous :: key(:) !! the tuple, `size == self%ncomp`; contiguous, as the hash needs.
             logical, intent(out) :: found !! `.true.` when the key was there to remove.
         end subroutine ix_hash_remove
         !> Sizes the hash table so `want` keys fit under the load factor, rehashing if needed.
@@ -3787,21 +3831,6 @@ module parquet_index
             type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_HASH`.
             integer(int64), intent(out) :: out(:,:) !! shaped `(nkeys, ncomp)`; filled in slot order.
         end subroutine ix_hash_collect
-        !> The hash of a string's bytes: the module's own mixer chained over 8-byte words, with
-        !! the length mixed in first, so that no second hash family enters the module and the
-        !! clustering tests hold it to the integer mixer's standard. Narrowed by the debug hook
-        !! `parquet_debug_set_index_string_hash_bits`, which is read here and nowhere else.
-        !!
-        !! **`b` is an EXPLICIT-SHAPE dummy on purpose.** A scalar `character` actual associates
-        !! with an explicit-shape `character(len=1)` array dummy by character sequence
-        !! association (F2018 15.5.2.11), so this one function hashes a scalar key, an element of
-        !! a `character` array and a slice of a packed payload alike, with no copy and no
-        !! `transfer`. An assumed-shape dummy would refuse the scalar.
-        pure module function ix_hash_str(b, n) result(h)
-            integer(int64), intent(in) :: n !! bytes to hash; may be 0.
-            character(len=1), intent(in) :: b(n) !! the bytes.
-            integer(int64) :: h !! a mixed bit pattern; only its low bits are used.
-        end function ix_hash_str
         !> The index stored for a key in the sorted backend, or 0. Binary search.
         pure module function ix_sorted_find(self, key) result(v)
             type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_SORTED`.

@@ -5121,6 +5121,113 @@ def check_join_specifics_forward_every_argument():
     return problems
 
 
+def check_index_map_components_are_adopted_and_reset():
+    """`ix_adopt` moves and `ix_reset_storage` releases EVERY component of `pf_index_map`.
+
+    A `%build` fills a LOCAL map on the calling thread and `ix_adopt` (src/parquet_index_map.f90)
+    swaps its storage into the caller's object under the guard, one `move_alloc` per allocatable
+    component and one assignment per scalar; `ix_reset_storage` is the matching release. A
+    component added to the type and forgotten in either would leave every built map without it,
+    silently -- nothing aborts, the map simply answers as if the component were at its default --
+    and no run-based test can see a component that is not there. So the rule is held from the
+    source: every component declared in the type's body must be named in both procedures, in the
+    form each uses. See `feature_risks.md` Risk-213.
+    """
+    problems = []
+    spec = SRC / "parquet_index.f90"
+    body = type_body_lines(spec, "pf_index_map")
+    if body is None:
+        return ["%s: could not find `type :: pf_index_map` -- this check needs updating"
+                % spec.relative_to(REPO_ROOT)]
+    components = []
+    for lineno, line in body:
+        code = strip_comment(line).strip()
+        if not code or code.lower().startswith("private"):
+            continue
+        match = re.match(r"^(integer|logical|character|type|real)\b(.*?)::\s*(\w+)", code, re.IGNORECASE)
+        if match:
+            components.append((match.group(3), "allocatable" in match.group(2).lower()))
+    if len(components) < 10:
+        return ["%s: found only %d components of pf_index_map -- this check needs updating"
+                % (spec.relative_to(REPO_ROOT), len(components))]
+    map_path = SRC / "parquet_index_map.f90"
+    bodies = {name: text for name, _, text in procedure_bodies(map_path)}
+    for proc in ("ix_adopt", "ix_reset_storage"):
+        if proc not in bodies:
+            return ["%s: no `%s` body found -- this check needs updating"
+                    % (map_path.relative_to(REPO_ROOT), proc)]
+    for name, allocatable in components:
+        if allocatable:
+            want_adopt = re.search(r"move_alloc\(fresh%%%s,\s*self%%%s\)" % (name, name), bodies["ix_adopt"])
+            want_reset = re.search(r"deallocate\(self%%%s\)" % name, bodies["ix_reset_storage"])
+        else:
+            want_adopt = re.search(r"self%%%s\s*=\s*fresh%%%s\b" % (name, name), bodies["ix_adopt"])
+            want_reset = re.search(r"self%%%s\s*=" % name, bodies["ix_reset_storage"])
+        if not want_adopt:
+            problems.append("%s: ix_adopt does not %s pf_index_map's component `%s` -- every "
+                            "%%build would silently lose it"
+                            % (map_path.relative_to(REPO_ROOT),
+                               "move_alloc" if allocatable else "assign", name))
+        if not want_reset:
+            problems.append("%s: ix_reset_storage does not %s pf_index_map's component `%s`"
+                            % (map_path.relative_to(REPO_ROOT),
+                               "deallocate" if allocatable else "reset", name))
+    return problems
+
+
+#: The parquet_index submodules whose impure aborts must go through the serialised reporter.
+INDEX_SUBMODULES = ("parquet_index_map.f90", "parquet_index_hash.f90", "parquet_index_sorted.f90",
+                    "parquet_index_multi.f90", "parquet_index_str.f90", "parquet_index_pool.f90")
+INDEX_PROC_HEAD = re.compile(
+    r"^\s*((?:pure|impure|elemental|recursive|module)\s+)*(subroutine|function)\s+(\w+)", re.IGNORECASE)
+INDEX_MODPROC = re.compile(r"^\s*module\s+procedure\s+(\w+)", re.IGNORECASE)
+INDEX_PROC_END = re.compile(r"^\s*end\s+(subroutine|function|procedure)\b", re.IGNORECASE)
+
+
+def check_index_aborts_go_through_reporter():
+    """Every `error stop` in an IMPURE procedure of the parquet_index submodules is `ix_abort`.
+
+    A `%build` runs OUTSIDE `pf_index_map_guard` (it fills a local map and `ix_adopt` swaps it in
+    under the guard), so two threads building two maps can fail at the same moment -- and several
+    threads terminating at once leaves the exit status undefined under ifx and interleaves the
+    messages. `ix_abort` (declared in src/parquet_index.f90, one process-wide critical around the
+    `error stop`) is what keeps at most one thread on the fatal path, for every index type. It
+    only works if every impure abort goes through it, and a new `error stop` written the natural
+    way compiles and passes every scenario. A `pure` procedure cannot call it (an OpenMP directive
+    may not appear in a pure procedure), so those keep a bare `error stop`; a `module procedure`
+    body is pure when the spec declares its interface `pure`. See `feature_risks.md` Risk-179.
+    """
+    problems = []
+    spec = (SRC / "parquet_index.f90").read_text()
+
+    def spec_is_pure(name):
+        return re.search(r"\bpure\s+(?:elemental\s+)?module\s+(?:function|subroutine)\s+%s\b" % name,
+                         spec, re.IGNORECASE) is not None
+
+    for filename in INDEX_SUBMODULES:
+        path = SRC / filename
+        stack = []
+        for lineno, line in enumerate(path.read_text().split("\n"), start=1):
+            code = strip_comment(line)
+            head = INDEX_PROC_HEAD.match(code)
+            if head and not re.match(r"^\s*end\b", code, re.IGNORECASE):
+                prefixes = head.group(0).lower()
+                stack.append((head.group(3), "pure" in prefixes or "elemental" in prefixes))
+            else:
+                modproc = INDEX_MODPROC.match(code)
+                if modproc:
+                    stack.append((modproc.group(1), spec_is_pure(modproc.group(1))))
+            if INDEX_PROC_END.match(code) and stack:
+                stack.pop()
+            if re.search(r"\berror\s+stop\b", code, re.IGNORECASE) and stack:
+                name, pure = stack[-1]
+                if not pure and name.lower() != "ix_abort":
+                    problems.append("%s:%d: `error stop` in the impure procedure `%s` -- route it "
+                                    "through `call ix_abort(...)`, the serialised reporter:\n    %s"
+                                    % (path.relative_to(REPO_ROOT), lineno, name, line.strip()))
+    return problems
+
+
 def check_no_leadz():
     """`LEADZ` must not appear in this project's Fortran at all -- `trailz` is the way.
 
@@ -5374,6 +5481,10 @@ def check_no_doc_block_opens_with_a_ford_metadata_key():
 
 CHECKS = (
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
+    ("pf_index_map components are adopted and reset",
+     check_index_map_components_are_adopted_and_reset),
+    ("every impure parquet_index abort goes through ix_abort",
+     check_index_aborts_go_through_reporter),
     ("every error scenario uses the pure result it computes",
      check_scenario_uses_a_pure_result),
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),

@@ -120,6 +120,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   by the rule a build follows (automatic, capped by `index_threads`, serial inside a parallel
   region), and takes `threads=` to say otherwise; it is no longer `pure`. See
   [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses).
+- **`pf_index_map` builds run outside the type's lock**, which a `%build` now takes only to swap
+  its finished result in, so builds of different maps on different threads no longer take turns.
+  Hash lookups are faster: `%get_many` probes a block of keys at a time, about twice as fast on a
+  map larger than the cache; a composite key's tuple and value sit in one record per slot, and the
+  tuple hash costs about a third of what it did. The order `%keys()` lists a composite hash map in
+  has changed (it was and remains unspecified). See
+  [Threading](doc/pages/utilities/index-maps.md#threading).
 
 ### Fixed
 

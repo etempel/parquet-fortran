@@ -36,11 +36,12 @@
 !! present one.
 !!
 !! **A descendant of `parquet_index_multi`, not a sibling**, so that host association reaches
-!! both the map's private helpers (the hash-table workers, the guards, the thread rule, the
-!! store's lifecycle in `parquet_index_map.f90`) and the multimap's (`mm_layout`, `mm_release`,
-!! the gathers and the probe passes). Every string-keyed `module procedure` of BOTH types lives
-!! here for that reason: the multimap's string build needs the map's string `%get_or_add_many`
-!! and the multimap's layout in one body.
+!! both the map's private helpers (the string hash and the tuple probe, the guards, the thread
+!! rule, `ix_adopt`, the store's lifecycle in `parquet_index_map.f90`) and the multimap's
+!! (`mm_layout`, `mm_release`, the gathers and the probe passes). Every string-keyed `module
+!! procedure` of BOTH types lives here for that reason: the multimap's string build needs the
+!! map's string `%get_or_add_many` and the multimap's layout in one body. A string `%build`
+!! builds into a local map and adopts it under the guard, exactly as the integer builds do.
 !!
 !! **A `parquet_string_column` is read in place.** The bulk forms alias the column's offsets and
 !! payload through `parquet_string_column_raw_buffers` and `c_f_pointer` -- no copy -- with the
@@ -74,49 +75,54 @@ submodule (parquet_index:parquet_index_multi) parquet_index_str
 contains
 
     ! ============================================================================================
-    ! pf_index_map: bulk build. Six forwarders onto two workers, under the map's guard.
+    ! pf_index_map: bulk build. Six forwarders onto two workers, each building into a LOCAL map
+    ! and adopting it under the guard (`ix_adopt`), as the integer builds do.
     ! ============================================================================================
 
     module procedure build_s1_nov
-        !$omp critical (pf_index_map_guard)
-        call ix_str_build_chr(self, keys, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_str_build_chr(fresh, keys, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_s1_nov
 
     module procedure build_s1_v32
         integer(int64), allocatable :: v(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_values(values, v)
-        !$omp critical (pf_index_map_guard)
-        call ix_str_build_chr(self, keys, values=v, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_str_build_chr(fresh, keys, values=v, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_s1_v32
 
     module procedure build_s1_v64
-        !$omp critical (pf_index_map_guard)
-        call ix_str_build_chr(self, keys, values=values, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_str_build_chr(fresh, keys, values=values, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_s1_v64
 
     module procedure build_sc_nov
-        !$omp critical (pf_index_map_guard)
-        call ix_str_build_col(self, keys, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_str_build_col(fresh, keys, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_sc_nov
 
     module procedure build_sc_v32
         integer(int64), allocatable :: v(:)
+        type(pf_index_map) :: fresh
 
         call ix_widen_values(values, v)
-        !$omp critical (pf_index_map_guard)
-        call ix_str_build_col(self, keys, values=v, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        call ix_str_build_col(fresh, keys, values=v, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_sc_v32
 
     module procedure build_sc_v64
-        !$omp critical (pf_index_map_guard)
-        call ix_str_build_col(self, keys, values=values, method=method, threads=threads, valid=valid)
-        !$omp end critical (pf_index_map_guard)
+        type(pf_index_map) :: fresh
+
+        call ix_str_build_col(fresh, keys, values=values, method=method, threads=threads, valid=valid)
+        call ix_adopt(self, fresh)
     end procedure build_sc_v64
 
     ! ============================================================================================
@@ -282,8 +288,8 @@ contains
     ! ============================================================================================
 
     module procedure map_keys_s
-        if (self%ncomp /= 0 .and. .not. self%is_str) error stop SP // &
-            "keys: this map holds integer keys; ask for an integer list"
+        if (self%ncomp /= 0 .and. .not. self%is_str) call ix_abort(SP // &
+            "keys: this map holds integer keys; ask for an integer list")
         call ix_str_collect(self, list)
     end procedure map_keys_s
 
@@ -711,8 +717,8 @@ contains
     end procedure mm_probe_sc_i64
 
     module procedure mm_keys_s
-        if (self%map%ncomp /= 0 .and. .not. self%map%is_str) error stop MM // &
-            "keys: this multimap holds integer keys; ask for an integer list"
+        if (self%map%ncomp /= 0 .and. .not. self%map%is_str) call ix_abort(MM // &
+            "keys: this multimap holds integer keys; ask for an integer list")
         call ix_str_collect(self%map, list)
     end procedure mm_keys_s
 
@@ -739,8 +745,8 @@ contains
         type(pf_index_map), intent(in) :: self !! the map.
         character(len=*), intent(in) :: what   !! procedure name, for the message.
 
-        if (self%ncomp /= 0 .and. .not. self%is_str) error stop SP // what // &
-            ": this map holds integer keys; use an integer key"
+        if (self%ncomp /= 0 .and. .not. self%is_str) call ix_abort(SP // what // &
+            ": this map holds integer keys; use an integer key")
     end subroutine ix_str_check_mutate
 
     !> Validates a string bulk call's shapes and returns the row count to walk. `ix_many_rows`'s
@@ -772,8 +778,8 @@ contains
         call ix_resolve_method(method, want, .true., what, owner)
         if (want == IX_DIRECT .or. want == IX_SORTED) then
             call ix_owner_of(owner, pfx)
-            error stop pfx // what // ": a string-keyed map is always hashed; method= must be " // &
-                """auto"" or ""hash"""
+            call ix_abort(pfx // what // ": a string-keyed map is always hashed; method= must be " // &
+                """auto"" or ""hash""")
         end if
     end subroutine ix_str_resolve_method
 
@@ -945,8 +951,8 @@ contains
 
         call ix_str_text(b, n, txt)
         write (pos, "(i0)") at
-        error stop SP // "build: duplicate key """ // txt // """ at position " // trim(pos) // &
-            " (every key must be unique)"
+        call ix_abort(SP // "build: duplicate key """ // txt // """ at position " // trim(pos) // &
+            " (every key must be unique)")
     end subroutine ix_str_report_duplicate
 
     !> Copies bytes into a scalar string, for a message. Cold path only.
@@ -1230,6 +1236,7 @@ contains
         integer :: nt
         logical :: hv, has_v, is_new
 
+        call ix_build_begin()
         n = size(keys, kind=int64)
         hv = present(valid)
         if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "build")
@@ -1243,7 +1250,7 @@ contains
         ! decision for the debug counter -- although this build's insert loop is serial, as the
         ! integer hash build's is; a partitioned string build is stage 6's business.
         nt = ix_threads_for(n, threads)
-        if (nt < 1) error stop SP // "build: the thread rule answered below 1"
+        if (nt < 1) call ix_abort(SP // "build: the thread rule answered below 1")
         call ix_reset_storage(self)
         call ix_mask_extent(n, valid, nv, first, last)
         call ix_str_start(self, nv)
@@ -1284,6 +1291,7 @@ contains
         integer :: nt
         logical :: has_v, is_new
 
+        call ix_build_begin()
         call ix_str_open_view(sc, v)
         n = v%n
         if (present(valid)) call ix_check_mask_len(size(valid, kind=int64), n, "build")
@@ -1295,7 +1303,7 @@ contains
         end if
         call ix_str_resolve_method(method, "build")
         nt = ix_threads_for(n, threads)
-        if (nt < 1) error stop SP // "build: the thread rule answered below 1"
+        if (nt < 1) call ix_abort(SP // "build: the thread rule answered below 1")
         call ix_reset_storage(self)
         call ix_mask_extent(n, eff, nv, first, last)
         call ix_str_start(self, nv)
@@ -1414,8 +1422,8 @@ contains
         type(pf_index_multimap), intent(in) :: self !! the multimap.
         character(len=*), intent(in) :: what        !! procedure name, for the message.
 
-        if (self%map%ncomp /= 0 .and. .not. self%map%is_str) error stop MM // what // &
-            ": this multimap holds integer keys; probe with integer keys"
+        if (self%map%ncomp /= 0 .and. .not. self%map%is_str) call ix_abort(MM // what // &
+            ": this multimap holds integer keys; probe with integer keys")
     end subroutine mm_str_check_probe
 
     !> Right-sizes the distinct-key map after a grouping pass that reserved for every row: the

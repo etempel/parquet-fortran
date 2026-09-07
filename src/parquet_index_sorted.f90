@@ -77,8 +77,8 @@ contains
         do i = 2_int64, n
             if (self%skeys(i) == self%skeys(i - 1_int64)) then
                 write (t, "(i0)") self%skeys(i)
-                error stop "pf_index_map%build: duplicate key " // trim(t) // &
-                    " (every key must be unique)"
+                call ix_abort("pf_index_map%build: duplicate key " // trim(t) // &
+                    " (every key must be unique)")
             end if
         end do
     end procedure ix_sorted_build

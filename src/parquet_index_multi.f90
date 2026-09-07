@@ -1135,10 +1135,10 @@ contains
         integer, intent(in) :: nc                   !! components presented per key.
         character(len=*), intent(in) :: what        !! procedure name, for the message.
 
-        if (self%map%is_str) error stop MM // what // &
-            ": this multimap holds string keys; probe with string keys"
-        if (self%map%ncomp > 0 .and. nc /= self%map%ncomp) error stop MM // what // &
-            ": the keys' component count does not match this multimap's"
+        if (self%map%is_str) call ix_abort(MM // what // &
+            ": this multimap holds string keys; probe with string keys")
+        if (self%map%ncomp > 0 .and. nc /= self%map%ncomp) call ix_abort(MM // what // &
+            ": the keys' component count does not match this multimap's")
     end subroutine mm_check_probe_shape
 
     !> Checks that a `valid=` mask has exactly one entry per key. Impure, being guard-only.
@@ -1147,7 +1147,7 @@ contains
         integer(int64), intent(in) :: n        !! keys presented.
         character(len=*), intent(in) :: what   !! procedure name, for the message.
 
-        if (nmask /= n) error stop MM // what // ": valid= must have exactly one element per key"
+        if (nmask /= n) call ix_abort(MM // what // ": valid= must have exactly one element per key")
     end subroutine mm_check_mask_len
 
     !> Refuses `threads=0`, with this type's name in the message; the map's rule would name the
@@ -1157,7 +1157,7 @@ contains
         character(len=*), intent(in) :: what     !! procedure name, for the message.
 
         if (.not. present(threads)) return
-        if (threads < 1) error stop MM // what // ": threads= must be at least 1"
+        if (threads < 1) call ix_abort(MM // what // ": threads= must be at least 1")
     end subroutine mm_check_threads
 
     !> Refuses an `int32` answer form when any stored value would not fit. Impure, being
@@ -1169,8 +1169,8 @@ contains
         type(pf_index_multimap), intent(in) :: self !! the multimap.
         character(len=*), intent(in) :: what        !! procedure name, for the message.
 
-        if (self%vmax > int(huge(0_int32), int64)) error stop MM // what // &
-            ": a stored value is too large for an int32 answer; take it as int64"
+        if (self%vmax > int(huge(0_int32), int64)) call ix_abort(MM // what // &
+            ": a stored value is too large for an int32 answer; take it as int64")
     end subroutine mm_check_int32_values
 
     !> The team for a bulk lookup over `n` rows, recorded for the debug counter.
@@ -1436,8 +1436,8 @@ contains
 
     !> Refuses a pair count the answer could not hold.
     subroutine mm_pair_overflow()
-        error stop MM // "probe_many: the pair count exceeds what the answer can hold in int64; " // &
-            "probe fewer keys at a time, or fewer that repeat this heavily"
+        call ix_abort(MM // "probe_many: the pair count exceeds what the answer can hold in int64; " // &
+            "probe fewer keys at a time, or fewer that repeat this heavily")
     end subroutine mm_pair_overflow
 
     ! ---- Storage lifecycle ----
@@ -1671,8 +1671,8 @@ contains
         allocate(slot(total), stat=ios)
         if (ios /= 0) then
             write (t, "(i0)") total
-            error stop MM // "build: could not allocate " // trim(t) // &
-                " slots for the direct backend; use method=""hash"" for keys this widely spread"
+            call ix_abort(MM // "build: could not allocate " // trim(t) // &
+                " slots for the direct backend; use method=""hash"" for keys this widely spread")
         end if
         slot = 0_int64
     end subroutine mm_alloc_slots
@@ -1872,8 +1872,8 @@ contains
             call mm_scan_1(keys, valid, hv, first, lo, hi)
             if (want == IX_DIRECT) then
                 call ix_span_ok(lo, hi, huge(0_int64), span, fits)
-                if (.not. fits) error stop MM // "build: method=""direct"" cannot cover this " // &
-                    "key range; it exceeds the whole int64 domain. Use method=""hash""."
+                if (.not. fits) call ix_abort(MM // "build: method=""direct"" cannot cover this " // &
+                    "key range; it exceeds the whole int64 domain. Use method=""hash"".")
             else
                 call ix_span_ok(lo, hi, ix_budget(nv), span, fits)
             end if
@@ -1913,9 +1913,9 @@ contains
         end if
         call mm_check_threads(threads, "build")
         call ix_resolve_method(method, want, .true., "build", MM)
-        if (want == IX_SORTED .and. nc > 1) error stop MM // "build: " // &
+        if (want == IX_SORTED .and. nc > 1) call ix_abort(MM // "build: " // &
             "method=""sorted"" supports single-component keys only; use ""hash"" or ""direct"" " // &
-            "for composite keys"
+            "for composite keys")
         call mm_release(self)
         call ix_mask_extent(n, valid, nv, first, last)
         if (nv == 0_int64) then
@@ -1935,9 +1935,9 @@ contains
             budget = ix_budget(nv)
             if (want == IX_DIRECT) budget = huge(0_int64)
             call mm_product_fits(lo(1:nc), hi(1:nc), budget, fits, sp(1:nc), total)
-            if (.not. fits .and. want == IX_DIRECT) error stop MM // "build: method=""direct"" " // &
+            if (.not. fits .and. want == IX_DIRECT) call ix_abort(MM // "build: method=""direct"" " // &
                 "cannot cover these key ranges; their product exceeds the int64 domain. Use " // &
-                "method=""hash""."
+                "method=""hash"".")
             if (fits) then
                 st(1) = 1_int64
                 do j = 2, nc

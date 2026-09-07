@@ -99,6 +99,7 @@ something a reader is expected to have.
 | [Risk-212](#risk-212--a-string-maps-occurrence-chain-must-stay-dense-and-a-hit-must-be-verified-against-the-stored-bytes) | A string map's occurrence chain must stay DENSE, and a hit must be verified against the stored bytes | 4 — covered |
 | [Risk-213](#risk-213--a-build-swaps-every-component-of-pf_index_map-in-under-the-guard-and-a-forgotten-one-is-silently-lost) | A build swaps EVERY component of `pf_index_map` in under the guard, and a forgotten one is silently lost | 4 — covered |
 | [Risk-214](#risk-214--a-partitioned-hash-insert-must-never-write-outside-its-own-slot-range-and-a-deferred-key-is-placed-only-after-every-range-is-done) | A partitioned hash insert must never write outside its own slot range, and a deferred key is placed only after every range is done | 4 — covered |
+| [Risk-215](#risk-215--the-sorted-backends-prefix-bucket-is-an-arithmetic-shift-and-a-subtraction-that-cannot-overflow-and-the-range-test-in-front-of-it-is-what-keeps-it-in-bounds) | The sorted backend's prefix bucket is an arithmetic shift and a subtraction that cannot overflow, and the range test in front of it is what keeps it in bounds | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8283,3 +8284,35 @@ the renumbering breaks. Verified by negative control: skipping the spill pass fa
 and renumbering after the spill pass fails the third. What it forbids: "optimising" the range
 test into a wrap, moving the spill pass into the parallel region, and reordering the
 `%get_or_add_many` driver's passes.
+
+### Risk-215 — The sorted backend's prefix bucket is an arithmetic shift and a subtraction that cannot overflow, and the range test in front of it is what keeps it in bounds
+
+The sorted backend's lookup (`ix_sorted_find`, `src/parquet_index_sorted.f90`) no longer searches
+the whole key array: it computes the key's prefix bucket, `shifta(key, spshift) - spbase`, reads
+where that bucket starts and ends in the prefix table, and searches that bucket alone. A wrong
+bucket is a SILENT MISS — the search runs over the wrong slice, finds nothing, and `%get` answers 0
+for a key the map holds, with nothing to say so. Two things keep the arithmetic exact at the ends
+of `int64`, and both look like pedantry until a key sits there. **The shift is at least 1 by
+construction** (the table has at most an eighth as many buckets as keys, and distinct keys span at
+least their count, so the span always reaches the bucket count), which puts both shifted terms in
+`-2**62 .. 2**62 - 1` and makes their difference overflow-free; the obvious spelling,
+`shiftr(key - kmin, s)`, overflows the subtraction for a map holding keys at both ends — and
+happens to give the RIGHT bucket wherever the compiler wraps it (the wrapped difference is the
+unsigned one, and a logical shift reads it as such), which is why no test can hold this rule: it
+survived as a mutation on gfortran, the overflow is undefined all the same, nagfor's `-C=intovf`
+aborts on it, and Risk-94 records what an optimiser may infer from one. **The span itself is
+formed only after the nested `huge + kmin` test** `ix_span_ok` uses, and a span past `huge` is
+handled without ever forming it — the shift is then chosen to leave exactly the bucket count's
+bits. And **the range test comes first**: a key below `skeys(1)` or above `skeys(nk)` answers 0
+before any bucket is computed, because the bucket function has no bounds test of its own and a key
+outside the range would index outside the table.
+
+**Covered by** `test_sorted_prefix_shapes` (`test/test_index.f90`), which checks every key, the
+position beside every key and both extremes of `int64` against an independent linear scan over
+seven key shapes — including a map holding keys at `-huge` and at `huge` together (the span past
+`huge`), a cluster of a thousand beside one key at `huge` (one full bucket, the rest empty), and a
+map too small for a table — and asserts through `%memory_bytes` that the table is really there, so
+a build that silently skipped it cannot pass; and by `test_sorted_boundaries`, the ends of a small
+map. What it forbids: computing the bucket from `key - kmin` (held by the standard and by a nagfor
+`-C=intovf` build, not by the suite); forming `kmax - kmin` before the nested guard; sizing the
+table so that a shift of 0 becomes possible; and moving the range test after the bucket.

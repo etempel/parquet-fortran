@@ -374,6 +374,18 @@ module parquet_index
         !> Sorted backend: ascending keys and their values, exact-fit, no slack.
         integer(int64), allocatable :: skeys(:)
         integer(int64), allocatable :: svals(:) !! see `skeys`.
+        !> Sorted backend: the prefix table that narrows a binary search to one bucket of the
+        !! key range. A key's bucket is `shifta(key, spshift) - spbase` (`key - spbase` when the
+        !! shift is 0), `spfx(b)` is the first position whose key's bucket is `b` or above, and
+        !! `spfx(spnb) = nk + 1`, so bucket `b` is `spfx(b) .. spfx(b + 1) - 1`. `spnb` is the
+        !! bucket count, 0 meaning no table (a map of fewer than sixteen keys searches the whole
+        !! array). `spbase` is `shifta(skeys(1), spshift)`, stored so the bucket of a key is two
+        !! operations and, with the shift at least 1, a subtraction that cannot overflow; see
+        !! `parquet_index_sorted.f90` for why the shift is chosen the way it is.
+        integer(int64), allocatable :: spfx(:)
+        integer(int64) :: spnb = 0_int64 !! see `spfx`.
+        integer :: spshift = 0 !! see `spfx`.
+        integer(int64) :: spbase = 0_int64 !! see `spfx`.
         !> `.true.` once this map holds STRING keys (`%build`, `%set` or `%get_or_add` over
         !! strings). The engine underneath is then the composite hash table over
         !! `(hash, occurrence)` tuples -- `ncomp` is 2 and `backend` is `IX_HASH` for the map's
@@ -3996,13 +4008,22 @@ module parquet_index
             type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_HASH`.
             integer(int64), intent(out) :: out(:,:) !! shaped `(nkeys, ncomp)`; filled in slot order.
         end subroutine ix_hash_collect
-        !> The index stored for a key in the sorted backend, or 0. Binary search.
+        !> The index stored for a key in the sorted backend, or 0. A range test, the prefix
+        !! table's bucket, and a binary search inside that bucket.
         pure module function ix_sorted_find(self, key) result(v)
             type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_SORTED`.
             integer(int64), intent(in) :: key !! the key, already widened.
             integer(int64) :: v !! the stored value, or 0 when absent.
         end function ix_sorted_find
-        !> Builds the sorted backend: one `pf_argsort` call, a gather, and a duplicate scan.
+        !> `%probe_stats` for the sorted backend: one load of the prefix table plus the binary
+        !! search's depth inside the widest bucket, and the key-weighted mean of the same.
+        pure module subroutine ix_sorted_probe_stats(self, max_probe, mean_probe)
+            type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_SORTED`.
+            integer(int64), intent(out) :: max_probe !! the longest search any stored key needs.
+            real(real64), intent(out) :: mean_probe !! the mean over stored keys.
+        end subroutine ix_sorted_probe_stats
+        !> Builds the sorted backend: one `pf_argsort` call, a gather, a duplicate scan, and the
+        !! prefix table over the sorted keys.
         module subroutine ix_sorted_build(self, keys, values, threads)
             type(pf_index_map), intent(inout) :: self !! the map; its sorted storage is replaced.
             integer(int64), intent(in) :: keys(:) !! the keys, already widened; must be unique.

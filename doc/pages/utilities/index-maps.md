@@ -81,8 +81,8 @@ reports the choice.
 
 | | direct | hash | sorted |
 |---|---|---|---|
-| lookup cost | two comparisons and one load | one probe, usually | `O(log n)` |
-| memory | 8 bytes per slot over the key range | 16 bytes per slot, table 1.7-3.3x the keys | 16 bytes per key, exact |
+| lookup cost | two comparisons and one load | one probe, usually | one table load, then `O(log n)` inside a bucket |
+| memory | 8 bytes per slot over the key range | 16 bytes per slot, table 1.7-3.3x the keys | 16 bytes per key plus a prefix table of at most a sixteenth of that (512 KB at most) |
 | `%build` | yes | yes | single-component keys only |
 | `%init` (fill as you go) | no | yes | no |
 | composite keys | yes | yes | no |
@@ -100,10 +100,17 @@ larger than the hash table would have been.
 **hash** is open addressing with linear probing. The general case, and the only backend you can add
 keys to one at a time.
 
-**sorted** is sorted keys plus a binary search. The smallest footprint available — exactly 16 bytes
-per key, with no slack — at logarithmic lookup cost. It is **opt-in**: the automatic choice never
-selects it, and it is frozen once built, which is what buys the exact fit. Pass `method="sorted"`
-when memory matters more than lookup speed.
+**sorted** is sorted keys plus a binary search, narrowed by a prefix table: the key range is cut
+into buckets (at most an eighth as many as there are keys, and never more than 65536), the table
+records where each bucket starts in the sorted array, and a lookup loads one entry and searches
+that bucket alone, so a key among ten million costs about eight comparisons rather than 24. The
+smallest footprint available — 16 bytes per key, with no slack, plus that table at a sixteenth of
+it or less — and, with the table, a lookup cost level with the hash backend's on evenly spread
+keys (`bench/benchmark_index.sh --mode=lookup` measures both). It is **opt-in**: the automatic
+choice never selects it, and it is frozen once built, which is what buys the exact fit. Pass
+`method="sorted"` when the map will not change after its build and memory matters. Keys that
+cluster in a narrow part of a wide range fall into one bucket and are searched as they would be
+without the table — logarithmic in the cluster's size — and nothing else changes for them.
 
 ### What the automatic choice does
 
@@ -303,8 +310,9 @@ It is allocated zero-length (or an empty column) for an empty map, never left un
 is ascending for the direct and sorted backends and unspecified for hash; ask for the matching
 values with `%get_many(list, vals)`.
 
-`%probe_stats` reports how far lookups have to walk: 1 for the direct backend, the binary search's
-depth for sorted, and the real probe lengths for hash. On the hash backend it scans the whole
+`%probe_stats` reports how far lookups have to walk: 1 for the direct backend, one prefix-table
+load plus the binary search's depth inside the widest bucket for sorted (and the key-weighted mean
+of the same), and the real probe lengths for hash. On the hash backend it scans the whole
 table, so it is a diagnostic rather than something to call in a loop; the other two answer without
 touching the keys. An empty map reports 0.
 
@@ -673,5 +681,7 @@ your own hardware.
   sort engine's figure for the same arrays.
 - **`%reserve` before a run of inserts** avoids the rehashes, which are the only part of
   incremental filling that is not amortised `O(1)`.
-- **The sorted backend trades speed for memory** and is the one to reach for when a map has to fit
-  somewhere the others will not.
+- **The sorted backend trades mutability for memory**, and is the one to reach for when a map has
+  to fit somewhere the others will not: with its prefix table a lookup costs about what a hash
+  probe does, at half the hash table's bytes, and what it gives up is `%set`, `%get_or_add` and
+  `%remove`.

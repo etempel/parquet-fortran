@@ -744,13 +744,13 @@ contains
         if (allocated(self%hrec)) b = b + 8_int64 * size(self%hrec, kind=int64)
         if (allocated(self%skeys)) b = b + 8_int64 * size(self%skeys, kind=int64)
         if (allocated(self%svals)) b = b + 8_int64 * size(self%svals, kind=int64)
+        if (allocated(self%spfx)) b = b + 8_int64 * size(self%spfx, kind=int64)
         if (allocated(self%soff)) b = b + 8_int64 * size(self%soff, kind=int64)
         if (allocated(self%sdat)) b = b + size(self%sdat, kind=int64)
         if (allocated(self%sval)) b = b + 8_int64 * size(self%sval, kind=int64)
     end procedure map_memory_bytes
 
     module procedure map_probe_stats
-        integer(int64) :: span, depth
         real(real64) :: mp
 
         max_probe = 0_int64
@@ -762,16 +762,11 @@ contains
             max_probe = 1_int64
             if (present(mean_probe)) mean_probe = 1.0_real64
         case (IX_SORTED)
-            ! The binary search's worst depth, which is what "probe length" means for a structure
-            ! that halves rather than walks: the smallest d with 2**d > nk.
-            depth = 0_int64
-            span = 1_int64
-            do while (span <= self%nk)
-                span = span * 2_int64
-                depth = depth + 1_int64
-            end do
-            max_probe = depth
-            if (present(mean_probe)) mean_probe = real(depth, real64)
+            ! One load of the prefix table plus the binary search inside the widest bucket --
+            ! what "probe length" means for a structure that halves rather than walks -- and the
+            ! key-weighted mean of the same, both from the table alone.
+            call ix_sorted_probe_stats(self, max_probe, mp)
+            if (present(mean_probe)) mean_probe = mp
         case (IX_HASH)
             ! `ix_hash_probe_stats` reports both, so the mean is computed and discarded when the
             ! caller did not ask for it. The alternative -- a second scan that skips the sum -- is
@@ -894,6 +889,7 @@ contains
         call move_alloc(fresh%hrec, self%hrec)
         call move_alloc(fresh%skeys, self%skeys)
         call move_alloc(fresh%svals, self%svals)
+        call move_alloc(fresh%spfx, self%spfx)
         call move_alloc(fresh%soff, self%soff)
         call move_alloc(fresh%sdat, self%sdat)
         call move_alloc(fresh%sval, self%sval)
@@ -904,6 +900,9 @@ contains
         self%kmin1 = fresh%kmin1
         self%kmax1 = fresh%kmax1
         self%hcap = fresh%hcap
+        self%spnb = fresh%spnb
+        self%spshift = fresh%spshift
+        self%spbase = fresh%spbase
         self%is_str = fresh%is_str
         self%nstr = fresh%nstr
         self%nchr = fresh%nchr
@@ -1172,9 +1171,13 @@ contains
         if (allocated(self%hrec)) deallocate(self%hrec)
         if (allocated(self%skeys)) deallocate(self%skeys)
         if (allocated(self%svals)) deallocate(self%svals)
+        if (allocated(self%spfx)) deallocate(self%spfx)
         if (allocated(self%soff)) deallocate(self%soff)
         if (allocated(self%sdat)) deallocate(self%sdat)
         if (allocated(self%sval)) deallocate(self%sval)
+        self%spnb = 0_int64
+        self%spshift = 0
+        self%spbase = 0_int64
         self%backend = IX_DIRECT
         self%ncomp = 0
         self%nk = 0_int64

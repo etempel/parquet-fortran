@@ -99,6 +99,7 @@ contains
             new_unittest("probe_stats describes the backend it is asked about", test_probe_stats_by_backend), &
             new_unittest("memory_bytes tracks what each backend allocates", test_memory_bytes), &
             new_unittest("a sorted map searches both ends correctly", test_sorted_boundaries), &
+            new_unittest("the sorted prefix table answers every key shape", test_sorted_prefix_shapes), &
             new_unittest("the pool hands out, recycles and counts", test_pool_basics), &
             new_unittest("the pool reuses before it grows", test_pool_reuse_before_growth), &
             new_unittest("is_used answers for every index and none other", test_pool_is_used), &
@@ -1603,9 +1604,17 @@ contains
         call check(error, meanp == 1.0_real64, "so its mean probe length is exactly 1")
         if (allocated(error)) return
         call m%build(keys, method="sorted")
-        call m%probe_stats(maxp)
-        call check(error, maxp == 7_int64, &
-            "the sorted backend reports its binary search depth: 7 for 64 keys")
+        call m%probe_stats(maxp, meanp)
+        ! 64 dense keys get a prefix table of 8 buckets (the largest power of two with eight or
+        ! more keys per bucket); a span of 63 shifts by 3, so the buckets hold keys 1..7, 8..15,
+        ! ..., 56..63 and 64 alone -- at most 8 keys, a search 4 deep (2**4 > 8) after the one
+        ! table load: 5. Without the table the whole array's search is 7 deep, which is what a
+        ! table that shaped nothing would report.
+        call check(error, maxp == 5_int64, &
+            "the sorted backend reports one table load plus the widest bucket's search: 5 for 64 keys")
+        if (allocated(error)) return
+        call check(error, meanp > 1.0_real64 .and. meanp <= 5.0_real64, &
+            "and a key-weighted mean between the load alone and the widest bucket")
         if (allocated(error)) return
         ! An empty map reports nothing rather than a stale figure.
         call m%clear()
@@ -1635,9 +1644,14 @@ contains
         hash_b = m%memory_bytes()
         call m%build(keys, method="sorted")
         sorted_b = m%memory_bytes()
-        ! The sorted backend is the exact-fit one: 16 bytes per key and no slack at all.
-        call check(error, sorted_b == 16000_int64, &
-            "the sorted backend must be exactly 16 bytes per key")
+        ! The sorted backend is the exact-fit one: 16 bytes per key and no slack, plus a prefix
+        ! table of at most an eighth of the key count in 8-byte entries (one sixteenth of the
+        ! keys' bytes) and one sentinel -- present here, since 1000 keys are enough for a table.
+        call check(error, sorted_b > 16000_int64, &
+            "a thousand-key sorted map carries a prefix table on top of its 16 bytes per key")
+        if (allocated(error)) return
+        call check(error, sorted_b <= 16000_int64 + 1000_int64 + 8_int64, &
+            "and that table is at most a sixteenth of the keys' bytes plus its sentinel")
         if (allocated(error)) return
         call check(error, direct_b == 8000_int64 + 32_int64, &
             "the direct backend is 8 bytes per slot over a dense range, plus its geometry")
@@ -1649,6 +1663,136 @@ contains
         call check(error, hash_b > sorted_b, &
             "and so costs more than the exact-fit sorted backend, which is why sorted exists")
     end subroutine test_memory_bytes
+
+    !> The prefix table answers every key shape a sorted map can meet: dense, strided and
+    !! sparse keys, keys at both ends of `int64` in one map (the span past `huge`, where no
+    !! difference of the ends may be formed), a cluster beside one far outlier (one bucket holds
+    !! nearly every key and the search inside it is the plain one), negative keys, and a map too
+    !! small for a table at all. Every shape is checked against an independent linear scan over
+    !! hits, the gaps beside every key, and the extremes of `int64`; the table's presence is
+    !! asserted through `%memory_bytes` so that a build which silently skipped it could not pass.
+    subroutine test_sorted_prefix_shapes(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:), values(:), probes(:), many(:)
+        integer(int64) :: i, n, maxp, hg
+        real(real64) :: meanp
+        integer :: shape
+
+        hg = huge(0_int64)
+        do shape = 1, 7
+            select case (shape)
+            case (1)
+                ! Dense: the case a raw top-16-bit prefix would put in ONE bucket.
+                n = 5000_int64
+                allocate(keys(n))
+                do i = 1_int64, n
+                    keys(i) = i
+                end do
+            case (2)
+                ! Strided by 2**16: keys that share their low sixteen bits.
+                n = 3000_int64
+                allocate(keys(n))
+                do i = 1_int64, n
+                    keys(i) = i * 65536_int64
+                end do
+            case (3)
+                ! The benchmark's sparse walk, spread over a range far wider than the count.
+                n = 4000_int64
+                allocate(keys(n))
+                do i = 1_int64, n
+                    keys(i) = 1_int64 + i * 2654435761_int64
+                end do
+            case (4)
+                ! Both ends of int64 in one map: the span exceeds huge and must never be formed.
+                n = 300_int64
+                allocate(keys(n))
+                do i = 1_int64, 150_int64
+                    keys(i) = -hg + (i - 1_int64) * 7_int64
+                    keys(150_int64 + i) = hg - (i - 1_int64) * 7_int64
+                end do
+            case (5)
+                ! Negative keys straddling zero, three apart.
+                n = 1334_int64
+                allocate(keys(n))
+                do i = 1_int64, n
+                    keys(i) = -2000_int64 + (i - 1_int64) * 3_int64
+                end do
+            case (6)
+                ! A cluster of a thousand beside one key at huge: the cluster's bucket holds
+                ! them all, every other bucket is empty, and the search inside degrades to the
+                ! plain one.
+                n = 1001_int64
+                allocate(keys(n))
+                do i = 1_int64, 1000_int64
+                    keys(i) = 1000000_int64 + i
+                end do
+                keys(n) = hg
+            case default
+                ! Fifteen keys: below the sixteen a table needs, so the plain search alone.
+                n = 15_int64
+                allocate(keys(n))
+                do i = 1_int64, n
+                    keys(i) = i * i
+                end do
+            end select
+            allocate(values(n))
+            do i = 1_int64, n
+                values(i) = n + 1_int64 - i
+            end do
+            ! Probes: every key, the position after every key, the ends and both extremes.
+            allocate(probes(2_int64 * n + 4_int64))
+            probes(1:n) = keys
+            do i = 1_int64, n
+                if (keys(i) < hg) then
+                    probes(n + i) = keys(i) + 1_int64
+                else
+                    probes(n + i) = keys(i) - 1_int64
+                end if
+            end do
+            probes(2_int64 * n + 1_int64) = -hg
+            probes(2_int64 * n + 2_int64) = hg
+            probes(2_int64 * n + 3_int64) = 0_int64
+            probes(2_int64 * n + 4_int64) = keys(1) - 1_int64
+            if (keys(1) == -hg) probes(2_int64 * n + 4_int64) = keys(1) + 3_int64
+            call check_lookups_against_oracle(error, keys, values, probes, "sorted")
+            if (allocated(error)) return
+            ! The same map through the bulk path, and the table's presence or absence.
+            call m%build(keys, values, method="sorted")
+            allocate(many(size(probes, kind=int64)))
+            call m%get_many(probes, many)
+            do i = 1_int64, size(probes, kind=int64)
+                call check(error, many(i) == m%get(probes(i)), &
+                    "sorted %get_many disagrees with %get on a prefix shape")
+                if (allocated(error)) return
+            end do
+            if (n >= 16_int64) then
+                call check(error, m%memory_bytes() > 16_int64 * n, &
+                    "a sorted map of sixteen keys or more must carry a prefix table")
+            else
+                call check(error, m%memory_bytes() == 16_int64 * n, &
+                    "a sorted map of fewer than sixteen keys carries no prefix table")
+            end if
+            if (allocated(error)) return
+            call m%probe_stats(maxp, meanp)
+            call check(error, maxp >= 1_int64 .and. meanp >= 1.0_real64 .and. meanp <= real(maxp, real64), &
+                "sorted probe stats: the mean lies between one load and the widest bucket's search")
+            if (allocated(error)) return
+            deallocate(keys, values, probes, many)
+        end do
+        ! The cluster-plus-outlier shape (6) reports the plain search's depth inside its one
+        ! full bucket: 1000 keys need 10 levels, plus the table load.
+        n = 1001_int64
+        allocate(keys(n))
+        do i = 1_int64, 1000_int64
+            keys(i) = 1000000_int64 + i
+        end do
+        keys(n) = hg
+        call m%build(keys, method="sorted")
+        call m%probe_stats(maxp)
+        call check(error, maxp == 11_int64, &
+            "a cluster beside one outlier degrades to the plain search inside its bucket: 1 + 10")
+    end subroutine test_sorted_prefix_shapes
 
     !> The binary search finds the first and last keys, which is where an off-by-one lives.
     subroutine test_sorted_boundaries(error)

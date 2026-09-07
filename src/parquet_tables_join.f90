@@ -7,17 +7,30 @@
 !! **NOT a generated file** -- `tools/generate_parquet_tables.py` emits this module's spec, so a
 !! signature change here is a generator edit and a body change is not.
 !!
-!! **One engine, over the two key columns CONCATENATED.** For each join key this file builds one
-!! `parquet_column` holding the left table's key rows followed by the right table's, hands all of
-!! them to `pf_argsort` as a `pf_sort_keys`, and reads the matches off `group_offsets` -- the run
-!! boundaries the sort reports in the same pass. A run holding rows from both halves is a match: a
-!! member at position `p <= nl` is left row `p`, one at `p > nl` is right row `p - nl`.
+!! **Two engines, one answer.** `table_join_pairs` resolves the vocabulary and the key columns
+!! once and hands the key SLOTS to one of two engines, which must agree to the row on every call
+!! both can take (`test/test_table_join.f90` runs its whole suite under each):
 !!
-!! That is astropy's join algorithm, and it needs no new sorting code at all. Multi-column keys,
-!! all nine orderable kinds, per-key null handling, the threading and the stable tie rule are
-!! already what `pf_argsort` does -- so "equal" here means exactly what it means in `%sort_by`, in
-!! a read-time `sort_by=`, and in `pf_match`. A join with a comparator of its own would be a
-!! second null policy and a second chance to disagree about what equality is.
+!!   * **The SORT engine** (`join_pairs_sort`, this file), over the two key columns
+!!     CONCATENATED: for each join key one `parquet_column` holding the left table's key rows
+!!     followed by the right table's, all of them handed to `pf_argsort` as a `pf_sort_keys`, and
+!!     the matches read off `group_offsets` -- the run boundaries the sort reports in the same
+!!     pass. A run holding rows from both halves is a match: a member at position `p <= nl` is
+!!     left row `p`, one at `p > nl` is right row `p - nl`. That is astropy's join algorithm, and
+!!     it needs no new sorting code at all: multi-column keys, all nine orderable kinds, per-key
+!!     null handling, the threading and the stable tie rule are already what `pf_argsort` does --
+!!     so "equal" here means exactly what it means in `%sort_by`, in a read-time `sort_by=`, and
+!!     in `pf_match`. It takes every `order="key"` join, a `PK_LOGICAL` key, and a string key
+!!     beside another key.
+!!   * **The HASH engine** (`join_pairs_hash`, `parquet_tables_join_hash.f90`): a
+!!     `pf_index_multimap` built over the right keys and probed once per left row, for every
+!!     other call under `order="left"`. Its equality is the index tier's, which is the sort
+!!     comparator's by construction (feature_risks.md Risk-211), so it is not a second null
+!!     policy either.
+!!
+!! Which engine runs is `join_choose_engine`'s decision, from the key kinds and `order=` alone --
+!! never from the data's values -- and a test-only hook can force either; both engine bodies
+!! record which one ran, so a suite can be run twice and assert it rather than assume it.
 !!
 !! **Everything that can produce a silent WRONG ANSWER is decided here**, before a single value
 !! column is touched: which groups are null-bearing and so match nothing, how many rows the output
@@ -31,6 +44,9 @@
 !! a documented output property with its own test.
 submodule (parquet_tables) parquet_tables_join
     use parquet_sorting, only : pf_sort_keys, pf_argsort
+    ! The multimap's tuple ceiling, for the eligibility test; the module is already in this
+    ! module's footprint through the spec's own import of the two index types.
+    use parquet_index, only : pf_index_max_components
     implicit none
     !
     !> `how=` tokens, in the order the error message lists them.
@@ -40,11 +56,82 @@ submodule (parquet_tables) parquet_tables_join
     integer, parameter :: REQ_MM = 0, REQ_11 = 1, REQ_1M = 2, REQ_M1 = 3
     !> `order=` tokens.
     integer, parameter :: ORD_LEFT = 1, ORD_KEY = 2
+    !> Engine tokens: which of the two pair-list engines built the match. They double as the
+    !! values the test-only hook `parquet_debug_set_join_engine` takes (0 there means automatic)
+    !! and `parquet_debug_join_engine_used` reports, so nothing ever translates between the two.
+    integer, parameter :: ENGINE_SORT = 1, ENGINE_HASH = 2
+    !
+    ! ---- The hash engine (parquet_tables_join_hash) ----
+    interface
+        !> The pair list built on a `pf_index_multimap` over the RIGHT keys and probed with the
+        !! left ones: the same answer `join_pairs_sort` gives for every call `join_hash_eligible`
+        !! accepts, and never reached for any other. Takes the key SLOTS, already resolved and
+        !! kind-checked by `join_resolve_keys`, and the resolved tokens, so the two engines
+        !! cannot disagree about which columns are the keys or what `how=` meant.
+        module subroutine join_pairs_hash(self, other, lslots, rslots, how_id, req_id, max_rows, &
+                threads, il, ir, n_out, matched)
+            class(parquet_table), intent(in) :: self  !! the LEFT table.
+            class(parquet_table), intent(in) :: other !! the RIGHT table.
+            integer, intent(in) :: lslots(:)          !! this table's key slots, primary first.
+            integer, intent(in) :: rslots(:)          !! `other`'s key slots, one per left one.
+            integer, intent(in) :: how_id             !! HOW_* token.
+            integer, intent(in) :: req_id             !! REQ_* token.
+            integer(int64), intent(in), optional :: max_rows !! output-size ceiling.
+            !> team for the multimap's build and probe and for this engine's own passes;
+            !! absent means the index tier's automatic rule.
+            integer, intent(in), optional :: threads
+            integer(int64), allocatable, intent(out) :: il(:) !! per output row: left row, or 0.
+            integer(int64), allocatable, intent(out) :: ir(:) !! per output row: right row, or 0.
+            integer(int64), intent(out) :: n_out              !! output rows; equals size(il).
+            logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
+        end subroutine join_pairs_hash
+    end interface
     !
 contains
     !
     module procedure table_join_pairs
         character(len=*), parameter :: PROC = "join"
+        integer, allocatable :: lslots(:), rslots(:)
+        integer :: how_id, req_id, ord_id, engine
+        !
+        call table_check_open(self, PROC)
+        call table_check_open(other, PROC)
+        call join_check_not_self(self, other)
+        call join_resolve_tokens(how, require, order, how_id, req_id, ord_id)
+        ! The keys are resolved and kind-checked ONCE, here, and both engines take the slots:
+        ! which columns are the keys is not a question two engines may answer separately.
+        call join_resolve_keys(self, other, on, other_on, lslots, rslots)
+        engine = join_choose_engine(self, lslots, ord_id)
+        if (engine == ENGINE_HASH) then
+            call join_pairs_hash(self, other, lslots, rslots, how_id, req_id, max_rows, threads, &
+                il, ir, n_out, matched)
+        else
+            call join_pairs_sort(self, other, lslots, rslots, how_id, req_id, ord_id, max_rows, &
+                threads, il, ir, n_out, matched)
+        end if
+    end procedure table_join_pairs
+    !
+    !> The SORT engine: astropy's algorithm over the two key columns concatenated.
+    !!
+    !! One `pf_argsort` over `nl + nr` rows with group offsets, then the matches read off the
+    !! runs of equal keys (`join_classify`), the cardinality assertion, the counting pass and the
+    !! emission in either order. Every `order="key"` join takes this engine, and so does every
+    !! key kind the hash engine declines (`join_hash_eligible`).
+    subroutine join_pairs_sort(self, other, lslots, rslots, how_id, req_id, ord_id, max_rows, &
+            threads, il, ir, n_out, matched)
+        class(parquet_table), intent(in) :: self  !! the LEFT table.
+        class(parquet_table), intent(in) :: other !! the RIGHT table.
+        integer, intent(in) :: lslots(:)          !! this table's key slots, primary first.
+        integer, intent(in) :: rslots(:)          !! `other`'s key slots, one per left one.
+        integer, intent(in) :: how_id             !! HOW_* token.
+        integer, intent(in) :: req_id             !! REQ_* token.
+        integer, intent(in) :: ord_id             !! ORD_* token.
+        integer(int64), intent(in), optional :: max_rows !! output-size ceiling.
+        integer, intent(in), optional :: threads  !! forwarded to pf_argsort; absent = auto.
+        integer(int64), allocatable, intent(out) :: il(:) !! per output row: left row, or 0.
+        integer(int64), allocatable, intent(out) :: ir(:) !! per output row: right row, or 0.
+        integer(int64), intent(out) :: n_out              !! output rows; equals size(il).
+        logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
         type(pf_sort_keys) :: skeys
         type(parquet_column), allocatable :: kc(:)
         integer(int64), allocatable :: perm(:), go(:)
@@ -54,13 +141,13 @@ contains
         integer(int64), allocatable :: lg_off(:), lg_idx(:), rg_off(:), rg_idx(:)
         integer(int64) :: nl, nr, ngroups
         integer(int64) :: n_pairs, n_lunm, n_runm, biggest
-        integer :: how_id, req_id, ord_id
         !
-        call table_check_open(self, PROC)
-        call table_check_open(other, PROC)
-        call join_check_not_self(self, other)
-        call join_resolve_tokens(how, require, order, how_id, req_id, ord_id)
-        call join_build_keys(self, other, on, other_on, skeys, kc)
+        ! Recorded FIRST, before anything can abort, and by this engine's own body rather than
+        ! by the dispatcher: a which-engine-ran observable has to be written by every route, the
+        ! fallback included, or a test forced onto the other engine cannot tell a decline from a
+        ! switch that never happened (.claude/rules/testing.md, "Mutation testing").
+        call join_note_engine(ENGINE_SORT)
+        call join_build_keys(self, other, lslots, rslots, skeys, kc)
         nl = self%nrows()
         nr = other%nrows()
         call pf_argsort(skeys, perm, group_offsets=go, threads=threads)
@@ -87,7 +174,7 @@ contains
             call join_emit_left_order(how_id, nl, group_of_left, lmatched, rmatched, &
                 rg_off, rg_idx, ngroups, il, ir)
         end if
-    end procedure table_join_pairs
+    end subroutine join_pairs_sort
     !
     module procedure table_join
         call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
@@ -154,7 +241,7 @@ contains
         logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
         integer(int64), allocatable, intent(out), optional :: pairs(:)       !! per output row.
         integer(int64), allocatable, intent(out), optional :: other_pairs(:) !! per output row.
-        integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        integer, intent(in), optional :: threads    !! forwarded to the engine; absent = auto.
         character(len=*), parameter :: PROC = "join"
         integer(int64), allocatable :: il(:), ir(:)
         integer, allocatable :: sslots(:), mlslots(:), mrslots(:)
@@ -179,9 +266,9 @@ contains
         ! Folding a token twice costs nothing; deriving those answers from `how` twice would not.
         call join_resolve_how(how, how_id)
         call join_check_left_containers(self, how_id)
-        ! Planned before the sort, because every refusal it raises is a NAME question -- a column
-        ! that is not there, a container that cannot be carried, a suffixed name that still
-        ! clashes -- and none of them is worth an O(n log n) sort first. It reads nothing.
+        ! Planned before the engine runs, because every refusal it raises is a NAME question -- a
+        ! column that is not there, a container that cannot be carried, a suffixed name that still
+        ! clashes -- and none of them is worth a sort or a hash build first. It reads nothing.
         call join_plan_payload(self, other, on, other_on, columns, other_suffix, how_id, &
             sslots, dnames, mlslots, mrslots)
         ! The engine. Every remaining refusal is here: the self-join, the key kinds and widths,
@@ -221,7 +308,7 @@ contains
         logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
         integer(int64), allocatable, intent(out), optional :: pairs(:)       !! per output row.
         integer(int64), allocatable, intent(out), optional :: other_pairs(:) !! per output row.
-        integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        integer, intent(in), optional :: threads    !! forwarded to the engine; absent = auto.
         character(len=:), allocatable :: onames(:), ronames(:)
         !
         call join_split_names(on, "on", onames)
@@ -324,8 +411,8 @@ contains
     end subroutine join_check_left_containers
     !
     !> Checks the key-name arguments alone: how many there are, and that none of them is a SORT
-    !! key. Reached from `join_impl` before the sort AND from `join_build_keys` inside it, so a
-    !! caller who reaches the engine by either route gets the identical message.
+    !! key. Reached from `join_impl` before the engine runs AND from `join_resolve_keys` inside
+    !! it, so a caller who reaches the engine by either route gets the identical message.
     subroutine join_check_key_args(on, other_on)
         character(len=*), intent(in) :: on(:)                 !! left key columns.
         character(len=*), intent(in), optional :: other_on(:) !! right key columns.
@@ -394,8 +481,8 @@ contains
     !
     !> Decides which of `other`'s columns come across and what each is called here.
     !!
-    !! Runs BEFORE the sort and reads nothing: every refusal it raises is a question about names
-    !! and declared kinds, and none of them is worth an O(n log n) sort first. `declared_kind` is
+    !! Runs BEFORE the engine and reads nothing: every refusal it raises is a question about names
+    !! and declared kinds, and none of them is worth a sort or a hash build first. `declared_kind` is
     !! set when a table is opened, from the file's schema, so the container refusal below does not
     !! need the column read either.
     !!
@@ -835,45 +922,168 @@ contains
         end do
     end subroutine join_build_merged_keys
     !
-    !> Phase A: one concatenated `parquet_column` per join key, added to `skeys` in order.
+    !> Phase A of the sort engine: one concatenated `parquet_column` per join key, added to
+    !! `skeys` in order.
     !!
     !! `kc` is returned rather than kept local because the group-nullness test in phase C reads
     !! it -- a `pf_sort_keys` does not hand its keys back, and re-deriving nullness from the two
     !! source columns would mean mapping every group member back across the concatenation.
     !!
-    !! **Kinds are checked here rather than left to `%append`.** `%append` refuses a mismatch too,
-    !! but its message names two columns where this one can name two columns, two kinds and two
-    !! files -- and a future permissive `%append` would let the concatenation succeed with an
-    !! int32 key silently compared against an int64 one. A 64-bit catalogue identifier above
-    !! 2**53 is exactly what that loses, which is why this library refuses rather than promotes.
-    subroutine join_build_keys(self, other, on, other_on, skeys, kc)
+    !! The slots arrive resolved and kind-checked from `join_resolve_keys`, so nothing here can
+    !! refuse: `%append` would refuse a kind mismatch too, but with a message naming two columns
+    !! where the resolver's names two columns, two kinds and two files -- and a future permissive
+    !! `%append` would let the concatenation succeed with an int32 key silently compared against
+    !! an int64 one, which is why the check lives ahead of both engines rather than here.
+    subroutine join_build_keys(self, other, lslots, rslots, skeys, kc)
+        class(parquet_table), intent(in) :: self  !! the left table.
+        class(parquet_table), intent(in) :: other !! the right table.
+        integer, intent(in) :: lslots(:)          !! this table's key slots, primary first.
+        integer, intent(in) :: rslots(:)          !! `other`'s key slots, one per left one.
+        type(pf_sort_keys), intent(out) :: skeys  !! the assembled key list.
+        type(parquet_column), allocatable, intent(out) :: kc(:) !! one concatenated key per entry.
+        integer :: j
+        !
+        allocate(kc(size(lslots, kind=int64)))
+        do j = 1, size(lslots)
+            call self%cache%cols(lslots(j))%values%deep_copy(kc(j))
+            call kc(j)%append(other%cache%cols(rslots(j))%values)
+            call skeys%add(kc(j))
+        end do
+    end subroutine join_build_keys
+    !
+    !> Resolves every key name on both sides to its slot and checks each pair's kind and width:
+    !! the ONE place both engines take their key columns from.
+    !!
+    !! `table_lookup_sort_key` is the sorts' own resolver, which brings the refusal of every
+    !! unorderable kind, the lazy first touch of a key column and the file-naming message suffix
+    !! with it -- so a join accepts exactly the columns `%sort_by` does. Also reached from
+    !! `join_impl` before the engine runs, through `join_check_key_args`, so a malformed key list
+    !! is refused before anything is read as well as here, and both routes raise the identical
+    !! message.
+    subroutine join_resolve_keys(self, other, on, other_on, lslots, rslots)
         class(parquet_table), intent(in) :: self  !! the left table.
         class(parquet_table), intent(in) :: other !! the right table.
         character(len=*), intent(in) :: on(:)     !! left key columns, primary first.
         character(len=*), intent(in), optional :: other_on(:) !! right key columns.
-        type(pf_sort_keys), intent(out) :: skeys  !! the assembled key list.
-        type(parquet_column), allocatable, intent(out) :: kc(:) !! one concatenated key per entry.
-        integer :: j, li, ri
+        integer, allocatable, intent(out) :: lslots(:) !! this table's key slots, in `on`'s order.
+        integer, allocatable, intent(out) :: rslots(:) !! `other`'s key slots, one per left one.
         character(len=:), allocatable :: rname
+        integer :: j
         !
-        ! Also called by join_impl before the sort, so a malformed key list is refused before an
-        ! O(n log n) sort as well as here, and both routes raise the identical message.
         call join_check_key_args(on, other_on)
-        allocate(kc(size(on, kind=int64)))
+        allocate(lslots(size(on, kind=int64)), rslots(size(on, kind=int64)))
         do j = 1, size(on)
             if (present(other_on)) then
                 rname = trim(other_on(j))
             else
                 rname = trim(on(j))
             end if
-            call table_lookup_sort_key(self, on(j), "join", li, key_kind="join")
-            call table_lookup_sort_key(other, rname, "join", ri, key_kind="join")
-            call join_check_key_kinds(self, other, on(j), rname, li, ri)
-            call self%cache%cols(li)%values%deep_copy(kc(j))
-            call kc(j)%append(other%cache%cols(ri)%values)
-            call skeys%add(kc(j))
+            call table_lookup_sort_key(self, on(j), "join", lslots(j), key_kind="join")
+            call table_lookup_sort_key(other, rname, "join", rslots(j), key_kind="join")
+            call join_check_key_kinds(self, other, on(j), rname, lslots(j), rslots(j))
         end do
-    end subroutine join_build_keys
+    end subroutine join_resolve_keys
+    !
+    !> Which engine builds this call's pair list.
+    !!
+    !! The test-only hook is read ONCE, here, and outranks nothing it should not: forcing the
+    !! sort engine takes it whatever the call; forcing the hash engine takes it only where
+    !! `join_hash_eligible` allows, and otherwise the sort engine runs and the observable says
+    !! so -- which is what lets one test suite run twice, once per forced mode, over every join
+    !! it holds, without a single test having to know which of its calls the hash engine can
+    !! take. A forced engine that ABORTED on an ineligible call would instead make every such
+    !! test fail under the second run, and one that BYPASSED the rule would run the multimap over
+    !! a tuple it cannot represent.
+    !!
+    !! **The automatic answer is the sort engine for every call, at this stage.** The selection
+    !! rule -- a function of row counts, key kinds and `order=` alone, never of the data's values
+    !! -- is written here from the sweep feature_join.md's stage 3 runs; until then the hash
+    !! engine is reached through the hook only.
+    integer function join_choose_engine(self, lslots, ord_id) result(engine)
+        class(parquet_table), intent(in) :: self !! the left table, whose key kinds decide.
+        integer, intent(in) :: lslots(:)         !! this table's key slots.
+        integer, intent(in) :: ord_id            !! ORD_* token.
+        integer(int64) :: mode
+        !
+        engine = ENGINE_SORT
+        mode = join_engine_mode()
+        if (mode == int(ENGINE_SORT, int64)) return
+        if (.not. join_hash_eligible(self, lslots, ord_id)) return
+        if (mode == int(ENGINE_HASH, int64)) engine = ENGINE_HASH
+    end function join_choose_engine
+    !
+    !> Whether the hash engine can take this call: `order="left"`, and every key column of a
+    !! kind `index_extract_keys` converts -- or a single string key, which the multimap keys in
+    !! place.
+    !!
+    !! The three exclusions are decisions rather than gaps (feature_join.md, section 11
+    !! questions 3 and 4): `order="key"` has no hash-side equivalent short of a second sort; a
+    !! `PK_LOGICAL` key is two groups, where the sort's counting path is already O(n); and a
+    !! string key beside another key would need a string-and-integer tuple the multimap does not
+    !! have. The kinds are already checked equal across the two sides, so the left ones decide.
+    logical function join_hash_eligible(self, lslots, ord_id) result(ok)
+        class(parquet_table), intent(in) :: self !! the left table.
+        integer, intent(in) :: lslots(:)         !! this table's key slots.
+        integer, intent(in) :: ord_id            !! ORD_* token.
+        integer :: j, ncomp
+        !
+        ok = .false.
+        if (ord_id /= ORD_LEFT) return
+        if (size(lslots) == 1) then
+            if (self%cache%cols(lslots(1))%values%kindof() == PK_STRING) then
+                ok = .true.
+                return
+            end if
+        end if
+        ncomp = 0
+        do j = 1, size(lslots)
+            select case (self%cache%cols(lslots(j))%values%kindof())
+            case (PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_DATE, PK_TIME)
+                ncomp = ncomp + 1
+            case (PK_TIMESTAMP)
+                ! Two components, the unit-free (seconds, nanoseconds) pair.
+                ncomp = ncomp + 2
+            case default
+                ! PK_LOGICAL, or a string beside another key: the sort engine's.
+                return
+            end select
+        end do
+        ok = ncomp <= pf_index_max_components
+    end function join_hash_eligible
+    !
+    !> The engine the test-only hook asks for: 0 for automatic, else an ENGINE_* token.
+    !!
+    !! One `bind(C)` read per join, a coarse operation, through a local interface so that the
+    !! hook stays out of `src/parquet_bindings.f90` and out of the library's own interface
+    !! (.claude/rules/cpp-wrapper.md, "Debug hooks"). `colwork_gate_limits` in
+    !! `parquet_tables_parallel.f90` is the same shape for the same reason.
+    function join_engine_mode() result(mode)
+        use iso_c_binding, only : c_int64_t
+        integer(int64) :: mode !! 0, ENGINE_SORT or ENGINE_HASH.
+        interface
+            function get_mode() result(res) bind(C, name="parquet_debug_get_join_engine")
+                import :: c_int64_t
+                integer(c_int64_t) :: res
+            end function get_mode
+        end interface
+        !
+        mode = int(get_mode(), int64)
+    end function join_engine_mode
+    !
+    !> Records which engine ran, for `parquet_debug_join_engine_used`. Called at the top of BOTH
+    !! engine bodies, never from the dispatcher, so that the fallback route writes it too.
+    subroutine join_note_engine(engine)
+        use iso_c_binding, only : c_int64_t
+        integer, intent(in) :: engine !! ENGINE_* token.
+        interface
+            subroutine set_used(e) bind(C, name="parquet_debug_set_join_engine_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: e
+            end subroutine set_used
+        end interface
+        !
+        call set_used(int(engine, c_int64_t))
+    end subroutine join_note_engine
     !
     !> Aborts unless two key columns hold the same kind and the same width.
     subroutine join_check_key_kinds(self, other, lname, rname, li, ri)

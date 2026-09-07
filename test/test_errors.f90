@@ -83,7 +83,7 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:), p16(:)
+                                            p15(:), p16(:), p17(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2415,7 +2415,23 @@ contains
             new_unittest("a join pair count that would wrap a 64-bit integer aborts", &
                 test_join_pair_count_overflow_aborts) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
+        p17 = [ &
+            new_unittest("join: require='m:1' on a duplicate right key aborts on the hash engine", &
+                test_join_require_m1_hash_aborts), &
+            new_unittest("join: require='1:m' on a duplicate left key aborts on the hash engine", &
+                test_join_require_1m_hash_aborts), &
+            new_unittest("join: exceeding max_rows aborts on the hash engine", &
+                test_join_max_rows_hash_aborts), &
+            new_unittest("join: max_rows= on the array key form, int32, aborts on the hash engine", &
+                test_join_max_rows_arr_i32_hash_aborts), &
+            new_unittest("join: max_rows= on the array key form, int64, aborts on the hash engine", &
+                test_join_max_rows_arr_i64_hash_aborts), &
+            new_unittest("join: max_rows= on the string key form, int32, aborts on the hash engine", &
+                test_join_max_rows_str_i32_hash_aborts), &
+            new_unittest("join: max_rows= on the string key form, int64, aborts on the hash engine", &
+                test_join_max_rows_str_i64_hash_aborts) &
+            ]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17]
     end subroutine collect_tests_parquet_errors
 
 
@@ -8385,6 +8401,103 @@ contains
             failure_message="a duplicate left key under require='1:m' was expected to abort", &
             required_stderr="asserts the left key is unique")
     end subroutine test_join_require_1m_aborts
+
+    !> Asserts a `_hash` twin's stdout shows the engine hook clear (the sort engine, 1) and then
+    !> set (the hash engine, 2) before the base scenario ran -- so the abort the twin then raises
+    !> is the hash engine's. Without this a twin whose hook did nothing would pass on the sort
+    !> engine's own abort.
+    subroutine check_hash_engine_was_forced(error, scenario)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario !! the `_hash` scenario's name.
+
+        call check_scenario_streams(error, scenario, "join engine used with the hook set=2", "stdout", &
+            "the hash twin must show the hash engine in force before its abort")
+        if (allocated(error)) return
+        call check_scenario_streams(error, scenario, "join engine used with the hook clear=1", "stdout", &
+            "the hash twin's control must show the sort engine before the hook is set")
+    end subroutine check_hash_engine_was_forced
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90 for
+    !> the two engine controls it prints before the base scenario runs.
+    subroutine test_join_require_m1_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_require_m1_hash", expect_abort=.true., &
+            failure_message="a duplicate right key under require='m:1' was expected to abort on the hash engine", &
+            required_stderr="asserts the right key is unique")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_require_m1_hash")
+    end subroutine test_join_require_m1_hash_aborts
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90.
+    subroutine test_join_require_1m_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_require_1m_hash", expect_abort=.true., &
+            failure_message="a duplicate left key under require='1:m' was expected to abort on the hash engine", &
+            required_stderr="asserts the left key is unique")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_require_1m_hash")
+    end subroutine test_join_require_1m_hash_aborts
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90.
+    subroutine test_join_max_rows_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_hash", expect_abort=.true., &
+            failure_message="a join over its max_rows ceiling was expected to abort on the hash engine", &
+            required_stderr="over the max_rows=")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_max_rows_hash")
+    end subroutine test_join_max_rows_hash_aborts
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90.
+    subroutine test_join_max_rows_arr_i32_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_arr_i32_hash", &
+            expect_abort=.true., &
+            failure_message="an int32 max_rows= on the array key form was expected to abort on the hash engine", &
+            required_stderr="over the max_rows=")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_max_rows_arr_i32_hash")
+    end subroutine test_join_max_rows_arr_i32_hash_aborts
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90.
+    subroutine test_join_max_rows_arr_i64_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_arr_i64_hash", &
+            expect_abort=.true., &
+            failure_message="an int64 max_rows= on the array key form was expected to abort on the hash engine", &
+            required_stderr="over the max_rows=")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_max_rows_arr_i64_hash")
+    end subroutine test_join_max_rows_arr_i64_hash_aborts
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90.
+    subroutine test_join_max_rows_str_i32_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_str_i32_hash", &
+            expect_abort=.true., &
+            failure_message="an int32 max_rows= on the string key form was expected to abort on the hash engine", &
+            required_stderr="over the max_rows=")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_max_rows_str_i32_hash")
+    end subroutine test_join_max_rows_str_i32_hash_aborts
+
+    !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90.
+    subroutine test_join_max_rows_str_i64_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_str_i64_hash", &
+            expect_abort=.true., &
+            failure_message="an int64 max_rows= on the string key form was expected to abort on the hash engine", &
+            required_stderr="over the max_rows=")
+        if (allocated(error)) return
+        call check_hash_engine_was_forced(error, "join_max_rows_str_i64_hash")
+    end subroutine test_join_max_rows_str_i64_hash_aborts
 
     !> join abort path: see scenario_join_bad_require in test/error_scenarios.f90 for what it
     !> does, and for the negative control that keeps this assertion honest.

@@ -253,6 +253,16 @@ contains
     !> find nothing -- the hook is read on every hash, on the calling thread. The suite is pure
     !> in-memory work over small fixtures and costs a fraction of a second serially.
     !>
+    !> "table_join_hash" is excluded because its collector forces the join's pair-list engine
+    !> through a process-global hook (parquet_debug_set_join_engine) and every test then asserts,
+    !> through the process-global observable parquet_debug_join_engine_used, that the hash engine
+    !> really ran. A join the hash engine declines -- order="key", a logical key -- runs the sort
+    !> engine and writes THAT into the observable, so a sibling test running concurrently could
+    !> read a decline that was not its own between its join and its assertion; and one test moves
+    !> the hook itself to prove it switches. The "table_join" suite, which runs the same tests
+    !> under automatic mode, has neither problem and stays parallel. Pure in-memory work over
+    !> five-row fixtures; serial it costs well under a second.
+    !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
     !> logic) that silently corrupted memory when multiple threads
@@ -295,7 +305,7 @@ contains
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
-            .or. name == "stats")
+            .or. name == "stats" .or. name == "table_join_hash")
     end function suite_is_safe_to_parallelize
 
 end module test_runner_support

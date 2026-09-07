@@ -26,18 +26,30 @@
 !! the oracle for the rewrite**, applied by hand to the source arrays, so an agreement says the
 !! columns really carry the rows the pair list named rather than that two joins agree.
 !!
+!! **The suite is run TWICE, under each pair-list engine.** `collect_tests_table_join` registers
+!! it with the test-only engine hook cleared (automatic, which is the sort engine) and
+!! `collect_tests_table_join_hash` registers the same tests with the hash engine forced;
+!! `pairs_of` asserts after every join which engine actually ran, against the suite's own
+!! expectation and the one exception (`order="key"` always costs the sort engine), so the second
+!! suite cannot pass vacuously and a shape the hash engine quietly declined would be named. The
+!! hook and the observable are process-global, so `table_join_hash` runs serially
+!! (`suite_is_safe_to_parallelize`): an ineligible join in a concurrently running sibling would
+!! otherwise overwrite the observable between a test's join and its own read of it.
+!!
 !! Abort paths live in test/error_scenarios.f90 as `join_*` scenarios, since they kill the
 !! process. Two tests here write a fixture, each to its own path -- the suite runs its tests
 !! concurrently, so a shared one would be truncated out from under the other.
 module test_table_join
     use parquet
     use iso_fortran_env, only : int32, int64, real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+    use iso_c_binding, only : c_int64_t
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_copy_sign, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
     private
     public :: collect_tests_table_join
+    public :: collect_tests_table_join_hash
     !
     !> The shared fixture's left key column. Chosen so that every case is present: a key with no
     !! counterpart (30, 99), a key with two (10), a key with one (20), and a repeated left key.
@@ -53,11 +65,63 @@ module test_table_join
     !! matched pair: the non-detaching tests below use this one and their negative controls use
     !! `RKEY`, so the only difference between the two arms is the uniqueness of one key.
     integer(int64), parameter :: UKEY(3) = [10_int64, 20_int64, 40_int64]
+    !> Engine tokens, matching the join's own (`ENGINE_SORT`/`ENGINE_HASH` in
+    !! src/parquet_tables_join.f90) and the values the hook takes and reports.
+    integer, parameter :: ENGINE_SORT = 1, ENGINE_HASH = 2
+    !> The engine every ELIGIBLE join in the running suite is expected to report, set by the
+    !! suite's collector: `table_join` forces nothing (automatic, the sort engine today) and
+    !! `table_join_hash` forces the hash engine. Process-global, like the hook it mirrors.
+    integer, save :: suite_engine = ENGINE_SORT
+    !
+    !> The engine hook and its observable. Declared locally here rather than in
+    !> `src/parquet_bindings.f90`, the convention every other `parquet_debug_*` hook follows.
+    interface
+        !> Forces the join's pair-list engine: 0 automatic, 1 the sort engine, 2 the hash engine.
+        subroutine parquet_debug_set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
+            import :: c_int64_t
+            integer(c_int64_t), value :: mode !! 0, 1 or 2.
+        end subroutine parquet_debug_set_join_engine
+        !> The engine the last join ran on, written by the engine body itself.
+        function parquet_debug_join_engine_used() result(res) &
+            bind(C, name="parquet_debug_join_engine_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! ENGINE_SORT or ENGINE_HASH.
+        end function parquet_debug_join_engine_used
+    end interface
     !
 contains
     !
-    !> Collects this suite's tests.
+    !> Collects this suite's tests under the automatic engine choice, which is the sort engine.
     subroutine collect_tests_table_join(testsuite)
+        type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the tests.
+        !
+        ! Set HERE, outside test-drive's parallel loop and before any test runs: the hook is
+        ! process-global. This collector also puts automatic mode back after `table_join_hash`,
+        ! which run_tester_cpp registers immediately before this suite for that reason.
+        call parquet_debug_set_join_engine(0_c_int64_t)
+        suite_engine = ENGINE_SORT
+        call join_tests(testsuite)
+    end subroutine collect_tests_table_join
+    !
+    !> Collects the same tests with the hash engine forced, plus the one test that proves the
+    !! hook switches engines. The suite runs serially (`suite_is_safe_to_parallelize`); see the
+    !! module header for why.
+    subroutine collect_tests_table_join_hash(testsuite)
+        type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the tests.
+        type(unittest_type), allocatable :: shared(:)
+        !
+        call parquet_debug_set_join_engine(int(ENGINE_HASH, c_int64_t))
+        suite_engine = ENGINE_HASH
+        call join_tests(shared)
+        ! Concatenated from a separate local rather than appended to itself: the self-referential
+        ! `x = [x, ...]` form double-frees under nagfor 7.2 (test/test_errors.f90's own note).
+        testsuite = [shared, &
+            new_unittest("the engine hook switches engines, and automatic means the sort engine", &
+                test_join_engine_hook_switches)]
+    end subroutine collect_tests_table_join_hash
+    !
+    !> The tests both suites share, in one list so the two cannot drift apart.
+    subroutine join_tests(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the tests.
         testsuite = [ &
             new_unittest("the inner pair list agrees with a brute-force oracle", &
@@ -143,9 +207,58 @@ contains
             new_unittest("a left join null-fills two string payload columns over 200 unmatched rows", &
                 test_join_left_string_nullfill), &
             new_unittest("the pair-count guard accepts the largest legal total exactly", &
-                test_join_add_checked_boundary) &
+                test_join_add_checked_boundary), &
+            new_unittest("order=key takes the sort engine whatever the hook asks", &
+                test_join_order_key_is_the_sort_engines), &
+            new_unittest("a logical key takes the sort engine whatever the hook asks", &
+                test_join_logical_key_is_the_sort_engines), &
+            new_unittest("a string key beside another key takes the sort engine", &
+                test_join_string_beside_int_key_is_the_sort_engines), &
+            new_unittest("a null-keyed right row comes out of an outer join unmatched", &
+                test_join_null_right_key_outer), &
+            new_unittest("a timestamp key matches by instant across file units", &
+                test_join_timestamp_key_across_units), &
+            new_unittest("a two-column key with a null in a different column on each side", &
+                test_join_multikey_null_on_each_side), &
+            new_unittest("a real key matches -0.0 to +0.0 and two NaN payloads to each other", &
+                test_join_real_key_signed_zero_and_nan_payloads), &
+            new_unittest("a string key matches by its exact bytes", &
+                test_join_string_key_exact_bytes) &
             ]
-    end subroutine collect_tests_table_join
+    end subroutine join_tests
+    !
+    !> Puts the hook back to the running suite's own mode, for a test that moved it.
+    subroutine restore_suite_engine()
+        if (suite_engine == ENGINE_HASH) then
+            call parquet_debug_set_join_engine(int(ENGINE_HASH, c_int64_t))
+        else
+            call parquet_debug_set_join_engine(0_c_int64_t)
+        end if
+    end subroutine restore_suite_engine
+    !
+    !> The engine an ELIGIBLE join in the running suite must report: the suite's own, except
+    !! that `order="key"` always costs the sort engine (feature_join.md, section 11 question 3).
+    integer function engine_expected(order) result(want)
+        character(len=*), intent(in), optional :: order !! the call's `order=`, if any.
+        !
+        want = suite_engine
+        if (present(order)) then
+            if (trim(order) == "key") want = ENGINE_SORT
+        end if
+    end function engine_expected
+    !
+    !> Asserts the last join ran on engine `want`, naming both when it did not.
+    subroutine check_engine(error, want)
+        type(error_type), allocatable, intent(out) :: error !! set when the wrong engine ran.
+        integer, intent(in) :: want                         !! ENGINE_SORT or ENGINE_HASH.
+        character(len=96) :: msg
+        integer :: got
+        !
+        got = int(parquet_debug_join_engine_used())
+        write (msg, "(a,i0,a,i0,a)") "the join ran on engine ", got, " where the suite expected ", &
+            want, " (1 sort, 2 hash)"
+        call check(error, got == want, trim(msg))
+    end subroutine check_engine
     !
     !> Builds a two-column table: an int64 key and an int64 payload numbered from 1.
     subroutine build(t, name, keys)
@@ -181,7 +294,11 @@ contains
     !! four of the six specifics, so an absent optional cannot be forwarded into one. The ceiling
     !! is asserted where it belongs -- `test_join_applies_max_rows` and the four `join_max_rows_*`
     !! error scenarios, each of which names its specific.
-    subroutine pairs_of(a, b, on, il, ir, n_out, other_on, how, order, require, matched)
+    !!
+    !! **Every call also asserts which engine ran** (`check_engine`), against the running suite's
+    !! expectation -- so a caller checks `error` after it, as after any `check`.
+    subroutine pairs_of(error, a, b, on, il, ir, n_out, other_on, how, order, require, matched)
+        type(error_type), allocatable, intent(out) :: error !! set when the wrong engine ran.
         type(parquet_table), intent(in) :: a  !! the LEFT table; cloned, never mutated.
         type(parquet_table), intent(in) :: b  !! the RIGHT table.
         character(len=*), intent(in) :: on(:) !! left key columns.
@@ -199,6 +316,7 @@ contains
         call w%join(b, on, other_on=other_on, how=how, order=order, require=require, &
             matched=matched, pairs=il, other_pairs=ir)
         n_out = size(il, kind=int64)
+        call check_engine(error, engine_expected(order))
     end subroutine pairs_of
     !
     !> Whether the pair list holds exactly `want`, in exactly that order.
@@ -229,7 +347,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         ! Oracle: every (i, j) with LKEY(i) == RKEY(j), counted independently of the engine.
         want = 0_int64
         do i = 1_int64, size(LKEY, kind=int64)
@@ -270,33 +389,39 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 0_int64, 2_int64, 2_int64, &
             2_int64, 4_int64, 3_int64, 0_int64, 4_int64, 1_int64, 5_int64, 2_int64, &
             5_int64, 4_int64], [2, 7])), "how=left must keep every left row, matched or not")
         if (allocated(error)) return
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="right")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="right")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([2_int64, 2_int64, 2_int64, 4_int64, &
             4_int64, 1_int64, 5_int64, 2_int64, 5_int64, 4_int64, 0_int64, 3_int64], [2, 6])), &
             "how=right must append the unmatched right rows in right-table order")
         if (allocated(error)) return
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="outer")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 0_int64, 2_int64, 2_int64, &
             2_int64, 4_int64, 3_int64, 0_int64, 4_int64, 1_int64, 5_int64, 2_int64, &
             5_int64, 4_int64, 0_int64, 3_int64], [2, 8])), &
             "how=outer must keep every row from both sides")
         if (allocated(error)) return
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="semi")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="semi")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([2_int64, 0_int64, 4_int64, 0_int64, &
             5_int64, 0_int64], [2, 3])), &
             "how=semi must emit each matching left row ONCE, however many matches it has")
         if (allocated(error)) return
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="anti")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="anti")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 0_int64, 3_int64, 0_int64], [2, 2])), &
             "how=anti must emit exactly the left rows with no counterpart")
         if (allocated(error)) return
         ! The default is "inner", and an unrecognized token aborts (a join_* error scenario).
-        call pairs_of(a, b, ["id"], il, ir, n_out)
+        call pairs_of(error, a, b, ["id"], il, ir, n_out)
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, "how= absent must mean inner")
     end subroutine test_join_how_variants
     !
@@ -311,7 +436,8 @@ contains
         ! Control first: with no nulls at all, all three rows match one-to-one.
         call build(a, "id", SAME)
         call build(b, "id", SAME)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, n_out == 3_int64, &
             "the control: three equal keys on each side must give three pairs")
         if (allocated(error)) return
@@ -320,18 +446,21 @@ contains
         ! are nulled below, null-vs-null.
         call a%set_null("id", 2_int64)
         call b%set_null("id", 3_int64)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64], [2, 1])), &
             "a null key must match nothing: only row 1 is valid on both sides")
         if (allocated(error)) return
         ! Null the SAME row on both sides: two nulls of what was the same value must not match.
         call b%set_null("id", 2_int64)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64], [2, 1])), &
             "two nulls must not match each other -- unknown is not equal to unknown")
         if (allocated(error)) return
         ! And a null-keyed left row is an UNMATCHED left row, not a dropped one.
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 0_int64, &
             3_int64, 0_int64], [2, 3])), &
             "how=left must keep a null-keyed left row, with no counterpart")
@@ -341,7 +470,8 @@ contains
         ! whether a right row matched, so dropping the null test on that side is invisible to
         ! them -- confirmed by mutation. Right rows 2 and 3 are both null here (the null tier
         ! collects them whatever value they used to hold), so both must come back unmatched.
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="outer")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 0_int64, &
             3_int64, 0_int64, 0_int64, 2_int64, 0_int64, 3_int64], [2, 5])), &
             "a null-keyed RIGHT row must be reported as unmatched, not silently dropped")
@@ -363,14 +493,16 @@ contains
         !
         call build(a, "id", [10_int64, 20_int64])
         call build(b, "id", [20_int64, 99_int64, 10_int64, 40_int64])
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="right")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="right")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 3_int64, 2_int64, 1_int64, &
             0_int64, 2_int64, 0_int64, 4_int64], [2, 4])), &
             "order=left must append the unmatched right rows in right-table order, not key order")
         if (allocated(error)) return
         ! order=key is where the other sequence is correct: each unmatched right row sits in its
         ! own group's place, so 40 precedes 99.
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="right", order="key")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="right", order="key")
+        if (allocated(error)) return
         call check(error, seq_is(il, ir, reshape([1_int64, 3_int64, 2_int64, 1_int64, &
             0_int64, 4_int64, 0_int64, 2_int64], [2, 4])), &
             "order=key must place each unmatched right row in its own group's position")
@@ -386,7 +518,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner", order="key")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner", order="key")
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, "order= must not change how many rows a join emits")
         if (allocated(error)) return
         ! Key order for this fixture: 10 (left rows 2 and 5) before 20 (left row 4). So the
@@ -413,7 +546,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner", matched=matched)
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner", matched=matched)
+        if (allocated(error)) return
         call check(error, size(matched) == size(LKEY), &
             "matched= must have one entry per PRE-join left row, not per output row")
         if (allocated(error)) return
@@ -423,7 +557,8 @@ contains
         call check(error, count(matched) == 3, "three of the five left rows have a counterpart")
         if (allocated(error)) return
         ! It does not depend on `how`: the question is about the left table, not the output.
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="anti", matched=matched)
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="anti", matched=matched)
+        if (allocated(error)) return
         call check(error, all(matched .eqv. [.false., .true., .false., .true., .true.]), &
             "matched= must not depend on which rows the how= happened to emit")
     end subroutine test_join_matched
@@ -441,7 +576,8 @@ contains
         call parquet_new_table(b)
         call b%add_column("f", [1_int64, 2_int64, 1_int64])
         call b%add_column("g", [20_int64, 20_int64, 10_int64])
-        call pairs_of(a, b, ["f", "g"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["f", "g"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         ! (1,10) meets right row 3; (1,20) meets right row 1; (2,10) meets nothing -- right row 2
         ! is (2,20), which agrees on `f` alone and must NOT match.
         call check(error, seq_is(il, ir, reshape([1_int64, 3_int64, 2_int64, 1_int64], [2, 2])), &
@@ -449,7 +585,8 @@ contains
         if (allocated(error)) return
         ! The control: on `f` alone the same fixture matches far more widely, so the assertion
         ! above is about the second key rather than about the fixture being sparse.
-        call pairs_of(a, b, ["f"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["f"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, "on `f` alone the same rows must match five ways")
     end subroutine test_join_multikey
     !
@@ -462,13 +599,15 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "ref_id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, other_on=["ref_id"], how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, other_on=["ref_id"], how="inner")
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, "other_on= must resolve the right table's own name")
         if (allocated(error)) return
         ! Identical to the same-name join, which is the only way to show other_on= changed the
         ! lookup and nothing else.
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il2, ir2, n2, how="inner")
+        call pairs_of(error, a, b, ["id"], il2, ir2, n2, how="inner")
+        if (allocated(error)) return
         call check(error, n2 == n_out .and. all(il == il2) .and. all(ir == ir2), &
             "renaming the right key must not change a single emitted pair")
     end subroutine test_join_other_on
@@ -485,11 +624,13 @@ contains
         allocate(none(0))
         call build(a, "id", LKEY)
         call build(b, "id", none)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, n_out == 0_int64 .and. size(il) == 0, &
             "nothing can match against an empty right table")
         if (allocated(error)) return
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", matched=matched)
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left", matched=matched)
+        if (allocated(error)) return
         call check(error, n_out == size(LKEY, kind=int64), &
             "how=left against an empty right table must keep every left row")
         if (allocated(error)) return
@@ -497,12 +638,14 @@ contains
         if (allocated(error)) return
         call build(a, "id", none)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="outer")
+        if (allocated(error)) return
         call check(error, n_out == size(RKEY, kind=int64), &
             "an empty left table under how=outer must leave the right rows unmatched")
         if (allocated(error)) return
         call build(b, "id", none)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="outer")
+        if (allocated(error)) return
         call check(error, n_out == 0_int64, "two empty tables must join to nothing")
     end subroutine test_join_empty
     !
@@ -522,18 +665,21 @@ contains
         ! [30, 10, 99, 20, 10] repeat only on 10 -- which has no counterpart here.
         call build(a, "id", LKEY)
         call build(b, "id", [20_int64, 40_int64])
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", require="m:1")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left", require="m:1")
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, "require='m:1' must accept a unique right key")
         if (allocated(error)) return
         ! Case folding, and the same assertion spelled the other way round.
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", require="M:1")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left", require="M:1")
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, "require= must be matched case-insensitively")
         if (allocated(error)) return
         ! Two NULL right keys are not a duplicate key: neither can match anything.
         call build(b, "id", [20_int64, 40_int64, 50_int64])
         call b%set_null("id", 2_int64)
         call b%set_null("id", 3_int64)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", require="m:1")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left", require="m:1")
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, &
             "two null right keys must not trip require='m:1' -- neither can match anything")
         if (allocated(error)) return
@@ -541,7 +687,8 @@ contains
         ! abort is join_require_m1 in test/error_scenarios.f90; here we only prove the fixture
         ! above is one edit away from tripping it, by showing the duplicate really is joinable.
         call build(b, "id", [20_int64, 20_int64])
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left")
+        if (allocated(error)) return
         call check(error, n_out == 6_int64, &
             "the duplicate right key really does multiply the output when it is not refused")
     end subroutine test_join_require_ok
@@ -567,7 +714,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call build(c, "id", LKEY)
         gen = c%generation()
         call c%join(b, ["id"])
@@ -1095,7 +1243,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", matched=want)
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="left", matched=want)
+        if (allocated(error)) return
         call a%join(b, ["id"], how="left", matched=got)
         call check(error, allocated(got), "%join must allocate matched= when it is asked for")
         if (allocated(error)) return
@@ -1131,7 +1280,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, order="key")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, order="key")
+        if (allocated(error)) return
         call build(c, "id", LKEY)
         call c%join(b, ["id"], order="key")
         call check(error, c%nrows() == n_out, "order=key must emit the counted number of rows")
@@ -1256,7 +1406,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out)
+        call pairs_of(error, a, b, ["id"], il, ir, n_out)
+        if (allocated(error)) return
         call check(error, n_out == 5_int64, &
             "the fixture must emit five rows, or the literal ceilings below are not the boundary")
         if (allocated(error)) return
@@ -1405,10 +1556,14 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_inner, how="inner")
-        call pairs_of(a, b, ["id"], il, ir, n_left, how="left")
-        call pairs_of(a, b, ["id"], il, ir, n_right, how="right")
-        call pairs_of(a, b, ["id"], il, ir, n_outer, how="outer")
+        call pairs_of(error, a, b, ["id"], il, ir, n_inner, how="inner")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["id"], il, ir, n_left, how="left")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["id"], il, ir, n_right, how="right")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["id"], il, ir, n_outer, how="outer")
+        if (allocated(error)) return
         call check(error, n_inner < n_left .and. n_inner < n_right, &
             "the fixture must have an unmatched row on each side, or the identity below is trivial")
         if (allocated(error)) return
@@ -1787,7 +1942,8 @@ contains
         call build(a, "id", LKEY)
         call a%add_column("lst", lc)
         call build(b, "id", RKEY)
-        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         do o = 1_int64, n_out
             src = il(o)
             want_len(o) = merge(0_int64, src, src == 5_int64)
@@ -1877,7 +2033,8 @@ contains
         ! with right row 1, and 2.0 pairs with 2.0. Row 1 (1.0) has no counterpart and is dropped.
         call build_real(a, "k", lk)
         call build_real(b, "k", rk)
-        call pairs_of(a, b, ["k"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["k"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, n_out == 3_int64, &
             "a NaN key must match every other NaN, giving three inner pairs, not one")
         if (allocated(error)) return
@@ -1894,7 +2051,8 @@ contains
         call a%set_null("k", 2_int64)
         call a%set_null("k", 4_int64)
         call b%set_null("k", 1_int64)
-        call pairs_of(a, b, ["k"], il, ir, n_out, how="inner")
+        call pairs_of(error, a, b, ["k"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
         call check(error, n_out == 1_int64, &
             "a null key must match nothing, so only the 2.0 pair survives")
         if (allocated(error)) return
@@ -2103,5 +2261,303 @@ contains
         call check(error, parquet_debug_join_add_checked(huge(0_int64), 0_int64) == huge(0_int64), &
             "adding nothing to the largest total is accepted")
     end subroutine test_join_add_checked_boundary
+    !
+    ! ======================================================================================
+    !  The two engines
+    ! ======================================================================================
+    !
+    !> The engine hook switches engines, and the automatic mode is the sort engine.
+    !!
+    !! **Without this the whole `table_join_hash` suite is potentially vacuous** -- the shape of
+    !! `test_fortran_engine_switches` in test/test_sorting_cpp.f90: if the hook were never read,
+    !! or the observable never written, both suites would run one engine and every agreement
+    !! assertion would pass while testing nothing. Registered in the hash suite only, which runs
+    !! serially: it writes the process-global hook mid-test, which a concurrently running sibling
+    !! would see between its own join and its engine assertion.
+    !!
+    !! The automatic arm pins what mode 0 means TODAY: the sort engine for every call. Stage 3 of
+    !! feature_join.md writes the selection rule into `join_choose_engine`, and this arm is then
+    !! the assertion that changes -- deliberately, rather than a test that fails silently.
+    subroutine test_join_engine_hook_switches(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, w
+        integer(int64), allocatable :: il1(:), ir1(:), il2(:), ir2(:), il3(:), ir3(:)
+        integer :: got_sort, got_hash, got_auto
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_set_join_engine(int(ENGINE_SORT, c_int64_t))
+        call a%clone(w)
+        call w%join(b, ["id"], how="outer", pairs=il1, other_pairs=ir1)
+        got_sort = int(parquet_debug_join_engine_used())
+        call parquet_debug_set_join_engine(int(ENGINE_HASH, c_int64_t))
+        call a%clone(w)
+        call w%join(b, ["id"], how="outer", pairs=il2, other_pairs=ir2)
+        got_hash = int(parquet_debug_join_engine_used())
+        call parquet_debug_set_join_engine(0_c_int64_t)
+        call a%clone(w)
+        call w%join(b, ["id"], how="outer", pairs=il3, other_pairs=ir3)
+        got_auto = int(parquet_debug_join_engine_used())
+        call restore_suite_engine()
+        call check(error, got_sort == ENGINE_SORT, "forcing the sort engine must run the sort engine")
+        if (allocated(error)) return
+        call check(error, got_hash == ENGINE_HASH, "forcing the hash engine must run the hash engine")
+        if (allocated(error)) return
+        call check(error, got_auto == ENGINE_SORT, &
+            "automatic mode is the sort engine at this stage (feature_join.md stage 3 changes this arm)")
+        if (allocated(error)) return
+        call check(error, size(il1) == size(il2) .and. size(il1) == size(il3) .and. size(il1) == 8, &
+            "the three runs must emit the outer join's eight rows")
+        if (allocated(error)) return
+        call check(error, all(il1 == il2) .and. all(ir1 == ir2) .and. all(il1 == il3) .and. all(ir1 == ir3), &
+            "the two engines must emit the identical pair list")
+    end subroutine test_join_engine_hook_switches
+    !
+    !> `order="key"` always costs the sort engine, under both suites; the same join under the
+    !! default order reports the suite's own engine, which is the control that makes the first
+    !! half a statement about `order=` rather than about the hook.
+    subroutine test_join_order_key_is_the_sort_engines(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, w
+        integer(int64), allocatable :: il(:), ir(:)
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call a%clone(w)
+        call w%join(b, ["id"], pairs=il, other_pairs=ir)
+        call check_engine(error, suite_engine)
+        if (allocated(error)) return
+        call a%clone(w)
+        call w%join(b, ["id"], order="key", pairs=il, other_pairs=ir)
+        call check_engine(error, ENGINE_SORT)
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([2_int64, 2_int64, 2_int64, 4_int64, &
+            5_int64, 2_int64, 5_int64, 4_int64, 4_int64, 1_int64], [2, 5])), &
+            "and still emit the five inner pairs in key order")
+    end subroutine test_join_order_key_is_the_sort_engines
+    !
+    !> A `PK_LOGICAL` key takes the sort engine whatever the hook asks (feature_join.md, section
+    !! 11 question 4), and the answer is the brute-force one. The int64 control first.
+    subroutine test_join_logical_key_is_the_sort_engines(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, w
+        integer(int64), allocatable :: il(:), ir(:)
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call a%clone(w)
+        call w%join(b, ["id"], pairs=il, other_pairs=ir)
+        call check_engine(error, suite_engine)
+        if (allocated(error)) return
+        call parquet_new_table(a)
+        call a%add_column("flag", [.true., .false., .true.])
+        call parquet_new_table(b)
+        call b%add_column("flag", [.false., .true.])
+        call a%join(b, ["flag"], pairs=il, other_pairs=ir)
+        call check_engine(error, ENGINE_SORT)
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 2_int64, 2_int64, 1_int64, &
+            3_int64, 2_int64], [2, 3])), &
+            "a logical key must match true to true and false to false, in left order")
+    end subroutine test_join_logical_key_is_the_sort_engines
+    !
+    !> A string key BESIDE another key takes the sort engine (the multimap's tuple is
+    !! integer-only), while the same string key ALONE is eligible and reports the suite's engine
+    !! -- the control that pins the exclusion to the combination rather than to strings.
+    subroutine test_join_string_beside_int_key_is_the_sort_engines(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, w
+        integer(int64), allocatable :: il(:), ir(:)
+        !
+        call parquet_new_table(a)
+        call a%add_column("id", [1_int64, 2_int64, 1_int64])
+        call a%add_column("s", ["x", "y", "x"])
+        call parquet_new_table(b)
+        call b%add_column("id", [1_int64, 1_int64])
+        call b%add_column("s", ["x", "y"])
+        call a%clone(w)
+        call w%join(b, ["s"], pairs=il, other_pairs=ir)
+        call check_engine(error, suite_engine)
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 2_int64, &
+            3_int64, 1_int64], [2, 3])), "the control: the string key alone matches x to x and y to y")
+        if (allocated(error)) return
+        call a%clone(w)
+        call w%join(b, "id,s", pairs=il, other_pairs=ir)
+        call check_engine(error, ENGINE_SORT)
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 3_int64, 1_int64], [2, 2])), &
+            "a string key beside an integer key must match only where both agree")
+    end subroutine test_join_string_beside_int_key_is_the_sort_engines
+    !
+    !> A null-keyed RIGHT row is in no group of the hash engine's build, and an outer join must
+    !! still emit it, unmatched, in right-table order -- the one right-side null shape the sort
+    !! engine's group walk handles for free and the hash engine has to re-add by hand.
+    subroutine test_join_null_right_key_outer(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_out
+        !
+        call build(a, "id", [10_int64, 20_int64])
+        call build(b, "id", [10_int64, 30_int64, 40_int64])
+        call b%set_null("id", 2_int64)
+        call check(error, b%is_null("id", 2_int64), "the fixture must hold a null right key")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["id"], il, ir, n_out, how="outer")
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 0_int64, &
+            0_int64, 2_int64, 0_int64, 3_int64], [2, 4])), &
+            "an outer join must emit the null-keyed right row unmatched, in right-table order")
+        if (allocated(error)) return
+        call check(error, count(il == 0_int64) == 2, &
+            "and exactly two right rows -- the null-keyed one and the unmatched one -- have no left half")
+    end subroutine test_join_null_right_key_outer
+    !
+    !> A timestamp key is matched by INSTANT, not by the unit the file stored it in: a
+    !! `timestamp[ms]` left table against a `timestamp[us]` right table, where an instant 500
+    !! microseconds off matches nothing rather than being rounded onto its neighbour. The hash
+    !! engine keys a timestamp as the unit-free (seconds, nanoseconds) tuple, the shape the sort
+    !! comparator compares.
+    subroutine test_join_timestamp_key_across_units(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: fl = "test_run/join_ts_units_left.parquet"
+        character(len=*), parameter :: fr = "test_run/join_ts_units_right.parquet"
+        type(parquet_table) :: a, b
+        type(parquet_timestamp) :: lt(3), rt(3)
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_out
+        integer :: i
+        !
+        do i = 1, 3
+            call lt(i)%set(2024, 1, 31, 12, 30, i - 1)
+        end do
+        call rt(1)%set(2024, 1, 31, 12, 30, 2)
+        call rt(2)%set(2024, 1, 31, 12, 30, 0)
+        call rt(3)%set(2024, 1, 31, 12, 30, 1, 500000)   ! +500 us: matches no left instant
+        call write_ts_fixture(fl, "timestamp[ms]", lt)
+        call write_ts_fixture(fr, "timestamp[us]", rt)
+        call parquet_open_table(a, fl)
+        call parquet_open_table(b, fr)
+        call check(error, a%nrows() == 3_int64 .and. b%nrows() == 3_int64, "both fixtures hold three rows")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["ts"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 2_int64, 3_int64, 1_int64], [2, 2])), &
+            "instants match across units, and the instant 500 us off matches nothing")
+    end subroutine test_join_timestamp_key_across_units
+    !
+    !> Writes a one-column timestamp file in the unit `token` names, for the units test.
+    subroutine write_ts_fixture(fname, token, ts)
+        character(len=*), intent(in) :: fname        !! the file to write.
+        character(len=*), intent(in) :: token        !! `"timestamp[ms]"` or another unit.
+        type(parquet_timestamp), intent(in) :: ts(:) !! the column's values.
+        type(parquet_writer) :: w
+        type(parquet_schema) :: s
+        !
+        call s%init("join_ts_units")
+        call s%add_field("ts", token)
+        call parquet_open_writer(w, fname, s)
+        call parquet_write_column(w, "ts", ts)
+        call parquet_close_writer(w)
+    end subroutine write_ts_fixture
+    !
+    !> A two-column key with a null in a DIFFERENT key column on each side: a row's validity is
+    !! the conjunction over its keys, so each null row matches nothing even though its other key
+    !! agrees with a row opposite. Under `outer` both come out unmatched; the single-key control
+    !! shows the same rows do match on the non-null column alone.
+    subroutine test_join_multikey_null_on_each_side(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_out
+        !
+        call parquet_new_table(a)
+        call a%add_column("f", [1_int64, 1_int64, 2_int64, 1_int64])
+        call a%add_column("g", [10_int64, 20_int64, 10_int64, 20_int64])
+        call a%set_null("f", 2_int64)
+        call parquet_new_table(b)
+        call b%add_column("f", [1_int64, 1_int64, 2_int64])
+        call b%add_column("g", [10_int64, 20_int64, 10_int64])
+        call b%set_null("g", 2_int64)
+        call pairs_of(error, a, b, ["f", "g"], il, ir, n_out, how="outer")
+        if (allocated(error)) return
+        ! Left row 4 is (1, 20) and right row 2 is (1, null): they agree on `f` and must not
+        ! match; left row 2 is (null, 20) against right row 2's 20 on `g`, and must not either.
+        call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 0_int64, &
+            3_int64, 3_int64, 4_int64, 0_int64, 0_int64, 2_int64], [2, 5])), &
+            "a null in either key column must leave that row unmatched on both sides")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["f"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
+        call check(error, n_out == 5_int64, &
+            "the control: on `f` alone the same rows match five ways, so the nulls above did the work")
+    end subroutine test_join_multikey_null_on_each_side
+    !
+    !> A real key matches `-0.0` to `+0.0` and two NaNs of different payload to each other: the
+    !! sort comparator's equality, and the one `parquet_index_real_key` canonicalises to. The
+    !! fixture asserts its own preconditions first -- that the two zeros and the two NaNs really
+    !! differ bit for bit -- or a fixture holding two identical values would pass this for
+    !! nothing.
+    subroutine test_join_real_key_signed_zero_and_nan_payloads(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_out
+        real(real64) :: nan, nan2, pz, nz, lk(3), rk(3)
+        !
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        ! The second payload is the first with its lowest mantissa bit flipped -- still a quiet
+        ! NaN, different bits. Built from the RUNTIME value rather than from a literal bit
+        ! pattern (nagfor constant-folds the latter and refuses its own result), and not through
+        ! `ieee_copy_sign`, which under ifx hands back the same bits for a NaN.
+        nan2 = transfer(ieor(transfer(nan, 0_int64), 1_int64), nan)
+        pz = 0.0_real64
+        nz = ieee_copy_sign(0.0_real64, -1.0_real64)
+        call check(error, transfer(nz, 0_int64) /= transfer(pz, 0_int64), &
+            "precondition: -0.0 and +0.0 must differ in their bits")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(nan2) .and. transfer(nan, 0_int64) /= transfer(nan2, 0_int64), &
+            "precondition: the two NaN payloads must differ in their bits and both be NaN")
+        if (allocated(error)) return
+        lk = [nz, nan, 1.0_real64]
+        rk = [pz, nan2, 2.0_real64]
+        call build_real(a, "k", lk)
+        call build_real(b, "k", rk)
+        call pairs_of(error, a, b, ["k"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 2_int64], [2, 2])), &
+            "-0.0 must match +0.0 and one NaN must match another, and 1.0 must match nothing")
+    end subroutine test_join_real_key_signed_zero_and_nan_payloads
+    !
+    !> A string key matches by its EXACT bytes: `"ab"` against `"ab "` is a miss, not a hit after
+    !! a trim (the sort engine's rule, and the index tier's, feature_risks.md Risk-211). A
+    !! `character` array is trimmed on the way into a column, so the padded value is put in with
+    !! the scalar `%set_element`, which does not trim -- and the fixture asserts it kept the
+    !! blank before anything is joined.
+    subroutine test_join_string_key_exact_bytes(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_out
+        character(len=:), allocatable :: got
+        !
+        call parquet_new_table(a)
+        call a%add_column("s", ["ab", "cd"])
+        call a%add_column("payload", [1_int64, 2_int64])
+        call parquet_new_table(b)
+        call b%add_column("s", ["ab", "xx", "cd"])
+        call b%add_column("payload", [1_int64, 2_int64, 3_int64])
+        call b%set_element("s", 2_int64, "ab ")
+        call b%get_element("s", 2_int64, got)
+        call check(error, len(got) == 3, "precondition: the scalar set must keep the trailing blank")
+        if (allocated(error)) return
+        call check(error, got == "ab ", "precondition: and the value must read back as 'ab '")
+        if (allocated(error)) return
+        call pairs_of(error, a, b, ["s"], il, ir, n_out, how="inner")
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 3_int64], [2, 2])), &
+            "'ab' must match 'ab' and 'cd' match 'cd', and 'ab ' must match neither")
+    end subroutine test_join_string_key_exact_bytes
     !
 end module test_table_join

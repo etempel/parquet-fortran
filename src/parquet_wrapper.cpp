@@ -4553,6 +4553,41 @@ extern "C"
 		return g_debug_colwork_min_columns;
 	}
 
+	// Test-only selector and observable for the ENGINE parquet_table%join builds its pair list with
+	// (src/parquet_tables_join.f90 dispatches; src/parquet_tables_join_hash.f90 is the second
+	// engine). The mode is read from Fortran once per join through a local bind(C) interface, and
+	// the observable is written by BOTH engine bodies -- the fallback included -- so a suite forced
+	// onto one engine can assert which one actually ran rather than assume it. Mode: 0 automatic
+	// (the library's own rule), 1 the sort engine, 2 the hash engine. Forcing an engine a call is
+	// not eligible for does not abort and does not bypass the eligibility rule: the join runs the
+	// engine it can and the observable says so, which is what lets one test suite run twice, once
+	// per forced mode, over every join it holds. Neither is a setting: no user program reads them,
+	// parquet_print_settings never prints them, parquet_reset_settings never resets them.
+	// std::atomic because test-drive runs a suite's tests concurrently and every join writes the
+	// observable; the counters above that are written from one thread stay plain.
+	static std::atomic<int64_t> g_debug_join_engine_mode{0};
+	static std::atomic<int64_t> g_debug_join_engine_used{0};
+
+	void parquet_debug_set_join_engine(int64_t mode)
+	{
+		g_debug_join_engine_mode = (mode >= 0 && mode <= 2) ? mode : 0;
+	}
+
+	int64_t parquet_debug_get_join_engine(void)
+	{
+		return g_debug_join_engine_mode;
+	}
+
+	void parquet_debug_set_join_engine_used(int64_t engine)
+	{
+		g_debug_join_engine_used = engine;
+	}
+
+	int64_t parquet_debug_join_engine_used(void)
+	{
+		return g_debug_join_engine_used;
+	}
+
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		g_debug_last_use_threads = use_threads;

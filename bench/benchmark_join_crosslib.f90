@@ -29,6 +29,11 @@
 !! no arm can be optimised away; and the output is written once, after the timed rounds, so no
 !! figure includes it twice.
 !!
+!! `--engine=auto|sort|hash` forces the join's pair-list engine through the test-only hook
+!! `parquet_debug_set_join_engine` (default `auto`, the library's own choice), and the
+!! `engine_used` fact reports which engine the timed join actually ran on -- what lets the
+!! accuracy harness rerun its cases under each engine and check the forced one took the call.
+!!
 !! Output is one `key=value` line per fact on stdout, prefixed `RESULT`, for the wrapper to parse.
 program benchmark_join_crosslib
     use parquet
@@ -40,13 +45,14 @@ program benchmark_join_crosslib
 
     character(len=:), allocatable :: left_file, right_file, out_file
     character(len=:), allocatable :: on_key, other_on_key, how, columns, require_tok
-    character(len=:), allocatable :: order_tok, suffix_tok, mode, left_keep
+    character(len=:), allocatable :: order_tok, suffix_tok, mode, left_keep, engine
     integer :: rounds, threads_req
     integer(int64), allocatable :: max_rows_req
     logical :: have_other_on, have_columns, have_require, have_order, have_suffix, have_keep
     logical :: have_max_rows
 
     call read_arguments()
+    call apply_engine()
 
     select case (mode)
     case ("eager")
@@ -77,6 +83,7 @@ contains
         suffix_tok = ""
         left_keep = ""
         mode = "eager"
+        engine = "auto"
         rounds = 3
         threads_req = 0
         have_max_rows = .false.
@@ -120,6 +127,8 @@ contains
                 have_keep = len_trim(left_keep) > 0
             else if (index(arg, "--mode=") == 1) then
                 mode = trim(arg(8:))
+            else if (index(arg, "--engine=") == 1) then
+                engine = trim(arg(10:))
             else if (index(arg, "--rounds=") == 1) then
                 read (arg(10:), *) rounds
             else if (index(arg, "--threads=") == 1) then
@@ -138,6 +147,47 @@ contains
             stop 2
         end if
     end subroutine read_arguments
+
+    !> Forces the join's pair-list engine through the test-only hook, per `--engine=`.
+    !!
+    !! A local `bind(C)` interface, as every `parquet_debug_*` hook is reached: the hook stays
+    !! out of `src/parquet_bindings.f90` and out of the library's own interface.
+    subroutine apply_engine()
+        use iso_c_binding, only : c_int64_t
+        interface
+            subroutine set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
+                import :: c_int64_t
+                integer(c_int64_t), value :: mode !! 0 automatic, 1 the sort engine, 2 the hash engine.
+            end subroutine set_join_engine
+        end interface
+
+        select case (engine)
+        case ("auto")
+            call set_join_engine(0_c_int64_t)
+        case ("sort")
+            call set_join_engine(1_c_int64_t)
+        case ("hash")
+            call set_join_engine(2_c_int64_t)
+        case default
+            write (output_unit, "(a)") "benchmark_join_crosslib: unknown --engine=" // engine
+            stop 2
+        end select
+    end subroutine apply_engine
+
+    !> The engine the last join ran on (1 the sort engine, 2 the hash engine), from the hook's
+    !! observable.
+    function engine_used() result(e)
+        use iso_c_binding, only : c_int64_t
+        integer(int64) :: e !! 1 or 2.
+        interface
+            function join_engine_used() result(res) bind(C, name="parquet_debug_join_engine_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: res !! the engine token.
+            end function join_engine_used
+        end interface
+
+        e = int(join_engine_used(), int64)
+    end function engine_used
 
     !> Seconds now, from the best clock available.
     function now() result(t)
@@ -383,6 +433,8 @@ contains
         else
             call emit("detached", "0")
         end if
+        call emit("engine", engine)
+        call emit_int("engine_used", engine_used())
 
         t_write = 0.0_real64
         if (len_trim(out_file) > 0) then
@@ -437,6 +489,8 @@ contains
         else
             call emit("detached", "0")
         end if
+        call emit("engine", engine)
+        call emit_int("engine_used", engine_used())
 
         t_write = 0.0_real64
         if (len_trim(out_file) > 0) then

@@ -1106,6 +1106,20 @@ program error_scenarios
         call scenario_join_max_rows_form(4)
     case ("join_require_1m")
         call scenario_join_require_1m()
+    case ("join_require_m1_hash")
+        call scenario_join_hash_twin("require_m1")
+    case ("join_require_1m_hash")
+        call scenario_join_hash_twin("require_1m")
+    case ("join_max_rows_hash")
+        call scenario_join_hash_twin("max_rows")
+    case ("join_max_rows_arr_i32_hash")
+        call scenario_join_hash_twin("max_rows_arr_i32")
+    case ("join_max_rows_arr_i64_hash")
+        call scenario_join_hash_twin("max_rows_arr_i64")
+    case ("join_max_rows_str_i32_hash")
+        call scenario_join_hash_twin("max_rows_str_i32")
+    case ("join_max_rows_str_i64_hash")
+        call scenario_join_hash_twin("max_rows_str_i64")
     case ("join_pair_count_overflow")
         call scenario_join_pair_count_overflow()
     case ("join_bad_require")
@@ -19689,6 +19703,58 @@ contains
         call a%join(b, "id", require="1:m")   ! -> aborts (two left rows share key 10)
         print '(a,i0)', "unexpectedly accepted a duplicate left key, rows=", a%nrows()
     end subroutine scenario_join_require_1m
+
+    !> The `_hash` twin of a join abort: the same scenario with the HASH engine forced through
+    !! the test-only hook, so the abort is proved on both engines -- the cardinality assertion
+    !! and the `max_rows=` ceiling are re-implemented there clause by clause
+    !! (src/parquet_tables_join_hash.f90), and an abort the sort engine raises says nothing
+    !! about the other.
+    !!
+    !! Two controls before the base scenario runs. A join with the hook CLEAR prints the engine
+    !! it ran on (the sort engine), and one with the hook SET prints the hash engine, so the
+    !! wrapper asserts from stdout that the forced engine really was in force when the base
+    !! scenario's abort came -- without that line, a twin whose hook did nothing would pass on
+    !! the sort engine's abort. The hook is reached through a local `bind(C)` interface, as every
+    !! `parquet_debug_*` hook is.
+    subroutine scenario_join_hash_twin(which)
+        use iso_c_binding, only : c_int64_t
+        character(len=*), intent(in) :: which !! the base scenario, by the tail of its name.
+        interface
+            subroutine set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
+                import :: c_int64_t
+                integer(c_int64_t), value :: mode !! 0 automatic, 1 the sort engine, 2 the hash engine.
+            end subroutine set_join_engine
+            function join_engine_used() result(e) bind(C, name="parquet_debug_join_engine_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: e !! the engine the last join ran on.
+            end function join_engine_used
+        end interface
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64, 30_int64])
+        call join_fixture(b, [20_int64, 30_int64])
+        call a%join(b, ["id"])
+        print '(a,i0)', "join engine used with the hook clear=", join_engine_used()
+        call set_join_engine(2_c_int64_t)
+        call join_fixture(a, [10_int64, 20_int64, 30_int64])
+        call a%join(b, ["id"])
+        print '(a,i0)', "join engine used with the hook set=", join_engine_used()
+        select case (which)
+        case ("require_m1")
+            call scenario_join_require_m1()
+        case ("require_1m")
+            call scenario_join_require_1m()
+        case ("max_rows")
+            call scenario_join_max_rows()
+        case ("max_rows_arr_i32")
+            call scenario_join_max_rows_form(1)
+        case ("max_rows_arr_i64")
+            call scenario_join_max_rows_form(2)
+        case ("max_rows_str_i32")
+            call scenario_join_max_rows_form(3)
+        case default
+            call scenario_join_max_rows_form(4)
+        end select
+    end subroutine scenario_join_hash_twin
 
     !> An unrecognized `require=` token aborts naming every accepted value, rather than falling
     !! back to no assertion -- which would be the worst available answer, since a caller who

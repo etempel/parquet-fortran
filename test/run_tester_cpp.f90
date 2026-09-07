@@ -46,7 +46,7 @@ program run_tester_cpp
     use test_table_codegen, only : collect_tests_table_codegen
     use test_table_container, only : collect_tests_table_container
     use test_table_parallel, only : collect_tests_table_parallel
-    use test_table_join, only : collect_tests_table_join
+    use test_table_join, only : collect_tests_table_join, collect_tests_table_join_hash
     use test_table_verbs, only : collect_tests_table_verbs
     use test_table_rowverbs, only : collect_tests_table_rowverbs
     use test_table_fill, only : collect_tests_table_fill
@@ -91,6 +91,10 @@ program run_tester_cpp
         new_testsuite("table_parallel", collect_tests_table_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
         new_testsuite("table_container", collect_tests_table_container), &
+        ! table_join_hash runs the join suite with the hash engine forced through a process-global
+        ! hook, and table_join's own collector puts the hook back to automatic -- so the two stay
+        ! in THIS order, hash first, or the forced engine leaks into every suite after it.
+        new_testsuite("table_join_hash", collect_tests_table_join_hash), &
         new_testsuite("table_join", collect_tests_table_join), &
         new_testsuite("table_verbs", collect_tests_table_verbs), &
         new_testsuite("table_rowverbs", collect_tests_table_rowverbs), &

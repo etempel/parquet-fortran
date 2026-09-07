@@ -48,11 +48,17 @@
 !! every character array argument; a scalar key is taken as written.
 submodule (parquet_tables) parquet_tables_index
     ! The key conversion and the column-acceptance rule, from parquet_core rather than repeated
-    ! here: one helper per key kind for the filter, the index and (later) the join, or a table's
-    ! `in` filter and its index disagree about a row. Both facades hide these names again.
+    ! here: one helper per key kind for the filter, the index and the join's hash engine, or a
+    ! table's `in` filter and its index disagree about a row. Both facades hide these names again.
     use parquet_core, only : parquet_index_real_key, parquet_date_key, parquet_time_key, &
         parquet_timestamp_key, parquet_set_family_for_column, parquet_filter_column_tokens, &
         FSET_NONE, FSET_STRING
+    ! The thread rule `index_team` forwards to -- the one the index tier's own build and bulk
+    ! lookups follow -- and the affinity clamp every resolved count goes through
+    ! (.claude/rules/api-conventions.md, "Thread counts"). Both modules are already in this
+    ! module's footprint, so a submodule import costs a consumer nothing.
+    use parquet_index, only : pf_index_threads
+    use parquet_settings_base, only : parquet_clamp_to_affinity
     implicit none
     !
     !> Error-message prefix for every `error stop` a query raises. The build's messages carry the
@@ -125,7 +131,8 @@ contains
             ix%built = .true.
             return
         end if
-        call index_extract_keys(self%cache%cols(idx)%values, kind, self%row_count, keys, pairs, valid)
+        call index_extract_keys(self%cache%cols(idx)%values, kind, self%row_count, keys, pairs, valid, &
+            threads)
         if (kind == PK_TIMESTAMP) then
             if (ix%uniq) then
                 call ix%map%build(pairs, valid=valid, threads=threads)
@@ -142,20 +149,9 @@ contains
         ix%built = .true.
     end procedure table_build_index
     !
-    !> Turns one resident column into the engine's keys: `keys(nrows)` for every kind but a
-    !! timestamp, whose `(nrows, 2)` tuples go into `pairs` instead, plus the validity mask when
-    !! the column holds any null (left unallocated otherwise, which the engines read as absent).
-    !!
-    !! Reached through the typed accessor tier (`parquet_column_data_ptr`, `parquet_column_is_null`)
-    !! rather than any binding on the column, per CLAUDE.md's rule for the table layer, and the
-    !! conversion itself is parquet_core's -- see the file header.
-    subroutine index_extract_keys(col, kind, nrows, keys, pairs, valid)
-        type(parquet_column), intent(in), target :: col !! the resident key column.
-        integer, intent(in) :: kind                     !! its PK_* kind, already accepted.
-        integer(int64), intent(in) :: nrows             !! the table's row count.
-        integer(int64), allocatable, intent(out) :: keys(:)     !! one key per row (every kind but timestamp).
-        integer(int64), allocatable, intent(out) :: pairs(:, :) !! `(nrows, 2)` tuples (timestamp only).
-        logical, allocatable, intent(out) :: valid(:)   !! .false. on each null row; unallocated if none.
+    ! ---- the key conversion, shared with the join's hash engine ------------------------------
+    !
+    module procedure index_extract_keys
         integer(int32), pointer :: p32(:)
         integer(int64), pointer :: p64(:)
         real(real32), pointer :: r32(:)
@@ -164,6 +160,7 @@ contains
         type(parquet_time), pointer :: pt(:)
         type(parquet_timestamp), pointer :: pts(:)
         integer(int64) :: i
+        integer :: nt
         !
         nullify(p32, p64, r32, r64, pd, pt, pts)
         select case (kind)
@@ -185,21 +182,49 @@ contains
         case (PK_TIME)
             call parquet_column_data_ptr(col, pt)
             keys = parquet_time_key(pt(1_int64:nrows))
-        case default
+        case (PK_TIMESTAMP)
             call parquet_column_data_ptr(col, pts)
             allocate(pairs(nrows, 2))
             call parquet_timestamp_key(pts(1_int64:nrows), pairs(:, 1), pairs(:, 2))
+        case (PK_STRING)
+            ! No key at all: the engines take the column's own string store in place, by its
+            ! exact bytes (see the file header), so only the mask below is wanted here.
+            continue
+        case default
+            ! Defensive: every caller has already accepted the kind through the filter's rule
+            ! (`%build_index`) or the join's eligibility test, so no fixture reaches this.
+            ! GCOVR_EXCL_START
+            error stop EP // "index_extract_keys: no key conversion exists for this column " // &
+                "kind; the caller was to have refused it first"
+            ! GCOVR_EXCL_STOP
         end select
-        ! parquet_column_any_null answers for all three storage classes -- the bitmap kinds and
-        ! the temporal elements alike -- which is why the row loop asks the column rather than
-        ! the pointer.
+        ! parquet_column_any_null answers for all three storage classes -- the bitmap kinds, the
+        ! temporal elements and the string store alike -- which is why the row loop asks the
+        ! column rather than the pointer. One `parquet_column_is_null` per row, on a team: a
+        ! read-only pass over a resident column, so the rows split with no shared state at all.
         if (parquet_column_any_null(col)) then
             allocate(valid(nrows))
+            nt = index_team(nrows, threads)
+            !$omp parallel do num_threads(nt) if (nt > 1) schedule(static)
             do i = 1_int64, nrows
                 valid(i) = .not. parquet_column_is_null(col, i)
             end do
+            !$omp end parallel do
         end if
-    end subroutine index_extract_keys
+    end procedure index_extract_keys
+    !
+    module procedure index_team
+        if (present(threads)) then
+            ! An explicit request is honoured whatever the size and wherever it is made, as the
+            ! index tier honours it -- but clamped to the affinity mask, since a team wider than
+            ! the processors is slower than no team at all. The area name is the index tier's,
+            ! because that is whose rule this is.
+            nt = parquet_clamp_to_affinity(max(threads, 1), "index")
+        else
+            nt = pf_index_threads(n)
+        end if
+        if (n < 2_int64) nt = 1
+    end procedure index_team
     !
     ! ---- the two guards every query runs ------------------------------------------------------
     !

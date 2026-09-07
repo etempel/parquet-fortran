@@ -9206,6 +9206,37 @@ module parquet_tables
         module subroutine tix_clear(self)
             class(parquet_table_index), intent(inout) :: self !! the index.
         end subroutine tix_clear
+        !> Turns one resident column into `parquet_index` keys: `keys(nrows)` for every scalar
+        !! kind but a timestamp, whose `(nrows, 2)` tuples go into `pairs` instead, plus the
+        !! validity mask when the column holds any null (left unallocated otherwise, which the
+        !! engines read as absent). A string column yields no key at all -- the engines take its
+        !! `parquet_string_column` in place, through `parquet_column_string_column` -- and only
+        !! the mask.
+        !!
+        !! **The ONE key conversion of the table layer**, shared by `%build_index` and the join's
+        !! hash engine (feature_risks.md Risk-211: a second copy is exactly what that entry
+        !! forbids), with parquet_core's helpers underneath it. Reached through the typed
+        !! accessor tier (`parquet_column_data_ptr`, `parquet_column_is_null`) rather than any
+        !! binding on the column. The validity pass is one `parquet_column_is_null` per row and
+        !! runs on the team `index_team(nrows, threads)` resolves.
+        module subroutine index_extract_keys(col, kind, nrows, keys, pairs, valid, threads)
+            type(parquet_column), intent(in), target :: col !! the resident key column.
+            integer, intent(in) :: kind                     !! its PK_* kind, already accepted.
+            integer(int64), intent(in) :: nrows             !! the table's row count.
+            integer(int64), allocatable, intent(out) :: keys(:)     !! one key per row (scalar kinds).
+            integer(int64), allocatable, intent(out) :: pairs(:, :) !! `(nrows, 2)` tuples (timestamp only).
+            logical, allocatable, intent(out) :: valid(:)   !! .false. on each null row; unallocated if none.
+            integer, intent(in), optional :: threads        !! team for the validity pass; absent = automatic.
+        end subroutine index_extract_keys
+        !> The team a key extraction, or a join's own bulk pass, over `n` rows runs on: an
+        !! explicit `threads=` clamped to this process's CPU affinity, else `pf_index_threads(n)`,
+        !! the rule the engine's own build and bulk lookups follow -- so the table layer opens no
+        !! team the index tier would not, and serial inside a parallel region as it is.
+        module function index_team(n, threads) result(nt)
+            integer(int64), intent(in) :: n          !! rows the pass will process.
+            integer, intent(in), optional :: threads !! the caller's request, or absent.
+            integer :: nt                            !! threads to use; 1 means serial.
+        end function index_team
     end interface
     ! ---- The join (parquet_tables_join -- HAND-WRITTEN, not generated) ----
     interface
@@ -9510,7 +9541,9 @@ module parquet_tables
             !> per PRE-join left row: .true. when it found at least one counterpart. The only
             !! coordinate system in which that question still has an answer after the mutation.
             logical, allocatable, intent(out), optional :: matched(:)
-            integer, intent(in), optional :: threads !! forwarded to pf_argsort; absent = auto.
+            !> team for the engine that builds the match (the sort, or the multimap's build and
+            !! probe); absent = automatic. Never changes which rows come out, or their order.
+            integer, intent(in), optional :: threads
         end subroutine table_join_pairs
     end interface
     !

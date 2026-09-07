@@ -100,6 +100,8 @@ something a reader is expected to have.
 | [Risk-213](#risk-213--a-build-swaps-every-component-of-pf_index_map-in-under-the-guard-and-a-forgotten-one-is-silently-lost) | A build swaps EVERY component of `pf_index_map` in under the guard, and a forgotten one is silently lost | 4 — covered |
 | [Risk-214](#risk-214--a-partitioned-hash-insert-must-never-write-outside-its-own-slot-range-and-a-deferred-key-is-placed-only-after-every-range-is-done) | A partitioned hash insert must never write outside its own slot range, and a deferred key is placed only after every range is done | 4 — covered |
 | [Risk-215](#risk-215--the-sorted-backends-prefix-bucket-is-an-arithmetic-shift-and-a-subtraction-that-cannot-overflow-and-the-range-test-in-front-of-it-is-what-keeps-it-in-bounds) | The sorted backend's prefix bucket is an arithmetic shift and a subtraction that cannot overflow, and the range test in front of it is what keeps it in bounds | 4 — covered |
+| [Risk-216](#risk-216--the-joins-hash-engine-puts-the-null-keyed-right-rows-back-by-subtraction-and-a-union-over-groups-loses-them-silently) | The join's hash engine puts the null-keyed right rows back by SUBTRACTION, and a union over groups loses them silently | 4 — covered |
+| [Risk-217](#risk-217--two-join-engines-assert-require-and-count-the-output-and-only-the-suite-run-under-both-can-see-them-disagree) | Two join engines assert `require=` and count the output, and only the suite run under both can see them disagree | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8159,10 +8161,13 @@ guard cannot pass by firing on everything.
 
 ### Risk-211 — `%build_index` and the filter's `in` leaf convert a key through ONE helper, and the NaN split is the one deliberate difference
 
-Three callers turn a column's values into `parquet_index` keys: the reader's pre-evaluated `in`
+Four callers turn a column's values into `parquet_index` keys: the reader's pre-evaluated `in`
 leaf (`parquet_answer_set_chunk`, `src/parquet_read.f90`), the in-memory evaluator's
-(`parquet_eval_set_leaf_column`, `src/parquet_read_eval.f90`) and the table's `%build_index`
-(`src/parquet_tables_index.f90`); the join's hash path will be a fourth. Two conversions of a real
+(`parquet_eval_set_leaf_column`, `src/parquet_read_eval.f90`), the table's `%build_index`
+(`src/parquet_tables_index.f90`) and the join's hash engine (`hash_key_codes`,
+`src/parquet_tables_join_hash.f90`) — the last two through ONE routine, `index_extract_keys`,
+declared in the module spec for exactly that reason: the join has no conversion of its own to
+drift, and a change to the helper reaches both. Two conversions of a real
 or temporal column — one normalising `-0.0`, one not; one taking `%raw()`, one an MJD; one
 widening `int32` first, one hashing it as is — give a table whose `in` filter and whose index
 **disagree about the same row**, and both answers are individually plausible. So every caller
@@ -8186,7 +8191,12 @@ different payload, and that the temporal helpers are the elements' raw storage; 
 `test_real_nan_is_one_key` (`test/test_table_index.f90`), which indexes two NaN rows as one key;
 by `test_in_timestamp_set_across_units` (`test/test_filter.f90`) and `test_timestamp_across_units`
 (`test/test_table_index.f90`), which hold the unit-free timestamp key on both paths; and by
-`test_in_temporal_row_mask_agrees`, the two-engine A/B over temporal sets.
+`test_in_temporal_row_mask_agrees`, the two-engine A/B over temporal sets. On the join's side,
+`test_join_real_key_signed_zero_and_nan_payloads` (`-0.0` against `+0.0`, two NaN payloads),
+`test_join_timestamp_key_across_units` (a `timestamp[ms]` table against a `timestamp[us]` one) and
+`test_join_multikey_null_on_each_side` (`test/test_table_join.f90`) run under both engines, so a
+key the hash engine converted differently from the sort comparator's equality would fail the
+`table_join_hash` suite.
 
 **A string column has no helper at all, and that is the same rule from the other side.** The
 filter's `%bind`, both `in` engines and `%build_index` hand a string column, or a character array,
@@ -8195,8 +8205,9 @@ of a `character` array trimmed first, per the library's array rule). There is no
 and therefore nothing to disagree about — as long as no caller introduces a conversion of its own
 (a `trim` on a scalar, a case fold, a `%strip_all` on the way in). `test_in_string_set_exact_bytes`
 (`test/test_filter.f90`) pins the two engines and both `%bind` forms on a fixture holding `"ab"`
-beside `"ab "`, and `test_string_column` (`test/test_table_index.f90`) pins `%find_all` against
-`pf_match_all` over the same column.
+beside `"ab "`, `test_string_column` (`test/test_table_index.f90`) pins `%find_all` against
+`pf_match_all` over the same column, and `test_join_string_key_exact_bytes`
+(`test/test_table_join.f90`) pins the join on the same two values under both engines.
 
 ### Risk-212 — A string map's occurrence chain must stay DENSE, and a hit must be verified against the stored bytes
 
@@ -8316,3 +8327,62 @@ a build that silently skipped it cannot pass; and by `test_sorted_boundaries`, t
 map. What it forbids: computing the bucket from `key - kmin` (held by the standard and by a nagfor
 `-C=intovf` build, not by the suite); forming `kmax - kmin` before the nested guard; sizing the
 table so that a shift of 0 becomes possible; and moving the range test after the bucket.
+
+### Risk-216 — The join's hash engine puts the null-keyed right rows back by SUBTRACTION, and a union over groups loses them silently
+
+Under `how="right"`/`"outer"` the sort engine emits an unmatched right row because it sits in a
+group whose `rmatched` is false — a null-keyed right row included, since the null tier collects it
+into a group like any other. The hash engine's multimap SKIPS a null-keyed right row at build time:
+it is in no group at all, so `group_hit` cannot see it and `%csr` does not list it.
+`hash_unmatched_right` (`src/parquet_tables_join_hash.f90`) therefore starts from "every right row
+is unmatched" and CLEARS the rows of the groups some probe reached — which is what puts the
+null-keyed rows back. Written the other way round, as the union of the rows of the UNHIT groups,
+it reads as the same thing and drops every null-keyed right row from a right or outer join: the
+row count is short by exactly the null count, every row that is emitted is correct, `n_out` and the
+rewrite agree with each other, and nothing aborts. The same shape one level up: `n_runm` must be
+counted off that mask, never off `%csr`'s groups.
+
+**Rule:** the unmatched-right mask is derived by subtraction from the full right row set and
+`n_runm` is `count(unm)`; neither may be rebuilt from the multimap's groups, which by construction
+hold only the valid keys.
+
+**Covered by** `test_join_null_right_key_outer` (`test/test_table_join.f90`), which nulls one right
+key, asserts the fixture really holds it, and requires the outer join to emit that row unmatched in
+right-table order beside the ordinary unmatched one — and by `test_join_nulls`' outer arm, where
+BOTH null-keyed right rows must come out. Both run under the `table_join_hash` suite, where the
+hash engine is forced and every join asserts through `parquet_debug_join_engine_used` that it ran.
+
+### Risk-217 — Two join engines assert `require=` and count the output, and only the suite run under both can see them disagree
+
+`join_check_require`/`join_count` (`src/parquet_tables_join.f90`) assert the cardinality and count
+the output over the sort engine's groups; `hash_check_require` and the counting in
+`join_pairs_hash` (`src/parquet_tables_join_hash.f90`) do the same over the multimap's probe
+ranges. Every clause of the documented contract now lives twice, and the two exclusions are the
+ones that drift first: a null-keyed row takes part in no match on either side, and a repeated key
+that matched NOTHING is not a violation (`doc/pages/tables/table-join.md`, "Saying what you
+expect"). An engine that counted the repeat nothing probed refuses a lookup-table join that was
+about to be correct; one that skipped the check hands back a result many times the expected size;
+one whose `n_out` disagreed with its emission would allocate the wrong length. All of it is silent
+in the suite that runs the other engine, because the sort engine's own tests never reach the hash
+engine's code — which is why the same suite is run twice, and why forcing an engine on a call it
+cannot take falls back rather than aborting (`join_choose_engine`): the fallback is what lets the
+whole suite run under the forced mode, and the observable written by BOTH engine bodies is what
+stops that fallback from hiding a decline.
+
+**Rule:** every join test lives in `join_tests` and so runs under both collectors; `pairs_of`
+asserts the engine after every join and a test that joins directly asserts it through
+`check_engine`; an abort the hash engine re-implements gets a `_hash` twin in all three scenario
+places (`scenario_join_hash_twin`), whose stdout must show the hook in force before the abort. A
+new clause added to one engine without its twin is caught by whichever of the two suites runs the
+other engine — and a clause added to neither is not, so a new contract on the page needs its test
+before its code.
+
+**Covered by** the `table_join_hash` suite (`test/run_tester_cpp.f90`, serial, the hash engine
+forced) beside `table_join`: `test_join_require_ok`, `test_join_applies_require`,
+`test_join_apply_outer`'s counting identity and every pair-list test; by
+`test_join_engine_hook_switches`, without which the second suite could pass vacuously; and by the
+seven `join_*_hash` scenarios in `test/error_scenarios.f90`, each asserting the sort engine's
+message text on the hash engine's abort. Four mutations of the hash engine — the null-keyed right
+rows dropped from the count, the `"1:m"` mask test flipped to `"m:1"`, the probe's `valid=`
+dropped, the matches emitted in key order — each fail a named test under `table_join_hash` and
+pass under `table_join`, which is the shape this entry asks a future change to keep.

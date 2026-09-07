@@ -22,6 +22,10 @@
 !! any of them. That is the same division of labour `parquet_tables_filter.f90` follows: this file
 !! decides which rows go, `parquet_tables_rowmutate.f90` owns what happens to them.
 submodule (parquet_tables) parquet_tables_fill
+    ! The string store's two bulk forms the string arms below are written on. A submodule-level
+    ! import, so `parquet_tables`' own footprint is unchanged (the module already compiles
+    ! parquet_strings for the type).
+    use parquet_strings, only : parquet_string_column_set_where, parquet_string_column_gather
     implicit none
 
     !> What kind of thing a caller handed `%fillna`, independent of which of the eighteen
@@ -484,6 +488,7 @@ contains
         type(parquet_date), pointer :: p_dt(:), p_dtv(:,:)
         type(parquet_time), pointer :: p_tm(:), p_tmv(:,:)
         type(parquet_timestamp), pointer :: p_ts(:), p_tsv(:,:)
+        type(parquet_string_column), pointer :: sc
         real(real64) :: x
         integer(int64) :: i, e, n, w
         !
@@ -530,19 +535,20 @@ contains
         case (PK_LOGICAL_VEC)
             call parquet_column_data_ptr(col, p_bv)
             where (.not. valid(1:w, 1:n)) p_bv(1:w, 1:n) = fv%lval
-        case (PK_STRING)
-            ! Storage class 2. `parquet_string_column`'s own %set clears that element's null, so
-            ! this loop needs no companion pass and clear_nulls_where below must NOT run for it.
-            do i = 1_int64, n
-                if (.not. valid(1, i)) call parquet_column_set_at(col, i, fv%sval)
-            end do
-            return
-        case (PK_STRING_VEC)
-            do i = 1_int64, n
-                do e = 1_int64, w
-                    if (.not. valid(e, i)) call parquet_column_set_elem(col, i, e, fv%sval)
-                end do
-            end do
+        case (PK_STRING, PK_STRING_VEC)
+            ! Storage class 2, written through the store's own ONE-PASS `set_where`, which marks
+            ! each written element valid as it goes -- so this needs no companion pass, and
+            ! clear_nulls_where below must NOT run for it. **A `%set` per null element is the
+            ! quadratic form and must not come back**: every `set` that changes an element's
+            ! length shifts the whole payload tail, so a column with millions of nulls is a hang
+            ! in practice. No unit test can assert a complexity class;
+            ! `bench/benchmark_join.sh --mode=nullfill` times this verb on a 16-byte string
+            ! column beside the same verb on a float64 one. The store is flat in element order,
+            ! (i-1)*w+e, which is `valid(w, n)`'s own column-major order, so the mask is handed
+            ! over as it is. The store rebuilds its own buffers behind the same object, which is
+            ! why nothing a caller can hold on to is invalidated.
+            call parquet_column_string_column(col, sc)
+            call parquet_string_column_set_where(sc, reshape(.not. valid, [w*n]), fv%sval)
             return
         case (PK_DATE)
             ! Storage class 3. The null is INSIDE the element, so writing a value is what clears
@@ -688,8 +694,9 @@ contains
         type(parquet_date), pointer :: p_dt(:), p_dtv(:,:)
         type(parquet_time), pointer :: p_tm(:), p_tmv(:,:)
         type(parquet_timestamp), pointer :: p_ts(:), p_tsv(:,:)
-        character(len=:), allocatable :: text
-        integer(int64) :: i, e, n, w, last, run, step, first
+        type(parquet_string_column), pointer :: sc
+        integer(int64), allocatable :: idx(:)
+        integer(int64) :: i, e, n, w, k, last, run, step, first
         !
         changed = .false.
         call col%element_validity(valid)
@@ -790,23 +797,29 @@ contains
                     if (src(e, i) /= 0_int64) p_bv(e, i) = p_bv(e, src(e, i))
                 end do
             end do
-        case (PK_STRING)
-            ! Read into a local first: %set may reallocate the packed store, so a value still
-            ! being held as a view into it would be read after the buffer moved.
-            do i = 1_int64, n
-                if (src(1, i) == 0_int64) cycle
-                call parquet_column_get_at(col, src(1, i), text)
-                call parquet_column_set_at(col, i, text)
-            end do
-            return
-        case (PK_STRING_VEC)
+        case (PK_STRING, PK_STRING_VEC)
+            ! Storage class 2, as ONE gather of the store over its own elements: flat element
+            ! k = (i-1)*w+e keeps itself where `src` is 0 and takes the source row's SAME element,
+            ! (src-1)*w+e, otherwise. `gather` rebuilds the payload once, may name an element
+            ! more than once, carries each kept element's own null across and recounts -- so a
+            ! position past `limit` (which the scan left at 0) stays null with nothing further to
+            ! do, and the storage-class-1 clearing pass below must NOT run for it. **A get-then-
+            ! set per filled element is the quadratic form and must not come back**: every `set`
+            ! that changes an element's length shifts the whole payload tail.
+            ! `bench/benchmark_join.sh --mode=nullfill` times this verb beside a float64 column.
+            call parquet_column_string_column(col, sc)
+            allocate(idx(w*n))
             do i = 1_int64, n
                 do e = 1_int64, w
-                    if (src(e, i) == 0_int64) cycle
-                    call parquet_column_get_elem(col, src(e, i), e, text)
-                    call parquet_column_set_elem(col, i, e, text)
+                    k = (i - 1_int64)*w + e
+                    if (src(e, i) == 0_int64) then
+                        idx(k) = k
+                    else
+                        idx(k) = (src(e, i) - 1_int64)*w + e
+                    end if
                 end do
             end do
+            call parquet_string_column_gather(sc, idx)
             return
         case (PK_DATE)
             call parquet_column_data_ptr(col, p_dt)

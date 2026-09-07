@@ -18,6 +18,7 @@
 # Usage:
 #   bench/benchmark_join.sh                       # every mode
 #   bench/benchmark_join.sh --mode=shape          # the lookup-table join alone
+#   bench/benchmark_join.sh --mode=nullfill       # the string null-fill and the fill verbs, per size
 #   NLEFT=20000000 NRIGHT=5000 bench/benchmark_join.sh --mode=shape
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
@@ -36,7 +37,11 @@
 #   THREADS=0       Forwarded to %join and to the bare pf_argsort arm. 0 means "ask the library",
 #                    which is what a real caller gets.
 #   NCOLS=8         Largest payload width --mode=payload sweeps to (it visits 1, 2, 4, 8).
-#   MODE=all        shape | size | how | payload | all.
+#   NULLFILL_ROWS=100000,200000,400000,800000
+#                   Left row counts --mode=nullfill sweeps, comma-separated. Each doubling should
+#                   about double the time; a quadrupling is the quadratic string null-fill that
+#                   mode exists to keep out.
+#   MODE=all        shape | size | how | payload | nullfill | all.
 #   LTO=0           Set to 1 when you have appended LTO flags, so the build tree is named apart
 #                    from its non-LTO twin.
 #
@@ -63,6 +68,7 @@ NSYM="${NSYM:-1000000}"
 ROUNDS="${ROUNDS:-3}"
 THREADS="${THREADS:-0}"
 NCOLS="${NCOLS:-8}"
+NULLFILL_ROWS="${NULLFILL_ROWS:-100000,200000,400000,800000}"
 MODE="${MODE:-all}"
 LTO="${LTO:-0}"
 
@@ -75,7 +81,8 @@ for arg in "$@"; do
         --rounds=*) ROUNDS="${arg#--rounds=}" ;;
         --threads=*) THREADS="${arg#--threads=}" ;;
         --ncols=*) NCOLS="${arg#--ncols=}" ;;
-        -h|--help) sed -n '2,53p' "$0"; finished=1; exit 0 ;;
+        --nullfill-rows=*) NULLFILL_ROWS="${arg#--nullfill-rows=}" ;;
+        -h|--help) sed -n '2,58p' "$0"; finished=1; exit 0 ;;
         *) echo "benchmark_join.sh: unknown argument '$arg'" >&2; exit 2 ;;
     esac
 done
@@ -137,6 +144,6 @@ echo "# $FLAGS_LINE"
 
 fpm run benchmark_join --profile release -- \
     --mode="$MODE" --nleft="$NLEFT" --nright="$NRIGHT" --nsym="$NSYM" \
-    --rounds="$ROUNDS" --threads="$THREADS" --ncols="$NCOLS"
+    --rounds="$ROUNDS" --threads="$THREADS" --ncols="$NCOLS" --nullfill-rows="$NULLFILL_ROWS"
 
 finished=1

@@ -1095,7 +1095,10 @@ contains
                         "64-bit row count. Deduplicate a side, or add require='m:1'."
                 end if
                 prod = nleft(g) * nright(g)
-                n_pairs = n_pairs + prod
+                ! The SUM is guarded as well as the product: n_lunm and n_runm are bounded by the
+                ! two row counts, but n_pairs is not, and a wrapped total would make n_out
+                ! negative and the join return an empty pair list without a word.
+                n_pairs = join_add_checked(n_pairs, prod)
                 if (prod > biggest) biggest = prod
             else
                 n_lunm = n_lunm + nleft(g)
@@ -1104,11 +1107,11 @@ contains
         end do
         select case (how_id)
         case (HOW_LEFT)
-            n_out = n_pairs + n_lunm
+            n_out = join_add_checked(n_pairs, n_lunm)
         case (HOW_RIGHT)
-            n_out = n_pairs + n_runm
+            n_out = join_add_checked(n_pairs, n_runm)
         case (HOW_OUTER)
-            n_out = n_pairs + n_lunm + n_runm
+            n_out = join_add_checked(join_add_checked(n_pairs, n_lunm), n_runm)
         case (HOW_SEMI)
             n_out = nl - n_lunm
         case (HOW_ANTI)
@@ -1117,6 +1120,36 @@ contains
             n_out = n_pairs
         end select
     end subroutine join_count
+    !
+    !> `a + b` over two row counts, refusing the sum that would wrap.
+    !!
+    !! `join_count` refuses a group whose PRODUCT would overflow; this is the same refusal on the
+    !! running SUM and on the `n_out` totals, which used to accumulate unguarded: a wrapped total
+    !! made `n_out` negative, `allocate(il(n_out), ir(n_out))` gave two zero-size arrays, and the
+    !! join returned an empty pair list with no error. Unreachable through any fixture -- it needs
+    !! more than 9.2e18 pairs across several groups -- which is exactly why it is a separate
+    !! helper: `parquet_debug_join_add_checked` reaches it from a test at the boundary. Both
+    !! arguments are counts, so `huge - a` cannot itself overflow. Deliberately not `pure`, so
+    !! that no compiler may elide the call.
+    function join_add_checked(a, b) result(s)
+        integer(int64), intent(in) :: a  !! the running total (>= 0).
+        integer(int64), intent(in) :: b  !! the count to add (>= 0).
+        integer(int64) :: s              !! `a + b`.
+        character(len=32) :: ta, tb
+        !
+        if (huge(0_int64) - a < b) then
+            write(ta, "(I0)") a
+            write(tb, "(I0)") b
+            error stop EP // "join: the output would have more rows than a 64-bit count can " // &
+                "hold (" // trim(ta) // " so far, plus " // trim(tb) // "). Deduplicate a side, " // &
+                "add require='m:1', or pass max_rows=."
+        end if
+        s = a + b
+    end function join_add_checked
+    !
+    module procedure parquet_debug_join_add_checked
+        s = join_add_checked(a, b)
+    end procedure parquet_debug_join_add_checked
     !
     !> The `max_rows=` abort. Split out so the counting pass reads as counting.
     subroutine join_refuse_size(n_out, max_rows, nl, nr, biggest)

@@ -52,7 +52,8 @@ module parquet_columns
         parquet_string_column_move_from, &
         parquet_string_column_null_count, parquet_string_column_reindex, parquet_string_column_reindex_trusted, &
         parquet_string_column_reserve, parquet_string_column_reserve_validity, parquet_string_column_set, &
-        parquet_string_column_set_null, parquet_string_column_shrink_to_fit, parquet_string_column_size
+        parquet_string_column_set_null, parquet_string_column_set_validity, parquet_string_column_shrink_to_fit, &
+        parquet_string_column_size
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     !
     implicit none

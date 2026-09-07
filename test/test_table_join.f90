@@ -139,7 +139,11 @@ contains
             new_unittest("columns= naming the merged key carries no second copy of it", &
                 test_join_columns_names_the_key), &
             new_unittest("a container column on this side is carried across a join", &
-                test_join_carries_left_container) &
+                test_join_carries_left_container), &
+            new_unittest("a left join null-fills two string payload columns over 200 unmatched rows", &
+                test_join_left_string_nullfill), &
+            new_unittest("the pair-count guard accepts the largest legal total exactly", &
+                test_join_add_checked_boundary) &
             ]
     end subroutine collect_tests_table_join
     !
@@ -2026,5 +2030,78 @@ contains
         call parquet_write_column(w, "id", keys)
         call parquet_close_writer(w)
     end subroutine write_meta_fixture
+    !
+    !> A left join that null-fills TWO string payload columns over 200 unmatched rows of 300 --
+    !! the shape whose per-row string null-fill was quadratic -- asserting every value and every
+    !! null, with the carried values of differing lengths (shortest first). The fixture is small on
+    !! purpose: no in-process test can assert a complexity class, and
+    !! `bench/benchmark_join.sh --mode=nullfill` is what holds the cost.
+    subroutine test_join_left_string_nullfill(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64) :: lk(300), rk(100), k
+        character(len=12) :: s1(100), s2(100), ls(300), want
+        character(len=:), allocatable :: g1(:), g2(:), gl(:)
+        logical :: ok
+        integer :: n_null
+        !
+        do k = 1_int64, 300_int64
+            lk(k) = k
+            write (ls(k), "(a,i0)") "L", k
+        end do
+        do k = 1_int64, 100_int64
+            rk(k) = 3_int64*k
+            write (s1(k), "(a,i0)") "s", k
+            write (s2(k), "(a,i0)") "value", k
+        end do
+        call parquet_new_table(a)
+        call a%add_column("id", lk)
+        call a%add_column("ls", ls)
+        call parquet_new_table(b)
+        call b%add_column("id", rk)
+        call b%add_column("s1", s1)
+        call b%add_column("s2", s2)
+        call a%join(b, ["id"], how="left", require="m:1")
+        call check(error, a%nrows() == 300_int64, "a left join keeps every left row")
+        if (allocated(error)) return
+        call a%get("s1", g1)
+        call a%get("s2", g2)
+        call a%get("ls", gl)
+        ok = .true.
+        n_null = 0
+        do k = 1_int64, 300_int64
+            write (want, "(a,i0)") "L", k
+            if (a%is_null("ls", k) .or. trim(gl(k)) /= trim(want)) ok = .false.
+            if (mod(k, 3_int64) == 0_int64) then
+                write (want, "(a,i0)") "s", k/3_int64
+                if (a%is_null("s1", k) .or. trim(g1(k)) /= trim(want)) ok = .false.
+                write (want, "(a,i0)") "value", k/3_int64
+                if (a%is_null("s2", k) .or. trim(g2(k)) /= trim(want)) ok = .false.
+            else
+                if (.not. a%is_null("s1", k) .or. .not. a%is_null("s2", k)) ok = .false.
+                n_null = n_null + 1
+            end if
+        end do
+        call check(error, n_null == 200, "the fixture must leave exactly 200 rows unmatched")
+        if (allocated(error)) return
+        call check(error, ok, "every matched row carries its two strings and every unmatched row is null in both")
+    end subroutine test_join_left_string_nullfill
+    !
+    !> The pair-count guard at its boundary: `huge - 1` plus 1 is the largest legal total and comes
+    !! back exact. One past it is the `join_pair_count_overflow` scenario in test/error_scenarios.f90,
+    !! since the refusal is an abort that no join fixture can reach.
+    subroutine test_join_add_checked_boundary(error)
+        type(error_type), allocatable, intent(out) :: error
+        !
+        call check(error, parquet_debug_join_add_checked(0_int64, 0_int64) == 0_int64, "0 + 0 is 0")
+        if (allocated(error)) return
+        call check(error, parquet_debug_join_add_checked(3_int64, 4_int64) == 7_int64, "3 + 4 is 7")
+        if (allocated(error)) return
+        call check(error, parquet_debug_join_add_checked(huge(0_int64) - 1_int64, 1_int64) == huge(0_int64), &
+            "the largest legal total is accepted and exact")
+        if (allocated(error)) return
+        call check(error, parquet_debug_join_add_checked(huge(0_int64), 0_int64) == huge(0_int64), &
+            "adding nothing to the largest total is accepted")
+    end subroutine test_join_add_checked_boundary
     !
 end module test_table_join

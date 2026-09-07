@@ -70,6 +70,10 @@ contains
                 test_compact_threaded_equals_serial), &
             new_unittest("threaded delete_by_mask equals the serial delete_by_mask", &
                 test_delete_by_mask_threaded_equals_serial), &
+            new_unittest("threaded set_validity equals the serial set_validity", &
+                test_set_validity_threaded_equals_serial), &
+            new_unittest("threaded set_where equals the serial set_where", &
+                test_set_where_threaded_equals_serial), &
             new_unittest("threaded statistics equals the serial statistics", &
                 test_statistics_threaded_equals_serial), &
             new_unittest("the thread floor declines below its break-even", test_thread_break_even) &
@@ -784,6 +788,179 @@ contains
         call check(error, ever_threaded, "negative control: at least one delete_by_mask arm must have threaded " // &
             "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_delete_by_mask_threaded_equals_serial
+    !
+    !> Fills `sel` with one of four selection shapes over `n` elements: everything, every other
+    !! element, whole uneven stretches, or the first and the last element only. The last one is
+    !! where a byte cursor is easiest to get wrong and the first is where a range's byte base is.
+    subroutine selection_shape(mode, n, sel)
+        integer, intent(in) :: mode            !! 1..4.
+        integer(int64), intent(in) :: n        !! element count.
+        logical, intent(out) :: sel(:)         !! the selection, `n` entries.
+        integer(int64) :: k
+        select case (mode)
+        case (1)
+            sel = .true.
+        case (2)
+            do k = 1_int64, n
+                sel(k) = mod(k, 2_int64) == 0_int64
+            end do
+        case (3)
+            do k = 1_int64, n
+                sel(k) = mod(k/37_int64, 3_int64) /= 0_int64
+            end do
+        case default
+            sel = .false.
+            sel(1) = .true.
+            sel(n) = .true.
+        end select
+    end subroutine selection_shape
+    !
+    !> `set_validity`'s threaded rebuild and its one-range rebuild produce identical columns.
+    !!
+    !! The same sweep `delete_by_mask` gets -- four selection shapes, row counts off a byte
+    !! boundary, with and without nulls already present -- and the same negative control on
+    !! `ever_threaded`. Two things a byte-for-byte equality cannot see are asserted beside it:
+    !! the null count must be exactly the mask's own count plus the nulls the source already had
+    !! among the kept elements (the add-only rule), and both arms must satisfy the class
+    !! invariants, since they share every phase but the split.
+    subroutine test_set_validity_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        logical, allocatable :: sel(:)
+        integer(int64) :: n, k, stride, want_null
+        integer :: mode
+        logical :: ever_threaded
+        integer :: saved_threads
+        !
+        ever_threaded = .false.
+        if (threading_unavailable(error)) return
+        saved_threads = borrow_threads()
+        do stride = 0_int64, 3_int64, 3_int64
+            do mode = 1, 4
+                do n = 1021_int64, 1022_int64
+                    call build_padded(src, n, stride)
+                    allocate(sel(n))
+                    call selection_shape(mode, n, sel)
+                    want_null = 0_int64
+                    do k = 1_int64, n
+                        if (sel(k) .or. src%is_null(k)) want_null = want_null + 1_int64
+                    end do
+                    !
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    call parquet_set_string_threads(1)
+                    ser = src%clone()
+                    call ser%set_validity(.not. sel)
+                    !
+                    call parquet_set_string_threads(0)
+                    call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                    par = src%clone()
+                    if (parquet_debug_string_bulk_threads(par) > 1) ever_threaded = .true.
+                    call par%set_validity(.not. sel)
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    !
+                    call check(error, par%size() == n, "set_validity must not change the row count")
+                    if (allocated(error)) return
+                    call check(error, ser%null_count() == want_null, &
+                        "the serial arm must hold the mask's nulls plus the ones the source already had")
+                    if (allocated(error)) return
+                    call check(error, par%null_count() == want_null, &
+                        "the threaded arm must hold the mask's nulls plus the ones the source already had")
+                    if (allocated(error)) return
+                    call check(error, same_column(ser, par), &
+                        "threaded set_validity must equal the serial one in every element and null")
+                    if (allocated(error)) return
+                    call check(error, ser%validate(), "the serial set_validity satisfies the class invariants")
+                    if (allocated(error)) return
+                    call check(error, par%validate(), "the threaded set_validity satisfies the class invariants")
+                    if (allocated(error)) return
+                    deallocate(sel)
+                end do
+            end do
+        end do
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one set_validity arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
+    end subroutine test_set_validity_threaded_equals_serial
+    !
+    !> `set_where`'s threaded rebuild and its one-range rebuild produce identical columns.
+    !!
+    !! Same sweep again, over two values: one LONGER than every element the fixture holds, so the
+    !! payload grows and every range's byte base moves, and one of a single byte, so it shrinks.
+    !! The null count must come out as the source's nulls among the elements the mask did not
+    !! select, and every selected element must read back as the value.
+    subroutine test_set_where_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        character(len=:), allocatable :: value, got
+        logical, allocatable :: sel(:)
+        integer(int64) :: n, k, stride, want_null
+        integer :: mode
+        logical :: ever_threaded, values_landed
+        integer :: saved_threads
+        !
+        ever_threaded = .false.
+        if (threading_unavailable(error)) return
+        saved_threads = borrow_threads()
+        do stride = 0_int64, 3_int64, 3_int64
+            do mode = 1, 4
+                if (mode <= 2) then
+                    value = "a replacement value longer than any element built here"
+                else
+                    value = "v"
+                end if
+                do n = 1021_int64, 1022_int64
+                    call build_padded(src, n, stride)
+                    allocate(sel(n))
+                    call selection_shape(mode, n, sel)
+                    want_null = 0_int64
+                    do k = 1_int64, n
+                        if (src%is_null(k) .and. .not. sel(k)) want_null = want_null + 1_int64
+                    end do
+                    !
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    call parquet_set_string_threads(1)
+                    ser = src%clone()
+                    call ser%set_where(sel, value)
+                    !
+                    call parquet_set_string_threads(0)
+                    call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                    par = src%clone()
+                    if (parquet_debug_string_bulk_threads(par) > 1) ever_threaded = .true.
+                    call par%set_where(sel, value)
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    !
+                    call check(error, par%size() == n, "set_where must not change the row count")
+                    if (allocated(error)) return
+                    call check(error, ser%null_count() == want_null, &
+                        "the serial arm must keep exactly the source nulls the mask did not select")
+                    if (allocated(error)) return
+                    call check(error, par%null_count() == want_null, &
+                        "the threaded arm must keep exactly the source nulls the mask did not select")
+                    if (allocated(error)) return
+                    values_landed = .true.
+                    do k = 1_int64, n
+                        if (.not. sel(k)) cycle
+                        call par%get(k, got, allow_null=.true.)
+                        if (got /= value) values_landed = .false.
+                        if (par%is_null(k)) values_landed = .false.
+                    end do
+                    call check(error, values_landed, "every selected element must read back as the value, and valid")
+                    if (allocated(error)) return
+                    call check(error, same_column(ser, par), &
+                        "threaded set_where must equal the serial one in every element and null")
+                    if (allocated(error)) return
+                    call check(error, ser%validate(), "the serial set_where satisfies the class invariants")
+                    if (allocated(error)) return
+                    call check(error, par%validate(), "the threaded set_where satisfies the class invariants")
+                    if (allocated(error)) return
+                    deallocate(sel)
+                end do
+            end do
+        end do
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one set_where arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
+    end subroutine test_set_where_threaded_equals_serial
     !
     !> The thread floor declines below its break-even rather than running a slower shape on two
     !! threads.

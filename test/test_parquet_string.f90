@@ -36,6 +36,8 @@ contains
             new_unittest("reindex permutes payload and nulls", test_reindex), &
             new_unittest("gather subsets, reorders and recounts nulls", test_gather), &
             new_unittest("delete_by_mask compacts in one pass", test_delete_by_mask), &
+            new_unittest("set_validity nulls by mask in one pass and only adds", test_set_validity_bulk), &
+            new_unittest("set_where writes a value by mask in one pass", test_set_where_bulk), &
             new_unittest("append_nulls appends n null elements", test_append_nulls), &
             new_unittest("find (exact, trimmed, reverse, absent)", test_find), &
             new_unittest("equals/contains/startswith/endswith", test_compare_ops), &
@@ -501,6 +503,160 @@ contains
         if (allocated(error)) return
         call check(error, col%validate(), "an emptied column must still satisfy its invariants")
     end subroutine test_delete_by_mask
+    !
+    !> `set_validity` is `set_null` over a whole mask in one rebuild, so the oracle is the loop it
+    !! replaces, run on a clone. The fixture puts its SHORTEST element first and already holds a
+    !! null before the call, so the add-only rule (feature_risks.md Risk-182) is exercised rather
+    !! than assumed; the mask nulls the FIRST and the LAST element, where a byte cursor is easiest
+    !! to get wrong, and a zero-length element sits in the middle.
+    subroutine test_set_validity_bulk(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col, oracle, empty
+        integer(int64), allocatable :: off_a(:), off_b(:)
+        character(len=1), allocatable :: dat_a(:), dat_b(:)
+        character(len=:), allocatable :: s
+        logical :: valid(6), none(0)
+        integer(int64) :: k
+        !
+        call col%append_string("a")
+        call col%append_string("bb")
+        call col%append_null()
+        call col%append_string("dddd")
+        call col%append_string("")
+        call col%append_string("ffffffff")
+        oracle = col%clone()
+        valid = [.false., .true., .true., .false., .true., .false.]
+        do k = 1_int64, 6_int64
+            if (.not. valid(k)) call oracle%set_null(k)
+        end do
+        call col%set_validity(valid)
+        call check(error, col%validate(), "set_validity must leave the column's invariants intact")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 4_int64, "three new nulls beside the one already there")
+        if (allocated(error)) return
+        call check_columns_agree(error, col, oracle, "set_validity against a set_null per .false. entry")
+        if (allocated(error)) return
+        call check(error, col%is_null(3_int64), &
+            "a .true. entry must not resurrect the null that was already there")
+        if (allocated(error)) return
+        call col%get(2_int64, s)
+        call check(error, s == "bb", "a kept element must keep its bytes after the first one was dropped")
+        if (allocated(error)) return
+        call col%get(5_int64, s)
+        call check(error, s == "" .and. .not. col%is_null(5_int64), &
+            "a zero-length element that stays valid stays valid")
+        if (allocated(error)) return
+        call check(error, col%character_size() == 2_int64, "the payload must shrink to the kept bytes")
+        if (allocated(error)) return
+        !
+        ! An all-true mask is a no-op that touches no buffer: offsets and payload byte-identical.
+        allocate(off_a(col%size() + 1_int64), dat_a(max(col%character_size(), 1_int64)))
+        allocate(off_b(col%size() + 1_int64), dat_b(max(col%character_size(), 1_int64)))
+        call col%copy_buffers(off_a, dat_a)
+        valid = .true.
+        call col%set_validity(valid)
+        call col%copy_buffers(off_b, dat_b)
+        call check(error, all(off_a == off_b), "an all-true mask must leave the offsets byte-identical")
+        if (allocated(error)) return
+        call check(error, all(dat_a == dat_b), "an all-true mask must leave the payload byte-identical")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 4_int64, "an all-true mask must change no null")
+        if (allocated(error)) return
+        !
+        ! The same mask again: an element that is already null is not counted twice.
+        valid = [.false., .true., .true., .false., .true., .false.]
+        call col%set_validity(valid)
+        call check(error, col%null_count() == 4_int64, "re-nulling a null must not double-count")
+        if (allocated(error)) return
+        !
+        ! A column with no rows takes an empty mask.
+        call empty%set_validity(none)
+        call check(error, empty%size() == 0_int64 .and. empty%validate(), "an empty column accepts an empty mask")
+    end subroutine test_set_validity_bulk
+    !
+    !> `set_where` is `set` over a whole mask in one rebuild, so the oracle is that loop on a
+    !! clone. The value is LONGER than every element (the payload grows, which is what rules an
+    !! in-place walk out), the mask names an element that already holds a value (the MASK selects,
+    !! not the null state), a null one, and the first and the last elements.
+    subroutine test_set_where_bulk(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col, oracle, empty
+        integer(int64), allocatable :: off_a(:), off_b(:)
+        character(len=1), allocatable :: dat_a(:), dat_b(:)
+        character(len=:), allocatable :: s
+        logical :: mask(6), none(0)
+        integer(int64) :: k
+        !
+        call col%append_string("a")
+        call col%append_string("bb")
+        call col%append_null()
+        call col%append_string("dddd")
+        call col%append_string("")
+        call col%append_string("ffffffff")
+        oracle = col%clone()
+        mask = [.true., .false., .true., .false., .false., .true.]
+        do k = 1_int64, 6_int64
+            if (mask(k)) call oracle%set(k, "replacement value")
+        end do
+        call col%set_where(mask, "replacement value")
+        call check(error, col%validate(), "set_where must leave the column's invariants intact")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 0_int64, "the selected null must be valid afterwards")
+        if (allocated(error)) return
+        call check_columns_agree(error, col, oracle, "set_where against a set per .true. entry")
+        if (allocated(error)) return
+        call col%get(1_int64, s)
+        call check(error, s == "replacement value", "an element that held a value takes the value too")
+        if (allocated(error)) return
+        call col%get(3_int64, s)
+        call check(error, s == "replacement value" .and. .not. col%is_null(3_int64), &
+            "the null element takes the value and becomes valid")
+        if (allocated(error)) return
+        call col%get(2_int64, s)
+        call check(error, s == "bb", "an unselected element keeps its bytes after its predecessor grew")
+        if (allocated(error)) return
+        call check(error, col%character_size() == 3_int64*17_int64 + 2_int64 + 4_int64, &
+            "the payload is the kept bytes plus one value per selected element")
+        if (allocated(error)) return
+        !
+        ! The empty value: the selected element becomes zero-length AND valid.
+        call col%set_null(2_int64)
+        call col%set_where([.false., .true., .false., .false., .false., .false.], "")
+        call check(error, col%is_empty(2_int64) .and. .not. col%is_null(2_int64), &
+            "an empty value leaves a valid zero-length element")
+        if (allocated(error)) return
+        ! A value with trailing blanks is stored verbatim -- a scalar is never trimmed.
+        call col%set_where([.false., .false., .false., .false., .true., .false.], "x  ")
+        call check(error, col%length(5_int64) == 3_int64, "a scalar value is stored verbatim, blanks included")
+        if (allocated(error)) return
+        !
+        ! An all-false mask is a no-op that touches no buffer.
+        allocate(off_a(col%size() + 1_int64), dat_a(max(col%character_size(), 1_int64)))
+        allocate(off_b(col%size() + 1_int64), dat_b(max(col%character_size(), 1_int64)))
+        call col%copy_buffers(off_a, dat_a)
+        mask = .false.
+        call col%set_where(mask, "never written")
+        call col%copy_buffers(off_b, dat_b)
+        call check(error, all(off_a == off_b), "an all-false mask must leave the offsets byte-identical")
+        if (allocated(error)) return
+        call check(error, all(dat_a == dat_b), "an all-false mask must leave the payload byte-identical")
+        if (allocated(error)) return
+        !
+        ! A column that never held a null needs no bitmap for this and gets none.
+        call oracle%clear()
+        call oracle%append_string("p")
+        call oracle%append_string("qq")
+        call oracle%set_where([.true., .false.], "rrr")
+        call check(error, .not. oracle%has_validity(), "a null-free column stays bitmap-free through set_where")
+        if (allocated(error)) return
+        call oracle%get(1_int64, s)
+        call check(error, s == "rrr" .and. oracle%null_count() == 0_int64, "and still takes the value")
+        if (allocated(error)) return
+        !
+        ! A column with no rows takes an empty mask.
+        call empty%set_where(none, "v")
+        call check(error, empty%size() == 0_int64 .and. empty%validate(), "an empty column accepts an empty mask")
+    end subroutine test_set_where_bulk
     !
     !> append_nulls is the bulk counterpart of calling append_null n times -- one capacity
     !> growth instead of n.
@@ -2360,6 +2516,17 @@ contains
         call a%delete_by_mask([.true., .false., .true., .false., .true.])
         call parquet_string_column_delete_by_mask(b, [.true., .false., .true., .false., .true.])
         call check_columns_agree(error, a, b, "delete_by_mask")
+        if (allocated(error)) return
+        !
+        call seed_agreement_column(a)
+        call seed_agreement_column(b)
+        call a%set_validity([.true., .false., .true., .true., .false.])
+        call parquet_string_column_set_validity(b, [.true., .false., .true., .true., .false.])
+        call check_columns_agree(error, a, b, "set_validity")
+        if (allocated(error)) return
+        call a%set_where([.false., .true., .true., .false., .false.], "typed")
+        call parquet_string_column_set_where(b, [.false., .true., .true., .false., .false.], "typed")
+        call check_columns_agree(error, a, b, "set_where")
         if (allocated(error)) return
         !
         call a%clear()

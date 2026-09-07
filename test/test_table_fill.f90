@@ -76,6 +76,16 @@ contains
             new_unittest("ffill fills a temporal column", test_ffill_temporal), &
             new_unittest("ffill treats each vector element as its own series", test_ffill_vector), &
             new_unittest("ffill on an all-null column fills nothing", test_ffill_all_null), &
+            new_unittest("fillna fills every null element of a string vector column", &
+                test_fillna_string_vector), &
+            new_unittest("ffill with limit on a string column whose values differ in length", &
+                test_ffill_string_limit_lengths), &
+            new_unittest("bfill with limit on a string column whose values differ in length", &
+                test_bfill_string_limit_lengths), &
+            new_unittest("ffill treats each string vector element as its own series", &
+                test_ffill_string_vector), &
+            new_unittest("bfill treats each string vector element as its own series", &
+                test_bfill_string_vector), &
             new_unittest("dropna drops a row null in any named column", test_dropna_any), &
             new_unittest("dropna any is the union across columns, not the intersection", &
                 test_dropna_any_is_a_union), &
@@ -595,6 +605,167 @@ contains
         if (allocated(error)) return
         call check(error, got(2, 2) == 22, "an element that had a value keeps it")
     end subroutine test_ffill_vector
+
+    !> Storage class 2 on a vector column: every null ELEMENT takes the value through one rebuild
+    !> of the store, and the elements around it -- of different lengths, shortest first -- keep
+    !> their own bytes. Built in memory; nothing here needs a file.
+    subroutine test_fillna_string_vector(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=6) :: m(3, 4)
+        logical :: valid(3, 4)
+        character(len=:), allocatable :: got(:,:)
+        logical, allocatable :: vmask(:,:)
+
+        m(:, 1) = ["a     ", "bb    ", "ccc   "]
+        m(:, 2) = ["dddd  ", "eeeee ", "ffffff"]
+        m(:, 3) = ["g     ", "hh    ", "iii   "]
+        m(:, 4) = ["jjjj  ", "k     ", "ll    "]
+        valid = .true.
+        valid(2, 1) = .false.
+        valid(3, 3) = .false.
+        valid(1, 4) = .false.
+        call parquet_new_table(t)
+        call t%add_column("m", m)
+        call t%set("m", m, is_valid=valid)
+        call check(error, t%has_nulls("m"), "the fixture must start with nulls")
+        if (allocated(error)) return
+        call t%fillna("m", "n/a")
+        call check(error, .not. t%has_nulls("m"), "%fillna must clear a string vector's nulls")
+        if (allocated(error)) return
+        call t%get("m", got, is_valid=vmask)
+        call check(error, all(vmask), "every element must report valid after the fill")
+        if (allocated(error)) return
+        call check(error, trim(got(2, 1)) == "n/a" .and. trim(got(3, 3)) == "n/a" .and. trim(got(1, 4)) == "n/a", &
+            "each null element takes the value")
+        if (allocated(error)) return
+        call check(error, trim(got(1, 1)) == "a" .and. trim(got(3, 2)) == "ffffff" .and. trim(got(2, 4)) == "k", &
+            "the elements around them keep their own bytes")
+    end subroutine test_fillna_string_vector
+
+    !> `%ffill` on a string column is ONE gather of the store over its own elements; a wrong
+    !> source index would carry the wrong bytes, so the carried values differ in length (shortest
+    !> first), and `limit=` leaves a run's tail null, which the gather must carry as null too.
+    subroutine test_ffill_string_limit_lengths(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=4) :: s(8) = ["a   ", "    ", "    ", "bbbb", "    ", "    ", "    ", "cc  "]
+        logical :: valid(8) = [.true., .false., .false., .true., .false., .false., .false., .true.]
+        character(len=:), allocatable :: got(:)
+        logical, allocatable :: vmask(:)
+
+        call parquet_new_table(t)
+        call t%add_column("s", s)
+        call t%set("s", s, is_valid=valid)
+        call t%ffill("s", 2)
+        call t%get("s", got, is_valid=vmask)
+        call check(error, all(vmask(1:6)) .and. .not. vmask(7) .and. vmask(8), &
+            "limit=2 fills two nulls after each value and leaves the third of a run null")
+        if (allocated(error)) return
+        call check(error, trim(got(2)) == "a" .and. trim(got(3)) == "a", "rows 2 and 3 carry the one-byte value")
+        if (allocated(error)) return
+        call check(error, trim(got(5)) == "bbbb" .and. trim(got(6)) == "bbbb", &
+            "rows 5 and 6 carry the four-byte value")
+        if (allocated(error)) return
+        call check(error, trim(got(8)) == "cc" .and. trim(got(4)) == "bbbb" .and. trim(got(1)) == "a", &
+            "a row that had a value keeps it")
+        if (allocated(error)) return
+        call check(error, t%has_nulls("s"), "row 7 stays null, so the column still holds a null")
+    end subroutine test_ffill_string_limit_lengths
+
+    !> The same fixture backwards, with the int64 limit specific: one row of each run fills from
+    !> the value BELOW it and the rest of the run stays null.
+    subroutine test_bfill_string_limit_lengths(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=4) :: s(8) = ["a   ", "    ", "    ", "bbbb", "    ", "    ", "    ", "cc  "]
+        logical :: valid(8) = [.true., .false., .false., .true., .false., .false., .false., .true.]
+        character(len=:), allocatable :: got(:)
+        logical, allocatable :: vmask(:)
+
+        call parquet_new_table(t)
+        call t%add_column("s", s)
+        call t%set("s", s, is_valid=valid)
+        call t%bfill("s", 1_int64)
+        call t%get("s", got, is_valid=vmask)
+        call check(error, vmask(3) .and. .not. vmask(2) .and. vmask(7) .and. .not. vmask(6) .and. .not. vmask(5), &
+            "limit=1 fills the last null of each run and leaves the rest of the run null")
+        if (allocated(error)) return
+        call check(error, trim(got(3)) == "bbbb" .and. trim(got(7)) == "cc", "each filled row carries the value below it")
+        if (allocated(error)) return
+        call check(error, trim(got(1)) == "a" .and. trim(got(4)) == "bbbb" .and. trim(got(8)) == "cc", &
+            "a row that had a value keeps it")
+    end subroutine test_bfill_string_limit_lengths
+
+    !> Element 1 and element 2 of a string vector are separate series: a null in one fills from
+    !> its own column of elements, never from its row neighbour. The flat index the gather is
+    !> built on is what a scalar-only test cannot see.
+    subroutine test_ffill_string_vector(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=4) :: m(2, 4)
+        logical :: valid(2, 4)
+        character(len=:), allocatable :: got(:,:)
+        logical, allocatable :: vmask(:,:)
+
+        m(:, 1) = ["aaa ", "    "]
+        m(:, 2) = ["    ", "cc  "]
+        m(:, 3) = ["    ", "    "]
+        m(:, 4) = ["b   ", "dddd"]
+        valid = .true.
+        valid(2, 1) = .false.   ! element 2 leads with a null, which must stay
+        valid(1, 2) = .false.   ! element 1 falls out at rows 2 and 3 ...
+        valid(1, 3) = .false.   ! ... and both take row 1's element 1
+        valid(2, 3) = .false.   ! element 2 falls out at row 3 and takes row 2's element 2
+        call parquet_new_table(t)
+        call t%add_column("m", m)
+        call t%set("m", m, is_valid=valid)
+        call t%ffill("m")
+        call t%get("m", got, is_valid=vmask)
+        call check(error, trim(got(1, 2)) == "aaa" .and. trim(got(1, 3)) == "aaa", &
+            "element 1 must be carried from element 1 of the row above, not from element 2")
+        if (allocated(error)) return
+        call check(error, trim(got(2, 3)) == "cc", "element 2 must be carried from element 2 of the row above")
+        if (allocated(error)) return
+        call check(error, .not. vmask(2, 1), "element 2 leads with a null and has nothing before it, so it stays null")
+        if (allocated(error)) return
+        call check(error, trim(got(1, 4)) == "b" .and. trim(got(2, 4)) == "dddd", "elements that had values keep them")
+    end subroutine test_ffill_string_vector
+
+    !> The same fixture backwards: element 1 fills from row 4's one-byte value, element 2 from row
+    !> 2's and row 4's, and nothing crosses between the two series.
+    subroutine test_bfill_string_vector(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=4) :: m(2, 4)
+        logical :: valid(2, 4)
+        character(len=:), allocatable :: got(:,:)
+        logical, allocatable :: vmask(:,:)
+
+        m(:, 1) = ["aaa ", "    "]
+        m(:, 2) = ["    ", "cc  "]
+        m(:, 3) = ["    ", "    "]
+        m(:, 4) = ["b   ", "dddd"]
+        valid = .true.
+        valid(2, 1) = .false.
+        valid(1, 2) = .false.
+        valid(1, 3) = .false.
+        valid(2, 3) = .false.
+        call parquet_new_table(t)
+        call t%add_column("m", m)
+        call t%set("m", m, is_valid=valid)
+        call t%bfill("m")
+        call t%get("m", got, is_valid=vmask)
+        call check(error, all(vmask), "every element follows a value backwards, so all must be filled")
+        if (allocated(error)) return
+        call check(error, trim(got(1, 2)) == "b" .and. trim(got(1, 3)) == "b", &
+            "element 1 must be carried back from element 1 of row 4")
+        if (allocated(error)) return
+        call check(error, trim(got(2, 1)) == "cc" .and. trim(got(2, 3)) == "dddd", &
+            "element 2 must be carried back from element 2 of the next row that has one")
+        if (allocated(error)) return
+        call check(error, trim(got(1, 1)) == "aaa" .and. trim(got(2, 2)) == "cc", "elements that had values keep them")
+    end subroutine test_bfill_string_vector
 
     !> With no value anywhere there is nothing to carry, and the column must come back unchanged
     !> rather than filled with whatever the storage happened to hold.

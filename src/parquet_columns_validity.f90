@@ -465,14 +465,16 @@ contains
             error stop EP//"set_validity: column has no kind assigned" ! GCOVR_EXCL_LINE
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC, &
               PK_STRING, PK_STRING_VEC)
-            ! No bitmap to write: these carry their null state in the element itself, so a
-            ! per-element setter really is the only route. What is avoidable is reaching it
-            ! through the generic `%set_null(i, e)`, which re-validates both indices, re-reads
-            ! the width and re-dispatches the kind for every null -- so the kind is resolved
-            ! once here instead, exactly as row_validity/element_validity now do on the read
-            ! side. There is no elemental shortcut in this direction: the setters ARE elemental,
-            ! but only a subset of elements is being nulled and Fortran has no masked elemental
-            ! call (`where` governs assignment, not a procedure reference).
+            ! No bitmap to write: the temporal kinds carry their null state in the element
+            ! itself, so a per-element setter really is the only route for them. What is
+            ! avoidable is reaching it through the generic `%set_null(i, e)`, which re-validates
+            ! both indices, re-reads the width and re-dispatches the kind for every null -- so
+            ! the kind is resolved once here instead, exactly as row_validity/element_validity
+            ! now do on the read side. There is no elemental shortcut in this direction: the
+            ! setters ARE elemental, but only a subset of elements is being nulled and Fortran
+            ! has no masked elemental call (`where` governs assignment, not a procedure
+            ! reference). The string kinds take the store's own bulk form instead (the
+            ! `case default` below).
             select case (self%kind)
             case (PK_DATE)
                 do i = 1_int64, n
@@ -505,14 +507,14 @@ contains
                     end do
                 end do
             case default
-                ! The string kinds: their nulls live in parquet_string_column's own bitmap,
-                ! reached by a flat element index, so this keeps the existing per-element route
-                ! minus the dispatch.
-                do i = 1_int64, n
-                    do e = 1_int64, w
-                        if (.not. valid(e, i)) call self%set_null(i, e)
-                    end do
-                end do
+                ! The string kinds: their nulls live in parquet_string_column's own bitmap, and
+                ! the store nulls a whole selection in ONE rebuild of its payload. A `set_null`
+                ! per element is the quadratic form -- each call compacts the payload -- and it
+                ! is how a string-vector column with many nulls was read from a file (mat_strv
+                ! hands this exactly that mask). The store is flat in element order, (i-1)*w+e,
+                ! which is `valid(w, n)`'s own column-major order, so the mask is handed over as
+                ! it is. The bench arm holding the cost is set_validity_rows's, below.
+                call parquet_string_column_set_validity(self%str, reshape(valid, [w*n]))
             end select
             ! Resolving the kind once above is what makes this necessary: the six temporal arms
             ! write the element's own null flag directly instead of going through `%set_null`, so
@@ -552,6 +554,7 @@ contains
         integer(int64) :: n, w, i, k, blk, cur, word
         character(len=32) :: got, want
         logical :: any_false
+        logical, allocatable :: emask(:)
         !
         n = self%nrows
         w = int(self%width, int64)
@@ -568,8 +571,24 @@ contains
         case (PK_NONE)
             ! Unreachable, exactly as in set_validity_elems above: a kindless column has no rows.
             error stop EP//"set_validity: column has no kind assigned" ! GCOVR_EXCL_LINE
-        case (PK_STRING, PK_STRING_VEC, PK_DATE, PK_TIME, PK_TIMESTAMP, &
-              PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
+        case (PK_STRING)
+            ! The store nulls the whole selection in ONE rebuild of its payload. **A `set_null`
+            ! per row is the quadratic form and must not come back**: each call compacts the
+            ! payload, so m nulled rows cost O(m * (nchars + nrows)) -- a `%join` that
+            ! null-filled two 16-byte string columns over 800k rows took 208 s that way, and a
+            ! 10M-row one did not finish. No unit test can assert a complexity class;
+            ! `bench/benchmark_join.sh --mode=nullfill` is what holds this, beside the same join
+            ! without strings. This is the arm `join_one_column` and `join_rewrite_left` reach.
+            call parquet_string_column_set_validity(self%str, valid)
+        case (PK_STRING_VEC)
+            ! Same, with the row mask expanded to the store's flat element order: a false row
+            ! marks all w of its elements, (i-1)*w+1 .. i*w.
+            allocate(emask(n*w))
+            do i = 1_int64, n
+                emask((i - 1_int64)*w + 1_int64:i*w) = valid(i)
+            end do
+            call parquet_string_column_set_validity(self%str, emask)
+        case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             ! No bitmap: these carry their null state in the element itself, so the per-row setter
             ! is the only route -- and it is already the whole-row one, so nothing is lost.
             do i = 1_int64, n

@@ -113,6 +113,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that repeats. The index checks the table's `%generation()` on every query and refuses once the rows
   have changed. See
   [Looking a value up](doc/pages/tables/table-mutate.md#looking-a-value-up-build_index).
+- **`parquet_string_column%set_validity` and `%set_where`**: null every element a mask marks, or
+  write one value into every element it marks, in one rebuild of the column instead of one
+  payload shift per element. See
+  [Bulk row-set operations](doc/pages/types/string-columns.md#bulk-row-set-operations).
 
 ### Changed
 
@@ -134,6 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - A column added with `%add_column` after another had been dropped could report a unit it was never
   given — the unit of whichever column had been last — and write it into the file.
+- A `left`, `right` or `outer` join that null-filled a string column, and a string vector column
+  read from a file with many nulls, took time quadratic in the number of nulls.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

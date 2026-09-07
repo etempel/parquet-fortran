@@ -391,7 +391,7 @@ shifts indices, or before gathering it with `build_from` below) — see
 
 ## Bulk row-set operations
 
-`set`/`set_null`/`erase` above act on one element. Four operations act on the whole row set at
+`set`/`set_null`/`erase` above act on one element. These operations act on the whole row set at
 once, each rebuilding the column in a single pass rather than repeating a per-element shift:
 
 ```fortran
@@ -399,11 +399,22 @@ call col%reindex(perm)          ! reorder: result element k is the old element p
 call col%delete_by_mask(keep)   ! keep only elements whose mask entry is .true., in order
 call col%gather(idx)            ! keep the listed elements, in the listed order; repeats allowed
 call col%append_nulls(n)        ! append n null elements, growing capacity once
+call col%set_validity(valid)    ! null every element whose mask entry is .false.
+call col%set_where(mask, value) ! write one value into every element whose mask entry is .true.
 ```
 
 **Prefer these to a loop.** `delete_by_mask` is the bulk counterpart of `erase`: deleting `m`
 elements one at a time costs O(m × nchars), this costs O(nchars) once. `append_nulls(n)` is
-`append_null` n times with one capacity growth instead of n.
+`append_null` n times with one capacity growth instead of n. `set_validity` is the bulk
+counterpart of `set_null` and `set_where` of `set` over a selection, on the same terms: `m`
+calls of the per-element form each shift the payload tail, these rebuild it once.
+
+`set_validity` only ever **adds** nulls: a `.true.` entry leaves its element exactly as it is, so
+a null the column already held survives, and the mask may describe just the elements you know
+about. `set_where` selects by the mask alone — an element that already held a value takes `value`
+too, and a null one becomes valid — and stores the value verbatim, blanks included. Both require
+exactly one mask entry per element, and an all-true mask for `set_validity` or an all-false one for
+`set_where` returns without touching a buffer.
 
 `reindex` validates `perm` completely before touching a buffer — length, range and no duplicates —
 so a bad permutation aborts with the column unchanged. `gather` checks only the range, deliberately:
@@ -413,9 +424,10 @@ shorter than, as long as, or longer than the column it replaces. `append_nulls(0
 negative count aborts.
 
 **All three of `reindex`, `delete_by_mask` and `gather` invalidate every outstanding handle** —
-see [Handle lifetime rules](#handle-lifetime-rules). All three are threaded on a large enough
-column, along with `build_from`, `strip_all`/`trim_all`, `to_character` and `statistics` — see
-[Threading inside one column](#threading-inside-one-column).
+see [Handle lifetime rules](#handle-lifetime-rules). `set_validity` and `set_where` do not: every
+index stays where it is, so a handle survives them as it survives `set`. All five are threaded on a
+large enough column, along with `build_from`, `strip_all`/`trim_all`, `to_character` and
+`statistics` — see [Threading inside one column](#threading-inside-one-column).
 
 `%empty()` is the obvious companion query: `.true.` when the column holds no rows.
 
@@ -563,7 +575,7 @@ lazily, most column operations do **not** invalidate outstanding handles:
 |---|---|
 | `append_string` / `append_null` / `append_column` | **No** (indices unchanged) |
 | `reserve` / `shrink_to_fit` | **No** |
-| `set(i, …)` / `set_null(i)` | No (content of `i` changes; the handle to `i` stays valid) |
+| `set(i, …)` / `set_null(i)` / `set_validity(valid)` / `set_where(mask, value)` | No (contents change; every index stays where it is) |
 | `get`, `view`, `view_slice`, comparisons, `find`, size queries, `print` | No (read-only) |
 | `erase(j)` | Handles at index `>= j` (the element is gone/shifted) |
 | `reindex(perm)` / `delete_by_mask(keep)` / `gather(idx)` | **Yes**, every handle — each rebuilds the whole column |
@@ -575,9 +587,9 @@ lazily, most column operations do **not** invalidate outstanding handles:
 
 ## Threading inside one column
 
-Seven operations split their work across threads when the column is large enough to be worth it —
-`%reindex`, `%gather`, `%delete_by_mask`, `%build_from`, `%strip_all`/`%trim_all`, `%to_character`
-and `%statistics`. Nothing needs to be asked for. `parquet_string_threads()` reports the ceiling
+The bulk operations split their work across threads when the column is large enough to be worth
+it — `%reindex`, `%gather`, `%delete_by_mask`, `%set_validity`, `%set_where`, `%build_from`,
+`%strip_all`/`%trim_all`, `%to_character` and `%statistics`. Nothing needs to be asked for. `parquet_string_threads()` reports the ceiling
 your machine and settings allow — not what a given call will use, since an individual operation
 narrows that further by the rules below — and `parquet_set_string_threads(n)` caps it (see
 [Settings](../operating/settings.html#threads-inside-one-string-column)).
@@ -642,6 +654,7 @@ and is covered in the main
 | `find` | O(rows × avg length) |
 | `set` (different length), `set_null`, `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
 | `reindex(perm)`, `delete_by_mask(keep)` | O(nchars), one pass |
+| `set_validity(valid)`, `set_where(mask, value)` | O(nchars + bytes written), one pass |
 | `gather(idx)` | O(selected chars), rebuilt into fresh buffers |
 | `append_nulls(n)` | amortized O(n), one capacity growth |
 | `empty` | O(1) |

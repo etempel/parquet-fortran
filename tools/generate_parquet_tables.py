@@ -330,6 +330,7 @@ module parquet_tables
     public :: parquet_debug_table_set_inflight
     public :: parquet_debug_colread_block_rows
     public :: parquet_debug_table_drop_name_index
+    public :: parquet_debug_join_add_checked
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -3211,6 +3212,20 @@ def gen_spec_interfaces():
             integer(int64), intent(out) :: mid_lo !! first row occupying a whole block.
             integer(int64), intent(out) :: mid_hi !! last such row; < mid_lo when there is none.
         end subroutine parquet_debug_colread_block_rows
+        !> Exposes the join's checked row-count addition for testing.
+        !!
+        !! **This is a debug hook, not API**, public for the same reason
+        !! `parquet_debug_colread_block_rows` is: the helper it forwards to lives in a submodule,
+        !! and the property it guards -- a running pair count that would wrap a 64-bit integer,
+        !! after which a join hands back an EMPTY pair list instead of refusing -- cannot be
+        !! provoked by any fixture, since it needs more than 9.2e18 pairs. This makes the guard
+        !! itself assertable at the boundary: `huge(0_int64) - 1` plus 1 is accepted and returned,
+        !! plus 2 aborts naming both counts.
+        module function parquet_debug_join_add_checked(a, b) result(s)
+            integer(int64), intent(in) :: a  !! the running total.
+            integer(int64), intent(in) :: b  !! the count to add.
+            integer(int64) :: s              !! `a + b`.
+        end function parquet_debug_join_add_checked
         !> Aborts if another thread is inside %append on this store.
         !!
         !! The cheap half of the append/read contract, and the one every read entry point takes:

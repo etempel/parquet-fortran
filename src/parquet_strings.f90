@@ -228,6 +228,8 @@ module parquet_strings
         !! no narrower visibility -- see reindex_trusted_i64.
         generic :: reindex_trusted => reindex_trusted_i32, reindex_trusted_i64
         procedure :: delete_by_mask                    !! Keep only the elements whose mask entry is .true.
+        procedure :: set_validity                      !! Null every element whose mask entry is .false., in one pass.
+        procedure :: set_where                         !! Write one value into every element whose mask entry is .true.
         procedure, private :: gather_i32               !! int32 specific of gather.
         procedure, private :: gather_i64               !! int64 specific of gather.
         generic :: gather => gather_i32, gather_i64    !! Keep the listed elements, in the listed order.
@@ -359,6 +361,8 @@ module parquet_strings
     public :: parquet_string_column_append_null
     public :: parquet_string_column_append_values
     public :: parquet_string_column_delete_by_mask
+    public :: parquet_string_column_set_validity
+    public :: parquet_string_column_set_where
     public :: parquet_string_column_reserve
     public :: parquet_string_column_get
     public :: parquet_string_column_copy_to
@@ -2710,6 +2714,221 @@ contains
             self%n_null = nn
         end if
     end subroutine delete_by_mask_serial
+    !
+    !> Nulls every element whose `valid` entry is `.false.`, in ONE rebuild of the payload.
+    !!
+    !! `parquet_column%set_validity`'s contract one tier down (`feature_risks.md` Risk-182): a
+    !! `.false.` entry nulls that element, discarding its bytes exactly as `set_null` would; a
+    !! `.true.` entry changes NOTHING, so an element that is already null stays null and the call
+    !! only ever ADDS nulls. An all-true mask returns before a buffer is touched. `valid` must have
+    !! exactly `size()` entries.
+    !!
+    !! **This exists because `set_null` compacts the payload on every call.** Nulling m elements
+    !! one at a time costs O(m * (nchars + nrows)) -- quadratic in the nulls -- where this costs
+    !! one pass over the payload whatever m is. That is the difference between a `%join` that
+    !! null-filled two 16-byte string columns over 800k rows in 208 s and one that does it in
+    !! well under a second; `bench/benchmark_join.sh --mode=nullfill` holds that ratio, since no
+    !! unit test can assert a complexity class. Same trade-off as `delete_by_mask` against
+    !! `erase`, and the same rebuild: `rebuild_selected` is shared with `set_where`.
+    subroutine parquet_string_column_set_validity(self, valid)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: valid(:)                     !! one entry per element; .false. nulls it.
+        character(len=1) :: no_bytes(1)
+        integer(int64) :: n
+        integer :: nt
+        n = self%nrows
+        if (size(valid, kind=int64) /= n) call fail_mask_length(size(valid, kind=int64), n, "set_validity")
+        if (n == 0_int64) return
+        if (all(valid)) return
+        nt = bulk_threads(n, self%nchars)
+        no_bytes = " "
+        call rebuild_selected(self, .not. valid, 0_int64, no_bytes, .true., nt)
+    end subroutine parquet_string_column_set_validity
+    !
+    !> Binding form of `parquet_string_column_set_validity`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine set_validity(self, valid)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: valid(:)                     !! one entry per element; .false. nulls it.
+        call parquet_string_column_set_validity(self, valid)
+    end subroutine set_validity
+    !
+    !> Writes `value` into every element whose `mask` entry is `.true.`, in ONE rebuild of the
+    !! payload, and marks each of them valid.
+    !!
+    !! The bulk counterpart of `set(i, value)` over a selection, and the same rebuild as
+    !! `set_validity` with a value in place of the zero-width slot. The mask, not the null state,
+    !! selects: an element that already held a value takes `value` too when its entry is `.true.`,
+    !! and a null element whose entry is `.false.` stays null. `value` is stored verbatim, blanks
+    !! included -- a scalar is never trimmed, which is `set`'s rule without its `strip=`/`trim=`
+    !! options. An all-false mask returns before a buffer is touched. `mask` must have exactly
+    !! `size()` entries.
+    !!
+    !! Exists for `parquet_table%fillna`, whose per-element `set` shifted the payload tail once
+    !! per null -- O(nulls * nchars) -- where this costs one pass; see `set_validity` for the
+    !! measurement and the benchmark that holds it.
+    subroutine parquet_string_column_set_where(self, mask, value)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: mask(:)                      !! one entry per element; .true. takes `value`.
+        character(len=*), intent(in) :: value               !! the replacement, stored verbatim.
+        character(len=1), allocatable :: vbytes(:)
+        integer(int64) :: n, vlen, nsel
+        integer :: nt
+        n = self%nrows
+        if (size(mask, kind=int64) /= n) call fail_mask_length(size(mask, kind=int64), n, "set_where")
+        if (n == 0_int64) return
+        nsel = count(mask, kind=int64)
+        if (nsel == 0_int64) return
+        vlen = len(value, kind=int64)
+        ! Re-seen as bytes ONCE, here, rather than by a `transfer` per selected element -- which
+        ! would allocate a temporary each time (fortran-gotchas.md). Sized at least 1 so that a
+        ! zero-length value still hands the rebuild an allocated array.
+        allocate(vbytes(max(vlen, 1_int64)))
+        vbytes = " "
+        if (vlen > 0_int64) vbytes(1:vlen) = transfer(value, vbytes(1:vlen))
+        ! The bytes this call will MOVE: the kept payload plus one copy of the value per selected
+        ! element, which is what the threading floor has to be measured against.
+        nt = bulk_threads(n, self%nchars + nsel*vlen)
+        call rebuild_selected(self, mask, vlen, vbytes, .false., nt)
+    end subroutine parquet_string_column_set_where
+    !
+    !> Binding form of `parquet_string_column_set_where`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine set_where(self, mask, value)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: mask(:)                      !! one entry per element; .true. takes `value`.
+        character(len=*), intent(in) :: value               !! the replacement, stored verbatim.
+        call parquet_string_column_set_where(self, mask, value)
+    end subroutine set_where
+    !
+    !> The mask-length abort `set_validity` and `set_where` share, naming both counts.
+    subroutine fail_mask_length(got, want, proc)
+        integer(int64), intent(in) :: got   !! entries the caller's mask has.
+        integer(int64), intent(in) :: want  !! elements the column has.
+        character(len=*), intent(in) :: proc !! the calling procedure, for the message.
+        character(len=32) :: tg, tw
+        write(tg, "(I0)") got
+        write(tw, "(I0)") want
+        error stop EP//proc//": mask has "//trim(tg)//" entries but the column has "//trim(tw)// &
+            " elements"
+    end subroutine fail_mask_length
+    !
+    !> The one rebuild behind `set_validity` and `set_where`: every element `sel` marks is
+    !! REPLACED by the `rlen` bytes of `rbytes` -- none of them for a null -- and every other
+    !! element keeps its bytes; then the selected elements' validity bits are turned toward
+    !! `to_null`, and `n_null` moves by exactly the number of bits that changed, so a selected
+    !! element already in the requested state costs nothing and counts nothing.
+    !!
+    !! **The row count does not change, so the destination row IS the source row** and only the
+    !! byte cursor is loop-carried. That is what makes this simpler than `delete_by_mask_parallel`
+    !! (two cursors) and lets the same plan serve one thread or many: each range of
+    !! `thread_row_ranges` counts the bytes it will emit, an `nt`-sized exclusive scan turns the
+    !! counts into per-range byte bases, and each range then writes its own disjoint slice of the
+    !! fresh payload AND its own offsets entries. Auxiliary memory is O(threads), not O(rows).
+    !!
+    !! **Fresh buffers even on one thread**, unlike `delete_by_mask_serial`: a `set_where` value
+    !! can be longer than the element it replaces, so an in-place walk could overrun bytes it has
+    !! not read yet, and one shape for both callers is worth one transient copy of the payload --
+    !! which the join that motivated this already pays for its gather.
+    !!
+    !! The validity phase is byte-aligned by construction (`thread_row_ranges`), so no two threads
+    !! ever read-modify-write the same validity byte -- `feature_risks.md` Risk-61's condition,
+    !! and the reason the row ranges are reused for it rather than any even split.
+    subroutine rebuild_selected(self, sel, rlen, rbytes, to_null, nt)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: sel(:)                       !! .true. for every element to replace.
+        integer(int64), intent(in) :: rlen                  !! bytes each replaced element takes.
+        character(len=1), intent(in) :: rbytes(:)           !! those bytes (at least one entry).
+        logical, intent(in) :: to_null                      !! .true.: the replaced elements become null.
+        integer, intent(in) :: nt                           !! threads to use (>= 1).
+        integer(int64) :: n, k, a, b, elen, total, nn, bpos, bytes
+        integer(int64), allocatable :: new_off(:), rlo(:), rhi(:), byte_base(:)
+        character(len=1), allocatable :: new_data(:)
+        integer :: tix
+        n = self%nrows
+        call thread_row_ranges(n, nt, rlo, rhi)
+        allocate(byte_base(nt + 1))
+        ! Phase 1: the bytes each range will emit. Reads `sel` and `offsets` only, never the
+        ! payload, so it is cheap next to the copy it is planning.
+        !$omp parallel do default(shared) private(tix, k, bytes) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            bytes = 0_int64
+            do k = rlo(tix), rhi(tix)
+                if (sel(k)) then
+                    bytes = bytes + rlen
+                else
+                    bytes = bytes + (self%offsets(k+1_int64) - self%offsets(k))
+                end if
+            end do
+            byte_base(tix+1) = bytes
+        end do
+        !$omp end parallel do
+        ! Phase 2: the scan, over `nt` entries rather than `n`.
+        byte_base(1) = 0_int64
+        do tix = 1, nt
+            byte_base(tix+1) = byte_base(tix+1) + byte_base(tix)
+        end do
+        total = byte_base(nt+1)
+        allocate(new_off(n + 1_int64))
+        new_off(1) = 0_int64
+        allocate(new_data(max(total, 1_int64)))
+        ! Phase 3: each range fills its own disjoint slice of both outputs from its own base.
+        !$omp parallel do default(shared) private(tix, k, a, b, elen, bpos) &
+        !$omp     schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            bpos = byte_base(tix)
+            do k = rlo(tix), rhi(tix)
+                if (sel(k)) then
+                    if (rlen > 0_int64) new_data(bpos+1_int64:bpos+rlen) = rbytes(1:rlen)
+                    bpos = bpos + rlen
+                else
+                    call elem_bounds(self, k, a, b)
+                    elen = b - a + 1_int64
+                    if (elen > 0_int64) new_data(bpos+1_int64:bpos+elen) = self%data(a:b)
+                    bpos = bpos + elen
+                end if
+                new_off(k+1_int64) = bpos
+            end do
+        end do
+        !$omp end parallel do
+        call move_alloc(new_off, self%offsets)
+        call move_alloc(new_data, self%data)
+        self%nchars = total
+        ! Phase 4: validity. Nulling needs the bitmap whether or not one exists yet; clearing
+        ! nulls on a column that has none is a no-op, and `bit_valid` already answers .true. for
+        ! every element of such a column, so the walk would change nothing -- skip it outright.
+        if (to_null) then
+            self%has_nulls = .true.
+            call ensure_validity_cap(self, n)
+        else if (.not. self%has_nulls) then
+            return
+        end if
+        nn = 0_int64
+        !$omp parallel do default(shared) private(tix, k) reduction(+:nn) &
+        !$omp     schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = rlo(tix), rhi(tix)
+                if (.not. sel(k)) cycle
+                if (to_null) then
+                    if (bit_valid(self, k)) then
+                        call set_bit_null(self, k)
+                        nn = nn + 1_int64
+                    end if
+                else
+                    if (.not. bit_valid(self, k)) then
+                        call set_bit_valid(self, k)
+                        nn = nn + 1_int64
+                    end if
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        if (to_null) then
+            self%n_null = self%n_null + nn
+        else
+            self%n_null = self%n_null - nn
+        end if
+    end subroutine rebuild_selected
     !
     !> int32 specific of gather; see the gather generic.
     subroutine parquet_string_column_gather_i32(self, idx)

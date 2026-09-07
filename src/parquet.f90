@@ -164,6 +164,7 @@ module parquet
     private :: parquet_string_column_has_validity, parquet_string_column_reserve_validity
     private :: parquet_string_column_append_column, parquet_string_column_append_null
     private :: parquet_string_column_append_values, parquet_string_column_delete_by_mask
+    private :: parquet_string_column_set_validity, parquet_string_column_set_where
     private :: parquet_string_column_reserve, parquet_string_column_get, parquet_string_column_copy_to
     private :: parquet_string_column_is_null, parquet_string_column_append_from, parquet_string_column_set
     private :: parquet_string_column_set_null, parquet_string_column_reindex, parquet_string_column_reindex_trusted

@@ -2407,7 +2407,13 @@ contains
             new_unittest("threads=0 on get_or_add_many aborts", &
                 test_index_get_or_add_many_threads_zero_aborts), &
             new_unittest("every partitioned pass completes on its legal inputs", &
-                test_index_partition_control_completes) &
+                test_index_partition_control_completes), &
+            new_unittest("parquet_string_column set_validity with a short mask aborts", &
+                test_string_column_set_validity_length_mismatch_aborts), &
+            new_unittest("parquet_string_column set_where with a short mask aborts", &
+                test_string_column_set_where_length_mismatch_aborts), &
+            new_unittest("a join pair count that would wrap a 64-bit integer aborts", &
+                test_join_pair_count_overflow_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
@@ -6191,6 +6197,33 @@ contains
             failure_message="delete_by_mask with a short mask was expected to abort", &
             required_stderr="parquet_strings: delete_by_mask: mask length does not match the row count")
     end subroutine test_string_column_delete_by_mask_length_mismatch_aborts
+
+    subroutine test_string_column_set_validity_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_set_validity_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="set_validity with a short mask was expected to abort", &
+            required_stderr="parquet_strings: set_validity: mask has 1 entries but the column has 2 elements")
+    end subroutine test_string_column_set_validity_length_mismatch_aborts
+
+    subroutine test_string_column_set_where_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_set_where_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="set_where with a short mask was expected to abort", &
+            required_stderr="parquet_strings: set_where: mask has 1 entries but the column has 2 elements")
+    end subroutine test_string_column_set_where_length_mismatch_aborts
+
+    !> join abort path: see scenario_join_pair_count_overflow in test/error_scenarios.f90 for the
+    !> control that keeps this assertion honest. The message names both counts.
+    subroutine test_join_pair_count_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "join_pair_count_overflow", &
+            expect_abort=.true., &
+            failure_message="a pair count one past huge(int64) was expected to abort", &
+            required_stderr="join: the output would have more rows than a 64-bit count can hold " // &
+                "(9223372036854775806 so far, plus 2)")
+    end subroutine test_join_pair_count_overflow_aborts
 
     subroutine test_string_column_append_nulls_negative_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -133,6 +133,8 @@ contains
                 test_set_validity_elems_temporal), &
             new_unittest("set_validity writes a row mask on the element-carried kinds", &
                 test_set_validity_rows_element_carried), &
+            new_unittest("set_validity on the string kinds is the store's one-pass rebuild", &
+                test_set_validity_string_bulk), &
             new_unittest("a temporal column's null cache is read, not rescanned, while clean", &
                 test_temporal_null_cache_is_read_when_clean), &
             new_unittest("an all-zero bitmap reports no nulls without dropping it", &
@@ -4026,6 +4028,80 @@ contains
         end do
         call check(error, .true., "a row mask nulls whole rows on every kind that carries its nulls in the element")
     end subroutine test_set_validity_rows_element_carried
+    !
+    !> The string kinds take both `set_validity` forms through `parquet_string_column%set_validity`
+    !! -- one rebuild of the store rather than a `set_null` per element -- and this holds the routed
+    !! forms to the per-element contract: a width-3 vector whose values differ in length (shortest
+    !! first) and which already holds an element null before either call, then a scalar column the
+    !! same way. The row form must null every element of a row and the element form only the
+    !! elements named; neither may resurrect the null that was already there.
+    subroutine test_set_validity_string_bulk(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        type(parquet_string_column), pointer :: sp
+        character(len=6) :: svals(3, 4)
+        character(len=4) :: flat(4)
+        logical :: rmask(4), emask(3, 4)
+        character(len=:), allocatable :: got
+        !
+        svals(:, 1) = ["a     ", "bb    ", "ccc   "]
+        svals(:, 2) = ["dddd  ", "eeeee ", "ffffff"]
+        svals(:, 3) = ["g     ", "hh    ", "iii   "]
+        svals(:, 4) = ["jjjj  ", "k     ", "ll    "]
+        call c%init(PK_STRING_VEC, 4_int64, 3_int32)
+        call c%set_all(svals)
+        call c%set_null(2_int64, 2_int64)
+        rmask = [.true., .true., .true., .false.]
+        call c%set_validity(rmask)
+        call check(error, c%is_null(4_int64, 1_int64) .and. c%is_null(4_int64, 2_int64) .and. &
+            c%is_null(4_int64, 3_int64), "a .false. row entry must null every element of that row")
+        if (allocated(error)) return
+        call check(error, c%is_null(2_int64, 2_int64), "the element null that was already there must survive")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 1_int64) .and. .not. c%is_null(2_int64, 3_int64), &
+            "the other elements of a .true. row must stay valid")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 3_int64, got)
+        call check(error, got == "ffffff", "the longest element must keep every byte after the rebuild")
+        if (allocated(error)) return
+        call c%get_elem(3_int64, 3_int64, got)
+        call check(error, got == "iii", "the element just before the nulled row keeps its bytes")
+        if (allocated(error)) return
+        emask = .true.
+        emask(1, 1) = .false.
+        emask(3, 3) = .false.
+        call c%set_validity(emask)
+        call check(error, c%is_null(1_int64, 1_int64) .and. c%is_null(3_int64, 3_int64), &
+            "the element form must null exactly the elements named")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64, 2_int64) .and. .not. c%is_null(3_int64, 2_int64), &
+            "and leave their row neighbours valid")
+        if (allocated(error)) return
+        call c%get_elem(1_int64, 2_int64, got)
+        call check(error, got == "bb", "a neighbour of a nulled element keeps its bytes")
+        if (allocated(error)) return
+        call c%string_column(sp)
+        call check(error, sp%null_count() == 6_int64, &
+            "the store must count the nulled row's three, the pre-existing one and the two named")
+        if (allocated(error)) return
+        call check(error, sp%validate(), "the store must satisfy its invariants after both rebuilds")
+        if (allocated(error)) return
+        !
+        flat = ["a   ", "bb  ", "ccc ", "dddd"]
+        call c%init(PK_STRING, 4_int64)
+        call c%set_all(flat)
+        call c%set_null(2_int64)
+        call c%set_validity([.true., .true., .false., .true.])
+        call check(error, c%is_null(3_int64) .and. c%is_null(2_int64) .and. .not. c%is_null(4_int64), &
+            "the scalar form must null the named row, keep the existing null and leave the rest valid")
+        if (allocated(error)) return
+        call c%get_at(4_int64, got)
+        call check(error, got == "dddd", "the last element keeps its bytes after an earlier one was dropped")
+        if (allocated(error)) return
+        call c%string_column(sp)
+        call check(error, sp%null_count() == 2_int64 .and. sp%character_size() == 5_int64, &
+            "the scalar store must hold two nulls and only the kept bytes")
+    end subroutine test_set_validity_string_bulk
     !
     !> A temporal column caches "does this column hold a null?", because answering it means an O(n)
     !! element scan. The read-only view of that question (`parquet_column_any_null`, used by every

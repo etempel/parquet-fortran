@@ -1106,6 +1106,8 @@ program error_scenarios
         call scenario_join_max_rows_form(4)
     case ("join_require_1m")
         call scenario_join_require_1m()
+    case ("join_pair_count_overflow")
+        call scenario_join_pair_count_overflow()
     case ("join_bad_require")
         call scenario_join_bad_require()
     case ("join_bad_order")
@@ -1628,6 +1630,10 @@ program error_scenarios
         call scenario_string_column_reindex_out_of_range()
     case ("string_column_delete_by_mask_length_mismatch")
         call scenario_string_column_delete_by_mask_length_mismatch()
+    case ("string_column_set_validity_length_mismatch")
+        call scenario_string_column_set_validity_length_mismatch()
+    case ("string_column_set_where_length_mismatch")
+        call scenario_string_column_set_where_length_mismatch()
     case ("string_column_append_nulls_negative")
         call scenario_string_column_append_nulls_negative()
     case ("columns_string_column_wrong_kind")
@@ -15795,6 +15801,29 @@ contains
         print '(a,i0)', "unexpectedly filtered with a short mask, size=", col%size()
     end subroutine scenario_string_column_delete_by_mask_length_mismatch
 
+    !> set_validity needs exactly one mask entry per element. The matching mask first is the
+    !> control: it must be accepted, or the abort below would be asserting nothing about length.
+    subroutine scenario_string_column_set_validity_length_mismatch()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%set_validity([.false., .true.])
+        print '(a,i0)', "control: a matching set_validity mask was accepted, nulls=", col%null_count()
+        call col%set_validity([.false.])   ! 1 entry for 2 elements -> aborts
+        print '(a,i0)', "unexpectedly accepted a short set_validity mask, size=", col%size()
+    end subroutine scenario_string_column_set_validity_length_mismatch
+
+    !> set_where needs exactly one mask entry per element; same control as above.
+    subroutine scenario_string_column_set_where_length_mismatch()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%set_where([.true., .false.], "xyz")
+        print '(a,i0)', "control: a matching set_where mask was accepted, chars=", col%character_size()
+        call col%set_where([.true.], "xyz")   ! 1 entry for 2 elements -> aborts
+        print '(a,i0)', "unexpectedly accepted a short set_where mask, size=", col%size()
+    end subroutine scenario_string_column_set_where_length_mismatch
+
     !> A negative bulk-null count is a caller bug, not an empty append.
     subroutine scenario_string_column_append_nulls_negative()
         type(parquet_string_column) :: col
@@ -19675,6 +19704,18 @@ contains
         call a%join(b, "id", require="1:2")   ! -> aborts (not one of the four tokens)
         print '(a,i0)', "unexpectedly accepted require=1:2, rows=", a%nrows()
     end subroutine scenario_join_bad_require
+
+    !> The join's running pair count refuses the sum that would wrap a 64-bit integer. No fixture
+    !> can reach it -- it needs more than 9.2e18 pairs -- so the guard is driven through its debug
+    !> hook. The control first proves the largest legal total is accepted and comes back exact,
+    !> and every result is printed, so that no compiler may treat the call as dead.
+    subroutine scenario_join_pair_count_overflow()
+        integer(int64) :: s
+        s = parquet_debug_join_add_checked(huge(0_int64) - 1_int64, 1_int64)
+        print '(a,i0)', "control: the boundary pair count was accepted, s=", s
+        s = parquet_debug_join_add_checked(huge(0_int64) - 1_int64, 2_int64)   ! one past it -> aborts
+        print '(a,i0)', "unexpectedly accepted a wrapping pair count, s=", s
+    end subroutine scenario_join_pair_count_overflow
 
     !> An unrecognized `order=` token aborts naming both accepted values rather than silently
     !! leaving the default ordering in place. The upper-cased recognized token is the control.

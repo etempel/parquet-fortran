@@ -20,6 +20,14 @@
 !! * `payload` -- an inner join carrying 1, 2, 4 and 8 columns. The SLOPE is the per-column
 !!                rewrite cost, which is what a fused copy-gather-nullfill would attack; the
 !!                intercept is everything else.
+!! * `nullfill` -- THE MODE THAT HOLDS A COMPLEXITY CLASS: a left join null-filling two 16-byte
+!!                string payload columns over a sweep of left row counts, beside the same join
+!!                without them, then `%fillna` and `%ffill` of a 16-byte string column with 75%
+!!                nulls beside the same verb on a float64 column. Two facts per size: the string
+!!                to numeric RATIO, and how the time GREW from the previous size -- about 2 per
+!!                doubling is linear, about 4 is quadratic. A per-element null-fill of a string
+!!                column compacts the payload once per element, which is exactly the quadratic
+!!                shape this mode exists to keep out; no unit test can assert it.
 !!
 !! **The decomposition is measured through the library's own API, not replicated here.** The
 !! `key build` and `sort` arms call `%deep_copy`/`%append` and `pf_argsort` exactly as
@@ -50,6 +58,7 @@ program benchmark_join
     integer(int64) :: nleft, nright, nsym
     integer :: rounds, threads_req, ncols_max
     character(len=:), allocatable :: mode
+    integer(int64), allocatable :: nullfill_rows(:)
     integer(int64) :: checksum
 
     checksum = 0_int64
@@ -58,6 +67,7 @@ program benchmark_join
     write (output_unit, "(a,i0,a,i0,a,i0)") "# nleft=", nleft, " nright=", nright, " nsym=", nsym
     write (output_unit, "(a,i0,a,i0,a,i0)") "# rounds=", rounds, " threads=", threads_req, &
         " ncols_max=", ncols_max
+    write (output_unit, "(a,*(i0,:,','))") "# nullfill_rows=", nullfill_rows
 #ifdef _OPENMP
     write (output_unit, "(a,i0)") "# omp_get_max_threads=", omp_get_max_threads()
 #else
@@ -74,11 +84,14 @@ program benchmark_join
         call mode_how()
     case ("payload")
         call mode_payload()
+    case ("nullfill")
+        call mode_nullfill()
     case ("all")
         call mode_shape()
         call mode_size()
         call mode_how()
         call mode_payload()
+        call mode_nullfill()
     case default
         write (output_unit, "(a)") "unknown mode: " // mode
         stop 2
@@ -100,6 +113,7 @@ contains
         threads_req = 0
         ncols_max = 8
         mode = "all"
+        nullfill_rows = [100000_int64, 200000_int64, 400000_int64, 800000_int64]
         n = command_argument_count()
         do i = 1, n
             call get_command_argument(i, arg)
@@ -117,9 +131,36 @@ contains
                 read (arg(9:), *) ncols_max
             else if (index(arg, "--mode=") == 1) then
                 mode = trim(arg(8:))
+            else if (index(arg, "--nullfill-rows=") == 1) then
+                call parse_row_list(arg(17:), nullfill_rows)
             end if
         end do
     end subroutine read_arguments
+
+    !> Reads a comma-separated list of row counts, in the order given.
+    subroutine parse_row_list(text, rows)
+        character(len=*), intent(in) :: text                 !! "100000,200000,...".
+        integer(int64), allocatable, intent(out) :: rows(:)  !! the counts.
+        integer :: i, start, n
+
+        n = 0
+        do i = 1, len_trim(text)
+            if (text(i:i) == ",") n = n + 1
+        end do
+        allocate(rows(n + 1))
+        n = 0
+        start = 1
+        do i = 1, len_trim(text) + 1
+            if (i > len_trim(text)) then
+                n = n + 1
+                read (text(start:i - 1), *) rows(n)
+            else if (text(i:i) == ",") then
+                n = n + 1
+                read (text(start:i - 1), *) rows(n)
+                start = i + 1
+            end if
+        end do
+    end subroutine parse_row_list
 
     !> Seconds now, from the best clock available.
     function now() result(t)
@@ -438,5 +479,152 @@ contains
         end if
         write (output_unit, "(a)") ""
     end subroutine mode_payload
+
+    !> Best-of-`rounds` time for one fill verb on one column, each round on a fresh clone.
+    subroutine time_fill(base, name, verb, is_string, best)
+        type(parquet_table), intent(in) :: base    !! the table, never mutated.
+        character(len=*), intent(in) :: name       !! the column to fill.
+        character(len=*), intent(in) :: verb       !! "fillna" or "ffill".
+        logical, intent(in) :: is_string           !! chooses the fill value's type for %fillna.
+        real(real64), intent(out) :: best          !! best elapsed seconds.
+        type(parquet_table) :: w
+        real(real64) :: t0, t1
+        integer :: r
+
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            call base%clone(w)
+            t0 = now()
+            if (verb == "fillna") then
+                if (is_string) then
+                    call w%fillna(name, "n/a")
+                else
+                    call w%fillna(name, -1.0_real64)
+                end if
+            else
+                call w%ffill(name)
+            end if
+            t1 = now()
+            if (t1 - t0 < best) best = t1 - t0
+            ! The fill's own effect, so a verb optimised into a no-op cannot report a figure.
+            if (.not. w%has_nulls(name)) checksum = checksum + 1_int64
+        end do
+    end subroutine time_fill
+
+    !> One row of --mode=nullfill: the string arm, its numeric control, their ratio, and each
+    !! arm's growth from the previous size (0 on the first size).
+    subroutine report_pair(label, n, t_str, t_num, prev_str, prev_num)
+        character(len=*), intent(in) :: label      !! what was measured.
+        integer(int64), intent(in) :: n            !! rows at this size.
+        real(real64), intent(in) :: t_str, t_num   !! best seconds, string arm and numeric control.
+        real(real64), intent(inout) :: prev_str, prev_num !! the previous size's times; updated.
+        real(real64) :: g_str, g_num
+
+        g_str = 0.0_real64
+        g_num = 0.0_real64
+        if (prev_str > 0.0_real64) g_str = t_str / prev_str
+        if (prev_num > 0.0_real64) g_num = t_num / prev_num
+        write (output_unit, "(a,t26,i9,a,f11.3,a,f11.3,a,f8.2,a,f6.2,a,f6.2)") label, n, " rows:", &
+            t_str * 1.0e3_real64, " ms strings,", t_num * 1.0e3_real64, " ms numeric, ratio", &
+            t_str / max(t_num, 1.0e-9_real64), "  growth", g_str, " /", g_num
+        flush (output_unit)
+        prev_str = t_str
+        prev_num = t_num
+    end subroutine report_pair
+
+    !> The null-fill sweep: a left join carrying two 16-byte string columns beside the same join
+    !! carrying two int64 ones, then `%fillna` and `%ffill` on a 16-byte string column beside a
+    !! float64 one, at every size of `nullfill_rows`.
+    subroutine mode_nullfill()
+        type(parquet_table) :: a, b_str, b_num, t_str, t_num
+        type(parquet_string_column) :: sc
+        integer(int64), allocatable :: lk(:), rk(:), rv(:)
+        character(len=16), allocatable :: rs(:)
+        real(real64), allocatable :: tx(:)
+        logical, allocatable :: tvalid(:)
+        real(real64) :: t_join_s, t_join_n, t_fill_s, t_fill_n, t_ff_s, t_ff_n
+        real(real64) :: p_join_s, p_join_n, p_fill_s, p_fill_n, p_ff_s, p_ff_n
+        integer(int64) :: n, n_out, nlook, i, r
+        character(len=16) :: one
+        integer :: s
+
+        nlook = 10000_int64
+        write (output_unit, "(a)") "## nullfill -- a left join null-filling two 16-byte string columns, " // &
+            "and the fill verbs"
+        write (output_unit, "(a,i0,a)") "   (", nlook, " right rows with a unique key; one left row in four " // &
+            "matches, three are null-filled;"
+        write (output_unit, "(a)") "    the fill verbs see a column three-quarters null; growth = this " // &
+            "size's time over the previous"
+        write (output_unit, "(a)") "    size's: about 2 per doubling is linear, about 4 is quadratic)"
+        write (output_unit, "(a)") ""
+        ! The lookup table: keys i*7919 (unique), two 16-byte string columns, and its numeric twin.
+        allocate(rk(nlook), rv(nlook), rs(nlook))
+        do i = 1_int64, nlook
+            rk(i) = i * 7919_int64
+            rv(i) = i
+            write (rs(i), "(a,i11.11)") "str_v", i
+        end do
+        call parquet_new_table(b_str)
+        call b_str%add_column("id", rk)
+        call b_str%add_column("s1", rs)
+        call b_str%add_column("s2", rs)
+        call parquet_new_table(b_num)
+        call b_num%add_column("id", rk)
+        call b_num%add_column("v1", rv)
+        call b_num%add_column("v2", rv)
+        p_join_s = 0.0_real64
+        p_join_n = 0.0_real64
+        p_fill_s = 0.0_real64
+        p_fill_n = 0.0_real64
+        p_ff_s = 0.0_real64
+        p_ff_n = 0.0_real64
+        do s = 1, size(nullfill_rows)
+            n = nullfill_rows(s)
+            ! Left keys: every fourth row takes a right key, the rest a value no right key holds.
+            allocate(lk(n))
+            do i = 1_int64, n
+                r = pf_random_int_at(20260907_int64, i, 1_int64, nlook)
+                if (mod(i, 4_int64) == 0_int64) then
+                    lk(i) = r * 7919_int64
+                else
+                    lk(i) = r * 7919_int64 + 1_int64
+                end if
+            end do
+            call build_left(a, lk)
+            call time_join(a, b_str, "id", "left", require="m:1", best=t_join_s, n_out=n_out)
+            call time_join(a, b_num, "id", "left", require="m:1", best=t_join_n, n_out=n_out)
+            call report_pair("join left m:1", n, t_join_s, t_join_n, p_join_s, p_join_n)
+            ! The fill verbs' fixtures: a 16-byte string column and a float64 column, both with a
+            ! value in every fourth row and a null elsewhere. The string one is built as a store
+            ! so that its nulls are appended rather than written afterwards.
+            allocate(tx(n), tvalid(n))
+            call sc%clear()
+            call sc%reserve(n, n * 16_int64)
+            do i = 1_int64, n
+                tx(i) = real(i, real64)
+                tvalid(i) = mod(i, 4_int64) == 0_int64
+                if (tvalid(i)) then
+                    write (one, "(a,i11.11)") "fill_", i
+                    call sc%append_string(one)
+                else
+                    call sc%append_null()
+                end if
+            end do
+            call parquet_new_table(t_str)
+            call t_str%add_column("s", sc)
+            call parquet_new_table(t_num)
+            call t_num%add_column("x", tx)
+            call t_num%set("x", tx, is_valid=tvalid)
+            call time_fill(t_str, "s", "fillna", .true., t_fill_s)
+            call time_fill(t_num, "x", "fillna", .false., t_fill_n)
+            call report_pair("%fillna", n, t_fill_s, t_fill_n, p_fill_s, p_fill_n)
+            call time_fill(t_str, "s", "ffill", .true., t_ff_s)
+            call time_fill(t_num, "x", "ffill", .false., t_ff_n)
+            call report_pair("%ffill", n, t_ff_s, t_ff_n, p_ff_s, p_ff_n)
+            checksum = checksum + n_out
+            deallocate(lk, tx, tvalid)
+        end do
+        write (output_unit, "(a)") ""
+    end subroutine mode_nullfill
 
 end program benchmark_join

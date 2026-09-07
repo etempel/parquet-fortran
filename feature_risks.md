@@ -93,6 +93,7 @@ something a reader is expected to have.
 | [Risk-206](#risk-206--explode-must-not-check-for-repeats-and-must-keep-the-range-check-it-does-have) | `%explode` must not check for repeats, and must keep the range check it does have | 4 — covered |
 | [Risk-207](#risk-207--pf_remaps-found-reports-what-matched-never-what-was-filled) | `pf_remap`'s `found` reports what MATCHED, never what was FILLED | 4 — covered |
 | [Risk-208](#risk-208--value_counts-must-gather-a-copy-and-must-ask-the-column-which-group-is-the-null-one) | `%value_counts` must gather a COPY, and must ask the column which group is the null one | 4 — covered |
+| [Risk-209](#risk-209--a-multimaps-rows-must-stay-ascending-by-position-within-a-group-and-only-that-order-is-a-contract) | A multimap's rows must stay ascending by POSITION within a group, and only that order is a contract | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8093,3 +8094,29 @@ value (a group of "0", or of whatever the storage held) or drop a real group.
 identified from the column rather than from the group's position; and `test_value_counts_is_a_read`
 (`test/test_table_rowverbs.f90`), which asserts the source table's rows, order and `%generation()`
 are untouched — the generation assertion being the one an in-place gather fails.
+
+### Risk-209 — A multimap's rows must stay ascending by POSITION within a group, and only that order is a contract
+
+`pf_index_multimap` (`src/parquet_index_multi.f90`) lays each group's values out in ascending
+order of the row they came from, by walking the rows in order and writing each at its group's
+cursor. Three things rest on that and none of them aborts if it goes: `%get_first` answers the
+group's first stored value, which is `pf_match`'s m:1 rule only while the first stored value is the
+lowest row; `%probe_many` reproduces `pf_match_all`'s contract, whose ranges are ascending; and the
+join's documented order for an m:m match is that same ascending-within-a-range order. A scatter
+that stops being stable — a threaded scatter through an unstable sort, a `head/next` chain that
+yields rows in reverse, a per-thread cursor that interleaves two threads' rows — produces a
+multimap whose counts are right, whose ranges hold the right rows, and whose `%get_first` and
+`%probe_many` are quietly wrong. This is the stage a partitioned, threaded build will touch, and
+it is the property that build must reproduce.
+
+**The other half is what is NOT a contract.** The group ids are dense in `1 .. ngroups` and stable
+for the life of one build; their order — first appearance on the serial pass — is documented as
+this version's behaviour and nothing more, so that the partitioned pass may number partition-major.
+`test_mm_group_ids_first_appearance` pins today's order deliberately: when the pass changes, that
+test is rewritten to assert density alone, not "fixed" by restoring the order.
+
+**Covered by** `test_mm_ascending_within_group` (`test/test_index_multimap.f90`), which asserts a
+strictly ascending range in every multi-row group and, with values that DESCEND in position, that
+the order is by position and not by value — the arm a scatter that sorted by value would pass —
+and by `test_mm_csr_equals_match_all`, whose element-for-element equality with `pf_match_all`
+fails on any reordering. Verified by control: reversing one group's scatter fails both.

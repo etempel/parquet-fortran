@@ -5425,6 +5425,37 @@ caller uses (`ix_many_rows`, `ix_tuple_width`) is safe, because the result keeps
 `check_scenario_uses_a_pure_result` does not see this shape -- it checks functions -- so the
 ifx debug run is the only thing that does.
 
+**gfortran 15.2 ICEs on a `pure module procedure` that passes a `class` dummy's component to a
+`class` dummy beside an allocatable `intent(out)`.** Measured in `src/parquet_index_multi.f90`:
+`mm_get_method` calling `map_get_method(self%map, method)` and both `%keys` forms calling
+`map_keys_r1`/`map_keys_r2(self%map, list)` -- `self` being `class(pf_index_multimap)`, `self%map`
+a `type(pf_index_map)` component, the callee's `self` a `class(pf_index_map)`, and the other
+argument an allocatable `intent(out)` (`character(len=:)` or a rank-1/rank-2 array alike) -- die
+in the front end with a bare `internal compiler error: Segmentation fault`, at `-O0` as at `-O2`,
+whether the actual is the caller's own `intent(out)` dummy or a local moved afterwards. The
+sibling call with no such argument (`map_memory_bytes(self%map)`, a function) compiles, and so do
+the same calls from an IMPURE procedure and from a worker taking `type(pf_index_multimap)`. Only
+one ICE is reported per compilation and it names whichever such call the front end meets last,
+so fixing the named line moves the message rather than clearing it -- three rounds here before
+the shape was recognised. **Workaround: repeat the callee's body over the map's `type`-dummy
+helpers** (`ix_collect_keys`, the backend `select case`), as those three procedures now do with a
+comment each; ifx compiles the original as written. Not in `check_source_conventions.py`, since
+the shape is rare and the compiler names the site.
+
+**ifx 2026.1.1 at `-O0 -check all` segfaults when an ABSENT optional allocatable dummy is passed
+through an OpenMP region to an optional dummy.** Measured in `pf_index_multimap%probe_many`
+(`src/parquet_index_multi.f90`): the driver's `logical, allocatable, intent(out), optional ::
+group_hit(:)` was handed, absent, into a `!$omp parallel do` region and on to
+`mm_probe_count`'s `optional :: group_hit(:)` dummy -- legal Fortran, and what gfortran at both
+profiles and ifx release run correctly. Under fpm's ifx debug profile the outlined region dies
+with `forrtl: severe (174): SIGSEGV` at the call, while the same call with `group_hit` PRESENT
+runs; a fourteen-line program calling `%probe_many` twice, once each way, reproduces it. The
+three `%probe_many` error scenarios found it, because the test suite always passed the array on
+the calls that thread. **Never pass an optional array dummy into a parallel region**: fill a local
+that always exists (one never-read entry when the caller did not ask) and `move_alloc` it into
+the optional afterwards, which is what `mm_probe_hit_buffer` now does. Same family as the two
+notes above -- the debug build is the only run that sees it, and no lint check can.
+
 `check_scenario_uses_a_pure_result` (`tools/check_source_conventions.py`) enforces it, resolving
 what "pure" means at a call site from `src/` in three ways — the `pure`/`elemental` functions
 themselves, the type-bound bindings that reach them (`m%get`), and the named generic interfaces

@@ -31,6 +31,12 @@
 !! sized `size(key)` would be a heap allocation per lookup on some compilers, which is the one
 !! thing this path must not do. The component count is validated BEFORE the widening loop, so only
 !! the elements that are about to be read are ever written.
+!!
+!! **`parquet_index_multi.f90` is a DESCENDANT of this submodule**, not a sibling, so that the
+!! multimap can reach the private helpers below by host association -- the chunk loops, the
+!! thread rule, the mask and value checks, the automatic choice -- rather than each being
+!! re-declared in the spec as a cross-submodule interface. Anything here that a message names
+!! the type in takes an optional `owner` prefix for that reason (`ix_owner_of`).
 submodule (parquet_index) parquet_index_map
     use parquet_utils, only: pf_to_lower
     use parquet_settings_base, only: parquet_auto_thread_count, parquet_clamp_to_affinity, &
@@ -966,34 +972,56 @@ contains
     end subroutine ix_do_reserve
 
     !> Validates a component count against the module's fixed maximum.
-    subroutine ix_check_ncomp(nc, what)
+    !!
+    !! `owner` is the type-name prefix of the message, `pf_index_map%` unless the caller is the
+    !! multimap (`src/parquet_index_multi.f90`), which shares this guard and must not report the
+    !! wrong type. The same optional prefix is on the three guards below for the same reason.
+    subroutine ix_check_ncomp(nc, what, owner)
         integer, intent(in) :: nc            !! the requested component count.
         character(len=*), intent(in) :: what !! procedure name, for the message.
+        character(len=*), intent(in), optional :: owner !! type prefix; `pf_index_map%` by default.
         character(len=32) :: t
+        character(len=:), allocatable :: pfx
 
-        if (nc < 1) error stop "pf_index_map%" // what // ": a key must have at least one component"
+        call ix_owner_of(owner, pfx)
+        if (nc < 1) error stop pfx // what // ": a key must have at least one component"
         if (nc > pf_index_max_components) then
             write (t, "(i0)") pf_index_max_components
-            error stop "pf_index_map%" // what // ": a key may have at most " // trim(t) // &
+            error stop pfx // what // ": a key may have at most " // trim(t) // &
                 " components (pf_index_max_components)"
         end if
     end subroutine ix_check_ncomp
+
+    !> The type-name prefix a shared guard's message carries: the caller's `owner`, or the map's.
+    subroutine ix_owner_of(owner, pfx)
+        character(len=*), intent(in), optional :: owner       !! the caller's prefix, or absent.
+        character(len=:), allocatable, intent(out) :: pfx     !! the prefix to print.
+
+        if (present(owner)) then
+            pfx = owner
+        else
+            pfx = "pf_index_map%"
+        end if
+    end subroutine ix_owner_of
 
     !> Resolves a `method=` token to a backend, or to `IX_WANT_AUTO`.
     !!
     !! Case-insensitive, like every other token argument in this library. `allow_frozen` is what
     !! separates `%build` from `%init`: the direct backend needs the whole key range up front and
     !! the sorted backend cannot be added to at all, so neither can start an incremental map.
-    subroutine ix_resolve_method(method, want, allow_frozen, what)
+    subroutine ix_resolve_method(method, want, allow_frozen, what, owner)
         character(len=*), intent(in), optional :: method !! the caller's token, or absent.
         integer, intent(out) :: want                     !! resolved backend, or `IX_WANT_AUTO`.
         logical, intent(in) :: allow_frozen              !! whether build-only backends are accepted.
         character(len=*), intent(in) :: what             !! procedure name, for the message.
+        character(len=*), intent(in), optional :: owner  !! type prefix; `pf_index_map%` by default.
         character(len=16) :: tok
+        character(len=:), allocatable :: pfx
 
         want = IX_WANT_AUTO
         if (.not. present(method)) return
-        if (len_trim(method) > len(tok)) error stop "pf_index_map%" // what // &
+        call ix_owner_of(owner, pfx)
+        if (len_trim(method) > len(tok)) error stop pfx // what // &
             ": unknown method (accepted: ""auto"", ""direct"", ""hash"", ""sorted"")"
         tok = method
         call pf_to_lower(tok)
@@ -1003,17 +1031,17 @@ contains
         case ("hash")
             want = IX_HASH
         case ("direct")
-            if (.not. allow_frozen) error stop "pf_index_map%" // what // &
+            if (.not. allow_frozen) error stop pfx // what // &
                 ": method=""direct"" needs the key range up front, so it is only available " // &
                 "on %build; use ""hash"" for an incremental map"
             want = IX_DIRECT
         case ("sorted")
-            if (.not. allow_frozen) error stop "pf_index_map%" // what // &
+            if (.not. allow_frozen) error stop pfx // what // &
                 ": method=""sorted"" is frozen once built, so it is only available on %build; " // &
                 "use ""hash"" for an incremental map"
             want = IX_SORTED
         case default
-            error stop "pf_index_map%" // what // ": unknown method """ // trim(tok) // &
+            error stop pfx // what // ": unknown method """ // trim(tok) // &
                 """ (accepted: ""auto"", ""direct"", ""hash"", ""sorted"")"
         end select
     end subroutine ix_resolve_method
@@ -1165,11 +1193,14 @@ contains
     ! ---- Value validation ----
 
     !> Checks that a values array is as long as the key array.
-    subroutine ix_check_values_len(nv, n)
+    subroutine ix_check_values_len(nv, n, owner)
         integer(int64), intent(in) :: nv !! elements in `values`.
         integer(int64), intent(in) :: n  !! keys presented.
+        character(len=*), intent(in), optional :: owner !! type prefix; `pf_index_map%` by default.
+        character(len=:), allocatable :: pfx
 
-        if (nv /= n) error stop "pf_index_map%build: " // &
+        call ix_owner_of(owner, pfx)
+        if (nv /= n) error stop pfx // "build: " // &
             "values= must have exactly one element per key"
     end subroutine ix_check_values_len
 
@@ -1178,12 +1209,15 @@ contains
     !! A row masked off by `valid` is never stored, so its value is not checked: a nullable key
     !! column's rows carry whatever sits in the null slots, and that is exactly the case the
     !! mask exists for.
-    subroutine ix_check_values_range(values, valid)
+    subroutine ix_check_values_range(values, valid, owner)
         integer(int64), intent(in) :: values(:)   !! the values about to be stored.
         logical, intent(in), optional :: valid(:) !! per row; a `.false.` row is not checked.
+        character(len=*), intent(in), optional :: owner !! type prefix; `pf_index_map%` by default.
         integer(int64) :: i
         character(len=32) :: t, p
+        character(len=:), allocatable :: pfx
 
+        call ix_owner_of(owner, pfx)
         do i = 1_int64, size(values, kind=int64)
             if (present(valid)) then
                 if (.not. valid(i)) cycle
@@ -1191,7 +1225,7 @@ contains
             if (values(i) < 1_int64) then
                 write (t, "(i0)") values(i)
                 write (p, "(i0)") i
-                error stop "pf_index_map%build: values(" // trim(p) // ") is " // trim(t) // &
+                error stop pfx // "build: values(" // trim(p) // ") is " // trim(t) // &
                     "; stored values must be >= 1 because 0 is how a lookup reports ""not found"""
             end if
         end do

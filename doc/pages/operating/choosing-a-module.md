@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **109** of this library's Fortran files.
+also the largest: a project that imports it compiles **110** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -48,7 +48,7 @@ in every one of them.
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 15 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |
 | `parquet_healpix` | 7 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
-| `parquet_index` | 10 | no | `pf_index_map`: which row holds this key, over a single integer key or a tuple of them, with three storage backends, two chosen from the keys and one opt-in; and `pf_index_pool`, which hands out and recycles unique index values |
+| `parquet_index` | 11 | no | `pf_index_map`: which row holds this key, over a single integer key or a tuple of them, with three storage backends, two chosen from the keys and one opt-in; `pf_index_multimap`: every row holding a key that repeats, as ranges; and `pf_index_pool`, which hands out and recycles unique index values |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
@@ -59,9 +59,9 @@ in every one of them.
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 28 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
-| `parquet_io` | 61 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 86 | **yes** | the `parquet_table` container |
-| `parquet` | 109 | **yes** | everything above, through one `use` |
+| `parquet_io` | 62 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 87 | **yes** | the `parquet_table` container |
+| `parquet` | 110 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 

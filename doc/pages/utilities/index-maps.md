@@ -5,11 +5,12 @@ title: Key-to-index lookup with parquet_index
 `parquet_index` answers the two halves of "where does this thing live in my arrays?".
 
 `pf_index_map` answers it for a key you already have: give it the key column of a table and it
-tells you, in a few nanoseconds, which row a key sits in. `pf_index_pool` answers it when nothing
-has a key yet: it issues 1, 2, 3, … on request and takes them back, so a program managing slots in
-its own arrays never has to track which are in use.
+tells you, in a few nanoseconds, which row a key sits in. `pf_index_multimap` answers it when the
+key repeats: every row a key sits in, as a range. `pf_index_pool` answers it when nothing has a
+key yet: it issues 1, 2, 3, … on request and takes them back, so a program managing slots in its
+own arrays never has to track which are in use.
 
-Both are ordinary Fortran containers over plain integer arrays. Nothing here reads or writes a
+All three are ordinary Fortran containers over plain integer arrays. Nothing here reads or writes a
 Parquet file, and `use parquet_index` never reaches the C++ bindings — see
 [Choosing a module](../operating/choosing-a-module.html) for what that does and does not buy you.
 
@@ -245,6 +246,124 @@ depth for sorted, and the real probe lengths for hash. On the hash backend it sc
 table, so it is a diagnostic rather than something to call in a loop; the other two answer without
 touching the keys. An empty map reports 0.
 
+## A key that repeats: `pf_index_multimap`
+
+`pf_index_map` refuses a duplicate key by contract. When the key column is not unique — an object
+identifier that repeats across observing bands, a group id, the build side of an m:m join — the
+question is "which rows", and `pf_index_multimap` answers it: every position holding a key, as a
+contiguous range, ascending by position.
+
+```fortran
+use parquet_index
+type(pf_index_multimap) :: mm
+integer(int64), allocatable :: rows(:)
+
+call mm%build(group_id)                  ! keys may repeat; values default to 1..n
+n = mm%count(42_int64)                   ! how many rows hold it; 0 when absent
+j = mm%get_first(42_int64)               ! the lowest of them; 0 when absent
+call mm%get_all(42_int64, rows)          ! all of them, ascending; zero-length when absent
+```
+
+Underneath it is a `pf_index_map` over the *distinct* keys, each mapped to a group id in
+`1 .. ngroups`, and a CSR pair beside it — `offsets(ngroups + 1)` and `rows(nkeys)` — with group
+`g`'s values at `rows(offsets(g) : offsets(g+1) - 1)`. So everything the map accepts, the multimap
+accepts too: `int32` or `int64` keys, scalar or a tuple per row, `values=`, `valid=`, `method=`
+and `threads=`; and the same "0 means not found" protocol on every lookup.
+
+### Building a multimap
+
+```fortran
+call mm%build(keys)                      ! values default to the row numbers 1..n
+call mm%build(keys, values)              ! or one value per row, each >= 1
+call mm%build(keys, valid=ok)            ! skip every row ok(:) marks .false.
+call mm%build(keys, method="hash")       ! or force the distinct-key map's backend
+```
+
+Within a group the values are in ascending order of **position**, whatever the values are: with
+the default values that is ascending row number, and `%get_first` is the lowest row. A `valid=`
+mask skips a row entirely — it is neither stored nor counted, and the values stay the original
+row numbers of the rows that were kept — which is how a nullable key column is indexed as it is.
+
+The backend is the map's automatic choice, applied to the **distinct** keys: a dense id column
+that repeats takes the direct backend, a sparse one the hash table, and `method=` overrides as on
+the map. The choice is made in two steps, so ten thousand keys spread over a billion and repeated
+a thousand times each still go to a 0.5 MB hash table rather than a 320 MB direct array. In this
+version the grouping pass is serial; `threads=` reaches the map built over the distinct keys and
+is honoured there.
+
+**Group ids are dense in `1 .. ngroups` and rows are ascending within a group; nothing else about
+the ids is a contract.** On this version's serial pass they follow first appearance among the
+unmasked rows, which a later partitioned pass will change. Rely on an id being stable for the
+life of one build, never on its order.
+
+### Looking up a key that repeats
+
+Scalar, all lock-free:
+
+```fortran
+g  = mm%get(key)                     ! the group id, 1..ngroups; 0 when absent
+n  = mm%count(key)                   ! rows holding the key; 0 when absent
+j  = mm%get_first(key)               ! the value at the lowest position; 0 when absent
+call mm%get_all(key, rows)           ! every value, ascending; zero-length when absent
+call mm%get_range(key, lo, hi)       ! the same as a slice of %csr's rows; lo > hi when absent
+```
+
+And in bulk, on a team of their own by the rule the map's `%get_many` follows:
+
+```fortran
+call mm%get_first_many(keys, rows)               ! one value per key, 0 where absent
+call mm%get_many(keys, groups)                   ! one group id per key, 0 where absent
+call mm%probe_many(keys, offsets, matches)       ! EVERY match, as a CSR pair
+```
+
+All three take `valid=` (a masked key answers 0, or an empty range, unprobed), `threads=`, and a
+count: `n_found=` on the first two, `n_matched=` on the third. `rows`, `groups` and `matches` may
+be `int32` or `int64`; an `int32` answer aborts up front, rather than truncating, if any stored
+value would not fit.
+
+### Every match at once: `%probe_many`
+
+`%probe_many` is `pf_match_all` on a hash engine, and the join's m:m primitive: `offsets` has one
+entry per probe key plus one, `offsets(1) == 1`, and the stored values for probe `i` are
+`matches(offsets(i) : offsets(i+1) - 1)` — an empty range when there are none, ascending by
+position within it. Two threaded passes over the probes: the group and count of each,
+prefix-summed into `offsets`; then each probe's range copied into place.
+
+```fortran
+call mm%probe_many(keys, offsets, matches, n_matched=nm, group_hit=hit)
+do i = 1, size(keys)
+    do p = offsets(i), offsets(i+1) - 1
+        ! key i matches stored row matches(p)
+    end do
+end do
+```
+
+`group_hit(ngroups)` is set for every group some probe reached — how a right or outer join finds
+the stored rows nothing probed, without a second structure.
+
+**`size(matches)` counts pairs, and a pair count is a product**: a key held by a thousand stored
+rows and a thousand probes contributes a million on its own. The total is
+`offsets(size(keys) + 1) - 1`, accumulated in `int64` and refused rather than wrapped when it
+would not fit; read it before doing anything proportional to it.
+
+### Introspecting a multimap
+
+```fortran
+n = mm%ngroups()                     ! distinct keys
+n = mm%nkeys()                       ! rows stored, repeats included
+n = mm%max_multiplicity()            ! rows in the largest group; 1 means every key is unique
+w = mm%ncomponents()                 ! components per key; 0 if never built
+b = mm%memory_bytes()                ! heap held: the distinct-key map plus the CSR pair
+call mm%get_method(token)            ! the distinct-key map's backend
+call mm%keys(list)                   ! the distinct keys; pair with %get_many for their groups
+call mm%csr(offsets, rows)           ! the CSR pair itself, copied out
+call mm%clear()                      ! forget every key and release all storage
+```
+
+`%max_multiplicity() == 1` is the m:1 check a join makes before choosing its path. `%csr` is for
+a caller that walks the ranges itself — a group-by, or a join's build side — or wants every group
+at once; group `g`, the id `%get` answers, holds `rows(offsets(g) : offsets(g+1) - 1)`.
+
 ## The index pool
 
 ```fortran
@@ -347,6 +466,11 @@ enough probe (see [Threads a build or a bulk lookup uses](#threads-a-build-or-a-
 and stands down to serial inside your parallel region, so calling it from your own threads costs
 nothing extra.
 
+**A multimap follows the same rules.** Its lookups are lock-free, its bulk forms open a team by
+the rule the map's `%get_many` follows and stand down inside your region, and a `%build` or
+`%clear` is serialised on a lock of its own — one per multimap type, distinct from the map's, so
+that the map calls a build makes underneath can take theirs.
+
 **The pool guards its queries as well as its mutations**, so `%is_used`, `%get_max_index` and the
 counters all take the lock that a map lookup avoids. A pool query in a hot loop is not free the way
 `%get` is; hold the answer rather than asking repeatedly.
@@ -394,7 +518,8 @@ segfaults on for any type with allocatable components. The per-thread array sati
 
 A `%build` threads its key scan and, on the direct backend, its scatter; a `%get_many` threads
 its probe, one contiguous chunk of the keys per thread. Both resolve their team by the same rule,
-over the rows they are handed.
+over the rows they are handed, and so do the multimap's `%get_first_many`, `%get_many` and
+`%probe_many`.
 
 ```fortran
 call m%build(keys)                   ! automatic
@@ -446,6 +571,10 @@ your own hardware.
   cache miss, so the speed-up tracks the thread count until memory bandwidth saturates.
 - **`%get_or_add_many` beats a loop of `%get_or_add`** by the lock it does not take per key;
   the hashing and the inserts cost the same either way.
+- **A multimap probe costs one map lookup per key plus one copy per pair.** `%get_first_many` is
+  the map's `%get_many` and one gather; `%probe_many` is that plus a copy of every matched range,
+  so its time is proportional to the pair count, and `--mode=multimap` prints it beside the
+  sort engine's figure for the same arrays.
 - **`%reserve` before a run of inserts** avoids the rehashes, which are the only part of
   incremental filling that is not amortised `O(1)`.
 - **The sorted backend trades speed for memory** and is the one to reach for when a map has to fit

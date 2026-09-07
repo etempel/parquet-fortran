@@ -75,7 +75,8 @@ contains
 
 end module test_module_surface_argsort
 
-!> `parquet_index` alone: the map, the pool, and every knob this tier's own code reads.
+!> `parquet_index` alone: the map, the multimap, the pool, and every knob this tier's own code
+!> reads.
 !!
 !! The build's thread cap plus the output pair (its affinity clamp warns through the same channel
 !! every other tier does) and the sorting knobs, because `method="sorted"` builds through
@@ -89,11 +90,12 @@ module test_module_surface_index
 
 contains
 
-    !> Round-trips every knob `parquet_index`'s own code reads, and exercises both types.
+    !> Round-trips every knob `parquet_index`'s own code reads, and exercises all three types.
     subroutine check_index_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
         character(len=:), allocatable :: tok
         type(pf_index_map) :: m
+        type(pf_index_multimap) :: mm
         type(pf_index_pool) :: p
         integer :: n_index, n_sort
 
@@ -129,6 +131,9 @@ contains
         call m%get_method(tok)
         if (what == "" .and. tok /= "direct") what = "pf_index_map%get_method"
         if (what == "" .and. p%get_index() /= 1_int64) what = "pf_index_pool%get_index"
+        call mm%build([10_int64, 11_int64, 10_int64])
+        if (what == "" .and. mm%count(10_int64) /= 2_int64) what = "pf_index_multimap%count"
+        call parquet_debug_set_index_pair_limit(0_int64)
         if (what == "" .and. pf_index_max_components < 1) what = "pf_index_max_components"
 
         call parquet_set_index_threads(n_index)

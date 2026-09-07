@@ -74,10 +74,12 @@ module parquet_index
 
     public :: pf_index_map
     public :: pf_index_pool
+    public :: pf_index_multimap
     public :: pf_index_threads
     public :: pf_index_max_components
     public :: parquet_debug_index_threads_used
     public :: parquet_debug_index_get_many_threads_used
+    public :: parquet_debug_set_index_pair_limit
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -197,6 +199,15 @@ module parquet_index
     !! the last to resolve its team, which is all a test may rely on. Written only by
     !! `ix_lookup_threads_for`, which every `%get_many` specific reaches.
     integer, save :: dbg_index_get_many_threads_used = 1
+
+    !> Pair count above which `pf_index_multimap%probe_many` refuses to answer: `huge(int64)`
+    !! unless a test has lowered it through `parquet_debug_set_index_pair_limit`.
+    !!
+    !! Test-only. The real ceiling is the `int64` domain, which no test can fill, and a guard no
+    !! test reaches is one edit away from being silently wrong; the hook is what lets the error
+    !! scenario reach it. Read once per `%probe_many` call, on the calling thread, so setting it
+    !! while another thread is inside a probe is a race the scenario harness never runs.
+    integer(int64), save :: dbg_index_pair_limit = huge(0_int64)
 
     !> Most components one key may have, and the reason the tuple paths allocate nothing.
     !!
@@ -438,6 +449,132 @@ module parquet_index
         procedure :: memory_bytes => pool_memory_bytes  !! Heap this pool holds, in bytes.
         procedure :: clear => pool_clear                !! Release every index and all storage.
     end type pf_index_pool
+
+    ! ---- pf_index_multimap ----
+
+    !> Maps a key to EVERY position that holds it: `pf_index_map` with the uniqueness rule relaxed.
+    !!
+    !! Built from a key array in which keys repeat, it answers "which rows" where the map answers
+    !! "which row" -- a contiguous range of stored values per key, ascending by position -- and
+    !! answers the same question for a whole probe array at once in the CSR shape `pf_match_all`
+    !! returns. It is the m:m half of a hash join, the engine under a table index over a key that
+    !! is not unique, and the partition a group-by needs.
+    !!
+    !! **Storage.** A `pf_index_map` over the DISTINCT keys, whose stored value is a group id in
+    !! `1 .. ngroups` (so the map's `>= 1` contract holds and every backend is available, direct
+    !! included), and a CSR pair beside it: `offsets(ngroups + 1)` with `offsets(1) = 1`, and
+    !! `rows(nkeys)` holding the values of group `g` at `rows(offsets(g) : offsets(g+1) - 1)`,
+    !! ascending by position. Values default to the row numbers `1 .. n` or come from `values=`,
+    !! are `>= 1` as the map's are, and 0 means "not found" on every lookup.
+    !!
+    !! **Group ids are dense in `1 .. ngroups` and rows are ascending within a group. Nothing else
+    !! about the ids is a contract.** On this version's serial grouping pass they follow first
+    !! appearance among the unmasked rows, which a later partitioned pass will change; rely on an
+    !! id being stable for the life of one build, never on its order.
+    !!
+    !! **Threading.** Lookups are lock-free, like the map's. The bulk forms (`%get_first_many`,
+    !! `%get_many`, `%probe_many`) open a team of their own by the rule `pf_index_map%get_many`
+    !! follows and stand down to serial inside a parallel region. A build or a `%clear` is
+    !! serialised on a lock of its own, `pf_index_multimap_guard`, distinct from the map's so that
+    !! the map calls made underneath can take theirs. A lookup racing a build of the same
+    !! multimap is not supported, for the reason the map's header gives.
+    !!
+    !! **No finalizer**, for the reason `pf_index_map` gives, and the same per-thread-array rule:
+    !! one instance per thread in a shared array allocated before the region.
+    type :: pf_index_multimap
+        private
+        !> The distinct keys, each mapped to its group id in `1 .. ng`.
+        type(pf_index_map) :: map
+        !> Group offsets into `grows`: group `g` holds `grows(goff(g) : goff(g+1) - 1)`. Length
+        !! `ng + 1` with `goff(1) = 1`; allocated only by a build.
+        integer(int64), allocatable :: goff(:)
+        !> The stored values, grouped by key and ascending by position within a group.
+        integer(int64), allocatable :: grows(:)
+        !> Groups, i.e. distinct keys stored. 0 before the first build and after `%clear`.
+        integer(int64) :: ng = 0_int64
+        !> Rows stored, repeats included: the length of `grows`.
+        integer(int64) :: nr = 0_int64
+        !> Rows in the largest group. 1 means every stored key is unique; 0 when empty.
+        integer(int64) :: maxmult = 0_int64
+        !> The largest stored value: what decides whether an `int32` answer form may run at all.
+        integer(int64) :: vmax = 0_int64
+    contains
+        !
+        ! ---- Lifecycle ----
+        !
+        !> Build the whole multimap from the keys you have, repeats and all.
+        generic :: build => &
+            mm_build_r1_k32_nov, mm_build_r1_k32_v32, mm_build_r1_k32_v64, &
+            mm_build_r1_k64_nov, mm_build_r1_k64_v32, mm_build_r1_k64_v64, &
+            mm_build_r2_k32_nov, mm_build_r2_k32_v32, mm_build_r2_k32_v64, &
+            mm_build_r2_k64_nov, mm_build_r2_k64_v32, mm_build_r2_k64_v64
+        procedure, private :: mm_build_r1_k32_nov, mm_build_r1_k32_v32, mm_build_r1_k32_v64
+        procedure, private :: mm_build_r1_k64_nov, mm_build_r1_k64_v32, mm_build_r1_k64_v64
+        procedure, private :: mm_build_r2_k32_nov, mm_build_r2_k32_v32, mm_build_r2_k32_v64
+        procedure, private :: mm_build_r2_k64_nov, mm_build_r2_k64_v32, mm_build_r2_k64_v64
+        procedure :: clear => mm_clear                    !! Forget every key and release all storage.
+        !
+        ! ---- Scalar lookup (lock-free; `pure`) ----
+        !
+        !> The group id of a key, in `1 .. ngroups`; 0 when absent.
+        generic :: get => mm_get_k32, mm_get_k64, mm_get_t32, mm_get_t64
+        procedure, private :: mm_get_k32, mm_get_k64, mm_get_t32, mm_get_t64
+        !> How many stored rows hold a key; 0 when absent.
+        generic :: count => mm_count_k32, mm_count_k64, mm_count_t32, mm_count_t64
+        procedure, private :: mm_count_k32, mm_count_k64, mm_count_t32, mm_count_t64
+        !> The value at the lowest position holding a key; 0 when absent. The m:1 answer.
+        generic :: get_first => mm_first_k32, mm_first_k64, mm_first_t32, mm_first_t64
+        procedure, private :: mm_first_k32, mm_first_k64, mm_first_t32, mm_first_t64
+        !> Every value stored for a key, ascending by position; zero-length when absent.
+        generic :: get_all => &
+            mm_all_k32_i32, mm_all_k32_i64, mm_all_k64_i32, mm_all_k64_i64, &
+            mm_all_t32_i32, mm_all_t32_i64, mm_all_t64_i32, mm_all_t64_i64
+        procedure, private :: mm_all_k32_i32, mm_all_k32_i64, mm_all_k64_i32, mm_all_k64_i64
+        procedure, private :: mm_all_t32_i32, mm_all_t32_i64, mm_all_t64_i32, mm_all_t64_i64
+        !> The range of `%csr`'s `rows` that holds a key; `lo > hi` when absent.
+        generic :: get_range => mm_range_k32, mm_range_k64, mm_range_t32, mm_range_t64
+        procedure, private :: mm_range_k32, mm_range_k64, mm_range_t32, mm_range_t64
+        !
+        ! ---- Bulk lookup (lock-free; on a team of their own) ----
+        !
+        !> `%get_first` over a whole array of keys, on a team. The m:1 form for a hot loop.
+        generic :: get_first_many => &
+            mm_fmany_r1_k32_i32, mm_fmany_r1_k32_i64, mm_fmany_r1_k64_i32, mm_fmany_r1_k64_i64, &
+            mm_fmany_r2_k32_i32, mm_fmany_r2_k32_i64, mm_fmany_r2_k64_i32, mm_fmany_r2_k64_i64
+        procedure, private :: mm_fmany_r1_k32_i32, mm_fmany_r1_k32_i64
+        procedure, private :: mm_fmany_r1_k64_i32, mm_fmany_r1_k64_i64
+        procedure, private :: mm_fmany_r2_k32_i32, mm_fmany_r2_k32_i64
+        procedure, private :: mm_fmany_r2_k64_i32, mm_fmany_r2_k64_i64
+        !> `%get` over a whole array of keys, on a team: the group id per key.
+        generic :: get_many => &
+            mm_many_r1_k32_i32, mm_many_r1_k32_i64, mm_many_r1_k64_i32, mm_many_r1_k64_i64, &
+            mm_many_r2_k32_i32, mm_many_r2_k32_i64, mm_many_r2_k64_i32, mm_many_r2_k64_i64
+        procedure, private :: mm_many_r1_k32_i32, mm_many_r1_k32_i64
+        procedure, private :: mm_many_r1_k64_i32, mm_many_r1_k64_i64
+        procedure, private :: mm_many_r2_k32_i32, mm_many_r2_k32_i64
+        procedure, private :: mm_many_r2_k64_i32, mm_many_r2_k64_i64
+        !> EVERY match between an array of probe keys and the stored keys, as a CSR pair.
+        generic :: probe_many => &
+            mm_probe_r1_k32_i32, mm_probe_r1_k32_i64, mm_probe_r1_k64_i32, mm_probe_r1_k64_i64, &
+            mm_probe_r2_k32_i32, mm_probe_r2_k32_i64, mm_probe_r2_k64_i32, mm_probe_r2_k64_i64
+        procedure, private :: mm_probe_r1_k32_i32, mm_probe_r1_k32_i64
+        procedure, private :: mm_probe_r1_k64_i32, mm_probe_r1_k64_i64
+        procedure, private :: mm_probe_r2_k32_i32, mm_probe_r2_k32_i64
+        procedure, private :: mm_probe_r2_k64_i32, mm_probe_r2_k64_i64
+        !
+        ! ---- Introspection ----
+        !
+        procedure :: csr => mm_csr                        !! The CSR pair, copied out.
+        procedure :: ngroups => mm_ngroups                !! Distinct keys stored.
+        procedure :: nkeys => mm_nkeys                    !! Rows stored, repeats included.
+        procedure :: ncomponents => mm_ncomponents        !! Components per key; 0 if never built.
+        procedure :: max_multiplicity => mm_max_multiplicity !! Rows in the largest group.
+        procedure :: memory_bytes => mm_memory_bytes      !! Heap this multimap holds, in bytes.
+        procedure :: get_method => mm_get_method          !! The distinct-key map's backend, as a token.
+        !> The distinct keys: rank 1 for a single-component multimap, rank 2 for a composite one.
+        generic :: keys => mm_keys_r1, mm_keys_r2
+        procedure, private :: mm_keys_r1, mm_keys_r2
+    end type pf_index_multimap
 
     ! ============================================================================================
     ! Implementations. Every one lives in a submodule; the abbreviated `module procedure NAME`
@@ -1681,6 +1818,1102 @@ module parquet_index
         end subroutine pool_clear
     end interface
 
+
+    ! ---- pf_index_multimap: bulk build (12 specifics, split for the reason the map's are) ----
+
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. Keys may repeat.
+        !!
+        !! Groups the unmasked rows by key, numbers the groups densely, and lays each group's
+        !! values out ascending by position. With `valid=`, a masked row is neither stored nor
+        !! counted, and the stored values stay the ROW NUMBERS of the rows that were kept (or
+        !! their `values=` entries), so a nullable key column can be indexed as it is. The
+        !! backend is the map's automatic choice applied to the DISTINCT keys unless `method=`
+        !! says otherwise. Serialised on `pf_index_multimap_guard`; idempotent by reconstruction.
+        module subroutine mm_build_r1_k32_nov(self, keys, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! one key per element; repeats are the point.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r1_k32_nov
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r1_k32_v32(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! one key per element; repeats are the point.
+        integer(int32), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r1_k32_v32
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r1_k32_v64(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! one key per element; repeats are the point.
+        integer(int64), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r1_k32_v64
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r1_k64_nov(self, keys, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! one key per element; repeats are the point.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r1_k64_nov
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r1_k64_v32(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! one key per element; repeats are the point.
+        integer(int32), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r1_k64_v32
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r1_k64_v64(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! one key per element; repeats are the point.
+        integer(int64), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r1_k64_v64
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r2_k32_nov(self, keys, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Rows may repeat;
+            !! a key is the whole tuple.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r2_k32_nov
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r2_k32_v32(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Rows may repeat;
+            !! a key is the whole tuple.
+        integer(int32), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r2_k32_v32
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r2_k32_v64(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Rows may repeat;
+            !! a key is the whole tuple.
+        integer(int64), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r2_k32_v64
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r2_k64_nov(self, keys, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Rows may repeat;
+            !! a key is the whole tuple.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r2_k64_nov
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r2_k64_v32(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Rows may repeat;
+            !! a key is the whole tuple.
+        integer(int32), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r2_k64_v32
+    end interface
+    interface
+        !> Builds the multimap from `keys`, replacing whatever it held. See `mm_build_r1_k32_nov`.
+        module subroutine mm_build_r2_k64_v64(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Rows may repeat;
+            !! a key is the whole tuple.
+        integer(int64), intent(in) :: values(:)
+            !! the value stored for each row, each >= 1. Defaults to `1 .. n` when absent.
+        character(len=*), intent(in), optional :: method
+            !! backend token for the distinct-key map: "auto" (default), "direct", "hash" or
+            !! "sorted".
+        integer, intent(in), optional :: threads
+            !! threads the build may use. The grouping pass of this version is serial; the
+            !! argument reaches the map built over the distinct keys, which honours it exactly as
+            !! `pf_index_map%build` does. ABSENT means automatic; `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted.
+        end subroutine mm_build_r2_k64_v64
+    end interface
+
+    ! ---- pf_index_multimap: lifecycle ----
+
+    interface
+        !> Forgets every key and releases all storage; the multimap is as new.
+        !!
+        !! Releases, matching `pf_index_map%clear`. Afterwards every lookup answers 0 or an empty
+        !! range, and the introspection counts are 0.
+        module subroutine mm_clear(self)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        end subroutine mm_clear
+    end interface
+
+    ! ---- pf_index_multimap: scalar lookup. Lock-free and `pure`; allocation-free bar `%get_all` ----
+
+    interface
+        !> The group id of `key`, in `1 .. ngroups`, or **0 when the key is absent**.
+        !!
+        !! The id is what `%csr`'s offsets are indexed by; it is dense, stable for the life of one
+        !! build, and carries no other meaning. A multimap that was never built answers 0 rather
+        !! than aborting, at no cost to the built path.
+        pure module function mm_get_k32(self, key) result(g)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64) :: g !! the group id, >= 1, or 0 when not found.
+        end function mm_get_k32
+    end interface
+    interface
+        !> The group id of `key`, or 0 when absent. See `mm_get_k32`.
+        pure module function mm_get_k64(self, key) result(g)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64) :: g !! the group id, >= 1, or 0 when not found.
+        end function mm_get_k64
+    end interface
+    interface
+        !> The group id of `key`, or 0 when absent. See `mm_get_k32`.
+        pure module function mm_get_t32(self, key) result(g)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64) :: g !! the group id, >= 1, or 0 when not found.
+        end function mm_get_t32
+    end interface
+    interface
+        !> The group id of `key`, or 0 when absent. See `mm_get_k32`.
+        pure module function mm_get_t64(self, key) result(g)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64) :: g !! the group id, >= 1, or 0 when not found.
+        end function mm_get_t64
+    end interface
+    interface
+        !> How many stored rows hold `key`; **0 when it is absent**.
+        pure module function mm_count_k32(self, key) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64) :: n !! rows holding the key; 0 when none does.
+        end function mm_count_k32
+    end interface
+    interface
+        !> How many stored rows hold `key`; 0 when absent. See `mm_count_k32`.
+        pure module function mm_count_k64(self, key) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64) :: n !! rows holding the key; 0 when none does.
+        end function mm_count_k64
+    end interface
+    interface
+        !> How many stored rows hold `key`; 0 when absent. See `mm_count_k32`.
+        pure module function mm_count_t32(self, key) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64) :: n !! rows holding the key; 0 when none does.
+        end function mm_count_t32
+    end interface
+    interface
+        !> How many stored rows hold `key`; 0 when absent. See `mm_count_k32`.
+        pure module function mm_count_t64(self, key) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64) :: n !! rows holding the key; 0 when none does.
+        end function mm_count_t64
+    end interface
+    interface
+        !> The value stored at the LOWEST position holding `key`, or **0 when it is absent**.
+        !!
+        !! With default values that is the smallest row number the key appears in -- `pf_match`'s
+        !! m:1 answer, and what a table index's `%find` forwards to. With `values=` it is the value
+        !! of that same lowest row, not the smallest value.
+        pure module function mm_first_k32(self, key) result(v)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64) :: v !! the value at the key's lowest position, or 0 when absent.
+        end function mm_first_k32
+    end interface
+    interface
+        !> The value at the lowest position holding `key`, or 0. See `mm_first_k32`.
+        pure module function mm_first_k64(self, key) result(v)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64) :: v !! the value at the key's lowest position, or 0 when absent.
+        end function mm_first_k64
+    end interface
+    interface
+        !> The value at the lowest position holding `key`, or 0. See `mm_first_k32`.
+        pure module function mm_first_t32(self, key) result(v)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64) :: v !! the value at the key's lowest position, or 0 when absent.
+        end function mm_first_t32
+    end interface
+    interface
+        !> The value at the lowest position holding `key`, or 0. See `mm_first_k32`.
+        pure module function mm_first_t64(self, key) result(v)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64) :: v !! the value at the key's lowest position, or 0 when absent.
+        end function mm_first_t64
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position.
+        !!
+        !! Allocated zero-length when the key is absent -- never left unallocated -- so
+        !! `size(rows)` is the only thing a caller has to test. `%get_range` is the
+        !! allocation-free form of the same answer.
+        pure module subroutine mm_all_k32_i32(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position. A stored
+            !! value above `huge(int32)` aborts rather than truncating; take them as `int64` if
+            !! the stored values can exceed it.
+        end subroutine mm_all_k32_i32
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_k32_i64(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position.
+        end subroutine mm_all_k32_i64
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_k64_i32(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key !! the key to look up.
+            integer(int32), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position. A stored
+            !! value above `huge(int32)` aborts rather than truncating; take them as `int64` if
+            !! the stored values can exceed it.
+        end subroutine mm_all_k64_i32
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_k64_i64(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position.
+        end subroutine mm_all_k64_i64
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_t32_i32(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int32), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position. A stored
+            !! value above `huge(int32)` aborts rather than truncating; take them as `int64` if
+            !! the stored values can exceed it.
+        end subroutine mm_all_t32_i32
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_t32_i64(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position.
+        end subroutine mm_all_t32_i64
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_t64_i32(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int32), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position. A stored
+            !! value above `huge(int32)` aborts rather than truncating; take them as `int64` if
+            !! the stored values can exceed it.
+        end subroutine mm_all_t64_i32
+    end interface
+    interface
+        !> Every value stored for `key`, ascending by position. See `mm_all_k32_i32`.
+        pure module subroutine mm_all_t64_i64(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position.
+        end subroutine mm_all_t64_i64
+    end interface
+    interface
+        !> The range of `%csr`'s `rows` array that holds `key`: the values are `rows(lo : hi)`.
+        !!
+        !! **`lo > hi` when the key is absent** -- `1` and `0`, so `rows(lo : hi)` is a legal empty
+        !! section. The allocation-free form of `%get_all`, for a caller holding the CSR pair.
+        pure module subroutine mm_range_k32(self, key, lo, hi)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: lo !! first position in `rows`; 1 when the key is absent.
+            integer(int64), intent(out) :: hi !! last position in `rows`; 0 when the key is absent.
+        end subroutine mm_range_k32
+    end interface
+    interface
+        !> The range of `%csr`'s `rows` holding `key`; `lo > hi` when absent. See `mm_range_k32`.
+        pure module subroutine mm_range_k64(self, key, lo, hi)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key !! the key to look up.
+            integer(int64), intent(out) :: lo !! first position in `rows`; 1 when the key is absent.
+            integer(int64), intent(out) :: hi !! last position in `rows`; 0 when the key is absent.
+        end subroutine mm_range_k64
+    end interface
+    interface
+        !> The range of `%csr`'s `rows` holding `key`; `lo > hi` when absent. See `mm_range_k32`.
+        pure module subroutine mm_range_t32(self, key, lo, hi)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64), intent(out) :: lo !! first position in `rows`; 1 when the key is absent.
+            integer(int64), intent(out) :: hi !! last position in `rows`; 0 when the key is absent.
+        end subroutine mm_range_t32
+    end interface
+    interface
+        !> The range of `%csr`'s `rows` holding `key`; `lo > hi` when absent. See `mm_range_k32`.
+        pure module subroutine mm_range_t64(self, key, lo, hi)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: key(:)
+            !! the key tuple; `size(key)` must equal `%ncomponents()`.
+            integer(int64), intent(out) :: lo !! first position in `rows`; 1 when the key is absent.
+            integer(int64), intent(out) :: hi !! last position in `rows`; 0 when the key is absent.
+        end subroutine mm_range_t64
+    end interface
+
+    ! ---- pf_index_multimap: bulk lookup. Threaded by the rule `pf_index_map%get_many` follows,
+    ! lock-free, and not `pure`, because each opens an OpenMP team of its own. ----
+
+    interface
+        !> For every key, the value at the lowest position holding it, or 0 where absent.
+        !!
+        !! `%get_first` over a whole array, on a team: one contiguous chunk of the keys per
+        !! thread, by the rule a build follows (`pf_index_threads`), serial inside a parallel
+        !! region, `threads=` to say otherwise. Lock-free. The m:1 lookup a table index over a
+        !! key that is not unique forwards to, and the form to prefer in a hot loop.
+        module subroutine mm_fmany_r1_k32_i32(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! A stored value above `huge(int32)` aborts rather than truncating; take the
+            !! answers as `int64` if the stored values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r1_k32_i32
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r1_k32_i64(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r1_k32_i64
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r1_k64_i32(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! A stored value above `huge(int32)` aborts rather than truncating; take the
+            !! answers as `int64` if the stored values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r1_k64_i32
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r1_k64_i64(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r1_k64_i64
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r2_k32_i32(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int32), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! A stored value above `huge(int32)` aborts rather than truncating; take the
+            !! answers as `int64` if the stored values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r2_k32_i32
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r2_k32_i64(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r2_k32_i64
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r2_k64_i32(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int32), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! A stored value above `huge(int32)` aborts rather than truncating; take the
+            !! answers as `int64` if the stored values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r2_k64_i32
+    end interface
+    interface
+        !> The value at the lowest position holding each key, or 0. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_r2_k64_i64(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_fmany_r2_k64_i64
+    end interface
+    interface
+        !> For every key, its group id, or 0 where absent.
+        !!
+        !! `%get` over a whole array, on the team `%get_first_many` describes. The ids index
+        !! `%csr`'s offsets, which is how a caller that holds the pair walks every match itself.
+        module subroutine mm_many_r1_k32_i32(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! An id above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r1_k32_i32
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r1_k32_i64(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r1_k32_i64
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r1_k64_i32(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int32), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! An id above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r1_k64_i32
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r1_k64_i64(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
+            integer(int64), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r1_k64_i64
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r2_k32_i32(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int32), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! An id above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r2_k32_i32
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r2_k32_i64(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r2_k32_i64
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r2_k64_i32(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int32), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            !! An id above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r2_k64_i32
+    end interface
+    interface
+        !> The group id of each key, or 0. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_r2_k64_i64(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to look up, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found
+            !! how many keys answered something other than 0.
+        end subroutine mm_many_r2_k64_i64
+    end interface
+    interface
+        !> EVERY match between the probe keys and the stored rows, as this library's CSR pair.
+        !!
+        !! `offsets` has length `size(keys) + 1` and `offsets(1) == 1`; the values stored for
+        !! probe `i` are `matches(offsets(i) : offsets(i+1) - 1)`, an empty range when there are
+        !! none and ascending by position within it -- `pf_match_all`'s contract, on a hash
+        !! engine, and the join's m:m primitive. Two threaded passes over the probes: the group
+        !! and the count of each, with a prefix sum into `offsets`; then each probe copies its
+        !! group's range into its own. On the team `%get_first_many` describes; lock-free.
+        !!
+        !! **`size(matches)` counts PAIRS, and a pair count is a product**: a key held by a
+        !! thousand stored rows and a thousand probes contributes a million on its own. The total
+        !! is `offsets(size(keys) + 1) - 1`, accumulated in `int64` and refused rather than
+        !! wrapped when it would not fit; read it before doing anything proportional to it.
+        module subroutine mm_probe_r1_k32_i32(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! the keys to probe with, one per element.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count. A stored value above `huge(int32)`
+            !! aborts rather than truncating; take the matches as `int64` if the stored values
+            !! can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r1_k32_i32
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r1_k32_i64(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:) !! the keys to probe with, one per element.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r1_k32_i64
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r1_k64_i32(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! the keys to probe with, one per element.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count. A stored value above `huge(int32)`
+            !! aborts rather than truncating; take the matches as `int64` if the stored values
+            !! can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r1_k64_i32
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r1_k64_i64(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:) !! the keys to probe with, one per element.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r1_k64_i64
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r2_k32_i32(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to probe with, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count. A stored value above `huge(int32)`
+            !! aborts rather than truncating; take the matches as `int64` if the stored values
+            !! can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r2_k32_i32
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r2_k32_i64(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to probe with, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r2_k32_i64
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r2_k64_i32(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to probe with, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count. A stored value above `huge(int32)`
+            !! aborts rather than truncating; take the matches as `int64` if the stored values
+            !! can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r2_k64_i32
+    end interface
+    interface
+        !> Every match between the probe keys and the stored rows, as a CSR pair. See
+        !! `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_r2_k64_i64(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to probe with, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within
+            !! each group. Its length is the PAIR count.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached: how a
+            !! right or outer join finds the stored rows nothing probed, with no second structure.
+        end subroutine mm_probe_r2_k64_i64
+    end interface
+
+    ! ---- pf_index_multimap: introspection. Read-only, so unguarded like the lookups ----
+
+    interface
+        !> The CSR pair itself, copied out: `offsets(ngroups + 1)` and `rows(nkeys)`.
+        !!
+        !! Group `g` -- the id `%get` and `%get_many` answer -- holds
+        !! `rows(offsets(g) : offsets(g+1) - 1)`, ascending by position. For a caller that walks
+        !! the ranges itself, a group-by or a join's build side, or wants every group at once.
+        !! Both are allocated even for an empty or unbuilt multimap: `[1]` and zero-length.
+        pure module subroutine mm_csr(self, offsets, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int64), allocatable, intent(out) :: offsets(:) !! group starts; length `ngroups + 1`.
+            integer(int64), allocatable, intent(out) :: rows(:) !! the stored values, grouped by key.
+        end subroutine mm_csr
+        !> Distinct keys stored, i.e. groups; 0 for an empty or unbuilt multimap.
+        pure module function mm_ngroups(self) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int64) :: n !! the group count.
+        end function mm_ngroups
+        !> Rows stored, repeats included: the length of the CSR `rows` array.
+        pure module function mm_nkeys(self) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int64) :: n !! the stored row count; 0 for an empty or unbuilt multimap.
+        end function mm_nkeys
+        !> Components per key: 1 for a single-component multimap, 0 for one never built.
+        pure module function mm_ncomponents(self) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer :: n !! the tuple width every key of this multimap must have.
+        end function mm_ncomponents
+        !> Rows in the largest group. 1 means every stored key is unique -- the m:1 check a join
+        !! makes before choosing its path -- and 0 means the multimap is empty.
+        pure module function mm_max_multiplicity(self) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int64) :: n !! the largest group's row count.
+        end function mm_max_multiplicity
+        !> Heap this multimap holds, in bytes: the distinct-key map's plus the CSR pair's.
+        pure module function mm_memory_bytes(self) result(b)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int64) :: b !! bytes of allocated storage, excluding the object itself.
+        end function mm_memory_bytes
+        !> The distinct-key map's resolved backend as a token: `"direct"`, `"hash"`, `"sorted"`,
+        !! or empty when nothing has been built. A subroutine, for the reason `map_get_method` gives.
+        pure module subroutine mm_get_method(self, method)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            character(len=:), allocatable, intent(out) :: method !! the backend token; always allocated.
+        end subroutine mm_get_method
+        !> The distinct keys of a single-component multimap, in the order the map holds them:
+        !! ascending for direct and sorted, unspecified for hash.
+        !!
+        !! Allocated zero-length when the multimap is empty -- never left unallocated. Pair each
+        !! key with its group through `%get_many(list, groups)`, and with its rows through
+        !! `%csr`.
+        pure module subroutine mm_keys_r1(self, list)
+        class(pf_index_multimap), intent(in) :: self !! the multimap; must have `ncomponents() <= 1`.
+            integer(int64), allocatable, intent(out) :: list(:) !! the distinct keys, one per element.
+        end subroutine mm_keys_r1
+        !> The distinct key tuples of a composite multimap, shaped `(ngroups, ncomp)`. See
+        !! `mm_keys_r1`.
+        pure module subroutine mm_keys_r2(self, list)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int64), allocatable, intent(out) :: list(:,:) !! the distinct key tuples, one per row.
+        end subroutine mm_keys_r2
+    end interface
+
     ! ---- The build's thread rule, reported ----
 
     !> The team an automatic `%build` over `n` keys, or an automatic `%get_many` over `n` rows,
@@ -1739,6 +2972,19 @@ module parquet_index
         module function parquet_debug_index_get_many_threads_used() result(n)
             integer :: n !! threads the last bulk lookup resolved; 1 means it ran serial.
         end function parquet_debug_index_get_many_threads_used
+    end interface
+
+    interface
+        !> Test-only. Lowers the pair count `pf_index_multimap%probe_many` refuses at, so that
+        !! the overflow guard can be reached by an error scenario; 0 (or any value below 1)
+        !! restores `huge(int64)`.
+        !!
+        !! The guard exists for an `int64` pair count, which no test can produce, and a guard no
+        !! test reaches is one edit away from being silently wrong. Process-global and read per
+        !! call, so set it from a single-threaded scenario only, never beside a running probe.
+        module subroutine parquet_debug_set_index_pair_limit(limit)
+            integer(int64), intent(in) :: limit !! the new ceiling; a value below 1 restores the default.
+        end subroutine parquet_debug_set_index_pair_limit
     end interface
 
     ! ---- Cross-submodule private helpers ----

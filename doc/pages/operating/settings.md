@@ -384,8 +384,9 @@ for what the bulk forms are and what omitting `threads=` costs you.
 
 ## Threads for an index build or a bulk lookup
 
-`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build` or one
-`pf_index_map%get_many` may use. Like every other per-area cap it is a cap rather than a request,
+`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build` or one bulk lookup —
+`pf_index_map%get_many`, or `pf_index_multimap`'s `%get_first_many`, `%get_many` and
+`%probe_many` — may use. Like every other per-area cap it is a cap rather than a request,
 read per call, with `0` meaning automatic, `1` forcing serial, and an explicit `threads=` on the
 call itself still winning.
 

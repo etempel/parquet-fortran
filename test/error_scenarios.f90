@@ -22,7 +22,8 @@ program error_scenarios
     ! src/parquet.f90 privatises it -- so naming its own module is how a caller reaches it,
     ! and this import is the documented route rather than a workaround.
     use parquet_healpix, only : pf_query_disc_runs
-    use parquet_index, only : pf_index_map, pf_index_pool, pf_index_max_components
+    use parquet_index, only : pf_index_map, pf_index_pool, pf_index_max_components, pf_index_multimap, &
+        parquet_debug_set_index_pair_limit
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
@@ -2762,6 +2763,46 @@ program error_scenarios
         call scenario_index_keys_rank1_on_composite()
     case ("index_control")
         call scenario_index_control()
+    case ("multimap_build_values_length")
+        call scenario_multimap_build_values_length()
+    case ("multimap_build_value_zero")
+        call scenario_multimap_build_value_zero()
+    case ("multimap_build_valid_length")
+        call scenario_multimap_build_valid_length()
+    case ("multimap_build_threads_zero")
+        call scenario_multimap_build_threads_zero()
+    case ("multimap_build_bad_method")
+        call scenario_multimap_build_bad_method()
+    case ("multimap_build_sorted_composite")
+        call scenario_multimap_build_sorted_composite()
+    case ("multimap_get_first_many_length")
+        call scenario_multimap_get_first_many_length()
+    case ("multimap_get_first_many_valid_length")
+        call scenario_multimap_get_first_many_valid_length()
+    case ("multimap_get_first_many_threads_zero")
+        call scenario_multimap_get_first_many_threads_zero()
+    case ("multimap_get_many_length")
+        call scenario_multimap_get_many_length()
+    case ("multimap_probe_many_valid_length")
+        call scenario_multimap_probe_many_valid_length()
+    case ("multimap_probe_many_threads_zero")
+        call scenario_multimap_probe_many_threads_zero()
+    case ("multimap_probe_many_pair_overflow")
+        call scenario_multimap_probe_many_pair_overflow()
+    case ("multimap_int32_answer_overflow")
+        call scenario_multimap_int32_answer_overflow()
+    case ("multimap_get_all_int32_overflow")
+        call scenario_multimap_get_all_int32_overflow()
+    case ("multimap_tuple_width_mismatch")
+        call scenario_multimap_tuple_width_mismatch()
+    case ("multimap_scalar_on_composite")
+        call scenario_multimap_scalar_on_composite()
+    case ("multimap_keys_rank1_on_composite")
+        call scenario_multimap_keys_rank1_on_composite()
+    case ("multimap_probe_shape_mismatch")
+        call scenario_multimap_probe_shape_mismatch()
+    case ("multimap_control")
+        call scenario_multimap_control()
     case ("pool_double_free")
         call scenario_pool_double_free()
     case ("pool_free_never_issued")
@@ -23833,6 +23874,285 @@ contains
         if (m%nkeys() /= 2_int64) error stop "control: masked build"
         print '(a)', "index control finished"
     end subroutine scenario_index_control
+
+    ! ---- parquet_index: pf_index_multimap ----
+    !
+    !> A `values=` array of the wrong length is refused, as the map's is, and the message names
+    !> the multimap: its build shares the map's guard and hands it its own prefix.
+    subroutine scenario_multimap_build_values_length()
+        type(pf_index_multimap) :: mm
+
+        call mm%build([1_int64, 2_int64, 2_int64], [1_int64, 2_int64, 3_int64])   ! control
+        print '(a,i0)', "a values array of the right length was accepted, ngroups=", mm%ngroups()
+        call mm%build([1_int64, 2_int64, 2_int64], [1_int64, 2_int64])           ! -> aborts
+        print '(a)', "a multimap values array of the wrong length was accepted"
+    end subroutine scenario_multimap_build_values_length
+    !
+    !> A stored value of 0 is refused: 0 is how every lookup on the multimap reports "not found".
+    subroutine scenario_multimap_build_value_zero()
+        type(pf_index_multimap) :: mm
+
+        call mm%build([1_int64, 2_int64, 2_int64], [1_int64, 0_int64, 2_int64])
+        print '(a)', "a multimap value of 0 was accepted"
+    end subroutine scenario_multimap_build_value_zero
+    !
+    !> A `valid=` mask of the wrong length is refused before any row is read.
+    subroutine scenario_multimap_build_valid_length()
+        type(pf_index_multimap) :: mm
+
+        call mm%build([1_int64, 2_int64, 2_int64], valid=[.true., .false., .true.])   ! control
+        print '(a,i0)', "a mask of the right length was accepted, nkeys=", mm%nkeys()
+        call mm%build([1_int64, 2_int64, 2_int64], valid=[.true., .false.])           ! -> aborts
+        print '(a)', "a multimap build mask of the wrong length was accepted"
+    end subroutine scenario_multimap_build_valid_length
+    !
+    !> `threads=0` is refused rather than read as "automatic", as on the map.
+    subroutine scenario_multimap_build_threads_zero()
+        type(pf_index_multimap) :: mm
+
+        call mm%build([1_int64, 2_int64, 2_int64], threads=1)   ! control
+        print '(a,i0)', "threads=1 was accepted, ngroups=", mm%ngroups()
+        call mm%build([1_int64, 2_int64, 2_int64], threads=0)   ! -> aborts
+        print '(a)', "threads=0 was accepted on a multimap build"
+    end subroutine scenario_multimap_build_threads_zero
+    !
+    !> An unknown backend token is refused, naming the multimap rather than the map whose
+    !> resolver it shares.
+    subroutine scenario_multimap_build_bad_method()
+        type(pf_index_multimap) :: mm
+
+        call mm%build([1_int64, 2_int64, 2_int64], method="btree")
+        print '(a)', "an unknown multimap method was accepted"
+    end subroutine scenario_multimap_build_bad_method
+    !
+    !> The sorted backend takes single-component keys only, on the multimap as on the map.
+    subroutine scenario_multimap_build_sorted_composite()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2)
+
+        pairs(:, 1) = [1_int64, 2_int64, 2_int64]
+        pairs(:, 2) = [1_int64, 1_int64, 2_int64]
+        call mm%build(pairs, method="sorted")
+        print '(a)', "a composite sorted multimap build was accepted"
+    end subroutine scenario_multimap_build_sorted_composite
+    !
+    !> A `%get_first_many` answer array of the wrong length is refused.
+    subroutine scenario_multimap_get_first_many_length()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: out(2)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%get_first_many([1_int64, 2_int64, 3_int64], out)
+        print '(a)', "a get_first_many length mismatch was accepted"
+    end subroutine scenario_multimap_get_first_many_length
+    !
+    !> A `%get_first_many` mask of the wrong length is refused.
+    subroutine scenario_multimap_get_first_many_valid_length()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: out(3)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%get_first_many([1_int64, 2_int64, 3_int64], out, valid=[.true., .false., .true.])
+        print '(a,i0)', "a mask of the right length was accepted, out(1)=", out(1)
+        call mm%get_first_many([1_int64, 2_int64, 3_int64], out, valid=[.true., .false.])   ! -> aborts
+        print '(a)', "a get_first_many mask of the wrong length was accepted"
+    end subroutine scenario_multimap_get_first_many_valid_length
+    !
+    !> `threads=0` on `%get_first_many` is refused.
+    subroutine scenario_multimap_get_first_many_threads_zero()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: out(3)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%get_first_many([1_int64, 2_int64, 3_int64], out, threads=1)   ! control
+        print '(a,i0)', "threads=1 was accepted, out(2)=", out(2)
+        call mm%get_first_many([1_int64, 2_int64, 3_int64], out, threads=0)   ! -> aborts
+        print '(a)', "threads=0 was accepted on get_first_many"
+    end subroutine scenario_multimap_get_first_many_threads_zero
+    !
+    !> A `%get_many` answer array of the wrong length is refused.
+    subroutine scenario_multimap_get_many_length()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: out(2)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%get_many([1_int64, 2_int64, 3_int64], out)
+        print '(a)', "a multimap get_many length mismatch was accepted"
+    end subroutine scenario_multimap_get_many_length
+    !
+    !> A `%probe_many` mask of the wrong length is refused.
+    subroutine scenario_multimap_probe_many_valid_length()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: off(:), m(:)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%probe_many([1_int64, 2_int64, 3_int64], off, m, valid=[.true., .false., .true.])
+        print '(a,i0)', "a mask of the right length was accepted, pairs=", size(m)
+        call mm%probe_many([1_int64, 2_int64, 3_int64], off, m, valid=[.true., .false.])   ! -> aborts
+        print '(a)', "a probe_many mask of the wrong length was accepted"
+    end subroutine scenario_multimap_probe_many_valid_length
+    !
+    !> `threads=0` on `%probe_many` is refused.
+    subroutine scenario_multimap_probe_many_threads_zero()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: off(:), m(:)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%probe_many([1_int64, 2_int64, 3_int64], off, m, threads=1)   ! control
+        print '(a,i0)', "threads=1 was accepted, pairs=", size(m)
+        call mm%probe_many([1_int64, 2_int64, 3_int64], off, m, threads=0)   ! -> aborts
+        print '(a)', "threads=0 was accepted on probe_many"
+    end subroutine scenario_multimap_probe_many_threads_zero
+    !
+    !> A pair count the answer could not hold is refused rather than wrapped. The real ceiling
+    !> is the int64 domain, which no scenario can fill, so the test-only hook lowers it: two
+    !> groups of five probed five times is 25 pairs against a ceiling of 20.
+    subroutine scenario_multimap_probe_many_pair_overflow()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: off(:), m(:)
+
+        call mm%build([1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 2_int64, 2_int64, 2_int64, 2_int64, 2_int64])
+        call parquet_debug_set_index_pair_limit(20_int64)
+        call mm%probe_many([1_int64, 2_int64], off, m)               ! control: 10 pairs fit
+        print '(a,i0)', "ten pairs under a ceiling of twenty were accepted, pairs=", size(m)
+        call mm%probe_many([1_int64, 2_int64, 1_int64, 2_int64, 1_int64], off, m)   ! -> aborts
+        print '(a,i0)', "a pair count over the ceiling was accepted, pairs=", size(m)
+    end subroutine scenario_multimap_probe_many_pair_overflow
+    !
+    !> A stored value too large for an `int32` answer aborts the bulk form up front, rather than
+    !> truncating or failing half-way through the array.
+    subroutine scenario_multimap_int32_answer_overflow()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: out(2)
+        integer(int32) :: out32(2)
+
+        call mm%build([1_int64, 2_int64, 2_int64], [int(huge(0_int32), int64) + 1_int64, 5_int64, 6_int64])
+        call mm%get_first_many([1_int64, 2_int64], out)     ! control: the int64 form answers
+        print '(a,i0)', "the int64 answer form accepted the value, out(1)=", out(1)
+        call mm%get_first_many([1_int64, 2_int64], out32)   ! -> aborts
+        print '(a,i0)', "a value too large for int32 was accepted, out32(1)=", out32(1)
+    end subroutine scenario_multimap_int32_answer_overflow
+    !
+    !> The same refusal on the scalar `%get_all`, whose check is inline in a pure body.
+    subroutine scenario_multimap_get_all_int32_overflow()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: rows(:)
+        integer(int32), allocatable :: rows32(:)
+
+        call mm%build([1_int64, 2_int64, 2_int64], [int(huge(0_int32), int64) + 1_int64, 5_int64, 6_int64])
+        call mm%get_all(1_int64, rows)     ! control: the int64 form answers
+        print '(a,i0)', "the int64 get_all accepted the value, size=", size(rows)
+        call mm%get_all(1_int64, rows32)   ! -> aborts
+        print '(a,i0)', "a value too large for int32 was accepted by get_all, size=", size(rows32)
+    end subroutine scenario_multimap_get_all_int32_overflow
+    !
+    !> A tuple of the wrong width is refused by every scalar lookup. The result is printed
+    !> because `%count` is `pure` and a discarded pure result may be deleted with its abort.
+    subroutine scenario_multimap_tuple_width_mismatch()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2), n
+
+        pairs(:, 1) = [1_int64, 2_int64, 2_int64]
+        pairs(:, 2) = [1_int64, 1_int64, 2_int64]
+        call mm%build(pairs)
+        n = mm%count([2_int64, 1_int64])                  ! control: the right width
+        print '(a,i0)', "a two-component lookup was accepted, count=", n
+        n = mm%count([1_int64, 2_int64, 3_int64])         ! -> aborts
+        print '(a,i0)', "a three-component lookup on a pair multimap was accepted, count=", n
+    end subroutine scenario_multimap_tuple_width_mismatch
+    !
+    !> A scalar key presented to a composite multimap is refused. The result is printed for
+    !> the reason `scenario_multimap_tuple_width_mismatch` gives.
+    subroutine scenario_multimap_scalar_on_composite()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2), g
+
+        pairs(:, 1) = [1_int64, 2_int64, 2_int64]
+        pairs(:, 2) = [1_int64, 1_int64, 2_int64]
+        call mm%build(pairs)
+        g = mm%get(1_int64)
+        print '(a,i0)', "a scalar lookup on a composite multimap was accepted, group=", g
+    end subroutine scenario_multimap_scalar_on_composite
+    !
+    !> A rank-1 key list asked of a composite multimap is refused, naming the rank to ask for.
+    subroutine scenario_multimap_keys_rank1_on_composite()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2)
+        integer(int64), allocatable :: list(:)
+
+        pairs(:, 1) = [1_int64, 2_int64, 2_int64]
+        pairs(:, 2) = [1_int64, 1_int64, 2_int64]
+        call mm%build(pairs)
+        call mm%keys(list)
+        print '(a,i0)', "a rank-1 key list of a composite multimap was accepted, size=", size(list)
+    end subroutine scenario_multimap_keys_rank1_on_composite
+    !
+    !> Probing a pair multimap with triples is refused before any probe is looked up.
+    subroutine scenario_multimap_probe_shape_mismatch()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2), triples(2, 3)
+        integer(int64), allocatable :: off(:), m(:)
+
+        pairs(:, 1) = [1_int64, 2_int64, 2_int64]
+        pairs(:, 2) = [1_int64, 1_int64, 2_int64]
+        triples = 1_int64
+        call mm%build(pairs)
+        call mm%probe_many(triples, off, m)
+        print '(a,i0)', "a probe of the wrong width was accepted, pairs=", size(m)
+    end subroutine scenario_multimap_probe_shape_mismatch
+    !
+    !> The negative control for every multimap guard above: each legal shape of every call
+    !> completes, so a guard that fired on a legal call would fail here.
+    subroutine scenario_multimap_control()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(4, 2), out(3), lo, hi, nm
+        integer(int32) :: out32(3)
+        integer(int64), allocatable :: rows(:), off(:), m(:), list(:), tuples(:,:)
+        logical, allocatable :: hit(:)
+        character(len=:), allocatable :: tok
+
+        call mm%build([5_int64, 7_int64, 5_int64, 9_int64], method="direct")
+        if (mm%count(5_int64) /= 2_int64 .or. mm%get_first(5_int64) /= 1_int64) &
+            error stop "control: direct count/get_first"
+        call mm%get_all(5_int64, rows)
+        if (size(rows) /= 2 .or. rows(2) /= 3_int64) error stop "control: get_all"
+        call mm%get_range(7_int64, lo, hi)
+        if (hi - lo /= 0_int64) error stop "control: get_range"
+        call mm%get_first_many([5_int64, 6_int64, 9_int64], out, valid=[.true., .true., .false.], threads=1)
+        if (out(1) /= 1_int64 .or. out(2) /= 0_int64 .or. out(3) /= 0_int64) &
+            error stop "control: masked get_first_many"
+        call mm%get_first_many([5_int64, 6_int64, 9_int64], out32)
+        if (out32(3) /= 4_int32) error stop "control: int32 get_first_many"
+        call mm%get_many([5_int64, 6_int64, 9_int64], out, threads=1)
+        if (out(1) /= 1_int64 .or. out(2) /= 0_int64) error stop "control: get_many"
+        call mm%probe_many([5_int64, 6_int64, 9_int64], off, m, threads=1, n_matched=nm, group_hit=hit)
+        if (size(m) /= 3 .or. nm /= 2_int64 .or. .not. hit(1) .or. hit(2)) error stop "control: probe_many"
+        call mm%csr(off, rows)
+        if (size(off) /= 4 .or. size(rows) /= 4) error stop "control: csr"
+        call mm%keys(list)
+        if (size(list) /= 3) error stop "control: keys"
+        call mm%build([5_int64, 7_int64, 5_int64, 9_int64], [4_int64, 3_int64, 2_int64, 1_int64], method="hash", &
+            valid=[.true., .true., .true., .false.])
+        if (mm%nkeys() /= 3_int64 .or. mm%get_first(5_int64) /= 4_int64) error stop "control: masked hash build"
+        call mm%build([5_int64, 7_int64, 5_int64, 9_int64], method="sorted", threads=1)
+        call mm%get_method(tok)
+        if (tok /= "sorted" .or. mm%max_multiplicity() /= 2_int64) error stop "control: sorted build"
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64, 2_int64]
+        pairs(:, 2) = [1_int64, 1_int64, 1_int64, 2_int64]
+        call mm%build(pairs, method="hash")
+        if (mm%count([1_int64, 1_int64]) /= 2_int64) error stop "control: composite count"
+        call mm%keys(tuples)
+        if (size(tuples, 1) /= 3) error stop "control: composite keys"
+        call mm%probe_many(pairs, off, m)
+        if (size(m) /= 6) error stop "control: composite probe_many"
+        call parquet_debug_set_index_pair_limit(5_int64)
+        call parquet_debug_set_index_pair_limit(0_int64)
+        call mm%probe_many(pairs, off, m)
+        if (size(m) /= 6) error stop "control: probe_many after the limit was reset"
+        call mm%clear()
+        if (mm%ngroups() /= 0_int64 .or. mm%get([1_int64, 1_int64]) /= 0_int64) error stop "control: clear"
+        print '(a)', "multimap control finished"
+    end subroutine scenario_multimap_control
 
     ! ---- parquet_index: pf_index_pool ----
     !

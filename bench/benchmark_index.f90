@@ -15,6 +15,10 @@
 !!                 sharing one map: what the named critical costs when it is contended, and what
 !!                 the bulk form saves by taking it once per call.
 !! * `pool`     -- `%get_index`/`%free_index` throughput, private and shared, and `%compact`.
+!! * `multimap` -- `pf_index_multimap` on the join's shapes: the build over keys that repeat
+!!                 `REPEAT` times on average, `%get_first_many` and `%probe_many` serial and on a
+!!                 team, and `pf_match_all` over the same arrays as the sort-engine baseline the
+!!                 hash engine is read against.
 !!
 !! **Rules this program follows, from CLAUDE.md's benchmarking section.** Every array is written
 !! once before any timed loop, so no figure pays first-touch page faults; the row walk uses a
@@ -24,13 +28,14 @@
 !! accumulated and printed so no arm can be optimised away, computed outside every timed region.
 program benchmark_index
     use parquet_index
+    use parquet_sorting, only: pf_match_all
     use iso_fortran_env, only: int32, int64, real64, output_unit
 #ifdef _OPENMP
     use omp_lib, only: omp_get_wtime, omp_get_max_threads, omp_get_thread_num
 #endif
     implicit none
 
-    integer(int64) :: nkeys, naccess
+    integer(int64) :: nkeys, naccess, repeat_factor
     integer :: rounds, threads_req, ncomp_max
     character(len=:), allocatable :: mode
     integer(int64) :: checksum
@@ -40,7 +45,8 @@ program benchmark_index
     write (output_unit, "(a)") "# benchmark_index -- parquet_index"
     write (output_unit, "(a,i0,a,i0,a,i0)") "# nkeys=", nkeys, " naccess=", naccess, &
         " rounds=", rounds
-    write (output_unit, "(a,i0,a,i0)") "# threads=", threads_req, " ncomp_max=", ncomp_max
+    write (output_unit, "(a,i0,a,i0,a,i0)") "# threads=", threads_req, " ncomp_max=", ncomp_max, &
+        " repeat=", repeat_factor
     write (output_unit, "(a)") ""
 
     select case (mode)
@@ -54,12 +60,15 @@ program benchmark_index
         call mode_mutate()
     case ("pool")
         call mode_pool()
+    case ("multimap")
+        call mode_multimap()
     case ("all")
         call mode_lookup()
         call mode_build()
         call mode_tuple()
         call mode_mutate()
         call mode_pool()
+        call mode_multimap()
     case default
         write (output_unit, "(a)") "unknown mode: " // mode
         stop 2
@@ -80,6 +89,7 @@ contains
         rounds = 5
         threads_req = 0
         ncomp_max = 4
+        repeat_factor = 1_int64
         mode = "all"
         n = command_argument_count()
         do i = 1, n
@@ -96,9 +106,12 @@ contains
                 read (arg(9:), *) ncomp_max
             else if (index(arg, "--mode=") == 1) then
                 mode = trim(arg(8:))
+            else if (index(arg, "--repeat=") == 1) then
+                read (arg(10:), *) repeat_factor
             end if
         end do
         if (ncomp_max > pf_index_max_components) ncomp_max = pf_index_max_components
+        if (repeat_factor < 1_int64) repeat_factor = 1_int64
     end subroutine read_arguments
 
     !> Seconds now, from the best clock available.
@@ -579,6 +592,134 @@ contains
         end if
         write (output_unit, "(a)") ""
     end subroutine mode_pool
+
+    ! ---- multimap ----
+
+    !> `pf_index_multimap` on the join's shapes: the build over keys with repeats, the m:1 and
+    !! m:m bulk lookups serial and on a team, and the sort engine over the same arrays.
+    !!
+    !! The build side is `NKEYS` rows drawn from `NKEYS / REPEAT` distinct sparse keys, so every
+    !! key repeats `REPEAT` times on average; the probe side is `NACCESS` keys of which every
+    !! second one is a stored key and the rest sit between two of them. `pf_match_all` over the
+    !! same two arrays is the baseline: it is what the join uses today, its contract is what
+    !! `%probe_many` reproduces, and the two are compared row for row before either is timed.
+    subroutine mode_multimap()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: distinct(:), keys(:), probes(:), first(:), off(:), m(:), &
+            off2(:), m2(:)
+        integer(int64) :: i, ndistinct, nm
+        integer :: r, nt
+        real(real64) :: t0, best
+        character(len=64) :: tag
+
+        write (output_unit, "(a)") "## multimap"
+        ndistinct = max(1_int64, nkeys / repeat_factor)
+        allocate(distinct(ndistinct), keys(nkeys), probes(naccess), first(naccess))
+        distinct = 0_int64
+        keys = 0_int64
+        probes = 0_int64
+        first = 0_int64
+        call fill_keys("sparse", distinct)
+        do i = 1_int64, nkeys
+            keys(i) = distinct(1_int64 + mod_wrap(i * 7919_int64, ndistinct))
+        end do
+        do i = 1_int64, naccess
+            probes(i) = distinct(1_int64 + mod_wrap(i * 104729_int64, ndistinct))
+            if (mod(i, 2_int64) == 0_int64) probes(i) = probes(i) + 1_int64
+        end do
+        nt = threads_req
+        if (nt < 1) nt = pf_index_threads(naccess)
+        write (output_unit, "(a,i0,a,i0,a,i0)") "# rows=", nkeys, " distinct=", ndistinct, &
+            " probes=", naccess
+        ! The build: serial grouping in this version, so one arm; `threads=` reaches the map.
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call mm%build(keys, threads=1)
+            best = min(best, now() - t0)
+            checksum = checksum + mm%ngroups()
+        end do
+        call report("multimap: build, threads=1", best, nkeys)
+        if (nt > 1) then
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call mm%build(keys, threads=nt)
+                best = min(best, now() - t0)
+                checksum = checksum + mm%ngroups()
+            end do
+            write (tag, "(a,i0)") "multimap: build, threads=", nt
+            call report(trim(tag), best, nkeys)
+        end if
+        write (output_unit, "(a,i0,a,i0,a)") "# multimap memory: ", mm%memory_bytes(), &
+            " bytes; max_multiplicity ", mm%max_multiplicity()
+        ! The m:1 bulk lookup, serial and on the team.
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call mm%get_first_many(probes, first, threads=1)
+            best = min(best, now() - t0)
+            checksum = checksum + first(1) + first(naccess)
+        end do
+        call report("multimap: get_first_many, threads=1", best, naccess)
+        if (nt > 1) then
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call mm%get_first_many(probes, first, threads=nt)
+                best = min(best, now() - t0)
+                checksum = checksum + first(1) + first(naccess)
+            end do
+            write (tag, "(a,i0)") "multimap: get_first_many, threads=", nt
+            call report(trim(tag), best, naccess)
+        end if
+        ! The m:m CSR probe, serial and on the team; the pair count is printed because it is
+        ! what the copy pass is proportional to.
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call mm%probe_many(probes, off, m, threads=1, n_matched=nm)
+            best = min(best, now() - t0)
+            checksum = checksum + size(m, kind=int64) + nm
+        end do
+        call report("multimap: probe_many, threads=1", best, naccess)
+        ! `kind=int64`: the pair count of a heavy-repeat shape passes 2**31 (ten million probes
+        ! over a thousand-row group is five billion pairs), and a default-kind `size` wraps.
+        write (output_unit, "(a,i0,a,i0)") "# probe_many pairs=", size(m, kind=int64), &
+            " matched probes=", nm
+        if (nt > 1) then
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call mm%probe_many(probes, off, m, threads=nt)
+                best = min(best, now() - t0)
+                checksum = checksum + size(m, kind=int64)
+            end do
+            write (tag, "(a,i0)") "multimap: probe_many, threads=", nt
+            call report(trim(tag), best, naccess)
+        end if
+        ! The sort engine over the same arrays: what the join runs today. Compared row for row
+        ! first, so the figure below is for an answer known to be the same one.
+        call pf_match_all(probes, keys, off2, m2, threads=nt)
+        if (size(off2) /= size(off) .or. size(m2) /= size(m)) then
+            write (output_unit, "(a)") "# ERROR: pf_match_all and probe_many disagree on shape"
+            stop 3
+        end if
+        if (any(off2 /= off) .or. any(m2 /= m)) then
+            write (output_unit, "(a)") "# ERROR: pf_match_all and probe_many disagree on content"
+            stop 3
+        end if
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call pf_match_all(probes, keys, off2, m2, threads=nt)
+            best = min(best, now() - t0)
+            checksum = checksum + size(m2, kind=int64)
+        end do
+        write (tag, "(a,i0)") "baseline: pf_match_all, threads=", nt
+        call report(trim(tag), best, naccess)
+        write (output_unit, "(a)") ""
+    end subroutine mode_multimap
 
     !> One take-and-give-back cycle on a shared pool, returning the index it held.
     function pool_cycle(p) result(idx)

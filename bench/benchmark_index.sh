@@ -28,7 +28,10 @@
 #                    gets; any other value is passed through so a figure is attributable to a
 #                    known team size. The team a threaded get_many arm used is in its label.
 #   NCOMP=4         Largest component count --mode=tuple sweeps to (it visits 1, 2 and 4).
-#   MODE=all        lookup | build | tuple | mutate | pool | all.
+#   REPEAT=1        --mode=multimap only: how many times each key repeats on average. The build
+#                    side is NKEYS rows over NKEYS/REPEAT distinct keys, so REPEAT=1 is the
+#                    distinct-key join shape and REPEAT=1000 the lookup-table one.
+#   MODE=all        lookup | build | tuple | mutate | pool | multimap | all.
 #   LTO=0           Set to 1 when you have appended LTO flags, so the build tree is named apart
 #                    from its non-LTO twin.
 #
@@ -37,6 +40,10 @@
 # NOT assert anything about FPM_CXXFLAGS. A wrapper whose timed work reaches C++ must (see
 # bench/benchmark_colindex.sh); adding a gate here that cannot fail meaningfully would be worse
 # than none.
+#
+# --mode=multimap ENDS WITH A pf_match_all ARM over the same arrays, which is the sort engine the
+# join runs today and the contract %probe_many reproduces; the two answers are compared row for
+# row before either is timed, so a figure there is for an answer known to be the same one.
 #
 # THE THREADED get_many ARM is read against the `threads=1` arm printed just above it: the pair is
 # the speed-up a bulk probe gains from the team, which is what the filter's per-row-group probe
@@ -62,6 +69,7 @@ NACCESS="${NACCESS:-4000000}"
 ROUNDS="${ROUNDS:-5}"
 THREADS="${THREADS:-0}"
 NCOMP="${NCOMP:-4}"
+REPEAT="${REPEAT:-1}"
 MODE="${MODE:-all}"
 LTO="${LTO:-0}"
 
@@ -73,7 +81,8 @@ for arg in "$@"; do
         --rounds=*) ROUNDS="${arg#--rounds=}" ;;
         --threads=*) THREADS="${arg#--threads=}" ;;
         --ncomp=*) NCOMP="${arg#--ncomp=}" ;;
-        -h|--help) sed -n '2,51p' "$0"; finished=1; exit 0 ;;
+        --repeat=*) REPEAT="${arg#--repeat=}" ;;
+        -h|--help) sed -n '2,58p' "$0"; finished=1; exit 0 ;;
         *) echo "benchmark_index.sh: unknown argument '$arg'" >&2; exit 2 ;;
     esac
 done
@@ -135,6 +144,6 @@ echo "# $FLAGS_LINE"
 
 fpm run benchmark_index --profile release -- \
     --mode="$MODE" --nkeys="$NKEYS" --naccess="$NACCESS" \
-    --rounds="$ROUNDS" --threads="$THREADS" --ncomp="$NCOMP"
+    --rounds="$ROUNDS" --threads="$THREADS" --ncomp="$NCOMP" --repeat="$REPEAT"
 
 finished=1

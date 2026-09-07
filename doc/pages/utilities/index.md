@@ -55,9 +55,11 @@ the two generators meant to be copied into your own project.
   this key, in a few nanoseconds, over a single integer key or a tuple of them when no one column
   is unique. Three storage backends behind one API — an array indexed by the key, an open-addressing
   hash table, and sorted keys plus a binary search — the first two chosen from the keys themselves,
-  the third opt-in. Then `pf_index_pool`, which hands out and recycles unique index values so a
-  program managing slots in its own arrays need not track which are free. Both are safe to mutate
-  from several threads at once, and a map's lookups are lock-free.
+  the third opt-in. `pf_index_multimap` is the same over a key that repeats: every row holding it,
+  as a range, and every match for a whole probe array at once as a CSR pair. Then `pf_index_pool`,
+  which hands out and recycles unique index values so a program managing slots in its own arrays
+  need not track which are free. All three are safe to mutate from several threads at once, and
+  the lookups are lock-free.
 - [Logging with `parquet_logging`](logging.html) — leveled logging for your own program:
   several destinations at once each with its own threshold and layout, ISO timestamps, colour,
   a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered

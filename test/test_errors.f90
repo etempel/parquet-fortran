@@ -2257,6 +2257,46 @@ contains
                 test_index_keys_rank1_on_composite_aborts), &
             new_unittest("every legal pf_index_map path completes", &
                 test_index_control_completes), &
+            new_unittest("a multimap values array of the wrong length aborts", &
+                test_multimap_build_values_length_aborts), &
+            new_unittest("storing the value 0 in a multimap aborts", &
+                test_multimap_build_value_zero_aborts), &
+            new_unittest("a multimap build mask of the wrong length aborts", &
+                test_multimap_build_valid_length_aborts), &
+            new_unittest("threads=0 on a multimap build aborts", &
+                test_multimap_build_threads_zero_aborts), &
+            new_unittest("an unknown multimap method token aborts", &
+                test_multimap_build_bad_method_aborts), &
+            new_unittest("a composite sorted multimap build aborts", &
+                test_multimap_build_sorted_composite_aborts), &
+            new_unittest("a get_first_many length mismatch aborts", &
+                test_multimap_get_first_many_length_aborts), &
+            new_unittest("a get_first_many mask of the wrong length aborts", &
+                test_multimap_get_first_many_valid_length_aborts), &
+            new_unittest("threads=0 on a get_first_many aborts", &
+                test_multimap_get_first_many_threads_zero_aborts), &
+            new_unittest("a multimap get_many length mismatch aborts", &
+                test_multimap_get_many_length_aborts), &
+            new_unittest("a probe_many mask of the wrong length aborts", &
+                test_multimap_probe_many_valid_length_aborts), &
+            new_unittest("threads=0 on a probe_many aborts", &
+                test_multimap_probe_many_threads_zero_aborts), &
+            new_unittest("a probe_many pair count over the ceiling aborts", &
+                test_multimap_probe_many_pair_overflow_aborts), &
+            new_unittest("a stored value too large for an int32 bulk answer aborts", &
+                test_multimap_int32_answer_overflow_aborts), &
+            new_unittest("a stored value too large for an int32 get_all aborts", &
+                test_multimap_get_all_int32_overflow_aborts), &
+            new_unittest("a multimap lookup of the wrong tuple width aborts", &
+                test_multimap_tuple_width_mismatch_aborts), &
+            new_unittest("a scalar lookup on a composite multimap aborts", &
+                test_multimap_scalar_on_composite_aborts), &
+            new_unittest("a rank-1 key list from a composite multimap aborts", &
+                test_multimap_keys_rank1_on_composite_aborts), &
+            new_unittest("a probe of the wrong tuple width aborts", &
+                test_multimap_probe_shape_mismatch_aborts), &
+            new_unittest("every legal pf_index_multimap path completes", &
+                test_multimap_control_completes), &
             new_unittest("a pool double free aborts", &
                 test_pool_double_free_aborts), &
             new_unittest("freeing a never-issued index aborts", &
@@ -2866,6 +2906,185 @@ contains
             failure_message="every legal pf_index_map call was expected to complete", &
             required_stderr="index control finished")
     end subroutine test_index_control_completes
+    !
+    !> See `scenario_multimap_build_values_length` (test/error_scenarios.f90).
+    subroutine test_multimap_build_values_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_build_values_length", &
+            expect_abort=.true., &
+            failure_message="a multimap values array of the wrong length was expected to abort", &
+            required_stderr="pf_index_multimap%build: values= must have exactly one element per key")
+    end subroutine test_multimap_build_values_length_aborts
+    !
+    !> See `scenario_multimap_build_value_zero` (test/error_scenarios.f90).
+    subroutine test_multimap_build_value_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_build_value_zero", &
+            expect_abort=.true., &
+            failure_message="a multimap value of 0 was expected to abort", &
+            required_stderr="pf_index_multimap%build: values(2) is 0")
+    end subroutine test_multimap_build_value_zero_aborts
+    !
+    !> See `scenario_multimap_build_valid_length` (test/error_scenarios.f90).
+    subroutine test_multimap_build_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_build_valid_length", &
+            expect_abort=.true., &
+            failure_message="a multimap build mask of the wrong length was expected to abort", &
+            required_stderr="pf_index_multimap%build: valid= must have exactly one element per key")
+    end subroutine test_multimap_build_valid_length_aborts
+    !
+    !> See `scenario_multimap_build_threads_zero` (test/error_scenarios.f90).
+    subroutine test_multimap_build_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_build_threads_zero", &
+            expect_abort=.true., &
+            failure_message="threads=0 on a multimap build was expected to abort", &
+            required_stderr="pf_index_multimap%build: threads= must be at least 1")
+    end subroutine test_multimap_build_threads_zero_aborts
+    !
+    !> See `scenario_multimap_build_bad_method` (test/error_scenarios.f90).
+    subroutine test_multimap_build_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_build_bad_method", &
+            expect_abort=.true., &
+            failure_message="an unknown multimap method was expected to abort", &
+            required_stderr="pf_index_multimap%build: unknown method")
+    end subroutine test_multimap_build_bad_method_aborts
+    !
+    !> See `scenario_multimap_build_sorted_composite` (test/error_scenarios.f90).
+    subroutine test_multimap_build_sorted_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_build_sorted_composite", &
+            expect_abort=.true., &
+            failure_message="a composite sorted multimap build was expected to abort", &
+            required_stderr="pf_index_multimap%build: method=""sorted"" supports single-component keys only")
+    end subroutine test_multimap_build_sorted_composite_aborts
+    !
+    !> See `scenario_multimap_get_first_many_length` (test/error_scenarios.f90).
+    subroutine test_multimap_get_first_many_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_first_many_length", &
+            expect_abort=.true., &
+            failure_message="a get_first_many length mismatch was expected to abort", &
+            required_stderr="pf_index_multimap%get_first_many: the keys and the answer array must have the same length")
+    end subroutine test_multimap_get_first_many_length_aborts
+    !
+    !> See `scenario_multimap_get_first_many_valid_length` (test/error_scenarios.f90).
+    subroutine test_multimap_get_first_many_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_first_many_valid_length", &
+            expect_abort=.true., &
+            failure_message="a get_first_many mask of the wrong length was expected to abort", &
+            required_stderr="pf_index_multimap%get_first_many: valid= must have exactly one element per key")
+    end subroutine test_multimap_get_first_many_valid_length_aborts
+    !
+    !> See `scenario_multimap_get_first_many_threads_zero` (test/error_scenarios.f90).
+    subroutine test_multimap_get_first_many_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_first_many_threads_zero", &
+            expect_abort=.true., &
+            failure_message="threads=0 on get_first_many was expected to abort", &
+            required_stderr="pf_index_multimap%get_first_many: threads= must be at least 1")
+    end subroutine test_multimap_get_first_many_threads_zero_aborts
+    !
+    !> See `scenario_multimap_get_many_length` (test/error_scenarios.f90).
+    subroutine test_multimap_get_many_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_many_length", &
+            expect_abort=.true., &
+            failure_message="a multimap get_many length mismatch was expected to abort", &
+            required_stderr="pf_index_multimap%get_many: the keys and the answer array must have the same length")
+    end subroutine test_multimap_get_many_length_aborts
+    !
+    !> See `scenario_multimap_probe_many_valid_length` (test/error_scenarios.f90).
+    subroutine test_multimap_probe_many_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_probe_many_valid_length", &
+            expect_abort=.true., &
+            failure_message="a probe_many mask of the wrong length was expected to abort", &
+            required_stderr="pf_index_multimap%probe_many: valid= must have exactly one element per key")
+    end subroutine test_multimap_probe_many_valid_length_aborts
+    !
+    !> See `scenario_multimap_probe_many_threads_zero` (test/error_scenarios.f90).
+    subroutine test_multimap_probe_many_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_probe_many_threads_zero", &
+            expect_abort=.true., &
+            failure_message="threads=0 on probe_many was expected to abort", &
+            required_stderr="pf_index_multimap%probe_many: threads= must be at least 1")
+    end subroutine test_multimap_probe_many_threads_zero_aborts
+    !
+    !> See `scenario_multimap_probe_many_pair_overflow` (test/error_scenarios.f90).
+    subroutine test_multimap_probe_many_pair_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_probe_many_pair_overflow", &
+            expect_abort=.true., &
+            failure_message="a pair count over the ceiling was expected to abort", &
+            required_stderr="pf_index_multimap%probe_many: the pair count exceeds")
+    end subroutine test_multimap_probe_many_pair_overflow_aborts
+    !
+    !> See `scenario_multimap_int32_answer_overflow` (test/error_scenarios.f90).
+    subroutine test_multimap_int32_answer_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_int32_answer_overflow", &
+            expect_abort=.true., &
+            failure_message="a value too large for an int32 answer was expected to abort", &
+            required_stderr="pf_index_multimap%get_first_many: a stored value is too large for an int32 answer")
+    end subroutine test_multimap_int32_answer_overflow_aborts
+    !
+    !> See `scenario_multimap_get_all_int32_overflow` (test/error_scenarios.f90).
+    subroutine test_multimap_get_all_int32_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_all_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="a value too large for an int32 get_all was expected to abort", &
+            required_stderr="pf_index_multimap%get_all: a stored value is too large for an int32 answer")
+    end subroutine test_multimap_get_all_int32_overflow_aborts
+    !
+    !> See `scenario_multimap_tuple_width_mismatch` (test/error_scenarios.f90).
+    subroutine test_multimap_tuple_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_tuple_width_mismatch", &
+            expect_abort=.true., &
+            failure_message="a lookup of the wrong tuple width on a multimap was expected to abort", &
+            required_stderr="pf_index_multimap%count: the key tuple's length does not match this multimap's component count")
+    end subroutine test_multimap_tuple_width_mismatch_aborts
+    !
+    !> See `scenario_multimap_scalar_on_composite` (test/error_scenarios.f90).
+    subroutine test_multimap_scalar_on_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_scalar_on_composite", &
+            expect_abort=.true., &
+            failure_message="a scalar lookup on a composite multimap was expected to abort", &
+            required_stderr="pf_index_multimap%get: this multimap has composite keys")
+    end subroutine test_multimap_scalar_on_composite_aborts
+    !
+    !> See `scenario_multimap_keys_rank1_on_composite` (test/error_scenarios.f90).
+    subroutine test_multimap_keys_rank1_on_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_keys_rank1_on_composite", &
+            expect_abort=.true., &
+            failure_message="a rank-1 key list from a composite multimap was expected to abort", &
+            required_stderr="pf_index_multimap%keys: this multimap has composite keys; ask for a rank-2 list")
+    end subroutine test_multimap_keys_rank1_on_composite_aborts
+    !
+    !> See `scenario_multimap_probe_shape_mismatch` (test/error_scenarios.f90).
+    subroutine test_multimap_probe_shape_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_probe_shape_mismatch", &
+            expect_abort=.true., &
+            failure_message="a probe of the wrong tuple width was expected to abort", &
+            required_stderr="pf_index_multimap%probe_many: the keys' component count does not match this multimap's")
+    end subroutine test_multimap_probe_shape_mismatch_aborts
+    !
+    !> See `scenario_multimap_control` (test/error_scenarios.f90).
+    subroutine test_multimap_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_control", expect_abort=.false., &
+            failure_message="every legal pf_index_multimap call was expected to complete", &
+            required_stderr="multimap control finished")
+    end subroutine test_multimap_control_completes
     !
     !> See `scenario_pool_double_free` (test/error_scenarios.f90) for why this is refused.
     subroutine test_pool_double_free_aborts(error)

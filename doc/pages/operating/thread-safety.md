@@ -350,7 +350,9 @@ said about it.
   region, like the sorts. Building one, and every
   `%insert`/`%remove`/`%get_or_add`, is serialised by the library on a single lock per type — so
   several threads streaming keys through one map's `%get_or_add` is a supported pattern, and each
-  thread's returned index is unique and stable. See
+  thread's returned index is unique and stable. `pf_index_multimap` follows the same rules: its
+  bulk lookups thread internally and stand down inside your region, and a build or `%clear` is
+  serialised on a lock of its own. See
   [Threading](../utilities/index-maps.html#threading).
 - **`pf_toml`: every public procedure is safe inside a parallel region**, because each takes one
   module-wide lock on entry. What that does not cover is a document's lifetime: closing one while

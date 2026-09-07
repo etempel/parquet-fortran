@@ -95,6 +95,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `valid=` on `%build`, `%get_many` and `%get_or_add_many` skips the rows a mask marks `.false.`, so
   a nullable key column can be indexed or probed without compacting it first. See
   [Filling a map as you go](doc/pages/utilities/index-maps.md#filling-a-map-as-you-go).
+- **`pf_index_multimap`: a map from a key to every position that holds it.** Built from a key
+  array in which keys repeat, it answers `%count`, `%get_first` and `%get_all` per key, and
+  `%get_first_many` and `%probe_many` for a whole probe array at once — the latter as the CSR pair
+  `pf_match_all` returns, on a hash engine and on a team. Tuple keys, `values=`, `valid=` masks and
+  the three backends are the map's. See
+  [A key that repeats](doc/pages/utilities/index-maps.md#a-key-that-repeats-pf_index_multimap).
 
 ### Changed
 

@@ -62,6 +62,7 @@ parquet_argsort_kernel.f90
 parquet_index.f90
 parquet_index_hash.f90
 parquet_index_map.f90
+parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
 parquet_settings_base.f90
@@ -250,6 +251,7 @@ parquet_expkey.f90
 parquet_index.f90
 parquet_index_hash.f90
 parquet_index_map.f90
+parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
 parquet_io.f90
@@ -314,6 +316,7 @@ parquet_expkey.f90
 parquet_index.f90
 parquet_index_hash.f90
 parquet_index_map.f90
+parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
 parquet_list.f90
@@ -410,6 +413,7 @@ parquet_healpix_query.f90
 parquet_index.f90
 parquet_index_hash.f90
 parquet_index_map.f90
+parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
 parquet_io.f90

@@ -1,0 +1,320 @@
+# Fortran gotchas
+
+Language and compiler traps, filed by the compiler that exhibits them. A rule that binds regardless
+of compiler is in the general group even when one compiler exposed it. Most of these are invisible
+to the compiler used daily and visible to one run rarely: keep the source portable, and build under
+more than one compiler. Where `tools/check_source_conventions.py` enforces a rule, the entry names
+the check. Source-layout rules (submodule ordering, interface placement, continuation limits) are
+in `code-style.md`.
+
+## Contents
+
+- [General Fortran & language gotchas](#general-fortran--language-gotchas)
+- [gfortran-specific gotchas](#gfortran-specific-gotchas)
+- [ifx-specific gotchas](#ifx-specific-gotchas)
+- [flang-specific gotchas](#flang-specific-gotchas)
+- [nagfor-specific gotchas](#nagfor-specific-gotchas)
+
+## General Fortran & language gotchas
+
+- **`STOP "message"` exits with status 0; only `ERROR STOP` exits non-zero.** A fatal path written
+  as `stop` tells a shell, a CI job or a scheduler that the run succeeded.
+- **Never write a function returning `character(len=:), allocatable`**; use a subroutine with an
+  allocatable `character` `intent(out)`/`intent(inout)` argument. gfortran's hidden length variable
+  is not thread-local (GCC PR113797, PR97977) and corrupts memory under concurrent calls; ifx
+  rejects the automatic-length variant. Applies to test code too (test-drive dispatches tests with
+  `!$omp parallel do`). For `x = obj%get(x)` shapes use one `intent(inout)` argument. Plain
+  non-`character` allocatable results are unaffected.
+- **`x = func()` from an unallocated allocatable result leaves `x` ALLOCATED** (empty). An API
+  cannot signal "absent" that way; use a flag or sentinel (`parquet_strings`' `allow_null` returns
+  `""` guarded by `is_null()`).
+- **Never blank a deferred-length allocatable character ARRAY with `arr = ""`**; it reallocates
+  every element to length zero (gfortran hides it, ifx shows blank strings then heap corruption).
+  Loop element by element. A scalar `suffix = ""` and an array assignment whose RHS already has the
+  right length are fine.
+- **Build every array of a matched set of `character` array arguments at the same length.**
+  Different constructor lengths for partner arguments corrupt memory under gfortran (SIGTRAP inside
+  the callee, survives `-fcheck=all`); nagfor runs it correctly. Prefer a shape with no `character`
+  array dummies at all.
+- **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**;
+  assign normally to blank-pad. **A per-element `transfer` into a `character(len=1)` payload
+  allocates a temporary each call**; use sequence association instead (`pack_character_bytes`,
+  `src/parquet_strings.f90`): a contiguous `character(len=w)` array passed to a
+  `character(len=1), intent(in) :: src(*)` dummy, with the public dummy declared `contiguous`, rank
+  flattened for free, and `len_trim` kept on the element view.
+- **`.and.` does not short-circuit.** `size(a) == size(b) .and. all(a == b)` reads out of bounds,
+  `lo < 0 .and. hi > huge(hi) + lo` overflows, and `cheap .and. expensive() == 0` may evaluate the
+  call (ifx does, gfortran does not). Nest the tests whenever the second operand indexes, computes,
+  or is more than a comparison. The mismatch can be the NORMAL case. `fpm test --profile nagdeb`
+  is the sharpest detector (`-C=array` names the array and both extents); under threads the same
+  defect can present as a bare SIGSEGV, so re-run with `OMP_NUM_THREADS=1` first.
+- **A component and its parent cannot both be actual arguments of one call** (`t%cache` and
+  `t%cache%reader`; F2018 15.5.2.13, undiagnosed by gfortran and ifx). Design around it: make the
+  inner one an optional argument where absent means "reach it through the parent"
+  (`table_open_reader_with_transform`), or resolve a local `type(...), pointer` with `target` on
+  both dummies. A pointer to a component of a non-`target` dummy is not permitted.
+- **An apparently redundant `x*1.0` on an actual argument may be an aliasing dodge** (the same
+  variable passed to an `intent(out)` and an `intent(in)` dummy); check before deleting, and
+  replace with an explicit local plus comment.
+- **Passing an UNALLOCATED allocatable to an `optional` dummy makes it ABSENT** (F2018 15.5.2.12).
+  Used deliberately by `row_validity` and the `mat_*` masks; any procedure returning such an array
+  documents that `allocated()` is part of its contract.
+- **`intent(out)` on a finalizable type resets every component; do not convert one to
+  `intent(inout)` without auditing every component** — an open/init body that sets a handful of
+  fields relies on the reset for the rest.
+- **`class(t), intent(out)` is expensive per element** (runtime default-initialisation), while
+  `class` + `intent(inout)` and `type` + `intent(out)` are free. A setter that assigns every
+  component on every path may take `intent(inout)`; one with a caught-failure path that returns
+  without assigning keeps `intent(out)`. A `pure` procedure cannot have a polymorphic `intent(out)`
+  dummy at all.
+- **Intrinsic assignment to or from a FINALIZABLE type runs the finalizer, twice per loop
+  iteration** in `dest(i) = obj%make(i)`. Set the components directly, or drop a finalizer a
+  non-owning handle does not need. Re-derive the finalizable types with `grep 'final ::' src/*.f90`.
+- **An array-section assignment whose two sides are the SAME array costs a heap temporary per
+  iteration** (the compiler cannot prove no overlap). Same array: scalar loop; different arrays:
+  section (one `memcpy`).
+- **A wrapping overflow is still undefined behaviour the optimiser may reason from elsewhere**: an
+  expression measured to wrap let ifx delete an `if (s < 0)` branch two functions away. Compute
+  without overflowing (`sub64`/`add64`, `src/parquet_random.f90`); a deliberately overflowing site
+  must be guarded by a comparison against an overflow-free implementation (`feature_risks.md`
+  Risk-94).
+- **A list-directed `read(text, *, iostat=ios) n` is not a strict parse**: `"5 6"` yields 5 with
+  `iostat == 0`. Parse caller-supplied text by hand (trim, one optional sign, digits and nothing
+  else), then convert (`env_int64`, `src/parquet_settings.f90`; `settings_env_two_numbers` scenario).
+- **`ATAN2(0.0, 0.0)` is prohibited** (F2018 16.9.16); gfortran/ifx/flang return 0, **nagfor returns
+  NaN and raises `IEEE_INVALID`** (fatal under its default `-ieee=stop`). The reachable input rarely
+  looks like "both zero" (a pole, a zero-length vector). `grep -n "atan2" src/*.f90` is the audit;
+  guard every site whose arguments can both vanish.
+- **`min`/`max`/`minval`/`maxval` and the two-`if` clamp compile to `minsd`/`maxsd`, which raise
+  `IEEE_INVALID` on a quiet NaN** (ordinary comparisons do not), and the answer is wrong even where
+  it does not trap. Screen the NaN first, as its own statement; refuse a NaN input at a validating
+  entry point. `any(x <= 0)` does NOT reject a NaN; `.not. all(x > 0)` does. Census of the
+  instruction per procedure (the audit; a source grep cannot see an if-converted clamp):
+
+```bash
+for o in build/<hash>/parquet-fortran/src_*.o; do objdump -d "$o" | awk -v O="$o" \
+  '/^[0-9a-f]+ <.*>:/ { s=$2; gsub(/[<>:]/,"",s) } /(minsd|maxsd|minpd|maxpd)/ { print s }'; \
+done | sort | uniq -c | sort -rn
+```
+
+  Every procedure it names screens the NaN or takes only validated values; the healpix
+  `pure elemental` conversions are the documented exception.
+- **`sign(1.0, x)` is not a portable negative-zero test** (processor-dependent for a zero `B`; ifx
+  answers `+1`). Use `(x == 0.0_real64) .and. transfer(x, 0_int64) < 0_int64` or
+  `ieee_is_negative`; build the value at runtime, and have a one-bit fixture assert its own
+  precondition first.
+- **Test for NaN with `ieee_is_nan` in cold code and `x /= x` on a hot path** (per-element,
+  per-row, per-comparison, `elemental`), with a comment saying why. `ieee_is_nan` is a runtime call
+  under ifx and nagfor and inlined under gfortran, so a gfortran measurement cannot see the
+  difference. Both forms are quiet on a quiet NaN. `-Wcompare-reals` hits on exact-equality checks
+  (`value == anint(value)`) are accepted, not epsilon-ised.
+- **`-ffast-math`/`-Ofast` fold every `ieee_is_nan` guard to `.false.`**; never build with them.
+- **A DIFFERENCE of two nearly-equal doubles carries ~8 digits, the rest is the compiler.** Form
+  small quantities directly (exact rational, `(a²-b²)/(a+b)`, half-angle sine); a test asserting
+  such a value below ~1e-8 relative pins one toolchain's rounding. An external reference computed
+  the cancelling way cannot certify a cancellation-free implementation; use a high-precision oracle
+  (`test_max_pixrad_high_precision`).
+- **An OpenMP `reduction(+:...)` over reals is not bit-reproducible** across calls or thread counts;
+  measure the tolerance floor by calling twice, or use an ordered/compensated sum.
+- **Nested OpenMP needs both `omp_set_nested(.true.)` and `omp_set_max_active_levels(2)`**
+  (libgomp keys on one ICV, NAG on the other), called once before any region; NAG aborts if called
+  inside an active region — guard with `omp_get_level() > 0`, not `omp_in_parallel()`.
+- **Every reference to an `omp_*` procedure, `use omp_lib` or `omp_lock_kind` sits inside
+  `#ifdef _OPENMP` with a serial arm** (`tid = 0`, `avail = 1`); `!$omp` directives need no guard.
+  The guard opens above the `!>` doc block, and a caller of an all-OpenMP procedure is guarded to
+  match. Enforced by `check_openmp_calls_are_guarded` (`src/`, `test/`); `app/`/`bench/` programs
+  need serial shims for the `omp_*` functions they call.
+- **A kind number is not a byte count** (nagfor numbers kinds sequentially: `logical(kind=4)` is
+  64 bits there). Take every kind from `iso_fortran_env`/`iso_c_binding`/`kind(.true.)`; assert a
+  required width at compile time with a `1/merge(1, 0, storage_size(...) == 32)` parameter; an
+  `interface` body needs the kind in its `import`.
+- **`EXECUTE_COMMAND_LINE` statuses differ per compiler**: nagfor returns the raw `wait()` status
+  (7 arrives as 1792); flang reports any non-zero exit through `cmdstat`. Only `exitstat == 0` /
+  `/= 0` is portable; decide "the command never ran" from evidence the command leaves (a missing
+  redirect file), never from `cmdstat`.
+- **A derived type or procedure cannot share its module's name**; two generic specifics are not
+  distinguished by `intent` or `allocatable`, only by type/kind/rank and argument count; an
+  `optional` dummy never helps disambiguate and can remove the margin that did. Test an intended
+  specific set in a throwaway module before designing an API around it.
+- **Give every non-`pointer`, non-`allocatable` component of a new derived type a default
+  initialiser**: `-finit-*` and `-nan` fill declared variables only, never an `allocate` payload.
+- **A procedure handing back a pointer into its own dummy (`h%col => self`) requires `target` on
+  the actual at every call site** (F2018 15.5.2.4). gfortran, ifx and flang run a violation
+  happily; only nagfor `-C=dangling` sees it. `check_view_call_sites_declare_target` derives the
+  handle-returning bindings from every bare `=> self` in `src/` and scans `src/`, `test/`, `app/`,
+  `bench/`. A pointer into what `self%<pointer component>` points at (`parquet_table%col`) is not
+  in this class — `grep -rnE "=> *self( |$)" src/*.f90` is the discriminator.
+- **A zero-length case reaches storage that was never allocated**: `C_LOC` on a zero-sized array is
+  non-conforming (F2018 18.2.3.6), and a whole-array assignment to, or a dummy association with, an
+  unallocated allocatable is too, even when nothing would be copied. Only nagfor `-C=array`/
+  `-C=pointer` sees it; the fix is at the allocator (`allocate_empty_storage`), not a guard per site.
+- **`-ftrapv` traps only the wrapping arm of `src/parquet_random.f90`** (the one ifx ships); a
+  non-aborting `-ftrapv` build is not evidence a site is safe (dead results are optimised away
+  before instrumentation). `tools/check_random_ubsan.sh` (machine B only) drives UBSan over both
+  arms and is the instrument (`feature_risks.md` Risk-112).
+
+## gfortran-specific gotchas
+
+- **Minimum gfortran is 13** (older versions miscompile an optional allocatable-`character`
+  argument); never refactor correct source to accommodate an older compiler.
+- **Never give a FINALIZABLE type to OpenMP's `private()`; declare it in a `block` inside the loop
+  body.** The `private` copy is not reliably default-initialised, so the first finalization frees
+  garbage (dies in `malloc`; reproducible with `OMP_NUM_THREADS=1`). The handle types
+  (`parquet_table_row`, `parquet_table_col`, `parquet_string`) have no finalizer and may be
+  `private()`. ifx forbids the `block` form for a type with allocatable components — see below.
+- **`-128_int8` trips the range check**; build the high bit with `ibset(0_int8, 7)`. An
+  array-constructor implied-do index has no implicit type under `implicit none`; list the elements.
+- **`-finit-*` does not reach an `allocate` payload**, so a clean `-finit-*` run does not rule out
+  uninitialised memory (`-finit-real=zero`, not `=0`).
+- **`intent(out)`'s implicit reset has one confirmed counterexample** on a scalar `logical`
+  component of a finalizable type (gfortran 13/14); add an explicit reset as the first executable
+  statement (`table%detached = .false.`).
+- **A `pointer`-typed intermediate component defeats `-fcheck=bounds`'s trust in an unallocated
+  LHS** (`out%cache%x = self%cache%x` reports a spurious bound mismatch), and the same shape with a
+  deferred-length character array segfaults on CI's gfortran while running clean locally. Use an
+  explicit `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop.
+- **gfortran 15.2 ICEs (bare `Segmentation fault`) on a `pure module procedure` passing a `class`
+  dummy's `type` component to a `class` dummy beside an allocatable `intent(out)` argument**
+  (`mm_get_method`, the `%keys` forms in `src/parquet_index_multi.f90`). Only one ICE is reported
+  per compilation, naming the last such call. Workaround: repeat the callee's body over the
+  `type`-dummy helpers, with a comment.
+
+## ifx-specific gotchas
+
+- **ifx forbids a type with ALLOCATABLE COMPONENTS in a `block` lexically inside a parallel region**
+  (privatization scaffolding `for_alloc_private`/`mold_ctor` segfaults every thread at `-O1`+, only
+  for a type from a separately compiled module) and is happy with `private()` — the opposite of
+  gfortran. A type in that class (`parquet_reader`, `parquet_writer`, `parquet_schema`,
+  `parquet_column`, `parquet_string_column`) uses **a shared array allocated before the region, one
+  slot per thread, indexed by `omp_get_thread_num() + 1`** (`materialize_marked_parallel`).
+  `parquet_table` stays block-local-safe only because it has no allocatable component
+  (`feature_risks.md` Risk-45). Diagnose with `nm <object> | grep -E "for_alloc_private|mold_ctor"`
+  before blaming the compiler; no scaffolding means the crashing binary is stale.
+- **`fpm test --profile debug` under ifx needs `export FOR_DISABLE_STACK_TRACE=1`**: `-check all`
+  emits `warning (406)` per array temporary, `-traceback` prints a traceback per warning, and
+  libifcore's traceback code is not thread safe under test-drive's parallel dispatch (crash, abort
+  in the allocator, or a hang re-reading `/proc/<pid>/maps`). `--flag "-check noarg_temp_created"`
+  does not override the profile.
+- **Never pass a FUNCTION RESULT or an ARRAY CONSTRUCTOR to an EXPLICIT-SHAPE array dummy**; assign
+  to a named local (or a `parameter` when constant) and pass that, or `warning (406)` fires on every
+  call. A genuinely non-contiguous actual (`data(:)%id` into a `contiguous` dummy) is a mandated
+  copy-in, not a defect; the warning names the CALLEE, so check the actual at the outermost call.
+  An I/O list section of an allocatable component warns; an implied-do over it is silent
+  (`col_print`). Triage: `fpm test --profile debug 2>&1 | grep -c 'warning (406)'`.
+- **Two threads reaching `ERROR STOP` at once leave the exit status nondeterministic, including 0**
+  (`exit()` from two threads is undefined); gfortran is deterministic. One abort inside or after a
+  region is safe, so the fix is a `critical` around the whole fatal body (`api-conventions.md`).
+- **An automatic-length `character` result whose length is a specification expression over
+  host-associated variables is an ICE** at `-O1`+ (clean at `-O0`), when called from a sibling
+  contained procedure inside a submodule's `module procedure`. Use the subroutine shape the
+  character-function rule already forces (`tok_text`, `src/parquet_read_filter.f90`).
+- **A default structure constructor `type_name()` is rejected (`error #6053`) when a component's
+  own type has private components in another module.** Reset the type's own components explicitly
+  and clear the private-dependent one separately (`table_drop_column`).
+- **A non-polymorphic `type(T)` actual passed to a `class(T)` dummy in another compilation unit
+  makes ifx build the class descriptor in the caller's prologue on every call**, one record per
+  allocatable component, into `.bss` (shared by every thread). The typed accessor tiers in
+  `columns-tables.md` are the fix; gfortran gains from the same shape.
+- **Vectorised transcendentals are not quiet on a NaN** (`__svml_sin2` raises `IEEE_INVALID` in its
+  argument reduction). A procedure meant to propagate a NaN quietly returns every NaN argument
+  before any transcendental (`pf_angdist_deg`). Reproduce against the built library, not a copy of
+  the formula, which vectorises differently.
+- **The same transcendental expression can differ by 1–2 ulp between a bulk loop and a scalar
+  evaluation at `-O0`** (identical at `-O2`); assert a re-derived value at a tolerance above the
+  round-trip error, never at zero (`test_count_within_sky`, 1e-9 degrees).
+- **An ABSENT optional allocatable dummy passed into an OpenMP region and on to an optional dummy
+  segfaults at `-O0 -check all`** (`SIGSEGV` at the call; clean on gfortran and ifx release). Never
+  pass an optional array dummy into a parallel region: fill a local that always exists and
+  `move_alloc` it into the optional afterwards (`mm_probe_hit_buffer`).
+- **A `pure` guard-only subroutine's CALL is deleted at `-O0`** (debug profile only; `-O2` and
+  gfortran abort). Write guard-only subroutines impure (`api-conventions.md`).
+
+## flang-specific gotchas
+
+flang builds here are serial only and `--profile release` does not link (`build.md`).
+
+- **A rejected format is reported through `iostat` AND leaves partial text in the buffer**
+  (`ios = 1005`; gfortran/ifx/nagfor leave it empty), so never decide "was this rendered?" from
+  emptiness (`rendered_ok`, `src/parquet_utils.f90`, keys on the overflow asterisk;
+  `feature_risks.md` Risk-187). A literal bad format is a compile error under flang; a reproducer
+  must pass it through a `character(len=*)` variable.
+- **A `character` temporary built inside a loop is not reclaimed until the procedure returns**, so
+  a long loop of `call sub("%" // what // ": ...")` exhausts the stack (SIGSEGV in the callee's
+  prologue, `EXC_BAD_ACCESS (code=2)` at a guard-page address, unwindable backtrace). Diagnose with
+  `ulimit -s 65520`, scale the fixture, print the counter. **Hoist**: build each message once above
+  the loop into a `character(len=:), allocatable`; never raise the limit (`-fno-stack-arrays` does
+  not help).
+
+## nagfor-specific gotchas
+
+`--profile release` is the only nagfor configuration with optimisation on (`nag`, `nagdeb`,
+`nagundef` are all `-O0`); it is the only one that can see a codegen defect, so run it as its own
+check and read a hang there as a possible miscompilation (`sample <pid>` names the procedure).
+Running and triaging NAG builds: `nagfor-builds.md`.
+
+- **nagfor unmasks the IEEE traps by default (`-ieee=stop`) for the whole process.** `anint(NaN)`
+  and `int(NaN)` trap (test `ieee_is_nan` first, as its own statement); `arrow::compute::MinMax`
+  raises `FE_INVALID` benignly on every non-empty float array. Mask the traps around a foreign call
+  known to raise with `feholdexcept` + `feclearexcept` + `fesetenv` (never `feupdateenv`), scoped
+  to the one call. `-ieee=full` is a diagnosis, not the fix (`feature_risks.md` Risk-124).
+- **An array-valued ordered comparison against a NaN raises invalid** (`count(a > 0.0)`,
+  `sum(a, mask=a > 0.0)`, vectorised path only — a five-element reproducer does not show it); the
+  scalar loop, `count(a /= a)` and `ieee_is_nan` never do. Reported only as a line at program exit.
+  Find it with `-ieee=stop -gline` appended to `FPM_FFLAGS` in its own `FPM_BUILD_DIR`, running
+  the application rather than the test binary. `NaN > 0` and `NaN <= 0` are both false, so a
+  `<= 0` guard does not skip a NaN.
+- **`-nan` (in the `nagfor` feature) poisons every undefined `real`, including the unwritten tail
+  of an `intent(out)` array**, as a signalling NaN. A test may not read past what the callee wrote:
+  use a canary outside the section passed in, or assert that returned entries agree. A second pass
+  over a multi-buffer fill uses the SAME cap as the filling pass (`grep` for a loop bound of
+  `min(m, size(<one buffer>))`). A raised flag is a line at `STOP` nobody correlates; turn it into
+  an assertion: save the flag, clear, call, read, restore `saved .or. raised`
+  (`test_sky_distances_are_degrees`, guarded by `ieee_support_flag`). A test building an extreme
+  fixture (subnormals by design) saves the flag on entry and restores on exit. `-nan` reaches no
+  `INTEGER`/`LOGICAL` and no `allocate` payload.
+- **`LEADZ` on `integer(int64)` is wrong by two at `-O1`+** (correct at `-O0`; `int32`, `trailz`,
+  `popcnt` correct): a descending `63 - leadz(w)` walk never terminates, a watermark scan is
+  silently high. Banned outright across `src/`, `test/`, `app/`, `bench/`, `tools/`
+  (`check_no_leadz`); use `trailz` and keep the last index reached, walking ascending and filling
+  from the far end when order mattered (`feature_risks.md` Risk-186).
+- **`len(s(d+1:))` is wrong when the lower bound is an EXPRESSION** (correct for a variable or
+  literal), and at `-O2` the wrong length folds an unrelated `dot == len(s)` comparison. Never form
+  a possibly-empty substring with an expression lower bound in a procedure that also compares
+  against `len()`: test each span only when non-empty and give it an explicit upper bound
+  (`significand_ok`, `src/parquet_utils.f90`; keep its shape). Audit:
+  `grep -rnE "\([a-zA-Z_][a-zA-Z0-9_]* *[+-] *[0-9a-zA-Z_]+ *:\)" src/*.f90`.
+- **The most-negative int64 CONSTANT combined with a runtime value is mis-evaluated** (guards wrong
+  in both directions, `INT64_MIN/scale` with the wrong sign, a common `ieor(., 2**63)` cancelled
+  from both sides of a relational). Form bounds from `huge`; a local copy is not a fix (the
+  optimiser propagates the constant back at `-O2`+); write the unsigned comparison out as
+  `(a < b) .neqv. ((a < 0) .neqv. (b < 0))`. A most-negative constant whose `ieor` result is stored
+  rather than compared (`SORT_SIGN_BIT`) is safe. Printing the expression shows the right value
+  (`feature_risks.md` Risk-125).
+- **Keep finalizers deallocate-only; never assign a scalar component in one.** Under
+  `-C=undefined` an implicitly invoked finalizer indexes a null definedness map and segfaults on
+  the first scalar store, with no diagnostic. Do not re-add the finalizers removed from
+  `parquet_string` and `parquet_string_column`; the remaining ones release C++ handles and locks.
+- **A written `ASSOCIATE` name whose selector is a pointer-valued function reference panics the
+  compiler at `-O1`+** (`find_node_sym -- invalid tree`); bind the result to a local pointer and
+  associate on that, for every such construct.
+- **A pointer-valued function result used directly as an actual argument generates invalid C**;
+  bind it to a local pointer first.
+- **A parent-type component read through a `class(...)` pointer in a `select type`'s
+  `class default` arm generates invalid C** (`no member named 'addr'`); write the concrete
+  `type is (...)` arms out (`key_origin`, `src/parquet_toml.f90`; do not fold it back).
+- **NAG's I/O runtime keeps ONE global unit table, not thread safe**: an `INQUIRE(FILE=)` or `OPEN`
+  on one thread races a `CLOSE` on another (bare SIGSEGV in `strlen`, no traceback; passes under
+  the checked profiles, fails under `nag`/`nagdeb`). Serialise every Fortran file operation in a
+  concurrent region on ONE named `critical`, bare `INQUIRE`/`OPEN`/`CLOSE` included; put the file
+  work in the region and the assertions after it.
+- **nagfor's fpp cannot turn a `-D` macro into a string by any route** (`#X` is invalid, the
+  gfortran `"&`/`&X"` splice is unrecognised, and fpm substitutes `{version}` only when it is the
+  entire macro value). A build-time string needed on every compiler is generated into a source
+  file, not preprocessed.
+- **A compile-time fork needs a check that RUNS under every compiler selecting an arm** (NAG spells
+  the preprocessor flag `-fpp`, has no `-U`, and `-u` means IMPLICIT NONE).
+- **`-C=dangling`/`-C=calls` both crash or hang on a `target` attribute on an `optional`,
+  assumed-size dummy receiving an ABSENT actual.** The twelve `write_<type>[_chunk]_flat` workers
+  therefore declare `valid(*)` without `target` (one `logical` copy on the unmasked path); never
+  give it back. A minimal reproducer for a codegen bug says what is sufficient to trigger it, never
+  what is necessary — settle a flag question by building the real library.

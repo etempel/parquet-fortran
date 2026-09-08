@@ -941,8 +941,6 @@ contains
     end procedure table_resolve
     !
     module procedure table_resolve_slot
-        character(len=:), allocatable :: sfx
-        !
         ! A column whose physical type this library cannot read got a slot at open time so it
         ! would still show up in %column_names -- but there is nothing to hand back, so any
         ! attempt to reach its values stops here rather than returning an empty column.
@@ -952,11 +950,7 @@ contains
                 idx = 0
                 return
             end if
-            ! The slot's OWN name, which is what the caller asked for under any entry point --
-            ! by name it is the name they passed, by position it is the one they meant.
-            call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
-            error stop EP // trim(proc) // ": this column's type is not supported by " // &
-                "parquet_table, so its values were never read" // sfx
+            call table_unsupported_column_abort(self%cache, idx, trim(proc))
         end if
         ! The lazy first touch, and the ONLY place it happens: every value accessor -- %col,
         ! %get, %set, %is_null, a row handle's %get, %get_slice -- reaches its slot through here,
@@ -995,7 +989,7 @@ contains
     !
     module procedure table_print_stat
         logical :: want_all, any_edited
-        integer :: i, nshown, wname
+        integer :: i, nshown, wname, wkind
         integer(int64) :: nulls, k
         character(len=:), allocatable :: kname, min_s, max_s, unit_s, fname
         character(len=32) :: rows_s, nulls_s, wdt_s
@@ -1012,6 +1006,9 @@ contains
         ! At least as wide as the header word, or the header line would be wider than the rows
         ! under it and nothing would line up.
         wname = len("column")
+        ! The kind column's floor, and its width for every table that has no unsupported column --
+        ! which is every table this library's own writer produced. Only the loop below widens it.
+        wkind = 18
         ! Gathered in the pass that is happening anyway, so the legend below costs nothing on a
         ! table with no edited columns -- which is every table read straight from a file.
         any_edited = .false.
@@ -1019,6 +1016,14 @@ contains
             if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
             nshown = nshown + 1
             wname = max(wname, len(self%cache%cols(i)%name))
+            ! An unsupported column reports Arrow's own spelling of its stored type, which is
+            ! longer than any kind name and has no bound in principle (a struct type prints its
+            ! whole field list). Sizing the column from the rows keeps such a listing aligned;
+            ! 18 stays the floor, so every table without one is byte-identical to before.
+            if (.not. self%cache%cols(i)%supported) then
+                call table_stat_kind_text(self%cache, i, kname)
+                wkind = max(wkind, len(kname))
+            end if
             if (self%cache%cols(i)%user_populated) any_edited = .true.
         end do
         call self%filename(fname)
@@ -1036,7 +1041,7 @@ contains
             print "(a)", "  (no materialized columns; pass all=.true. to list every column)"
             return
         end if
-        print "(a)", "  " // pad("column", wname) // "  " // pad("kind", 18) // "  " // &
+        print "(a)", "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  " // &
             pad("width", 6) // "  " // pad("nulls", 10) // "  " // pad("min", 22) // "  max"
         do i = 1, self%cache%ncols
             if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
@@ -1044,15 +1049,15 @@ contains
             ! its width would read the data, and a report must not change what it reports on.
             if (self%cache%cols(i)%width_pending) then
                 print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
-                    pad("pending", 18) // "  " // pad("-", 6) // "  " // pad("-", 10) // "  " // &
+                    pad("pending", wkind) // "  " // pad("-", 6) // "  " // pad("-", 10) // "  " // &
                     pad("-", 22) // "  -"
                 cycle
             end if
-            call parquet_kind_name(self%cache%cols(i)%declared_kind, kname)
+            call table_stat_kind_text(self%cache, i, kname)
             write(wdt_s, "(I0)") self%cache%cols(i)%width
             if (self%cache%cols(i)%residency /= RES_FULL) then
                 print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
-                    pad(kname, 18) // "  " // pad(trim(wdt_s), 6) // "  " // pad("-", 10) // &
+                    pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // pad("-", 10) // &
                     "  " // pad("-", 22) // "  -"
                 cycle
             end if
@@ -1074,7 +1079,7 @@ contains
             ! the slot and %set_user_populated refuses to set it on one.
             if (self%cache%cols(i)%user_populated) max_s = max_s // " *"
             print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
-                pad(kname, 18) // "  " // pad(trim(wdt_s), 6) // "  " // pad(trim(nulls_s), 10) // &
+                pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // pad(trim(nulls_s), 10) // &
                 "  " // pad(min_s, 22) // "  " // max_s
         end do
         if (any_edited) then
@@ -1082,6 +1087,25 @@ contains
                 "and %reload need force=."
         end if
     end procedure table_print_stat
+    !
+    !> The text of a column's `kind` cell in %print_stat. For a column whose stored type this
+    !> layer cannot read, that is Arrow's own spelling of the stored type -- the only place such a
+    !> listing can say what the column actually holds, since `declared_kind` is PK_NONE for every
+    !> one of them and the kind name alone would report them all identically. Every other column
+    !> reports its PK_* kind name, exactly as before.
+    subroutine table_stat_kind_text(cache, i, text)
+        type(parquet_table_cache), intent(in) :: cache      !! the column store.
+        integer, intent(in) :: i                            !! 1-based slot.
+        character(len=:), allocatable, intent(out) :: text  !! the cell's text.
+        !
+        ! Guarded the same way table_unsupported_column_abort's own lookup is: a column with no
+        ! file behind it has no stored type, and table_detach releases the reader.
+        if (.not. cache%cols(i)%supported .and. cache%cols(i)%file_source .and. allocated(cache%reader)) then
+            call parquet_get_column_arrow_type(cache%reader, cache%cols(i)%file_name, text)
+            return
+        end if
+        call parquet_kind_name(cache%cols(i)%declared_kind, text)
+    end subroutine table_stat_kind_text
     !
     !> How many of a table's columns are resident.
     integer function count_resident(cache) result(n)
@@ -1290,6 +1314,26 @@ contains
             suffix = parts // ")"
         end if
     end procedure table_context_suffix
+    !
+    module procedure table_unsupported_column_abort
+        character(len=:), allocatable :: sfx, stored
+        !
+        ! The slot's OWN name, which is what the caller asked for under any entry point -- by name
+        ! it is the name they passed, by position it is the one they meant.
+        call table_context_suffix(cache, cache%cols(idx)%name, sfx)
+        ! Arrow's own spelling of the stored type is the one thing a caller looking at such a
+        ! column actually needs: "not supported" says which column is the problem but not what it
+        ! is, and every other query answers "unknown" for exactly these columns. Guarded rather
+        ! than unconditional -- a column with no file behind it has no stored type to report, and
+        ! `table_detach` closes and releases the reader while leaving the slots in place, so
+        ! neither can be assumed here.
+        if (cache%cols(idx)%file_source .and. allocated(cache%reader)) then
+            call parquet_get_column_arrow_type(cache%reader, cache%cols(idx)%file_name, stored)
+            sfx = " (stored as " // stored // ")" // sfx
+        end if
+        error stop EP // trim(proc) // ": this column's type is not supported by " // &
+            "parquet_table, so its values were never read" // sfx
+    end procedure table_unsupported_column_abort
     !
     module procedure table_lookup_or_fail
         character(len=:), allocatable :: sfx

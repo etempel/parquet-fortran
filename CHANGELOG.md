@@ -127,13 +127,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `sort_by=`, the row-group statistics screen and `parquet_table` all accept it where they
   previously reported it as an unreadable column. The category codes, their order and pandas'
   `ordered` flag are not carried. See
-  [Reading dictionary columns from other tools](doc/pages/types/supported-data-types.md#reading-dictionary-columns-from-other-tools).
+  [Reading dictionary columns from other tools](doc/pages/types/supported-data-types.md#reading-dictionary-columns-from-other-tools)
+  and [Files written by pandas](doc/pages/io/reading.md#files-written-by-pandas).
 - **`parquet_table%print_rows`: look at a table.** `call t%print_rows()` prints the first and last
   rows of every resident column, aligned, with a kind row under the names, this table's own row
   number in a gutter and `<null>` where a value is missing; `first=`/`last=`, `rows=` (a slice),
   `columns=`, `unit=`, `digits=`, `max_width=` and `max_columns=` choose what is shown and where.
   It reads nothing unless `columns=` names a column that is not resident yet. See
   [Showing the rows](doc/pages/tables/table.md#showing-the-rows-print_rows).
+- **`parquet_get_column_arrow_type`: what a column is actually stored as.**
+  `call parquet_get_column_arrow_type(reader, name, arrow_type)` reports a column's stored type as
+  Arrow spells it — `dictionary<values=string, indices=int8, ordered=0>`, `decimal128(10, 2)`,
+  `fixed_size_list<element: double>[3]` — including for the columns `parquet_get_column_type`
+  answers `"unknown"` for. It peels nothing, reads no column data, and aborts only on a name that
+  does not exist. `parquet_table` uses it in two diagnostics: reaching an unsupported column's
+  values names the stored type in the abort message, and `%print_stat(all=.true.)` shows it in that
+  column's `kind` cell instead of `PK_NONE`. See
+  [What a column is actually stored as](doc/pages/io/reading.md#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type).
 
 ### Changed
 

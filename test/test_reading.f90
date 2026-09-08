@@ -114,6 +114,8 @@ contains
             new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
                 "case-insensitivity, missing columns, struct-leaf paths, and a foreign-typed column", &
                 test_column_exists_and_get_column_type), &
+            new_unittest("parquet_get_column_arrow_type reports the stored Arrow type, peeling nothing", &
+                test_get_column_arrow_type), &
             new_unittest("parquet_get_column_type reports the narrowest lossless Fortran kind", &
                 test_column_type_narrowest_lossless_mapping), &
             new_unittest("an encoding wrapper does not hide a column's shape", &
@@ -3358,6 +3360,116 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_column_exists_and_get_column_type
+    !> parquet_get_column_arrow_type reports the STORED type, spelled as Arrow spells it -- for
+    !> exactly the columns parquet_get_column_type cannot describe. Every assertion below pairs
+    !> the two queries, so what the test states is the CONTRAST rather than a lone string: a
+    !> dictionary column is "string" to one and `dictionary<...>` to the other, a decimal is
+    !> "float64" and `decimal128(10, 2)`, and a column outside the nine canonical tokens is
+    !> "unknown" and its real name. The expected spellings are Arrow's own DataType::ToString
+    !> output, which is what pyarrow prints for these same fixtures.
+    subroutine test_get_column_arrow_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: at, type_name
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+
+        ! A plain column: the two queries agree, because there is nothing to peel.
+        call parquet_get_column_arrow_type(reader, "id", at)
+        call check(error, at == "int32", "id's stored Arrow type should be int32, got '" // at // "'")
+        if (allocated(error)) return
+        ! The result is exactly as long as the type name, with no padding. This needs its own
+        ! assertion: Fortran blank-pads the shorter side of a character comparison, so every ==
+        ! in this test would still pass if the length query and the fill disagreed and left the
+        ! buffer half blank. Only the length says so.
+        call check(error, len(at) == len_trim(at), "the returned type must carry no trailing padding")
+        if (allocated(error)) return
+
+        ! A dictionary column -- the pandas `category` case. The read decodes it, so
+        ! parquet_get_column_type answers with the VALUE type; this query answers with what the
+        ! file actually holds, including the index type the decode discards.
+        call parquet_get_column_arrow_type(reader, "cat", at)
+        call check(error, at == "dictionary<values=string, indices=int8, ordered=0>", &
+            "cat's stored Arrow type should be the dictionary type, got '" // at // "'")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "cat", type_name)
+        call check(error, type_name == "string", &
+            "cat's declared type should still be string, got '" // type_name // "'")
+        if (allocated(error)) return
+
+        ! pandas' `ordered` flag is dropped by the read and is visible here -- one of the few
+        ! ways to see it at all from Fortran.
+        call parquet_get_column_arrow_type(reader, "cat_ordered", at)
+        call check(error, at == "dictionary<values=string, indices=int8, ordered=1>", &
+            "cat_ordered's stored Arrow type should carry ordered=1, got '" // at // "'")
+        if (allocated(error)) return
+
+        ! THE CASE THE QUERY EXISTS FOR: a column this library cannot read at all. "unknown" is a
+        ! true answer to "what do I declare" and a useless one to "what is this", which is what a
+        ! caller looking at such a column actually needs.
+        call parquet_get_column_arrow_type(reader, "cat_bytes", at)
+        call check(error, at == "dictionary<values=binary, indices=int8, ordered=0>", &
+            "cat_bytes's stored Arrow type should name binary, got '" // at // "'")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "cat_bytes", type_name)
+        call check(error, type_name == "unknown", &
+            "cat_bytes's declared type should be unknown, got '" // type_name // "'")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+
+        ! A decimal: precision and scale survive here and are lost by the float64 mapping.
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        call parquet_get_column_arrow_type(reader, "v_decimal_scaled", at)
+        call check(error, at == "decimal128(10, 2)", &
+            "v_decimal_scaled's stored Arrow type should carry its precision and scale, got '" // at // "'")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "v_decimal_scaled", type_name)
+        call check(error, type_name == "float64", &
+            "v_decimal_scaled's declared type should be float64, got '" // type_name // "'")
+        if (allocated(error)) return
+
+        call parquet_get_column_arrow_type(reader, "v_uint32", at)
+        call check(error, at == "uint32", "v_uint32's stored Arrow type should be uint32, got '" // at // "'")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "v_uint32", type_name)
+        call check(error, type_name == "int64", &
+            "v_uint32's declared type should be the int64 it widens into, got '" // type_name // "'")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+
+        ! A dotted struct-leaf path resolves like every other column-name argument, and a vector
+        ! leaf is NOT unwrapped to its element type the way parquet_get_column_type unwraps it.
+        call parquet_open_reader(reader, "test/fixtures/nested_struct.parquet")
+        call parquet_get_column_arrow_type(reader, "main.inner.name", at)
+        call check(error, at == "string", &
+            "the struct leaf main.inner.name should report string, got '" // at // "'")
+        if (allocated(error)) return
+        call parquet_get_column_arrow_type(reader, "vecdata.spectrum", at)
+        call check(error, at == "fixed_size_list<element: double>[3]", &
+            "a vector leaf should report its list type, not its element type, got '" // at // "'")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "vecdata.spectrum", type_name)
+        call check(error, type_name == "float64", &
+            "vecdata.spectrum's declared type should be its element type, got '" // type_name // "'")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+
+        ! A map column, which is what parquet_table's unsupported-column abort names when it
+        ! appends the stored type -- so the message's own source is asserted here.
+        call parquet_open_reader(reader, "test/fixtures/map_payloads.parquet")
+        call parquet_get_column_arrow_type(reader, "m_intkey", at)
+        call check(error, at == "map<int32, int32 ('m_intkey')>", &
+            "m_intkey's stored Arrow type should be its map type, got '" // at // "'")
+        if (allocated(error)) return
+        call check(error, len(at) == len_trim(at), &
+            "a long type name must carry no trailing padding either")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+    end subroutine test_get_column_arrow_type
 
     !> An Arrow ENCODING WRAPPER must not hide the shape of what it wraps.
     !>

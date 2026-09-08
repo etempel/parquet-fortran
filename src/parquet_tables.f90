@@ -81,7 +81,8 @@ module parquet_tables
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
         parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices, &
-        parquet_get_column_time_info, parquet_size_auto, parquet_reader_adopt_transform, &
+        parquet_get_column_time_info, parquet_get_column_arrow_type, parquet_size_auto, &
+        parquet_reader_adopt_transform, &
         parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
         parquet_split_name_list, parquet_parse_sort_key, &
         parquet_parse_filter_rules, parquet_eval_filter_leaf, parquet_eval_filter_program, &
@@ -3682,6 +3683,15 @@ module parquet_tables
             character(len=*), intent(in) :: name                  !! column name ("" to omit it).
             character(len=:), allocatable, intent(out) :: suffix  !! the message suffix.
         end subroutine table_context_suffix
+        !> Never returns: `error stop`s because slot `idx` holds a column whose stored type this
+        !! layer cannot read. One helper rather than the same sentence in six accessors, so that
+        !! every way of reaching such a column -- %get, a row handle, %cast, %fillna, %to_matrix,
+        !! %convert -- says the same thing and names the stored Arrow type.
+        module subroutine table_unsupported_column_abort(cache, idx, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the column store.
+            integer, intent(in) :: idx                     !! 1-based slot of the offending column.
+            character(len=*), intent(in) :: proc           !! message label, e.g. "get" or "row get".
+        end subroutine table_unsupported_column_abort
         !> error stops unless `self%cache` is associated -- the guard every accessor runs first.
         module subroutine table_check_open(self, proc)
             class(parquet_table), intent(in) :: self !! the table.

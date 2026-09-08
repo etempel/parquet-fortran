@@ -462,7 +462,6 @@ contains
     module procedure table_cast
         integer :: idx
         logical :: strict, deferred
-        character(len=:), allocatable :: sfx
         !
         call table_check_not_shared(self, "cast")
         strict = .false.
@@ -473,11 +472,7 @@ contains
         ! table_resolve would have applied on the way past are applied here instead.
         call table_lookup_or_fail(self, name, "cast", idx, found)
         if (idx == 0) return
-        if (.not. self%cache%cols(idx)%supported) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "cast: this column's type is not supported by parquet_table, so " // &
-                "its values were never read" // sfx
-        end if
+        if (.not. self%cache%cols(idx)%supported) call table_unsupported_column_abort(self%cache, idx, "cast")
         ! A plain LIST/LARGE_LIST from a foreign writer has no kind yet, and its kind is what
         ! decides whether this cast is legal at all -- so settle it first. That reads the column,
         ! which is why such a column never takes the deferred path below.

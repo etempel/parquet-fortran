@@ -18,7 +18,8 @@ full under [Important behavior](../../index.html#important-behavior) in the READ
 - [Reading parquet files from your Fortran code](reading.html) — open a file, read whole columns,
   random access by row or element, shape/type/size queries, reading a list, map or struct column,
   prefetching, reading a file's table metadata, checking values against declared qc bounds,
-  printing a reader-activity summary on close, and chunked reads.
+  printing a reader-activity summary on close, chunked reads, and what to expect from files
+  written by pandas.
 - [Filtering, sorting and sampling rows](filter-sort-sample.html) — `filter=`, `sort_by=` and
   `sample_fraction=`: the rule grammar, three-valued Null logic, row-group pruning, and how the
   three compose.

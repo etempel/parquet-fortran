@@ -135,10 +135,17 @@ Three things follow, and are worth knowing before relying on it:
   `dictionary<values=string, indices=int8, ordered=0>`**, the same way it goes on showing
   `string_view` above: that cell reports the file's own stored schema, which nothing on the read
   side rewrites. The column reads as a string column and describes itself as what it is on disk.
+  [`parquet_get_column_arrow_type`](../io/reading.html#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type)
+  reports the same thing for one column on demand, which is how to see the index type and the
+  `ordered` flag the decode drops.
 
 The decode costs one pass over the column (each row's value copied out of the dictionary) and the
 dense values in memory, which is what any read of the column would have cost had it not been
 encoded.
+
+Everything else a pandas-written file does differently — the `__index_level_0__` column, the
+`large_string` default, the frame description under the `pandas` metadata key — is in
+[Files written by pandas](../io/reading.html#files-written-by-pandas).
 
 ## Vector-column width (`col_size`) limit
 

@@ -508,16 +508,11 @@ contains
         character(len=*), intent(in) :: name      !! the column named by the caller.
         character(len=*), intent(in) :: proc      !! calling procedure, for every message.
         integer, intent(out) :: idx               !! its slot.
-        character(len=:), allocatable :: sfx
         !
         call table_check_not_shared(self, proc)
         call table_check_open(self, proc)
         call table_resolve(self, name, proc, idx, writing=.false.)
-        if (.not. self%cache%cols(idx)%supported) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // trim(proc) // ": this column's type is not supported by " // &
-                "parquet_table, so its values were never read" // sfx
-        end if
+        if (.not. self%cache%cols(idx)%supported) call table_unsupported_column_abort(self%cache, idx, trim(proc))
     end subroutine convert_prepare
     !
     !> Refuses a `to_name` that is already a column, before any work is done.

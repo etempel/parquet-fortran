@@ -2409,6 +2409,19 @@ contains
             if (tzlen > 0) call parquet_reader_get_column_timezone(reader%handle, trim(name)//char(0), timezone, tzlen)
         end if
     end procedure parquet_get_column_time_info
+    module procedure parquet_get_column_arrow_type
+        integer(c_long_long) :: nbytes
+
+        call check_reader_open(reader, "parquet_get_column_arrow_type")
+        call check_column_exists(reader, name, "parquet_get_column_arrow_type")
+        ! Length first, then allocate, then fill -- the shape parquet_get_column_time_info's
+        ! timezone above already uses, and necessary here for the same reason: Arrow's spelling of
+        ! a type has no upper bound (a struct prints its whole field list, and nests), so there is
+        ! no fixed buffer length that would be honest for every answer.
+        nbytes = parquet_reader_get_column_arrow_type_length(reader%handle, trim(name)//char(0))
+        allocate(character(len=int(nbytes)) :: arrow_type)
+        if (nbytes > 0) call parquet_reader_get_column_arrow_type(reader%handle, trim(name)//char(0), arrow_type, nbytes)
+    end procedure parquet_get_column_arrow_type
     !> Resolves `name`'s canonical physical data type (see valid_query_data_types in parquet_core.f90),
     !> without checking that `name` exists first -- every caller (parquet_column_exists/
     !> parquet_get_column_type) already validated existence via parquet_reader_has_column/

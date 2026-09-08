@@ -1583,6 +1583,7 @@ module parquet_core
     public :: parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
     public :: parquet_ns_per_sec, parquet_ns_per_day, parquet_ns_to_sec, parquet_ns_to_day
     public :: parquet_get_column_time_info
+    public :: parquet_get_column_arrow_type
     public :: parquet_open_writer
     public :: parquet_write_column
     public :: parquet_new_row_group
@@ -3441,6 +3442,23 @@ module parquet_core
             integer, intent(out), optional :: unit !! stored unit (a parquet_unit_* selector).
             character(len=:), allocatable, intent(out), optional :: timezone !! IANA tz, or "" if naive.
         end subroutine parquet_get_column_time_info
+        !> Returns column `name`'s stored Arrow type, spelled the way Arrow itself spells it:
+        !> `"dictionary<values=string, indices=int8, ordered=0>"`, `"decimal128(10, 2)"`,
+        !> `"list<item: int32>"`, `"int32"`. Schema-only -- reads no column data, and aborts only
+        !> if `name` does not exist. Accepts a dotted struct-leaf path, like every other
+        !> column-name argument.
+        !>
+        !> Distinct from parquet_get_column_type, which answers *what do I declare for this
+        !> column* and reports `"unknown"` for a type this library cannot read. This one answers
+        !> *what is actually in the file*, which is the question worth asking about exactly those
+        !> columns. It peels nothing: a dictionary column reports its dictionary type rather than
+        !> the value type it decodes to, and a vector column its `fixed_size_list` rather than its
+        !> element type.
+        module subroutine parquet_get_column_arrow_type(reader, name, arrow_type)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! column name (may be a dotted struct path).
+            character(len=:), allocatable, intent(out) :: arrow_type !! Arrow's own spelling of the stored type.
+        end subroutine parquet_get_column_arrow_type
         !> Returns .true. if column `name` (a top-level or dotted struct-leaf path, same
         !> convention as every other column-name argument) exists in `reader`'s schema,
         !> optionally restricted to a set of allowed data types via `types`.

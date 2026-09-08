@@ -372,7 +372,7 @@ contains
         character(len=*), intent(in) :: proc           !! calling procedure, for every message.
         integer, allocatable, intent(out) :: slots(:)  !! one slot index per name, in order.
         logical, intent(in) :: writing                 !! .true. when values are about to be written.
-        character(len=:), allocatable :: sfx, name
+        character(len=:), allocatable :: name
         integer :: k
         !
         call table_check_open(self, proc)
@@ -381,9 +381,7 @@ contains
             name = trim(names(k))
             call table_resolve(self, name, proc, slots(k), writing=writing)
             if (.not. self%cache%cols(slots(k))%supported) then
-                call table_context_suffix(self%cache, name, sfx)
-                error stop EP // trim(proc) // ": this column's type is not supported by " // &
-                    "parquet_table, so its values were never read" // sfx
+                call table_unsupported_column_abort(self%cache, slots(k), trim(proc))
             end if
         end do
     end subroutine matrix_prepare

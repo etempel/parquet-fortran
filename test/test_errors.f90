@@ -1676,6 +1676,10 @@ contains
                 test_temporal_write_time_precision_loss_aborts), &
             new_unittest("parquet_get_column_time_info on a date column aborts", &
                 test_temporal_time_info_on_date_column_aborts), &
+            new_unittest("parquet_get_column_arrow_type aborts only on a missing column", &
+                test_arrow_type_unknown_column_aborts), &
+            new_unittest("%print_stat names an unsupported column's stored Arrow type", &
+                test_table_print_stat_unsupported_column), &
             new_unittest("qc: miss: declared on a temporal column suppresses the null WARNING", &
                 test_temporal_qc_miss_declared_null_no_warning), &
             new_unittest("writing a Null into a protected timestamp column aborts", &
@@ -4286,7 +4290,11 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_unsupported_column_read", expect_abort=.true., &
             failure_message="reading a column of an unsupported physical type was expected to abort", &
-            required_stderr="this column's type is not supported by parquet_table")
+            ! The appended stored type is the point: "not supported" alone says which column is
+            ! the problem and not what it is, and PK_NONE is the same answer for every one of
+            ! them. Asserted as one substring so the clause cannot drift away from the sentence.
+            required_stderr="this column's type is not supported by parquet_table, so its values " // &
+                "were never read (stored as map<int32, int32 ('m_intkey')>)")
     end subroutine test_table_unsupported_column_read_aborts
 
     subroutine test_table_add_column_row_mismatch_aborts(error)
@@ -13486,6 +13494,26 @@ contains
             failure_message="parquet_get_column_time_info on a date column was expected to abort", &
             required_stderr="column is not a time/timestamp column")
     end subroutine test_temporal_time_info_on_date_column_aborts
+    !> The message must name parquet_get_column_arrow_type: "column not found" comes from the
+    !> shared check_column_exists guard, so asserting the bare phrase would pass against any of
+    !> the ninety-odd queries that call it. The scenario's own negative control (see its comment)
+    !> covers the other half -- that the query does not abort for a type it cannot describe.
+    subroutine test_arrow_type_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "arrow_type_unknown_column", expect_abort=.true., &
+            failure_message="parquet_get_column_arrow_type on a missing column was expected to abort", &
+            required_stderr="parquet_get_column_arrow_type: column not found in parquet file: no_such_column")
+    end subroutine test_arrow_type_unknown_column_aborts
+    !> The kind cell of an unsupported column carries its stored Arrow type. Asserted through the
+    !> scenario harness rather than in-process because %print_stat prints to stdout; the harness
+    !> searches both captured streams. The scenario's own negative control (see its comment)
+    !> covers the other direction -- that a SUPPORTED dictionary column is unaffected.
+    subroutine test_table_print_stat_unsupported_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_print_stat_unsupported_column", expect_abort=.false., &
+            failure_message="%print_stat(all=.true.) over an unsupported column was expected to run to completion", &
+            required_stderr="dictionary<values=binary, indices=int8, ordered=0>")
+    end subroutine test_table_print_stat_unsupported_column
 
     !> `qc: miss:` is supported on a temporal column even though `qc:` BOUNDS are not: a `date`
     !> field declaring qc_miss="Null" must write its null element without a WARNING. Both halves

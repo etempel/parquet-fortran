@@ -108,9 +108,7 @@ contains
             error stop EP // "row " // trim(proc) // ": no column of this name" // sfx
         end if
         if (.not. self%cache%cols(idx)%supported) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // "row " // trim(proc) // ": this column's type is not supported by " // &
-                "parquet_table, so its values were never read" // sfx
+            call table_unsupported_column_abort(self%cache, idx, "row " // trim(proc))
         end if
         ! A row read is a value read, so it triggers the same lazy first touch the table's own
         ! accessors do -- which is the whole reason the handle carries the scope by value.

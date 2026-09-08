@@ -1087,11 +1087,16 @@ parquet_table: catalogue.parquet
 
 `all=.true.` lists every column, with `-` where one that has not been read has nothing to report.
 
-Four things worth knowing:
+Worth knowing:
 
 - **Printing never reads anything.** A deferred plain-`LIST` column prints as `pending` rather
   than being measured — a diagnostic that changes what it is diagnosing is worse than one that
   admits it does not know.
+- **A column this layer cannot read shows its stored Arrow type in the `kind` cell**, instead of
+  the `PK_NONE` that is every such column's kind and so tells them all apart from nothing. The
+  kind column widens to fit it, so the listing stays aligned.
+  [`parquet_get_column_arrow_type`](../io/reading.html#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type)
+  answers the same question for one column, on a reader.
 - **A `logical` column reports `T:<n>`/`F:<n>`** instead of an ordering, and a **vector** column's
   statistic is over all of its elements, flattened. An all-null column has no min or max and
   prints `-`.

@@ -1884,6 +1884,10 @@ program error_scenarios
         call scenario_temporal_foreign_tz_roundtrip()
     case ("time_info_on_date_column")
         call scenario_time_info_on_date_column()
+    case ("arrow_type_unknown_column")
+        call scenario_arrow_type_unknown_column()
+    case ("table_print_stat_unsupported_column")
+        call scenario_table_print_stat_unsupported_column()
     case ("list_type_foreign_fixture")
         call scenario_list_type_foreign_fixture()
     case ("schema_add_field_date_with_unit")
@@ -14091,6 +14095,46 @@ contains
         print '(a)', "unexpectedly queried a date column's time unit without error"
         call parquet_close_reader(reader)
     end subroutine scenario_time_info_on_date_column
+    !> parquet_get_column_arrow_type aborts on a name that does not exist. That is its ONLY
+    !> failure mode: a type the library cannot read is an ANSWER for this query rather than an
+    !> error, which is the whole reason it exists, so a missing name is the one thing left to
+    !> refuse.
+    !>
+    !> The query on "cat_bytes" first is the NEGATIVE CONTROL, and is what makes the scenario mean
+    !> anything. It is a dictionary over `binary` -- the column every other reader query in this
+    !> library calls "unknown" -- so a build that aborted on any type it did not recognise, rather
+    !> than only on a missing name, would fail here instead of passing.
+    subroutine scenario_arrow_type_unknown_column()
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: at
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+        call parquet_get_column_arrow_type(reader, "cat_bytes", at)
+        if (index(at, "dictionary<values=binary") /= 1) then
+            error stop "the negative control failed: an unreadable column did not report its stored type"
+        end if
+        print '(a)', "control: cat_bytes is " // at
+        call parquet_get_column_arrow_type(reader, "no_such_column", at)   ! -> aborts
+        print '(a)', "unexpectedly reported a type for a column that does not exist: " // at
+    end subroutine scenario_arrow_type_unknown_column
+    !> %print_stat(all=.true.) names the STORED Arrow type of a column the table layer cannot
+    !> read, rather than PK_NONE's kind name. Every unsupported column has the same PK_NONE kind,
+    !> so without this the listing reports them all identically and a reader learns only that
+    !> something is wrong, not what.
+    !>
+    !> Runs to completion (expected exit 0): this scenario exists because %print_stat writes to
+    !> stdout via `print`, which an in-process test cannot capture -- the scenario harness can,
+    !> so the assertion lives in test_errors.f90 against the captured output. The `cat` column
+    !> beside it is the NEGATIVE CONTROL: it is a dictionary too, but over strings, so the table
+    !> DOES support it and it must still report a kind name (`PK_STRING`'s) rather than its
+    !> dictionary type.
+    subroutine scenario_table_print_stat_unsupported_column()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/dictionary_types.parquet")
+        call t%print_stat(all=.true.)
+        if (t%is_supported("cat_bytes")) error stop "the fixture no longer has an unsupported column"
+        if (.not. t%is_supported("cat")) error stop "the negative control failed: cat should be supported"
+    end subroutine scenario_table_print_stat_unsupported_column
 
     !> The qc: miss: half of the temporal qc rule: `min:`/`max:` bounds are rejected for a
     !> date/time/timestamp field, but `miss:` is accepted and active. This scenario declares

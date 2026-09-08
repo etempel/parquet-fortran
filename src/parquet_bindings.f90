@@ -70,6 +70,7 @@ module parquet_bindings
     public :: parquet_reader_path_nrows
     public :: parquet_reader_get_column_type_name, parquet_reader_get_column_nullable
     public :: parquet_reader_get_column_shape_name, parquet_reader_get_map_value_type_name
+    public :: parquet_reader_get_column_arrow_type_length, parquet_reader_get_column_arrow_type
     public :: parquet_writer_set_protected_column
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_has_chunk_reads
@@ -1010,6 +1011,28 @@ module parquet_bindings
             character(kind=c_char) :: name(*) !! null-terminated column name (may be a dotted struct path).
             integer(c_long_long) :: nullable !! 1 if the field is nullable, 0 if not.
         end function
+        !> Byte length of `name`'s stored Arrow type as Arrow spells it, for the
+        !> allocate-then-fill pair below. Schema-only (reads no column data).
+        function parquet_reader_get_column_arrow_type_length(reader, name) &
+                bind(C, name="parquet_reader_get_column_arrow_type_length") result(strlen)
+            import
+            type(c_ptr), value :: reader !! opaque reader handle.
+            character(kind=c_char) :: name(*) !! null-terminated column name (may be a dotted struct path).
+            integer(c_long_long) :: strlen !! byte length of the type string.
+        end function
+
+        !> Copies `name`'s stored Arrow type name into `buf`, space-padded to
+        !> `buf_len`. Peels nothing: a dictionary column answers `dictionary<...>`
+        !> and a vector column its `fixed_size_list<...>`, which is what makes this
+        !> distinct from parquet_reader_get_column_type_name above.
+        subroutine parquet_reader_get_column_arrow_type(reader, name, buf, buf_len) &
+                bind(C, name="parquet_reader_get_column_arrow_type")
+            import
+            type(c_ptr), value :: reader !! opaque reader handle.
+            character(kind=c_char) :: name(*) !! null-terminated column name (may be a dotted struct path).
+            character(kind=c_char) :: buf(*) !! receiving buffer, at least `buf_len` bytes.
+            integer(c_long_long), value :: buf_len !! size of `buf` in bytes.
+        end subroutine
 
         !> Validates and applies a packed row filter to `reader`; returns
         !> non-zero and writes a message to `err_out` on failure. The clauses

@@ -9236,6 +9236,38 @@ extern "C"
 		return field->nullable() ? 1 : 0;
 	}
 
+	// Byte length of `name`'s stored Arrow type as Arrow itself spells it (DataType::ToString()),
+	// for the allocate-then-fill pair below -- the same length-then-copy shape
+	// parquet_reader_get_column_timezone_length/parquet_reader_get_column_timezone use, and for
+	// the same reason: an Arrow type string has no upper bound (a struct type prints its whole
+	// field list, and nests), so no fixed receiving buffer on the Fortran side would be honest.
+	// A fixed one would fix the case in hand and move the boundary rather than remove it.
+	//
+	// Reports the type AS STORED, peeling nothing: a dictionary column answers
+	// "dictionary<values=string, indices=int8, ordered=0>" rather than "string", and a vector
+	// column answers "fixed_size_list<item: int32>[3]" rather than "int32". That is the whole
+	// point of the query -- parquet_reader_get_column_type_name above already answers "what do I
+	// declare for this column", and this one answers "what is actually in the file", which is the
+	// question worth asking about a column the library cannot read at all. Schema-only: reads no
+	// column data. Assumes `name` already resolves, like every other query in this cluster
+	// (parquet_get_column_arrow_type in parquet_read.f90 probes existence via check_column_exists
+	// first).
+	int64_t parquet_reader_get_column_arrow_type_length(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		return static_cast<int64_t>(resolved.leaf_field->type()->ToString().size());
+	}
+
+	// Copies `name`'s stored Arrow type name into `buf`, space-padded to buf_len. See the length
+	// query above for what "as stored" means here, and why the length is a separate call.
+	void parquet_reader_get_column_arrow_type(void *handle, const char *name, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		copy_string_with_padding(buf, buf_len, resolved.leaf_field->type()->ToString());
+	}
+
 	// Returns the declared vector-column element count of `name` (1 for a scalar column),
 	// without reading any column data except for a plain LIST/LARGE_LIST. A FIXED_SIZE_LIST
 	// column's width is a schema-level constant (arrow::FixedSizeListType::list_size()), so it's

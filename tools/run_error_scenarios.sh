@@ -1218,6 +1218,8 @@ scenarios=(
     "temporal_foreign_int96_roundtrip:0"
     "temporal_foreign_tz_roundtrip:0"
     "time_info_on_date_column:1"
+    "arrow_type_unknown_column:1"
+    "table_print_stat_unsupported_column:0"
     "list_type_foreign_fixture:0"
     "schema_add_field_date_with_unit:1"
     "validate_qc_on_temporal_column:1"

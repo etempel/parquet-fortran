@@ -49,8 +49,8 @@ Notes:
   name checks this and fails immediately with `error stop` naming the missing column —
   `parquet_read_column`, `parquet_read_column_chunk`, `parquet_get_col_size`,
   `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_get_column_type`,
-  `parquet_read_array_row_mode`, `parquet_read_array_element_mode` and `parquet_prefetch_columns`
-  among them. The one deliberate exception is `parquet_column_exists`, whose whole job is to
+  `parquet_get_column_arrow_type`, `parquet_read_array_row_mode`, `parquet_read_array_element_mode`
+  and `parquet_prefetch_columns` among them. The one deliberate exception is `parquet_column_exists`, whose whole job is to
   answer that question — it returns `.false.` instead of aborting.
 - For string columns, choose a fixed string length that is large enough for your data — or read
   into a `type(parquet_string_column)` instead, which needs no pre-sizing; see
@@ -417,7 +417,9 @@ ordinary column of that type — `parquet_read_column`, the compact `parquet_str
 categorical type to carry them in. The rule is the value type's own row above, so a dictionary over
 a type this library cannot read — `dictionary<binary>` — still reports `"unknown"` and still fails
 on a read, exactly as a plain `binary` column does. See
-[Reading dictionary columns from other tools](../types/supported-data-types.html#reading-dictionary-columns-from-other-tools).
+[Reading dictionary columns from other tools](../types/supported-data-types.html#reading-dictionary-columns-from-other-tools)
+for the encoding, and [Files written by pandas](#files-written-by-pandas) below for the rest of
+what a pandas-written file does differently.
 
 A **vector or list** column reports its **element** type: an `int32` vector (`FIXED_SIZE_LIST`)
 column and a variable-length `list<int32>` column both report `"int32"`. That unwrapping goes
@@ -427,6 +429,46 @@ exactly one level, so it does not extend to the other containers — a `map` col
 `parquet_get_column_type` fails with
 `error stop` only if `name` doesn't exist — that is a caller mistake, and `parquet_column_exists` is
 the query for it. A type it cannot read is an answer (`"unknown"`), not an error.
+
+### What a column is actually stored as: `parquet_get_column_arrow_type`
+
+The two queries above ask *what should I declare for this column?*, and for a column this library
+cannot read they both answer `"unknown"`. That is a true answer, and a useless one in the situation
+you are most likely to be in when you get it: an unfamiliar file, and a column you expected to
+work. `parquet_get_column_arrow_type(reader, name, arrow_type)` answers the other question — *what
+is actually in the file?* — in Arrow's own words:
+
+```fortran
+character(len=:), allocatable :: arrow_type
+call parquet_get_column_arrow_type(reader, "cls", arrow_type)
+! arrow_type = "dictionary<values=string, indices=int8, ordered=0>"
+```
+
+It **peels nothing**, which is what separates it from `parquet_get_column_type`:
+
+| the column | `parquet_get_column_type` | `parquet_get_column_arrow_type` |
+|---|---|---|
+| a pandas `category` | `string` | `dictionary<values=string, indices=int8, ordered=0>` |
+| a `float64` vector column | `float64` | `fixed_size_list<element: double>[3]` |
+| a scaled decimal | `float64` | `decimal128(10, 2)` |
+| a map column | `unknown` | `map<int32, int32 ('m_intkey')>` |
+| a plain `int32` column | `int32` | `int32` |
+
+Use the left column to decide what to declare, and the right one to find out what you are looking
+at. The two right-hand answers you cannot get any other way are the dictionary's *index* type and
+`ordered` flag, both of which the decode discards, and a decimal's precision and scale, which the
+`float64` mapping loses.
+
+`arrow_type` is `character(len=:), allocatable` and comes back allocated to exactly the length of
+the type name, however long that is — a `struct` type prints its whole field list, and nests, so no
+fixed buffer length would be honest for every answer. Schema-only like the queries above: it reads
+no column data, takes a dotted struct-leaf path, and `error stop`s only if `name` doesn't exist.
+There is no "unknown" here — whatever Arrow can name, this reports.
+
+`parquet_table` calls it for you in two places, so a table often answers this question without
+being asked: reaching the values of a column it cannot read names the stored type in the abort
+message, and `%print_stat(all=.true.)` shows it in the `kind` cell of such a column instead of
+`PK_NONE`.
 
 ### Which kind of container a column is: `parquet_get_column_shape`
 
@@ -497,6 +539,81 @@ its values are of a type outside those tokens. Schema-only, like the two queries
 
 Keys are always strings, so there is no query for their type. See
 [Map columns](../types/map-columns.html) for reading one.
+
+## Files written by pandas
+
+A Parquet file written by `DataFrame.to_parquet` is an ordinary Arrow-written file, and this
+library reads it with no special handling and no conversion step. Five of its habits are worth
+knowing about anyway: one used to need a workaround before opening the file, one puts a column in
+the file that you did not, and the rest are things you would otherwise go looking for.
+
+- **A `category` column arrives as plain strings.** pandas writes a `Categorical` as an Arrow
+  *dictionary* — the distinct values once, plus a narrow index per row — and this library decodes
+  it as it reads, so the column behaves in every way like an ordinary string column:
+  `parquet_get_column_type` answers `"string"`, and `parquet_read_column`, the compact
+  `parquet_string_column` read, `filter=`, `sort_by=`, `qc:` and `parquet_table` all accept it.
+  `.astype(str)` before `to_parquet` is no longer needed. What is *not* carried across is the
+  encoding itself: the category codes, their order, and pandas' `ordered` flag have no Fortran
+  counterpart and are dropped. If you need the codes, factorise the strings you read back —
+  `pf_index_map`'s `%get_or_add_many`, or `pf_rank(method="dense")`. If you only want to *see* the
+  encoding, [`parquet_get_column_arrow_type`](#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type)
+  reports it verbatim. An *integer* categorical never reaches this path at all: Arrow restores a
+  stored dictionary only for string and binary values, so pandas' `Categorical([1, 2, 1])` arrives
+  as a dense `int64` column.
+
+- **A non-default index becomes a real column called `__index_level_0__`.** A default `RangeIndex`
+  writes no column and is recorded in metadata only; any other index is written as ordinary data,
+  under `__index_level_0__` or under the index's own name if it has one. It is a normal column —
+  nothing here invented it, and `parquet_get_column_names` lists it like any other. Drop it with
+  `t%drop_columns("__index_level_0__", ignore_missing=.true.)` if it is in your way, or write the
+  file with `to_parquet(index=False)` and it will not be there.
+
+- **Strings may be `large_string`, and it makes no difference.** pandas 3 writes its default string
+  dtype as Arrow `large_string` where pandas 2 wrote `string`. Both read identically here, so a
+  file written by either release needs nothing.
+
+- **The frame's own description is in the metadata.** pyarrow stores a JSON description of the
+  DataFrame — its dtypes, its index, its column order — under the file-level metadata key `pandas`.
+  `parquet_get_metadata(reader, "pandas", value)` returns it verbatim and
+  `parquet_get_metadata_items` lists it alongside everything else, for a program that wants the
+  original dtypes rather than the ones Arrow reports. See
+  [Reading table metadata](#reading-table-metadata-with-parquet_get_metadata).
+
+- **Reading this library's output back in pandas needs nothing either.** `pd.read_parquet` sees an
+  ordinary Arrow file: a `parquet_string_column` column comes back as `large_string`, and the
+  `.maml` sidecar and its units (`write_maml=.true.`) are a separate file that pandas neither sees
+  nor needs. Nothing else differs from any other Arrow-written file.
+
+### A pandas file end to end
+
+A catalogue written by pandas, with a `cls` category, an object index (so `__index_level_0__` is
+there) and a million rows:
+
+```fortran
+program look_at_a_pandas_file
+    use parquet
+    implicit none
+    type(parquet_table) :: t
+    integer(int64), allocatable :: rows(:)
+    type(parquet_table_index) :: ix
+
+    call parquet_open_table(t, "catalogue.parquet")
+    call t%print_rows()                                 ! the header, and the "no materialized
+                                                        ! columns" hint -- nothing is read yet
+    call t%drop_columns("__index_level_0__", ignore_missing=.true.)
+    call t%print_rows(columns="obj_id,cls,flux")        ! reads those three, shows 5 + 5 rows
+    call t%filter_rows('cls == "galaxy"')               ! cls is a string column now
+    call t%build_index("obj_id", ix)
+    call ix%find_all(10999997_int64, rows)
+    call t%print_rows(rows=parquet_slice_list(rows))    ! exactly the rows the lookup returned
+end program look_at_a_pandas_file
+```
+
+Before the category column was decoded, the second `%print_rows` and the `%filter_rows` would both
+have failed on `cls`. See [Showing the rows: `%print_rows`](../tables/table.html#showing-the-rows-print_rows)
+for what the display prints, and
+[Reading dictionary columns from other tools](../types/supported-data-types.html#reading-dictionary-columns-from-other-tools)
+for the encoding itself, including what a dictionary over a type this library cannot read does.
 
 ## Reading a container column
 

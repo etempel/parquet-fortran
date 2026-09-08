@@ -121,6 +121,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `%set_where`: null every element a mask marks, or write one value into every element it marks,
   in one rebuild of the column instead of one payload shift per element. See
   [Bulk row-set operations](doc/pages/types/string-columns.md#bulk-row-set-operations).
+- **A dictionary-encoded column reads as an ordinary column of its values** — what pandas writes
+  for a `Categorical`. Such a column is decoded as it is read, so `parquet_get_column_type` reports
+  the value type, and `parquet_read_column`, the compact `parquet_string_column` read, `filter=`,
+  `sort_by=`, the row-group statistics screen and `parquet_table` all accept it where they
+  previously reported it as an unreadable column. The category codes, their order and pandas'
+  `ordered` flag are not carried. See
+  [Reading dictionary columns from other tools](doc/pages/types/supported-data-types.md#reading-dictionary-columns-from-other-tools).
 
 ### Changed
 

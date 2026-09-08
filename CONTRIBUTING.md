@@ -167,6 +167,19 @@ It needs the same `FPM_CXXFLAGS`/`FPM_LDFLAGS` used to build the project itself 
 if they are unset. Its `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override, so
 fixture regeneration is not possible as-is on a GCC-only Linux box without editing the script first.
 
+One fixture comes from elsewhere: **`test/fixtures/pandas_written.parquet` is written by pandas
+itself**, via `tools/generate_pandas_fixture.py`, because what it pins is *provenance* — that a real
+pandas release, given an ordinary DataFrame and no Parquet-specific arguments, produces exactly the
+shapes the reader tests expect (a `category` as an Arrow dictionary over strings, a plain string
+column as `large_string`, a non-default index as a `__index_level_0__` column). The C++ generator can
+imitate those types but cannot testify that pandas produces them. It needs pandas and pyarrow, so
+run it by hand under the `astro` environment; `--check` compares the committed file's schema and
+values with what the current environment writes, without overwriting it:
+
+```bash
+conda activate astro && tools/generate_pandas_fixture.py --check
+```
+
 ### Other tools/ helpers
 
 The repository's own scripts live in **two directories, split by contract**:
@@ -234,6 +247,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_random_perm_vectors.py` | The same for the permutation contract. |
 | `generate_stats_vectors.py` | `parquet_stats`' golden expectations, from a 50-digit `mpmath` oracle. |
 | `generate_fixtures.cpp` | The hand-built Arrow fixtures — see [above](#regenerating-the-test-fixtures). |
+| `generate_pandas_fixture.py` | The one fixture pandas itself writes — see [above](#regenerating-the-test-fixtures). |
 | `run_generate_fixtures.sh` | Builds and runs that generator. |
 | `generate_logo_svg.py` | Regenerates `doc/media/logo.*`. |
 

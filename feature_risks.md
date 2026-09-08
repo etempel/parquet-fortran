@@ -288,6 +288,8 @@ something a reader is expected to have.
 | [Risk-187](#risk-187--a-rejected-fmt-that-leaves-partial-text-behind-returns-a-plausible-number-instead-of-asterisks) | A rejected `fmt` that leaves PARTIAL TEXT behind returns a plausible number instead of asterisks | 4 — covered |
 | [Risk-188](#risk-188--a-joins-left-container-column-is-carried-only-because-join-reuses-the-shared-gather) | A join's left container column is carried only because `%join` reuses the shared gather | 4 — covered |
 | [Risk-189](#risk-189--a-driver-that-resolves-a-thread-count-and-then-drops-it-threads-nothing-silently) | A driver that RESOLVES a thread count and then drops it threads nothing, silently | 4 — covered |
+| [Risk-223](#risk-223--a-decoded-dictionary-columns-schema-type-and-its-cached-array-disagree-and-only-code-that-reads-the-array-is-right) | A decoded dictionary column's schema type and its cached array disagree | 1 — new |
+| [Risk-224](#risk-224--resolve_column_types-fixed-buffer-is-safe-only-while-the-c-side-emits-nothing-but-tokens) | `resolve_column_type`'s fixed buffer is safe only while the C++ side emits nothing but tokens | 1 — new |
 
 ---
 
@@ -298,6 +300,59 @@ decided whether it is testable, and before any test is written. Give it the next
 **one above the highest in the [Index](#index)**, read from there rather than from any number
 written in prose — state what breaks and why the failure is quiet, and leave the **Test** half to
 whoever triages it into one of the three sections below.
+
+### Risk-223 — A decoded dictionary column's schema type and its cached array disagree, and only code that reads the array is right
+
+A dictionary-encoded column (what pandas writes for a `Categorical`) is decoded to its values as it
+is read: `decode_dictionary_chunks` casts every chunk in `combine_column_chunks`, so `column_cache`
+holds a dense array. The reader's `schema` is deliberately NOT rewritten — it keeps saying
+`dictionary<values=string, indices=int8, ordered=0>`, because `parquet_close_reader(print_stat=
+.true.)`'s `parquet_type` cell reports the file's own type, the same contract a `string_view`
+column already relies on. **So for exactly this class of column the schema and the data describe
+different representations, and only one of them is what a read hands back.**
+
+Every decision today is taken from the array (`is_string_like_type(array->type_id())`, the sort
+key's bind, the filter evaluator) or peels the schema first — `unwrap_encoding_layers` in the shape,
+width and element-count queries and in the statistics screen's leaf classification, and the explicit
+`DICTIONARY` arm in `parquet_reader_get_column_type_name`. A future decision taken from the RAW
+schema type — choosing an offsets width, a buffer-extraction path, a statistics kind, a container
+arm — sees a dictionary where the data is dense, and answers for a representation that is not there.
+Nothing aborts, and no existing test notices, because every other fixture's schema and array agree.
+
+**Rule:** new code that switches on `resolved.leaf_field->type()` either peels the wrapper or reads
+the array's own type. The peel is deliberately NOT applied for a leaf reached through a struct path
+or under a list, because the decode does not reach those either — Arrow restores a stored dictionary
+type at any depth (measured: `list<dictionary<string>>` and `struct<f: dictionary<string>>` both
+come back dictionary-typed), while `decode_dictionary_chunks` only ever sees the top-level chunk.
+Claiming one of those as readable would be the same defect in the other direction.
+
+**Test:** `test/fixtures/dictionary_types.parquet` carries a `plain` twin of `cat` holding the same
+values, and the `reading`, `filter`, `filter_screen` and `table` suites compare the two through
+every path that exists today. That oracle covers the paths that exist; it cannot cover a path added
+later, which is what this entry is for.
+
+### Risk-224 — `resolve_column_type`'s fixed buffer is safe only while the C++ side emits nothing but tokens
+
+`resolve_column_type` (`src/parquet_read.f90`) receives the column-type answer into a
+`character(len=32) :: buf`. `copy_string_with_padding` truncates silently, and Fortran cannot tell a
+truncated name from a short one — a caller comparing against `"string"` would simply stop matching,
+and `parquet_column_exists(types=)` would answer `.false.` for a column that is readable.
+
+It is correct today because `parquet_reader_get_column_type_name` writes one of the nine canonical
+tokens or the literal `"unknown"`, never Arrow's own spelling of a type. That is a property of the
+C++ function, stated in its comment, not something the Fortran side checks or could check. A change
+that made it write a type description again — "restoring the diagnostic that used to name the
+unreadable type" is the plausible one, and it once wrote `dictionary<values=string, indice` cut at
+32 characters — would bring the truncation back, and no test would fail, because every token still
+fits.
+
+**Rule:** the type-name query emits tokens only. Anything that has to report Arrow's own spelling of
+a type needs its own query with a length-then-allocate pair of bindings (the shape
+`parquet_reader_get_column_timezone_length` uses), never this buffer.
+
+**Test:** not testable from the Fortran side — a truncation is indistinguishable from a short
+answer, and no input can produce one while the C++ side keeps its contract. Held by construction and
+by this entry.
 
 ## 2. Risks with a proposed testing scenario
 

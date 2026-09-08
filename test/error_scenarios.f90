@@ -506,6 +506,8 @@ program error_scenarios
         call scenario_read_column_with_nulls()
     case ("read_unsupported_physical_type")
         call scenario_read_unsupported_physical_type()
+    case ("read_dictionary_binary_unsupported")
+        call scenario_read_dictionary_binary_unsupported()
     case ("prefetch_unknown_column")
         call scenario_prefetch_unknown_column()
     case ("filter_unknown_column")
@@ -4435,6 +4437,22 @@ contains
         call parquet_read_column(reader, "d", values)
         print '(a)', "unexpectedly read a column of an unsupported physical type without error"
     end subroutine scenario_read_unsupported_physical_type
+
+    !> A dictionary column over BINARY values, read as strings.
+    !>
+    !> Decoding a dictionary column (a pandas `category`) on read deliberately does not widen what
+    !> this library can read: Arrow restores a stored dictionary type over binary values as
+    !> readily as over strings, and a dictionary over binary must be refused exactly as a plain
+    !> binary column is. Its type query answers "unknown" (asserted in the `reading` suite), and
+    !> the read itself aborts here.
+    subroutine scenario_read_dictionary_binary_unsupported()
+        type(parquet_reader) :: reader
+        character(len=16) :: values(8)
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+        call parquet_read_column(reader, "cat_bytes", values)
+        print '(a)', "unexpectedly read a dictionary column over binary values without error"
+    end subroutine scenario_read_dictionary_binary_unsupported
 
     !> The 11 scenarios below each exercise exactly one report_fatal_error
     !> call site added to convert_values_to_int32/int64 (parquet_wrapper.cpp)

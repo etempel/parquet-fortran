@@ -118,6 +118,16 @@ contains
                 test_column_type_narrowest_lossless_mapping), &
             new_unittest("an encoding wrapper does not hide a column's shape", &
                 test_encoding_wrapper_shape), &
+            new_unittest("a dictionary column (a pandas category) reports its VALUE type", &
+                test_dictionary_type_query), &
+            new_unittest("a dictionary column reads exactly like its plain twin", &
+                test_dictionary_reads_equal_plain), &
+            new_unittest("a dictionary column reads row group by row group, each with its own dictionary", &
+                test_dictionary_chunk_reads), &
+            new_unittest("an all-null and an ordered dictionary column both read", &
+                test_dictionary_allnull_and_ordered), &
+            new_unittest("a file written by pandas reads, category column included", &
+                test_pandas_written_file), &
             new_unittest("parquet_column_exists(types=) asks 'can I read it as this?'", &
                 test_column_exists_types_alias_asymmetry), &
             new_unittest("parquet_get_column_names lists every column, expanding nested structs " // &
@@ -3365,10 +3375,13 @@ contains
     !! SCALAR storage must still answer `"scalar"`, so peeling must not be mistaken for
     !! "a wrapped column is a container".
     !!
-    !! The type query is deliberately NOT expected to change: it reports what the column can be
-    !! READ as, and this library cannot read a tensor or a dictionary column, so `"unknown"` is
-    !! the right answer there. The pair ("unknown", "vector") is the useful one -- a four-wide
-    !! vector of a type you cannot have.
+    !! The TYPE query answers the two wrappers differently, and that difference is the point.
+    !! A dictionary column is decoded to its values on read, so it reports `"string"`; an
+    !! extension type is not, so `tensor_col` stays `"unknown"` -- the pair ("unknown", "vector")
+    !! is still the useful one there, a four-wide vector of a type you cannot have. If the type
+    !! query ever started peeling with `unwrap_encoding_layers` (which strips every wrapper) the
+    !! tensor assertion below is what would catch it. The dictionary cases pandas actually
+    !! produces have their own fixture, `test/fixtures/dictionary_types.parquet`.
     subroutine test_encoding_wrapper_shape(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
@@ -3412,6 +3425,11 @@ contains
         call parquet_get_col_size(reader, "dict_col", col_size)
         call check(error, col_size == 1, "so its col_size is 1")
         if (allocated(error)) return
+        call parquet_get_column_type(reader, "dict_col", type_name)
+        call check(error, type_name == "string", &
+            "and, unlike the extension column above, it is decoded on read, so it reports its " // &
+            "value type, got " // type_name)
+        if (allocated(error)) return
 
         ! Control 3: an ordinary column in the same file, unaffected by any of this.
         call parquet_get_column_shape(reader, "plain", shape)
@@ -3422,6 +3440,295 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_encoding_wrapper_shape
+
+    !> Every query about a DICTIONARY-typed column -- what pandas writes for a `Categorical` --
+    !! answers for the column's VALUE type, because the column is decoded to its values on read
+    !! (decode_dictionary_chunks in src/parquet_wrapper.cpp).
+    !!
+    !! `cat_int` and `cat_bytes` are the two controls that keep this from being "a dictionary is
+    !! always a string". Arrow restores a stored dictionary type only over string/binary values,
+    !! so `cat_int` was written as a dictionary and arrives dense: nothing here decodes it, and it
+    !! answers for its own int64 values. `cat_bytes` IS restored as a dictionary, and still
+    !! answers "unknown", because a dictionary over a value type this library cannot read is no
+    !! more readable than a plain column of that type.
+    subroutine test_dictionary_type_query(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: type_name, shape
+        integer(int32) :: col_size
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+
+        call parquet_get_column_type(reader, "cat", type_name)
+        call check(error, type_name == "string", &
+            "a dictionary<string> column is decoded on read, so its type is 'string', got " // type_name)
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "plain", type_name)
+        call check(error, type_name == "string", "and its plain twin answers the same, got " // type_name)
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "cat_ordered", type_name)
+        call check(error, type_name == "string", &
+            "pandas' ordered=1 flag is dropped, not refused, got " // type_name)
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "cat_large", type_name)
+        call check(error, type_name == "string", &
+            "a dictionary over large_string is a string column too, got " // type_name)
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "cat_allnull", type_name)
+        call check(error, type_name == "string", &
+            "an all-null dictionary column still knows its value type, got " // type_name)
+        if (allocated(error)) return
+
+        ! Control 1: Arrow hands this one back dense, so it answers for int64 rather than string.
+        call parquet_get_column_type(reader, "cat_int", type_name)
+        call check(error, type_name == "int64", &
+            "a categorical over integers is not restored as a dictionary at all, got " // type_name)
+        if (allocated(error)) return
+        ! Control 2: restored as a dictionary, and still unreadable -- peeling the wrapper must not
+        ! be mistaken for being able to read what is under it.
+        call parquet_get_column_type(reader, "cat_bytes", type_name)
+        call check(error, type_name == "unknown", &
+            "a dictionary over binary stays unreadable, exactly as a plain binary column is, got " // type_name)
+        if (allocated(error)) return
+
+        ! The types= filter is built on the same answer, so it matches the decoded type.
+        call check(error, parquet_column_exists(reader, "cat", types="string"), &
+            "parquet_column_exists(reader, ""cat"", types=""string"")")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "cat", types="int64"), &
+            ".not. parquet_column_exists(reader, ""cat"", types=""int64"")")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "cat_bytes", types="string"), &
+            ".not. parquet_column_exists(reader, ""cat_bytes"", types=""string"")")
+        if (allocated(error)) return
+
+        ! The shape queries already peeled the wrapper before this stage existed; they must still
+        ! say the same thing, since a dictionary wraps one value per row.
+        call parquet_get_column_shape(reader, "cat", shape)
+        call check(error, shape == "scalar", "a dictionary column holds one value per row, got " // shape)
+        if (allocated(error)) return
+        call parquet_get_col_size(reader, "cat", col_size)
+        call check(error, col_size == 1, "so its col_size is 1")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+    end subroutine test_dictionary_type_query
+
+    !> A dictionary column's values, nulls and string length are exactly its plain twin's.
+    !!
+    !! `plain` is the ORACLE: it carries the same eight values as an ordinary string column, so
+    !! every assertion here compares two columns of the same file rather than a hand-copied
+    !! expectation. Row 5 is the one that catches a decode using the wrong dictionary: the file's
+    !! two row groups carry DIFFERENT dictionaries, and index 0 means "alpha" in the first and
+    !! "gamma" in the second, so a decode done once against the first dictionary returns "alpha"
+    !! there and still passes every other row.
+    subroutine test_dictionary_reads_equal_plain(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=16) :: cat_values(8), plain_values(8)
+        logical :: cat_valid(8), plain_valid(8)
+        type(parquet_string_column) :: cat_col, plain_col
+        character(len=:), allocatable :: cat_text, plain_text
+        integer :: cat_strlen, plain_strlen
+        integer(int64) :: i
+        integer :: null_count
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+        call parquet_read_column(reader, "cat", cat_values, null_value="MISSING", is_valid=cat_valid)
+        call parquet_read_column(reader, "plain", plain_values, null_value="MISSING", is_valid=plain_valid)
+
+        ! Vacuity guard: the comparison below proves nothing if the fixture stopped carrying nulls.
+        null_count = count(.not. plain_valid)
+        call check(error, null_count == 2, &
+            "the fixture must carry exactly 2 null rows or the null comparison asserts nothing")
+        if (allocated(error)) return
+
+        call check(error, all(cat_values == plain_values), &
+            "a dictionary column's padded read equals its plain twin's, value for value")
+        if (allocated(error)) return
+        call check(error, all(cat_valid .eqv. plain_valid), &
+            "and its null mask equals the twin's, row for row")
+        if (allocated(error)) return
+        ! Named explicitly, because this is the row a single-dictionary decode gets wrong.
+        call check(error, trim(cat_values(5)) == "gamma", &
+            "row 5 sits in the second row group, whose dictionary differs from the first's, got " // trim(cat_values(5)))
+        if (allocated(error)) return
+
+        ! The compact read is a separate path (buffers handed straight to Fortran), so it gets its
+        ! own comparison rather than being assumed to follow.
+        call parquet_read_column(reader, "cat", cat_col)
+        call parquet_read_column(reader, "plain", plain_col)
+        call check(error, cat_col%size() == plain_col%size(), "the compact reads have the same row count")
+        if (allocated(error)) return
+        do i = 1_int64, plain_col%size()
+            call check(error, cat_col%is_null(i) .eqv. plain_col%is_null(i), &
+                "cat_col%is_null(i) .eqv. plain_col%is_null(i)")
+            if (allocated(error)) return
+            if (plain_col%is_null(i)) cycle
+            call cat_col%get(i, cat_text)
+            call plain_col%get(i, plain_text)
+            call check(error, cat_text == plain_text, "cat_text == plain_text")
+            if (allocated(error)) return
+        end do
+
+        call parquet_get_string_length(reader, "cat", cat_strlen)
+        call parquet_get_string_length(reader, "plain", plain_strlen)
+        call check(error, cat_strlen == plain_strlen .and. cat_strlen == 5, &
+            "the longest value is the same 5 characters in both columns")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+    end subroutine test_dictionary_reads_equal_plain
+
+    !> The row-group (chunk) read of a dictionary column matches its plain twin's, row group by
+    !! row group -- the path a decode placed at the whole-column read alone would miss.
+    subroutine test_dictionary_chunk_reads(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        integer(int64) :: num_row_groups, rg, rg_size, i
+        character(len=16), allocatable :: cat_chunk(:), plain_chunk(:)
+        integer(int32), allocatable :: id_chunk(:)
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+        call parquet_get_num_row_groups(reader, num_row_groups)
+
+        ! Vacuity guard: one row group would leave the differing-dictionary case untested.
+        call check(error, num_row_groups == 2_int64, &
+            "the fixture must have 2 row groups or the per-chunk decode is not exercised")
+        if (allocated(error)) return
+
+        do rg = 1_int64, num_row_groups
+            call parquet_get_chunk_size(reader, rg_size, row_group=rg)
+            allocate(cat_chunk(rg_size), plain_chunk(rg_size), id_chunk(rg_size))
+            call parquet_read_column_chunk(reader, "cat", rg, cat_chunk, null_value="MISSING")
+            call parquet_read_column_chunk(reader, "plain", rg, plain_chunk, null_value="MISSING")
+            call parquet_read_column_chunk(reader, "id", rg, id_chunk)
+            do i = 1_int64, rg_size
+                call check(error, cat_chunk(i) == plain_chunk(i), &
+                    "cat_chunk(i) == plain_chunk(i)")
+                if (allocated(error)) return
+            end do
+            ! The second row group's first row is index 0 of ITS dictionary, which is "gamma".
+            if (rg == 2_int64) then
+                call check(error, trim(cat_chunk(1)) == "gamma" .and. id_chunk(1) == 5_int32, &
+                    "the second row group decodes against its own dictionary, got " // trim(cat_chunk(1)))
+                if (allocated(error)) return
+            end if
+            deallocate(cat_chunk, plain_chunk, id_chunk)
+        end do
+
+        call parquet_close_reader(reader)
+    end subroutine test_dictionary_chunk_reads
+
+    !> The two edge shapes: an EMPTY dictionary (every row null), which a decode assuming at least
+    !! one dictionary entry trips over, and an `ordered` dictionary, whose flag is dropped rather
+    !! than refused.
+    subroutine test_dictionary_allnull_and_ordered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=16) :: values(8), plain_values(8)
+        logical :: valid(8), plain_valid(8)
+
+        call parquet_open_reader(reader, "test/fixtures/dictionary_types.parquet")
+
+        call parquet_read_column(reader, "cat_allnull", values, null_value="MISSING", is_valid=valid)
+        call check(error, .not. any(valid), "every row of an all-null dictionary column is null")
+        if (allocated(error)) return
+        call check(error, all(values == "MISSING"), "and each one takes the substituted null value")
+        if (allocated(error)) return
+
+        call parquet_read_column(reader, "cat_ordered", values, null_value="MISSING", is_valid=valid)
+        call parquet_read_column(reader, "plain", plain_values, null_value="MISSING", is_valid=plain_valid)
+        call check(error, all(values == plain_values) .and. all(valid .eqv. plain_valid), &
+            "an ordered dictionary column reads exactly like its unordered plain twin")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+    end subroutine test_dictionary_allnull_and_ordered
+
+    !> A file written by pandas itself, with no Parquet-specific arguments: the provenance the C++
+    !! fixture generator cannot fake. `tools/generate_pandas_fixture.py` writes it and documents
+    !! what each column is for; this test is the reason it is committed.
+    !!
+    !! Four things about pandas' output are pinned here, and each of them would change what this
+    !! library reads if a future pandas changed it: a `Categorical` is written as a dictionary over
+    !! strings and reads as a string column; an INTEGER categorical is written as its values, so
+    !! Arrow hands it back as int64 and nothing decodes it; a plain string column is `large_string`
+    !! from pandas 3 on, which reads as a string column too; and a non-default index becomes an
+    !! ordinary column named `__index_level_0__`, with the frame's own dtypes recorded under the
+    !! schema metadata key `pandas`.
+    subroutine test_pandas_written_file(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: names(:), keys(:), values(:), type_name
+        character(len=16) :: cls(6), survey(6)
+        logical :: cls_valid(6)
+        integer(int64) :: index_col(6), prio(6)
+        integer :: i
+        logical :: found_index, found_pandas
+        character(len=*), parameter :: in_file = "test/fixtures/pandas_written.parquet"
+
+        call parquet_open_reader(reader, in_file)
+
+        ! The index column is an ordinary column, addressable by its pandas-given name.
+        call parquet_get_column_names(reader, names)
+        found_index = .false.
+        do i = 1, size(names)
+            if (trim(names(i)) == "__index_level_0__") found_index = .true.
+        end do
+        call check(error, found_index, &
+            "a non-default pandas index is written as a column named __index_level_0__")
+        if (allocated(error)) return
+        call parquet_read_column(reader, "__index_level_0__", index_col)
+        call check(error, all(index_col == [10_int64, 20_int64, 30_int64, 40_int64, 50_int64, 60_int64]), &
+            "and it holds the index values, not a row number")
+        if (allocated(error)) return
+
+        ! The category column: a dictionary over strings, decoded on read.
+        call parquet_get_column_type(reader, "cls", type_name)
+        call check(error, type_name == "string", &
+            "a pandas category column reads as a string column, got " // type_name)
+        if (allocated(error)) return
+        call parquet_read_column(reader, "cls", cls, null_value="MISSING", is_valid=cls_valid)
+        call check(error, trim(cls(1)) == "galaxy" .and. trim(cls(5)) == "qso", &
+            "its values come back as the category labels")
+        if (allocated(error)) return
+        call check(error, count(.not. cls_valid) == 1 .and. .not. cls_valid(3), &
+            "and the one missing category is a null row, not a label")
+        if (allocated(error)) return
+
+        ! A plain pandas 3 string column is large_string, which is a string column here too.
+        call parquet_get_column_type(reader, "survey", type_name)
+        call check(error, type_name == "string", &
+            "a plain pandas string column reads as a string column, got " // type_name)
+        if (allocated(error)) return
+        call parquet_read_column(reader, "survey", survey)
+        call check(error, trim(survey(1)) == "4MOST" .and. trim(survey(3)) == "DESI", &
+            "and its values survive the large_string layout")
+        if (allocated(error)) return
+
+        ! An INTEGER categorical is not a dictionary at all by the time it reaches this library.
+        call parquet_get_column_type(reader, "prio", type_name)
+        call check(error, type_name == "int64", &
+            "a pandas categorical over integers is written as its values, got " // type_name)
+        if (allocated(error)) return
+        call parquet_read_column(reader, "prio", prio)
+        call check(error, all(prio == [1_int64, 2_int64, 1_int64, 3_int64, 2_int64, 1_int64]), &
+            "and reads as those integers")
+        if (allocated(error)) return
+
+        ! pandas records the frame's own dtypes under this key, which is how pandas rebuilds the
+        ! Categorical on its side. This library carries it as ordinary file metadata.
+        call parquet_get_metadata_items(reader, keys, values)
+        found_pandas = .false.
+        do i = 1, size(keys)
+            if (trim(keys(i)) == "pandas") found_pandas = .true.
+        end do
+        call check(error, found_pandas, "the file carries pandas' own dtype metadata under the key 'pandas'")
+        if (allocated(error)) return
+
+        call parquet_close_reader(reader)
+    end subroutine test_pandas_written_file
 
     !> Every row of parquet_get_column_type's narrowest-lossless mapping, including the two
     !> deliberately LOSSY rows (uint64 and the decimals) and the "unknown" fallthrough.

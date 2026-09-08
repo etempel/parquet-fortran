@@ -141,7 +141,9 @@ contains
                 test_literal_list_prunes_without_statistics), &
             new_unittest("is_finite / is_not_finite never prune on bounds", test_is_finite_declines), &
             new_unittest("is_finite / is_not_finite prune a row group whose column is entirely null", &
-                test_is_finite_prunes_all_null_row_group) &
+                test_is_finite_prunes_all_null_row_group), &
+            new_unittest("a dictionary column is screened like the string column it reads as", &
+                test_dictionary_column_prunes) &
             ]
     end subroutine collect_tests_filter_screen
     !
@@ -1915,5 +1917,50 @@ contains
         if (allocated(error)) return
         call check(error, pruned == 0_int64, &
             "is_finite control: a null-free fixture must prune nothing")
-    end subroutine test_is_finite_prunes_all_null_row_group
+    end subroutine test_is_finite_prunes_all_null_row_group    !
+    !> A dictionary column (a pandas `category`) must be PRUNED on, not merely read correctly.
+    !>
+    !> The screen classifies a filter leaf from the file's schema type, where a decoded dictionary
+    !> column still reads as `dictionary<values=string, ...>`; without peeling that wrapper the
+    !> leaf falls to the screen's `default:` arm and declines. Declining is the safe direction --
+    !> the answer stays right, only the optimization is lost -- so the equality half of this test
+    !> passes either way and the PRUNED COUNT is the only assertion that can tell the two apart.
+    !>
+    !> `test/fixtures/dictionary_types.parquet` has two row groups holding "alpha"/"beta" and
+    !> "gamma"/"beta"/"delta", so `cat == "alpha"` can only match the first: exactly one row group
+    !> must go. `cat_allnull` is the negative control in the other direction -- a column whose
+    !> every row is null has no usable min/max, so the screen must decline rather than prune.
+    subroutine test_dictionary_column_prunes(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test/fixtures/dictionary_types.parquet"
+
+        call compare_screened(file, 'cat == "alpha"', "id", agree, pruned, nrows)
+        call check(error, agree, "cat == alpha: the screened and unscreened reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 2, "cat == alpha: two rows hold it, both in the first row group")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, &
+            "cat == alpha: the second row group cannot match, so the screen must rule it out -- " // &
+            "a pruned count of 0 means the dictionary wrapper hid the column's type from the screen")
+        if (allocated(error)) return
+
+        ! The plain twin is the oracle: the same rule over an ordinary string column of the same
+        ! file must prune exactly as much, or the peel is doing something the twin's path does not.
+        call compare_screened(file, 'plain == "alpha"', "id", agree, pruned, nrows)
+        call check(error, agree .and. nrows == 2, "plain == alpha: the twin keeps the same two rows")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, "plain == alpha: and prunes the same single row group")
+        if (allocated(error)) return
+
+        ! Negative control: no usable bounds, so the screen declines instead of pruning.
+        call compare_screened(file, 'cat_allnull == "alpha"', "id", agree, pruned, nrows)
+        call check(error, agree .and. nrows == 0, "an all-null column matches nothing under an equality rule")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "an all-null dictionary column has no min/max, so the screen must decline rather than prune")
+    end subroutine test_dictionary_column_prunes
+
 end module test_filter_screen

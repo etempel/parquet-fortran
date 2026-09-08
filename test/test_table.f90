@@ -471,7 +471,9 @@ contains
             new_unittest("parquet_row_index under bounded names the same physical rows", &
                 test_bounded_row_index), &
             new_unittest("bounded= on a slice is accepted and changes nothing", &
-                test_bounded_on_slice_is_inert) &
+                test_bounded_on_slice_is_inert), &
+            new_unittest("a table reads a dictionary column as an ordinary string column", &
+                test_table_dictionary_column) &
             ]
         testsuite = [p1, p2, p3]
     end subroutine collect_tests_parquet_table
@@ -14041,4 +14043,62 @@ contains
             "the covering row groups must reach at least the slice's last row")
     end subroutine test_slice_has_nulls_and_bounds
     !
+    !
+    !> A `parquet_table` over a file with a dictionary column (a pandas `category`) treats it as an
+    !> ordinary string column: it is classified as supported, has kind `PK_STRING`, and every verb
+    !> works on it.
+    !>
+    !> This is the query that mattered most before the decode existed. A table classifies each
+    !> column at open from `parquet_get_column_type`, so an "unknown" answer there does not merely
+    !> lose one query -- it marks the column unsupported, and `%get`, `%col`, `%kind` and the rest
+    !> all refuse it for the whole life of the table. `plain` is the ORACLE again: the same values
+    !> as an ordinary string column in the same file.
+    subroutine test_table_dictionary_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_string_column) :: cat_col
+        character(len=:), allocatable :: cat_chr(:), plain_chr(:), one
+        character(len=*), parameter :: f = "test/fixtures/dictionary_types.parquet"
+
+        call parquet_open_table(t, f)
+        call check(error, t%is_supported("cat"), &
+            "a dictionary column must classify as supported, or every table verb refuses it")
+        if (allocated(error)) return
+        call check(error, t%kind("cat") == PK_STRING, "and its kind is PK_STRING, like its plain twin")
+        if (allocated(error)) return
+        call check(error, t%kind("plain") == PK_STRING, "t%kind(""plain"") == PK_STRING")
+        if (allocated(error)) return
+        ! Arrow hands an integer categorical back dense, so the table sees an ordinary int64
+        ! column; a dictionary over binary is unreadable either way.
+        call check(error, t%kind("cat_int") == PK_INT64, "an integer categorical is an int64 column")
+        if (allocated(error)) return
+        call check(error, .not. t%is_supported("cat_bytes"), &
+            "a dictionary over binary stays unsupported, exactly as a plain binary column is")
+        if (allocated(error)) return
+
+        call t%get("cat", cat_chr)
+        call t%get("plain", plain_chr)
+        call check(error, size(cat_chr) == size(plain_chr) .and. len(cat_chr) == len(plain_chr), &
+            "the character form of both columns has the same shape and width")
+        if (allocated(error)) return
+        call check(error, all(cat_chr == plain_chr), &
+            "and the same values, row for row, including the two null rows")
+        if (allocated(error)) return
+
+        call t%get("cat", cat_col)
+        call check(error, cat_col%size() == 8_int64, "the compact form holds every row")
+        if (allocated(error)) return
+        call cat_col%get(5_int64, one)
+        call check(error, one == "gamma", &
+            "row 5 comes from the second row group's own dictionary, got " // one)
+        if (allocated(error)) return
+        call check(error, cat_col%is_null(3_int64), "and row 3 is null, as in the twin")
+        if (allocated(error)) return
+
+        ! Summarizing must not abort on the file, unsupported columns included -- the one place a
+        ! table looks at every column at once.
+        call t%print_stat(all=.true.)
+        call check(error, t%nrows() == 8_int64, "%print_stat must not disturb the table it reports on")
+    end subroutine test_table_dictionary_column
+
 end module test_table

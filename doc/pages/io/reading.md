@@ -390,6 +390,7 @@ What these two queries report is the kind to declare if you want the file's valu
 | `decimal32`, `decimal64`, `decimal128`, `decimal256` | `float64` — **lossy**, deliberately |
 | `bool` | `boolean` |
 | `string`, `large_string` | `string` |
+| `dictionary<string>`, `dictionary<large_string>` — what pandas writes for a `category` | `string` |
 | `date32`, `date64` | `date` |
 | `time32`, `time64` | `time` |
 | `timestamp` | `timestamp` |
@@ -407,6 +408,16 @@ than `int32`.
 because that column's target kind is `int32`. The two ask different questions: *can I read this as a
 float at all?* against *is `float64` the right declaration?* Both are useful, so neither was made to
 imply the other.
+
+A **dictionary column** reports the type of its **values**, because that is what a read of it
+hands back: the column is decoded to its values as it is read, so it behaves in every way like an
+ordinary column of that type — `parquet_read_column`, the compact `parquet_string_column` read,
+`filter=`, `sort_by=` and `parquet_table` all accept it. What is lost is the encoding: the category
+*codes*, their *order*, and pandas' `ordered` flag are not carried, since Fortran has no
+categorical type to carry them in. The rule is the value type's own row above, so a dictionary over
+a type this library cannot read — `dictionary<binary>` — still reports `"unknown"` and still fails
+on a read, exactly as a plain `binary` column does. See
+[Reading dictionary columns from other tools](../types/supported-data-types.html#reading-dictionary-columns-from-other-tools).
 
 A **vector or list** column reports its **element** type: an `int32` vector (`FIXED_SIZE_LIST`)
 column and a variable-length `list<int32>` column both report `"int32"`. That unwrapping goes

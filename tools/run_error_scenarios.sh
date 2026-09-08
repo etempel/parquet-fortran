@@ -247,6 +247,7 @@ scenarios=(
     "get_field_name_index_too_high:1"
     "read_column_with_nulls:1"
     "read_unsupported_physical_type:1"
+    "read_dictionary_binary_unsupported:1"
     "large_string_roundtrip:0"
     "streamed_string_is_large_utf8:0"
     "whole_string_is_plain_utf8:0"

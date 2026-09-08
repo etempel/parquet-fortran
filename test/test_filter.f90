@@ -63,6 +63,8 @@ contains
             new_unittest("quoted string values may contain spaces, parens and keywords", test_quoted_value_contents), &
             new_unittest("an ordering comparison on a string column selects the right rows", &
                 test_string_ordering_filter), &
+            new_unittest("a dictionary column filters, sets and sorts like its plain twin", &
+                test_dictionary_column_filter_and_sort), &
             new_unittest("a dotted struct-leaf name inside an expression", test_struct_leaf_in_expression), &
             new_unittest("Kleene: not (x > v) excludes Null rows", test_kleene_not_excludes_nulls), &
             new_unittest("Kleene: or does not resurrect a Null row", test_kleene_or_keeps_nulls_out), &
@@ -509,6 +511,94 @@ contains
         call check(error, trim(got(1)) == "mango" .and. trim(got(2)) == "zebra", &
             "a string ordering filter kept the wrong rows, or lost their file order")
     end subroutine test_string_ordering_filter
+    !
+    !> A dictionary column -- what pandas writes for a `Categorical` -- is decoded to its values
+    !> on read, so every consumer downstream of the read treats it as an ordinary string column.
+    !> This test pins that for the three that ask different questions of it: an equality clause, a
+    !> bound set, and a sort key.
+    !>
+    !> `plain` is the ORACLE. It holds the same eight values as an ordinary string column in the
+    !> same file, so each assertion compares the two columns rather than a hand-written
+    !> expectation -- a filter that decoded to the wrong values would have to break the twin in
+    !> exactly the same way to pass.
+    subroutine test_dictionary_column_filter_and_sort(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        integer(int32), allocatable :: cat_ids(:), plain_ids(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test/fixtures/dictionary_types.parquet"
+
+        ! The two rows holding "beta" sit one in each row group, so a decode that only ever looked
+        ! at the first row group's dictionary cannot select both.
+        call filtered_ids(file, 'cat == "beta"', cat_ids)
+        call filtered_ids(file, 'plain == "beta"', plain_ids)
+        call check(error, size(cat_ids) == 2, "cat == ""beta"" must keep the two rows holding it")
+        if (allocated(error)) return
+        call check(error, size(cat_ids) == size(plain_ids), "and as many rows as the plain twin does")
+        if (allocated(error)) return
+        call check(error, all(cat_ids == plain_ids) .and. all(cat_ids == [2_int32, 6_int32]), &
+            "a filter on a dictionary column must select the same rows as the same filter on its twin")
+        if (allocated(error)) return
+
+        ! A bound set. The first element is deliberately the SHORTEST of the two, the arrangement
+        ! that catches a per-element length taken from element 1 (see CLAUDE.md's note on
+        ! sized-from-the-first-element bugs).
+        block
+            character(len=5) :: want(2)
+            want(1) = "beta"
+            want(2) = "gamma"
+            call filt%add_in("cat", want)
+            call parquet_open_reader(reader, file, filter=filt)
+            call parquet_get_nrows(reader, nrows)
+            deallocate(cat_ids)
+            allocate(cat_ids(nrows))
+            call parquet_read_column(reader, "id", cat_ids)
+            call parquet_close_reader(reader)
+        end block
+        call check(error, all(cat_ids == [2_int32, 5_int32, 6_int32]), &
+            "an `in` set over a dictionary column must match its decoded values")
+        if (allocated(error)) return
+
+        ! A sort key. Both orders must agree row for row, nulls included.
+        call srt%add("cat")
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_get_nrows(reader, nrows)
+        deallocate(cat_ids)
+        allocate(cat_ids(nrows))
+        call parquet_read_column(reader, "id", cat_ids)
+        call parquet_close_reader(reader)
+        block
+            type(parquet_sortkey) :: srt_plain
+            call srt_plain%add("plain")
+            call parquet_open_reader(reader, file, sort_by=srt_plain)
+            deallocate(plain_ids)
+            allocate(plain_ids(nrows))
+            call parquet_read_column(reader, "id", plain_ids)
+            call parquet_close_reader(reader)
+        end block
+        call check(error, all(cat_ids == plain_ids), &
+            "sorting by a dictionary column must order the rows exactly as sorting by its twin does")
+    end subroutine test_dictionary_column_filter_and_sort
+    !
+    !> Reads the `id` column of `file` under one filter rule -- the primitive the dictionary test
+    !> above is built from.
+    subroutine filtered_ids(file, rule, ids)
+        character(len=*), intent(in) :: file !! fixture to read.
+        character(len=*), intent(in) :: rule !! the filter expression.
+        integer(int32), allocatable, intent(out) :: ids(:) !! `id` of every surviving row.
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+
+        call filt%add(rule)
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(ids(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+    end subroutine filtered_ids
     subroutine test_quoted_value_contents(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer

@@ -251,6 +251,8 @@ contains
                 test_read_column_with_nulls_aborts), &
             new_unittest("reading a column of an unsupported physical type aborts", &
                 test_read_unsupported_physical_type_aborts), &
+            new_unittest("reading a dictionary column over binary values aborts", &
+                test_read_dictionary_binary_unsupported_aborts), &
             new_unittest("array-mode whole-column read of an int32 vector column as logical aborts", &
                 test_read_array_full_bool_type_mismatch_aborts), &
             new_unittest("array-mode whole-column read of an int32 vector column as string aborts", &
@@ -7344,6 +7346,15 @@ contains
         call check_scenario_exit_status(error, "read_unsupported_physical_type", expect_abort=.true., &
             failure_message="reading a column of an unsupported physical Parquet type was expected to abort")
     end subroutine test_read_unsupported_physical_type_aborts
+
+    !> A dictionary column over binary values must be refused exactly as a plain binary column is
+    !> -- decoding a dictionary on read does not widen what this library can read.
+    subroutine test_read_dictionary_binary_unsupported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "read_dictionary_binary_unsupported", expect_abort=.true., &
+            failure_message="reading a dictionary column over binary values was expected to abort")
+    end subroutine test_read_dictionary_binary_unsupported_aborts
 
     !> The 16 tests below are the Fortran-side counterpart of 16 scenarios added to
     !> error_scenarios.f90 covering array-mode bool8/string type-mismatch + col_index bounds

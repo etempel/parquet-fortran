@@ -104,6 +104,42 @@ buffers — so a `string_view` column is converted to `large_utf8` first and the
 costs one pass over the column's bytes, and the result replaces the cached column, so reading it a
 second time pays nothing. Values, nulls and reported types are unchanged either way.
 
+## Reading dictionary columns from other tools
+
+A **dictionary column** is Arrow's encoded representation of a column with few distinct values: the
+values are stored once in a dictionary, and each row holds a small integer index into it. It is what
+**pandas writes for a `Categorical`**, and — like `string_view` above — it only ever arrives when
+reading a file written by another Arrow-based tool, since this library's own writer never produces
+one. (Parquet's own page-level dictionary *encoding* is unrelated and always in play; it is a
+compression detail this library, and every other reader, never sees.)
+
+Such a column is **decoded to its values as it is read**, once, at the point every read path funnels
+through. So it behaves exactly like an ordinary column of the value type: `parquet_get_column_type`
+reports that type, `parquet_read_column` and the compact `parquet_string_column` read hand back the
+values, `parquet_get_string_length` measures them, and `filter=`, `sort_by=`, `qc:` and
+`parquet_table` all accept the column. A null index reads as a null row.
+
+Three things follow, and are worth knowing before relying on it:
+
+- **The encoding is not carried.** Fortran has no categorical type, so the category *codes*, the
+  dictionary's *order* and pandas' `ordered` flag are all dropped — a decoded column is its values
+  and nothing else. To recover codes, factorise the strings yourself: `pf_index_map`'s
+  `%get_or_add_many` assigns each distinct value an index in one call.
+- **Only what Arrow restores arrives as a dictionary at all.** Arrow's Parquet reader rebuilds a
+  stored dictionary type only over `string` and `binary` values, so a pandas categorical over
+  *integers* is handed back as a plain `int64` column and never reaches this path. A
+  `dictionary<binary>` does arrive, and stays unreadable — `parquet_get_column_type` answers
+  `"unknown"` and a read of it aborts, exactly as for a plain `binary` column. Decoding widens
+  nothing.
+- **`parquet_close_reader(print_stat=.true.)`'s `parquet_type` cell still shows
+  `dictionary<values=string, indices=int8, ordered=0>`**, the same way it goes on showing
+  `string_view` above: that cell reports the file's own stored schema, which nothing on the read
+  side rewrites. The column reads as a string column and describes itself as what it is on disk.
+
+The decode costs one pass over the column (each row's value copied out of the dictionary) and the
+dense values in memory, which is what any read of the column would have cost had it not been
+encoded.
+
 ## Vector-column width (`col_size`) limit
 
 Unlike a *scalar* column's row count, which this library supports beyond Fortran's default-integer

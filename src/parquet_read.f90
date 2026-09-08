@@ -2413,12 +2413,13 @@ contains
     !> without checking that `name` exists first -- every caller (parquet_column_exists/
     !> parquet_get_column_type) already validated existence via parquet_reader_has_column/
     !> check_column_exists beforehand. `recognized` is .false. if the physical type falls outside
-    !> the nine canonical tokens, in which case `type_name` instead holds a raw Arrow type
-    !> description for a diagnostic message.
+    !> the nine canonical tokens, in which case `type_name` is the literal "unknown" -- the C++
+    !> side never writes Arrow's own spelling of a type here, which is what keeps `buf` below
+    !> long enough for every answer it can receive.
     subroutine resolve_column_type(reader, name, type_name, recognized)
         type(parquet_reader), intent(in) :: reader !! open reader whose column is queried.
         character(len=*), intent(in) :: name !! existing column name.
-        character(len=:), allocatable, intent(out) :: type_name !! canonical token, or raw type description.
+        character(len=:), allocatable, intent(out) :: type_name !! canonical token, or "unknown".
         logical, intent(out) :: recognized !! .true. if type_name is one of the nine canonical tokens.
         character(len=32) :: buf
 

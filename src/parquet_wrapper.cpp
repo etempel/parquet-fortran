@@ -1712,59 +1712,120 @@ extern "C"
 		return current->column_index;
 	}
 
-	// A column chunk read via FileReader::ReadColumn can still be split
-	// across several Arrow chunks if the file has multiple row groups (see
-	// the `chunk_size` writer option) -- collapse those into one contiguous
-	// array here, same as the whole-table CombineChunks this replaced used
-	// to do, just scoped to one column instead of the entire file.
-	static std::shared_ptr<arrow::Array> combine_column_chunks(const std::shared_ptr<arrow::ChunkedArray> &chunked, const std::string &name)
-	{
-		if (chunked->num_chunks() == 1)
-		{
-			return chunked->chunk(0);
-		}
-		// GCOVR_EXCL_START -- untested compat backstop, confirmed unreachable through this
-		// library's current read paths, not just untested: a temporary instrumented build (a
-		// counter printed on every call) showed every one of 400+ combine_column_chunks calls
-		// across the full test suite -- including a dedicated probe against a 3-row-group
-		// (chunk_size=2, 5 rows) file's whole-column read -- always sees exactly 1 chunk. Arrow's
-		// FileReader::ReadColumn/ReadTable evidently always coalesces every row group into a
-		// single chunk in this Arrow version, regardless of row-group count. Kept rather than
-		// deleted: a genuine second-level safeguard against a future Arrow version (or a
-		// different reader configuration) not coalescing this way, not dead code to remove --
-		// same reasoning as the pattern already used for genuinely file-I/O-triggered backstops
-		// elsewhere in this file.
-		if (chunked->num_chunks() == 0)
-		{
-			auto empty = arrow::MakeEmptyArray(chunked->type(), arrow::default_memory_pool());
-			if (!empty.ok())
-			{
-				throw std::runtime_error(std::string("Failed to build empty array for column: ") + name);
-			}
-			return empty.ValueOrDie();
-		}
-		auto combined = arrow::Concatenate(chunked->chunks(), arrow::default_memory_pool());
-		if (!combined.ok())
-		{
-			throw std::runtime_error(std::string("Failed to combine chunks for column: ") + name + ": " + combined.status().ToString());
-		}
-		return combined.ValueOrDie();
-		// GCOVR_EXCL_STOP
-	} // GCOVR_EXCL_LINE -- gcov attribution artifact under GCC: this closing brace shows uncovered
-	// even though the function's other, always-taken return path (chunked->chunk(0) above) proves
-	// it demonstrably runs -- same category as this file's other documented closing-brace
-	// attribution artifacts.
-
-	// Arrow's compute kernels (MinMax, Filter, ...) live in a separate
+	// Arrow's compute kernels (MinMax, Filter, Cast, ...) live in a separate
 	// registry from core arrow/parquet and are only usable once explicitly
-	// registered -- done lazily here (only print_stat/filtering need them),
-	// once per process via std::call_once, since the underlying registry is
+	// registered -- done lazily here (print_stat, filtering and the dictionary decode below are
+	// what need them), once per process via std::call_once, since the underlying registry is
 	// process-global and not safe to register into concurrently.
 	static void ensure_compute_initialized()
 	{
 		static std::once_flag compute_init_flag;
 		std::call_once(compute_init_flag, []() { auto st = arrow::compute::Initialize(); (void)st; });
 	}
+
+	// Decodes a DICTIONARY-typed column back to its plain value type, chunk by chunk.
+	//
+	// A column arrives dictionary-typed when the file's stored Arrow schema (store_schema()) says
+	// it was one -- which is what pandas writes for a Categorical. Arrow's own reader restores
+	// that type (parquet/arrow/schema.cc's ApplyOriginalStorageMetadata, which rebuilds it from
+	// the ORIGINAL index width, so the indices are typically int8 rather than int32), and only
+	// over STRING/BINARY values (IsDictionaryReadSupported) -- a categorical over integers or
+	// floats is already handed back dense by Arrow itself and never reaches here.
+	//
+	// Fortran has no categorical type, so the only faithful thing to hand back is the values --
+	// the same choice every other consumer that cannot represent codes makes. The category codes,
+	// their order and pandas' `ordered` flag are dropped; the guide says so.
+	//
+	// Done HERE, at combine_column_chunks, because every read path funnels through it (the
+	// whole-column read, the row-group chunk read, the width-measuring read and both prefetch
+	// paths), so one decode covers all of them and the decoded array is what enters column_cache.
+	// Per CHUNK and before Concatenate, so that row groups carrying DIFFERENT dictionaries never
+	// have to be unified first -- arrow::Concatenate would do that correctly, but not having the
+	// question is better than answering it.
+	//
+	// The precedent is coerce_string_view_to_offset_string below: a representation the downstream
+	// code does not speak, converted once at the read boundary. Returns `chunked` untouched for
+	// every other type, which is every column this library's own writer produces.
+	static std::shared_ptr<arrow::ChunkedArray> decode_dictionary_chunks(
+		const std::shared_ptr<arrow::ChunkedArray> &chunked, const std::string &name)
+	{
+		if (chunked->type()->id() != arrow::Type::DICTIONARY) return chunked;
+		ensure_compute_initialized();
+		auto value_type = std::static_pointer_cast<arrow::DictionaryType>(chunked->type())->value_type();
+		arrow::ArrayVector decoded;
+		decoded.reserve(static_cast<size_t>(chunked->num_chunks()));
+		for (const auto &chunk : chunked->chunks())
+		{
+			// Casting a dictionary array to its value type runs Arrow's UnpackDictionary kernel
+			// (one Take over the dictionary), registered for every dictionary source type. A null
+			// index and a null dictionary entry both decode to a null value, and an empty
+			// dictionary (an all-null column) decodes to an all-null dense array.
+			auto cast_result = arrow::compute::Cast(chunk, value_type);
+			if (!cast_result.ok())
+			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop: no valid dictionary array makes UnpackDictionary fail.
+				report_fatal_error("decode_dictionary_chunks",
+					std::string("failed to decode a dictionary-encoded column: ") + name);
+			}
+			// GCOVR_EXCL_STOP
+			decoded.push_back(cast_result.ValueOrDie().make_array());
+		}
+		auto rebuilt = arrow::ChunkedArray::Make(std::move(decoded), value_type);
+		if (!rebuilt.ok())
+		{ // GCOVR_EXCL_START -- Make only rejects a chunk whose type differs from `value_type`, which the Cast rules out.
+			report_fatal_error("decode_dictionary_chunks",
+				std::string("failed to rebuild a decoded dictionary column: ") + name);
+		}
+		// GCOVR_EXCL_STOP
+		return rebuilt.ValueOrDie();
+	}
+
+	// A column chunk read via FileReader::ReadColumn can still be split
+	// across several Arrow chunks if the file has multiple row groups (see
+	// the `chunk_size` writer option) -- collapse those into one contiguous
+	// array here, same as the whole-table CombineChunks this replaced used
+	// to do, just scoped to one column instead of the entire file.
+	//
+	// Also the one place a dictionary-encoded column is decoded, since every read path reaches an
+	// Arrow array through here -- see decode_dictionary_chunks above.
+	static std::shared_ptr<arrow::Array> combine_column_chunks(const std::shared_ptr<arrow::ChunkedArray> &chunked_in, const std::string &name)
+	{
+		auto chunked = decode_dictionary_chunks(chunked_in, name);
+		if (chunked->num_chunks() == 1)
+		{
+			return chunked->chunk(0);
+		}
+		// A column with NO chunks at all. Not producible from a Parquet file through any read
+		// path here (a zero-row column still arrives as one empty chunk), so this is a backstop
+		// against a future Arrow version, not dead code to remove.
+		if (chunked->num_chunks() == 0)
+		{
+			// GCOVR_EXCL_START -- see above: no fixture can produce a chunk-less column.
+			auto empty = arrow::MakeEmptyArray(chunked->type(), arrow::default_memory_pool());
+			if (!empty.ok())
+			{
+				throw std::runtime_error(std::string("Failed to build empty array for column: ") + name);
+			}
+			return empty.ValueOrDie();
+			// GCOVR_EXCL_STOP
+		}
+		// Reached by a DICTIONARY column and, today, by nothing else. Arrow's
+		// FileReader::ReadColumn coalesces every row group of an ordinary column into a single
+		// chunk, whatever the row-group count (measured: every column of every other fixture here
+		// arrives as one chunk, a 3-row-group file included) -- but it cannot do that for a
+		// dictionary column, whose row groups carry independent dictionaries, so one arrives with
+		// one chunk per row group. Those chunks are decoded above before they reach this point, so
+		// what is concatenated here is always a plain value-typed array.
+		auto combined = arrow::Concatenate(chunked->chunks(), arrow::default_memory_pool());
+		if (!combined.ok())
+		{ // GCOVR_EXCL_START -- Concatenate Status backstop over arrays that are already decoded and same-typed.
+			throw std::runtime_error(std::string("Failed to combine chunks for column: ") + name + ": " + combined.status().ToString());
+		}
+		// GCOVR_EXCL_STOP
+		return combined.ValueOrDie();
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact under GCC: this closing brace shows uncovered
+	// even though the function's other, always-taken return path (chunked->chunk(0) above) proves
+	// it demonstrably runs -- same category as this file's other documented closing-brace
+	// attribution artifacts.
 
 	// Every no-argument arrow::<type>() factory (arrow::int32(), arrow::utf8(), ...) returns a
 	// reference to a function-local static singleton -- normally safe to call concurrently for
@@ -6802,7 +6863,12 @@ extern "C"
 		// resolution, as column_has_nulls_from_footer's is_stats_set()/statistics() pair.
 		if (descr->sort_order() == parquet::SortOrder::UNKNOWN) return leaf;
 
-		auto type_id = resolved.leaf_field->type()->id();
+		// Peeled, so that a dictionary-encoded column (a pandas `category`, decoded on read by
+		// decode_dictionary_chunks) is screened like the string column it reads as instead of
+		// falling to `default:` and declining. Correct whatever the wrapper: a column chunk's
+		// min/max are over the VALUES, and Parquet has no dictionary type of its own -- the
+		// wrapper is Arrow's, restored from the stored schema. See unwrap_encoding_layers.
+		auto type_id = unwrap_encoding_layers(resolved.leaf_field->type())->id();
 		switch (type_id)
 		{
 		case arrow::Type::INT8:
@@ -9026,10 +9092,12 @@ extern "C"
 	// its physical Arrow type maps onto one of those nine tokens -- a FIXED_SIZE_LIST/LIST/
 	// LARGE_LIST vector column is unwrapped to its element type first, so an int32 vector column
 	// reports "int32" here too (col_size/vector-ness is a separate query, see
-	// parquet_reader_get_column_col_size). Otherwise writes the raw Arrow type description (e.g.
-	// "decimal128(10, 2)") into `buf` and returns 0, for a caller-side diagnostic message -- this
-	// project's own writer never produces such a column, but a column written by a different tool
-	// can (see test/fixtures/extended_types.parquet). Assumes `name` already resolves: callers
+	// parquet_reader_get_column_col_size). Otherwise writes the literal "unknown" into `buf` and
+	// returns 0 -- never Arrow's own spelling of the type, so `buf` never needs to hold more than
+	// one of those tokens (this matters on the Fortran side, whose receiving buffer is fixed at 32
+	// characters: see resolve_column_type in parquet_read.f90). This project's own writer never
+	// produces an unreadable column, but a column written by a different tool can (see
+	// test/fixtures/extended_types.parquet). Assumes `name` already resolves: callers
 	// (parquet_column_exists/parquet_get_column_type in parquet_read.f90) always probe existence
 	// via parquet_reader_has_column/check_column_exists first.
 	int64_t parquet_reader_get_column_type_name(void *handle, const char *name, char *buf, int64_t buf_len)
@@ -9037,6 +9105,27 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
 		auto type = resolved.leaf_field->type();
+		if (resolved.child_path.empty() && type->id() == arrow::Type::DICTIONARY)
+		{
+			// A whole-column dictionary is DECODED to its value type on read (see
+			// decode_dictionary_chunks), so this query reports the value type: a pandas `category`
+			// answers "string" and reads like any other string column.
+			//
+			// Deliberately here rather than as an arm inside arrow_leaf_family, and deliberately
+			// only for a leaf that IS the whole column. Arrow restores a stored dictionary type at
+			// any depth -- measured with pyarrow, both `list<dictionary<string>>` and
+			// `struct<f: dictionary<string>>` come back dictionary-typed -- while the decode only
+			// ever sees the top-level chunk. A family arm would therefore make a NESTED dictionary
+			// claim to be readable while its data is still dictionary-encoded; those keep
+			// answering "unknown", exactly as they do today.
+			//
+			// Not unwrap_encoding_layers either, though it peels a dictionary too: it also peels
+			// extension and run-end-encoded types, and reading through an extension type (an
+			// arrow.uuid handed back as sixteen bytes of fixed_size_binary) would be a wrong
+			// answer with no warning. A dictionary over a value type this library cannot read
+			// (binary) still answers "unknown" below, exactly as a plain column of it does.
+			type = std::static_pointer_cast<arrow::DictionaryType>(type)->value_type();
+		}
 		if (type->id() == arrow::Type::FIXED_SIZE_LIST || type->id() == arrow::Type::LIST ||
 			type->id() == arrow::Type::LARGE_LIST)
 		{

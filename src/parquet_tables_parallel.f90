@@ -279,6 +279,18 @@ contains
         !$omp end parallel do
     end procedure table_colwork
     !
+    module procedure table_stat_threads
+        integer :: inner
+        !
+        ! A column is scanned by one thread from end to end -- the pass has no within-column level
+        ! -- so the plan is the reindex's: across columns only, gated on the same work floor and
+        ! column count, capped by the same setting.
+        call colwork_plan(cache, .false., slots, nt, inner)
+        ! Noted on both paths, serial included, for the reason table_colwork notes it: so a test
+        ! can tell "scanned on one thread" from "the gate declined and nothing was recorded".
+        call parquet_debug_note_table_threads(nt, inner)
+    end procedure table_stat_threads
+    !
     !> Applies one `PCW_*` operation to one column. The whole body of both loops above, so the two
     !! paths cannot drift.
     subroutine colwork_one(cache, op, idx, rows, keep, valid, threads)
@@ -506,9 +518,11 @@ contains
     !! `%prefetch`'s are. **`table_colwork_clone` does NOT run that guard** -- `%clone` checks only
     !! that the table is open -- and is safe for a different reason: it only ever READS the source
     !! (`deep_copy` takes `self` intent(in)) and writes a destination the caller has just created
-    !! and nobody else can reach. The join's carry is the clone's case. Do not "unify" these into
-    !! one sentence: a future caller that mutated a possibly-shared source would satisfy the second
-    !! argument while breaking the first.
+    !! and nobody else can reach. The join's carry is the clone's case, and so is
+    !! `table_stat_threads`: `%print_stat`'s scan reads every column it visits and writes nothing
+    !! but its own text cells. Do not "unify" these into one sentence: a future caller that
+    !! mutated a possibly-shared source would satisfy the second argument while breaking the
+    !! first.
     integer function colwork_avail(cache, slots, nout) result(n)
         use parquet_settings, only : parquet_get_table_threads, parquet_clamp_to_affinity
 #ifdef _OPENMP

@@ -152,7 +152,9 @@ contains
             new_unittest("gather_from's mask only adds nulls, and an all-true mask costs no bitmap", &
                 test_gather_from_mask_add_only), &
             new_unittest("gather_from: a zero-row source, an empty list, a reused destination, int32", &
-                test_gather_from_edges) &
+                test_gather_from_edges), &
+            new_unittest("row_validity_range agrees with is_null on every range and kind", &
+                test_row_validity_range_matches_is_null) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -4546,4 +4548,104 @@ contains
         call col%adopt_container(cc)
     end subroutine build_null_free_list
 
+    !
+    !> row_validity_range must agree with is_null on every row of every range, including ranges
+    !! whose bits share a 64-bit word with rows outside them (the walk touches whole words and
+    !! must not mark a neighbour), on a bitmap kind, a vector kind with element nulls, a temporal
+    !! kind, a string kind and a null-free column -- and must write nothing past the range
+    !! (feature_risks.md Risk-223).
+    subroutine test_row_validity_range_matches_is_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: n = 200_int64
+        type(parquet_column) :: c
+        integer(int32) :: v(n), vv(3, n)
+        integer(int64) :: w(n)
+        character(len=4) :: s(n)
+        type(parquet_date) :: d(n), d0
+        integer(int64) :: i
+        integer :: e
+
+        do i = 1_int64, n
+            v(i) = int(i, int32)
+            w(i) = i*3_int64
+            do e = 1, 3
+                vv(e, i) = int(10_int64*i, int32) + e
+            end do
+            write(s(i), '(a1, i3.3)') "s", i
+        end do
+        ! A bitmap kind with nulls on both sides of both 64-bit word boundaries and at both ends.
+        call c%init(PK_INT32, n)
+        call c%set_all(v)
+        call c%set_null(1_int64)
+        call c%set_null(64_int64)
+        call c%set_null(65_int64)
+        call c%set_null(128_int64)
+        call c%set_null(129_int64)
+        call c%set_null(n)
+        call check_validity_ranges(error, c, n, "int32 with nulls at the word boundaries")
+        if (allocated(error)) return
+        ! A vector kind: element nulls, so one row's three bits straddle the word boundaries.
+        call c%init(PK_INT32_VEC, n, width=3_int32)
+        call c%set_all(vv)
+        call c%set_null(22_int64, 3_int64)
+        call c%set_null(43_int64, 1_int64)
+        call c%set_null(64_int64, 2_int64)
+        call c%set_null(129_int64, 2_int64)
+        call check_validity_ranges(error, c, n, "int32 vector with element nulls")
+        if (allocated(error)) return
+        ! A temporal kind: a default-initialised element is null, and there is no bitmap.
+        d0 = parquet_date(2024, 1, 1)
+        do i = 1_int64, n
+            if (i == 3_int64 .or. i == 64_int64 .or. i == 130_int64) cycle
+            d(i) = d0 + int(i - 1_int64, int32)
+        end do
+        call c%init(PK_DATE, n)
+        call c%set_all(d)
+        call check_validity_ranges(error, c, n, "date with null elements")
+        if (allocated(error)) return
+        ! A string kind: the nulls live in the store's own bitmap.
+        call c%init(PK_STRING, n)
+        call c%set_all(s)
+        call c%set_null(2_int64)
+        call c%set_null(65_int64)
+        call c%set_null(n)
+        call check_validity_ranges(error, c, n, "string with nulls")
+        if (allocated(error)) return
+        ! No nulls at all: the one-flag-test path.
+        call c%init(PK_INT64, n)
+        call c%set_all(w)
+        call check_validity_ranges(error, c, n, "int64 with no nulls")
+    end subroutine test_row_validity_range_matches_is_null
+    !
+    !> Every range in the list, against is_null row by row, and the entries past the range untouched.
+    subroutine check_validity_ranges(error, c, n, what)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column), intent(in) :: c !! the column under test.
+        integer(int64), intent(in) :: n       !! its row count.
+        character(len=*), intent(in) :: what  !! names the column in the failure message.
+        integer(int64), parameter :: ranges(2, 10) = reshape([ &
+            1_int64, 200_int64,  1_int64, 1_int64,  60_int64, 70_int64,  64_int64, 64_int64, &
+            65_int64, 65_int64,  63_int64, 66_int64,  129_int64, 200_int64,  200_int64, 200_int64, &
+            100_int64, 101_int64,  2_int64, 199_int64], [2, 10])
+        logical :: valid(n + 8_int64)
+        integer(int64) :: lo, hi, i
+        integer :: r
+        character(len=64) :: where
+
+        do r = 1, size(ranges, 2)
+            lo = ranges(1, r)
+            hi = ranges(2, r)
+            valid = .false.
+            call c%row_validity_range(lo, hi, valid)
+            do i = lo, hi
+                write(where, '(a, i0, a, i0, a, i0)') " range ", lo, ":", hi, " row ", i
+                call check(error, valid(i - lo + 1_int64) .eqv. .not. c%is_null(i), &
+                    what // trim(where) // ": row_validity_range disagrees with is_null")
+                if (allocated(error)) return
+            end do
+            call check(error, .not. any(valid(hi - lo + 2_int64:)), &
+                what // ": row_validity_range wrote past the end of its range")
+            if (allocated(error)) return
+        end do
+    end subroutine check_validity_ranges
 end module test_columns

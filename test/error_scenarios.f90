@@ -2484,6 +2484,16 @@ program error_scenarios
         call scenario_table_drop_predefined()
     case ("table_print_stat_nan")
         call scenario_table_print_stat_nan()
+    case ("table_print_stat_scan_serial")
+        call scenario_table_print_stat_scan(threads=1)
+    case ("table_print_stat_scan_parallel")
+        call scenario_table_print_stat_scan(threads=0)
+    case ("table_print_stat_no_stats")
+        call scenario_table_print_stat_no_stats()
+    case ("column_row_validity_range_out_of_range")
+        call scenario_column_row_validity_range_out_of_range()
+    case ("column_row_validity_range_short_mask")
+        call scenario_column_row_validity_range_short_mask()
     case ("codegen_row_index_out_of_range")
         call scenario_codegen_row_index_out_of_range()
     case ("codegen_range_out_of_range")
@@ -18333,6 +18343,178 @@ contains
         call t%add_column("allnan", allnan)
         call t%print_stat()
     end subroutine scenario_table_print_stat_nan
+
+    !> The block-wise statistics scan behind %print_stat, on a fixture longer than two of its blocks.
+    !!
+    !! `STAT_BLOCK` (src/parquet_tables_access.f90) is 4096 rows; 10007 rows here make three blocks,
+    !! the last one partial, and every null and NaN sits on one side or the other of a block
+    !! boundary (rows 4096/4097 and 8192/8193), in the first row, or in the last -- the places a
+    !! mask carried over from the previous block, or a range bound off by one, would move a count or
+    !! an extreme without anything aborting (feature_risks.md Risk-223). One column per kind family,
+    !! each with a null count and two extremes that no other column's line can be mistaken for.
+    !!
+    !! `threads` goes to parquet_set_table_threads: 1 forces the scan serial, 0 lets it open a team,
+    !! which it does because the widest column (`i32v`, 16 x 10007 elements) is above the work floor.
+    !! The trailing "parallel scan:" line says which happened, read back through the table-threads
+    !! observation hook, so the wrapper can tell the two runs apart rather than asserting the same
+    !! path twice.
+    subroutine scenario_table_print_stat_scan(threads)
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        use iso_c_binding, only : c_int64_t
+        integer, intent(in) :: threads !! parquet_set_table_threads' cap: 1 serial, 0 automatic.
+        integer, parameter :: nr = 10007
+        type(parquet_table) :: t
+        integer(int32) :: i32(nr), i32v(16, nr)
+        integer(int64) :: i64(nr)
+        real(real64) :: f64(nr), f64v(2, nr), nan64
+        real(real32) :: f32(nr), nan32
+        logical :: bool(nr), boolv(2, nr)
+        character(len=6) :: str(nr)
+        character(len=7) :: strv(2, nr)
+        type(parquet_date) :: date(nr), datev(2, nr), d0, null_date
+        integer :: i, e
+        interface
+            !> Threads the last table-layer team resolved to; 1 when it ran serially.
+            function parquet_debug_get_table_threads_used() result(res) &
+                bind(C, name="parquet_debug_get_table_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: res
+            end function parquet_debug_get_table_threads_used
+        end interface
+
+        nan64 = ieee_value(1.0_real64, ieee_quiet_nan)
+        nan32 = ieee_value(1.0_real32, ieee_quiet_nan)
+        d0 = parquet_date(2020, 1, 1)
+        do i = 1, nr
+            i32(i) = 1000000 + i
+            i64(i) = 2000000000000_int64 + int(i, int64)
+            f64(i) = 0.5_real64*real(i, real64)
+            f32(i) = nan32
+            bool(i) = mod(i, 3) == 0
+            write(str(i), '(a1, i5.5)') "m", i
+            do e = 1, 16
+                i32v(e, i) = 100*i + e
+            end do
+            do e = 1, 2
+                f64v(e, i) = 0.25_real64*real(i, real64) + real(e, real64)
+                boolv(e, i) = (e == 1) .and. mod(i, 2) == 0
+                write(strv(e, i), '(a1, i5.5, a1)') "v", i, achar(iachar("a") + e - 1)
+            end do
+            date(i) = d0 + (i - 1)
+            datev(1, i) = d0 + (i - 1)
+            datev(2, i) = d0 + (i - 1 + 20000)
+        end do
+        ! NaNs are values, never nulls, and go on both sides of the second boundary and in the
+        ! first block; the string extremes sit just past a boundary each; a temporal null is a
+        ! default-initialised element and rides in with the values.
+        f64(3) = nan64
+        f64(4096) = nan64
+        f64(8193) = nan64
+        f64v(1, 8192) = nan64
+        str(4097) = "zzz"
+        str(8193) = "aaa"
+        date(4096) = null_date
+        date(8193) = null_date
+        datev(2, 5) = null_date
+
+        call parquet_new_table(t)
+        call t%add_column("i32", i32)
+        call t%add_column("i64", i64)
+        call t%add_column("f64", f64)
+        call t%add_column("f32", f32)
+        call t%add_column("bool", bool)
+        call t%add_column("str", str)
+        call t%add_column("i32v", i32v)
+        call t%add_column("f64v", f64v)
+        call t%add_column("boolv", boolv)
+        call t%add_column("date", date)
+        call t%add_column("datev", datev)
+        call t%add_column("strv", strv)
+        ! Nulls: the first row, both sides of both boundaries, the last row, and a few inside.
+        call t%set_null("i32", 1)
+        call t%set_null("i32", 4096)
+        call t%set_null("i32", 4097)
+        call t%set_null("i32", 8192)
+        call t%set_null("i32", 8193)
+        call t%set_null("i32", nr)
+        call t%set_null("i64", 4095)
+        call t%set_null("i64", 4098)
+        call t%set_null("f64", 4097)
+        call t%set_null("f64", nr)
+        call t%set_null("f32", 5)
+        call t%set_null("f32", 6)
+        call t%set_null("bool", 4096)
+        call t%set_null("bool", 4097)
+        call t%set_null("str", 2)
+        call t%set_null("str", 8192)
+        call t%set_null("str", nr)
+        ! A vector row is null when ANY element is: one element each, at a boundary and at the end.
+        call t%set_null("i32v", 4096, 2)
+        call t%set_null("i32v", nr, 16)
+        call t%set_null("f64v", 1)
+        call t%set_null("boolv", 3)
+        call t%set_null("strv", 4097, 2)
+
+        call parquet_set_table_threads(threads)
+        call t%print_stat()
+        if (parquet_debug_get_table_threads_used() > 1_c_int64_t) then
+            print '(a)', "parallel scan: yes"
+        else
+            print '(a)', "parallel scan: no"
+        end if
+    end subroutine scenario_table_print_stat_scan
+
+    !> %print_stat(stats=.false.): the listing without its null count, minimum and maximum, over a
+    !! resident column that was written into (so the edited marker has to find its new place after
+    !! the width) and a column left unread.
+    subroutine scenario_table_print_stat_no_stats()
+        type(parquet_writer) :: writer
+        type(parquet_table) :: t
+        integer(int32) :: a(3), b(3)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_print_stat_no_stats.parquet"
+
+        a = [1_int32, 2_int32, 3_int32]
+        b = [4_int32, 5_int32, 6_int32]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "a", a)
+        call parquet_write_column(writer, "b", b)
+        call parquet_close_writer(writer)
+
+        call parquet_open_table(t, out_file)
+        call t%set("a", [10_int32, 20_int32, 30_int32])
+        call t%print_stat(all=.true., stats=.false.)
+    end subroutine scenario_table_print_stat_no_stats
+
+    !> row_validity_range must refuse a range reaching past the column, after accepting one inside it.
+    subroutine scenario_column_row_validity_range_out_of_range()
+        type(parquet_column) :: c
+        logical :: valid(8)
+
+        call c%init(PK_INT32, 5_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32, 4_int32, 5_int32])
+        call c%set_null(2_int64)
+        call c%row_validity_range(1_int64, 5_int64, valid)
+        if (valid(2) .or. .not. all(valid([1, 3, 4, 5]))) then
+            error stop "row_validity_range: the in-range control did not report row 2 null and the rest valid"
+        end if
+        print '(a)', "row_validity_range accepted a range inside the column"
+        call c%row_validity_range(2_int64, 6_int64, valid)
+        print '(a)', "row_validity_range accepted a range past the end -- it must abort"
+    end subroutine scenario_column_row_validity_range_out_of_range
+
+    !> row_validity_range must refuse a mask shorter than the range, after filling one that fits.
+    subroutine scenario_column_row_validity_range_short_mask()
+        type(parquet_column) :: c
+        logical :: fits(5), short(3)
+
+        call c%init(PK_INT32, 5_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32, 4_int32, 5_int32])
+        call c%row_validity_range(1_int64, 5_int64, fits)
+        if (.not. all(fits)) error stop "row_validity_range: the fitting-mask control reported a null"
+        print '(a)', "row_validity_range accepted a mask as long as the range"
+        call c%row_validity_range(1_int64, 5_int64, short)
+        print '(a)', "row_validity_range accepted a mask shorter than the range -- it must abort"
+    end subroutine scenario_column_row_validity_range_short_mask
 
     !> Writes the fixture the generated-table scenarios open, matching table_types/maml_example4.maml's
     !! file columns. Kept minimal: these scenarios are about the guards, not the data.

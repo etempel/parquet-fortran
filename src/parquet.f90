@@ -152,6 +152,9 @@ module parquet
     ! Not part of that per-cell tier, hidden here for the same reason: it is the non-mutating
     ! `any_null` the table's read accessors must use, and a user already has `%any_null()`.
     private :: parquet_column_any_null
+    ! Its ranged sibling, which %print_stat's statistics scan reads a column's nulls through a
+    ! block at a time; a user already has `%row_validity_range`.
+    private :: parquet_column_row_validity_range
     ! parquet_strings' typed tier, hidden for the same reason once more. These are how
     ! parquet_columns reaches a column's embedded parquet_string_column without a type-bound
     ! call, and they duplicate no user-facing capability: every one of them is already a binding
@@ -171,6 +174,7 @@ module parquet
     private :: parquet_string_column_gather, parquet_string_column_gather_from
     private :: parquet_string_column_append_nulls
     private :: parquet_string_column_raw_buffers
+    private :: parquet_string_column_argminmax
     ! parquet_list's own two internal accessors, hidden for the same reason again: they are how
     ! the LIST write path reaches a list column's offsets and payload without a per-row allocation,
     ! and they duplicate no user-facing capability (%length/%view/%get already answer both

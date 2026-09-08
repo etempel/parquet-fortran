@@ -207,9 +207,10 @@ module parquet_settings
     !! the table's OpenMP plumbing.
     integer, save :: cfg_prefetch_threads = 0
     !> Cap on the threads a table's row-structural mutation (%sort_by, %filter_rows, %top_n and the
-    !! calls that go through them) may use to rewrite its columns concurrently. `0` means "auto" (as
-    !! many as OpenMP offers, never more than the table has columns). Read only in
-    !! src/parquet_tables_parallel.f90, which owns the table layer's OpenMP plumbing.
+    !! calls that go through them) may use to rewrite its columns concurrently, and on the columns
+    !! %print_stat's statistics pass scans at once. `0` means "auto" (as many as OpenMP offers,
+    !! never more than the table has columns). Read only in src/parquet_tables_parallel.f90, which
+    !! owns the table layer's OpenMP plumbing.
     integer, save :: cfg_table_threads = 0
     !> (`cfg_string_threads` lives in parquet_settings_base -- see the note at the verbosity levels
     !! above. It is written by parquet_set_string_threads below and read by parquet_string_threads.)
@@ -369,7 +370,8 @@ contains
 
     !> Sets the cap on how many threads a `parquet_table`'s row-structural mutation may use to
     !> rewrite its columns concurrently -- `%sort_by`, `%filter_rows`, `%top_n`, and `%delete_rows`
-    !> and `%truncate`, which go through the same loop.
+    !> and `%truncate`, which go through the same loop -- and on how many columns `%print_stat`'s
+    !> statistics pass scans at once, which divides its work the same way.
     !>
     !> Read per mutation, so it takes effect immediately. `0` restores automatic behaviour. The value
     !> is a **cap**: the mutation never uses more threads than OpenMP offers, and never more than the

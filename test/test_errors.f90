@@ -15,7 +15,7 @@
 !> `error_type` calls its FINAL `escalate_error` and aborts the whole process.
 module test_errors
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
-    !$ use omp_lib, only : omp_get_max_threads
+    !$ use omp_lib, only : omp_get_max_threads, omp_get_num_procs
     !
     implicit none
     private
@@ -83,7 +83,7 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:), p16(:), p17(:)
+                                            p15(:), p16(:), p17(:), p18(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2463,7 +2463,19 @@ contains
             new_unittest("join: require='1:m' aborts from the sort engine's check on a team", &
                 test_join_require_1m_threaded_aborts) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17]
+        p18 = [ &
+            new_unittest("%print_stat's statistics scan prints every kind's nulls, min and max, serially", &
+                test_table_print_stat_scan_serial), &
+            new_unittest("%print_stat's statistics scan prints the same rows on a team", &
+                test_table_print_stat_scan_parallel), &
+            new_unittest("%print_stat(stats=.false.) lists kind and width only", &
+                test_table_print_stat_no_stats), &
+            new_unittest("column row_validity_range with a range past the end aborts", &
+                test_column_row_validity_range_out_of_range_aborts), &
+            new_unittest("column row_validity_range with a mask shorter than the range aborts", &
+                test_column_row_validity_range_short_mask_aborts) &
+            ]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18]
     end subroutine collect_tests_parquet_errors
 
 
@@ -4753,6 +4765,104 @@ contains
         call check_scenario_streams(error, "table_print_stat_nan", "NaN", expect_on="stdout", &
             failure_message="a column whose every value is NaN should report NaN, not ""-""")
     end subroutine test_table_print_stat_nan_excluded
+
+    !> The twelve rows scenario_table_print_stat_scan prints, one per column kind, asserted WHOLE --
+    !! name, kind, width, null count, minimum and maximum, padded exactly as %print_stat pads them --
+    !! so a count or an extreme moved by one row at a block boundary cannot pass (feature_risks.md
+    !! Risk-223). Shared by the serial and the on-a-team wrapper, which differ only in the
+    !! "parallel scan:" line they then assert.
+    subroutine check_print_stat_scan_rows(error, scenario)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: scenario !! the scenario whose stdout carries the rows.
+        character(len=88), parameter :: rows(12) = [character(len=88) :: &
+            "  i32     PK_INT32            1       6           1000002                 1010006", &
+            "  i64     PK_INT64            1       2           2000000000001           2000000010007", &
+            "  f64     PK_FLOAT64          1       2           0.500000                5003.00", &
+            "  f32     PK_FLOAT32          1       2           NaN                     NaN", &
+            "  bool    PK_LOGICAL          1       2           T:3335                  F:6670", &
+            "  str     PK_STRING           1       3           aaa                     zzz", &
+            "  i32v    PK_INT32_VEC        16      2           101                     1000616", &
+            "  f64v    PK_FLOAT64_VEC      2       1           1.50000                 2503.75", &
+            "  boolv   PK_LOGICAL_VEC      2       1           T:5003                  F:15009", &
+            "  date    PK_DATE             1       2           2020-01-01              2047-05-25", &
+            "  datev   PK_DATE_VEC         2       1           2020-01-01              2102-02-26", &
+            "  strv    PK_STRING_VEC       2       1           v00001a                 v10007b"]
+        integer :: k
+
+        do k = 1, size(rows)
+            call check_scenario_streams(error, scenario, trim(rows(k)), "stdout", &
+                "column " // trim(rows(k)(3:8)) // " must print exactly this statistics row: " // trim(rows(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine check_print_stat_scan_rows
+
+    !> The block-wise scan on one thread: every kind's row, and the scan really was serial.
+    subroutine test_table_print_stat_scan_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_print_stat_scan_rows(error, "table_print_stat_scan_serial")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "table_print_stat_scan_serial", "parallel scan: no", "stdout", &
+            "parquet_set_table_threads(1) must keep the statistics pass on one thread")
+    end subroutine test_table_print_stat_scan_serial
+
+    !> The same rows from a scan the fixture is large enough to spread over a team, plus the proof
+    !! that the team was opened -- without which this would be the serial test run twice.
+    !!
+    !! Skipped where no team can open: without OpenMP, or with fewer than two threads or two
+    !! processors, the pass resolves to one thread and the rows would be asserted against the path
+    !! the serial test already covers.
+    subroutine test_table_print_stat_scan_parallel(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: nthreads, nprocs
+
+        nthreads = 1
+        nprocs = 1
+        !$ nthreads = omp_get_max_threads()
+        !$ nprocs = omp_get_num_procs()
+        if (nthreads < 2 .or. nprocs < 2) then
+            call skip_test(error, "needs OpenMP with at least two threads and two processors: the " // &
+                "statistics pass resolves to one thread otherwise, and its team would go untested")
+            return
+        end if
+        call check_print_stat_scan_rows(error, "table_print_stat_scan_parallel")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "table_print_stat_scan_parallel", "parallel scan: yes", "stdout", &
+            "the statistics pass was expected to open a team on a fixture above the work floor")
+    end subroutine test_table_print_stat_scan_parallel
+
+    !> stats=.false. drops the three statistics columns from the header and every row, keeps the
+    !! kind and width, and moves the edited marker to after the width.
+    subroutine test_table_print_stat_no_stats(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "table_print_stat_no_stats", "  column  kind                width", &
+            "stdout", "the header must end at the width column")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "table_print_stat_no_stats", "  a       PK_INT32            1 *", &
+            "stdout", "a written-into resident column must show its width and then the edited marker")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "table_print_stat_no_stats", "  b       PK_INT32            1", &
+            "stdout", "an unread column must still list its kind and width")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "table_print_stat_no_stats", expect_abort=.false., &
+            failure_message="printing without statistics was not expected to abort", &
+            forbidden_text="nulls")
+    end subroutine test_table_print_stat_no_stats
+
+    subroutine test_column_row_validity_range_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_row_validity_range_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a row range reaching past the column was expected to abort", &
+            required_stderr="row_validity_range: row range out of range")
+    end subroutine test_column_row_validity_range_out_of_range_aborts
+
+    subroutine test_column_row_validity_range_short_mask_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_row_validity_range_short_mask", &
+            expect_abort=.true., &
+            failure_message="a mask shorter than the row range was expected to abort", &
+            required_stderr="row_validity_range: valid is shorter than the row range")
+    end subroutine test_column_row_validity_range_short_mask_aborts
 
     !> A NaN is a write-time qc violation, and reporting it must not require ordering it.
     !!

@@ -107,6 +107,7 @@ something a reader is expected to have.
 | [Risk-220](#risk-220--the-sort-engines-passes-over-the-runs-have-a-serial-arm-and-a-threaded-arm-and-only-a-fixture-with-duplicates-nulls-and-unmatched-rows-on-both-sides-can-see-them-disagree) | The sort engine's passes over the runs have a serial arm and a threaded arm, and only a fixture with duplicates, nulls and unmatched rows on both sides can see them disagree | 4 — covered |
 | [Risk-221](#risk-221--a-scoped-filters-row-group-cut-is-structural-and-gating-it-on-the-statistics-screen-loses-the-masks-bound-with-every-answer-still-right) | A scoped filter's row-group cut is structural, and gating it on the statistics screen loses the mask's bound with every answer still right | 4 — covered |
 | [Risk-222](#risk-222--a-builds-work-floor-is-a-tuning-constant-only-a-benchmark-can-see-and-the-sorted-ones-team-is-not-reported-at-all) | A build's work floor is a tuning constant only a benchmark can see, and the sorted one's team is not reported at all | 3 — partly covered |
+| [Risk-223](#risk-223--print_stats-block-wise-scan-can-miscount-at-a-block-boundary-or-print-one-columns-statistics-on-another-and-nothing-aborts) | `%print_stat`'s block-wise scan can miscount at a block boundary, or print one column's statistics on another, and nothing aborts | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8645,3 +8646,31 @@ STATISTICS decision goes below the gate, a STRUCTURAL one above it.
 counter cannot state the property: over a rule-carrying `parquet_reader_set_filter` call the mask is
 a minority of what the reader retains, so the byte half of that test uses a rule-less scoped call,
 which installs the same mask while reading no column.
+
+### Risk-223 — `%print_stat`'s block-wise scan can miscount at a block boundary, or print one column's statistics on another, and nothing aborts
+
+`%print_stat`'s statistics are one pass per column (`stat_*` in the generated
+`src/parquet_tables_access.f90`), walking a bitmap kind `STAT_BLOCK` rows at a time behind a mask
+`parquet_column_row_validity_range` fills for that block alone, and the columns are scanned on a
+team (`table_stat_threads`, `src/parquet_tables_parallel.f90`) into per-column text cells that
+`table_print_stat` prints afterwards. Three things can go wrong with every answer still plausible: a
+mask entry left over from the previous block, or a range bound off by one where a block meets the
+next or where the last, partial block ends, silently moves a null count or an extreme by a row; a
+row whose validity bit shares a 64-bit word with the neighbouring block is marked in the wrong
+block; and a cell written under the wrong index prints one column's statistics on another's line.
+A fixture that fits in one block, or a scan forced serial, sees none of it.
+
+**Rule:** the scenario's fixture must stay longer than two `STAT_BLOCK`s with nulls and NaNs placed
+on both sides of every block boundary and in the last partial block; `STAT_BLOCK` and that fixture's
+row count are changed together (each names the other). The parallel scenario must keep its
+widest column above the work floor, or the team is never opened and the two scenarios test the same
+path twice.
+
+**Covered by** `test_table_print_stat_scan_serial` and `test_table_print_stat_scan_parallel`
+(`test/test_errors.f90`, over the `table_print_stat_scan_serial`/`_parallel` scenarios in
+`test/error_scenarios.f90`), which assert the complete printed row — null count, minimum and maximum
+— for every column kind of a fixture built to the rule above, once with the scan forced serial
+through `parquet_set_table_threads(1)` and once on a team the scenario proves was opened;
+`test_row_validity_range_matches_is_null` (`test/test_columns.f90`) pins the ranged mask against the
+per-row `is_null` across word boundaries; and `test_argminmax_matches_compare`
+(`test/test_parquet_string.f90`) pins the string extremes against the `%compare` scan they replaced.

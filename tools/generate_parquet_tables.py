@@ -2964,14 +2964,18 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: name     !! column name, for the message.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_slice_size
-        !> A column's min and max as display text, for %print_stat.
+        !> A column's null count, and its min and max as display text, for %print_stat -- in ONE
+        !! pass over the column.
         !!
         !! Over the VALUES only: a null row contributes nothing and is counted separately, which
         !! is the sort engine's rule too. An all-null column has neither, and both come back as
-        !! "-". A `logical` column reports true/false counts instead of an ordering, and a vector
-        !! column's statistic is over all of its elements, flattened.
-        module subroutine table_column_stat_text(values, min_s, max_s)
-            type(parquet_column), intent(in) :: values          !! the column, which must be resident.
+        !! "-". A `logical` column reports true/false counts instead of an ordering, a vector
+        !! column's statistic is over all of its elements, flattened, and a list or map column
+        !! reports its shortest and longest row. Read-only, so any number of columns can be
+        !! scanned at once -- which is how %print_stat calls it.
+        module subroutine table_column_stat_text(values, nulls, min_s, max_s)
+            type(parquet_column), intent(in), target :: values  !! the column, which must be resident.
+            integer(int64), intent(out) :: nulls                !! rows that are null.
             character(len=:), allocatable, intent(out) :: min_s !! smallest value as text, or "-".
             character(len=:), allocatable, intent(out) :: max_s !! largest value as text, or "-".
         end subroutine table_column_stat_text
@@ -3438,6 +3442,19 @@ def gen_spec_interfaces():
             !! skips the mask without the caller branching.
             logical, intent(in), optional :: valid(:)
         end subroutine table_colwork_join
+        !> The team %print_stat's statistics pass may spread the columns it scans over: 1
+        !! (serial) or more, never more than there are columns to scan.
+        !!
+        !! `colwork_plan`'s across-columns level and nothing else -- the same work floor, the same
+        !! parquet_set_table_threads cap, and serial inside an existing parallel region -- so a
+        !! setting a program made for its sorts governs its diagnostics too. The pass only reads,
+        !! which is what makes it safe without the shared-table refusal (see `colwork_avail`).
+        !! Reported through the same test-only hook as a mutation's team.
+        module function table_stat_threads(cache, slots) result(nt)
+            type(parquet_table_cache), intent(in) :: cache !! the column store.
+            integer, intent(in) :: slots(:)                !! slots the pass will scan.
+            integer :: nt                                  !! columns scanned at once.
+        end function table_stat_threads
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
         !! every other column, so callers can invoke it unconditionally.
         !!
@@ -3522,11 +3539,17 @@ def gen_spec_interfaces():
         !!
         !! These are statistics of the values IN MEMORY, computed here by a plain Fortran scan.
         !! They are not the file's own footer statistics, and they are the only ones available for
-        !! a column built with %add_column, which has no footer at all. The scan is O(rows) per
-        !! column, so this is not a call to put in a loop over a large table.
-        module subroutine table_print_stat(self, all)
+        !! a column built with %add_column, which has no footer at all. Each resident column is
+        !! scanned once, on its own thread where the table is large enough: the columns are spread
+        !! over a team capped by parquet_set_table_threads (serial inside an existing parallel
+        !! region), and the listing is printed afterwards, serially and in column order, so it is
+        !! byte-identical whatever the team was. `stats=.false.` skips the scan altogether and
+        !! lists the columns with their kind and width only -- the form to reach for on a large
+        !! table when the question is what is resident, not what it holds.
+        module subroutine table_print_stat(self, all, stats)
             class(parquet_table), intent(in) :: self !! the table.
             logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
+            logical, intent(in), optional :: stats   !! .false.: no null count, min or max (default .true.).
         end subroutine table_print_stat
         !> Prints the table's rows -- the first `first` and the last `last` of them, aligned in
         !! columns, with the column names and their kinds above. Where %print_stat DESCRIBES what
@@ -6526,6 +6549,13 @@ def gen_access():
 submodule (parquet_tables) parquet_tables_access
     implicit none
     !
+    !> Rows a `stat_*` scan takes per block: the length of the mask it asks
+    !! `parquet_column_row_validity_range` for at a time. 4096 rows is a 16 KiB mask, which stays
+    !! in the first-level cache beside the block of values it screens. test/error_scenarios.f90's
+    !! `scenario_table_print_stat_scan` fixture is sized to span more than two of these blocks, so
+    !! a boundary mistake here has a test that can see it -- change one and the other together.
+    integer(int64), parameter :: STAT_BLOCK = 4096_int64
+    !
 contains
     !""")
     for k in PTR_KINDS:
@@ -7091,56 +7121,90 @@ NUMFMT = {
 
 
 def stat_impl(k):
-    """One kind's min/max, as text, over the rows that are not null.
+    """One kind's statistics in ONE pass: the null count, and the min/max as text over the rows
+    that are not null.
 
-    A statistic is over the VALUES: a null row contributes nothing, and the null count is
-    reported separately. That is the sort engine's rule too, so the library has one story about
-    where nulls sit rather than two. An all-null column has no min or max and prints "-".
+    A statistic is over the VALUES: a null row contributes nothing and is counted separately. That
+    is the sort engine's rule too, so the library has one story about where nulls sit rather than
+    two. An all-null column has no min or max and prints "-".
 
     A vector kind's statistic is over ALL of its elements, flattened -- the same convention the
-    reader's own print_stat uses for a vector column's null count.
+    reader's own print_stat uses for a vector column's null count -- and its ROW is null when any
+    element is, which is the row form's rule everywhere in this layer.
+
+    **No row costs a procedure call.** A bitmap kind reads its nulls through
+    `parquet_column_row_validity_range`, STAT_BLOCK rows at a time into a mask on the stack, so
+    the per-row test is one logical load; a column with no nulls at all skips the mask and, for an
+    integer or logical kind, is two whole-column intrinsic reductions the compiler vectorises. A
+    temporal element carries its own null and is asked directly. A string kind takes its null
+    count from the store's own counter and its extremes from `%argminmax`, which finds both by
+    index inside the store. Per-element calls to `%is_null` and `%compare` are what this replaced,
+    and they were the whole cost of `%print_stat` on a large table.
 
     **A float kind excludes a NaN from the ordering, and the reason is a trap rather than taste.**
     `min`/`max` over a NaN is not merely processor-dependent in Fortran, it is a fatal signal: both
     compile to x86 `minsd`/`maxsd`, which raise IEEE_INVALID for a QUIET-NaN operand, and nagfor
-    unmasks the IEEE traps by default (`-ieee=stop`) -- so `%print_info` on a column holding a NaN
+    unmasks the IEEE traps by default (`-ieee=stop`) -- so `%print_stat` on a column holding a NaN
     killed the process there, in an optimised build only. Screening the NaN out is also the answer
     `pf_minmax` gives (`skipnan` defaults to excluding it) and the one Parquet's own column
-    statistics record, so the three now agree. A column whose every value is NaN reports NaN rather
-    than "-", which is reserved for a column with no value to report at all.
+    statistics record, so the three agree. A column whose every value is NaN reports NaN rather
+    than "-", which is reserved for a column with no value to report at all. The screen is what
+    keeps the float kinds on an explicit loop rather than `minval`/`maxval`: a masked intrinsic
+    reduction gives no guarantee that a masked-out NaN never reaches the comparison.
     """
     tag, pk, decl, comp, rank, cat = k
+    header = f"""    subroutine stat_{tag}(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null."""
     if cat == "num" and tag.startswith("bool"):
         # A logical column's useful summary is how many of each, not an ordering.
-        inner = ("                do e = 1, size(p, 1)\n"
-                 "                    if (p(e, i)) then\n"
-                 "                        nt = nt + 1\n"
-                 "                    else\n"
-                 "                        nf = nf + 1\n"
-                 "                    end if\n"
-                 "                end do") if rank == 2 else (
-                 "                if (p(i)) then\n"
-                 "                    nt = nt + 1\n"
-                 "                else\n"
-                 "                    nf = nf + 1\n"
-                 "                end if")
-        bool_edecl = "        integer :: e\n" if rank == 2 else ""
-        return f"""    !> {pk}: true/false counts rather than an ordering.
-    subroutine stat_{tag}(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+        if rank == 1:
+            no_nulls = """            if (.not. parquet_column_any_null(values)) then
+                nt = count(p(1:n), kind=int64)
+                nf = n - nt"""
+            counted = "                    nt = nt + count(p(lo:hi) .and. valid(1:nb), kind=int64)"
+            nf_line = "                nf = nvalid - nt"
+            wdecl = ""
+            wset = ""
+        else:
+            no_nulls = """            if (.not. parquet_column_any_null(values)) then
+                nt = count(p(:, 1:n), kind=int64)
+                nf = n*w - nt"""
+            counted = """                    do i = lo, hi
+                        if (valid(i - lo + 1_int64)) nt = nt + count(p(:, i), kind=int64)
+                    end do"""
+            nf_line = "                nf = nvalid*w - nt"
+            wdecl = ", w, i"
+            wset = "            w = int(size(p, 1), int64)\n"
+        return f"""    !> {pk}: true/false counts rather than an ordering, and the null count, in one pass.
+{header}
         character(len=:), allocatable, intent(out) :: min_s    !! "T:<n>".
         character(len=:), allocatable, intent(out) :: max_s    !! "F:<n>".
         {decl}, pointer :: p{dims(rank)}
-        integer(int64) :: i, nt, nf
-{bool_edecl}        character(len=32) :: buf
+        integer(int64) :: n, nt, nf, lo, hi, nb, nvalid{wdecl}
+        logical :: valid(STAT_BLOCK)
+        character(len=32) :: buf
         !
+        nulls = 0_int64
         nt = 0_int64
         nf = 0_int64
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-{inner}
-        end do
+        n = values%length()
+        if (n > 0_int64) then
+            call parquet_column_data_ptr(values, p)
+{wset}{no_nulls}
+            else
+                nvalid = 0_int64
+                do lo = 1_int64, n, STAT_BLOCK
+                    hi = min(lo + STAT_BLOCK - 1_int64, n)
+                    nb = hi - lo + 1_int64
+                    call parquet_column_row_validity_range(values, lo, hi, valid)
+{counted}
+                    nvalid = nvalid + count(valid(1:nb), kind=int64)
+                end do
+{nf_line}
+                nulls = n - nvalid
+            end if
+        end if
         write(buf, "(I0)") nt
         min_s = "T:" // trim(buf)
         write(buf, "(I0)") nf
@@ -7150,13 +7214,86 @@ def stat_impl(k):
     if cat == "num":
         base = tag[:-1] if tag.endswith("v") else tag
         fmt = NUMFMT[base]
-        # A float kind screens the NaN out before it can reach `min`/`max`; see this function's
-        # own docstring for why that is a trap and not a preference. An integer kind cannot hold
-        # one, so it keeps the shorter body and gains neither the test nor the two extra locals.
         isreal = base in ("f32", "f64")
-        elem = "p(i)" if rank == 1 else "p(e, i)"
+        # Two FORD rules shape the float kinds' doc-comment, and each was learned by breaking it:
+        # a continuation line is `!!`, never a second `!>` (FORD starts a new doc-comment at every
+        # `!>` and parses its first line for metadata), and the first line of a MULTI-line comment
+        # must not open with a bare `word:` -- so the float arm says "Smallest and largest
+        # PK_FLOAT32 value" where the single-line kinds keep "PK_INT32: smallest and largest
+        # value". `ford docs.md` reports "Ignoring unknown Ford metadata", once per kind, if either
+        # is reverted. See CLAUDE.md's "FORD doc-comment conventions".
         if isreal:
-            core = f"""v = {elem}
+            headline = ("    !> Smallest and largest %s value over the rows that hold one, and the null count, "
+                        "in one\n    !! pass.\n    !!\n    !! A NaN never enters the ordering. It is excluded, as "
+                        "`pf_minmax` excludes it and as\n    !! Parquet's own statistics do, and a column whose "
+                        "every value is NaN reports NaN." % pk)
+        else:
+            headline = ("    !> Smallest and largest %s value over the rows that hold one, and the null "
+                        "count, in one pass." % pk)
+        if not isreal:
+            if rank == 1:
+                whole = """            mn = minval(p(1:n))
+            mx = maxval(p(1:n))"""
+                per_row = """                    if (valid(i - lo + 1_int64)) then
+                        mn = min(mn, p(i))
+                        mx = max(mx, p(i))
+                    end if"""
+                wguard = ""
+            else:
+                whole = """            mn = minval(p(:, 1:n))
+            mx = maxval(p(:, 1:n))"""
+                per_row = """                    if (valid(i - lo + 1_int64)) then
+                        mn = min(mn, minval(p(:, i)))
+                        mx = max(mx, maxval(p(:, i)))
+                    end if"""
+                wguard = "        if (size(p, 1) < 1) return\n"
+            return f"""{headline}
+    !!
+    !! A column with no nulls is two whole-column reductions; one with nulls walks a block at a
+    !! time behind the row mask, its running extremes seeded with the kind's own bounds so no
+    !! "first value" test sits in the loop.
+{header}
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        {decl}, pointer :: p{dims(rank)}
+        {decl} :: mn, mx
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
+        character(len=32) :: buf
+        !
+        nulls = 0_int64
+        min_s = "-"
+        max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+{wguard}        if (.not. parquet_column_any_null(values)) then
+{whole}
+        else
+            mn = huge(mn)
+            mx = -huge(mx) - 1
+            nvalid = 0_int64
+            do lo = 1_int64, n, STAT_BLOCK
+                hi = min(lo + STAT_BLOCK - 1_int64, n)
+                nb = hi - lo + 1_int64
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                do i = lo, hi
+{per_row}
+                end do
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            end do
+            nulls = n - nvalid
+            if (nvalid == 0_int64) return
+        end if
+        write(buf, "{fmt}") mn
+        min_s = trim(adjustl(buf))
+        write(buf, "{fmt}") mx
+        max_s = trim(adjustl(buf))
+    end subroutine stat_{tag}
+"""
+        # A float kind: the NaN screen keeps this an explicit loop, so the null mask is consulted
+        # inline and a column with no nulls simply never builds one.
+        core = """v = {elem}
 if (v /= v) then
     if (.not. saw_nan) then
         nanv = v
@@ -7169,17 +7306,7 @@ else if (first) then
 else
     mn = min(mn, v)
     mx = max(mx, v)
-end if"""
-        else:
-            core = f"""if (first) then
-    mn = {elem}
-    mx = {elem}
-    first = .false.
-else
-    mn = min(mn, {elem})
-    mx = max(mx, {elem})
-end if"""
-        # A rank-2 kind runs the same core once per element, one indent level deeper.
+end if""".format(elem="p(i)" if rank == 1 else "p(e, i)")
         pad = " " * (16 if rank == 1 else 20)
         core = "\n".join(pad + ln for ln in core.split("\n"))
         if rank == 1:
@@ -7189,52 +7316,51 @@ end if"""
                     + core + "\n"
                     + "                end do")
         edecl = "        integer :: e\n" if rank == 2 else ""
-        nan_decl = f"        {decl} :: v, nanv\n" if isreal else ""
-        nan_init = "        saw_nan = .false.\n" if isreal else ""
-        nan_flag = ", saw_nan" if isreal else ""
-        # Two FORD rules shape the float kinds' doc-comment, and each was learned by breaking it:
-        # a continuation line is `!!`, never a second `!>` (FORD starts a new doc-comment at every
-        # `!>` and parses its first line for metadata), and the first line of a MULTI-line comment
-        # must not open with a bare `word:` -- so the float arm says "Smallest and largest
-        # PK_FLOAT32 value" where the single-line kinds keep "PK_INT32: smallest and largest
-        # value". `ford docs.md` reports "Ignoring unknown Ford metadata", once per kind, if either
-        # is reverted. See CLAUDE.md's "FORD doc-comment conventions".
-        nan_note = ("\n    !!\n    !! A NaN never enters the ordering. It is excluded, as "
-                    "`pf_minmax` excludes it and as\n    !! Parquet's own statistics do, and a "
-                    "column whose every value is NaN reports NaN.") if isreal else ""
-        headline = ("Smallest and largest %s value, over the rows that hold one." % pk) if isreal \
-            else ("%s: smallest and largest value, over the rows that hold one." % pk)
-        if isreal:
-            tail = """        if (first) then
+        return f"""{headline}
+{header}
+        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
+        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
+        {decl}, pointer :: p{dims(rank)}
+        {decl} :: mn, mx, v, nanv
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+{edecl}        logical :: valid(STAT_BLOCK), first, saw_nan, has_nulls
+        character(len=32) :: buf
+        !
+        nulls = 0_int64
+        min_s = "-"
+        max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        has_nulls = parquet_column_any_null(values)
+        first = .true.
+        saw_nan = .false.
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            if (has_nulls) then
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            else
+                nvalid = nvalid + nb
+            end if
+            do i = lo, hi
+                if (has_nulls) then
+                    if (.not. valid(i - lo + 1_int64)) cycle
+                end if
+{body}
+            end do
+        end do
+        nulls = n - nvalid
+        if (first) then
             ! "-" is reserved for a column with nothing to report. Values that are all NaN are
             ! values, so they report NaN -- and `nanv` carries one of the column's own rather
             ! than building a fresh one, which nagfor would trap on (`0.0/0.0` raises).
             if (.not. saw_nan) return
             mn = nanv
             mx = nanv
-        end if"""
-        else:
-            tail = "        if (first) return"
-        return f"""    !> {headline}{nan_note}
-    subroutine stat_{tag}(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
-        character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
-        character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
-        {decl}, pointer :: p{dims(rank)}
-        {decl} :: mn, mx
-{nan_decl}        integer(int64) :: i
-{edecl}        logical :: first{nan_flag}
-        character(len=32) :: buf
-        !
-        min_s = "-"
-        max_s = "-"
-        first = .true.
-{nan_init}        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-{body}
-        end do
-{tail}
+        end if
         write(buf, "{fmt}") mn
         min_s = trim(adjustl(buf))
         write(buf, "{fmt}") mx
@@ -7243,47 +7369,56 @@ end if"""
 """
     if cat == "tmp":
         if rank == 1:
-            body = """                if (first) then
-                    mn = p(i)
-                    mx = p(i)
+            # A temporal element carries its own null, and that IS the row's null state.
+            skip = """            if (p(i)%is_null()) then
+                nulls = nulls + 1_int64
+                cycle
+            end if"""
+            body = """            if (first) then
+                mn = p(i)
+                mx = p(i)
+                first = .false.
+            else
+                if (p(i) < mn) mn = p(i)
+                if (mx < p(i)) mx = p(i)
+            end if"""
+        else:
+            # The row is null when ANY element is (the row form's rule) and is then skipped whole,
+            # so every element the inner loop sees holds a value.
+            skip = """            if (any(p(:, i)%is_null())) then
+                nulls = nulls + 1_int64
+                cycle
+            end if"""
+            body = """            do e = 1, size(p, 1)
+                if (first) then
+                    mn = p(e, i)
+                    mx = p(e, i)
                     first = .false.
                 else
-                    if (p(i) < mn) mn = p(i)
-                    if (mx < p(i)) mx = p(i)
-                end if"""
-        else:
-            body = """                do e = 1, size(p, 1)
-                    if (p(e, i)%is_null()) cycle
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        if (p(e, i) < mn) mn = p(e, i)
-                        if (mx < p(e, i)) mx = p(e, i)
-                    end if
-                end do"""
+                    if (p(e, i) < mn) mn = p(e, i)
+                    if (mx < p(e, i)) mx = p(e, i)
+                end if
+            end do"""
         edecl = "        integer :: e\n" if rank == 2 else ""
-        # A temporal element carries its own null, so a row that is not null can still hold one
-        # on the scalar path -- checked before the value is used, since < aborts on a null.
-        guard = ("            if (p(i)%is_null()) cycle\n" if rank == 1 else "")
-        return f"""    !> {pk}: earliest and latest value, in ISO-8601 form.
-    subroutine stat_{tag}(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+        return f"""    !> {pk}: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+{header}
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         {decl}, pointer :: p{dims(rank)}
         {decl} :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
 {edecl}        logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-{guard}{body}
+        do i = 1_int64, n
+{skip}
+{body}
         end do
         if (first) return
         call mn%to_string(min_s)
@@ -7291,37 +7426,47 @@ end if"""
     end subroutine stat_{tag}
 """
     # string kinds: lexicographic, over the flat store
-    n_elems = "values%length()" if rank == 1 else "values%length() * int(values%colwidth(), int64)"
-    return f"""    !> {pk}: lexicographically smallest and largest value.
-    subroutine stat_{tag}(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    if rank == 1:
+        nulls_body = """        ! One element per row, so the store's own counter is the row count.
+        nulls = store%null_count()"""
+        ndecl = ""
+    else:
+        nulls_body = """        ! A row is null when ANY of its elements is (the row form's rule), and a store that never
+        ! materialized a validity bitmap has none.
+        n = values%length()
+        w = int(values%colwidth(), int64)
+        if (store%has_validity()) then
+            do i = 1_int64, n
+                base = (i - 1_int64)*w
+                do e = 1_int64, w
+                    if (store%is_null(base + e)) then
+                        nulls = nulls + 1_int64
+                        exit
+                    end if
+                end do
+            end do
+        end if"""
+        ndecl = "        integer(int64) :: n, w, i, e, base\n"
+    return f"""    !> {pk}: lexicographically smallest and largest value, and the null count, in one pass.
+{header}
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         type(parquet_string_column), pointer :: store
         character(len=:), allocatable :: sv
-        integer(int64) :: i, n, imin, imax
-        !
+        integer(int64) :: imin, imax
+{ndecl}        !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        call values%string_column(store)
-        n = {n_elems}
-        imin = 0_int64
-        imax = 0_int64
-        do i = 1_int64, n
-            if (store%is_null(i)) cycle
-            if (imin == 0_int64) then
-                imin = i
-                imax = i
-            else
-                ! Compared by INDEX, never by value. `%compare` orders two elements without
-                ! materializing either, where `%get` allocates a deferred-length string per row --
-                ! about 0.11 s per 4 M elements, for a scan that only ever keeps two of them
-                ! (feature_risks.md Risk-60). Its ordering is Fortran's own `<`, blanks and all,
-                ! so this picks exactly the winners the previous value comparison did.
-                if (store%compare(i, imin) < 0) imin = i
-                if (store%compare(i, imax) > 0) imax = i
-            end if
-        end do
+        call parquet_column_string_column(values, store)
+{nulls_body}
+        ! Found by INDEX inside the store, over every non-null element: `%argminmax` carries its
+        ! two candidates' payload bounds across the scan and pays one byte comparison per element,
+        ! where a `%compare` against each running winner re-validated both indices and re-read
+        ! both offset pairs twice per element, and `%get` would allocate a deferred-length string
+        ! per row for a scan that only ever keeps two of them (feature_risks.md Risk-60). Its
+        ! ordering is Fortran's own `<`, blanks and all.
+        call store%argminmax(imin, imax)
         if (imin == 0_int64) return
         ! Only the two winners are materialized. Trimmed for display only: a vector string column
         ! stores its values blank-padded to the widest element, and printing that padding says
@@ -7338,8 +7483,9 @@ end if"""
 def stat_dispatch():
     arms = []
     for k in KINDS:
-        arms.append(f"        case ({k[1]})\n            call stat_{k[0]}(values, min_s, max_s)")
+        arms.append(f"        case ({k[1]})\n            call stat_{k[0]}(values, nulls, min_s, max_s)")
     return """    module procedure table_column_stat_text
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
         select case (values%kindof())
@@ -7348,15 +7494,35 @@ def stat_dispatch():
             ! A list or a map has no min/max VALUE -- there is no order on a whole row -- so the
             ! stat columns report the shortest and longest ROW instead, which is the one summary a
             ! reader of a %print_stat table actually wants from a ragged column.
-            call stat_container_lengths(values, min_s, max_s)
+            call stat_container_lengths(values, nulls, min_s, max_s)
         case default
             ! PK_NONE, and PK_STRUCT: nothing to summarize. A struct's rows all carry the same
             ! field count by construction, so a length extreme would print the same number twice.
+            ! The null count still counts.
+            nulls = count_null_rows(values)
             return
         end select
     end procedure table_column_stat_text
     !
-    !> Shortest and longest ROW of a container column, excluding null rows.
+    !> Rows that are null, for a kind with nothing else to report (PK_STRUCT; PK_NONE holds no
+    !! rows): the block walk the `stat_*` scans use, with no values to read beside it.
+    integer(int64) function count_null_rows(values) result(nulls)
+        type(parquet_column), intent(in), target :: values !! the column.
+        integer(int64) :: n, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
+        !
+        n = values%length()
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            call parquet_column_row_validity_range(values, lo, hi, valid)
+            nvalid = nvalid + count(valid(1:nb), kind=int64)
+        end do
+        nulls = n - nvalid
+    end function count_null_rows
+    !
+    !> Shortest and longest ROW of a container column, excluding null rows, and the null count.
     !!
     !! **Reads nothing.** The lengths come from the container's own offsets, which are resident
     !! whenever the column is -- %print_stat's documented contract is that it leaves a lazy table
@@ -7368,8 +7534,9 @@ def stat_dispatch():
     !! An all-null column reports "-" for both, exactly as an unsummarizable kind does. Note this
     !! is a different question from a row of length zero, which is a real, present, empty list and
     !! IS counted -- `test/fixtures/list_widths.parquet`'s `with_empty` column has both.
-    subroutine stat_container_lengths(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values         !! the column to summarize.
+    subroutine stat_container_lengths(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values !! the column to summarize.
+        integer(int64), intent(out) :: nulls               !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s !! shortest present row, or "-".
         character(len=:), allocatable, intent(out) :: max_s !! longest present row, or "-".
         class(parquet_container_column), pointer :: c
@@ -7377,6 +7544,7 @@ def stat_dispatch():
         logical :: seen
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
         call parquet_column_container(values, c)
@@ -7386,7 +7554,10 @@ def stat_dispatch():
         lo = 0_int64
         hi = 0_int64
         do k = 1_int64, n
-            if (c%is_null_row(k)) cycle
+            if (c%is_null_row(k)) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
             call container_row_length(c, k, len_k)
             if (.not. seen) then
                 lo = len_k

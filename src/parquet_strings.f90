@@ -258,6 +258,7 @@ module parquet_strings
         procedure, private :: equals_i64               !! int64 specific of equals.
         generic :: equals => equals_i32, equals_i64    !! Whether element i equals str.
         procedure :: compare                           !! Orders element i against element j.
+        procedure :: argminmax                         !! Indices of the smallest and largest elements.
         ! --- conversion / ownership ---
         procedure :: to_character                      !! Materialize the whole column as a char array.
         procedure :: clone                             !! Independent deep copy.
@@ -382,6 +383,7 @@ module parquet_strings
     public :: parquet_string_column_append_nulls
     public :: parquet_string_column_move_from
     public :: parquet_string_column_raw_buffers
+    public :: parquet_string_column_argminmax
     !
     !> Typed form of `%reserve`, generic over an int32 or int64 index/count argument.
     interface parquet_string_column_reserve
@@ -3717,19 +3719,37 @@ contains
         class(parquet_string_column), intent(in) :: self !! the column.
         integer(int64), intent(in) :: i                  !! 1-based index of the first element.
         integer(int64), intent(in) :: j                  !! 1-based index of the second element.
-        integer(int64) :: ai, bi, aj, bj, li, lj, k, common
-        character(len=1) :: ci, cj
+        integer(int64) :: ai, bi, aj, bj
         call check_index(self, i, "compare")
         call check_index(self, j, "compare")
+        ! No payload at all means every element is empty, and two empties are equal.
+        res = 0
+        if (.not. allocated(self%data)) return
         call elem_bounds(self, i, ai, bi)
         call elem_bounds(self, j, aj, bj)
+        res = payload_compare(self%data, ai, bi, aj, bj)
+    end function compare
+    !
+    !> Orders the payload bytes `data(ai:bi)` against `data(aj:bj)` exactly as `compare` orders
+    !! two elements: -1, 0 or +1, the shorter operand compared as though blank-padded. This is
+    !! `compare`'s body with the two bounds already in hand, so that a scan carrying its
+    !! candidates' bounds across the loop (`parquet_string_column_argminmax`) pays one byte
+    !! comparison per element and neither the index checks nor the bounds lookups.
+    pure integer function payload_compare(data, ai, bi, aj, bj) result(res)
+        character(len=1), intent(in) :: data(:) !! the packed payload.
+        integer(int64), intent(in) :: ai        !! first operand's first byte.
+        integer(int64), intent(in) :: bi        !! first operand's last byte (bi < ai when empty).
+        integer(int64), intent(in) :: aj        !! second operand's first byte.
+        integer(int64), intent(in) :: bj        !! second operand's last byte (bj < aj when empty).
+        integer(int64) :: li, lj, k, common
+        character(len=1) :: ci, cj
         li = bi - ai + 1_int64
         lj = bj - aj + 1_int64
         common = min(li, lj)
         res = 0
         do k = 1_int64, common
-            ci = self%data(ai + k - 1_int64)
-            cj = self%data(aj + k - 1_int64)
+            ci = data(ai + k - 1_int64)
+            cj = data(aj + k - 1_int64)
             if (ci /= cj) then
                 if (ci < cj) then
                     res = -1
@@ -3743,8 +3763,8 @@ contains
         ! blanks, which is what Fortran's own padding rule does.
         if (li > lj) then
             do k = common + 1_int64, li
-                if (self%data(ai + k - 1_int64) /= " ") then
-                    if (self%data(ai + k - 1_int64) < " ") then
+                if (data(ai + k - 1_int64) /= " ") then
+                    if (data(ai + k - 1_int64) < " ") then
                         res = -1
                     else
                         res = 1
@@ -3754,8 +3774,8 @@ contains
             end do
         else if (lj > li) then
             do k = common + 1_int64, lj
-                if (self%data(aj + k - 1_int64) /= " ") then
-                    if (" " < self%data(aj + k - 1_int64)) then
+                if (data(aj + k - 1_int64) /= " ") then
+                    if (" " < data(aj + k - 1_int64)) then
                         res = -1
                     else
                         res = 1
@@ -3764,7 +3784,70 @@ contains
                 end if
             end do
         end if
-    end function compare
+    end function payload_compare
+    !
+    !> Typed form of `%argminmax`: the indices of the lexicographically smallest and largest
+    !! non-null elements, or `0` for both when the column holds no non-null element.
+    !!
+    !! **The ordering is exactly `%compare`'s** -- Fortran's own `<` on the two values, the shorter
+    !! one blank-padded -- and on a tie the EARLIER index is kept, so the answer is the one a scan
+    !! keeping a running winner through `%compare` gives. What this buys over that scan is the
+    !! per-element cost: the two candidates' payload bounds are carried across the loop, so an
+    !! element costs one byte comparison against each and no index check, where the scan paid two
+    !! `%compare` calls, each re-validating both indices and re-reading both offset pairs. A null
+    !! element is skipped, as that scan skips it; nothing is materialized.
+    subroutine parquet_string_column_argminmax(self, imin, imax)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(out) :: imin              !! index of the smallest element, or 0.
+        integer(int64), intent(out) :: imax              !! index of the largest element, or 0.
+        integer(int64) :: i, a, b, amin, bmin, amax, bmax
+        imin = 0_int64
+        imax = 0_int64
+        amin = 0_int64
+        bmin = -1_int64
+        amax = 0_int64
+        bmax = -1_int64
+        do i = 1_int64, self%nrows
+            if (.not. bit_valid(self, i)) cycle
+            ! No payload at all means every element is empty, and the first non-null one wins
+            ! both places outright: there is nothing to compare.
+            if (.not. allocated(self%data)) then
+                imin = i
+                imax = i
+                return
+            end if
+            a = self%offsets(i) + 1_int64
+            b = self%offsets(i + 1_int64)
+            if (imin == 0_int64) then
+                imin = i
+                imax = i
+                amin = a
+                bmin = b
+                amax = a
+                bmax = b
+            else
+                if (payload_compare(self%data, a, b, amin, bmin) < 0) then
+                    imin = i
+                    amin = a
+                    bmin = b
+                end if
+                if (payload_compare(self%data, a, b, amax, bmax) > 0) then
+                    imax = i
+                    amax = a
+                    bmax = b
+                end if
+            end if
+        end do
+    end subroutine parquet_string_column_argminmax
+    !
+    !> Binding form of `parquet_string_column_argminmax`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine argminmax(self, imin, imax)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(out) :: imin              !! index of the smallest element, or 0.
+        integer(int64), intent(out) :: imax              !! index of the largest element, or 0.
+        call parquet_string_column_argminmax(self, imin, imax)
+    end subroutine argminmax
     !
     !> Materializes the whole column into a conventional Fortran character array `out`, each
     !! element blank-padded to the longest element's length. A null element error stops by default;

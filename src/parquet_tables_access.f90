@@ -11,6 +11,13 @@
 submodule (parquet_tables) parquet_tables_access
     implicit none
     !
+    !> Rows a `stat_*` scan takes per block: the length of the mask it asks
+    !! `parquet_column_row_validity_range` for at a time. 4096 rows is a 16 KiB mask, which stays
+    !! in the first-level cache beside the block of values it screens. test/error_scenarios.f90's
+    !! `scenario_table_print_stat_scan` fixture is sized to span more than two of these blocks, so
+    !! a boundary mistake here has a test that can see it -- change one and the other together.
+    integer(int64), parameter :: STAT_BLOCK = 4096_int64
+    !
 contains
     !
     module procedure col_ptr_i32
@@ -337,58 +344,79 @@ contains
     end procedure set_arr_strcol
     !
     module procedure table_column_stat_text
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
         select case (values%kindof())
         case (PK_INT32)
-            call stat_i32(values, min_s, max_s)
+            call stat_i32(values, nulls, min_s, max_s)
         case (PK_INT64)
-            call stat_i64(values, min_s, max_s)
+            call stat_i64(values, nulls, min_s, max_s)
         case (PK_FLOAT32)
-            call stat_f32(values, min_s, max_s)
+            call stat_f32(values, nulls, min_s, max_s)
         case (PK_FLOAT64)
-            call stat_f64(values, min_s, max_s)
+            call stat_f64(values, nulls, min_s, max_s)
         case (PK_LOGICAL)
-            call stat_bool(values, min_s, max_s)
+            call stat_bool(values, nulls, min_s, max_s)
         case (PK_STRING)
-            call stat_str(values, min_s, max_s)
+            call stat_str(values, nulls, min_s, max_s)
         case (PK_DATE)
-            call stat_date(values, min_s, max_s)
+            call stat_date(values, nulls, min_s, max_s)
         case (PK_TIME)
-            call stat_time(values, min_s, max_s)
+            call stat_time(values, nulls, min_s, max_s)
         case (PK_TIMESTAMP)
-            call stat_ts(values, min_s, max_s)
+            call stat_ts(values, nulls, min_s, max_s)
         case (PK_INT32_VEC)
-            call stat_i32v(values, min_s, max_s)
+            call stat_i32v(values, nulls, min_s, max_s)
         case (PK_INT64_VEC)
-            call stat_i64v(values, min_s, max_s)
+            call stat_i64v(values, nulls, min_s, max_s)
         case (PK_FLOAT32_VEC)
-            call stat_f32v(values, min_s, max_s)
+            call stat_f32v(values, nulls, min_s, max_s)
         case (PK_FLOAT64_VEC)
-            call stat_f64v(values, min_s, max_s)
+            call stat_f64v(values, nulls, min_s, max_s)
         case (PK_LOGICAL_VEC)
-            call stat_boolv(values, min_s, max_s)
+            call stat_boolv(values, nulls, min_s, max_s)
         case (PK_STRING_VEC)
-            call stat_strv(values, min_s, max_s)
+            call stat_strv(values, nulls, min_s, max_s)
         case (PK_DATE_VEC)
-            call stat_datev(values, min_s, max_s)
+            call stat_datev(values, nulls, min_s, max_s)
         case (PK_TIME_VEC)
-            call stat_timev(values, min_s, max_s)
+            call stat_timev(values, nulls, min_s, max_s)
         case (PK_TIMESTAMP_VEC)
-            call stat_tsv(values, min_s, max_s)
+            call stat_tsv(values, nulls, min_s, max_s)
         case (PK_LIST, PK_MAP)
             ! A list or a map has no min/max VALUE -- there is no order on a whole row -- so the
             ! stat columns report the shortest and longest ROW instead, which is the one summary a
             ! reader of a %print_stat table actually wants from a ragged column.
-            call stat_container_lengths(values, min_s, max_s)
+            call stat_container_lengths(values, nulls, min_s, max_s)
         case default
             ! PK_NONE, and PK_STRUCT: nothing to summarize. A struct's rows all carry the same
             ! field count by construction, so a length extreme would print the same number twice.
+            ! The null count still counts.
+            nulls = count_null_rows(values)
             return
         end select
     end procedure table_column_stat_text
     !
-    !> Shortest and longest ROW of a container column, excluding null rows.
+    !> Rows that are null, for a kind with nothing else to report (PK_STRUCT; PK_NONE holds no
+    !! rows): the block walk the `stat_*` scans use, with no values to read beside it.
+    integer(int64) function count_null_rows(values) result(nulls)
+        type(parquet_column), intent(in), target :: values !! the column.
+        integer(int64) :: n, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
+        !
+        n = values%length()
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            call parquet_column_row_validity_range(values, lo, hi, valid)
+            nvalid = nvalid + count(valid(1:nb), kind=int64)
+        end do
+        nulls = n - nvalid
+    end function count_null_rows
+    !
+    !> Shortest and longest ROW of a container column, excluding null rows, and the null count.
     !!
     !! **Reads nothing.** The lengths come from the container's own offsets, which are resident
     !! whenever the column is -- %print_stat's documented contract is that it leaves a lazy table
@@ -400,8 +428,9 @@ contains
     !! An all-null column reports "-" for both, exactly as an unsummarizable kind does. Note this
     !! is a different question from a row of length zero, which is a real, present, empty list and
     !! IS counted -- `test/fixtures/list_widths.parquet`'s `with_empty` column has both.
-    subroutine stat_container_lengths(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values         !! the column to summarize.
+    subroutine stat_container_lengths(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values !! the column to summarize.
+        integer(int64), intent(out) :: nulls               !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s !! shortest present row, or "-".
         character(len=:), allocatable, intent(out) :: max_s !! longest present row, or "-".
         class(parquet_container_column), pointer :: c
@@ -409,6 +438,7 @@ contains
         logical :: seen
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
         call parquet_column_container(values, c)
@@ -418,7 +448,10 @@ contains
         lo = 0_int64
         hi = 0_int64
         do k = 1_int64, n
-            if (c%is_null_row(k)) cycle
+            if (c%is_null_row(k)) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
             call container_row_length(c, k, len_k)
             if (.not. seen) then
                 lo = len_k
@@ -459,94 +492,145 @@ contains
         end select ! GCOVR_EXCL_STOP
     end subroutine container_row_length
     !
-    !> PK_INT32: smallest and largest value, over the rows that hold one.
-    subroutine stat_i32(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> Smallest and largest PK_INT32 value over the rows that hold one, and the null count, in one pass.
+    !!
+    !! A column with no nulls is two whole-column reductions; one with nulls walks a block at a
+    !! time behind the row mask, its running extremes seeded with the kind's own bounds so no
+    !! "first value" test sits in the loop.
+    subroutine stat_i32(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         integer(int32), pointer :: p(:)
         integer(int32) :: mn, mx
-        integer(int64) :: i
-        logical :: first
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
-                    first = .false.
-                else
-                    mn = min(mn, p(i))
-                    mx = max(mx, p(i))
-                end if
-        end do
-        if (first) return
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        if (.not. parquet_column_any_null(values)) then
+            mn = minval(p(1:n))
+            mx = maxval(p(1:n))
+        else
+            mn = huge(mn)
+            mx = -huge(mx) - 1
+            nvalid = 0_int64
+            do lo = 1_int64, n, STAT_BLOCK
+                hi = min(lo + STAT_BLOCK - 1_int64, n)
+                nb = hi - lo + 1_int64
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                do i = lo, hi
+                    if (valid(i - lo + 1_int64)) then
+                        mn = min(mn, p(i))
+                        mx = max(mx, p(i))
+                    end if
+                end do
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            end do
+            nulls = n - nvalid
+            if (nvalid == 0_int64) return
+        end if
         write(buf, "(I0)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(I0)") mx
         max_s = trim(adjustl(buf))
     end subroutine stat_i32
 
-    !> PK_INT64: smallest and largest value, over the rows that hold one.
-    subroutine stat_i64(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> Smallest and largest PK_INT64 value over the rows that hold one, and the null count, in one pass.
+    !!
+    !! A column with no nulls is two whole-column reductions; one with nulls walks a block at a
+    !! time behind the row mask, its running extremes seeded with the kind's own bounds so no
+    !! "first value" test sits in the loop.
+    subroutine stat_i64(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         integer(int64), pointer :: p(:)
         integer(int64) :: mn, mx
-        integer(int64) :: i
-        logical :: first
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
-                    first = .false.
-                else
-                    mn = min(mn, p(i))
-                    mx = max(mx, p(i))
-                end if
-        end do
-        if (first) return
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        if (.not. parquet_column_any_null(values)) then
+            mn = minval(p(1:n))
+            mx = maxval(p(1:n))
+        else
+            mn = huge(mn)
+            mx = -huge(mx) - 1
+            nvalid = 0_int64
+            do lo = 1_int64, n, STAT_BLOCK
+                hi = min(lo + STAT_BLOCK - 1_int64, n)
+                nb = hi - lo + 1_int64
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                do i = lo, hi
+                    if (valid(i - lo + 1_int64)) then
+                        mn = min(mn, p(i))
+                        mx = max(mx, p(i))
+                    end if
+                end do
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            end do
+            nulls = n - nvalid
+            if (nvalid == 0_int64) return
+        end if
         write(buf, "(I0)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(I0)") mx
         max_s = trim(adjustl(buf))
     end subroutine stat_i64
 
-    !> Smallest and largest PK_FLOAT32 value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT32 value over the rows that hold one, and the null count, in one
+    !! pass.
     !!
     !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
     !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
-    subroutine stat_f32(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    subroutine stat_f32(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real32), pointer :: p(:)
-        real(real32) :: mn, mx
-        real(real32) :: v, nanv
-        integer(int64) :: i
-        logical :: first, saw_nan
+        real(real32) :: mn, mx, v, nanv
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK), first, saw_nan, has_nulls
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        has_nulls = parquet_column_any_null(values)
         first = .true.
         saw_nan = .false.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            if (has_nulls) then
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            else
+                nvalid = nvalid + nb
+            end if
+            do i = lo, hi
+                if (has_nulls) then
+                    if (.not. valid(i - lo + 1_int64)) cycle
+                end if
                 v = p(i)
                 if (v /= v) then
                     if (.not. saw_nan) then
@@ -561,7 +645,9 @@ contains
                     mn = min(mn, v)
                     mx = max(mx, v)
                 end if
+            end do
         end do
+        nulls = n - nvalid
         if (first) then
             ! "-" is reserved for a column with nothing to report. Values that are all NaN are
             ! values, so they report NaN -- and `nanv` carries one of the column's own rather
@@ -576,28 +662,45 @@ contains
         max_s = trim(adjustl(buf))
     end subroutine stat_f32
 
-    !> Smallest and largest PK_FLOAT64 value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT64 value over the rows that hold one, and the null count, in one
+    !! pass.
     !!
     !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
     !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
-    subroutine stat_f64(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    subroutine stat_f64(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real64), pointer :: p(:)
-        real(real64) :: mn, mx
-        real(real64) :: v, nanv
-        integer(int64) :: i
-        logical :: first, saw_nan
+        real(real64) :: mn, mx, v, nanv
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK), first, saw_nan, has_nulls
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        has_nulls = parquet_column_any_null(values)
         first = .true.
         saw_nan = .false.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            if (has_nulls) then
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            else
+                nvalid = nvalid + nb
+            end if
+            do i = lo, hi
+                if (has_nulls) then
+                    if (.not. valid(i - lo + 1_int64)) cycle
+                end if
                 v = p(i)
                 if (v /= v) then
                     if (.not. saw_nan) then
@@ -612,7 +715,9 @@ contains
                     mn = min(mn, v)
                     mx = max(mx, v)
                 end if
+            end do
         end do
+        nulls = n - nvalid
         if (first) then
             ! "-" is reserved for a column with nothing to report. Values that are all NaN are
             ! values, so they report NaN -- and `nanv` carries one of the column's own rather
@@ -627,62 +732,68 @@ contains
         max_s = trim(adjustl(buf))
     end subroutine stat_f64
 
-    !> PK_LOGICAL: true/false counts rather than an ordering.
-    subroutine stat_bool(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_LOGICAL: true/false counts rather than an ordering, and the null count, in one pass.
+    subroutine stat_bool(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! "T:<n>".
         character(len=:), allocatable, intent(out) :: max_s    !! "F:<n>".
         logical, pointer :: p(:)
-        integer(int64) :: i, nt, nf
+        integer(int64) :: n, nt, nf, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
         character(len=32) :: buf
         !
+        nulls = 0_int64
         nt = 0_int64
         nf = 0_int64
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                if (p(i)) then
-                    nt = nt + 1
-                else
-                    nf = nf + 1
-                end if
-        end do
+        n = values%length()
+        if (n > 0_int64) then
+            call parquet_column_data_ptr(values, p)
+            if (.not. parquet_column_any_null(values)) then
+                nt = count(p(1:n), kind=int64)
+                nf = n - nt
+            else
+                nvalid = 0_int64
+                do lo = 1_int64, n, STAT_BLOCK
+                    hi = min(lo + STAT_BLOCK - 1_int64, n)
+                    nb = hi - lo + 1_int64
+                    call parquet_column_row_validity_range(values, lo, hi, valid)
+                    nt = nt + count(p(lo:hi) .and. valid(1:nb), kind=int64)
+                    nvalid = nvalid + count(valid(1:nb), kind=int64)
+                end do
+                nf = nvalid - nt
+                nulls = n - nvalid
+            end if
+        end if
         write(buf, "(I0)") nt
         min_s = "T:" // trim(buf)
         write(buf, "(I0)") nf
         max_s = "F:" // trim(buf)
     end subroutine stat_bool
 
-    !> PK_STRING: lexicographically smallest and largest value.
-    subroutine stat_str(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_STRING: lexicographically smallest and largest value, and the null count, in one pass.
+    subroutine stat_str(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         type(parquet_string_column), pointer :: store
         character(len=:), allocatable :: sv
-        integer(int64) :: i, n, imin, imax
+        integer(int64) :: imin, imax
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        call values%string_column(store)
-        n = values%length()
-        imin = 0_int64
-        imax = 0_int64
-        do i = 1_int64, n
-            if (store%is_null(i)) cycle
-            if (imin == 0_int64) then
-                imin = i
-                imax = i
-            else
-                ! Compared by INDEX, never by value. `%compare` orders two elements without
-                ! materializing either, where `%get` allocates a deferred-length string per row --
-                ! about 0.11 s per 4 M elements, for a scan that only ever keeps two of them
-                ! (feature_risks.md Risk-60). Its ordering is Fortran's own `<`, blanks and all,
-                ! so this picks exactly the winners the previous value comparison did.
-                if (store%compare(i, imin) < 0) imin = i
-                if (store%compare(i, imax) > 0) imax = i
-            end if
-        end do
+        call parquet_column_string_column(values, store)
+        ! One element per row, so the store's own counter is the row count.
+        nulls = store%null_count()
+        ! Found by INDEX inside the store, over every non-null element: `%argminmax` carries its
+        ! two candidates' payload bounds across the scan and pays one byte comparison per element,
+        ! where a `%compare` against each running winner re-validated both indices and re-read
+        ! both offset pairs twice per element, and `%get` would allocate a deferred-length string
+        ! per row for a scan that only ever keeps two of them (feature_risks.md Risk-60). Its
+        ! ordering is Fortran's own `<`, blanks and all.
+        call store%argminmax(imin, imax)
         if (imin == 0_int64) return
         ! Only the two winners are materialized. Trimmed for display only: a vector string column
         ! stores its values blank-padded to the widest element, and printing that padding says
@@ -694,194 +805,259 @@ contains
         max_s = trim(sv)
     end subroutine stat_str
 
-    !> PK_DATE: earliest and latest value, in ISO-8601 form.
-    subroutine stat_date(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_DATE: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+    subroutine stat_date(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         type(parquet_date), pointer :: p(:)
         type(parquet_date) :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
         logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-            if (p(i)%is_null()) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
-                    first = .false.
-                else
-                    if (p(i) < mn) mn = p(i)
-                    if (mx < p(i)) mx = p(i)
-                end if
+        do i = 1_int64, n
+            if (p(i)%is_null()) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
+            if (first) then
+                mn = p(i)
+                mx = p(i)
+                first = .false.
+            else
+                if (p(i) < mn) mn = p(i)
+                if (mx < p(i)) mx = p(i)
+            end if
         end do
         if (first) return
         call mn%to_string(min_s)
         call mx%to_string(max_s)
     end subroutine stat_date
 
-    !> PK_TIME: earliest and latest value, in ISO-8601 form.
-    subroutine stat_time(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_TIME: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+    subroutine stat_time(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         type(parquet_time), pointer :: p(:)
         type(parquet_time) :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
         logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-            if (p(i)%is_null()) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
-                    first = .false.
-                else
-                    if (p(i) < mn) mn = p(i)
-                    if (mx < p(i)) mx = p(i)
-                end if
+        do i = 1_int64, n
+            if (p(i)%is_null()) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
+            if (first) then
+                mn = p(i)
+                mx = p(i)
+                first = .false.
+            else
+                if (p(i) < mn) mn = p(i)
+                if (mx < p(i)) mx = p(i)
+            end if
         end do
         if (first) return
         call mn%to_string(min_s)
         call mx%to_string(max_s)
     end subroutine stat_time
 
-    !> PK_TIMESTAMP: earliest and latest value, in ISO-8601 form.
-    subroutine stat_ts(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_TIMESTAMP: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+    subroutine stat_ts(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         type(parquet_timestamp), pointer :: p(:)
         type(parquet_timestamp) :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
         logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-            if (p(i)%is_null()) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
-                    first = .false.
-                else
-                    if (p(i) < mn) mn = p(i)
-                    if (mx < p(i)) mx = p(i)
-                end if
+        do i = 1_int64, n
+            if (p(i)%is_null()) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
+            if (first) then
+                mn = p(i)
+                mx = p(i)
+                first = .false.
+            else
+                if (p(i) < mn) mn = p(i)
+                if (mx < p(i)) mx = p(i)
+            end if
         end do
         if (first) return
         call mn%to_string(min_s)
         call mx%to_string(max_s)
     end subroutine stat_ts
 
-    !> PK_INT32_VEC: smallest and largest value, over the rows that hold one.
-    subroutine stat_i32v(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> Smallest and largest PK_INT32_VEC value over the rows that hold one, and the null count, in one pass.
+    !!
+    !! A column with no nulls is two whole-column reductions; one with nulls walks a block at a
+    !! time behind the row mask, its running extremes seeded with the kind's own bounds so no
+    !! "first value" test sits in the loop.
+    subroutine stat_i32v(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         integer(int32), pointer :: p(:,:)
         integer(int32) :: mn, mx
-        integer(int64) :: i
-        integer :: e
-        logical :: first
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                do e = 1, size(p, 1)
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        mn = min(mn, p(e, i))
-                        mx = max(mx, p(e, i))
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        if (size(p, 1) < 1) return
+        if (.not. parquet_column_any_null(values)) then
+            mn = minval(p(:, 1:n))
+            mx = maxval(p(:, 1:n))
+        else
+            mn = huge(mn)
+            mx = -huge(mx) - 1
+            nvalid = 0_int64
+            do lo = 1_int64, n, STAT_BLOCK
+                hi = min(lo + STAT_BLOCK - 1_int64, n)
+                nb = hi - lo + 1_int64
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                do i = lo, hi
+                    if (valid(i - lo + 1_int64)) then
+                        mn = min(mn, minval(p(:, i)))
+                        mx = max(mx, maxval(p(:, i)))
                     end if
                 end do
-        end do
-        if (first) return
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            end do
+            nulls = n - nvalid
+            if (nvalid == 0_int64) return
+        end if
         write(buf, "(I0)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(I0)") mx
         max_s = trim(adjustl(buf))
     end subroutine stat_i32v
 
-    !> PK_INT64_VEC: smallest and largest value, over the rows that hold one.
-    subroutine stat_i64v(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> Smallest and largest PK_INT64_VEC value over the rows that hold one, and the null count, in one pass.
+    !!
+    !! A column with no nulls is two whole-column reductions; one with nulls walks a block at a
+    !! time behind the row mask, its running extremes seeded with the kind's own bounds so no
+    !! "first value" test sits in the loop.
+    subroutine stat_i64v(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         integer(int64), pointer :: p(:,:)
         integer(int64) :: mn, mx
-        integer(int64) :: i
-        integer :: e
-        logical :: first
+        integer(int64) :: n, i, lo, hi, nb, nvalid
+        logical :: valid(STAT_BLOCK)
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                do e = 1, size(p, 1)
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        mn = min(mn, p(e, i))
-                        mx = max(mx, p(e, i))
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        if (size(p, 1) < 1) return
+        if (.not. parquet_column_any_null(values)) then
+            mn = minval(p(:, 1:n))
+            mx = maxval(p(:, 1:n))
+        else
+            mn = huge(mn)
+            mx = -huge(mx) - 1
+            nvalid = 0_int64
+            do lo = 1_int64, n, STAT_BLOCK
+                hi = min(lo + STAT_BLOCK - 1_int64, n)
+                nb = hi - lo + 1_int64
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                do i = lo, hi
+                    if (valid(i - lo + 1_int64)) then
+                        mn = min(mn, minval(p(:, i)))
+                        mx = max(mx, maxval(p(:, i)))
                     end if
                 end do
-        end do
-        if (first) return
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            end do
+            nulls = n - nvalid
+            if (nvalid == 0_int64) return
+        end if
         write(buf, "(I0)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(I0)") mx
         max_s = trim(adjustl(buf))
     end subroutine stat_i64v
 
-    !> Smallest and largest PK_FLOAT32_VEC value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT32_VEC value over the rows that hold one, and the null count, in one
+    !! pass.
     !!
     !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
     !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
-    subroutine stat_f32v(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    subroutine stat_f32v(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real32), pointer :: p(:,:)
-        real(real32) :: mn, mx
-        real(real32) :: v, nanv
-        integer(int64) :: i
+        real(real32) :: mn, mx, v, nanv
+        integer(int64) :: n, i, lo, hi, nb, nvalid
         integer :: e
-        logical :: first, saw_nan
+        logical :: valid(STAT_BLOCK), first, saw_nan, has_nulls
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        has_nulls = parquet_column_any_null(values)
         first = .true.
         saw_nan = .false.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            if (has_nulls) then
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            else
+                nvalid = nvalid + nb
+            end if
+            do i = lo, hi
+                if (has_nulls) then
+                    if (.not. valid(i - lo + 1_int64)) cycle
+                end if
                 do e = 1, size(p, 1)
                     v = p(e, i)
                     if (v /= v) then
@@ -898,7 +1074,9 @@ contains
                         mx = max(mx, v)
                     end if
                 end do
+            end do
         end do
+        nulls = n - nvalid
         if (first) then
             ! "-" is reserved for a column with nothing to report. Values that are all NaN are
             ! values, so they report NaN -- and `nanv` carries one of the column's own rather
@@ -913,29 +1091,46 @@ contains
         max_s = trim(adjustl(buf))
     end subroutine stat_f32v
 
-    !> Smallest and largest PK_FLOAT64_VEC value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT64_VEC value over the rows that hold one, and the null count, in one
+    !! pass.
     !!
     !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
     !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
-    subroutine stat_f64v(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    subroutine stat_f64v(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real64), pointer :: p(:,:)
-        real(real64) :: mn, mx
-        real(real64) :: v, nanv
-        integer(int64) :: i
+        real(real64) :: mn, mx, v, nanv
+        integer(int64) :: n, i, lo, hi, nb, nvalid
         integer :: e
-        logical :: first, saw_nan
+        logical :: valid(STAT_BLOCK), first, saw_nan, has_nulls
         character(len=32) :: buf
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
+        has_nulls = parquet_column_any_null(values)
         first = .true.
         saw_nan = .false.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
+        nvalid = 0_int64
+        do lo = 1_int64, n, STAT_BLOCK
+            hi = min(lo + STAT_BLOCK - 1_int64, n)
+            nb = hi - lo + 1_int64
+            if (has_nulls) then
+                call parquet_column_row_validity_range(values, lo, hi, valid)
+                nvalid = nvalid + count(valid(1:nb), kind=int64)
+            else
+                nvalid = nvalid + nb
+            end if
+            do i = lo, hi
+                if (has_nulls) then
+                    if (.not. valid(i - lo + 1_int64)) cycle
+                end if
                 do e = 1, size(p, 1)
                     v = p(e, i)
                     if (v /= v) then
@@ -952,7 +1147,9 @@ contains
                         mx = max(mx, v)
                     end if
                 end do
+            end do
         end do
+        nulls = n - nvalid
         if (first) then
             ! "-" is reserved for a column with nothing to report. Values that are all NaN are
             ! values, so they report NaN -- and `nanv` carries one of the column's own rather
@@ -967,65 +1164,85 @@ contains
         max_s = trim(adjustl(buf))
     end subroutine stat_f64v
 
-    !> PK_LOGICAL_VEC: true/false counts rather than an ordering.
-    subroutine stat_boolv(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_LOGICAL_VEC: true/false counts rather than an ordering, and the null count, in one pass.
+    subroutine stat_boolv(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! "T:<n>".
         character(len=:), allocatable, intent(out) :: max_s    !! "F:<n>".
         logical, pointer :: p(:,:)
-        integer(int64) :: i, nt, nf
-        integer :: e
+        integer(int64) :: n, nt, nf, lo, hi, nb, nvalid, w, i
+        logical :: valid(STAT_BLOCK)
         character(len=32) :: buf
         !
+        nulls = 0_int64
         nt = 0_int64
         nf = 0_int64
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                do e = 1, size(p, 1)
-                    if (p(e, i)) then
-                        nt = nt + 1
-                    else
-                        nf = nf + 1
-                    end if
+        n = values%length()
+        if (n > 0_int64) then
+            call parquet_column_data_ptr(values, p)
+            w = int(size(p, 1), int64)
+            if (.not. parquet_column_any_null(values)) then
+                nt = count(p(:, 1:n), kind=int64)
+                nf = n*w - nt
+            else
+                nvalid = 0_int64
+                do lo = 1_int64, n, STAT_BLOCK
+                    hi = min(lo + STAT_BLOCK - 1_int64, n)
+                    nb = hi - lo + 1_int64
+                    call parquet_column_row_validity_range(values, lo, hi, valid)
+                    do i = lo, hi
+                        if (valid(i - lo + 1_int64)) nt = nt + count(p(:, i), kind=int64)
+                    end do
+                    nvalid = nvalid + count(valid(1:nb), kind=int64)
                 end do
-        end do
+                nf = nvalid*w - nt
+                nulls = n - nvalid
+            end if
+        end if
         write(buf, "(I0)") nt
         min_s = "T:" // trim(buf)
         write(buf, "(I0)") nf
         max_s = "F:" // trim(buf)
     end subroutine stat_boolv
 
-    !> PK_STRING_VEC: lexicographically smallest and largest value.
-    subroutine stat_strv(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_STRING_VEC: lexicographically smallest and largest value, and the null count, in one pass.
+    subroutine stat_strv(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         type(parquet_string_column), pointer :: store
         character(len=:), allocatable :: sv
-        integer(int64) :: i, n, imin, imax
+        integer(int64) :: imin, imax
+        integer(int64) :: n, w, i, e, base
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
-        call values%string_column(store)
-        n = values%length() * int(values%colwidth(), int64)
-        imin = 0_int64
-        imax = 0_int64
-        do i = 1_int64, n
-            if (store%is_null(i)) cycle
-            if (imin == 0_int64) then
-                imin = i
-                imax = i
-            else
-                ! Compared by INDEX, never by value. `%compare` orders two elements without
-                ! materializing either, where `%get` allocates a deferred-length string per row --
-                ! about 0.11 s per 4 M elements, for a scan that only ever keeps two of them
-                ! (feature_risks.md Risk-60). Its ordering is Fortran's own `<`, blanks and all,
-                ! so this picks exactly the winners the previous value comparison did.
-                if (store%compare(i, imin) < 0) imin = i
-                if (store%compare(i, imax) > 0) imax = i
-            end if
-        end do
+        call parquet_column_string_column(values, store)
+        ! A row is null when ANY of its elements is (the row form's rule), and a store that never
+        ! materialized a validity bitmap has none.
+        n = values%length()
+        w = int(values%colwidth(), int64)
+        if (store%has_validity()) then
+            do i = 1_int64, n
+                base = (i - 1_int64)*w
+                do e = 1_int64, w
+                    if (store%is_null(base + e)) then
+                        nulls = nulls + 1_int64
+                        exit
+                    end if
+                end do
+            end do
+        end if
+        ! Found by INDEX inside the store, over every non-null element: `%argminmax` carries its
+        ! two candidates' payload bounds across the scan and pays one byte comparison per element,
+        ! where a `%compare` against each running winner re-validated both indices and re-read
+        ! both offset pairs twice per element, and `%get` would allocate a deferred-length string
+        ! per row for a scan that only ever keeps two of them (feature_risks.md Risk-60). Its
+        ! ordering is Fortran's own `<`, blanks and all.
+        call store%argminmax(imin, imax)
         if (imin == 0_int64) return
         ! Only the two winners are materialized. Trimmed for display only: a vector string column
         ! stores its values blank-padded to the widest element, and printing that padding says
@@ -1037,102 +1254,120 @@ contains
         max_s = trim(sv)
     end subroutine stat_strv
 
-    !> PK_DATE_VEC: earliest and latest value, in ISO-8601 form.
-    subroutine stat_datev(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_DATE_VEC: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+    subroutine stat_datev(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         type(parquet_date), pointer :: p(:,:)
         type(parquet_date) :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
         integer :: e
         logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                do e = 1, size(p, 1)
-                    if (p(e, i)%is_null()) cycle
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        if (p(e, i) < mn) mn = p(e, i)
-                        if (mx < p(e, i)) mx = p(e, i)
-                    end if
-                end do
+        do i = 1_int64, n
+            if (any(p(:, i)%is_null())) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
+            do e = 1, size(p, 1)
+                if (first) then
+                    mn = p(e, i)
+                    mx = p(e, i)
+                    first = .false.
+                else
+                    if (p(e, i) < mn) mn = p(e, i)
+                    if (mx < p(e, i)) mx = p(e, i)
+                end if
+            end do
         end do
         if (first) return
         call mn%to_string(min_s)
         call mx%to_string(max_s)
     end subroutine stat_datev
 
-    !> PK_TIME_VEC: earliest and latest value, in ISO-8601 form.
-    subroutine stat_timev(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_TIME_VEC: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+    subroutine stat_timev(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         type(parquet_time), pointer :: p(:,:)
         type(parquet_time) :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
         integer :: e
         logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                do e = 1, size(p, 1)
-                    if (p(e, i)%is_null()) cycle
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        if (p(e, i) < mn) mn = p(e, i)
-                        if (mx < p(e, i)) mx = p(e, i)
-                    end if
-                end do
+        do i = 1_int64, n
+            if (any(p(:, i)%is_null())) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
+            do e = 1, size(p, 1)
+                if (first) then
+                    mn = p(e, i)
+                    mx = p(e, i)
+                    first = .false.
+                else
+                    if (p(e, i) < mn) mn = p(e, i)
+                    if (mx < p(e, i)) mx = p(e, i)
+                end if
+            end do
         end do
         if (first) return
         call mn%to_string(min_s)
         call mx%to_string(max_s)
     end subroutine stat_timev
 
-    !> PK_TIMESTAMP_VEC: earliest and latest value, in ISO-8601 form.
-    subroutine stat_tsv(values, min_s, max_s)
-        type(parquet_column), intent(in) :: values             !! the column.
+    !> PK_TIMESTAMP_VEC: earliest and latest value, in ISO-8601 form, and the null count, in one pass.
+    subroutine stat_tsv(values, nulls, min_s, max_s)
+        type(parquet_column), intent(in), target :: values     !! the column.
+        integer(int64), intent(out) :: nulls                   !! rows that are null.
         character(len=:), allocatable, intent(out) :: min_s    !! earliest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! latest value, or "-".
         type(parquet_timestamp), pointer :: p(:,:)
         type(parquet_timestamp) :: mn, mx
-        integer(int64) :: i
+        integer(int64) :: n, i
         integer :: e
         logical :: first
         !
+        nulls = 0_int64
         min_s = "-"
         max_s = "-"
+        n = values%length()
+        if (n < 1_int64) return
+        call parquet_column_data_ptr(values, p)
         first = .true.
-        call values%data_ptr(p)
-        do i = 1_int64, values%length()
-            if (values%is_null(i)) cycle
-                do e = 1, size(p, 1)
-                    if (p(e, i)%is_null()) cycle
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        if (p(e, i) < mn) mn = p(e, i)
-                        if (mx < p(e, i)) mx = p(e, i)
-                    end if
-                end do
+        do i = 1_int64, n
+            if (any(p(:, i)%is_null())) then
+                nulls = nulls + 1_int64
+                cycle
+            end if
+            do e = 1, size(p, 1)
+                if (first) then
+                    mn = p(e, i)
+                    mx = p(e, i)
+                    first = .false.
+                else
+                    if (p(e, i) < mn) mn = p(e, i)
+                    if (mx < p(e, i)) mx = p(e, i)
+                end if
+            end do
         end do
         if (first) return
         call mn%to_string(min_s)

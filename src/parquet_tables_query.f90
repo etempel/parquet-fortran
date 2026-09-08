@@ -16,6 +16,15 @@
 submodule (parquet_tables) parquet_tables_query
     implicit none
     !
+    !> One column's statistics as text, gathered by `table_print_stat` before it prints anything:
+    !! the scan that fills these runs across columns on a team, and the printing that reads them
+    !! stays serial and in column order.
+    type :: stat_cell
+        character(len=:), allocatable :: nulls !! null count as text.
+        character(len=:), allocatable :: mn    !! smallest value as text, or "-".
+        character(len=:), allocatable :: mx    !! largest value as text, or "-".
+    end type stat_cell
+    !
 contains
     !
     module procedure table_scope_of
@@ -988,10 +997,11 @@ contains
     end procedure table_check_not_detached
     !
     module procedure table_print_stat
-        logical :: want_all, any_edited
-        integer :: i, nshown, wname, wkind
-        integer(int64) :: nulls, k
-        character(len=:), allocatable :: kname, min_s, max_s, unit_s, fname
+        logical :: want_all, want_stats, any_edited
+        integer :: i, j, nshown, nscan, wname, wkind, nt
+        integer, allocatable, dimension(:) :: slots, cell_of
+        type(stat_cell), allocatable, dimension(:) :: cells
+        character(len=:), allocatable :: kname, unit_s, fname, tail
         character(len=32) :: rows_s, nulls_s, wdt_s
         !
         call table_check_open(self, "print_stat")
@@ -1001,6 +1011,8 @@ contains
         if (parquet_output_is_suppressed()) return
         want_all = .false.
         if (present(all)) want_all = all
+        want_stats = .true.
+        if (present(stats)) want_stats = stats
         !
         nshown = 0
         ! At least as wide as the header word, or the header line would be wider than the rows
@@ -1041,52 +1053,119 @@ contains
             print "(a)", "  (no materialized columns; pass all=.true. to list every column)"
             return
         end if
-        print "(a)", "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  " // &
-            pad("width", 6) // "  " // pad("nulls", 10) // "  " // pad("min", 22) // "  max"
+        ! The statistics pass, done BEFORE anything below the header is printed: every resident
+        ! column whose width is settled is scanned once, one column per thread on the team
+        ! table_stat_threads resolves (capped by parquet_set_table_threads, serial inside an
+        ! existing parallel region or on a small table), into its own text cell. Printing then
+        ! only reads the cells, serially and in column order, so the listing is byte-identical
+        ! whatever the team was. A deferred plain-LIST column is left out: measuring it would
+        ! read the data, and a report must not change what it reports on.
+        allocate(cell_of(self%cache%ncols))
+        cell_of = 0
+        nscan = 0
+        if (want_stats) then
+            allocate(slots(self%cache%ncols))
+            do i = 1, self%cache%ncols
+                if (self%cache%cols(i)%residency /= RES_FULL) cycle
+                if (self%cache%cols(i)%width_pending) cycle
+                nscan = nscan + 1
+                slots(nscan) = i
+                cell_of(i) = nscan
+            end do
+            allocate(cells(nscan))
+            if (nscan > 0) then
+                nt = table_stat_threads(self%cache, slots(1:nscan))
+                ! Each iteration reads one column and writes one cell that no other iteration
+                ! touches; the columns are distinct allocations. Dynamic, because a string
+                ! column costs several times what a numeric one does and the cheap ones should
+                ! not wait behind it.
+                !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt) &
+                !$omp if (nt > 1)
+                do j = 1, nscan
+                    call fill_stat_cell(self%cache%cols(slots(j))%values, cells(j))
+                end do
+                !$omp end parallel do
+            end if
+        end if
+        if (want_stats) then
+            print "(a)", "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  " // &
+                pad("width", 6) // "  " // pad("nulls", 10) // "  " // pad("min", 22) // "  max"
+        else
+            print "(a)", "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  width"
+        end if
         do i = 1, self%cache%ncols
             if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
             ! A deferred plain-LIST column is reported as pending rather than resolved: measuring
             ! its width would read the data, and a report must not change what it reports on.
             if (self%cache%cols(i)%width_pending) then
-                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
-                    pad("pending", wkind) // "  " // pad("-", 6) // "  " // pad("-", 10) // "  " // &
-                    pad("-", 22) // "  -"
+                if (want_stats) then
+                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                        pad("pending", wkind) // "  " // pad("-", 6) // "  " // pad("-", 10) // &
+                        "  " // pad("-", 22) // "  -"
+                else
+                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                        pad("pending", wkind) // "  -"
+                end if
                 cycle
             end if
             call table_stat_kind_text(self%cache, i, kname)
             write(wdt_s, "(I0)") self%cache%cols(i)%width
             if (self%cache%cols(i)%residency /= RES_FULL) then
-                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
-                    pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // pad("-", 10) // &
-                    "  " // pad("-", 22) // "  -"
+                if (want_stats) then
+                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                        pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // pad("-", 10) // &
+                        "  " // pad("-", 22) // "  -"
+                else
+                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                        pad(kname, wkind) // "  " // trim(wdt_s)
+                end if
                 cycle
             end if
-            nulls = 0_int64
-            do k = 1_int64, self%cache%cols(i)%values%length()
-                if (parquet_column_is_null(self%cache%cols(i)%values, k)) nulls = nulls + 1_int64
-            end do
-            write(nulls_s, "(I0)") nulls
-            call table_column_stat_text(self%cache%cols(i)%values, min_s, max_s)
             call self%cache%cols(i)%values%unit_string(unit_s)
             if (allocated(self%cache%cols(i)%unit)) unit_s = self%cache%cols(i)%unit
             if (len_trim(unit_s) > 0) kname = kname // " [" // trim(unit_s) // "]"
-            ! The edited marker goes AFTER `max`, which is the row's last field and the only one
-            ! that is not padded -- so it cannot overflow anything, and the layout stays
-            ! byte-identical for a table with nothing marked. The `kind` field would have been the
-            ! obvious place and is already taken: a unit is appended into the same pad(kname, 18).
-            ! Only this branch can carry it. A width_pending or non-resident column is never
-            ! user_populated, because %evict_column and %reload both clear the flag as they empty
-            ! the slot and %set_user_populated refuses to set it on one.
-            if (self%cache%cols(i)%user_populated) max_s = max_s // " *"
-            print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
-                pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // pad(trim(nulls_s), 10) // &
-                "  " // pad(min_s, 22) // "  " // max_s
+            ! The edited marker goes AFTER the row's last field, which is the only one that is
+            ! not padded -- so it cannot overflow anything, and the layout stays byte-identical
+            ! for a table with nothing marked. The `kind` field would have been the obvious
+            ! place and is already taken: a unit is appended into the same pad(kname, 18). Only
+            ! this branch can carry it. A width_pending or non-resident column is never
+            ! user_populated, because %evict_column and %reload both clear the flag as they
+            ! empty the slot and %set_user_populated refuses to set it on one.
+            tail = ""
+            if (self%cache%cols(i)%user_populated) tail = " *"
+            if (want_stats) then
+                j = cell_of(i)
+                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // &
+                    pad(cells(j)%nulls, 10) // "  " // pad(cells(j)%mn, 22) // "  " // &
+                    cells(j)%mx // tail
+            else
+                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    pad(kname, wkind) // "  " // trim(wdt_s) // tail
+            end if
         end do
         if (any_edited) then
             print "(a)", "  * values written into the table, not the file's own -- %evict_column " // &
                 "and %reload need force=."
         end if
     end procedure table_print_stat
+    !
+    !> One column's statistics into its text cell: the body of `table_print_stat`'s scan loop.
+    !!
+    !! A subroutine rather than inline in the loop so the parallel region's body is one call with
+    !! no allocatable temporaries of its own (feature_risks.md Risk-45 is about a finalizable local
+    !! inside a region; a deferred-length string is not one, but keeping the region's body to a
+    !! call is the shape every other region in this layer has).
+    subroutine fill_stat_cell(values, cell)
+        type(parquet_column), intent(in), target :: values !! the resident column to scan.
+        type(stat_cell), intent(out) :: cell               !! its statistics as text.
+        integer(int64) :: nulls
+        character(len=32) :: buf
+        !
+        call table_column_stat_text(values, nulls, cell%mn, cell%mx)
+        write(buf, "(I0)") nulls
+        cell%nulls = trim(buf)
+    end subroutine fill_stat_cell
     !
     !> The text of a column's `kind` cell in %print_stat. For a column whose stored type this
     !> layer cannot read, that is Arrow's own spelling of the stored type -- the only place such a

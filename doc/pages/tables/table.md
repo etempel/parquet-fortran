@@ -1072,9 +1072,9 @@ below shows a double, so one value looks the same in both.
 
 ### Describing the columns: `%print_stat`
 
-`call t%print_stat()` prints one line per **materialized** column to standard output — its kind
-and unit, width, null count and min/max — under a header saying how many of the table's columns
-those are:
+`call t%print_stat([all], [stats])` prints one line per **materialized** column to standard
+output — its kind and unit, width, null count and min/max — under a header saying how many of
+the table's columns those are:
 
 ```
 parquet_table: catalogue.parquet
@@ -1086,6 +1086,8 @@ parquet_table: catalogue.parquet
 ```
 
 `all=.true.` lists every column, with `-` where one that has not been read has nothing to report.
+`stats=.false.` skips the statistics altogether and lists the columns with their kind and width
+only — the form for a large table when the question is what is resident, not what it holds.
 
 Worth knowing:
 
@@ -1106,8 +1108,11 @@ Worth knowing:
 - **These are statistics of what is in memory**, computed by a plain scan here — not the file's
   own footer statistics, and the only ones available for a column built with `%add_column`, which
   has no footer at all.
-- **It costs a pass over every column it prints**, so it is a diagnostic, not something to put in
-  a loop.
+- **It costs one pass over every column it prints**, so it is a diagnostic, not something to put
+  in a loop. The columns are scanned one per thread on a large table — the team is capped by
+  [`parquet_set_table_threads`](../operating/settings.html#threads-for-mutating-a-table), and is
+  serial inside your own parallel region — and the listing is printed afterwards, in column
+  order, so it reads the same whatever the team was. `stats=.false.` skips the pass.
 
 ## Current limitations
 

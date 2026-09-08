@@ -3800,14 +3800,18 @@ module parquet_tables
             character(len=*), intent(in) :: name     !! column name, for the message.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_slice_size
-        !> A column's min and max as display text, for %print_stat.
+        !> A column's null count, and its min and max as display text, for %print_stat -- in ONE
+        !! pass over the column.
         !!
         !! Over the VALUES only: a null row contributes nothing and is counted separately, which
         !! is the sort engine's rule too. An all-null column has neither, and both come back as
-        !! "-". A `logical` column reports true/false counts instead of an ordering, and a vector
-        !! column's statistic is over all of its elements, flattened.
-        module subroutine table_column_stat_text(values, min_s, max_s)
-            type(parquet_column), intent(in) :: values          !! the column, which must be resident.
+        !! "-". A `logical` column reports true/false counts instead of an ordering, a vector
+        !! column's statistic is over all of its elements, flattened, and a list or map column
+        !! reports its shortest and longest row. Read-only, so any number of columns can be
+        !! scanned at once -- which is how %print_stat calls it.
+        module subroutine table_column_stat_text(values, nulls, min_s, max_s)
+            type(parquet_column), intent(in), target :: values  !! the column, which must be resident.
+            integer(int64), intent(out) :: nulls                !! rows that are null.
             character(len=:), allocatable, intent(out) :: min_s !! smallest value as text, or "-".
             character(len=:), allocatable, intent(out) :: max_s !! largest value as text, or "-".
         end subroutine table_column_stat_text
@@ -4274,6 +4278,19 @@ module parquet_tables
             !! skips the mask without the caller branching.
             logical, intent(in), optional :: valid(:)
         end subroutine table_colwork_join
+        !> The team %print_stat's statistics pass may spread the columns it scans over: 1
+        !! (serial) or more, never more than there are columns to scan.
+        !!
+        !! `colwork_plan`'s across-columns level and nothing else -- the same work floor, the same
+        !! parquet_set_table_threads cap, and serial inside an existing parallel region -- so a
+        !! setting a program made for its sorts governs its diagnostics too. The pass only reads,
+        !! which is what makes it safe without the shared-table refusal (see `colwork_avail`).
+        !! Reported through the same test-only hook as a mutation's team.
+        module function table_stat_threads(cache, slots) result(nt)
+            type(parquet_table_cache), intent(in) :: cache !! the column store.
+            integer, intent(in) :: slots(:)                !! slots the pass will scan.
+            integer :: nt                                  !! columns scanned at once.
+        end function table_stat_threads
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
         !! every other column, so callers can invoke it unconditionally.
         !!
@@ -4358,11 +4375,17 @@ module parquet_tables
         !!
         !! These are statistics of the values IN MEMORY, computed here by a plain Fortran scan.
         !! They are not the file's own footer statistics, and they are the only ones available for
-        !! a column built with %add_column, which has no footer at all. The scan is O(rows) per
-        !! column, so this is not a call to put in a loop over a large table.
-        module subroutine table_print_stat(self, all)
+        !! a column built with %add_column, which has no footer at all. Each resident column is
+        !! scanned once, on its own thread where the table is large enough: the columns are spread
+        !! over a team capped by parquet_set_table_threads (serial inside an existing parallel
+        !! region), and the listing is printed afterwards, serially and in column order, so it is
+        !! byte-identical whatever the team was. `stats=.false.` skips the scan altogether and
+        !! lists the columns with their kind and width only -- the form to reach for on a large
+        !! table when the question is what is resident, not what it holds.
+        module subroutine table_print_stat(self, all, stats)
             class(parquet_table), intent(in) :: self !! the table.
             logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
+            logical, intent(in), optional :: stats   !! .false.: no null count, min or max (default .true.).
         end subroutine table_print_stat
         !> Prints the table's rows -- the first `first` and the last `last` of them, aligned in
         !! columns, with the column names and their kinds above. Where %print_stat DESCRIBES what

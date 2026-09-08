@@ -94,7 +94,9 @@ contains
             new_unittest("copy_buffers exports the offsets and payload, empty column included", &
                 test_copy_buffers), &
             new_unittest("every typed parquet_string_column_* form agrees with its own binding", &
-                test_typed_tier_agrees_with_bindings) &
+                test_typed_tier_agrees_with_bindings), &
+            new_unittest("argminmax picks the elements a compare scan picks, ties to the earliest", &
+                test_argminmax_matches_compare) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -2655,4 +2657,96 @@ contains
     end subroutine test_gather_from
     !
 
+    !
+    !> %argminmax must point at exactly the elements a scan keeping running winners through
+    !! %compare points at: nulls skipped, the shorter operand blank-padded, and a tie kept by the
+    !! EARLIER index -- since %print_stat's string extremes moved from that scan onto it
+    !! (feature_risks.md Risk-223). The reference is that scan, run here over the same column.
+    subroutine test_argminmax_matches_compare(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        integer(int64) :: imin, imax, emin, emax
+        integer :: k
+        character(len=8) :: buf
+
+        ! Nothing to point at: an empty column, then an all-null one.
+        call col%argminmax(imin, imax)
+        call check(error, imin == 0_int64 .and. imax == 0_int64, "an empty column has no extremes")
+        if (allocated(error)) return
+        call col%append_null()
+        call col%append_null()
+        call col%argminmax(imin, imax)
+        call check(error, imin == 0_int64 .and. imax == 0_int64, "an all-null column has no extremes")
+        if (allocated(error)) return
+        ! A column of empty strings only has no payload at all: every element ties, the first wins.
+        call col%clear()
+        call col%append_null()
+        call col%append_string("")
+        call col%append_string("")
+        call col%argminmax(imin, imax)
+        call check(error, imin == 2_int64 .and. imax == 2_int64, &
+            "with no payload every non-null element is equal and the earliest wins both places")
+        if (allocated(error)) return
+        ! The mixed fixture: the shortest element first (the sized-from-the-first trap), an empty
+        ! string, a blank-padded twin of an earlier value (a tie the earlier index must keep), nulls,
+        ! a byte below blank (a tab sorts before the padding an empty string compares as), and a
+        ! value above the rest that a second copy must not displace.
+        call col%clear()
+        call col%append_string("b")
+        call col%append_string("")
+        call col%append_string("b   ")
+        call col%append_null()
+        call col%append_string("zeta")
+        call col%append_string("zeta ")
+        call col%append_string("a")
+        call col%append_string("a ")
+        call col%append_null()
+        call col%append_string("zz")
+        call col%append_string("Z")
+        call col%append_string(achar(9) // "x")
+        call col%append_string("zz")
+        call col%append_string(achar(9) // "x")
+        call col%argminmax(imin, imax)
+        call reference_argminmax(col, emin, emax)
+        call check(error, imin == emin, "argminmax's minimum must be the compare scan's")
+        if (allocated(error)) return
+        call check(error, imax == emax, "argminmax's maximum must be the compare scan's")
+        if (allocated(error)) return
+        ! The expectation spelt out, so the reference cannot agree with argminmax by sharing a bug.
+        call check(error, imin == 12_int64, "the tab-led element is the minimum, and its first copy")
+        if (allocated(error)) return
+        call check(error, imax == 10_int64, "'zz' is the maximum, and its first copy")
+        if (allocated(error)) return
+        ! Many more, in a pattern with repeats, so the running candidates change hands often.
+        do k = 1, 300
+            write(buf, '(a1, i3.3, a1)') achar(iachar("a") + mod(k*7, 26)), mod(k*13, 1000), " "
+            call col%append_string(buf(1:1 + mod(k, 6)))
+            if (mod(k, 17) == 0) call col%append_null()
+        end do
+        call col%argminmax(imin, imax)
+        call reference_argminmax(col, emin, emax)
+        call check(error, imin == emin .and. imax == emax, &
+            "argminmax must match the compare scan over the long fixture")
+    end subroutine test_argminmax_matches_compare
+    !
+    !> The scan %argminmax replaced: running winners through %compare, nulls skipped, ties kept.
+    subroutine reference_argminmax(col, emin, emax)
+        type(parquet_string_column), intent(in) :: col !! the column.
+        integer(int64), intent(out) :: emin            !! index of the smallest element, or 0.
+        integer(int64), intent(out) :: emax            !! index of the largest element, or 0.
+        integer(int64) :: i
+
+        emin = 0_int64
+        emax = 0_int64
+        do i = 1_int64, col%size()
+            if (col%is_null(i)) cycle
+            if (emin == 0_int64) then
+                emin = i
+                emax = i
+            else
+                if (col%compare(i, emin) < 0) emin = i
+                if (col%compare(i, emax) > 0) emax = i
+            end if
+        end do
+    end subroutine reference_argminmax
 end module test_parquet_string

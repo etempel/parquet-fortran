@@ -225,7 +225,8 @@ one processor makes the prefetch serial by the same route.
 
 `parquet_set_table_threads(n)` caps the threads a table's row-structural mutation uses to rewrite
 its columns — `%sort_by`, `%filter_rows`, `%top_n`, `%join`'s rewrite of both sides, and
-`%delete_rows` and `%truncate`, which go through the same loop. Every column is rewritten
+`%delete_rows` and `%truncate`, which go through the same loop — and the columns `%print_stat`'s
+statistics pass scans at once, which divides its work the same way. Every column is rewritten
 independently of every other, so the work divides cleanly across the columns, one per thread. A
 **gather** — `%top_n`, and a `%join`'s rewrite of its own rows and of every column it carries in —
 can also divide one column's rows across the team, and does so whenever there are fewer columns

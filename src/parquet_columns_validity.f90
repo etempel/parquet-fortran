@@ -353,6 +353,101 @@ contains
         end do
     end procedure row_validity
     !
+    !> The ranged, non-allocating `row_validity`: fills `valid(1:last-first+1)` for rows
+    !! `first..last`.
+    !!
+    !! The same per-kind cases as `row_validity`, restricted to the rows asked for: the temporal
+    !! kinds are one elemental expression over the range, the string and container kinds a loop
+    !! over it, and a bitmap kind walks only the words its rows' bits fall in -- from the word
+    !! holding row `first`'s first bit to the one holding row `last`'s last bit -- skipping every
+    !! zero word and marking rows from the set bits of the rest, exactly as the whole-column walk
+    !! does. A set bit in the first or last word may belong to a row outside the range (the words
+    !! are shared with the neighbouring rows), which is why every marked row is bounds-tested
+    !! before its entry is written. Writes nothing beyond entry `last-first+1`.
+    module procedure parquet_column_row_validity_range
+        integer(int64) :: n, i, e, w, blk, blk_lo, blk_hi, base, word
+        integer :: p
+        !
+        n = last - first + 1_int64
+        if (first < 1_int64 .or. last > col%nrows .or. n < 1_int64) then
+            error stop EP//"row_validity_range: row range out of range"
+        end if
+        if (size(valid, kind=int64) < n) then
+            error stop EP//"row_validity_range: valid is shorter than the row range"
+        end if
+        valid(1:n) = .true.
+        w = int(col%width, int64)
+        select case (col%kind)
+        case (PK_DATE)
+            valid(1:n) = .not. col%dt(first:last)%is_null()
+            return
+        case (PK_TIME)
+            valid(1:n) = .not. col%tm(first:last)%is_null()
+            return
+        case (PK_TIMESTAMP)
+            valid(1:n) = .not. col%ts(first:last)%is_null()
+            return
+        case (PK_DATE_VEC)
+            valid(1:n) = .not. any(col%dtv(1:w, first:last)%is_null(), dim=1)
+            return
+        case (PK_TIME_VEC)
+            valid(1:n) = .not. any(col%tmv(1:w, first:last)%is_null(), dim=1)
+            return
+        case (PK_TIMESTAMP_VEC)
+            valid(1:n) = .not. any(col%tsv(1:w, first:last)%is_null(), dim=1)
+            return
+        case (PK_STRING, PK_STRING_VEC)
+            ! Flat element index into the string store, as row_validity walks it; the early exit
+            ! keeps a row with a null in its first element from scanning the rest.
+            if (.not. allocated(col%str)) return
+            do i = first, last
+                base = (i - 1_int64)*w
+                do e = 1_int64, w
+                    if (parquet_string_column_is_null(col%str, base + e)) then
+                        valid(i - first + 1_int64) = .false.
+                        exit
+                    end if
+                end do
+            end do
+            return
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Row nullness lives inside the container (see row_validity's own container arm).
+            if (.not. allocated(col%container)) return
+            do i = first, last
+                valid(i - first + 1_int64) = .not. col%container%is_null_row(i)
+            end do
+            return
+        end select
+        ! A bitmap kind. One flag test settles the common no-null column; the allocation guard
+        ! keeps a future caller from turning a missing bitmap into an out-of-bounds read.
+        if (.not. col%has_nulls) return
+        if (.not. allocated(col%validity)) return
+        ! 0-based bit positions: row `first` starts at bit (first-1)*w, row `last` ends at bit
+        ! last*w-1. Each word is 64 element bits, so the two words holding those bits bound the
+        ! walk; the upper bound is also clamped to the bitmap actually allocated.
+        blk_lo = ((first - 1_int64)*w)/BITS_PER_BLOCK + 1_int64
+        blk_hi = min((last*w - 1_int64)/BITS_PER_BLOCK + 1_int64, size(col%validity, kind=int64))
+        do blk = blk_lo, blk_hi
+            word = col%validity(blk)
+            if (word == 0_int64) cycle
+            base = (blk - 1_int64)*BITS_PER_BLOCK
+            ! The set bits only (trailz + ibclr), as row_validity walks them: cost proportional
+            ! to the nulls in these words, not to the rows. A bit naming a row outside the range
+            ! belongs to a neighbour sharing the word and is skipped.
+            do while (word /= 0_int64)
+                p = trailz(word)
+                i = (base + int(p, int64))/w + 1_int64
+                if (i >= first .and. i <= last) valid(i - first + 1_int64) = .false.
+                word = ibclr(word, p)
+            end do
+        end do
+    end procedure parquet_column_row_validity_range
+    !
+    !> Binding form of `parquet_column_row_validity_range`; forwards to it.
+    module procedure row_validity_range
+        call parquet_column_row_validity_range(self, first, last, valid)
+    end procedure row_validity_range
+    !
     !> Builds the whole per-ELEMENT validity mask in one pass, shaped `(width, nrows)`.
     !!
     !! The same three cases as `row_validity`, and the same contract: a null-free column leaves

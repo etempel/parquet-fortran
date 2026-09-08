@@ -541,6 +541,12 @@ module parquet_columns
     ! `src/parquet.f90` privatises this too; a user calls `%any_null()`.
     public :: parquet_column_any_null
     !
+    ! INTERNAL API on the same terms: the ranged form of `row_validity`, which fills a caller's
+    ! block-sized mask for a row range without allocating. `%print_stat`'s statistics scan walks
+    ! a column with it; `src/parquet.f90` privatises this too, and a user calls
+    ! `%row_validity_range`.
+    public :: parquet_column_row_validity_range
+    !
     ! Test-only, and public for the reason `parquet_debug_string_bulk_threads` is (parquet_strings):
     ! this tier is Arrow-free by contract, so the C++ hook every other `parquet_debug_*` observable
     ! uses is not available, and a test that re-derived the rule would assert against its own copy.
@@ -804,6 +810,7 @@ module parquet_columns
         !! row form answers "ANY element of the row is null"; see the module doc.
         generic :: is_null => is_null_row, is_null_elem
         procedure :: row_validity                      !! Build the whole per-row validity mask at once.
+        procedure :: row_validity_range                !! Fill a caller's mask for a range of rows.
         procedure :: element_validity                  !! Build the whole per-ELEMENT validity mask at once.
         ! --- validity mutation (sparse: see the module doc) ---
         procedure, private :: set_null_row              !! set_null specific taking a row index alone.
@@ -1275,6 +1282,32 @@ module parquet_columns
             class(parquet_column), intent(in) :: self     !! the column.
             logical, allocatable, intent(out) :: valid(:) !! per-row mask, or unallocated when no nulls.
         end subroutine row_validity
+        !> Fills `valid(1:last-first+1)` for rows `first..last`: `.true.` where the row is not null,
+        !! with the row form's "any element null" rule on a vector kind.
+        !!
+        !! The ranged, NON-allocating form of `row_validity`, for a caller walking a column a block
+        !! at a time and wanting a mask the size of its block rather than one the size of the column
+        !! (`%print_stat`'s statistics scan, whose mask is a few kilobytes on the stack whatever the
+        !! row count). The bitmap words the range touches are walked as `row_validity` walks the
+        !! whole bitmap -- a zero word is skipped, a nonzero one costs its set bits -- and a column
+        !! with no nulls costs one flag test. `valid` must have at least `last-first+1` entries;
+        !! entries beyond that are left as they were. Aborts on a range outside `1..length()`.
+        !!
+        !! `intent(in)` on the column, for the reason `row_validity` is -- see its note.
+        module subroutine row_validity_range(self, first, last, valid)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: first       !! first row of the range, 1-based.
+            integer(int64), intent(in) :: last        !! last row of the range, inclusive.
+            logical, intent(inout) :: valid(:)        !! receives one entry per row of the range.
+        end subroutine row_validity_range
+        !> Typed form of `row_validity_range`, for `parquet_tables` -- the `type` twin the per-cell
+        !! tier above explains, and the one `%print_stat`'s scan calls per block.
+        module subroutine parquet_column_row_validity_range(col, first, last, valid)
+            type(parquet_column), intent(in) :: col  !! the column.
+            integer(int64), intent(in) :: first      !! first row of the range, 1-based.
+            integer(int64), intent(in) :: last       !! last row of the range, inclusive.
+            logical, intent(inout) :: valid(:)       !! receives one entry per row of the range.
+        end subroutine parquet_column_row_validity_range
         !> Fills `valid` with one entry per ELEMENT, shaped `(width, nrows)`: the column's true
         !! validity state, without the row summary `row_validity` applies.
         !!

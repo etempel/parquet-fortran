@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`parquet_table%print_stat` takes `stats=.false.`**, which lists the columns with their kind
+  and width only, skipping the null count and min/max. See
+  [Describing the columns](doc/pages/tables/table.md#describing-the-columns-print_stat).
 - **Row filters accept a bound set: `in` and `not_in`.** `filt%add_in("ID", ids)` keeps the rows
   whose value appears in an array you attach, and `filt%bind("wanted", ids)` plus
   `filt%add("ID in @wanted or flag == 7")` puts the same set inside an ordinary expression. Integer,
@@ -147,6 +150,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`parquet_table%print_stat` computes its statistics in one pass per column, and scans the
+  columns in parallel** on a large table, capped by `parquet_set_table_threads`. The listing is
+  unchanged.
 - **`parquet_table%join` builds its match on a hash engine.** A join over integer, real, date,
   time or timestamp keys, or over one string key, under the default `order="left"` builds a
   `pf_index_multimap` over the other table's keys and probes it once per row, in place of sorting

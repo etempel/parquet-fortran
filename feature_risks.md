@@ -8430,10 +8430,20 @@ temptation is real, because a size clause is the obvious "optimisation" once one
 close: the sweep recorded in feature_join.md (stage 3) found none, on either compiler, down to a
 thousand rows against ten.
 
+**Stage 6 of feature_join.md (2026-09-08, `55a7f1a`) changed the evidence, not the rule.** Its
+re-measurement (4.1's companion there) finds the sort engine 15 to 31% *faster* than the hash engine
+on the in-memory symmetric 10M x 10M fixture, on every `how` and under both compilers, with the
+crossover between 2.5M and 10M rows a side under gfortran and below every size measured under ifx —
+because stage 5 threaded the sort engine's residue after stage 3 fitted the rule. So a shape does
+now measure close, and by much more than the floor: the sentence above about the sweep finding none
+is the state at stage 3, not at `55a7f1a`. The small-right lookup shape the rule was built for is
+still the hash engine's by 2x.
+
 **Rule:** the selection is a function of the key kinds and `order=` alone. A future clause that
 needs anything else is a design change to be argued in a planning document, not an edit to the
 predicate; and the test-only hook stays the only override (no argument, no setting — section 9 of
-feature_join.md).
+feature_join.md). That the measurement has moved does not loosen this: it is the argument for
+opening the design question, not for editing the predicate.
 
 **Covered by** `test_join_engine_rule_is_data_independent` (`test/test_table_join.f90`, the serial
 `table_join_hash` suite), which clears the hook and requires the same engine at `threads=1` and

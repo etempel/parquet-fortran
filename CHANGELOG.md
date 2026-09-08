@@ -126,6 +126,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`pf_index_map%build` stops threading two passes that were losing on small key counts.** An
+  automatic build takes the partitioned hash insert only from 32768 keys, where it starts to pay
+  (below that the serial insert is up to 3x faster on the team the rule resolves), and an automatic
+  `method="sorted"` build sorts serially below 262144 keys (up to 1.9x faster there). An explicit
+  `threads=` is honoured at every size, as before, and no answer changes.
+
 - **`parquet_table%join` builds its match on a hash engine.** A join over integer, real, date,
   time or timestamp keys, or over one string key, under the default `order="left"` builds a
   `pf_index_multimap` over the other table's keys and probes it once per row, in place of sorting

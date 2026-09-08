@@ -176,6 +176,69 @@ module parquet_index
     !! anything having to force it. Keep that true if the number is ever raised.
     integer(int64), parameter :: IX_MIN_KEYS_PER_THREAD = 4096_int64
 
+    !> Keys an AUTOMATIC hash build insists on before it takes the partitioned insert.
+    !!
+    !! The team `IX_MIN_KEYS_PER_THREAD` answers is the right team for the SCAN and the SCATTER,
+    !! and too small a one for the partitioned insert, which pays a plan, a scatter into partition
+    !! order and a serial spill tail before it inserts anything. Measured on machine B (dense
+    !! int64 keys, `OMP_NUM_THREADS=64`, best of 7, ns per key, the automatic team in brackets),
+    !! serial insert against partitioned:
+    !!
+    !!        n     gfortran serial / auto   ifx serial / auto
+    !!     8192       12.8 / 35.1 [2]          10.2 / 18.6 [2]
+    !!    12000       12.7 / 37.7 [2]          10.6 / 17.9 [2]
+    !!    16384       13.4 / 23.5 [4]          11.6 / 13.5 [4]
+    !!    24000       13.6 / 16.5 [5]          11.3 /  9.1 [5]
+    !!    32768       16.7 / 11.4 [8]          14.7 /  8.1 [8]
+    !!    65536       21.2 /  6.6 [16]         19.1 /  4.9 [16]
+    !!
+    !! So the partitioned pass loses up to 3x below about thirty thousand keys and wins from there.
+    !! **The two compilers cross over at different points and gfortran is weighted here**: ifx is
+    !! already ahead at 24000 (9.1 against 11.3), so this floor costs it about 1.25x at that one
+    !! size, against gfortran's 2.9x gain at 8192-12000 and 1.7x at 16384. Eight threads' worth of
+    !! work is the value that puts both compilers past their crossover. It is a
+    !! floor of its own rather than a larger `IX_MIN_KEYS_PER_THREAD` because that constant also
+    !! sizes the scan, the scatter and `%get_many`, which do pay at two threads -- and because
+    !! `%get_or_add_many`, which takes the same partitioned pass over an existing map, was measured
+    !! ahead of serial at every size down to ten thousand keys (68.6 against 93.8 ns per key at
+    !! n = 10000) and is deliberately left alone.
+    !!
+    !! **Only the automatic path is floored.** An explicit `threads=` is the caller saying what
+    !! they want, as everywhere else in this library, and `test_threaded_build_matches_serial`
+    !! (`test/test_index_omp.f90`) depends on being able to ask for the partitioned pass at 30000
+    !! keys. Not a setting: it changes how fast a build runs and never what it answers.
+    integer(int64), parameter :: IX_PART_MIN_KEYS = 32768_int64
+
+    !> Keys an AUTOMATIC `method="sorted"` build insists on before it lets `pf_argsort` thread.
+    !!
+    !! **The sort's two floors do not coincide, and between them a build pays for teams that sort
+    !! nothing.** `tail_team` opens a team for the extraction, the identity fill and the narrowing
+    !! at `max(SORT_TAIL_MIN_ROWS, 1024 * nt)` rows -- 65536 at 64 threads -- while the engine keeps
+    !! the permutation build serial until `max(SORT_ENGINE_MIN_ROWS, 2048 * nt)`, which is 131072
+    !! (both in src/parquet_argsort_kernel.f90 and _engine.f90). So from 65536 to 131072 rows the
+    !! tails thread and the sort does not; and from there to about 300000 the threaded sort is
+    !! itself still behind the serial one on this key shape. Measured on machine B (dense int64
+    !! keys, `OMP_NUM_THREADS=64`, best of 7, ns per key), the automatic build against the same
+    !! build forced serial:
+    !!
+    !!         n     gfortran auto / serial   ifx auto / serial
+    !!     50000        27.0 / 27.3              11.5 / 11.9
+    !!    100000        56.2 / 29.4              24.1 / 13.8
+    !!    200000        43.2 / 29.8              13.9 / 13.4
+    !!    400000        28.3 / 32.3               7.7 / 14.9
+    !!   1000000        19.2 / 36.1               8.0 / 17.7
+    !!
+    !! Serial is level to 50000, ahead by up to 1.9x at 100000-200000, and behind from 400000 --
+    !! so the floor sits between, at 2**18. The gap scales with `OMP_NUM_THREADS` (at 100000 keys
+    !! under gfortran: 29.4 ns per key at 1 thread, 36.0 at 4, 46.3 at 16, 57.5 at 64) and vanishes
+    !! at one, which is what identifies it as a team being opened rather than work being done.
+    !! **Which of the tail passes dominates is not separated here** -- the floors above say a team
+    !! is opened over work too small for it, and the ladder says what removing it is worth; the
+    !! attribution between extraction, identity fill and narrowing is not measured.
+    !!
+    !! **Only the automatic path is floored**, for the reason given on `IX_PART_MIN_KEYS`.
+    integer(int64), parameter :: IX_SORTED_MIN_THREADED = 262144_int64
+
     !> Threads the LAST `%build` resolved for its own work; 1 means it ran serial.
     !!
     !! **Test-only, and the only observable a threading test of this module has.** A build's answer

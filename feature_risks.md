@@ -106,6 +106,7 @@ something a reader is expected to have.
 | [Risk-219](#risk-219--a-gathers-team-goes-across-the-columns-or-inside-one-and-a-plan-that-always-picks-one-level-answers-every-test-right) | A gather's team goes ACROSS the columns or INSIDE one, and a plan that always picks one level answers every test right | 4 — covered |
 | [Risk-220](#risk-220--the-sort-engines-passes-over-the-runs-have-a-serial-arm-and-a-threaded-arm-and-only-a-fixture-with-duplicates-nulls-and-unmatched-rows-on-both-sides-can-see-them-disagree) | The sort engine's passes over the runs have a serial arm and a threaded arm, and only a fixture with duplicates, nulls and unmatched rows on both sides can see them disagree | 4 — covered |
 | [Risk-221](#risk-221--a-scoped-filters-row-group-cut-is-structural-and-gating-it-on-the-statistics-screen-loses-the-masks-bound-with-every-answer-still-right) | A scoped filter's row-group cut is structural, and gating it on the statistics screen loses the mask's bound with every answer still right | 4 — covered |
+| [Risk-222](#risk-222--a-builds-work-floor-is-a-tuning-constant-only-a-benchmark-can-see-and-the-sorted-ones-team-is-not-reported-at-all) | A build's work floor is a tuning constant only a benchmark can see, and the sorted one's team is not reported at all | 3 — partly covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8521,6 +8522,39 @@ carried column, `matched=` and both pair lists — on a fixture with duplicate k
 null key on each, and rows that match nothing on either. The abort's ordering is covered by the
 `join_require_m1_threaded` and `join_require_1m_threaded` scenarios (`test/error_scenarios.f90`),
 which lower the floor, print the team the group passes recorded, and abort with the serial message.
+
+### Risk-222 — A build's work floor is a tuning constant only a benchmark can see, and the sorted one's team is not reported at all
+
+`pf_index_map%build` declines two threaded passes on small key counts: the partitioned hash insert
+below `IX_PART_MIN_KEYS`, and a threaded sort below `IX_SORTED_MIN_THREADED` (both
+`src/parquet_index.f90`, each carrying the ladder it was set from). Both floors apply to the
+AUTOMATIC path only — an explicit `threads=` is forwarded whatever the key count — and neither
+changes an answer. That is what makes them dangerous to maintain: **a floor that stops working is
+silent.** Delete either one and every test still passes on correctness; the only symptom is a build
+that is up to 3x slower on a few tens of thousands of keys, which no assertion looks at.
+
+The two are not equally exposed. The hash floor **is** observable:
+`parquet_debug_index_spills` answers -1 for the serial insert loop and 0 or more for the partitioned
+pass, so a test can see which pass ran. The sorted floor is **not**: what it suppresses is the team
+inside `pf_argsort`'s tail passes (extraction, identity fill, narrowing), and nothing reports that
+team — `parquet_debug_sort_threads_used` reports the permutation build's, which is 1 on both sides
+of the floor at the sizes in question. So the sorted floor rests on its measured ladder and on
+nothing else.
+
+**Rule:** neither constant may be changed, and the sorted branch in `ix_sorted_build`
+(`src/parquet_index_sorted.f90`) may not be simplified back to a single forwarded `threads=`,
+without re-running `bench/benchmark_index.sh --mode=build` across the key counts in the ladders and
+recording the result. Treat "the tests still pass" as no evidence at all here. If the sort tier ever
+gains an observable for its tail team, this entry should be revisited and the sorted floor pinned by
+a test like the hash one.
+
+**Covered by** `test_partitioned_build_floor` (`test/test_index_omp.f90`, the serially registered
+`index_omp` suite, so an automatic build really threads there), which asserts the serial insert
+below the floor, the partitioned pass above it, and the partitioned pass below it when `threads=` is
+given — verified by two negative controls, one lowering `IX_PART_MIN_KEYS` to 1 and one applying the
+floor to explicit requests too, each of which fails the suite. `test_sorted_build_floor` beside it
+covers the three arms of the sorted branch for the ANSWER only, which is why this entry is `3 —
+partly covered` rather than 4.
 
 ### Risk-221 — A scoped filter's row-group cut is structural, and gating it on the statistics screen loses the mask's bound with every answer still right
 

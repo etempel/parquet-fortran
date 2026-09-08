@@ -61,7 +61,11 @@ contains
                 test_partitioned_build_answers), &
             new_unittest("a threaded get_or_add_many codes densely and consistently", &
                 test_partitioned_get_or_add_many), &
-            new_unittest("a multimap grouped on a team answers as the serial one", test_mm_threaded_grouping) &
+            new_unittest("a multimap grouped on a team answers as the serial one", test_mm_threaded_grouping), &
+            new_unittest("the partitioned insert has a work floor, and only the automatic path takes it", &
+                test_partitioned_build_floor), &
+            new_unittest("a sorted build answers the same each side of its threading floor", &
+                test_sorted_build_floor) &
             ]
     end subroutine collect_tests_index_omp
 
@@ -1409,4 +1413,125 @@ contains
     end subroutine test_mm_threaded_grouping
 
     ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.
+
+    !> The partitioned hash insert declines below `IX_PART_MIN_KEYS` on the AUTOMATIC path, and an
+    !! explicit `threads=` still reaches it there.
+    !!
+    !! `parquet_debug_index_spills` is the observable that separates the two passes: the serial
+    !! insert loop writes -1, the partitioned pass writes the number of keys it deferred to its
+    !! spill tail, which is 0 or more. Without it the arms answer identically and the floor would be
+    !! invisible -- the same reason the neighbouring partitioned-build test reads it.
+    !!
+    !! Both sizes are chosen so the automatic backend choice takes HASH (the key span is far wider
+    !! than `ix_budget` allows the direct backend), and `pf_index_threads` is checked first: if it
+    !! answers 1 no team is opened at either size and every arm below is the same serial code.
+    subroutine test_partitioned_build_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64), parameter :: BELOW = 12000_int64  !! under IX_PART_MIN_KEYS.
+        integer(int64), parameter :: ABOVE = 40000_int64  !! over it.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(ABOVE), auto_small(200), given_small(200), i
+        integer :: nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no arm below opens a team, so the floor " // &
+            "being asserted is not the reason any of them runs serially")
+        return
+#endif
+        nt = pf_index_threads(BELOW)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so the " // &
+                "automatic team is 1 at both sizes and the floor decides nothing")
+            return
+        end if
+        do i = 1_int64, ABOVE
+            keys(i) = i * 7919_int64
+        end do
+        ! Automatic, below the floor: the serial insert, whatever team the rule resolved.
+        call m%build(keys(1:BELOW))
+        call check(error, parquet_debug_index_spills() == -1_int64, &
+            "an automatic build below IX_PART_MIN_KEYS must take the serial insert")
+        if (allocated(error)) return
+        do i = 1_int64, 200_int64
+            auto_small(i) = m%get(keys(i * 37_int64))
+        end do
+        ! The same size with an explicit request: honoured, so the partitioned pass runs.
+        call m%build(keys(1:BELOW), threads=nt)
+        call check(error, parquet_debug_index_spills() >= 0_int64, &
+            "an explicit threads= must still reach the partitioned insert below the floor")
+        if (allocated(error)) return
+        do i = 1_int64, 200_int64
+            given_small(i) = m%get(keys(i * 37_int64))
+        end do
+        call check(error, all(auto_small == given_small), &
+            "the floored and the partitioned build answered differently on the same keys")
+        if (allocated(error)) return
+        ! Automatic, above the floor: the partitioned pass again.
+        call m%build(keys)
+        call check(error, parquet_debug_index_spills() >= 0_int64, &
+            "an automatic build above IX_PART_MIN_KEYS must take the partitioned insert")
+        if (allocated(error)) return
+        do i = 1_int64, 200_int64
+            call check(error, m%get(keys(i * 37_int64)) == i * 37_int64, &
+                "the partitioned build above the floor lost or misplaced a key")
+            if (allocated(error)) return
+        end do
+    end subroutine test_partitioned_build_floor
+
+    !> A `method="sorted"` build answers the same on all three sides of its threading floor.
+    !!
+    !! `IX_SORTED_MIN_THREADED` decides what the automatic path forwards to `pf_argsort` -- a
+    !! serial request below it, an absence above it -- and an explicit `threads=` is forwarded
+    !! whatever the count. All three are the same answer, and this is what covers the branch;
+    !! **the floor itself has no observable**, since the team it suppresses is inside the sort's
+    !! tail passes and nothing reports it. `bench/benchmark_index.sh --mode=build` is what measures
+    !! the difference it makes, and the ladder is on the constant.
+    subroutine test_sorted_build_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64), parameter :: BELOW = 20000_int64   !! under IX_SORTED_MIN_THREADED.
+        integer(int64), parameter :: ABOVE = 300000_int64  !! over it.
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:)
+        integer(int64) :: want(300), got(300), i
+        integer :: nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the automatic path and the serial one " // &
+            "are the same code, so the equality below would hold for the wrong reason")
+        return
+#endif
+        nt = pf_index_threads(ABOVE)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no arm " // &
+                "below can differ from the serial one")
+            return
+        end if
+        allocate(keys(ABOVE))
+        do i = 1_int64, ABOVE
+            keys(i) = i * 65537_int64
+        end do
+        ! Below the floor, automatic: the sort is asked to run serially.
+        call m%build(keys(1:BELOW), method="sorted")
+        do i = 1_int64, 300_int64
+            want(i) = m%get(keys(i * 61_int64))
+        end do
+        ! The same size with an explicit request, which is forwarded whatever the floor says.
+        call m%build(keys(1:BELOW), method="sorted", threads=nt)
+        do i = 1_int64, 300_int64
+            got(i) = m%get(keys(i * 61_int64))
+        end do
+        call check(error, all(want == got), &
+            "a sorted build below the floor answered differently with threads= given")
+        if (allocated(error)) return
+        ! Above the floor, automatic: the sort chooses its own team.
+        call m%build(keys, method="sorted")
+        do i = 1_int64, 300_int64
+            call check(error, m%get(keys(i * 61_int64)) == i * 61_int64, &
+                "a sorted build above the floor lost or misplaced a key")
+            if (allocated(error)) return
+        end do
+        call check(error, m%nkeys() == ABOVE, &
+            "a sorted build above the floor stored the wrong number of keys")
+    end subroutine test_sorted_build_floor
+
 end module test_index_omp ! GCOVR_EXCL_LINE

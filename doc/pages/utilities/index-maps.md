@@ -642,6 +642,13 @@ the answer. `threads=0` is refused rather than read as "automatic".
 `threads=` to ask for more. A `method="sorted"` build sorts through `pf_argsort`, so that phase
 answers to the sorting thread knobs instead, while the key scan around it follows the rule above.
 
+**Two passes of a build have a work floor of their own**, because a team costs them more than it
+saves on a small map: an automatic `hash` build inserts serially until the key count justifies the
+partitioned insert, and an automatic `sorted` build sorts serially until the key count justifies a
+threaded sort. Both floors apply to the automatic answer alone — an explicit `threads=` is
+forwarded whatever the key count. The scan around them threads by the rule above at every size, and
+`bench/benchmark_index.sh --mode=build` is what measures the difference on your own hardware.
+
 Threading a build or a lookup changes how fast it answers and never what it answers.
 
 ## Performance notes

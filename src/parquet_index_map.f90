@@ -3481,7 +3481,7 @@ contains
         logical, intent(in), optional :: valid(:)         !! per row; `.false.` skips the row.
         integer(int64) :: n, nv, first, last, lo, hi, span, budget, i, off, cnt
         integer :: want, nt
-        logical :: has_v, hv, is_new, fits, dup
+        logical :: has_v, hv, is_new, fits, dup, part_ok
 
         call ix_build_begin()
         n = size(keys, kind=int64)
@@ -3511,6 +3511,9 @@ contains
             self%next_auto = last
         end if
         nt = ix_threads_for(n, threads)
+        ! The partitioned hash insert has a work floor of its own, above the team rule's:
+        ! see IX_PART_MIN_KEYS. An explicit `threads=` is honoured whatever the key count.
+        part_ok = present(threads) .or. nv >= IX_PART_MIN_KEYS
         lo = keys(first)
         hi = keys(first)
         !$omp parallel do default(shared) private(i) reduction(min:lo) reduction(max:hi) &
@@ -3571,7 +3574,7 @@ contains
         case (IX_HASH)
             self%backend = IX_HASH
             self%nk = 0_int64
-            if (nt > 1) then
+            if (nt > 1 .and. part_ok) then
                 call ix_hash_build_part_1(self, keys, values, valid, nv, nt, dup)
                 if (.not. dup) return
                 ! The partitioned pass met a duplicate but cannot say which copy is the later one
@@ -3595,8 +3598,11 @@ contains
                 end if
                 if (.not. is_new) call ix_report_duplicate_1(keys(i), i)
             end do
-            if (nt > 1) call ix_abort("pf_index_map%build: duplicate keys were detected but " // &
-                "could not be named")
+            ! The SAME condition that chose the partitioned pass, not just `nt > 1`: below the
+            ! partitioned insert's own floor the serial loop is the only pass that ran, and a clean
+            ! run of it means there was no duplicate to name.
+            if (nt > 1 .and. part_ok) call ix_abort("pf_index_map%build: duplicate keys were " // &
+                "detected but could not be named")
         case (IX_SORTED)
             self%backend = IX_SORTED
             if (hv) then
@@ -3646,7 +3652,7 @@ contains
         integer(int64) :: sp(pf_index_max_components), kb(pf_index_max_components)
         integer(int64) :: n, nv, first, last, budget, total, grown_total, i, off, cnt, l, h, span
         integer :: want, nt, nc, j
-        logical :: has_v, hv, is_new, fits, dup
+        logical :: has_v, hv, is_new, fits, dup, part_ok
 
         call ix_build_begin()
         n = size(keys, 1, kind=int64)
@@ -3681,6 +3687,9 @@ contains
             self%next_auto = last
         end if
         nt = ix_threads_for(n, threads)
+        ! The partitioned hash insert has a work floor of its own, above the team rule's:
+        ! see IX_PART_MIN_KEYS. An explicit `threads=` is honoured whatever the key count.
+        part_ok = present(threads) .or. nv >= IX_PART_MIN_KEYS
         ! One scalar-reduction pass per component. Deliberately not an array reduction over
         ! `(nc)`: support for those differs across the compilers this library is built with, and
         ! each column here is stride-1, so the separate passes cost nothing over one fused pass.
@@ -3783,13 +3792,13 @@ contains
         case (IX_HASH)
             self%backend = IX_HASH
             self%nk = 0_int64
-            if (nt > 1 .and. nc > 1) then
+            if (nt > 1 .and. part_ok .and. nc > 1) then
                 call ix_hash_build_part_n(self, keys, values, valid, nv, nt, dup)
                 if (.not. dup) return
                 ! As in `ix_build_1`: the serial loop names the duplicate at its canonical position.
                 self%hrec = 0_int64
                 self%nk = 0_int64
-            else if (nt > 1) then
+            else if (nt > 1 .and. part_ok) then
                 ! A 1-tuple map is the scalar table underneath, and takes the scalar pass.
                 call ix_hash_build_part_1(self, keys(:, 1), values, valid, nv, nt, dup)
                 if (.not. dup) return
@@ -3817,8 +3826,11 @@ contains
                 end if
                 if (.not. is_new) call ix_report_duplicate_n(kb(1:nc), i)
             end do
-            if (nt > 1) call ix_abort("pf_index_map%build: duplicate keys were detected but " // &
-                "could not be named")
+            ! The SAME condition that chose the partitioned pass, not just `nt > 1`: below the
+            ! partitioned insert's own floor the serial loop is the only pass that ran, and a clean
+            ! run of it means there was no duplicate to name.
+            if (nt > 1 .and. part_ok) call ix_abort("pf_index_map%build: duplicate keys were " // &
+                "detected but could not be named")
         case (IX_SORTED)
             self%backend = IX_SORTED
             ! `keys(:, 1)` is a contiguous column, so this passes the caller's own storage.

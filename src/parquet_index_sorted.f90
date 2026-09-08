@@ -108,7 +108,18 @@ contains
         allocate(self%svals(n))
         self%nk = n
         if (n == 0_int64) return
-        call pf_argsort(keys, perm, threads=threads)
+        ! **The automatic path has a floor the sort itself does not**: below `IX_SORTED_MIN_THREADED`
+        ! keys a threaded sort costs this build up to 1.9x what a serial one does, because the
+        ! sort's tail passes open a team from 32768 rows while the permutation build stays serial
+        ! far past that. The constant carries the ladder. An explicit `threads=` is forwarded
+        ! whatever the key count, as everywhere else here.
+        if (present(threads)) then
+            call pf_argsort(keys, perm, threads=threads)
+        else if (n >= IX_SORTED_MIN_THREADED) then
+            call pf_argsort(keys, perm)
+        else
+            call pf_argsort(keys, perm, threads=1)
+        end if
         do i = 1_int64, n
             self%skeys(i) = keys(perm(i))
             ! With `values` absent the value for key `i` is `i`, so after the sort the value of the

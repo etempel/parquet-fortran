@@ -862,6 +862,20 @@ def gen_table_type():
         procedure :: is_user_populated => table_is_user_populated !! Whether a column is claimed as holding the caller's values.
         procedure :: validate_qc => table_validate_qc !! Check every qc-declaring column, holding none.
         procedure :: print_stat => table_print_stat  !! Print what the table holds, to stdout.
+        procedure, private :: print_rows_all    !! %print_rows specific with no column list.
+        procedure, private :: print_rows_string !! %print_rows specific taking a separated name string.
+        procedure, private :: print_rows_array  !! %print_rows specific taking an array of names.
+        !> Prints the table's rows themselves, aligned, with a kind row under the column names --
+        !! where %print_stat describes what the table holds, this shows it.
+        !!
+        !! Every argument is optional and every one is a DISPLAY choice, so a bare
+        !! `call t%print_rows()` is the whole call: the first and last five rows of every resident
+        !! column. `columns` (a "a,b,c" string or an array of names) comes first when it is given
+        !! and is the only argument that reads anything; `first`/`last` choose how many rows from
+        !! each end, `rows` (a parquet_slice) names them explicitly instead, `unit` chooses where
+        !! the text goes, and `digits`/`max_width`/`max_columns` bound how much of each value and
+        !! how many columns are shown. See the specifics for each argument's own description.
+        generic :: print_rows => print_rows_all, print_rows_string, print_rows_array
         procedure :: nrows_unfiltered => table_nrows_unfiltered !! Rows before filter=/sample_fraction=.
         procedure :: row_group_extent => table_row_group_extent !! Rows in the row groups this table covers.
         procedure :: row_group_bounds => table_row_group_bounds !! Row-group row ranges, this table's rows or the file's.
@@ -3504,6 +3518,95 @@ def gen_spec_interfaces():
             class(parquet_table), intent(in) :: self !! the table.
             logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
         end subroutine table_print_stat
+        !> Prints the table's rows -- the first `first` and the last `last` of them, aligned in
+        !! columns, with the column names and their kinds above. Where %print_stat DESCRIBES what
+        !! the table holds, this SHOWS it.
+        !!
+        !! ```
+        !! parquet_table: catalogue.parquet
+        !!   rows: 1000000   columns: 12 (3 shown)
+        !!        row    obj_id  cls     flux
+        !!               int64   string  float64 [Jy]
+        !!          1     10001  galaxy  0.0123457
+        !!          2     10002  star    <null>
+        !!        ...     ...    ...     ...
+        !!    1000000  11000000  galaxy  0.45
+        !! ```
+        !!
+        !! **It reads nothing.** Only the columns that are already resident are shown; a lazy
+        !! table with nothing read prints its header and one line saying so. That is %print_stat's
+        !! rule kept for the same reason -- a display that quietly reads a whole file to show ten
+        !! rows is worse than one that says what it is holding. The `columns=` forms are the way
+        !! to ask for more, and they DO read what they name.
+        !!
+        !! **The `row` gutter is this table's own 1-based row number** -- what %row, %get_slice
+        !! and parquet_slice_range count in -- never the file's physical row, which is an ordinary
+        !! column (`parquet_row_index`) and appears only when it is resident.
+        !!
+        !! **A null prints as `<null>` on every kind**, which no string value can be confused with
+        !! (a string column holding the text `null` prints it without the brackets). `NaN` is a
+        !! value, not a null, and prints as the compiler spells it.
+        !!
+        !! **`verbosity = "silent"` prints nothing**, as it does for every other solicited printer
+        !! here; the argument and column-name checks below still run, so a wrong call is still
+        !! reported.
+        module subroutine print_rows_all(self, first, last, rows, unit, digits, max_width, max_columns)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in), optional :: first   !! rows to show from the top; default 5, and 0 when only `last` is given.
+            integer, intent(in), optional :: last    !! rows to show from the bottom; default 5, and 0 when only `first` is given.
+            type(parquet_slice), intent(in), optional :: rows !! show exactly these rows, in this order; excludes first=/last=.
+            integer, intent(in), optional :: unit    !! unit to write to; default the `message_stream` setting's.
+            integer, intent(in), optional :: digits  !! significant digits in a real cell, 1..17; default 6.
+            integer, intent(in), optional :: max_width !! longest cell text before it is cut with "..."; at least 8, default 32.
+            integer, intent(in), optional :: max_columns !! most columns to show before "... (+N more)"; at least 1, default 20.
+        end subroutine print_rows_all
+        !> %print_rows over the named columns, READING any of them that is not resident yet.
+        !!
+        !! `columns` may list several names separated by commas and/or semicolons ("ra;dec, mag"),
+        !! through the same tokenizer %prefetch and parquet_prefetch_columns use, and the columns
+        !! are shown in the order named rather than in table order. A name matching no column is a
+        !! hard error naming every missing name, as %require_columns reports it.
+        !!
+        !! The read is the ordinary first touch a %get would take, so every residency and
+        !! concurrency rule applies unchanged -- in particular this form cannot be called from
+        !! inside a parallel region for a column that is not resident yet.
+        module subroutine print_rows_string(self, columns, first, last, rows, unit, digits, max_width, max_columns)
+            class(parquet_table), intent(in) :: self  !! the table (fills through %cache).
+            character(len=*), intent(in) :: columns   !! column(s) to show, comma/semicolon separated.
+            integer, intent(in), optional :: first    !! rows to show from the top; default 5, and 0 when only `last` is given.
+            integer, intent(in), optional :: last     !! rows to show from the bottom; default 5, and 0 when only `first` is given.
+            type(parquet_slice), intent(in), optional :: rows !! show exactly these rows, in this order; excludes first=/last=.
+            integer, intent(in), optional :: unit     !! unit to write to; default the `message_stream` setting's.
+            integer, intent(in), optional :: digits   !! significant digits in a real cell, 1..17; default 6.
+            integer, intent(in), optional :: max_width !! longest cell text before it is cut with "..."; at least 8, default 32.
+            integer, intent(in), optional :: max_columns !! most columns to show before "... (+N more)"; at least 1, default 20.
+        end subroutine print_rows_string
+        !> %print_rows over the named columns, given as an ARRAY of names -- the form that reaches
+        !! a column whose own name contains a comma or a semicolon.
+        module subroutine print_rows_array(self, columns, first, last, rows, unit, digits, max_width, max_columns)
+            class(parquet_table), intent(in) :: self  !! the table (fills through %cache).
+            character(len=*), intent(in) :: columns(:) !! columns to show, in the order to show them.
+            integer, intent(in), optional :: first    !! rows to show from the top; default 5, and 0 when only `last` is given.
+            integer, intent(in), optional :: last     !! rows to show from the bottom; default 5, and 0 when only `first` is given.
+            type(parquet_slice), intent(in), optional :: rows !! show exactly these rows, in this order; excludes first=/last=.
+            integer, intent(in), optional :: unit     !! unit to write to; default the `message_stream` setting's.
+            integer, intent(in), optional :: digits   !! significant digits in a real cell, 1..17; default 6.
+            integer, intent(in), optional :: max_width !! longest cell text before it is cut with "..."; at least 8, default 32.
+            integer, intent(in), optional :: max_columns !! most columns to show before "... (+N more)"; at least 1, default 20.
+        end subroutine print_rows_array
+        !> `text` in a field `w` wide: blank-padded on the right, or on the left with `right`.
+        !!
+        !! Longer text is returned WHOLE rather than truncated -- a ragged line is a nuisance, a
+        !! silently shortened value is a wrong answer. Every display in this layer pads through
+        !! this one function, which is why it is declared here rather than kept private to the
+        !! submodule that first needed it (a module-contained private procedure cannot be called
+        !! from a submodule at all -- see .claude/rules/code-style.md).
+        module function pad(text, w, right) result(res)
+            character(len=*), intent(in) :: text  !! the text to place; trailing blanks are dropped.
+            integer, intent(in) :: w              !! field width.
+            logical, intent(in), optional :: right !! .true.: right-align instead of left-align.
+            character(len=max(len_trim(text), w)) :: res !! the padded field.
+        end function pad
         !> .true. when this table's read-time transform REMOVES rows, so the reader's own row
         !! numbering is the surviving rows rather than the file's.
         !!

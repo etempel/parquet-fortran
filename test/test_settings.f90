@@ -140,6 +140,8 @@ contains
                 test_statistics_prescreen_effect), &
             new_unittest("verbosity=silent makes print_schema_info a no-op, file and all", &
                 test_verbosity_silences_print_schema_info), &
+            new_unittest("verbosity=silent makes %print_rows a no-op", &
+                test_verbosity_silences_print_rows), &
             new_unittest("both integer kinds reach the same setting", test_both_integer_kinds), &
             new_unittest("every environment variable reaches its own knob", test_env_every_variable), &
             new_unittest("an absent variable leaves its knob alone", test_env_absent_leaves_knob), &
@@ -2287,6 +2289,82 @@ contains
         close(u)
         call check(error, nlines > 0, "the negative control's file should not be empty")
     end subroutine test_verbosity_silences_print_schema_info
+
+    !> `verbosity="silent"` silences SOLICITED output, and `%print_rows` is solicited output, so
+    !! the call writes nothing at all.
+    !!
+    !! **The negative control is the same call at `"normal"` on the same unit**, without which
+    !! this test passes just as happily against a `%print_rows` that never writes anything.
+    !!
+    !! Unlike `%print_schema_info`, `%print_rows` writes to a unit the CALLER opened, so silence
+    !! is an empty file rather than an absent one -- there is no `open` here for the suppression
+    !! check to sit in front of.
+    !!
+    !! Lives in this suite rather than beside the other `%print_rows` tests in
+    !! test_table_display.f90 because it writes a process-global setting, and `settings` is one of
+    !! the suites excluded from test-drive's per-test parallelism.
+    subroutine test_verbosity_silences_print_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        integer(int32) :: id(4)
+        character(len=*), parameter :: fixture = "test_run/settings_silent_print_rows.parquet"
+        character(len=*), parameter :: out = "test_run/settings_silent_print_rows.txt"
+        integer :: u, quiet_lines, loud_lines, i
+
+        call parquet_reset_settings()
+        do i = 1, 4
+            id(i) = int(i, int32)
+        end do
+        call parquet_open_writer(w, fixture)
+        call parquet_write_column(w, "id", id)
+        call parquet_close_writer(w)
+        call parquet_open_table(t, fixture)
+        call t%materialize_all()
+
+        call parquet_set_verbosity("silent")
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_rows(unit=u)
+        close(u)
+        call count_file_lines(out, quiet_lines)
+
+        call parquet_set_verbosity("normal")
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_rows(unit=u)
+        close(u)
+        call count_file_lines(out, loud_lines)
+        call parquet_reset_settings()
+
+        call check(error, quiet_lines == 0, &
+            "verbosity=silent must make %print_rows write nothing at all")
+        if (allocated(error)) return
+        call check(error, loud_lines > 0, &
+            "the negative control at verbosity=normal should have written the display")
+        if (allocated(error)) return
+        ! The guards run whatever the verbosity is, so the silenced call must not have skipped
+        ! them -- but an abort here would take the process down, so what is asserted is the
+        ! survivable half: the table is untouched and still printable.
+        call check(error, t%nrows() == 4_int64, "and the table must be unchanged either way")
+    end subroutine test_verbosity_silences_print_rows
+
+    !> Counts the lines in `path`, or reports 0 when it does not exist.
+    subroutine count_file_lines(path, nlines)
+        character(len=*), intent(in) :: path !! file to count.
+        integer, intent(out) :: nlines       !! how many lines it holds.
+        integer :: u, ios
+        logical :: exists
+
+        nlines = 0
+        inquire(file=path, exist=exists)
+        if (.not. exists) return
+        open(newunit=u, file=path, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios)      ! no item: the count is all this loop wants
+            if (ios /= 0) exit
+            nlines = nlines + 1
+        end do
+        close(u)
+    end subroutine count_file_lines
 
     !> Deletes `path` if it exists, so a test that asserts a file's ABSENCE cannot be fooled by one
     !! an earlier run left behind.

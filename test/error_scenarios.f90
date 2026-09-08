@@ -508,6 +508,22 @@ program error_scenarios
         call scenario_read_unsupported_physical_type()
     case ("read_dictionary_binary_unsupported")
         call scenario_read_dictionary_binary_unsupported()
+    case ("print_rows_negative_count")
+        call scenario_print_rows_negative_count()
+    case ("print_rows_rows_with_first")
+        call scenario_print_rows_rows_with_first()
+    case ("print_rows_slice_out_of_range")
+        call scenario_print_rows_slice_out_of_range()
+    case ("print_rows_missing_column")
+        call scenario_print_rows_missing_column()
+    case ("print_rows_bad_digits")
+        call scenario_print_rows_bad_digits()
+    case ("print_rows_bad_width")
+        call scenario_print_rows_bad_width()
+    case ("print_rows_bad_max_columns")
+        call scenario_print_rows_bad_max_columns()
+    case ("print_rows_unopened")
+        call scenario_print_rows_unopened()
     case ("prefetch_unknown_column")
         call scenario_prefetch_unknown_column()
     case ("filter_unknown_column")
@@ -4453,6 +4469,121 @@ contains
         call parquet_read_column(reader, "cat_bytes", values)
         print '(a)', "unexpectedly read a dictionary column over binary values without error"
     end subroutine scenario_read_dictionary_binary_unsupported
+
+    ! ---- %print_rows argument guards --------------------------------------------------------
+    !
+    ! Every guard %print_rows has, one scenario each. They matter as a GROUP: all eight abort from
+    ! the same procedure, so an exit status alone cannot tell a guard that fired from the wrong
+    ! guard firing, which is why each test in test_errors.f90 asserts a fragment of the message
+    ! rather than only the status. The permitted EDGE of each bound (digits=1, digits=17,
+    ! max_width=8, max_columns=1, first=0/last=0) is asserted in process, in the `table_display`
+    ! suite -- an out-of-process scenario can only show that something aborted.
+    !
+    ! One fixture file per scenario, because the runner dispatches these concurrently.
+
+    !> A six-row table, for the guards below to be called on.
+    subroutine write_print_rows_fixture(file)
+        character(len=*), intent(in) :: file !! this scenario's own fixture path.
+        type(parquet_writer) :: w
+        integer(int32) :: id(6)
+        integer :: i
+
+        do i = 1, 6
+            id(i) = int(i, int32)
+        end do
+        call parquet_open_writer(w, file)
+        call parquet_write_column(w, "id", id)
+        call parquet_close_writer(w)
+    end subroutine write_print_rows_fixture
+
+    !> A negative row count is a caller mistake, not an empty display.
+    subroutine scenario_print_rows_negative_count()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_negative_count.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(first=-1)
+        print '(a)', "unexpectedly accepted a negative first="
+    end subroutine scenario_print_rows_negative_count
+
+    !> `rows=` names the rows explicitly, so `first=`/`last=` alongside it has no reading that is
+    !> obviously right -- and a caller who wrote both meant one of them.
+    subroutine scenario_print_rows_rows_with_first()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_rows_with_first.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(rows=parquet_slice_list([1_int32, 2_int32]), first=2)
+        print '(a)', "unexpectedly accepted rows= together with first="
+    end subroutine scenario_print_rows_rows_with_first
+
+    !> A slice row outside the table is reported by the slice machinery itself, so the message is
+    !> the one every other slice consumer produces rather than a second copy of it.
+    subroutine scenario_print_rows_slice_out_of_range()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_slice_range.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(rows=parquet_slice_list([99_int32]))
+        print '(a)', "unexpectedly accepted a slice row outside the table"
+    end subroutine scenario_print_rows_slice_out_of_range
+
+    !> A `columns=` name matching no column, reported through %require_columns so that EVERY
+    !> missing name is listed rather than only the first.
+    subroutine scenario_print_rows_missing_column()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_missing_column.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows("id,nosuchcolumn")
+        print '(a)', "unexpectedly accepted a column name the table does not have"
+    end subroutine scenario_print_rows_missing_column
+
+    !> Zero significant digits would render every real as nothing at all.
+    subroutine scenario_print_rows_bad_digits()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_bad_digits.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(digits=0)
+        print '(a)', "unexpectedly accepted digits=0"
+    end subroutine scenario_print_rows_bad_digits
+
+    !> Below eight characters the "..." marker is most of the cell.
+    subroutine scenario_print_rows_bad_width()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_bad_width.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(max_width=3)
+        print '(a)', "unexpectedly accepted max_width=3"
+    end subroutine scenario_print_rows_bad_width
+
+    !> Showing no columns at all is what %print_stat is for; zero is not a display.
+    subroutine scenario_print_rows_bad_max_columns()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_bad_maxcols.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(max_columns=0)
+        print '(a)', "unexpectedly accepted max_columns=0"
+    end subroutine scenario_print_rows_bad_max_columns
+
+    !> The open check sits ABOVE the verbosity check, so an unopened table reports that mistake
+    !> rather than silently doing nothing for the wrong reason.
+    subroutine scenario_print_rows_unopened()
+        type(parquet_table) :: t
+
+        call t%print_rows()
+        print '(a)', "unexpectedly printed rows of a table that was never opened"
+    end subroutine scenario_print_rows_unopened
 
     !> The 11 scenarios below each exercise exactly one report_fatal_error
     !> call site added to convert_values_to_int32/int64 (parquet_wrapper.cpp)

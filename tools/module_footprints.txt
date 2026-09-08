@@ -363,6 +363,7 @@ parquet_tables_col.f90
 parquet_tables_colaccess.f90
 parquet_tables_container.f90
 parquet_tables_convert.f90
+parquet_tables_display.f90
 parquet_tables_fill.f90
 parquet_tables_filter.f90
 parquet_tables_index.f90
@@ -477,6 +478,7 @@ parquet_tables_col.f90
 parquet_tables_colaccess.f90
 parquet_tables_container.f90
 parquet_tables_convert.f90
+parquet_tables_display.f90
 parquet_tables_fill.f90
 parquet_tables_filter.f90
 parquet_tables_index.f90

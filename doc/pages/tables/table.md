@@ -995,6 +995,83 @@ holds text, and re-reading it into the parsed kind is not something the reader c
 
 ## Seeing what a table holds
 
+Two printers, answering two different questions. `%print_rows` **shows the rows**; `%print_stat`
+**describes the columns**.
+
+### Showing the rows: `%print_rows`
+
+`call t%print_rows()` prints the first and last five rows of every resident column, aligned, with
+the column names and their kinds above them:
+
+```
+parquet_table: catalogue.parquet
+  rows: 1000   columns: 3 (3 shown)
+   row  obj_id  cls          flux
+         int64  string    float64
+     1   10001  galaxy  0.0123457
+     2   10002  galaxy     <null>
+     3   10003  star     0.037037
+     4   10004  galaxy  0.0493827
+     5   10005  galaxy  0.0617284
+   ...     ...  ...           ...
+   996   10996  star      12.2963
+   997   10997  galaxy    12.3086
+   998   10998  galaxy        7.5
+   999   10999  star      12.3333
+  1000   11000  galaxy       0.45
+```
+
+The `row` gutter is **this table's own 1-based row number** — what `%row`, `%get_slice` and
+`parquet_slice_range` count in — never the file's physical row. That is an ordinary column
+(`parquet_row_index`, see [Which row of the file is
+this?](table-open.html#which-row-of-the-file-is-this)) and appears only when it is resident.
+
+The **kind row** under the names is what says what each column became here — `string` where the
+file said `dictionary`, `float64` where it said `float32`. A vector column's width goes in
+brackets after its kind (`int32_vec[3]`), and so does its unit, if it has one
+(`float64 [Jy]`).
+
+Every argument is optional and every one is a display choice:
+
+| argument | what it does |
+|---|---|
+| `columns` | show these columns, in the order named, **reading any that is not resident yet**. Either a `"ra;dec, mag"` string or an array of names, the same two spellings [`%prefetch`](#laziness-and-what-it-costs) takes. Naming `parquet_row_index` here creates it, exactly as reading it any other way does. |
+| `first`, `last` | rows from the top and from the bottom. Default 5 and 5; naming **either one sets the other to 0**, so `first=20` is `head(20)` and `last=3` is `tail(3)`. Both clamp to the table, and a table the two ends cover prints once, with no `...` row. |
+| `rows` | show exactly the rows this `parquet_slice` names, in the slice's own order — repeats and all. The form for "show me the rows that lookup returned" (`parquet_slice_list(ix%find_all(...))`). Cannot be combined with `first=`/`last=`. |
+| `unit` | the unit number to write to. Absent, the `message_stream` setting decides between standard output and standard error, exactly as every other printer here does. |
+| `digits` | significant digits in a real cell, 1..17. Default 6. |
+| `max_width` | longest cell text before it is cut to `max_width - 3` characters plus `...`. At least 8, default 32. A column NAME is never cut — a truncated heading would leave you guessing which column you are reading. |
+| `max_columns` | most columns to show. At least 1, default 20; the heading says `... (+N more)` for the rest. |
+
+```fortran
+call t%print_rows()                                     ! five rows from each end
+call t%print_rows(first=20)                             ! head(20)
+call t%print_rows("obj_id,cls,flux", last=3)            ! three named columns, tail(3)
+call t%print_rows(rows=parquet_slice_list(hits), unit=log_unit)
+```
+
+Four rules worth knowing:
+
+- **It reads nothing unless `columns=` names an unread column.** A lazy table with nothing
+  resident prints its header and one line saying so, rather than reading the file to show you ten
+  rows of it — `%print_stat`'s rule, kept for the same reason. `columns=` is how you ask for more,
+  and it takes the ordinary first touch a `%get` would, so every residency and concurrency rule
+  applies unchanged.
+- **A null prints as `<null>`, on every kind.** No string value can be mistaken for it: a string
+  column holding the text `null` prints that text, without the brackets. A **`NaN` is a value, not
+  a null**, and prints as one — the same line the filter draws, kept on the display side.
+- **A container cell reports its row's size** — `[3 items]` for a list, `{2 pairs}` for a map. A
+  container's payload is reachable only through its own handle (see [Container columns in a
+  table](#container-columns-in-a-table)), and one row of it can be arbitrarily long.
+- **`verbosity = "silent"` prints nothing**, as it does for every other solicited printer here.
+  The argument and column-name checks still run, so a wrong call is still reported.
+
+A real is rendered the way C's `%g` renders one — six significant digits by default, no trailing
+zeros, and exponential notation only below 1e-4 or above 1e6 — which is also how `%print_stat`
+below shows a double, so one value looks the same in both.
+
+### Describing the columns: `%print_stat`
+
 `call t%print_stat()` prints one line per **materialized** column to standard output — its kind
 and unit, width, null count and min/max — under a header saying how many of the table's columns
 those are:

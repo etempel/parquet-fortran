@@ -1094,17 +1094,21 @@ contains
         end do
     end function count_resident
     !
-    !> `text` in a field `w` wide: blank-padded, or returned whole when it is longer.
-    !!
-    !! A column whose value overflows its column is left overflowing rather than truncated -- a
-    !! ragged line is a nuisance, a silently shortened value is a wrong answer.
-    function pad(text, w) result(res)
-        character(len=*), intent(in) :: text !! the text to place.
-        integer, intent(in) :: w             !! field width.
-        character(len=max(len_trim(text), w)) :: res !! the padded field.
+    module procedure pad
+        logical :: rt
         !
-        res = trim(text)
-    end function pad
+        rt = .false.
+        if (present(right)) rt = right
+        if (rt) then
+            ! Blank-filled first, then the text placed against the right-hand edge. `len(res)` is
+            ! at least len_trim(text), so the start index is always >= 1, and an all-blank `text`
+            ! gives a zero-length substring at res(len+1:len) rather than an invalid one.
+            res = ""
+            res(len(res) - len_trim(text) + 1:) = trim(text)
+        else
+            res = trim(text)
+        end if
+    end procedure pad
     !
     module procedure table_valid_mask_of
         call fill_row_mask(cache, idx, mask)

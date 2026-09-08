@@ -253,6 +253,18 @@ contains
                 test_read_unsupported_physical_type_aborts), &
             new_unittest("reading a dictionary column over binary values aborts", &
                 test_read_dictionary_binary_unsupported_aborts), &
+            new_unittest("%print_rows refuses a negative first=/last=", &
+                test_print_rows_negative_count_aborts), &
+            new_unittest("%print_rows refuses rows= together with first=/last=", &
+                test_print_rows_rows_with_first_aborts), &
+            new_unittest("%print_rows refuses a slice row outside the table", &
+                test_print_rows_slice_out_of_range_aborts), &
+            new_unittest("%print_rows refuses a columns= name the table does not have", &
+                test_print_rows_missing_column_aborts), &
+            new_unittest("%print_rows refuses digits= outside 1..17", test_print_rows_bad_digits_aborts), &
+            new_unittest("%print_rows refuses max_width= below 8", test_print_rows_bad_width_aborts), &
+            new_unittest("%print_rows refuses max_columns= below 1", test_print_rows_bad_max_columns_aborts), &
+            new_unittest("%print_rows on an unopened table reports THAT", test_print_rows_unopened_aborts), &
             new_unittest("array-mode whole-column read of an int32 vector column as logical aborts", &
                 test_read_array_full_bool_type_mismatch_aborts), &
             new_unittest("array-mode whole-column read of an int32 vector column as string aborts", &
@@ -7355,6 +7367,87 @@ contains
         call check_scenario_exit_status(error, "read_dictionary_binary_unsupported", expect_abort=.true., &
             failure_message="reading a dictionary column over binary values was expected to abort")
     end subroutine test_read_dictionary_binary_unsupported_aborts
+
+    !> The eight tests below cover every guard %print_rows has.
+    !>
+    !> Each asserts a FRAGMENT OF THE MESSAGE as well as the exit status, which most scenarios
+    !> here deliberately do not (see check_scenario_exit_status_and_stderr's own note). The reason
+    !> is specific to this group: all eight abort from the same procedure on the same fixture, so
+    !> a status-only assertion passes just as happily when the wrong guard fires, or when one
+    !> guard has swallowed another's case. The fragment is the shortest text that tells them
+    !> apart, not the whole message, so rewording stays free.
+
+    !> A negative row count is a caller mistake, not an empty display.
+    subroutine test_print_rows_negative_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_negative_count", expect_abort=.true., &
+            failure_message="%print_rows(first=-1) was expected to abort", &
+            required_stderr="must not be negative")
+    end subroutine test_print_rows_negative_count_aborts
+
+    !> rows= and first=/last= are two ways of choosing rows, and giving both says nothing.
+    subroutine test_print_rows_rows_with_first_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_rows_with_first", expect_abort=.true., &
+            failure_message="%print_rows(rows=..., first=...) was expected to abort", &
+            required_stderr="rows= selects the rows explicitly")
+    end subroutine test_print_rows_rows_with_first_aborts
+
+    !> The slice machinery's own range check, reached through the display rather than duplicated.
+    subroutine test_print_rows_slice_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_slice_out_of_range", expect_abort=.true., &
+            failure_message="%print_rows(rows=) with a row outside the table was expected to abort", &
+            required_stderr="outside the table")
+    end subroutine test_print_rows_slice_out_of_range_aborts
+
+    !> A columns= name the table does not have, reported with every missing name.
+    subroutine test_print_rows_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_missing_column", expect_abort=.true., &
+            failure_message="%print_rows over a missing column was expected to abort", &
+            required_stderr="this table does not have")
+    end subroutine test_print_rows_missing_column_aborts
+
+    !> digits= outside 1..17 cannot render a real.
+    subroutine test_print_rows_bad_digits_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_bad_digits", expect_abort=.true., &
+            failure_message="%print_rows(digits=0) was expected to abort", &
+            required_stderr="digits= must be between 1 and 17")
+    end subroutine test_print_rows_bad_digits_aborts
+
+    !> Below eight characters a cut cell is mostly marker.
+    subroutine test_print_rows_bad_width_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_bad_width", expect_abort=.true., &
+            failure_message="%print_rows(max_width=3) was expected to abort", &
+            required_stderr="max_width= must be at least 8")
+    end subroutine test_print_rows_bad_width_aborts
+
+    !> Zero columns is not a display.
+    subroutine test_print_rows_bad_max_columns_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_bad_max_columns", expect_abort=.true., &
+            failure_message="%print_rows(max_columns=0) was expected to abort", &
+            required_stderr="max_columns= must be at least 1")
+    end subroutine test_print_rows_bad_max_columns_aborts
+
+    !> The open check sits above the verbosity check, so this reports the real mistake.
+    subroutine test_print_rows_unopened_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_unopened", expect_abort=.true., &
+            failure_message="%print_rows on an unopened table was expected to abort", &
+            required_stderr="print_rows: table has not been opened")
+    end subroutine test_print_rows_unopened_aborts
 
     !> The 16 tests below are the Fortran-side counterpart of 16 scenarios added to
     !> error_scenarios.f90 covering array-mode bool8/string type-mismatch + col_index bounds

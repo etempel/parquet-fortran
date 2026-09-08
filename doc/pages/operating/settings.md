@@ -642,8 +642,8 @@ call parquet_set_verbosity("errors_only")   ! a clean run in a batch pipeline
 and the context lines a failing writer close prints before aborting all survive. Your program's
 control flow depends on that output being findable, so no setting may hide it.
 
-**One consequence to know before you use `"silent"`:** it turns `%print_stat`, `%print_schema_info`
-and `parquet_string_column`'s printers into no-ops, along with
+**One consequence to know before you use `"silent"`:** it turns `%print_rows`, `%print_stat`,
+`%print_schema_info` and `parquet_string_column`'s printers into no-ops, along with
 `parquet_open_reader(..., print_stat=.true.)`. That is what a global output control means, and it is
 a debugging trap worth naming — add a print, see nothing, and the table is not at fault.
 `parquet_print_settings` is the one exemption: it prints at every level, so a silenced program can

@@ -70,6 +70,61 @@ submodule (parquet_core:parquet_read) parquet_read_eval
 
 contains
 
+    !> The `parquet_get_column_type`/`parquet_get_column_shape` tokens a resident column of PK kind
+    !> `kind` would have been reported with, so that the checks and messages the reader's engine
+    !> raises from the schema can be raised here from a column instead.
+    !>
+    !> The INVERSE of table_kind_from_type (parquet_tables_read.f90), which maps the same nine
+    !> element tokens the other way. The two are separate because they run in different modules on
+    !> different inputs, and the pairing is protected by its failure DIRECTION rather than by a
+    !> check: a kind missing here yields an empty type token, which refuses the clause outright.
+    !> A refusal is loud, so the in-memory-versus-reader A/B tests over every column type -- which
+    !> cover all nine -- report it immediately; there is no way for a missing entry to become a
+    !> wrong answer.
+    module procedure parquet_filter_column_tokens
+        shape_token = "scalar"
+        select case (kind)
+        case (PK_INT32)
+            type_token = "int32"
+        case (PK_INT64)
+            type_token = "int64"
+        case (PK_FLOAT32)
+            type_token = "float32"
+        case (PK_FLOAT64)
+            type_token = "float64"
+        case (PK_LOGICAL)
+            type_token = "boolean"
+        case (PK_STRING)
+            type_token = "string"
+        case (PK_DATE)
+            type_token = "date"
+        case (PK_TIME)
+            type_token = "time"
+        case (PK_TIMESTAMP)
+            type_token = "timestamp"
+        case (PK_LIST)
+            type_token = ""
+            shape_token = "list"
+        case (PK_MAP)
+            type_token = ""
+            shape_token = "map"
+        case (PK_STRUCT)
+            type_token = ""
+            shape_token = "struct"
+        case default
+            ! Every *_VEC kind, and PK_NONE. A vector column is named by its shape rather than its
+            ! element type, because that is the half of the answer the refusal is about.
+            type_token = ""
+            shape_token = "vector"
+        end select
+        ! A width above 1 is a vector column whatever the discriminator says -- belt and braces, so
+        ! that a scalar kind carrying a width could never be compared element-wise by accident.
+        if (width /= 1) then
+            type_token = ""
+            shape_token = "vector"
+        end if
+    end procedure parquet_filter_column_tokens
+
     !> Answers one parsed leaf against one resident column. See the interface in parquet_core.f90.
     module procedure parquet_eval_filter_leaf
         character(len=:), allocatable :: type_token, shape_token, low
@@ -282,61 +337,6 @@ contains
         end do
         ok = .true.
     end procedure parquet_eval_filter_program
-
-    !> The `parquet_get_column_type`/`parquet_get_column_shape` tokens a resident column of PK kind
-    !> `kind` would have been reported with, so that the checks and messages the reader's engine
-    !> raises from the schema can be raised here from a column instead.
-    !>
-    !> The INVERSE of table_kind_from_type (parquet_tables_read.f90), which maps the same nine
-    !> element tokens the other way. The two are separate because they run in different modules on
-    !> different inputs, and the pairing is protected by its failure DIRECTION rather than by a
-    !> check: a kind missing here yields an empty type token, which refuses the clause outright.
-    !> A refusal is loud, so the in-memory-versus-reader A/B tests over every column type -- which
-    !> cover all nine -- report it immediately; there is no way for a missing entry to become a
-    !> wrong answer.
-    module procedure parquet_filter_column_tokens
-        shape_token = "scalar"
-        select case (kind)
-        case (PK_INT32)
-            type_token = "int32"
-        case (PK_INT64)
-            type_token = "int64"
-        case (PK_FLOAT32)
-            type_token = "float32"
-        case (PK_FLOAT64)
-            type_token = "float64"
-        case (PK_LOGICAL)
-            type_token = "boolean"
-        case (PK_STRING)
-            type_token = "string"
-        case (PK_DATE)
-            type_token = "date"
-        case (PK_TIME)
-            type_token = "time"
-        case (PK_TIMESTAMP)
-            type_token = "timestamp"
-        case (PK_LIST)
-            type_token = ""
-            shape_token = "list"
-        case (PK_MAP)
-            type_token = ""
-            shape_token = "map"
-        case (PK_STRUCT)
-            type_token = ""
-            shape_token = "struct"
-        case default
-            ! Every *_VEC kind, and PK_NONE. A vector column is named by its shape rather than its
-            ! element type, because that is the half of the answer the refusal is about.
-            type_token = ""
-            shape_token = "vector"
-        end select
-        ! A width above 1 is a vector column whatever the discriminator says -- belt and braces, so
-        ! that a scalar kind carrying a width could never be compared element-wise by accident.
-        if (width /= 1) then
-            type_token = ""
-            shape_token = "vector"
-        end if
-    end procedure parquet_filter_column_tokens
 
     !> KL_TRUE / KL_FALSE from a plain comparison result -- the twin of C++'s kleene_of.
     pure integer(int8) function parquet_kleene_of(b) result(res)

@@ -72,9 +72,17 @@ in `api-conventions.md`; module placement in `module-structure.md`; language and
   through a public relay in the owning module's `contains` (`parquet_argsort`'s `oracle_*` relays;
   `check_no_submodule_oracle_pointer_call`).
 - **An intermediate submodule must not reference a name it reaches only by host association from
-  the module above** (nagfor then fails to compile its descendants). Give it its own
-  `use ..., only:`, or move the code into a leaf submodule with an interface in `parquet_core.f90`
-  (`resolve_temporal_write_unit`).
+  the module above** (nagfor then fails to compile its descendants, `Bad module file format for X,
+  could not ref Y`). Give it its own `use ..., only:`, or move the code into a leaf submodule with
+  an interface in `parquet_core.f90` (`resolve_temporal_write_unit`). Import a GENERIC of the
+  parent's own imports the way the parent does, bare: an `only:` list naming one is rejected by
+  gfortran (`use parquet_columns` in `parquet_tables_join.f90`).
+- **Keep every submodule chain two deep: module, submodule, leaf.** A submodule three levels below
+  its module cannot be compiled by nagfor at all when the middle one reaches ANY host-associated
+  name, and there is no `use` for a name declared in a parent submodule. Two leaves that need the
+  same private helpers get them from the submodule they share, not from one another
+  (`parquet_index_map.f90` holds the multimap's `mm_*` workers for `parquet_index_multi.f90` and
+  `parquet_index_str.f90`).
 - **A `FINAL` target stays module-contained** (nagfor ICE for every sibling submodule otherwise).
 - **A type may not carry more than 255 bindings sorting alphabetically ahead of a SPECIAL binding**
   (defined assignment/operator); flang stores the index in one byte. `parquet_table`'s

@@ -44,6 +44,14 @@
 !! only a stable sort guarantees exists. Stability decides only the ORDER within a group, which is
 !! a documented output property with its own test.
 submodule (parquet_tables) parquet_tables_join
+    ! An INTERMEDIATE submodule (parquet_tables_join_hash.f90 descends from it) may not
+    ! reach a name by host association from the module above: nagfor then cannot compile
+    ! its descendants. Every use-associated name this file references is imported here.
+    use, intrinsic :: iso_fortran_env, only : int64
+    ! Bare, as parquet_tables.f90 imports it: an `only:` list naming a GENERIC of parquet_columns
+    ! (`parquet_column_is_null`) is rejected by gfortran when the module above already has it.
+    use parquet_columns
+    use parquet_core, only : parquet_split_name_list
     use parquet_sorting, only : pf_sort_keys, pf_argsort
     ! The sort's own thread rule and its tail floor, for the sort engine's passes over the
     ! runs: that engine resolves ONE team, by the call `pf_argsort` makes over the same rows,

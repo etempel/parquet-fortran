@@ -53,6 +53,28 @@ submodule (parquet_index:parquet_index_map) parquet_index_hash
 
 contains
 
+    !> Grows the hash table when the load factor demands it. See the interface in
+    !! parquet_index.f90. Implemented FIRST in this file because nagfor rejects a separate
+    !! module procedure whose body follows a call to it in the same submodule.
+    module procedure ix_hash_reserve
+        integer(int64) :: need
+
+        ! **The early return is what keeps a bulk build linear**, not a micro-optimisation. Every
+        ! insert calls this with `nk + 1`, and `ix_hash_cap_for` walks the capacity up by doubling
+        ! from `IX_MIN_HASH_CAP` -- about seventeen iterations plus a division at a million keys,
+        ! computed and discarded on every single key. Testing the load factor against the table
+        ! that is already there answers the common case in two arithmetic operations.
+        !
+        ! The multiplication is guarded rather than assumed safe: `hcap * IX_MAX_LOAD_PCT`
+        ! overflows for a capacity above `huge / 60`, which no real table reaches but which the
+        ! reader should not have to verify from the call sites.
+        if (self%hcap > 0_int64 .and. self%hcap <= huge(0_int64) / IX_MAX_LOAD_PCT) then
+            if (want <= (self%hcap * IX_MAX_LOAD_PCT) / 100_int64) return
+        end if
+        need = ix_hash_cap_for(want)
+        if (need > self%hcap) call ix_hash_rehash(self, need)
+    end procedure ix_hash_reserve
+
     ! ---- Insertion ----
 
     !> Aborts when a placement scan has walked the whole table without finding an empty slot.
@@ -306,25 +328,6 @@ contains
         end if
         self%hcap = newcap
     end subroutine ix_hash_rehash
-
-    module procedure ix_hash_reserve
-        integer(int64) :: need
-
-        ! **The early return is what keeps a bulk build linear**, not a micro-optimisation. Every
-        ! insert calls this with `nk + 1`, and `ix_hash_cap_for` walks the capacity up by doubling
-        ! from `IX_MIN_HASH_CAP` -- about seventeen iterations plus a division at a million keys,
-        ! computed and discarded on every single key. Testing the load factor against the table
-        ! that is already there answers the common case in two arithmetic operations.
-        !
-        ! The multiplication is guarded rather than assumed safe: `hcap * IX_MAX_LOAD_PCT`
-        ! overflows for a capacity above `huge / 60`, which no real table reaches but which the
-        ! reader should not have to verify from the call sites.
-        if (self%hcap > 0_int64 .and. self%hcap <= huge(0_int64) / IX_MAX_LOAD_PCT) then
-            if (want <= (self%hcap * IX_MAX_LOAD_PCT) / 100_int64) return
-        end if
-        need = ix_hash_cap_for(want)
-        if (need > self%hcap) call ix_hash_rehash(self, need)
-    end procedure ix_hash_reserve
 
     ! ---- Diagnostics ----
 

@@ -35,20 +35,25 @@
 !! element is never a key: a build skips it, a bulk form answers 0 for it, a scalar form cannot
 !! present one.
 !!
-!! **A descendant of `parquet_index_multi`, not a sibling**, so that host association reaches
-!! both the map's private helpers (the string hash and the tuple probe, the guards, the thread
-!! rule, `ix_adopt`, the store's lifecycle in `parquet_index_map.f90`) and the multimap's
-!! (`mm_layout`, `mm_release`, the gathers and the probe passes). Every string-keyed `module
+!! **A descendant of `parquet_index_map`, beside `parquet_index_multi` rather than below it**, so
+!! that host association reaches both the map's private helpers (the string hash and the tuple
+!! probe, the guards, the thread rule, `ix_adopt`, the store's lifecycle) and the multimap's
+!! (`mm_layout`, `mm_release`, the gathers and the probe passes) -- both of which live in
+!! `parquet_index_map.f90`, the one scope the two leaves share. Every string-keyed `module
 !! procedure` of BOTH types lives here for that reason: the multimap's string build needs the
 !! map's string `%get_or_add_many` and the multimap's layout in one body. A string `%build`
 !! builds into a local map and adopts it under the guard, exactly as the integer builds do.
+!!
+!! A sibling and not a descendant because nagfor cannot compile a submodule three levels below
+!! its module when the middle one reaches any name by host association (CLAUDE.md,
+!! "fortran-gotchas.md"); `parquet_index_multi` reaches dozens.
 !!
 !! **A `parquet_string_column` is read in place.** The bulk forms alias the column's offsets and
 !! payload through `parquet_string_column_raw_buffers` and `c_f_pointer` -- no copy -- with the
 !! column dummy declared `target`, so the aliases are valid for the call's duration and are never
 !! kept beyond it. Whether an element is null is asked of the column through the typed accessor,
 !! row by row, only when the column carries a validity bitmap at all.
-submodule (parquet_index:parquet_index_multi) parquet_index_str
+submodule (parquet_index:parquet_index_map) parquet_index_str
     use iso_c_binding, only: c_ptr, c_f_pointer, c_associated, c_loc, c_null_ptr
     use parquet_strings, only: parquet_string_column_is_null, parquet_string_column_raw_buffers
     implicit none

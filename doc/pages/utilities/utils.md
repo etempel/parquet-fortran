@@ -3,14 +3,15 @@ title: Text and path helpers with parquet_utils
 ---
 
 `parquet_utils` is a small module of things a program built on this library keeps needing and
-Fortran does not supply: ASCII case folding, turning a value into text and reading it back, and
-joining and taking apart POSIX paths.
+Fortran does not supply: division that does not raise a flag, angle wrapping and conversion, the
+cross product, ASCII case folding, turning a value into text and reading it back, and joining and
+taking apart POSIX paths.
 
 It is a leaf. `use parquet_utils` compiles **one** of this library's Fortran files and imports
-nothing but `iso_fortran_env`, so its Fortran graph never reaches the C++ bindings. That is
-narrower than "no C++": `link` is a package-level key in `fpm.toml`, so the wrapper is still
-compiled and Arrow still linked whichever module you import — see
-[Choosing a module](../operating/choosing-a-module.html). It is also available through
+nothing but the intrinsic modules `iso_fortran_env` and `ieee_arithmetic`, so its Fortran graph
+never reaches the C++ bindings. That is narrower than "no C++": `link` is a package-level key in
+`fpm.toml`, so the wrapper is still compiled and Arrow still linked whichever module you import —
+see [Choosing a module](../operating/choosing-a-module.html). It is also available through
 `use parquet` like everything else.
 
 ## Rules that apply to everything here
@@ -24,6 +25,12 @@ string the runtime rejects comes back as a run of asterisks rather than ending y
 other external I/O and from executing a `STOP`, so most of the paragraph above is enforced by the
 compiler on every build rather than being a promise. It is also a capability: you can call these
 from your own `pure` procedures and from inside a `do concurrent` block.
+
+**Every numeric helper comes in both real kinds, and neither widens behind your back.**
+`pf_safe_div`, the four `pf_wrap_*`, `pf_deg2rad`/`pf_rad2deg` and `pf_cross_product` each accept
+`real(real32)` and `real(real64)`, and the `real32` form does `real32` arithmetic throughout. That
+is what lets `pf_safe_div` promise it returns *exactly* what `a/b` returns; if you want `real64`
+accuracy, pass `real64`.
 
 **Every result is allocated, on every path.** Where the answer is empty you get an allocated,
 zero-length string — never an unallocated one. So `len(result) == 0` is the only test you ever
@@ -40,6 +47,86 @@ Everything that produces text is a **subroutine** with the result as an argument
 That is a project-wide rule with a measured reason behind it — a gfortran function returning
 `character(len=:), allocatable` corrupts its result under concurrency — and it is why every call
 below reads `call pf_something(input, result)`.
+
+## Division that does not raise a flag
+
+```fortran
+res = pf_safe_div(a, b)
+```
+
+`a/b` when `b` is not zero, `+/-Infinity` when `b` is zero and `a` is not, and a quiet NaN when
+both are zero — the same values the division itself produces, but produced *by construction*
+rather than by dividing, so **no IEEE exception flag is raised**. It is `pure elemental`, so it
+applies to whole arrays.
+
+That is the whole point of it. Dividing by a quantity that is legitimately zero for part of a
+dataset — a bin nothing fell into, a denominator counting something that did not happen — already
+gives NaN or Infinity, and both are meaningful answers there ("undefined" and "unsatisfiable") that
+a `real64` parquet column stores perfectly well. What it *also* does is raise `IEEE_DIVIDE_BY_ZERO`
+and `IEEE_INVALID`, so a run whose only division by zero was the expected one still ends with the
+runtime's floating-point warnings — and those warnings then hide any exception worth knowing about.
+Some compilers print them on every run; a `-ffpe-trap` build stops outright.
+
+```fortran
+! completeness per sky pixel; a pixel with no available time divides 0 by 0
+frac = pf_safe_div(t_done, t_available)     ! NaN there, and the flags stay clear
+```
+
+**It is deliberately not a "return zero when the denominator is zero" helper.** That would turn an
+unsatisfiable request into an unremarkable number, which is the failure this exists to prevent
+rather than to cause. If you want a fallback value, test the denominator yourself and say so.
+
+## Angles: wrapping and converting
+
+```fortran
+res = pf_wrap_deg(angle)    ! degrees -> [0, 360)
+res = pf_wrap_180(angle)    ! degrees -> [-180, 180)
+res = pf_wrap_rad(angle)    ! radians -> [0, 2*pi)
+res = pf_wrap_pi(angle)     ! radians -> [-pi, pi)
+res = pf_deg2rad(angle)
+res = pf_rad2deg(angle)
+```
+
+All six are `pure elemental`. Use `pf_wrap_deg`/`pf_wrap_rad` for a position — a right ascension, a
+longitude, a position angle — and `pf_wrap_180`/`pf_wrap_pi` for a *difference* of two of them.
+
+**Correct for any input, which the one-line version usually written by hand is not.** The idiom
+`if (ra < 0.0) ra = ra + 360.0` adds one turn, so it leaves `-400.0` at `-40.0`; these reduce by
+however many turns it takes:
+
+```fortran
+pf_wrap_deg(-400.0_real64)   ! 320.0, not -40.0
+pf_wrap_deg(760.0_real64)    ! 40.0
+pf_wrap_180(540.0_real64)    ! -180.0
+```
+
+**Both ranges are half-open**, `[0, 360)` and `[-180, 180)`, so `pf_wrap_180(180.0)` is `-180.0`.
+Half-open in both directions is what makes every wrap **idempotent**: wrapping an already-wrapped
+angle changes nothing, so you can apply one wherever you are unsure rather than tracking whether it
+has been applied already.
+
+**Wrap in degrees where your data is in degrees.** 360 is exact in binary and `2*pi` is not, so the
+radian forms carry the rounding of the stored `2*pi` when they reduce a large angle. For the same
+reason `pf_deg2rad` and `pf_rad2deg` do not round-trip bit-for-bit — `pi/180` and `180/pi` are each
+rounded, so the two multiplications compose to a factor a rounding away from one.
+
+There are deliberately **no named constants** here: this module publishes the two conversions, not
+a `pi`. A library that writes parquet files has no business owning the spelling of `pi`, and
+publishing one invites `e`, `c` and `G` next.
+
+## Cross product
+
+```fortran
+res = pf_cross_product(a, b)     ! a and b are real, dimension(3)
+```
+
+The right-handed cross product of two 3-vectors, `pure`, in either real kind. It lives here rather
+than in [HEALPix](healpix.html) because it has no HEALPix content: a program holding unit vectors
+from `pf_ang2vec` should not have to compile a pixelisation tier for nine lines of arithmetic.
+
+Both arguments must be of size 3, and **that is not checked** — a check would need an error path,
+which this module does not have. The dummy argument is declared `dimension(3)`, so a wrong length is
+a compile-time error wherever the compiler can see the shape.
 
 ## Case folding
 

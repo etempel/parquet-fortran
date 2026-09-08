@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`parquet_utils` gains eight numeric helpers**, `pure` and in both real kinds like everything
+  else there. `pf_safe_div(a, b)` is `a/b` with the IEEE value a zero denominator would have
+  produced, returned by construction so that no exception flag is raised. `pf_wrap_deg`,
+  `pf_wrap_180`, `pf_wrap_rad` and `pf_wrap_pi` reduce an angle to `[0, 360)`, `[-180, 180)`,
+  `[0, 2*pi)` and `[-pi, pi)`, for any input and any number of turns. `pf_deg2rad` and `pf_rad2deg`
+  convert between the two units, and `pf_cross_product` is the cross product of two 3-vectors. See
+  [Text and path helpers](doc/pages/utilities/utils.md). The module now imports `ieee_arithmetic`
+  alongside `iso_fortran_env`; both are intrinsic, so it remains a leaf compiling one file.
+- **`pf_log_now(date, time [, millis])`** returns the current local date and time as
+  `YYYY-MM-DD` and `HH:MM:SS`, in the shape the `{date}` and `{time}` record placeholders render,
+  for a program stamping its own output rather than a log record. See
+  [Logging](doc/pages/utilities/logging.md#the-wall-clock-for-your-own-output).
 - **`parquet_table%print_stat` takes `stats=.false.`**, which lists the columns with their kind
   and width only, skipping the null count and min/max. See
   [Describing the columns](doc/pages/tables/table.md#describing-the-columns-print_stat).
@@ -191,6 +203,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `pf_chord2_from_angle` is now monotone in the angle over its whole domain: an angle at or above
+  pi gives 4 rather than the falling half of the sine, and a negative angle gives -1 rather than the
+  bound for the positive one. The documented substitution of a squared-chord comparison for
+  `pf_angdist(v1, v2) <= r` was silently wrong for those two ranges. No value inside `[0, pi)`
+  changes.
 - A column added with `%add_column` after another had been dropped could report a unit it was never
   given — the unit of whichever column had been last — and write it into the file.
 - A `left`, `right` or `outer` join that null-filled a string column, and a string vector column

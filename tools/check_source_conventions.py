@@ -1961,8 +1961,11 @@ def check_parquet_toml_stays_arrow_free():
 def check_parquet_utils_stays_arrow_free():
     """`use parquet_utils` must not reach parquet_bindings.
 
-    Stricter than a tier rule: this module imports `iso_fortran_env` and NOTHING else, not even
-    `parquet_settings_base`, and that is load-bearing rather than tidy. `parquet_settings_base`
+    Stricter than a tier rule: this module imports the INTRINSIC modules `iso_fortran_env` and
+    `ieee_arithmetic` and NOTHING else -- no module of this library, not even
+    `parquet_settings_base` -- and that is load-bearing rather than tidy. An intrinsic module is
+    not a compiled file, a tier edge or a footprint entry, so it does not weaken the property;
+    a library module would. `parquet_settings_base`
     used to carry a private ASCII fold with a doc-comment explaining that it could not call
     `parquet_core`'s copy without creating a circular dependency; a module strictly below
     everything is what removes that cycle. The obvious import to add here is `parquet_settings`,

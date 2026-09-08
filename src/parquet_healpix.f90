@@ -1369,6 +1369,14 @@ module parquet_healpix
     !! definition internally in the other units -- degrees in, the chord itself out -- so the two
     !! differ twice over. That tier and this one may not share code (this one reaches nothing but
     !! `parquet_settings_base`), so the agreement is checked by a test that imports both.
+    !!
+    !! **Monotone for EVERY angle, not only for one in `[0, pi]`.** An angle at or above pi gives
+    !! exactly 4, the antipodal maximum, rather than the falling half of the sine -- so a radius
+    !! beyond a half turn selects everything instead of selecting less than a smaller radius did. A
+    !! negative angle gives -1, a bound no squared distance can meet, so a negative radius matches
+    !! nothing, exactly as a direct `dist <= angle` comparison would. Neither guard can change the
+    !! value of an angle already in `[0, pi)`, which is the only range the substitution above was
+    !! ever valid over. A NaN angle still yields a NaN.
     interface pf_chord2_from_angle
         module procedure hpx_chord2_from_angle
     end interface pf_chord2_from_angle

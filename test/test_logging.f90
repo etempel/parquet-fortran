@@ -2029,8 +2029,72 @@ contains
             new_unittest("get_name reports the base name", test_get_name), &
             new_unittest("get_full_name reports the composed name", test_get_full_name), &
             new_unittest("logger, sink and name rule compose with max, all three binding at once", &
-                test_threshold_composition) &
+                test_threshold_composition), &
+            new_unittest("pf_log_now renders the wall clock in the shape the record does", &
+                test_log_now) &
             ]
     end subroutine collect_tests_logging
+
+    !> `pf_log_now` renders `YYYY-MM-DD` and `HH:MM:SS`, with the separators in the right places
+    !! and every field taken from the field it names.
+    !!
+    !! **The fields are checked against `date_and_time`'s own numbers, not merely for shape.** The
+    !! mistake this procedure exists to prevent is indexing the wrong source string -- an hour
+    !! followed by two digits of the *year* -- which produces text of exactly the right shape, with
+    !! digits in every position and colons where colons belong. A test asserting only the shape
+    !! would pass on it.
+    !!
+    !! The clock can tick between the two calls, so only the fields that cannot have changed are
+    !! compared: the date, and the hour. Minutes and seconds are checked for range instead, which
+    !! catches a wrong source field (a year's `26` is a legal minute, but a month's `09` in the
+    !! seconds slot alongside a mismatched minute is not something a real clock produces twice).
+    subroutine test_log_now(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        character(len=:), allocatable :: d, t, t_ms
+        integer :: v(8), yyyy, mm, dd, hh, mi, ss
+
+        call pf_log_now(d, t)
+        call date_and_time(values = v)
+
+        call check(error, len(d), 10, "the date must be exactly YYYY-MM-DD")
+        if (allocated(error)) return
+        call check(error, len(t), 8, "the default time must be exactly HH:MM:SS")
+        if (allocated(error)) return
+        call check(error, d(5:5) == "-" .and. d(8:8) == "-", "the date separators must be hyphens")
+        if (allocated(error)) return
+        call check(error, t(3:3) == ":" .and. t(6:6) == ":", "the time separators must be colons")
+        if (allocated(error)) return
+
+        read (d(1:4), '(i4)') yyyy
+        read (d(6:7), '(i2)') mm
+        read (d(9:10), '(i2)') dd
+        read (t(1:2), '(i2)') hh
+        read (t(4:5), '(i2)') mi
+        read (t(7:8), '(i2)') ss
+
+        call check(error, yyyy, v(1), "the year is not date_and_time's year")
+        if (allocated(error)) return
+        call check(error, mm, v(2), "the month is not date_and_time's month")
+        if (allocated(error)) return
+        call check(error, dd, v(3), "the day is not date_and_time's day")
+        if (allocated(error)) return
+        call check(error, hh, v(5), "the hour is not date_and_time's hour")
+        if (allocated(error)) return
+        ! Minutes and seconds may have advanced between the two calls, so these are range
+        ! assertions -- which is still enough to catch a field read out of the date string.
+        call check(error, mi >= 0 .and. mi <= 59, "the minutes field is not a minute")
+        if (allocated(error)) return
+        call check(error, ss >= 0 .and. ss <= 60, "the seconds field is not a second")
+        if (allocated(error)) return
+
+        ! The milliseconds form extends the same text rather than re-rendering it differently.
+        call pf_log_now(d, t_ms, millis=.true.)
+        call check(error, len(t_ms), 12, "the millis form must be exactly HH:MM:SS.mmm")
+        if (allocated(error)) return
+        call check(error, t_ms(9:9) == ".", "the millis separator must be a full stop")
+        if (allocated(error)) return
+        call check(error, t_ms(3:3) == ":" .and. t_ms(6:6) == ":", &
+            "the millis form must keep the same colons")
+    end subroutine test_log_now
 
 end module test_logging

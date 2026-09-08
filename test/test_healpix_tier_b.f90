@@ -24,7 +24,8 @@ module test_healpix_tier_b
     use parquet_healpix
     use test_healpix_vectors
     use iso_fortran_env, only : int32, int64, real64
-    use ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow
+    use ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow, &
+                                ieee_is_nan, ieee_value, ieee_quiet_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     implicit none
     private
@@ -71,6 +72,8 @@ contains
                          test_ud_pix_nest_sentinels), &
             new_unittest("the chord pair round trips and matches angdist", &
                          test_chord_round_trip), &
+            new_unittest("chord2 is monotone for every angle, not only for one in [0, pi]", &
+                         test_chord2_monotone), &
             new_unittest("query_disc_count equals query_disc's own count", &
                          test_disc_count_matches), &
             new_unittest("query_disc_alloc returns exactly what query_disc does", &
@@ -754,6 +757,67 @@ contains
         call check(error, pf_angle_from_chord2(4.0_real64 + 1.0e-12_real64), pi, &
                    "a chord2 slightly above 4 clamps to pi", thr=1.0e-15_real64)
     end subroutine test_chord_round_trip
+
+    !> `pf_chord2_from_angle` is non-decreasing over its WHOLE domain, and a negative angle
+    !! selects nothing.
+    !!
+    !! The substitution the procedure exists for -- `sum((v1-v2)**2) <= chord2(r)` in place of
+    !! `pf_angdist(v1,v2) <= r` -- is valid only while the chord orders as the angle does. Both
+    !! guards in the implementation are what extends that beyond `[0, pi)`, and this is their
+    !! negative control: without the pi clamp the sweep below fails as soon as it passes pi
+    !! (`2*sin(angle/2)` starts falling, so a wider radius produces a smaller bound), and without
+    !! the negative branch a negative radius silently means the positive one.
+    subroutine test_chord2_monotone(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer :: k, nbad, nchecked
+        real(real64) :: a, prev, c2
+        character(len=160) :: detail
+
+        ! Sweeps from below zero to well past a full turn, so the whole domain is covered rather
+        ! than the range the substitution was originally written for.
+        nbad = 0
+        nchecked = 0
+        prev = -huge(1.0_real64)
+        detail = ""
+        do k = -20, 300
+            a = real(k, real64) * 0.05_real64
+            c2 = pf_chord2_from_angle(a)
+            nchecked = nchecked + 1
+            if (c2 < prev) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,es16.9,a,es16.9,a,es16.9)') "at angle=", a, &
+                    " chord2=", c2, " fell below ", prev
+            end if
+            prev = c2
+        end do
+        call check(error, nchecked, 321, "the monotonicity sweep did not run")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "chord2 is not monotone in the angle: " // trim(detail))
+        if (allocated(error)) return
+
+        ! An angle at or beyond a half turn is the antipodal maximum, exactly.
+        call check(error, pf_chord2_from_angle(pi), 4.0_real64, &
+                   "chord2(pi) must be exactly 4, the antipodal squared chord", thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_chord2_from_angle(4.0_real64), 4.0_real64, &
+                   "an angle beyond pi must stay at 4 rather than coming back down", thr=0.0_real64)
+        if (allocated(error)) return
+
+        ! A negative radius must match nothing. Asserted against a real squared distance rather
+        ! than against -1 itself, because "no squared distance can meet it" is the contract and
+        ! the sentinel's value is not.
+        call check(error, pf_chord2_from_angle(-1.0_real64) < 0.0_real64, &
+                   "a negative angle must give a bound no squared distance can meet")
+        if (allocated(error)) return
+        call check(error, .not. (0.0_real64 <= pf_chord2_from_angle(-1.0e-30_real64)), &
+                   "even a coincident pair must fail the bound for a negative radius")
+        if (allocated(error)) return
+
+        ! An undefined radius stays undefined: written as two comparisons rather than a MIN so
+        ! that a NaN cannot be turned into an all-sky bound.
+        call check(error, ieee_is_nan(pf_chord2_from_angle(ieee_value(1.0_real64, ieee_quiet_nan))), &
+                   "a NaN angle must give a NaN, not the pi clamp")
+    end subroutine test_chord2_monotone
 
     ! ---- B.8/B.9: the disc siblings ----
 

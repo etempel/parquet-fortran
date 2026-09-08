@@ -201,6 +201,25 @@ contains
     module procedure hpx_chord2_from_angle
         real(real64) :: s
 
+        ! Both guards exist to keep the result MONOTONE in the angle, which is the whole property
+        ! the substitution `sum((v1-v2)**2) <= chord2(r)` for `pf_angdist(v1,v2) <= r` rests on.
+        ! Unguarded, `2*sin(angle/2)` stops rising at pi and comes back down, so a radius beyond a
+        ! half turn produced a SMALLER bound than one just under it -- selecting fewer points the
+        ! wider the caller asked. And a negative radius has to match nothing, which a squared chord
+        ! cannot express by itself: `sin` is odd and the square makes it positive again, so the
+        ! unguarded form turned `r = -1` into the bound for `r = +1`.
+        !
+        ! Written as two comparisons rather than `min(angle, hpx_pi)` so that a NaN angle still
+        ! yields a NaN: MIN with a NaN operand may return the other one, which would silently turn
+        ! an undefined radius into an all-sky one.
+        if (angle < 0.0_real64) then
+            chord2 = -1.0_real64
+            return
+        end if
+        if (angle >= hpx_pi) then
+            chord2 = 4.0_real64
+            return
+        end if
         s = 2.0_real64 * sin(0.5_real64 * angle)
         chord2 = s * s
     end procedure hpx_chord2_from_angle

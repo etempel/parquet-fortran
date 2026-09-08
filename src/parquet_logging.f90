@@ -111,6 +111,7 @@ module parquet_logging
     public :: pf_log_error, pf_log_critical, pf_log_blank, pf_log_fatal
     public :: pf_log_enabled, pf_log_flush, pf_log_reset_dedup
     public :: pf_log_level_from_name, pf_log_level_name, pf_log_color, pf_log_elapsed
+    public :: pf_log_now
     public :: pf_log_set_context, pf_log_push_context, pf_log_pop_context
     public :: pf_log_clear_context, pf_log_context_depth
     public :: pf_log_push_name, pf_log_pop_name, pf_log_clear_names, pf_log_name_depth
@@ -2852,6 +2853,60 @@ contains
         end if
         if (seconds < 0.0_real64) seconds = 0.0_real64
     end subroutine pf_log_elapsed
+
+    !> The current local date and time as text: `YYYY-MM-DD` and `HH:MM:SS`.
+    !!
+    !! The same two fields the `%d` and `%t` record placeholders render, from the same
+    !! `date_and_time` call and the same digit stores, so a timestamp a program writes into its own
+    !! output reads identically to the one in its log. `millis=.true.` gives `HH:MM:SS.mmm`, which
+    !! is `%t` exactly; the default omits the milliseconds, which is what a file header wants.
+    !!
+    !! **This exists because hand-formatting it is a trap, and not a hypothetical one.**
+    !! `date_and_time` returns the date as `CCYYMMDD` and the time as `HHMMSS.sss` in two separate
+    !! strings, so the two are indexed almost identically and a caller assembling
+    !! `tt(1:2)//":"//dd(3:4)//":"//dd(5:6)` gets an hour followed by two digits of the *year* and
+    !! the month. Three such lines are live in sibling projects in this workspace. The result looks
+    !! like a plausible time, so nothing about it draws attention.
+    !!
+    !! **Wall-clock, and therefore not monotonic**: this is the time to stamp on a file, and
+    !! `pf_log_elapsed` is the one to measure a duration with. A clock adjustment mid-run moves this
+    !! and does not move that.
+    !!
+    !! Subroutine with allocatable `intent(out)` results rather than a function returning
+    !! `character(len=:), allocatable`, per the project-wide ban on that shape (GCC PR113797).
+    subroutine pf_log_now(date, time, millis)
+        character(len=:), allocatable, intent(out) :: date   !! Receives `YYYY-MM-DD`, 10 characters.
+        character(len=:), allocatable, intent(out) :: time   !! Receives `HH:MM:SS`, or `HH:MM:SS.mmm`.
+        logical, intent(in), optional :: millis               !! `.true.` to keep the milliseconds.
+        integer :: v(8)
+        character(len=10) :: d
+        character(len=12) :: t
+        logical :: want_ms
+
+        want_ms = .false.
+        if (present(millis)) want_ms = millis
+
+        call date_and_time(values = v)
+        call put_digits(d(1:4), v(1))
+        d(5:5) = "-"
+        call put_digits(d(6:7), v(2))
+        d(8:8) = "-"
+        call put_digits(d(9:10), v(3))
+        call put_digits(t(1:2), v(5))
+        t(3:3) = ":"
+        call put_digits(t(4:5), v(6))
+        t(6:6) = ":"
+        call put_digits(t(7:8), v(7))
+        t(9:9) = "."
+        call put_digits(t(10:12), v(8))
+
+        date = d
+        if (want_ms) then
+            time = t
+        else
+            time = t(1:8)
+        end if
+    end subroutine pf_log_now
 
     !> Applies every `PF_LOG_*` environment variable that is set, to the **default logger only**.
     !!

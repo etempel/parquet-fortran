@@ -1,10 +1,14 @@
-!> Small, self-contained text and path helpers for programs built on this library: ASCII case
-!> folding, value-to-text rendering, and POSIX path joining and splitting.
+!> Small, self-contained numeric, text and path helpers for programs built on this library: total
+!> arithmetic and angle handling, ASCII case folding, value-to-text rendering, and POSIX path
+!> joining and splitting.
 !!
-!! `parquet_utils` is a **leaf**: it imports `iso_fortran_env` and nothing else -- not even
-!! `parquet_settings_base`. `use parquet_utils` therefore compiles one Fortran file and never
-!! crosses the C++ boundary. `check_parquet_utils_stays_arrow_free`
-!! (tools/check_source_conventions.py) is what keeps that true.
+!! `parquet_utils` is a **leaf**: it imports the two INTRINSIC modules `iso_fortran_env` and
+!! `ieee_arithmetic`, and nothing else -- no module of this library, not even
+!! `parquet_settings_base`. An intrinsic module is not a compiled file, not a tier edge and not a
+!! footprint entry, so the property that promise protects is untouched: `use parquet_utils`
+!! compiles one Fortran file and never crosses the C++ boundary.
+!! `check_parquet_utils_stays_arrow_free` (tools/check_source_conventions.py) is what keeps that
+!! true.
 !!
 !! **That leaf status is load-bearing rather than tidy.** `parquet_settings_base` carried its own
 !! private ASCII fold with a doc-comment explaining that it could not call `parquet_core`'s copy
@@ -52,18 +56,56 @@
 !! `posixpath`, and `tools/generate_path_reference.py` emits the values the tests assert, so
 !! "we follow Python" is checked rather than claimed.
 !!
+!! **Every numeric helper computes in the KIND it was handed, and none widens behind your back.**
+!! `pf_safe_div`, the four `pf_wrap_*`, `pf_deg2rad`/`pf_rad2deg` and `pf_cross_product` each have a
+!! `real32` and a `real64` specific, and the `real32` one does `real32` arithmetic throughout. That
+!! is what lets `pf_safe_div` promise it returns *exactly* what `a/b` returns, which a form widening
+!! to `real64` and narrowing back could not. A caller wanting `real64` accuracy passes `real64`.
+!!
+!! **Both wrapping ranges are HALF-OPEN -- `[0, 360)` and `[-180, 180)` -- and the guard that keeps
+!! them so is load-bearing rather than defensive.** `modulo` is the whole computation, and `modulo`
+!! can return the divisor itself when the true result is a rounding below it: measured on gfortran
+!! 15.2, `modulo(-1.0e-30, 360.0)` is exactly `360.0` in both kinds, and
+!! `modulo(x + 180, 360) - 180` is exactly `180.0` for `x` one ulp below `-180`. Each wrap therefore
+!! ends with one comparison folding that case back to the low end. Both ranges being half-open is
+!! also what makes every wrap **idempotent**: wrapping an already-wrapped angle changes nothing.
+!!
 !! Guide: `doc/pages/utilities/utils.md`. Tests: `test/test_utils.f90` (suite name `utils`).
 module parquet_utils
     use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64
+    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, &
+        ieee_positive_inf, ieee_negative_inf
     implicit none
     private
 
+    public :: pf_safe_div
+    public :: pf_wrap_deg, pf_wrap_180, pf_wrap_rad, pf_wrap_pi
+    public :: pf_deg2rad, pf_rad2deg
+    public :: pf_cross_product
     public :: pf_to_lower, pf_to_upper
     public :: pf_to_str
     public :: pf_from_str
     public :: pf_join_path
     public :: pf_dirname, pf_basename, pf_path_ext, pf_path_stem
     public :: pf_split_path, pf_path_add_suffix
+
+    !> Pi, and a turn of it, in each kind. Private and deliberately so: this module publishes the
+    !! two CONVERSIONS and the four wraps, not a namespace of named constants -- a library that
+    !! writes Parquet files has no business owning the spelling of `pi`, and publishing one invites
+    !! `e`, `c` and `G` next. `parquet_healpix` keeps its own private `hpx_pi` for the same reason
+    !! and is unaffected by these.
+    !!
+    !! The `real32` values are the `real64` ones narrowed, so each is the nearest `real32` to pi
+    !! rather than pi truncated to a shorter decimal literal.
+    real(real64), parameter :: PI_R64 = 3.141592653589793238462643_real64
+    real(real64), parameter :: TWOPI_R64 = 2.0_real64 * PI_R64
+    real(real32), parameter :: PI_R32 = real(PI_R64, real32)
+    real(real32), parameter :: TWOPI_R32 = real(TWOPI_R64, real32)
+    !> The two angle-conversion factors, in each kind, narrowed from `real64` for the same reason.
+    real(real64), parameter :: DEG2RAD_R64 = PI_R64 / 180.0_real64
+    real(real64), parameter :: RAD2DEG_R64 = 180.0_real64 / PI_R64
+    real(real32), parameter :: DEG2RAD_R32 = real(DEG2RAD_R64, real32)
+    real(real32), parameter :: RAD2DEG_R32 = real(RAD2DEG_R64, real32)
 
     !> The path separator. POSIX `/` on every platform, deliberately -- see the module header.
     character(len=1), parameter :: PATH_SEP = "/"
@@ -72,6 +114,113 @@ module parquet_utils
     !> Scratch width for one `pf_to_str` rendering. A `fmt` producing more than this many
     !! characters is reported the same way any other rejected `fmt` is, as a run of asterisks.
     integer, parameter :: TO_STR_BUF = 512
+
+    ! ---- Total arithmetic ----
+
+    !> Divides `a` by `b`, returning exactly what `a/b` returns, but WITHOUT evaluating the
+    !! division when `b` is zero -- and therefore without raising an IEEE exception.
+    !!
+    !! `pf_safe_div(a, b)` is `a/b` whenever `b` is non-zero, `+/-Infinity` when `b` is zero and `a`
+    !! is not, and a quiet NaN when both are zero. `pure elemental`, so it applies to whole arrays.
+    !!
+    !! **The point is the FLAGS, not the values.** Dividing by a quantity that is legitimately zero
+    !! for part of a dataset -- a bin nothing fell into, a denominator counting something that did
+    !! not happen -- already yields NaN or Infinity, and both are meaningful answers there
+    !! ("undefined" and "unsatisfiable") that a `real64` Parquet column stores perfectly well. What
+    !! the plain division ALSO does is raise `IEEE_DIVIDE_BY_ZERO` and `IEEE_INVALID`, so a run
+    !! whose only division by zero was expected still ends with the runtime's floating-point
+    !! warnings -- which then hide any exception worth knowing about. This returns the same value by
+    !! construction rather than by arithmetic, so the numbers are bit-for-bit what they were and the
+    !! flags stay clear.
+    !!
+    !! **It is deliberately NOT a "return zero when the denominator is zero" helper.** That would
+    !! silently turn an unsatisfiable request into an unremarkable one, which is the failure this
+    !! exists to prevent rather than to cause.
+    !!
+    !! **A NaN operand is passed through to the division**, which is where it belongs: `b` is then
+    !! not zero, so the guard does not fire and `a/b` is a NaN by the ordinary rules.
+    interface pf_safe_div
+        module procedure pf_safe_div_r32 !! `real(real32)` numerator and denominator.
+        module procedure pf_safe_div_r64 !! `real(real64)` numerator and denominator.
+    end interface pf_safe_div
+
+    ! ---- Angles ----
+
+    !> Reduces an angle in DEGREES to the half-open range `[0, 360)`.
+    !!
+    !! Correct for any finite input and any number of turns -- `pf_wrap_deg(-400.0)` is `320.0` --
+    !! which the conditional `if (x < 0.0) x = x + 360.0` written at a call site is not. `pure
+    !! elemental`. A non-finite input yields a non-finite result. See the module header for why the
+    !! range is half-open and what the closing comparison in each of these is for.
+    interface pf_wrap_deg
+        module procedure pf_wrap_deg_r32 !! `real(real32)` angle in degrees.
+        module procedure pf_wrap_deg_r64 !! `real(real64)` angle in degrees.
+    end interface pf_wrap_deg
+
+    !> Reduces an angle in DEGREES to the half-open range `[-180, 180)`, the form a *difference*
+    !! of two angles wants.
+    !!
+    !! `[-180, 180)` rather than `(-180, 180]` so that this is `pf_wrap_deg` shifted, with the same
+    !! half-open convention and the same idempotence: `pf_wrap_180(180.0)` is `-180.0`, and wrapping
+    !! that again leaves it there. `pure elemental`.
+    interface pf_wrap_180
+        module procedure pf_wrap_180_r32 !! `real(real32)` angle in degrees.
+        module procedure pf_wrap_180_r64 !! `real(real64)` angle in degrees.
+    end interface pf_wrap_180
+
+    !> Reduces an angle in RADIANS to the half-open range `[0, 2*pi)`. The radian counterpart of
+    !! `pf_wrap_deg`; see it, and the module header, for the rules. `pure elemental`.
+    !!
+    !! **The radian forms are approximate in a way the degree forms are not**: 360 is exact in
+    !! binary and `2*pi` is not, so the reduction of a large angle carries the rounding of the
+    !! stored `2*pi`. Wrap in degrees where the input is in degrees.
+    interface pf_wrap_rad
+        module procedure pf_wrap_rad_r32 !! `real(real32)` angle in radians.
+        module procedure pf_wrap_rad_r64 !! `real(real64)` angle in radians.
+    end interface pf_wrap_rad
+
+    !> Reduces an angle in RADIANS to the half-open range `[-pi, pi)`. The radian counterpart of
+    !! `pf_wrap_180`, and it carries the same approximation note as `pf_wrap_rad`. `pure elemental`.
+    interface pf_wrap_pi
+        module procedure pf_wrap_pi_r32 !! `real(real32)` angle in radians.
+        module procedure pf_wrap_pi_r64 !! `real(real64)` angle in radians.
+    end interface pf_wrap_pi
+
+    !> Degrees to radians, `pure elemental`. The multiplication is by the nearest value of the
+    !! argument's own kind to `pi/180`; nothing is widened.
+    interface pf_deg2rad
+        module procedure pf_deg2rad_r32 !! `real(real32)` angle in degrees.
+        module procedure pf_deg2rad_r64 !! `real(real64)` angle in degrees.
+    end interface pf_deg2rad
+
+    !> Radians to degrees, `pure elemental`. The inverse of `pf_deg2rad`, with the same rule.
+    !!
+    !! **The pair does not round-trip bit-for-bit**, and no test may assert that it does: `pi/180`
+    !! and `180/pi` are each rounded, so the two multiplications compose to a factor a rounding away
+    !! from one. That is a property of binary floating point, not of these procedures.
+    interface pf_rad2deg
+        module procedure pf_rad2deg_r32 !! `real(real32)` angle in radians.
+        module procedure pf_rad2deg_r64 !! `real(real64)` angle in radians.
+    end interface pf_rad2deg
+
+    ! ---- Vectors ----
+
+    !> The cross product `a x b` of two 3-vectors.
+    !!
+    !! `pure`, total, and the only procedure in this module taking or returning an array. It exists
+    !! here rather than in `parquet_healpix` because it has no HEALPix content whatever: a consumer
+    !! holding unit vectors from `pf_ang2vec` should not have to compile a pixelisation tier for
+    !! nine lines of arithmetic.
+    !!
+    !! **Both arguments must be of size 3, and this is NOT checked** -- a check would need an error
+    !! path, which this module does not have. The dummy is declared `dimension(3)`, so a
+    !! shorter actual is a compile-time error wherever the compiler can see the shape and undefined
+    !! behaviour where it cannot; passing an assumed-shape slice of the wrong length is the one way
+    !! to get that wrong.
+    interface pf_cross_product
+        module procedure pf_cross_product_r32 !! `real(real32)` vectors.
+        module procedure pf_cross_product_r64 !! `real(real64)` vectors.
+    end interface pf_cross_product
 
     ! ---- Case folding ----
 
@@ -238,6 +387,187 @@ module parquet_utils
     end interface pf_join_path
 
 contains
+
+    ! ================================================================================
+    ! Total arithmetic
+    ! ================================================================================
+
+    !> `a/b` when `b` is non-zero, and the IEEE value the division would have produced otherwise.
+    !! See `pf_safe_div`.
+    pure elemental function pf_safe_div_r32(a, b) result(res)
+        real(real32), intent(in) :: a !! the numerator.
+        real(real32), intent(in) :: b !! the denominator; zero is expected here, not exceptional.
+        real(real32) :: res !! `a/b`; `+/-Infinity` when `b == 0` and `a /= 0`, NaN when both are 0.
+
+        if (b /= 0.0_real32) then
+            res = a / b
+        else if (a > 0.0_real32) then
+            res = ieee_value(res, ieee_positive_inf)
+        else if (a < 0.0_real32) then
+            res = ieee_value(res, ieee_negative_inf)
+        else
+            ! Both zero, or `a` is a NaN: a quiet NaN either way, and the NaN case reaches here
+            ! only because a NaN compares false against both bounds above.
+            res = ieee_value(res, ieee_quiet_nan)
+        end if
+    end function pf_safe_div_r32
+
+    !> `a/b` when `b` is non-zero, and the IEEE value the division would have produced otherwise.
+    !! See `pf_safe_div`.
+    pure elemental function pf_safe_div_r64(a, b) result(res)
+        real(real64), intent(in) :: a !! the numerator.
+        real(real64), intent(in) :: b !! the denominator; zero is expected here, not exceptional.
+        real(real64) :: res !! `a/b`; `+/-Infinity` when `b == 0` and `a /= 0`, NaN when both are 0.
+
+        if (b /= 0.0_real64) then
+            res = a / b
+        else if (a > 0.0_real64) then
+            res = ieee_value(res, ieee_positive_inf)
+        else if (a < 0.0_real64) then
+            res = ieee_value(res, ieee_negative_inf)
+        else
+            res = ieee_value(res, ieee_quiet_nan)
+        end if
+    end function pf_safe_div_r64
+
+    ! ================================================================================
+    ! Angles
+    ! ================================================================================
+    !
+    ! Every one of the eight wraps is `modulo` plus one comparison. The comparison is not
+    ! defensive: `modulo` returns the divisor itself when the true result rounds up to it, so
+    ! without it the advertised range would be closed at the top on some inputs. Measured values
+    ! are in the module header.
+
+    !> An angle in degrees reduced to `[0, 360)`. See `pf_wrap_deg`.
+    pure elemental function pf_wrap_deg_r32(angle) result(res)
+        real(real32), intent(in) :: angle !! an angle in degrees, of any magnitude and sign.
+        real(real32) :: res !! the same direction, in `[0, 360)`.
+
+        res = modulo(angle, 360.0_real32)
+        if (res >= 360.0_real32) res = 0.0_real32
+    end function pf_wrap_deg_r32
+
+    !> An angle in degrees reduced to `[0, 360)`. See `pf_wrap_deg`.
+    pure elemental function pf_wrap_deg_r64(angle) result(res)
+        real(real64), intent(in) :: angle !! an angle in degrees, of any magnitude and sign.
+        real(real64) :: res !! the same direction, in `[0, 360)`.
+
+        res = modulo(angle, 360.0_real64)
+        if (res >= 360.0_real64) res = 0.0_real64
+    end function pf_wrap_deg_r64
+
+    !> An angle in degrees reduced to `[-180, 180)`. See `pf_wrap_180`.
+    pure elemental function pf_wrap_180_r32(angle) result(res)
+        real(real32), intent(in) :: angle !! an angle in degrees, of any magnitude and sign.
+        real(real32) :: res !! the same direction, in `[-180, 180)`.
+
+        res = modulo(angle + 180.0_real32, 360.0_real32) - 180.0_real32
+        if (res >= 180.0_real32) res = -180.0_real32
+    end function pf_wrap_180_r32
+
+    !> An angle in degrees reduced to `[-180, 180)`. See `pf_wrap_180`.
+    pure elemental function pf_wrap_180_r64(angle) result(res)
+        real(real64), intent(in) :: angle !! an angle in degrees, of any magnitude and sign.
+        real(real64) :: res !! the same direction, in `[-180, 180)`.
+
+        res = modulo(angle + 180.0_real64, 360.0_real64) - 180.0_real64
+        if (res >= 180.0_real64) res = -180.0_real64
+    end function pf_wrap_180_r64
+
+    !> An angle in radians reduced to `[0, 2*pi)`. See `pf_wrap_rad`.
+    pure elemental function pf_wrap_rad_r32(angle) result(res)
+        real(real32), intent(in) :: angle !! an angle in radians, of any magnitude and sign.
+        real(real32) :: res !! the same direction, in `[0, 2*pi)`.
+
+        res = modulo(angle, TWOPI_R32)
+        if (res >= TWOPI_R32) res = 0.0_real32
+    end function pf_wrap_rad_r32
+
+    !> An angle in radians reduced to `[0, 2*pi)`. See `pf_wrap_rad`.
+    pure elemental function pf_wrap_rad_r64(angle) result(res)
+        real(real64), intent(in) :: angle !! an angle in radians, of any magnitude and sign.
+        real(real64) :: res !! the same direction, in `[0, 2*pi)`.
+
+        res = modulo(angle, TWOPI_R64)
+        if (res >= TWOPI_R64) res = 0.0_real64
+    end function pf_wrap_rad_r64
+
+    !> An angle in radians reduced to `[-pi, pi)`. See `pf_wrap_pi`.
+    pure elemental function pf_wrap_pi_r32(angle) result(res)
+        real(real32), intent(in) :: angle !! an angle in radians, of any magnitude and sign.
+        real(real32) :: res !! the same direction, in `[-pi, pi)`.
+
+        res = modulo(angle + PI_R32, TWOPI_R32) - PI_R32
+        if (res >= PI_R32) res = -PI_R32
+    end function pf_wrap_pi_r32
+
+    !> An angle in radians reduced to `[-pi, pi)`. See `pf_wrap_pi`.
+    pure elemental function pf_wrap_pi_r64(angle) result(res)
+        real(real64), intent(in) :: angle !! an angle in radians, of any magnitude and sign.
+        real(real64) :: res !! the same direction, in `[-pi, pi)`.
+
+        res = modulo(angle + PI_R64, TWOPI_R64) - PI_R64
+        if (res >= PI_R64) res = -PI_R64
+    end function pf_wrap_pi_r64
+
+    !> Degrees to radians. See `pf_deg2rad`.
+    pure elemental function pf_deg2rad_r32(angle) result(res)
+        real(real32), intent(in) :: angle !! an angle in degrees.
+        real(real32) :: res !! the same angle in radians.
+
+        res = angle * DEG2RAD_R32
+    end function pf_deg2rad_r32
+
+    !> Degrees to radians. See `pf_deg2rad`.
+    pure elemental function pf_deg2rad_r64(angle) result(res)
+        real(real64), intent(in) :: angle !! an angle in degrees.
+        real(real64) :: res !! the same angle in radians.
+
+        res = angle * DEG2RAD_R64
+    end function pf_deg2rad_r64
+
+    !> Radians to degrees. See `pf_rad2deg`.
+    pure elemental function pf_rad2deg_r32(angle) result(res)
+        real(real32), intent(in) :: angle !! an angle in radians.
+        real(real32) :: res !! the same angle in degrees.
+
+        res = angle * RAD2DEG_R32
+    end function pf_rad2deg_r32
+
+    !> Radians to degrees. See `pf_rad2deg`.
+    pure elemental function pf_rad2deg_r64(angle) result(res)
+        real(real64), intent(in) :: angle !! an angle in radians.
+        real(real64) :: res !! the same angle in degrees.
+
+        res = angle * RAD2DEG_R64
+    end function pf_rad2deg_r64
+
+    ! ================================================================================
+    ! Vectors
+    ! ================================================================================
+
+    !> The cross product of two 3-vectors. See `pf_cross_product`.
+    pure function pf_cross_product_r32(a, b) result(res)
+        real(real32), intent(in), dimension(3) :: a !! the left operand.
+        real(real32), intent(in), dimension(3) :: b !! the right operand.
+        real(real32), dimension(3) :: res !! `a x b`.
+
+        res(1) = a(2) * b(3) - a(3) * b(2)
+        res(2) = a(3) * b(1) - a(1) * b(3)
+        res(3) = a(1) * b(2) - a(2) * b(1)
+    end function pf_cross_product_r32
+
+    !> The cross product of two 3-vectors. See `pf_cross_product`.
+    pure function pf_cross_product_r64(a, b) result(res)
+        real(real64), intent(in), dimension(3) :: a !! the left operand.
+        real(real64), intent(in), dimension(3) :: b !! the right operand.
+        real(real64), dimension(3) :: res !! `a x b`.
+
+        res(1) = a(2) * b(3) - a(3) * b(2)
+        res(2) = a(3) * b(1) - a(1) * b(3)
+        res(3) = a(1) * b(2) - a(2) * b(1)
+    end function pf_cross_product_r64
 
     ! ================================================================================
     ! Case folding

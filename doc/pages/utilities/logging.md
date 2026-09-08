@@ -28,6 +28,7 @@ omitted.
 - [Sinks: where records go](#sinks-where-records-go)
 - [Which threshold decides](#which-threshold-decides)
 - [The line layout](#the-line-layout)
+- [The wall clock, for your own output](#the-wall-clock-for-your-own-output)
 - [Colour](#colour)
 - [Emitting a record: the call signature](#emitting-a-record-the-call-signature)
 - [Building a message](#building-a-message)
@@ -283,6 +284,40 @@ rather than substituted: `x` + `general`, and nothing at all when there is no na
 
 Two templates are provided: `PF_LOG_FMT_BRIEF` (`{time} [{level}] {message}`, the console default)
 and `PF_LOG_FMT_FULL` (date, level, name, thread and context — the file default).
+
+## The wall clock, for your own output
+
+```fortran
+character(len=:), allocatable :: d, t
+
+call pf_log_now(d, t)                  ! d = "2026-09-08", t = "14:35:22"
+call pf_log_now(d, t, millis=.true.)   ! t = "14:35:22.041", exactly what {time} renders
+```
+
+The current local date and time as text, in the same shape the `{date}` and `{time}` placeholders
+put in a record — from the same `date_and_time` call and the same digit stores, so a timestamp you
+stamp on your own output file reads identically to the one in your log. It is the one procedure
+here that is not about emitting a record: it exists so that a program writing a header, a readme or
+a filename does not format the clock by hand.
+
+**Formatting it by hand is a trap, and not a hypothetical one.** `date_and_time` hands back the
+date as `CCYYMMDD` and the time as `HHMMSS.sss` in two *separate* strings, indexed almost
+identically:
+
+```fortran
+character(len=12) :: dd, tt, zz
+
+call date_and_time(dd, tt, zz)
+write (iu, '(a)') "# run at " // tt(1:2)//':'//dd(3:4)//':'//dd(5:6)   ! WRONG
+```
+
+That prints the hour, then two digits of the **year**, then the month — `14:26:09` for a run at
+14:35:22 on 2026-09-08. It has the right shape, the right punctuation and a plausible value, so
+nothing about it draws attention. Three such lines are live in sibling projects in this workspace.
+
+**Wall-clock, and therefore not monotonic.** This is the time to stamp on a file;
+`pf_log_elapsed(seconds)` is the one to measure a duration with, since it reads `system_clock` and
+is immune to a clock adjustment mid-run.
 
 ## Colour
 

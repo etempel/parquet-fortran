@@ -35,7 +35,8 @@ module test_utils
     use test_path_vectors
     use iso_fortran_env, only: int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only: ieee_support_flag, ieee_get_flag, &
-        ieee_set_flag, ieee_underflow
+        ieee_set_flag, ieee_underflow, ieee_divide_by_zero, ieee_invalid, &
+        ieee_is_nan, ieee_is_finite
     implicit none
     private
 
@@ -48,6 +49,17 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! Receives the suite's tests.
 
         testsuite = [ &
+            new_unittest("safe_div is plain division wherever the denominator is not zero", &
+                         test_safe_div_matches_division), &
+            new_unittest("safe_div gives the IEEE value a zero denominator would have", &
+                         test_safe_div_zero_denominator), &
+            new_unittest("safe_div raises no IEEE flag, which is the point of it", &
+                         test_safe_div_raises_no_flag), &
+            new_unittest("every wrap lands inside its advertised half-open range", test_wrap_ranges), &
+            new_unittest("the wrap edge guard fires on the inputs that need it", test_wrap_edge_guard), &
+            new_unittest("wrapping crosses several turns and is idempotent", test_wrap_turns), &
+            new_unittest("deg2rad and rad2deg agree with the definition", test_angle_conversions), &
+            new_unittest("cross_product is the right-handed cross product", test_cross_product), &
             new_unittest("case folding covers every ASCII letter", test_fold_ascii), &
             new_unittest("case folding leaves every other byte alone", test_fold_leaves_others), &
             new_unittest("case folding in place preserves length", test_fold_inplace), &
@@ -76,6 +88,295 @@ contains
             new_unittest("dirname and basename recompose the path", test_round_trip) &
             ]
     end subroutine collect_tests_utils
+
+    ! ================================================================================
+    ! Total arithmetic
+    ! ================================================================================
+
+    !> Wherever the denominator is non-zero, `pf_safe_div` must be `a/b` and nothing else.
+    !!
+    !! Asserted as bit equality rather than within a tolerance: the contract is that a program's
+    !! outputs are unchanged by adopting it, which a tolerance would not check.
+    subroutine test_safe_div_matches_division(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64) :: a(6), b(6)
+        real(real32) :: a4(6), b4(6)
+        integer :: i, nbad
+
+        a = [1.0_real64, -1.0_real64, 3.0_real64, -7.5_real64, 1.0e300_real64, 0.0_real64]
+        b = [3.0_real64, 7.0_real64, -11.0_real64, 0.25_real64, 1.0e-300_real64, 5.0_real64]
+        a4 = [1.0_real32, -1.0_real32, 3.0_real32, -7.5_real32, 1.0e30_real32, 0.0_real32]
+        b4 = [3.0_real32, 7.0_real32, -11.0_real32, 0.25_real32, 1.0e-30_real32, 5.0_real32]
+
+        nbad = 0
+        do i = 1, size(a)
+            if (pf_safe_div(a(i), b(i)) /= a(i) / b(i)) nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, "pf_safe_div disagrees with a/b on a real64 non-zero denominator")
+        if (allocated(error)) return
+
+        nbad = 0
+        do i = 1, size(a4)
+            if (pf_safe_div(a4(i), b4(i)) /= a4(i) / b4(i)) nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, "pf_safe_div disagrees with a/b on a real32 non-zero denominator")
+        if (allocated(error)) return
+
+        ! Elemental, so a whole array goes through one call and must agree element for element.
+        call check(error, all(pf_safe_div(a, b) == a / b), "the elemental real64 form disagrees with a/b")
+        if (allocated(error)) return
+        call check(error, all(pf_safe_div(a4, b4) == a4 / b4), "the elemental real32 form disagrees with a/b")
+    end subroutine test_safe_div_matches_division
+
+    !> A zero denominator gives the value the division would have given, by construction.
+    subroutine test_safe_div_zero_denominator(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64) :: zero, res
+        real(real32) :: zero4, res4
+
+        ! Both zeros are assembled at run time. A literal zero lets the compiler fold the whole
+        ! call away and leave the test asserting on a constant it computed itself, which would
+        ! pass whatever the procedure does.
+        zero = real(command_argument_count(), real64) * 0.0_real64
+        zero4 = real(command_argument_count(), real32) * 0.0_real32
+
+        res = pf_safe_div(1.0_real64, zero)
+        call check(error, res > 0.0_real64 .and. .not. ieee_is_finite(res), &
+            "pf_safe_div(+x, 0) must be +Infinity")
+        if (allocated(error)) return
+        res = pf_safe_div(-1.0_real64, zero)
+        call check(error, res < 0.0_real64 .and. .not. ieee_is_finite(res), &
+            "pf_safe_div(-x, 0) must be -Infinity")
+        if (allocated(error)) return
+        res = pf_safe_div(zero, zero)
+        call check(error, ieee_is_nan(res), "pf_safe_div(0, 0) must be NaN")
+        if (allocated(error)) return
+
+        res4 = pf_safe_div(1.0_real32, zero4)
+        call check(error, res4 > 0.0_real32 .and. .not. ieee_is_finite(res4), &
+            "the real32 form must give +Infinity too")
+        if (allocated(error)) return
+        res4 = pf_safe_div(zero4, zero4)
+        call check(error, ieee_is_nan(res4), "the real32 form must give NaN for 0/0 too")
+        if (allocated(error)) return
+
+        ! Deliberately not zero: the whole point is that an unsatisfiable request stays visibly
+        ! unsatisfiable instead of becoming an unremarkable number.
+        call check(error, .not. (pf_safe_div(1.0_real64, zero) == 0.0_real64), &
+            "pf_safe_div must not turn a division by zero into zero")
+    end subroutine test_safe_div_zero_denominator
+
+    !> The property the procedure exists for: dividing by a legitimate zero must leave the IEEE
+    !! exception flags alone, so that a raised flag still means something worth investigating.
+    subroutine test_safe_div_raises_no_flag(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        logical :: flag_div, flag_inv, saved_div, saved_inv, supported
+        real(real64) :: zero, res(3)
+
+        zero = real(command_argument_count(), real64) * 0.0_real64
+        supported = ieee_support_flag(ieee_divide_by_zero, zero) .and. ieee_support_flag(ieee_invalid, zero)
+
+        ! The suite runs concurrently, so the flags are saved and put back: leaving one raised
+        ! would surface at the end of the whole run and read as a defect in whatever ran last.
+        saved_div = .false.
+        saved_inv = .false.
+        if (supported) then
+            call ieee_get_flag(ieee_divide_by_zero, saved_div)
+            call ieee_get_flag(ieee_invalid, saved_inv)
+            call ieee_set_flag(ieee_divide_by_zero, .false.)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+
+        ! Kept as three separate results and never combined: adding +Infinity to -Infinity raises
+        ! the invalid-operation flag by itself, so a test that summed them would measure its own
+        ! arithmetic instead of pf_safe_div's.
+        res(1) = pf_safe_div(1.0_real64, zero)
+        res(2) = pf_safe_div(-1.0_real64, zero)
+        res(3) = pf_safe_div(zero, zero)
+
+        flag_div = .false.
+        flag_inv = .false.
+        if (supported) then
+            call ieee_get_flag(ieee_divide_by_zero, flag_div)
+            call ieee_get_flag(ieee_invalid, flag_inv)
+            call ieee_set_flag(ieee_divide_by_zero, saved_div)
+            call ieee_set_flag(ieee_invalid, saved_inv)
+        end if
+
+        call check(error, .not. flag_div, "pf_safe_div raised the IEEE divide-by-zero flag")
+        if (allocated(error)) return
+        call check(error, .not. flag_inv, "pf_safe_div raised the IEEE invalid-operation flag")
+        if (allocated(error)) return
+        ! Reading the results keeps the three calls above from being optimised away entirely.
+        call check(error, ieee_is_nan(res(3)), "the 0/0 result was not the NaN the flag test relies on")
+    end subroutine test_safe_div_raises_no_flag
+
+    ! ================================================================================
+    ! Angles
+    ! ================================================================================
+
+    !> Every wrap lands strictly inside its advertised half-open range, over a sweep crossing
+    !! several turns in both directions, in both kinds.
+    subroutine test_wrap_ranges(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64), parameter :: PI = 3.141592653589793238462643_real64
+        real(real32), parameter :: PI4 = real(PI, real32)
+        real(real64) :: x
+        real(real32) :: x4
+        integer :: i, nbad, nchecked
+
+        nbad = 0
+        nchecked = 0
+        do i = -2000, 2000
+            x = real(i, real64) * 0.37_real64 - 400.0_real64
+            x4 = real(x, real32)
+            nchecked = nchecked + 1
+            if (pf_wrap_deg(x) < 0.0_real64 .or. pf_wrap_deg(x) >= 360.0_real64) nbad = nbad + 1
+            if (pf_wrap_180(x) < -180.0_real64 .or. pf_wrap_180(x) >= 180.0_real64) nbad = nbad + 1
+            if (pf_wrap_rad(x) < 0.0_real64 .or. pf_wrap_rad(x) >= 2.0_real64 * PI) nbad = nbad + 1
+            if (pf_wrap_pi(x) < -PI .or. pf_wrap_pi(x) >= PI) nbad = nbad + 1
+            if (pf_wrap_deg(x4) < 0.0_real32 .or. pf_wrap_deg(x4) >= 360.0_real32) nbad = nbad + 1
+            if (pf_wrap_180(x4) < -180.0_real32 .or. pf_wrap_180(x4) >= 180.0_real32) nbad = nbad + 1
+            if (pf_wrap_rad(x4) < 0.0_real32 .or. pf_wrap_rad(x4) >= 2.0_real32 * PI4) nbad = nbad + 1
+            if (pf_wrap_pi(x4) < -PI4 .or. pf_wrap_pi(x4) >= PI4) nbad = nbad + 1
+        end do
+
+        ! The loop is the assertion, so its having run is asserted too: a sweep that never
+        ! executed would report success while checking nothing.
+        call check(error, nchecked, 4001, "the wrap sweep did not run -- the range assertions asserted nothing")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "a wrap returned a value outside its advertised half-open range")
+    end subroutine test_wrap_ranges
+
+    !> The closing comparison in each wrap is load-bearing, and these are the inputs that prove it.
+    !!
+    !! Each value below makes `modulo` return the divisor itself, measured on gfortran 15.2 -- so
+    !! without the guard the result is exactly the excluded upper end of the range. Deleting any of
+    !! the `if (res >= ...)` lines in `parquet_utils` makes this test fail, which is what makes it a
+    !! negative control rather than a restatement of the code.
+    subroutine test_wrap_edge_guard(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64), parameter :: PI = 3.141592653589793238462643_real64
+        real(real64) :: x
+
+        call check(error, pf_wrap_deg(-1.0e-30_real64), 0.0_real64, &
+            "wrap_deg of a tiny negative must be 0, not 360", thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_deg(-1.0e-30_real32), 0.0_real32, &
+            "the real32 wrap_deg must be 0 there too", thr=0.0_real32)
+        if (allocated(error)) return
+        call check(error, pf_wrap_rad(-1.0e-30_real64) < 2.0_real64 * PI, &
+            "wrap_rad of a tiny negative must stay below 2*pi")
+        if (allocated(error)) return
+
+        ! One ulp below -180 is what drives the symmetric form to exactly +180.
+        x = -180.0_real64 - epsilon(1.0_real64) * 180.0_real64
+        call check(error, pf_wrap_180(x) < 180.0_real64, &
+            "wrap_180 one ulp below -180 must stay below +180")
+        if (allocated(error)) return
+        call check(error, pf_wrap_180(-180.0_real32 - epsilon(1.0_real32) * 180.0_real32) < 180.0_real32, &
+            "the real32 wrap_180 must stay below +180 there too")
+        if (allocated(error)) return
+        call check(error, pf_wrap_pi(-PI - epsilon(1.0_real64) * PI) < PI, &
+            "wrap_pi one ulp below -pi must stay below +pi")
+    end subroutine test_wrap_edge_guard
+
+    !> Wrapping is correct across several turns -- which the single conditional it replaces is not
+    !! -- and applying it twice changes nothing.
+    subroutine test_wrap_turns(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64), parameter :: PI = 3.141592653589793238462643_real64
+
+        ! The case `if (x < 0.0) x = x + 360.0` gets wrong: one addition leaves -400 at -40.
+        call check(error, pf_wrap_deg(-400.0_real64), 320.0_real64, &
+            "wrap_deg(-400) must be 320, which a single conditional addition would not give", thr=1.0e-12_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_deg(760.0_real64), 40.0_real64, "wrap_deg(760) must be 40", thr=1.0e-12_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_deg(360.0_real64), 0.0_real64, "wrap_deg(360) must be 0", thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_180(540.0_real64), -180.0_real64, "wrap_180(540) must be -180", thr=1.0e-12_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_180(180.0_real64), -180.0_real64, &
+            "wrap_180(180) must be -180 -- the range is half-open at the top", thr=0.0_real64)
+        if (allocated(error)) return
+
+        ! Idempotence, which is what the half-open convention buys.
+        call check(error, pf_wrap_180(pf_wrap_180(180.0_real64)), pf_wrap_180(180.0_real64), &
+            "wrapping an already-wrapped angle changed it", thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_deg(pf_wrap_deg(-400.0_real64)), pf_wrap_deg(-400.0_real64), &
+            "wrap_deg is not idempotent", thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_wrap_pi(pf_wrap_pi(3.0_real64 * PI)), pf_wrap_pi(3.0_real64 * PI), &
+            "wrap_pi is not idempotent", thr=0.0_real64)
+    end subroutine test_wrap_turns
+
+    !> The two conversions against the definition, and against each other.
+    subroutine test_angle_conversions(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64), parameter :: PI = 3.141592653589793238462643_real64
+
+        call check(error, pf_deg2rad(180.0_real64), PI, "deg2rad(180) must be pi", thr=1.0e-15_real64)
+        if (allocated(error)) return
+        call check(error, pf_deg2rad(-90.0_real64), -0.5_real64 * PI, "deg2rad(-90) must be -pi/2", thr=1.0e-15_real64)
+        if (allocated(error)) return
+        call check(error, pf_rad2deg(PI), 180.0_real64, "rad2deg(pi) must be 180", thr=1.0e-13_real64)
+        if (allocated(error)) return
+        call check(error, pf_deg2rad(180.0_real32), real(PI, real32), &
+            "the real32 deg2rad must give pi", thr=1.0e-6_real32)
+        if (allocated(error)) return
+        call check(error, pf_rad2deg(real(PI, real32)), 180.0_real32, &
+            "the real32 rad2deg must give 180", thr=1.0e-4_real32)
+        if (allocated(error)) return
+        ! A round trip within a tolerance, never bit-for-bit: pi/180 and 180/pi are each rounded,
+        ! so the two multiplications compose to a factor a rounding away from one.
+        call check(error, pf_rad2deg(pf_deg2rad(37.25_real64)), 37.25_real64, &
+            "deg2rad then rad2deg must return the angle", thr=1.0e-12_real64)
+    end subroutine test_angle_conversions
+
+    ! ================================================================================
+    ! Vectors
+    ! ================================================================================
+
+    !> The cross product against hand-computed values, its two defining identities, and the
+    !! right-handed orientation of the axis triple.
+    subroutine test_cross_product(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64) :: ex(3), ey(3), ez(3), a(3), b(3), c(3)
+        real(real32) :: a4(3), b4(3)
+
+        ex = [1.0_real64, 0.0_real64, 0.0_real64]
+        ey = [0.0_real64, 1.0_real64, 0.0_real64]
+        ez = [0.0_real64, 0.0_real64, 1.0_real64]
+
+        call check(error, all(pf_cross_product(ex, ey) == ez), "x cross y must be z, not -z")
+        if (allocated(error)) return
+        call check(error, all(pf_cross_product(ey, ez) == ex), "y cross z must be x")
+        if (allocated(error)) return
+        call check(error, all(pf_cross_product(ez, ex) == ey), "z cross x must be y")
+        if (allocated(error)) return
+
+        a = [1.0_real64, 2.0_real64, 3.0_real64]
+        b = [4.0_real64, 5.0_real64, 6.0_real64]
+        c = pf_cross_product(a, b)
+        call check(error, all(c == [-3.0_real64, 6.0_real64, -3.0_real64]), &
+            "the cross product of (1,2,3) and (4,5,6) must be (-3,6,-3)")
+        if (allocated(error)) return
+        ! The two identities that pin the orientation and the plane at once.
+        call check(error, all(pf_cross_product(b, a) == -c), "the cross product must be anticommutative")
+        if (allocated(error)) return
+        call check(error, abs(dot_product(c, a)) < 1.0e-12_real64 .and. abs(dot_product(c, b)) < 1.0e-12_real64, &
+            "the cross product must be orthogonal to both operands")
+        if (allocated(error)) return
+        call check(error, all(pf_cross_product(a, a) == 0.0_real64), "a vector crossed with itself must be zero")
+        if (allocated(error)) return
+
+        a4 = real(a, real32)
+        b4 = real(b, real32)
+        call check(error, all(pf_cross_product(a4, b4) == [-3.0_real32, 6.0_real32, -3.0_real32]), &
+            "the real32 form must give the same vector")
+    end subroutine test_cross_product
 
     ! ================================================================================
     ! Case folding

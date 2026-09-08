@@ -552,6 +552,15 @@ Where you already hold unit vectors, this is the same comparison with **no inver
 candidate** — the chord is strictly increasing in the angle, so ordering by squared chord and
 ordering by angle are the same order. Convert the radius once, outside the loop.
 
+**That substitution holds for every radius, not only for one in `[0, pi]`.** `2*sin(angle/2)` stops
+rising at a half turn and comes back down, so the bare formula would make a radius beyond pi select
+*fewer* points than a smaller one; and because `sin` is odd and the result is squared, it would turn
+a negative radius into the bound for the positive one. `pf_chord2_from_angle` guards both: an angle
+at or above pi gives exactly 4, the antipodal maximum, and a negative angle gives -1, a bound no
+squared distance can meet — so a negative radius matches nothing, exactly as a direct
+`dist <= radius` comparison would. Neither guard can change the value of an angle already inside
+`[0, pi)`. A NaN radius still gives a NaN.
+
 **Two warnings, and they compound.** `pf_chord2_from_angle` takes **radians** and returns the
 **square** of the chord. `parquet_spatial` carries the same definition internally in the other
 units — degrees in, the chord itself out — so a value moved between the two tiers without

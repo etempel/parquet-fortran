@@ -303,7 +303,11 @@ contains
             new_unittest("a character result is as wide as the widest of to_values and default", &
                 test_remap_character_width), &
             new_unittest("two null keys in a lookup table are not a duplicate", &
-                test_remap_null_keys_are_not_duplicates) &
+                test_remap_null_keys_are_not_duplicates), &
+            new_unittest("pf_value_counts answers for every element type and both count kinds", &
+                test_value_counts_every_specific), &
+            new_unittest("pf_remap answers for every key type crossed with every value type", &
+                test_remap_every_specific) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -8455,5 +8459,316 @@ contains
         call check(error, len(got) == 3, &
             "a default SHORTER than to_values must not narrow the result")
     end subroutine test_remap_character_width
+    !
+    !> Every `pf_value_counts` specific is reached: ten element types times the two `counts`
+    !> kinds, twenty in all.
+    !>
+    !> `SWDUP` is the fixture for the same reason `test_unique_every_specific` uses it -- three
+    !> classes of two, interleaved -- so every type must answer three distinct values with a count
+    !> of two each. A body that reported one entry per RUN rather than per VALUE would answer four
+    !> distinct values here, and one that lost a run boundary would not give every count as 2.
+    !>
+    !> **This is a REACHABILITY sweep, and it is deliberately shallow**: the rules (nulls outside
+    !> the population, NaN as one value, the ascending order) are asserted once and properly in
+    !> the four tests above. What is only asserted here is that the generated specific for each
+    !> type and each count kind exists, compiles into the generic, and answers -- which is exactly
+    !> what a generated per-type surface loses silently when one row of its table is wrong.
+    subroutine test_value_counts_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: c32(:)
+        integer(int64), allocatable :: c64(:)
+        integer :: k
+        logical :: ok
+
+        block
+            integer(int32) :: v(SWN)
+            integer(int32), allocatable :: d(:)
+            v = 10_int32 * int(SWDUP, int32)
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64) .and. all(d == [10_int32, 20_int32, 30_int32]), &
+                "int32 pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            integer(int64), allocatable :: d(:)
+            v = 100_int64 * int(SWDUP, int64)
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64), "int64 pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            real(real32), allocatable :: d(:)
+            v = real(SWDUP, real32) + 0.5_real32
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64), "real32 pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            real(real64), allocatable :: d(:)
+            v = real(SWDUP, real64) + 0.25_real64
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64), "real64 pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: d(:)
+            call pf_value_counts(SWBOOL, d, c32)
+            call pf_value_counts(SWBOOL, d, c64)
+            ! Two-valued, so this fixture is three .false. and three .true. rather than 3 x 2.
+            call check(error, size(d) == 2 .and. all(c64 == 3_int64) .and. &
+                all(int(c32, int64) == c64), "logical pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            character(len=2), allocatable :: d(:)
+            do k = 1, SWN
+                v(k) = swchr(SWDUP(k))
+            end do
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64) .and. &
+                all(d == [swchr(1), swchr(2), swchr(3)]), &
+                "character pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN)
+            type(parquet_date), allocatable :: d(:)
+            call v%set_raw(1000_int32 + int(SWDUP, int32))
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64), "parquet_date pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            type(parquet_time), allocatable :: d(:)
+            call v%set_raw(2000_int64 + int(SWDUP, int64))
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64), "parquet_time pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            type(parquet_timestamp), allocatable :: d(:)
+            call v%set_raw(3000_int64 + int(SWDUP, int64), 7_int32)
+            call pf_value_counts(v, d, c32)
+            call pf_value_counts(v, d, c64)
+            call check(error, size(d) == 3 .and. all(c64 == 2_int64) .and. &
+                all(int(c32, int64) == c64), "parquet_timestamp pf_value_counts, both count kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc, d
+            do k = 1, SWN
+                call sc%append_string(swchr(SWDUP(k)))
+            end do
+            call pf_value_counts(sc, d, c32)
+            call pf_value_counts(sc, d, c64)
+            ok = d%size() == 3_int64 .and. all(c64 == 2_int64)
+            if (ok) ok = all(int(c32, int64) == c64)
+            call check(error, ok, "parquet_string_column pf_value_counts, both count kinds")
+        end block
+    end subroutine test_value_counts_every_specific
+    !
+    !> Every `pf_remap` specific is reached: eleven key types crossed with six value types,
+    !> sixty-six in all.
+    !>
+    !> The two axes are independent by construction -- one worker per key type resolves the
+    !> lookup, one per value type gathers it -- so a crossing that does not compile, or that
+    !> resolves to the wrong specific, is invisible to any test that exercises one diagonal. This
+    !> walks the whole lattice.
+    !>
+    !> Each key block builds the six-element `SWDUP` fixture over three key values and asserts
+    !> that every value kind comes back as `TO_*(SWDUP)`, which pins the mapping row by row rather
+    !> than merely checking a length. `logical` keys take a two-entry table, being two-valued.
+    subroutine test_remap_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: TO_I32(3) = [11_int32, 22_int32, 33_int32]
+        integer(int64), parameter :: TO_I64(3) = [110_int64, 220_int64, 330_int64]
+        real(real32), parameter :: TO_F32(3) = [1.5_real32, 2.5_real32, 3.5_real32]
+        real(real64), parameter :: TO_F64(3) = [1.25_real64, 2.25_real64, 3.25_real64]
+        logical, parameter :: TO_LOG(3) = [.true., .false., .true.]
+        character(len=2), parameter :: TO_CHR(3) = ["aa", "bb", "cc"]
+        integer(int32), allocatable :: o32(:)
+        integer(int64), allocatable :: o64(:)
+        real(real32), allocatable :: p32(:)
+        real(real64), allocatable :: p64(:)
+        logical, allocatable :: ob(:)
+        character(len=:), allocatable :: oc(:)
+        integer :: k
+        logical :: ok
+
+        block
+            integer(int32) :: v(SWN), keys(3)
+            v = 10_int32 * int(SWDUP, int32)
+            keys = [10_int32, 20_int32, 30_int32]
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "int32 keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN), keys(3)
+            v = 100_int64 * int(SWDUP, int64)
+            keys = [100_int64, 200_int64, 300_int64]
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "int64 keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN), keys(3)
+            v = real(SWDUP, real32) + 0.5_real32
+            keys = [1.5_real32, 2.5_real32, 3.5_real32]
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "real32 keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN), keys(3)
+            v = real(SWDUP, real64) + 0.25_real64
+            keys = [1.25_real64, 2.25_real64, 3.25_real64]
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "real64 keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            ! Two-valued, so a two-entry lookup table: .false. maps to entry 1, .true. to entry 2.
+            logical :: keys(2)
+            integer :: cls(SWN)
+            keys = [.false., .true.]
+            cls = merge(2, 1, SWBOOL)
+            call pf_remap(SWBOOL, keys, TO_I32(1:2), o32);  ok = all(o32 == TO_I32(cls))
+            call pf_remap(SWBOOL, keys, TO_I64(1:2), o64);  ok = ok .and. all(o64 == TO_I64(cls))
+            call pf_remap(SWBOOL, keys, TO_F32(1:2), p32);  ok = ok .and. all(p32 == TO_F32(cls))
+            call pf_remap(SWBOOL, keys, TO_F64(1:2), p64);  ok = ok .and. all(p64 == TO_F64(cls))
+            call pf_remap(SWBOOL, keys, TO_LOG(1:2), ob);   ok = ok .and. all(ob .eqv. TO_LOG(cls))
+            call pf_remap(SWBOOL, keys, TO_CHR(1:2), oc);   ok = ok .and. all(oc == TO_CHR(cls))
+            call check(error, ok, "logical keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN), keys(3)
+            do k = 1, SWN
+                v(k) = swchr(SWDUP(k))
+            end do
+            do k = 1, 3
+                keys(k) = swchr(k)
+            end do
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "character keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN), keys(3)
+            call v%set_raw(1000_int32 + int(SWDUP, int32))
+            call keys%set_raw(1000_int32 + [1_int32, 2_int32, 3_int32])
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "parquet_date keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN), keys(3)
+            call v%set_raw(2000_int64 + int(SWDUP, int64))
+            call keys%set_raw(2000_int64 + [1_int64, 2_int64, 3_int64])
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "parquet_time keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN), keys(3)
+            call v%set_raw(3000_int64 + int(SWDUP, int64), 7_int32)
+            call keys%set_raw(3000_int64 + [1_int64, 2_int64, 3_int64], 7_int32)
+            call pf_remap(v, keys, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(v, keys, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(v, keys, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(v, keys, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(v, keys, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(v, keys, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "parquet_timestamp keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sv, sk
+            do k = 1, SWN
+                call sv%append_string(swchr(SWDUP(k)))
+            end do
+            do k = 1, 3
+                call sk%append_string(swchr(k))
+            end do
+            call pf_remap(sv, sk, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(sv, sk, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(sv, sk, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(sv, sk, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(sv, sk, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(sv, sk, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "parquet_string_column keys to all six value kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: cv, ck
+            call cv%init(PK_INT32, int(SWN, int64))
+            call cv%set_all(10_int32 * int(SWDUP, int32))
+            call ck%init(PK_INT32, 3_int64)
+            call ck%set_all([10_int32, 20_int32, 30_int32])
+            call pf_remap(cv, ck, TO_I32, o32);  ok = all(o32 == TO_I32(SWDUP))
+            call pf_remap(cv, ck, TO_I64, o64);  ok = ok .and. all(o64 == TO_I64(SWDUP))
+            call pf_remap(cv, ck, TO_F32, p32);  ok = ok .and. all(p32 == TO_F32(SWDUP))
+            call pf_remap(cv, ck, TO_F64, p64);  ok = ok .and. all(p64 == TO_F64(SWDUP))
+            call pf_remap(cv, ck, TO_LOG, ob);   ok = ok .and. all(ob .eqv. TO_LOG(SWDUP))
+            call pf_remap(cv, ck, TO_CHR, oc);   ok = ok .and. all(oc == TO_CHR(SWDUP))
+            call check(error, ok, "parquet_column keys to all six value kinds")
+        end block
+    end subroutine test_remap_every_specific
     !
 end module test_sorting

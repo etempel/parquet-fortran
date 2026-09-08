@@ -113,24 +113,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that repeats. The index checks the table's `%generation()` on every query and refuses once the rows
   have changed. See
   [Looking a value up](doc/pages/tables/table-mutate.md#looking-a-value-up-build_index).
-- **`parquet_string_column%set_validity`, `%set_where` and `%gather_from`**: null every element a
-  mask marks, or write one value into every element it marks, in one rebuild of the column instead
-  of one payload shift per element; and build a column from another column's listed elements in
-  one rebuild, with an optional mask that nulls the listed elements it marks and an optional
-  `threads=`. See
+- **Bulk row-set primitives on both column types.** `parquet_column%gather_from(src, idx,
+  [valid], [threads])` builds a column from another column's listed rows in one pass — the
+  source's kind, width, unit and nulls carried, a mask's nulls added — on a team when `threads=`
+  asks for one, and `%gather` takes the same `valid=` and `threads=`.
+  `parquet_string_column` gains `%gather_from` with the same shape, plus `%set_validity` and
+  `%set_where`: null every element a mask marks, or write one value into every element it marks,
+  in one rebuild of the column instead of one payload shift per element. See
   [Bulk row-set operations](doc/pages/types/string-columns.md#bulk-row-set-operations).
-- **`parquet_column%gather_from(src, idx, [valid], [threads])`** builds a column from another
-  column's listed rows in one pass — the source's kind, width, unit and nulls carried, a mask's
-  nulls added — on a team when `threads=` asks for one; `%gather` takes the same `valid=` and
-  `threads=`.
 
 ### Changed
-
-- **`pf_index_map%build` stops threading two passes that were losing on small key counts.** An
-  automatic build takes the partitioned hash insert only from 32768 keys, where it starts to pay
-  (below that the serial insert is up to 3x faster on the team the rule resolves), and an automatic
-  `method="sorted"` build sorts serially below 262144 keys (up to 1.9x faster there). An explicit
-  `threads=` is honoured at every size, as before, and no answer changes.
 
 - **`parquet_table%join` builds its match on a hash engine.** A join over integer, real, date,
   time or timestamp keys, or over one string key, under the default `order="left"` builds a
@@ -151,19 +143,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   engine also classifies the runs, checks `require=`, counts and emits its rows on that team, and
   every join turns its match into row indices on its engine's team. See
   [Sorting in parallel](doc/pages/utilities/sorting.md#sorting-in-parallel).
-- **`pf_index_map%get_many` threads.** A bulk lookup now cuts its keys into one chunk per thread,
-  by the rule a build follows (automatic, capped by `index_threads`, serial inside a parallel
-  region), and takes `threads=` to say otherwise; it is no longer `pure`. See
-  [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses).
-- **`pf_index_map` builds run outside the type's lock**, which a `%build` now takes only to swap
-  its finished result in, so builds of different maps on different threads no longer take turns.
-  A hash build threads: on a team the table is filled by a partitioned insert, so a build of
-  millions of keys costs a few nanoseconds per key rather than the serial insert's tens.
-  Hash lookups are faster: `%get_many` probes a block of keys at a time, about twice as fast on a
-  map larger than the cache; a composite key's tuple and value sit in one record per slot, and the
-  tuple hash costs about a third of what it did. The order `%keys()` lists a composite hash map in
-  has changed (it was and remains unspecified). See
-  [Threading](doc/pages/utilities/index-maps.md#threading).
+- **`pf_index_map` builds and bulk lookups thread, and both backends are faster.** A build now
+  runs outside the type's lock, which `%build` takes only to swap its finished result in, so builds
+  of different maps on different threads no longer take turns. A hash build fills its table by a
+  partitioned insert on the team, costing a few nanoseconds per key rather than the serial insert's
+  tens; an automatic build threads from 32768 keys and an automatic `method="sorted"` build sorts
+  on the team from 262144, with an explicit `threads=` honoured at every size as before.
+  `%get_many` threads too — one chunk of keys per thread, by that same rule, capped by
+  `index_threads` and serial inside a parallel region — and takes `threads=` to say otherwise; it
+  is no longer `pure`. Lookups are faster on both backends: the hash backend probes a block of keys
+  at a time, about twice as fast on a map larger than the cache, and holds a composite key's tuple
+  and value in one record per slot with a cheaper tuple hash; the sorted backend carries a prefix
+  table, about ten times faster on an integer key and fourteen on a tuple. No answer changes,
+  except that the order `%keys()` lists a composite hash map in has changed (it was and remains
+  unspecified). See
+  [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses)
+  and [Threading](doc/pages/utilities/index-maps.md#threading).
 
 ### Fixed
 

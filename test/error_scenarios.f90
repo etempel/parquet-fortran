@@ -76,6 +76,8 @@ program error_scenarios
         call scenario_string_view_roundtrip()
     case ("string_view_compact_read")
         call scenario_string_view_compact_read()
+    case ("string_read_over_offset_limit")
+        call scenario_string_read_over_offset_limit()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
     case ("col_size_and_row_mode_avoid_whole_column_read")
@@ -5295,6 +5297,277 @@ contains
         end if
         call parquet_close_reader(reader)
     end subroutine scenario_large_string_roundtrip
+
+    !> Proves that a plain `string` column whose byte payload exceeds Arrow's int32 offset ceiling
+    !> (2^31-1 bytes, ~2 GiB) reads back intact instead of aborting the process. Arrow's Parquet
+    !> decoder cannot hold such a column in one `utf8` array, so it hands it over in several
+    !> chunks, and arrow::Concatenate cannot rebuild it as `utf8` either ("offset overflow while
+    !> concatenating arrays"); combine_column_chunks (parquet_wrapper.cpp) widens the chunks to
+    !> arrow::large_utf8() first -- see widen_string_chunks_if_needed there. A genuine case needs
+    !> more than 2 GiB of strings, so this scenario reaches the same path on a tiny fixture through
+    !> two test-only, process-global hooks declared locally below (not part of the public Fortran
+    !> API): parquet_debug_set_string_offset_limit shrinks the ceiling to a few bytes, and
+    !> parquet_debug_set_force_chunk_split re-slices every column into several chunks. Safe as
+    !> process-globals for the same reason as scenario_large_string_roundtrip's use of the first,
+    !> above: this scenario always runs as its own isolated subprocess.
+    !>
+    !> Every whole-column read funnels through that one function, so every entry point is driven
+    !> here: the lazy single-column read, `prefetch=.true.`, parquet_prefetch_columns, a row filter
+    !> on the column, a sort on it, a row-group chunk read, the compact parquet_string_column read,
+    !> and parquet_table%materialize_all -- the call that aborted in the field. Values are compared
+    !> row by row, nulls and an empty string included, with the split chunks cut mid-bitmap-byte
+    !> (a wrong offset base shows exactly at a chunk boundary), and the widening is proven both
+    !> present and invisible: two counters say which branch ran, while parquet_get_column_type,
+    !> parquet_get_column_arrow_type and %kind keep answering for a `string` column.
+    !>
+    !> Two negative controls on the same fixture come first. With the real ceiling in force, the
+    !> split column is combined WITHOUT being widened -- the decision keys on the payload, never on
+    !> the chunk count, or every multi-chunk column would silently pay for 64-bit offsets. With the
+    !> ceiling shrunk but no split, a single-chunk column never reaches the check at all.
+    subroutine scenario_string_read_over_offset_limit()
+        interface
+            subroutine parquet_debug_set_string_offset_limit(n) &
+                bind(C, name="parquet_debug_set_string_offset_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! byte threshold to use instead of the real 2^31-1 limit; <=0 restores it.
+            end subroutine parquet_debug_set_string_offset_limit
+
+            subroutine parquet_debug_set_force_chunk_split(n) &
+                bind(C, name="parquet_debug_set_force_chunk_split")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! chunks every read column is re-sliced into; <=1 restores normal reads.
+            end subroutine parquet_debug_set_force_chunk_split
+
+            function parquet_debug_get_chunk_concat_count() result(n) &
+                bind(C, name="parquet_debug_get_chunk_concat_count")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: n !! columns rebuilt from several chunks so far, widened or not.
+            end function parquet_debug_get_chunk_concat_count
+
+            function parquet_debug_get_string_offset_widen_count() result(n) &
+                bind(C, name="parquet_debug_get_string_offset_widen_count")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: n !! columns widened to 64-bit offsets before being combined so far.
+            end function parquet_debug_get_string_offset_widen_count
+        end interface
+
+        character(len=*), parameter :: out_file = "test_run/error_scenario_string_read_over_offset_limit.parquet"
+        integer, parameter :: nrows = 12
+        integer(int64), parameter :: split = 3_int64 !! chunks per column under the hook.
+        integer(int64), parameter :: small_limit = 4_int64 !! bytes: any two rows of `name` exceed it.
+        ! Shortest value first and a longer one later (testing.md's "sized from the first element"
+        ! rule), and deliberately NOT in sorted order, so the sort below has something to do.
+        ! 50 bytes in all: any two rows exceed the shrunk ceiling, the column is far below the real one.
+        character(len=8) :: names(nrows) = [character(len=8) :: &
+            "k", "bb", "hhhhhhhh", "a", "eeeee", "jjj", "ccc", "llllllll", "ii", "dddd", "ggggggg", "ffffff"]
+        ! Rows 3 and 7 are null; row 4 is an EMPTY string, which must stay distinct from a null.
+        character(len=8) :: notes(nrows) = [character(len=8) :: &
+            "x", "yy", "", "", "zzzzz", "q", "", "rrrrrrrr", "s", "tt", "uuu", "vvvvvvvv"]
+        logical :: note_valid(nrows) = [.true., .true., .false., .true., .true., .true., .false., &
+            .true., .true., .true., .true., .true.]
+        integer(int32) :: ids(nrows) = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        ! `id` in ascending `name` order: a(4) bb(2) ccc(7) dddd(10) eeeee(5) ffffff(12) ggggggg(11)
+        ! hhhhhhhh(3) ii(9) jjj(6) k(1) llllllll(8).
+        integer(int32) :: ids_by_name(nrows) = [4, 2, 7, 10, 5, 12, 11, 3, 9, 6, 1, 8]
+
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        type(parquet_string_column) :: col
+        type(parquet_table) :: t
+        character(len=8) :: back(nrows), note_back(nrows)
+        character(len=8), allocatable :: chunk_back(:)
+        character(len=:), allocatable :: chr(:), type_name, arrow_type, text
+        logical :: note_back_valid(nrows)
+        logical, allocatable :: vmask(:)
+        integer(int32) :: ids_back(nrows), id_hit(1)
+        integer(int64) :: concat0, widen0, nrows_back, num_row_groups, rg, rg_size
+        integer :: strlen_max, i
+
+        ! 1. The fixture, written with the real ceiling in force so the file stores plain utf8,
+        !    in three row groups (5, 5 and 2 rows).
+        call schema%init(table="string_read_over_offset_limit")
+        call schema%add_field("id", "int32")
+        call schema%add_field("name", "string", array_size=8)
+        call schema%add_field("note", "string", array_size=8)
+        call parquet_open_writer(writer, out_file, schema, chunk_size=5)
+        call parquet_write_column(writer, "id", ids)
+        call parquet_write_column(writer, "name", names)
+        call parquet_write_column(writer, "note", notes, is_valid=note_valid)
+        call parquet_close_writer(writer)
+
+        ! 2. Negative control A: the real ceiling, every column split into three chunks. The
+        !    column is combined (the concat counter moves) and not widened (the widen counter
+        !    does not), and comes back intact through a plain utf8 Concatenate.
+        call parquet_debug_set_force_chunk_split(split)
+        concat0 = parquet_debug_get_chunk_concat_count()
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+        if (parquet_debug_get_chunk_concat_count() /= concat0 + 1) error stop &
+            "control A: the split column was never combined from several chunks -- nothing below tests that path"
+        if (parquet_debug_get_string_offset_widen_count() /= widen0) error stop &
+            "control A: a multi-chunk string column that fits int32 offsets was widened -- the check keys on chunk count"
+        if (any(back /= names)) error stop "control A: a multi-chunk utf8 column did not round-trip"
+
+        ! 3. Negative control B: the ceiling shrunk to 4 bytes, no split. A single-chunk column
+        !    returns before the payload test, whatever the ceiling says.
+        call parquet_debug_set_force_chunk_split(0_int64)
+        call parquet_debug_set_string_offset_limit(small_limit)
+        concat0 = parquet_debug_get_chunk_concat_count()
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+        if (parquet_debug_get_chunk_concat_count() /= concat0) error stop "control B: a single-chunk column was combined"
+        if (parquet_debug_get_string_offset_widen_count() /= widen0) error stop "control B: a single-chunk column was widened"
+        if (any(back /= names)) error stop "control B: a single-chunk utf8 column did not round-trip"
+
+        ! 4. The case: the shrunk ceiling AND three chunks, through every whole-column entry point.
+        call parquet_debug_set_force_chunk_split(split)
+
+        ! 4a. The lazy single-column read, with nulls, the string-length query and the two type
+        !     queries; print_stat runs its min/max over the widened array. Three columns are
+        !     combined; the two string ones are widened and the int32 one must not be.
+        concat0 = parquet_debug_get_chunk_concat_count()
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "name", back)
+        call parquet_read_column(reader, "note", note_back, null_value="<null>", is_valid=note_back_valid)
+        call parquet_read_column(reader, "id", ids_back)
+        call parquet_get_string_length(reader, "name", strlen_max)
+        call parquet_get_column_type(reader, "name", type_name)
+        call parquet_get_column_arrow_type(reader, "name", arrow_type)
+        call parquet_close_reader(reader, print_stat=.true.)
+        if (parquet_debug_get_chunk_concat_count() /= concat0 + 3) error stop &
+            "read_column: not every column was combined from several chunks"
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 2) error stop &
+            "read_column: the two string columns over the ceiling were not both widened (and the int32 one must not be)"
+        if (any(back /= names)) error stop "read_column: the widened string column did not round-trip"
+        if (any(ids_back /= ids)) error stop "read_column: the int32 column beside it did not round-trip"
+        if (any(note_back_valid .neqv. note_valid)) error stop "read_column: the nulls did not survive the widening"
+        do i = 1, nrows
+            if (note_valid(i) .and. note_back(i) /= notes(i)) error stop &
+                "read_column: a valid row of the null-bearing widened column is wrong"
+            if (.not. note_valid(i) .and. note_back(i) /= "<null>") error stop "read_column: a null row did not take null_value"
+        end do
+        if (strlen_max /= 8) error stop "parquet_get_string_length was wrong for a widened string column"
+        if (type_name /= "string") error stop "parquet_get_column_type changed its answer for a widened column: " // type_name
+        if (arrow_type /= "string") error stop &
+            "parquet_get_column_arrow_type must report the file's stored type, got " // arrow_type
+
+        ! 4b. prefetch=.true. (every column at once, parquet_reader_prefetch_all_columns).
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_open_reader(reader, out_file, prefetch=.true.)
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 2) error stop &
+            "prefetch=.true. did not widen both string columns"
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+        if (any(back /= names)) error stop "prefetch=.true.: the widened string column did not round-trip"
+
+        ! 4c. parquet_prefetch_columns (a named subset, parquet_reader_prefetch_columns).
+        call parquet_open_reader(reader, out_file)
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_prefetch_columns(reader, ["name"])
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 1) error stop &
+            "parquet_prefetch_columns did not widen the string column"
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+        if (any(back /= names)) error stop "parquet_prefetch_columns: the widened string column did not round-trip"
+
+        ! 4d. A row filter on the column: parquet_reader_set_filter decodes it whole first.
+        call filt%add('name == "ccc"')
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_open_reader(reader, out_file, filter=filt)
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 1) error stop "filter=: the filter column was not widened"
+        call parquet_get_nrows(reader, nrows_back)
+        if (nrows_back /= 1_int64) error stop "filter= on the widened column did not select exactly one row"
+        call parquet_read_column(reader, "id", id_hit)
+        call parquet_close_reader(reader)
+        if (id_hit(1) /= 7) error stop "filter= on the widened column selected the wrong row"
+
+        ! 4e. A sort on the column. The key is fetched (widened once) to build the permutation,
+        !     and installing it releases every decoded column so it is re-read through the
+        !     permutation -- so reading `name` afterwards widens it a second time.
+        call srt%add("name")
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_read_column(reader, "id", ids_back)
+        call parquet_read_column(reader, "name", back)
+        call parquet_close_reader(reader)
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 2) error stop &
+            "sort_by=: expected the key column widened for the sort and again for the read through the permutation"
+        if (any(ids_back /= ids_by_name)) error stop "sort_by= on the widened column put the rows in the wrong order"
+        do i = 1, nrows
+            if (back(i) /= names(ids_by_name(i))) error stop "sort_by=: the sorted widened column itself is wrong"
+        end do
+
+        ! 4f. Row-group chunk reads: each row group is combined on its own. The two 5-row groups
+        !     split and widen; the 2-row group is shorter than the split and stays one chunk.
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_num_row_groups(reader, num_row_groups)
+        if (num_row_groups /= 3_int64) error stop "fixture: expected three row groups"
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        do rg = 1_int64, num_row_groups
+            call parquet_get_chunk_size(reader, rg_size, row_group=rg)
+            allocate(chunk_back(rg_size))
+            call parquet_read_column_chunk(reader, "name", rg, chunk_back)
+            do i = 1, int(rg_size)
+                if (chunk_back(i) /= names(int(rg - 1) * 5 + i)) error stop &
+                    "read_column_chunk: a widened row-group chunk is wrong"
+            end do
+            deallocate(chunk_back)
+        end do
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 2) error stop &
+            "read_column_chunk: expected the two 5-row groups widened and the 2-row group left alone"
+
+        ! 4g. The compact parquet_string_column read hands the widened buffers straight to Fortran
+        !     (extract_string_buffers' 64-bit offsets path), nulls and the empty string included.
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call parquet_read_column(reader, "note", col)
+        call parquet_close_reader(reader)
+        if (parquet_debug_get_string_offset_widen_count() /= widen0 + 1) error stop &
+            "compact read: the string column was not widened"
+        if (col%size() /= int(nrows, int64)) error stop "compact read: wrong row count"
+        if (col%null_count() /= 2_int64) error stop "compact read: wrong null count"
+        do i = 1, nrows
+            if (col%is_null(i) .neqv. .not. note_valid(i)) error stop "compact read: a null landed on the wrong row"
+            if (note_valid(i)) then
+                call col%get(i, text)
+                if (text /= trim(notes(i))) error stop "compact read: a value is wrong"
+            end if
+        end do
+
+        ! 4h. parquet_table: %materialize_all (the call that aborted in the field), %kind and %get.
+        !     The table may read per row group on several threads, so only "widened at least once"
+        !     is asserted on the counter.
+        call parquet_open_table(t, out_file)
+        widen0 = parquet_debug_get_string_offset_widen_count()
+        call t%materialize_all()
+        if (parquet_debug_get_string_offset_widen_count() <= widen0) error stop "%materialize_all: no string column was widened"
+        if (t%nrows() /= int(nrows, int64)) error stop "%materialize_all: wrong row count"
+        if (t%kind("name") /= PK_STRING) error stop "%kind of a widened column is not PK_STRING"
+        if (t%kind("note") /= PK_STRING) error stop "%kind of a widened null-bearing column is not PK_STRING"
+        call t%get("name", chr)
+        do i = 1, nrows
+            if (trim(chr(i)) /= trim(names(i))) error stop "%get: the widened string column is wrong"
+        end do
+        call t%get("note", chr, is_valid=vmask)
+        if (any(vmask .neqv. note_valid)) error stop "%get: the nulls of the widened column are wrong"
+        do i = 1, nrows
+            if (note_valid(i) .and. trim(chr(i)) /= trim(notes(i))) error stop &
+                "%get: a valid row of the widened null-bearing column is wrong"
+        end do
+
+        ! Restore both hooks -- defensive in a one-shot subprocess, but it keeps this correct if a
+        ! later edit ever adds more reads to this scenario.
+        call parquet_debug_set_force_chunk_split(0_int64)
+        call parquet_debug_set_string_offset_limit(0_int64)
+        print '(a)', "string_read_over_offset_limit: every entry point read the widened column intact"
+    end subroutine scenario_string_read_over_offset_limit
 
     !> Proves the arrow::Type::STRING_VIEW read path (is_string_like_type/make_string_like_accessor's
     !> STRING_VIEW branches, added alongside STRING/LARGE_STRING in parquet_wrapper.cpp) round-trips

@@ -44,7 +44,9 @@ contains
             new_unittest("date/time/timestamp: foreign INT96 and non-UTC-timezone fixtures round-trip", &
                 test_datetime_foreign_fixtures), &
             new_unittest("plain LIST/LARGE_LIST columns from a foreign-written file (col_size, string length, print_stat)", &
-                test_list_type_foreign_fixture) &
+                test_list_type_foreign_fixture), &
+            new_unittest("a string column over Arrow's int32 offset ceiling reads back widened, through every " // &
+                "whole-column entry point", test_string_read_over_offset_limit) &
             ]
         !
         testsuite = p1
@@ -123,5 +125,23 @@ contains
         call check_scenario_exit_status(error, "list_type_foreign_fixture", expect_abort=.false., &
             failure_message="LIST/LARGE_LIST foreign-fixture columns did not report the expected sizes/lengths")
     end subroutine test_list_type_foreign_fixture
+
+    !> A plain `string` column whose byte payload exceeds Arrow's int32 offset ceiling (~2 GiB)
+    !> arrives from Arrow's decoder as several chunks that no single `utf8` array can hold, and
+    !> reading it aborted the process with `offset overflow while concatenating arrays`.
+    !> combine_column_chunks (parquet_wrapper.cpp) widens such a column to `large_utf8` before
+    !> combining it. A genuine case needs more than 2 GiB of strings, so the proof runs out of
+    !> process as scenario_string_read_over_offset_limit in error_scenarios.f90, which reaches the
+    !> same path on a tiny fixture through two process-global test hooks (a shrunk ceiling and a
+    !> forced chunk split -- see the scenario's own comment for why that is safe only in
+    !> isolation), drives every whole-column entry point through it, and carries its own negative
+    !> controls.
+    subroutine test_string_read_over_offset_limit(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "string_read_over_offset_limit", expect_abort=.false., &
+            failure_message="a string column over the int32 offset ceiling (shrunk by the debug hook) did not " // &
+            "read back widened and intact through every whole-column entry point")
+    end subroutine test_string_read_over_offset_limit
 
 end module test_reading_errors

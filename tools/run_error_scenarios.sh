@@ -261,6 +261,7 @@ scenarios=(
     "whole_string_is_plain_utf8:0"
     "string_view_roundtrip:0"
     "string_view_compact_read:0"
+    "string_read_over_offset_limit:0"
     "list_element_count_auto_multi_row_group:0"
     "columns_data_ptr_kind_mismatch:1"
     "columns_uninitialized_append_nulls:1"

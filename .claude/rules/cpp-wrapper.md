@@ -32,6 +32,9 @@ paths:
 - Uncaught exceptions crossing `extern "C"` terminate the process; the one working `try`/`catch` is
   `parquet_reader_set_filter`. Treat every other `throw` site as unreachable by a clean test.
 - `// ====` banner comments are the navigation aid; keep them when adding sections.
+- **Never range-for over a reference into a temporary** (`for (auto &c : x->Slice(...)->chunks())`):
+  C++20 extends no lifetime through the member call, so the loop reads a destroyed object.
+  Name the temporary first, then iterate its member.
 
 ## Arrow's type singletons
 
@@ -91,3 +94,11 @@ per-column-total ceiling copy `check_col_size_fits_arrow_limit`/`check_column_co
    `report_fatal_error` (never a truncating cast) before the value flows into the Arrow API.
 4. A scenario (shrink the limit, tiny fixture) + `test/test_errors.f90` wrapper asserting the exact
    stderr + `tools/run_error_scenarios.sh` entry + a README Limitations bullet.
+
+The STRING/BINARY offset ceiling is the exception: WIDENED, never refused, on both sides. The writer
+picks `large_utf8` from the projected payload; `combine_column_chunks` casts a multi-chunk column
+whose payload exceeds the ceiling to 64-bit offsets before concatenating
+(`widen_string_chunks_if_needed`). Decide on the payload, never on the chunk count, and resolve the
+limit only through `effective_string_offset_limit()`. `scenario_string_read_over_offset_limit`
+reaches the path through `parquet_debug_set_force_chunk_split` beside the shrunk limit, with the
+`parquet_debug_get_chunk_concat_count`/`_string_offset_widen_count` pair as its controls.

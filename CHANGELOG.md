@@ -192,6 +192,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - With `parquet_set_statistics_prescreen(.false.)`, a filter scoped to a row-group range — the
   engine behind `parquet_open_table(..., bounded=.true.)` — held a row mask covering the whole file
   and read the row groups outside its scope.
+- A `string` column whose total byte payload exceeds 2 GiB (Arrow's `utf8` offset limit) could
+  not be read: every whole-column read of it, `parquet_table%materialize_all` included, aborted the
+  process with `offset overflow while concatenating arrays`. Such a column is widened to 64-bit
+  offsets as it is read.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

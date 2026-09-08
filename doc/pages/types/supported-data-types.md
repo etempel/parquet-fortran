@@ -83,6 +83,14 @@ container's own storage already carries 64-bit offsets, so there is no int32-off
 choose between. Both therefore report `large_string` in `parquet_type`; nothing else about them
 differs.
 
+The same ceiling exists on the read side, and the same widening handles it. A `string` column whose
+stored byte payload exceeds the `utf8` limit — one written by another tool without the promotion
+above, say — cannot be assembled as a single `utf8` array, so it is widened to `large_utf8` as it
+is read. Nothing is visible to the caller: every read function, row filtering, sorting and
+`parquet_table` behave as for any other `string` column, and `parquet_type`,
+`parquet_get_column_type` and `parquet_get_column_arrow_type` go on reporting the file's own
+`string`. The cost is one pass over the column's offsets, paid only by a column over the limit.
+
 ## Reading `string_view` columns from other tools
 
 This library's own writer never produces Arrow's `string_view` representation — it only ever appears

@@ -1779,17 +1779,131 @@ extern "C"
 		return rebuilt.ValueOrDie();
 	}
 
-	// A column chunk read via FileReader::ReadColumn can still be split
-	// across several Arrow chunks if the file has multiple row groups (see
-	// the `chunk_size` writer option) -- collapse those into one contiguous
-	// array here, same as the whole-table CombineChunks this replaced used
-	// to do, just scoped to one column instead of the entire file.
+	// Resolves the int32 STRING-offset ceiling in force: kArrowInt32OffsetLimit, or the test-only
+	// g_debug_string_offset_limit override. Defined beside those two in the string-accessor
+	// section further below, and declared here because combine_column_chunks is its first caller.
+	static int64_t effective_string_offset_limit();
+
+	// Test-only: when > 1, combine_column_chunks re-slices EVERY column it is handed into this many
+	// chunks before combining them (debug_split_chunks below), so a tiny fixture can reach the
+	// multi-chunk path -- and, with g_debug_string_offset_limit shrunk beside it, the
+	// offset-widening path -- that in production only a dictionary column or a string column too
+	// large for one int32-offset array reaches. 0 (the default) changes nothing. Same
+	// process-global/subprocess-isolation reasoning as g_debug_string_offset_limit, below: safe
+	// only because the scenario that sets it runs as its own isolated subprocess.
+	static int64_t g_debug_force_chunk_split = 0;
+
+	// Test-only counters, one per branch of combine_column_chunks's multi-chunk path: how many
+	// columns arrow::Concatenate rebuilt from several chunks, and how many of those were first
+	// widened to 64-bit offsets. The pair is what lets a scenario tell "combined and widened
+	// nothing" from "never combined at all" (a lone zero cannot). Both are live on the ordinary
+	// read path -- a dictionary column reaches the first from any file, an oversized string
+	// column reaches both -- so, like g_debug_physical_column_read_count, they are atomic: several
+	// OpenMP threads can be reading columns at once.
+	static std::atomic<int64_t> g_debug_chunk_concat_count{0};
+	static std::atomic<int64_t> g_debug_string_offset_widen_count{0};
+
+	// Applies g_debug_force_chunk_split (see its comment): returns `chunked` re-sliced into that
+	// many chunks, cut at whatever row boundaries the row count puts them on -- so a slice can
+	// start mid-byte in a validity bitmap and at a nonzero offset into a values buffer, which is
+	// exactly what a bad offset base in the combining code below would get wrong. Untouched when
+	// the hook is clear or the column is shorter than the requested chunk count.
+	static std::shared_ptr<arrow::ChunkedArray> debug_split_chunks(const std::shared_ptr<arrow::ChunkedArray> &chunked)
+	{
+		const int64_t pieces = g_debug_force_chunk_split;
+		if (pieces <= 1 || chunked->length() < pieces) return chunked;
+		const int64_t n = chunked->length();
+		arrow::ArrayVector slices;
+		for (int64_t p = 0; p < pieces; ++p)
+		{
+			const int64_t begin = n * p / pieces;
+			const int64_t end = n * (p + 1) / pieces;
+			// Named, not iterated in place: Slice() returns a temporary, and a range-for over a
+			// reference INTO a temporary (its chunks()) outlives it under C++20.
+			auto piece = chunked->Slice(begin, end - begin);
+			for (const auto &chunk : piece->chunks()) slices.push_back(chunk);
+		}
+		auto rebuilt = arrow::ChunkedArray::Make(std::move(slices), chunked->type());
+		if (!rebuilt.ok())
+		{ // GCOVR_EXCL_START -- Make only rejects a chunk whose type differs from `chunked`'s own, which a Slice cannot produce.
+			report_fatal_error("debug_split_chunks", "failed to re-slice a column into chunks: " + rebuilt.status().ToString());
+		}
+		// GCOVR_EXCL_STOP
+		return rebuilt.ValueOrDie();
+	}
+
+	// The byte payload of a chunked STRING or BINARY column, summed over its chunks: the quantity
+	// an int32 offsets buffer bounds. 0 for every other type, which has no such ceiling here --
+	// LARGE_STRING/LARGE_BINARY included, since they are already the widened form.
+	static int64_t chunked_int32_offset_payload_bytes(const arrow::ChunkedArray &chunked)
+	{
+		const auto type_id = chunked.type()->id();
+		if (type_id != arrow::Type::STRING && type_id != arrow::Type::BINARY) return 0;
+		int64_t total = 0;
+		for (const auto &chunk : chunked.chunks())
+		{
+			// StringArray derives from BinaryArray, so one cast serves both types;
+			// total_values_length() is O(1) (last offset minus first) and honours a slice.
+			total += std::static_pointer_cast<arrow::BinaryArray>(chunk)->total_values_length();
+		}
+		return total;
+	}
+
+	// Widens a STRING/BINARY chunked column to 64-bit offsets when its payload will not fit the
+	// int32 ceiling -- the one case in which arrow::Concatenate cannot rebuild it as a single
+	// array ("offset overflow while concatenating arrays, consider casting input from `string` to
+	// `large_string` first", in Arrow's own words). Arrow's Parquet decoder is what hands such a
+	// column over in several chunks: it opens a new chunk whenever the next value would overflow
+	// the offsets (parquet/decoder.cc's ArrowBinaryHelper, against arrow::kBinaryMemoryLimit),
+	// and nothing downstream can merge those chunks back into one `utf8` array, because the result
+	// type has nowhere to put the offsets. Found on a 139.5M-row `string` column of 2.89 GiB
+	// (1.45x the ceiling), which aborted every whole-column read of it, parquet_table's
+	// %materialize_all included, with the message above as an uncaught exception.
+	//
+	// The cast rewrites only each chunk's offsets buffer and shares its value bytes
+	// (arrow/compute/kernels/scalar_cast_string.cc's CastBinaryToBinaryOffsets), so the extra cost
+	// is the wider offsets (8 bytes a row) on top of the copy Concatenate makes anyway -- about
+	// two seconds for that column, measured from pyarrow. Decided on the PAYLOAD, never on the
+	// chunk count: a multi-chunk column that fits (a dictionary column, or a future Arrow that
+	// stops coalescing row groups) keeps its plain `utf8` form and pays nothing. Invisible to every
+	// consumer: the read side already handles LARGE_STRING wherever it handles STRING
+	// (is_string_like_type/make_string_like_accessor/extract_string_buffers, the filter, the sort
+	// key, the print paths), which is what lets this library's own WRITER emit large_utf8 for such
+	// a column -- and parquet_get_column_type, parquet_get_column_arrow_type and print_stat's
+	// parquet_type cell all answer from the file's own schema, so the column still reports
+	// `string`. The same manoeuvre, for the same reason, as coerce_string_view_to_offset_string
+	// below. Returns `chunked` untouched for every column that fits.
+	static std::shared_ptr<arrow::ChunkedArray> widen_string_chunks_if_needed(
+		const std::shared_ptr<arrow::ChunkedArray> &chunked, const std::string &name)
+	{
+		if (chunked_int32_offset_payload_bytes(*chunked) <= effective_string_offset_limit()) return chunked;
+		ensure_compute_initialized(); // Cast lives in the compute registry
+		auto target = chunked->type()->id() == arrow::Type::BINARY ? arrow::large_binary() : arrow::large_utf8();
+		auto cast_result = arrow::compute::Cast(chunked, target);
+		if (!cast_result.ok())
+		{ // GCOVR_EXCL_START -- Cast-kernel Status backstop: widening the offsets of decoded chunks cannot fail.
+			report_fatal_error("combine_column_chunks",
+				std::string("failed to widen column to 64-bit offsets: ") + name + ": " + cast_result.status().ToString());
+		}
+		// GCOVR_EXCL_STOP
+		++g_debug_string_offset_widen_count;
+		return cast_result.ValueOrDie().chunked_array();
+	}
+
+	// Collapses a column's chunks into one contiguous array, which is what column_cache holds and
+	// every read path below indexes. Arrow's FileReader::ReadColumn/ReadTable coalesce every row
+	// group of an ordinary column into a single chunk whatever the row-group count, so a column
+	// arrives in several chunks only when Arrow cannot do that: a DICTIONARY column, whose row
+	// groups carry independent dictionaries (one chunk per row group), and a STRING/BINARY column
+	// whose byte payload exceeds the int32 offset ceiling (split where the offsets would overflow
+	// -- see widen_string_chunks_if_needed). The test-only g_debug_force_chunk_split is the third
+	// source.
 	//
 	// Also the one place a dictionary-encoded column is decoded, since every read path reaches an
 	// Arrow array through here -- see decode_dictionary_chunks above.
 	static std::shared_ptr<arrow::Array> combine_column_chunks(const std::shared_ptr<arrow::ChunkedArray> &chunked_in, const std::string &name)
 	{
-		auto chunked = decode_dictionary_chunks(chunked_in, name);
+		auto chunked = debug_split_chunks(decode_dictionary_chunks(chunked_in, name));
 		if (chunked->num_chunks() == 1)
 		{
 			return chunked->chunk(0);
@@ -1808,19 +1922,20 @@ extern "C"
 			return empty.ValueOrDie();
 			// GCOVR_EXCL_STOP
 		}
-		// Reached by a DICTIONARY column and, today, by nothing else. Arrow's
-		// FileReader::ReadColumn coalesces every row group of an ordinary column into a single
-		// chunk, whatever the row-group count (measured: every column of every other fixture here
-		// arrives as one chunk, a 3-row-group file included) -- but it cannot do that for a
-		// dictionary column, whose row groups carry independent dictionaries, so one arrives with
-		// one chunk per row group. Those chunks are decoded above before they reach this point, so
-		// what is concatenated here is always a plain value-typed array.
-		auto combined = arrow::Concatenate(chunked->chunks(), arrow::default_memory_pool());
+		// Several chunks (the function comment lists the three sources). A dictionary column's
+		// chunks were decoded above, so what reaches here is always plain value-typed arrays; a
+		// string column over the int32 ceiling is widened first, since Concatenate cannot rebuild
+		// it as one `utf8` array at all -- before the widening existed, that failure reached the
+		// backstop below on every whole-column read of such a column.
+		auto to_combine = widen_string_chunks_if_needed(chunked, name);
+		auto combined = arrow::Concatenate(to_combine->chunks(), arrow::default_memory_pool());
 		if (!combined.ok())
-		{ // GCOVR_EXCL_START -- Concatenate Status backstop over arrays that are already decoded and same-typed.
-			throw std::runtime_error(std::string("Failed to combine chunks for column: ") + name + ": " + combined.status().ToString());
+		{ // GCOVR_EXCL_START -- Concatenate Status backstop over same-typed arrays that are known to fit.
+			report_fatal_error("combine_column_chunks",
+				std::string("failed to combine the chunks of column ") + name + ": " + combined.status().ToString());
 		}
 		// GCOVR_EXCL_STOP
+		++g_debug_chunk_concat_count;
 		return combined.ValueOrDie();
 	} // GCOVR_EXCL_LINE -- gcov attribution artifact under GCC: this closing brace shows uncovered
 	// even though the function's other, always-taken return path (chunked->chunk(0) above) proves
@@ -1853,7 +1968,7 @@ extern "C"
 	//
 	// This is deliberately NOT an exhaustive fix for every possible lazy Arrow cache -- that is an
 	// unwinnable fight against Arrow's own internals. Two are known and covered; if a THIRD
-	// distinct race against one of these same ten singletons ever surfaces (see CLAUDE.md's note
+	// distinct race against one of these same singletons ever surfaces (see CLAUDE.md's note
 	// for the "how to tell" signature), add whatever call reproduces it here rather than chasing
 	// it as a one-off, and reconsider a broader warm-up (e.g. a full dummy write+close exercising
 	// every type) if the individual-cache approach keeps growing.
@@ -1864,7 +1979,7 @@ extern "C"
 			std::vector<std::shared_ptr<arrow::DataType>> singletons{
 				arrow::int32(), arrow::int64(), arrow::float32(), arrow::float64(),
 				arrow::boolean(), arrow::utf8(), arrow::large_utf8(), arrow::utf8_view(),
-				arrow::binary(), arrow::date32(),
+				arrow::binary(), arrow::large_binary(), arrow::date32(),
 			};
 			for (const auto &t : singletons)
 			{
@@ -2291,17 +2406,28 @@ extern "C"
 	// parquet_append_string_array_column check a column's projected byte total against this
 	// (or, under test, g_debug_string_offset_limit -- see
 	// parquet_debug_set_string_offset_limit) before building it, switching to
-	// arrow::large_utf8() instead of arrow::utf8() when it would overflow.
+	// arrow::large_utf8() instead of arrow::utf8() when it would overflow; on the read side
+	// widen_string_chunks_if_needed applies the same test to a column arriving in several chunks.
+	// Every one of those checks resolves the limit through effective_string_offset_limit() below.
 	static constexpr int64_t kArrowInt32OffsetLimit = 2147483647; // 2^31 - 1
 
 	// Test-only override of kArrowInt32OffsetLimit -- see parquet_debug_set_string_offset_limit,
 	// further below, for why this is a process-global rather than scoped to one writer (short
 	// version: parquet_writer%handle is a private component of the parquet Fortran module, so no
 	// test-only Fortran hook can reach a specific writer's handle from outside that module; a
-	// global is the only thing reachable, made safe by running the one test that touches it as
-	// an isolated subprocess -- see test/error_scenarios.f90's scenario_large_utf8_roundtrip).
-	// <= 0 (the default) means "use the real production limit".
+	// global is the only thing reachable, made safe by running the few tests that touch it as
+	// isolated subprocesses -- see test/error_scenarios.f90's scenario_large_string_roundtrip and
+	// scenario_string_read_over_offset_limit). <= 0 (the default) means "use the real
+	// production limit".
 	static int64_t g_debug_string_offset_limit = -1;
+
+	// The int32 STRING-offset ceiling in force: the override above when set, else the real one.
+	// The single home of that resolution, for the writer's three size tests and the reader's
+	// widening alike (declared ahead of combine_column_chunks, its first caller).
+	static int64_t effective_string_offset_limit()
+	{
+		return g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
+	}
 
 	// Test-only override of kArrowInt32OffsetLimit for a variable-length LIST column's own offsets
 	// buffer -- the list counterpart of g_debug_string_offset_limit above, and a process-global for
@@ -13841,8 +13967,7 @@ static std::shared_ptr<arrow::Array> build_list_child_array(const ValueType *val
 static std::shared_ptr<arrow::Array> build_list_string_child(const int64_t *str_offsets, const char *data,
 	int64_t nelems, int64_t nchars, const int8_t *elem_valid)
 {
-	int64_t limit = g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
-	bool use_large = nchars > limit;
+	bool use_large = nchars > effective_string_offset_limit();
 
 	auto append_all = [&](auto &builder) -> std::shared_ptr<arrow::Array>
 	{
@@ -14552,8 +14677,7 @@ extern "C"
 			return array;
 		};
 
-		int64_t limit = g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
-		bool use_large = would_overflow_string_offset_limit(nrows, item_len, limit);
+		bool use_large = would_overflow_string_offset_limit(nrows, item_len, effective_string_offset_limit());
 
 		std::shared_ptr<arrow::Array> array;
 		if (use_large)
@@ -14610,8 +14734,7 @@ extern "C"
 			return array;
 		};
 
-		int64_t limit = g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
-		bool use_large = would_overflow_string_offset_limit(nrows * col_size, item_len, limit);
+		bool use_large = would_overflow_string_offset_limit(nrows * col_size, item_len, effective_string_offset_limit());
 
 		std::shared_ptr<arrow::Array> array = use_large
 			? build(std::make_shared<arrow::LargeStringBuilder>())
@@ -15263,17 +15386,48 @@ extern "C"
 	// ==== Test-only debug hooks (error-scenario/fixture support, never public API) ====
 	//
 	// Test-only: overrides g_debug_string_offset_limit (see its own comment for why this is a
-	// process-global) so test/error_scenarios.f90's scenario_large_utf8_roundtrip can exercise
-	// the arrow::large_utf8() write/read path with a tiny fixture instead of needing genuine
-	// multi-gigabyte string data. Safe as a process-global specifically because that scenario
-	// runs as its own isolated subprocess (see tools/run_error_scenarios.sh's pattern, already
-	// used this way elsewhere), so it can never race with a concurrently-running test-drive
-	// test's own string columns. Not part of the public Fortran API: reachable only via a
-	// bind(C) interface declared directly in test/error_scenarios.f90, never
-	// src/parquet_bindings.f90. Pass n<=0 to restore the real production limit.
+	// process-global) so test/error_scenarios.f90's scenario_large_string_roundtrip can exercise
+	// the arrow::large_utf8() write/read path, and scenario_string_read_over_offset_limit the
+	// read-side widening, with a tiny fixture instead of needing genuine multi-gigabyte string
+	// data. Safe as a process-global specifically because each such scenario runs as its own
+	// isolated subprocess (see tools/run_error_scenarios.sh's pattern, already used this way
+	// elsewhere), so it can never race with a concurrently-running test-drive test's own string
+	// columns. Not part of the public Fortran API: reachable only via a bind(C) interface
+	// declared directly in test/error_scenarios.f90, never src/parquet_bindings.f90. Pass n<=0 to
+	// restore the real production limit.
 	void parquet_debug_set_string_offset_limit(int64_t n)
 	{
 		g_debug_string_offset_limit = n;
+	}
+
+	// Test-only: sets g_debug_force_chunk_split (see its own comment) so
+	// test/error_scenarios.f90's scenario_string_read_over_offset_limit can hand
+	// combine_column_chunks a multi-chunk column from a tiny fixture -- in production only a
+	// dictionary column or a string column over the int32 offset ceiling arrives that way. Same
+	// process-global/subprocess-isolation reasoning as parquet_debug_set_string_offset_limit,
+	// above. Pass n<=1 to restore normal reads.
+	void parquet_debug_set_force_chunk_split(int64_t n)
+	{
+		g_debug_force_chunk_split = n;
+	}
+
+	// Test-only: returns g_debug_chunk_concat_count (see its own comment) -- how many columns
+	// combine_column_chunks has rebuilt from several chunks so far. The negative-control half of
+	// the pair: a scenario reads it beside the widen count below to prove that a multi-chunk
+	// column which FITS the offset ceiling was combined without being widened, rather than never
+	// reaching the multi-chunk path at all.
+	int64_t parquet_debug_get_chunk_concat_count()
+	{
+		return g_debug_chunk_concat_count.load();
+	}
+
+	// Test-only: returns g_debug_string_offset_widen_count (see its own comment) -- how many
+	// columns widen_string_chunks_if_needed has cast to 64-bit offsets so far. What lets
+	// scenario_string_read_over_offset_limit assert that the widening ran (and, in its negative
+	// controls, that it did not) when nothing a caller can observe distinguishes the two.
+	int64_t parquet_debug_get_string_offset_widen_count()
+	{
+		return g_debug_string_offset_widen_count.load();
 	}
 
 	// Test-only: overrides g_debug_list_offset_limit (see its own comment) so an error scenario can

@@ -2438,16 +2438,24 @@ contains
     !> parquet_set_arrow_threads is a global Arrow thread-pool capacity knob,
     !> not something that changes any file's content -- a valid call must be
     !> a no-op as far as write/read correctness goes.
+    !>
+    !> **The capacity is restored before the assertion**, because it resizes a pool the whole
+    !> process shares and nothing else here would ever put it back: left at 2, every suite running
+    !> after this one in run_tester_cpp -- which is all but this one -- would read and write with a
+    !> different Arrow thread-pool capacity in a full run than in a `-- writing` run. That makes a
+    !> sibling suite's behaviour depend on whether this test ran first, which is exactly the
+    !> difference nobody thinks to look for when a test passes alone and fails in a full run.
     subroutine test_set_max_threads_valid_value_does_not_break_round_trip(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         integer(int32) :: values(5), read_back(5)
         character(len=*), parameter :: out_file = "test_run/test_set_max_threads.parquet"
-        integer :: i
+        integer :: i, saved_threads
 
         values = [(i, i=1,5)]
 
+        saved_threads = parquet_get_arrow_threads()
         call parquet_set_arrow_threads(2)
 
         call parquet_open_writer(writer, out_file)
@@ -2457,6 +2465,8 @@ contains
         call parquet_open_reader(reader, out_file)
         call parquet_read_column(reader, "v", read_back)
         call parquet_close_reader(reader)
+
+        call parquet_set_arrow_threads(saved_threads)
 
         call check(error, all(read_back == values), &
             "parquet_set_arrow_threads(2) broke a subsequent write/read round-trip")

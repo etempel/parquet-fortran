@@ -937,6 +937,11 @@ extern "C"
 		return live;
 	}
 
+	// Test-only: how many rows the mask most recently installed in this process spans -- see
+	// parquet_debug_get_row_mask_length, far below, for why this is process-global rather than read
+	// off the handle, and what it is asserted for.
+	static int64_t g_debug_row_mask_length = -1;
+
 	// Installs `combined` (one byte per LIVE row, in file order -- the layout
 	// assign_row_group_live_offsets just laid out) as the reader's mask, and refreshes the derived
 	// per-row-group survivor counts. The single place a mask becomes active, shared by
@@ -968,6 +973,7 @@ extern "C"
 		}
 		// GCOVR_EXCL_STOP
 		reader_handle->live_mask = std::static_pointer_cast<arrow::BooleanArray>(mask_array);
+		g_debug_row_mask_length = reader_handle->live_mask->length();
 		refresh_row_group_surviving(reader_handle);
 		int64_t matched = 0;
 		for (uint8_t v : combined) matched += (v != 0);
@@ -7093,17 +7099,28 @@ extern "C"
 	{
 		reader_handle->row_group_live.assign(static_cast<size_t>(reader_handle->num_row_groups), 1);
 		reader_handle->row_groups_pruned = 0;
-		g_debug_row_groups_pruned = 0;
+		// THE SCOPE CUT IS STRUCTURAL, NOT A SCREEN, so it runs ABOVE the g_statistics_prescreen
+		// gate below: a row group outside [rg_lo, rg_hi] holds no mask bits whatever the statistics
+		// say, and marking it here is what sizes the mask to the scope instead of to the file.
+		// Gating it on the setting instead gives a scoped filter a whole-file mask under
+		// parquet_set_statistics_prescreen(.false.), and leaves every later whole-column read
+		// decoding the row groups the scope excludes -- with the answer still correct, so nothing
+		// but the mask's own length can see it (feature_risks.md Risk-221).
+		for (int64_t rg = 1; rg_lo > 0 && rg <= reader_handle->num_row_groups; ++rg)
+		{
+			if (rg < rg_lo || rg > rg_hi)
+			{
+				reader_handle->row_group_live[static_cast<size_t>(rg - 1)] = 0;
+				++reader_handle->row_groups_pruned;
+			}
+		}
+		g_debug_row_groups_pruned = reader_handle->row_groups_pruned;
 		if (!g_statistics_prescreen) return;
 
 		for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
 		{
-			if (rg_lo > 0 && (rg < rg_lo || rg > rg_hi))
-			{
-				reader_handle->row_group_live[static_cast<size_t>(rg - 1)] = 0;
-				++reader_handle->row_groups_pruned;
-				continue;
-			}
+			// Out of scope: already marked not-live above, and there is nothing left to screen.
+			if (rg_lo > 0 && (rg < rg_lo || rg > rg_hi)) continue;
 			// A clause-less call (a bare row/row-group range, carrying only a slice's own bounds --
 			// see parquet_reader_set_filter's row_lo/row_hi) has no expression to screen with, so
 			// the scope check above is the whole screen. Explicit rather than falling into the
@@ -15305,6 +15322,24 @@ extern "C"
 	int64_t parquet_debug_get_row_groups_pruned(void)
 	{
 		return g_debug_row_groups_pruned;
+	}
+
+	// Test-only: how many ROWS the mask most recently installed in this process spans -- the live
+	// rows of the row groups the screen and any row-group scope left live, which is the mask's own
+	// length and therefore what it costs. -1 until some reader installs one.
+	//
+	// This exists because the property "a scoped filter's mask scales with its scope, not the file"
+	// cannot be measured through Arrow's memory pool: bytes_allocated() is process-global and, over
+	// a set_filter call, the mask is a minority of what an open reader retains (the rest is Arrow's
+	// own read state for the last row group touched, which is larger than the mask and varies with
+	// the Arrow version, the column's encoding and its compression). Asserting the length instead
+	// states the property exactly, on every machine and every Arrow build.
+	//
+	// Process-global for the same reason parquet_debug_get_row_groups_pruned is (see there), and it
+	// carries the same consequence: the suite asserting on it must not run its tests concurrently.
+	int64_t parquet_debug_get_row_mask_length(void)
+	{
+		return g_debug_row_mask_length;
 	}
 
 

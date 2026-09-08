@@ -55,9 +55,16 @@ wrong answer, so every rule keeps the failure direction at "prune nothing":
 - `live_mask` is `filter_mask` restricted to the live row groups and is what `apply_row_transform`
   filters with; `filter_mask` stays the canonical full-length object. The unpruned path
   deliberately keeps `ReadColumn` in `get_single_chunk_array`; re-measure before unifying.
-- A test needs both halves: A/B equality against `parquet_debug_set_disable_statistics_prescreen(1)`
-  AND an assertion on `parquet_debug_get_row_groups_pruned()`. Both hooks are process-global, so the
-  `filter_screen` suite is excluded from per-test parallelism.
+- **A scoped filter's row-group cut is STRUCTURAL, and runs above the `g_statistics_prescreen`
+  gate**; only the statistics decisions sit below it. Classify any new work in `screen_row_groups`
+  that way before placing it: gating a structural cut costs the mask's bound with every answer still
+  right (`feature_risks.md` Risk-221).
+- A test needs both halves: A/B equality against `parquet_set_statistics_prescreen(.false.)` AND an
+  assertion on `parquet_debug_get_row_groups_pruned()`. That hook and
+  `parquet_debug_get_row_mask_length` (the mask's own row count, which is how the scope's bound is
+  asserted — Arrow's pool counter cannot, the mask being a minority of what a reader retains across
+  a set_filter call) are process-global, so the `filter_screen` suite is excluded from per-test
+  parallelism.
 
 ## Row transforms: a MASK or a PERMUTATION
 

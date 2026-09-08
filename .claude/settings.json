@@ -13,6 +13,7 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git show:*)",
+      "Bash(git stash:*)",
       "Bash(git tag -l:*)",
       "Bash(grep:*)",
       "Bash(find:*)",
@@ -32,7 +33,6 @@
       "Bash(git reset:*)",
       "Bash(git rm:*)",
       "Bash(git clean:*)",
-      "Bash(git stash:*)",
       "Bash(rm -r:*)"
     ],
     "deny": [

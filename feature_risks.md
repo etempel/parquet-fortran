@@ -105,6 +105,7 @@ something a reader is expected to have.
 | [Risk-218](#risk-218--the-joins-engine-choice-reads-the-key-kinds-and-order-alone-and-a-data-dependent-choice-would-hide-behind-the-floor) | The join's engine choice reads the key kinds and `order=` alone, and a data-dependent choice would hide behind the floor | 4 — covered |
 | [Risk-219](#risk-219--a-gathers-team-goes-across-the-columns-or-inside-one-and-a-plan-that-always-picks-one-level-answers-every-test-right) | A gather's team goes ACROSS the columns or INSIDE one, and a plan that always picks one level answers every test right | 4 — covered |
 | [Risk-220](#risk-220--the-sort-engines-passes-over-the-runs-have-a-serial-arm-and-a-threaded-arm-and-only-a-fixture-with-duplicates-nulls-and-unmatched-rows-on-both-sides-can-see-them-disagree) | The sort engine's passes over the runs have a serial arm and a threaded arm, and only a fixture with duplicates, nulls and unmatched rows on both sides can see them disagree | 4 — covered |
+| [Risk-221](#risk-221--a-scoped-filters-row-group-cut-is-structural-and-gating-it-on-the-statistics-screen-loses-the-masks-bound-with-every-answer-still-right) | A scoped filter's row-group cut is structural, and gating it on the statistics screen loses the mask's bound with every answer still right | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8520,3 +8521,38 @@ carried column, `matched=` and both pair lists — on a fixture with duplicate k
 null key on each, and rows that match nothing on either. The abort's ordering is covered by the
 `join_require_m1_threaded` and `join_require_1m_threaded` scenarios (`test/error_scenarios.f90`),
 which lower the floor, print the team the group passes recorded, and abort with the serial message.
+
+### Risk-221 — A scoped filter's row-group cut is structural, and gating it on the statistics screen loses the mask's bound with every answer still right
+
+`screen_row_groups` (`src/parquet_wrapper.cpp`) does two things that look like one. It prunes row
+groups the STATISTICS rule out, which is an optimisation switched by
+`parquet_set_statistics_prescreen`; and for a scoped filter it marks the row groups outside
+`[rg_lo, rg_hi]` not-live, which is not an optimisation at all — those row groups hold no mask bits
+by construction, whatever any statistic says, and marking them is what sizes `live_mask` to the
+scope instead of to the file. The two sat in one loop under one `if (!g_statistics_prescreen)
+return;`, so switching the screen off switched the scope cut off with it: the narrow scope got a
+whole-file mask, and `live_row_group_list` stopped skipping the excluded row groups, so every later
+whole-column read decoded them and masked them away.
+
+**Why nothing noticed.** With clauses, `combined` is sized to the live rows and initialised
+all-false and only the in-scope row groups are ever written into it; without clauses it starts
+all-true and the physical row range — which `parquet_reader_set_filter` requires to lie inside the
+scope's own span, and without which the Fortran side never makes the call at all — cuts it instead.
+Either way the ANSWER is identical: same surviving rows, same order, same `nrows`. What changes is
+only how much the reader allocates and reads, which is exactly the property the bounded-memory
+engine exists for and which no equality test can see. Note how narrow the second arm's margin is:
+the same gate over a scope with no row range to fall back on would return every row in the file.
+
+**Rule.** The scope cut runs before the `g_statistics_prescreen` gate and outside the screening
+loop; `g_debug_row_groups_pruned` is published before that early return, so the out-of-scope count
+is reported with the screen off too. Any new work in `screen_row_groups` is classified first: a
+STATISTICS decision goes below the gate, a STRUCTURAL one above it.
+
+**Covered by** `a scoped filter's retained mask scales with its scope, not the file`
+(`test/test_filter_screen.f90`), which asserts the mask's own length through
+`parquet_debug_get_row_mask_length` — 40000 rows for a 2-row-group scope of a 400000-row file, and
+400000 for the whole file — and repeats the narrow arm with
+`parquet_set_statistics_prescreen(.false.)`, which is the half that pins this entry. Arrow's pool
+counter cannot state the property: over a rule-carrying `parquet_reader_set_filter` call the mask is
+a minority of what the reader retains, so the byte half of that test uses a rule-less scoped call,
+which installs the same mask while reading no column.

@@ -52,6 +52,13 @@ module test_filter_screen
             import :: c_long_long
             integer(c_long_long) :: res !! pruned row-group count of the last screen.
         end function parquet_debug_get_row_groups_pruned
+        !> How many ROWS the mask most recently installed in this process spans -- the mask's own
+        !> length, and therefore what it costs. -1 before any reader installs one.
+        function parquet_debug_get_row_mask_length() result(res) &
+            bind(C, name="parquet_debug_get_row_mask_length")
+            import :: c_long_long
+            integer(c_long_long) :: res !! rows the last installed mask spans.
+        end function parquet_debug_get_row_mask_length
         !> Arrow's own default memory pool's currently-allocated byte count -- the ONLY way to
         !> observe whether an Arrow-side structure was actually freed or how large it is (RSS
         !> cannot answer either question; see CLAUDE.md's "Measuring whether Arrow memory was
@@ -1166,33 +1173,46 @@ contains
         call check(error, num_rg == 10_int64, "parquet_get_num_row_groups must still report all 10 row groups")
     end subroutine test_num_row_groups_unchanged
     !
-    !> The memory property the row-group-segmented mask exists for: what a filtered reader RETAINS
-    !> scales with the rows it actually covers, not with the file's total row count. An excluded
-    !> row group -- pruned by statistics, or outside a scoped filter's range -- holds no mask bits
-    !> at all, where the full-length mask this replaced held a run of all-false ones for it.
+    !> The memory property the row-group-segmented mask exists for: a scoped filter's mask spans the
+    !> rows of the row groups in its SCOPE, not the file's total row count. An excluded row group --
+    !> pruned by statistics, or outside a scoped filter's range -- holds no mask bits at all, where
+    !> the full-length mask this replaced held a run of all-false ones for it.
     !>
-    !> Asserted as the DIFFERENCE between two scopes over the SAME file, never as an absolute
-    !> size, and that is what makes it both robust and discriminating. Robust, because the fixture,
-    !> its footer and its schema are identical in both halves, so everything that does not depend
-    !> on the scope cancels -- including a fixed ~85 kB the reader legitimately still holds at
-    !> measurement time (the last row group's decoded chunk, read while the expression was being
-    !> evaluated), which would swamp a ratio test. Discriminating, because under the full-length
-    !> representation this replaced, BOTH scopes retained a mask of total_nrows bits and the
-    !> difference would be approximately zero; under the current one it is the extra row groups'
-    !> own bits and nothing else.
+    !> **The property is asserted on the mask's own LENGTH, exactly**, through
+    !> parquet_debug_get_row_mask_length. Arrow's pool counter cannot state it: measured across a
+    !> whole parquet_reader_set_filter call the mask is a MINORITY of what the open reader then
+    !> holds, because the scoped engine reads one row group of each filter column per row group in
+    !> scope and Arrow keeps its own read state for the last of those -- about 85 kB on this
+    !> fixture, larger than the mask itself, and varying with the Arrow version, the column's
+    !> encoding and its compression. A difference between two scopes does not cancel it either: it
+    !> is not a constant, and on a float column measured the other way it is larger for the NARROW
+    !> scope than the wide one. That is a threshold this test cannot own.
     !>
-    !> Measured with Arrow's own pool counter, never RSS -- freed pool pages are not returned to
+    !> The byte measurement is kept, on a call shaped so that the mask is all there is to see --
+    !> see scoped_mask_bytes -- because a length alone would not notice a mask that grew a second
+    !> buffer per row. Both halves are needed: the length says the mask covers the scope, the bytes
+    !> say the length is what it costs.
+    !>
+    !> Bytes come from Arrow's own pool counter, never RSS -- freed pool pages are not returned to
     !> the OS, so RSS cannot answer this question at all (CLAUDE.md, "Measuring whether Arrow
     !> memory was actually freed"). Only the RETAINED half is asserted on: the transient vector
     !> built during evaluation is a plain std::vector the Arrow pool never sees (its disappearance
     !> is a benchmark-harness observation, not a unit-testable one).
     !>
-    !> This test lives in the filter_screen suite because the pool counter is process-global, and
-    !> run_tester.f90 excludes exactly this suite from its per-test parallelism -- a concurrently
-    !> allocating sibling test would make the measurement meaningless.
+    !> The statistics-screen-off arm is not a duplicate of the first. The row-group SCOPE cut is
+    !> structural -- an out-of-scope row group holds no mask bits whatever the statistics say -- so
+    !> it must survive parquet_set_statistics_prescreen(.false.). Gating it on that setting instead
+    !> -- by placing it under screen_row_groups' own prescreen return, where it reads as part of the
+    !> screen -- gives the narrow scope a whole-file mask and makes every later whole-column read
+    !> decode the row groups the scope excludes, with every answer still correct. Nothing else in
+    !> this suite can see that (feature_risks.md Risk-221).
+    !>
+    !> This test lives in the filter_screen suite because both hooks are process-global, and
+    !> test/test_runner_support.f90 excludes exactly this suite from its per-test parallelism -- a
+    !> concurrently filtering sibling test would install the mask this one then reads.
     subroutine test_scoped_mask_memory_scales_with_scope(error)
         type(error_type), allocatable, intent(out) :: error
-        integer(int64) :: narrow_bytes, wide_bytes
+        integer(int64) :: narrow_rows, wide_rows, narrow_bytes, wide_bytes
         character(len=*), parameter :: file = "test_run/screen_mask_memory.parquet"
         ! 20 row groups of 20000 rows: big enough that one row group's worth of mask bits (2.5 kB)
         ! stands clear of allocator granularity, small enough to stay an ordinary unit test.
@@ -1202,37 +1222,84 @@ contains
         ! The screen must not prune anything here, or it would narrow the wide scope too and the
         ! two halves would stop differing in the way this test is about. "id > 0" matches every
         ! row, so every row group in scope stays live.
-        call retained_mask_bytes(file, "id > 0", 1_int64, 2_int64, narrow_bytes)
-        call retained_mask_bytes(file, "id > 0", 1_int64, 20_int64, wide_bytes)
+        call scoped_mask_rows(file, "id > 0", 1_int64, 2_int64, narrow_rows)
+        call scoped_mask_rows(file, "id > 0", 1_int64, 20_int64, wide_rows)
+        call check(error, narrow_rows == 40000_int64, &
+            "scoped mask: 2 row groups of 20000 rows must give a 40000-row mask, not one row per file row")
+        if (allocated(error)) return
+        call check(error, wide_rows == 400000_int64, &
+            "scoped mask: 20 row groups of 20000 rows must give a 400000-row mask")
+        if (allocated(error)) return
 
-        ! 18 more row groups in scope, at 20000 rows each, is 45000 more mask bytes. Asserted with
-        ! a wide margin (>30000) rather than exactly, since allocator granularity rounds it up.
+        call parquet_set_statistics_prescreen(.false.)
+        call scoped_mask_rows(file, "id > 0", 1_int64, 2_int64, narrow_rows)
+        call parquet_set_statistics_prescreen(.true.)
+        call check(error, narrow_rows == 40000_int64, &
+            "scoped mask: the row-group scope must bound the mask with the statistics screen off too")
+        if (allocated(error)) return
+
+        call scoped_mask_bytes(file, 1_int64, 2_int64, 1_int64, 40000_int64, narrow_bytes)
+        call scoped_mask_bytes(file, 1_int64, 20_int64, 1_int64, 400000_int64, wide_bytes)
+        ! 5000 and 50000 bytes of mask bits. Bounded rather than compared exactly, since a builder
+        ! that does not shrink its buffer to fit would hand back the next power of two instead --
+        ! 8 kB and 64 kB, which pass both of these and fail an equality.
+        call check(error, narrow_bytes < 20000_int64, &
+            "scoped mask memory: a 40000-row mask must retain ~5 kB, not the whole file's 50 kB")
+        if (allocated(error)) return
         call check(error, wide_bytes - narrow_bytes > 30000_int64, &
             "scoped mask memory: 18 more row groups in scope must retain ~45 kB more mask")
     end subroutine test_scoped_mask_memory_scales_with_scope
     !
-    !> Arrow-pool bytes retained by an open, scoped-filter reader: measured as the difference
-    !> across the open, with the counter read once before and once after, so whatever the process
-    !> already held drops out. The reader is left open across the measurement deliberately -- the
-    !> point is what it RETAINS while usable, not what it peaked at.
-    subroutine retained_mask_bytes(file, rule, rg_lo, rg_hi, bytes)
+    !> How many rows the mask a scoped filter installs actually spans. The reader is opened
+    !> unfiltered and the filter applied afterwards, because that is the form carrying a row-group
+    !> range: parquet_open_reader(..., filter=) reaches the whole-file, column-caching engine
+    !> instead.
+    subroutine scoped_mask_rows(file, rule, rg_lo, rg_hi, mask_rows)
         character(len=*), intent(in) :: file !! fixture to read.
         character(len=*), intent(in) :: rule !! the filter expression.
         integer(int64), intent(in) :: rg_lo !! first row group in scope (1-based).
         integer(int64), intent(in) :: rg_hi !! last row group in scope (inclusive).
+        integer(int64), intent(out) :: mask_rows !! rows the installed mask spans.
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add(rule)
+        call parquet_open_reader(reader, file)
+        call parquet_reader_set_filter(reader, filt, rg_lo, rg_hi)
+        mask_rows = parquet_debug_get_row_mask_length()
+        call parquet_close_reader(reader)
+    end subroutine scoped_mask_rows
+    !
+    !> Arrow-pool bytes an open, scoped reader retains for its mask: the counter read once before
+    !> and once after the parquet_reader_set_filter call, so whatever the process already held drops
+    !> out. The reader is left open across the measurement deliberately -- the point is what it
+    !> RETAINS while usable, not what it peaked at.
+    !>
+    !> **The filter carries no rules**, only the row-group scope and the physical row range those
+    !> row groups span. That installs the same mask through the same path (screen_row_groups' scope
+    !> cut, then assign_row_group_live_offsets, then install_row_mask) while reading no column at
+    !> all, so the pool counter sees the mask and nothing else -- which is the whole reason for the
+    !> shape. Adding a rule puts Arrow's read state for one row group inside the window, and that is
+    !> bigger than the quantity being measured; the rule-carrying form is asserted on by
+    !> scoped_mask_rows instead, where no allocator is involved.
+    subroutine scoped_mask_bytes(file, rg_lo, rg_hi, row_lo, row_hi, bytes)
+        character(len=*), intent(in) :: file !! fixture to read.
+        integer(int64), intent(in) :: rg_lo !! first row group in scope (1-based).
+        integer(int64), intent(in) :: rg_hi !! last row group in scope (inclusive).
+        integer(int64), intent(in) :: row_lo !! first physical row of that range.
+        integer(int64), intent(in) :: row_hi !! last physical row of that range.
         integer(int64), intent(out) :: bytes !! pool bytes the open reader retains.
         type(parquet_reader) :: reader
         type(parquet_filter) :: filt
         integer(int64) :: before, after
 
-        call filt%add(rule)
         call parquet_open_reader(reader, file)
         before = parquet_get_arrow_bytes_allocated()
-        call parquet_reader_set_filter(reader, filt, rg_lo, rg_hi)
+        call parquet_reader_set_filter(reader, filt, rg_lo, rg_hi, row_lo, row_hi)
         after = parquet_get_arrow_bytes_allocated()
         call parquet_close_reader(reader)
         bytes = after - before
-    end subroutine retained_mask_bytes
+    end subroutine scoped_mask_bytes
     !
     !> The null tests answer from the footer's null count alone, so they prune on a column type
     !> every COMPARISON declines -- and that short-circuit is the thing worth pinning.

@@ -165,6 +165,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   given — the unit of whichever column had been last — and write it into the file.
 - A `left`, `right` or `outer` join that null-filled a string column, and a string vector column
   read from a file with many nulls, took time quadratic in the number of nulls.
+- With `parquet_set_statistics_prescreen(.false.)`, a filter scoped to a row-group range — the
+  engine behind `parquet_open_table(..., bounded=.true.)` — held a row mask covering the whole file
+  and read the row groups outside its scope.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

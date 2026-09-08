@@ -5242,7 +5242,7 @@ def gen_spec_interfaces():
         !! anything proportional to it is allocated, which is what lets `max_rows=` refuse a
         !! join rather than run out of memory during one.
         module subroutine table_join_pairs(self, other, on, other_on, how, require, order, &
-                max_rows, il, ir, n_out, matched, threads)
+                max_rows, il, ir, n_out, matched, threads, team)
             class(parquet_table), intent(in) :: self  !! the LEFT table.
             class(parquet_table), intent(in) :: other !! the RIGHT table.
             character(len=*), intent(in) :: on(:)     !! left key columns, primary first.
@@ -5266,6 +5266,10 @@ def gen_spec_interfaces():
             !> team for the engine that builds the match (the sort, or the multimap's build and
             !! probe); absent = automatic. Never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
+            !> receives the team the engine's own passes ran on -- the sort engine's passes
+            !! over the runs, or the hash engine's emission -- so a caller's passes over the
+            !! pair list can run on the same one; 1 means serial.
+            integer, intent(out), optional :: team
         end subroutine table_join_pairs
     end interface""")
     w("    !")

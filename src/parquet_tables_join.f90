@@ -45,6 +45,12 @@
 !! a documented output property with its own test.
 submodule (parquet_tables) parquet_tables_join
     use parquet_sorting, only : pf_sort_keys, pf_argsort
+    ! The sort's own thread rule and its tail floor, for the sort engine's passes over the
+    ! runs: that engine resolves ONE team, by the call `pf_argsort` makes over the same rows,
+    ! and every pass that reads the sort's result runs on it. `parquet_argsort` is already in
+    ! this module's footprint through `parquet_sorting`, so a submodule import costs a
+    ! consumer nothing (the arrangement `parquet_tables_index.f90` keeps for the index tier).
+    use parquet_argsort, only : resolve_thread_count, tail_team
     ! The multimap's tuple ceiling, for the eligibility test; the module is already in this
     ! module's footprint through the spec's own import of the two index types.
     use parquet_index, only : pf_index_max_components
@@ -70,7 +76,7 @@ submodule (parquet_tables) parquet_tables_join
         !! kind-checked by `join_resolve_keys`, and the resolved tokens, so the two engines
         !! cannot disagree about which columns are the keys or what `how=` meant.
         module subroutine join_pairs_hash(self, other, lslots, rslots, how_id, req_id, max_rows, &
-                threads, il, ir, n_out, matched)
+                threads, team, il, ir, n_out, matched)
             class(parquet_table), intent(in) :: self  !! the LEFT table.
             class(parquet_table), intent(in) :: other !! the RIGHT table.
             integer, intent(in) :: lslots(:)          !! this table's key slots, primary first.
@@ -81,6 +87,9 @@ submodule (parquet_tables) parquet_tables_join
             !> team for the multimap's build and probe and for this engine's own passes;
             !! absent means the index tier's automatic rule.
             integer, intent(in), optional :: threads
+            !> receives the team this engine's own pass (the emission) ran on, for the caller's
+            !! passes over the pair list; 1 means serial.
+            integer, intent(out) :: team
             integer(int64), allocatable, intent(out) :: il(:) !! per output row: left row, or 0.
             integer(int64), allocatable, intent(out) :: ir(:) !! per output row: right row, or 0.
             integer(int64), intent(out) :: n_out              !! output rows; equals size(il).
@@ -94,6 +103,7 @@ contains
         character(len=*), parameter :: PROC = "join"
         integer, allocatable :: lslots(:), rslots(:)
         integer :: how_id, req_id, ord_id, engine
+        integer :: eng_team !! the team the engine's own passes ran on.
         !
         call table_check_open(self, PROC)
         call table_check_open(other, PROC)
@@ -105,11 +115,12 @@ contains
         engine = join_choose_engine(self, lslots, ord_id)
         if (engine == ENGINE_HASH) then
             call join_pairs_hash(self, other, lslots, rslots, how_id, req_id, max_rows, threads, &
-                il, ir, n_out, matched)
+                eng_team, il, ir, n_out, matched)
         else
             call join_pairs_sort(self, other, lslots, rslots, how_id, req_id, ord_id, max_rows, &
-                threads, il, ir, n_out, matched)
+                threads, eng_team, il, ir, n_out, matched)
         end if
+        if (present(team)) team = eng_team
     end procedure table_join_pairs
     !
     !> The SORT engine: astropy's algorithm over the two key columns concatenated.
@@ -119,7 +130,7 @@ contains
     !! emission in either order. Every `order="key"` join takes this engine, and so does every
     !! key kind the hash engine declines (`join_hash_eligible`).
     subroutine join_pairs_sort(self, other, lslots, rslots, how_id, req_id, ord_id, max_rows, &
-            threads, il, ir, n_out, matched)
+            threads, team, il, ir, n_out, matched)
         class(parquet_table), intent(in) :: self  !! the LEFT table.
         class(parquet_table), intent(in) :: other !! the RIGHT table.
         integer, intent(in) :: lslots(:)          !! this table's key slots, primary first.
@@ -128,7 +139,8 @@ contains
         integer, intent(in) :: req_id             !! REQ_* token.
         integer, intent(in) :: ord_id             !! ORD_* token.
         integer(int64), intent(in), optional :: max_rows !! output-size ceiling.
-        integer, intent(in), optional :: threads  !! forwarded to pf_argsort; absent = auto.
+        integer, intent(in), optional :: threads  !! the sort's request, and this engine's own.
+        integer, intent(out) :: team              !! the team this engine's passes ran on; 1 = serial.
         integer(int64), allocatable, intent(out) :: il(:) !! per output row: left row, or 0.
         integer(int64), allocatable, intent(out) :: ir(:) !! per output row: right row, or 0.
         integer(int64), intent(out) :: n_out              !! output rows; equals size(il).
@@ -142,6 +154,7 @@ contains
         integer(int64), allocatable :: lg_off(:), lg_idx(:), rg_off(:), rg_idx(:)
         integer(int64) :: nl, nr, ngroups
         integer(int64) :: n_pairs, n_lunm, n_runm, biggest
+        integer(int64) :: nt64 !! the sort's resolved count, before the tail floor.
         !
         ! Recorded FIRST, before anything can abort, and by this engine's own body rather than
         ! by the dispatcher: a which-engine-ran observable has to be written by every route, the
@@ -151,29 +164,43 @@ contains
         call join_build_keys(self, other, lslots, rslots, skeys, kc)
         nl = self%nrows()
         nr = other%nrows()
+        ! THE ONE TEAM of this engine. Resolved by the sort's own rule -- `threads=` honoured,
+        ! else the automatic count under `parquet_set_sort_threads`, serial inside a parallel
+        ! region, clamped to the affinity mask -- through the very call `pf_argsort` makes below
+        ! over the same row count, so the sort and every pass that reads its result run on one
+        ! team; then lowered by `tail_team`'s floor, since each of those passes is a whole-array
+        ! sweep and a team is not worth opening over a few thousand rows. Recorded before
+        ! anything can abort, on every route including the serial one, for the reason the
+        ! engine is: the pair list is identical at every team size, so the record is the only
+        ! observation that `threads=` reached these passes (feature_risks.md Risk-189).
+        call resolve_thread_count(threads, nl + nr, nt64)
+        team = tail_team(nt64, nl + nr)
+        call join_note_group_threads(team)
         call pf_argsort(skeys, perm, group_offsets=go, threads=threads)
         ngroups = size(go, kind=int64) - 1_int64
-        call join_classify(kc, perm, go, nl, nr, ngroups, nleft, nright, lmatched, rmatched, &
+        call join_classify(kc, perm, go, nl, nr, ngroups, team, nleft, nright, lmatched, rmatched, &
             group_of_left, lg_off, lg_idx, rg_off, rg_idx)
         call join_check_require(req_id, nleft, nright, lmatched, rmatched, lg_off, lg_idx, &
-            rg_off, rg_idx, ngroups)
-        call join_count(how_id, nleft, nright, lmatched, rmatched, ngroups, nl, &
+            rg_off, rg_idx, ngroups, team)
+        call join_count(how_id, nleft, nright, lmatched, rmatched, ngroups, nl, team, &
             n_pairs, n_lunm, n_runm, biggest, n_out)
         if (present(max_rows)) then
             if (n_out > max_rows) call join_refuse_size(n_out, max_rows, nl, nr, biggest)
         end if
         if (present(matched)) then
             allocate(matched(nl))
-            if (nl > 0_int64) call join_fill_matched(group_of_left, lmatched, nl, matched)
+            if (nl > 0_int64) call join_fill_matched(group_of_left, lmatched, nl, team, matched)
         end if
         allocate(il(n_out), ir(n_out))
         if (n_out < 1_int64) return
         if (ord_id == ORD_KEY) then
+            ! Serial: a group-major walk with one cursor, and the rare ordering. Its left-major
+            ! twin below is the one that is threaded.
             call join_emit_key_order(how_id, ngroups, lmatched, rmatched, lg_off, lg_idx, &
                 rg_off, rg_idx, il, ir)
         else
             call join_emit_left_order(how_id, nl, group_of_left, lmatched, rmatched, &
-                rg_off, rg_idx, ngroups, il, ir)
+                rg_off, rg_idx, ngroups, team, il, ir)
         end if
     end subroutine join_pairs_sort
     !
@@ -249,6 +276,7 @@ contains
         character(len=:), allocatable :: dnames(:)
         integer(int64) :: n_out
         integer :: how_id
+        integer :: team !! the engine's team, for the passes over the pair list.
         !
         ! VALIDATE EVERYTHING, THEN MUTATE EVERYTHING -- parquet_tables_rowmutate.f90's first
         ! rule, and a join has more chance to break it than anything already there because it
@@ -279,12 +307,12 @@ contains
         ! documented as being over the PRE-join rows: this is the last point at which they exist.
         call table_join_pairs(self, other, on, other_on=other_on, how=how, require=require, &
             order=order, max_rows=max_rows, il=il, ir=ir, n_out=n_out, matched=matched, &
-            threads=threads)
+            threads=threads, team=team)
         ! Reads the payload columns that are not resident yet -- AFTER the engine, so a join that
         ! was going to be refused does not read a column first. A column already resident, which
         ! is every column the `columns=`-absent default selects, returns immediately.
         call join_touch_payload(other, sslots)
-        call join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots)
+        call join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots, team)
         ! Handed over rather than copied, and AFTER the rewrite because the rewrite reads both.
         ! `il`/`ir` are dead from here, so move_alloc makes `pairs=` cost nothing at all on a
         ! join whose output is larger than either input -- which is the shape a caller asking
@@ -697,9 +725,10 @@ contains
     !! which nothing may read (a null row's value bytes are unspecified by `%init`'s contract). The
     !! alternative -- a gather that understood index 0 -- would be a new primitive across all
     !! eighteen kinds for a case two shipped bindings already express.
-    subroutine join_side_index(side, n_out, idx, valid)
+    subroutine join_side_index(side, n_out, nt, idx, valid)
         integer(int64), intent(in) :: side(:)                   !! per output row: that side's row, or 0.
         integer(int64), intent(in) :: n_out                     !! output rows.
+        integer, intent(in) :: nt                               !! team for the two sweeps; 1 = serial.
         integer(int64), allocatable, intent(out) :: idx(:)      !! per output row: a row, never 0.
         !> per output row: .false. where it has no counterpart. LEFT UNALLOCATED when every output
         !! row matched -- an unallocated allocatable actual makes an optional dummy absent (F2018
@@ -710,8 +739,12 @@ contains
         integer(int64) :: o
         logical :: any_unmatched
         !
+        ! Two element-wise sweeps with no shared state but the one flag, which is a reduction:
+        ! each thread writes its own rows of `idx` and reads its own rows of `side`.
         allocate(idx(n_out))
         any_unmatched = .false.
+        !$omp parallel do num_threads(nt) default(shared) private(o) reduction(.or.: any_unmatched) &
+        !$omp schedule(static) if (nt > 1)
         do o = 1_int64, n_out
             if (side(o) == 0_int64) then
                 idx(o) = 1_int64
@@ -720,11 +753,14 @@ contains
                 idx(o) = side(o)
             end if
         end do
+        !$omp end parallel do
         if (.not. any_unmatched) return
         allocate(valid(n_out))
+        !$omp parallel do num_threads(nt) default(shared) private(o) schedule(static) if (nt > 1)
         do o = 1_int64, n_out
             valid(o) = side(o) /= 0_int64
         end do
+        !$omp end parallel do
     end subroutine join_side_index
     !
     !> Whether the output leaves every one of this table's rows exactly where it was -- the
@@ -756,7 +792,7 @@ contains
     !> The rewrite: this table's own columns gathered by `il`, then `other`'s carried in beside
     !! them. The only procedure here that writes to `self`, which is what makes "validate
     !! everything, then mutate everything" checkable by looking at the call order in `join_impl`.
-    subroutine join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots)
+    subroutine join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots, team)
         class(parquet_table), intent(inout) :: self  !! the left table.
         class(parquet_table), intent(in) :: other    !! the right table.
         integer(int64), intent(in) :: il(:)          !! per output row: left row, or 0.
@@ -766,17 +802,23 @@ contains
         character(len=*), intent(in) :: dnames(:)    !! this table's name for each.
         integer, intent(in) :: mlslots(:)            !! merged keys: this table's slots.
         integer, intent(in) :: mrslots(:)            !! merged keys: `other`'s slots.
+        integer, intent(in) :: team                  !! the engine's team, for the side-index passes.
         type(parquet_column), allocatable :: mkcols(:)
         integer(int64), allocatable :: lidx(:), ridx(:)
         logical, allocatable :: lvalid(:), rvalid(:)
         integer, allocatable :: lslots(:), dslots(:)
         integer(int64) :: nl
-        integer :: j
+        integer :: j, nt
         logical :: rebuilt
         !
         nl = self%row_count
-        call join_side_index(il, n_out, lidx, lvalid)
-        call join_side_index(ir, n_out, ridx, rvalid)
+        ! The engine's own team, lowered by the tail floor to the OUTPUT rows the two passes
+        ! below sweep -- an anti join's output can be a fraction of the input the team was
+        ! sized for. Recorded on every join, whatever the engine.
+        nt = tail_team(int(team, int64), n_out)
+        call join_note_side_threads(nt)
+        call join_side_index(il, n_out, nt, lidx, lvalid)
+        call join_side_index(ir, n_out, nt, ridx, rvalid)
         ! THE MERGED KEYS FIRST, and that ordering is the whole of why this is a separate step:
         ! it reads this table's key columns while they still hold their OWN rows, before the
         ! gather below rewrites them. Only reachable when some output row has no left counterpart,
@@ -1083,6 +1125,38 @@ contains
         call set_used(int(engine, c_int64_t))
     end subroutine join_note_engine
     !
+    !> Records the team the sort engine's passes over the runs ran on, for
+    !! `parquet_debug_get_join_group_threads_used`. Written by the sort engine's body on every
+    !! route, 1 included, and as 0 by the hash engine, which has no such passes -- so a test
+    !! reading it after a hash-engine join sees that, not a stale team from an earlier join.
+    subroutine join_note_group_threads(nt)
+        use iso_c_binding, only : c_int64_t
+        integer, intent(in) :: nt !! the team; 0 for the hash engine.
+        interface
+            subroutine set_group(n) bind(C, name="parquet_debug_set_join_group_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: n
+            end subroutine set_group
+        end interface
+        !
+        call set_group(int(nt, c_int64_t))
+    end subroutine join_note_group_threads
+    !
+    !> Records the team `join_apply`'s two side-index passes ran on, for
+    !! `parquet_debug_get_join_side_threads_used`. Written on every join, whatever the engine.
+    subroutine join_note_side_threads(nt)
+        use iso_c_binding, only : c_int64_t
+        integer, intent(in) :: nt !! the team; 1 means serial.
+        interface
+            subroutine set_side(n) bind(C, name="parquet_debug_set_join_side_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: n
+            end subroutine set_side
+        end interface
+        !
+        call set_side(int(nt, c_int64_t))
+    end subroutine join_note_side_threads
+    !
     !> Aborts unless two key columns hold the same kind and the same width.
     subroutine join_check_key_kinds(self, other, lname, rname, li, ri)
         class(parquet_table), intent(in) :: self  !! the left table.
@@ -1123,7 +1197,11 @@ contains
     !! **A group is null-bearing when ANY of its keys is null for it**, tested on the group's
     !! FIRST member alone. That is sufficient rather than a shortcut: a null compares equal only
     !! to another null, so within one group a given key is null for every member or for none.
-    subroutine join_classify(kc, perm, go, nl, nr, ngroups, nleft, nright, lmatched, rmatched, &
+    !!
+    !! **Serial in one pass, or on a team in three** (`nt`), and the two give the same eleven
+    !! results element for element -- `a join's group passes and its side index run on the
+    !! join's team` (`test/test_table_parallel.f90`) is the A/B, on every `how`.
+    subroutine join_classify(kc, perm, go, nl, nr, ngroups, nt, nleft, nright, lmatched, rmatched, &
             group_of_left, lg_off, lg_idx, rg_off, rg_idx)
         type(parquet_column), intent(in) :: kc(:)   !! the concatenated key columns.
         integer(int64), intent(in) :: perm(:)       !! the concatenation's permutation.
@@ -1131,6 +1209,7 @@ contains
         integer(int64), intent(in) :: nl            !! left rows.
         integer(int64), intent(in) :: nr            !! right rows.
         integer(int64), intent(in) :: ngroups       !! number of groups.
+        integer, intent(in) :: nt                   !! team; 1 is the single serial pass.
         integer(int64), allocatable, intent(out) :: nleft(:)  !! left rows per group.
         integer(int64), allocatable, intent(out) :: nright(:) !! right rows per group.
         logical, allocatable, intent(out) :: lmatched(:) !! per group: its left rows found a match.
@@ -1140,9 +1219,11 @@ contains
         integer(int64), allocatable, intent(out) :: lg_idx(:) !! left rows, grouped, ascending.
         integer(int64), allocatable, intent(out) :: rg_off(:) !! group -> slice of rg_idx.
         integer(int64), allocatable, intent(out) :: rg_idx(:) !! right rows, grouped, ascending.
-        integer(int64) :: g, t, p, cl, cr, lc, rc
+        integer(int64) :: g, t, p, cl, cr, lc, rc, c, tl, tr
+        integer(int64), allocatable :: glo(:), ghi(:), tot_l(:), tot_r(:)
+        logical, allocatable :: hasnull(:)
         integer :: j
-        logical :: isnull
+        logical :: isnull, anynull
         !
         allocate(nleft(max(ngroups, 1_int64)), nright(max(ngroups, 1_int64)))
         allocate(lmatched(max(ngroups, 1_int64)), rmatched(max(ngroups, 1_int64)))
@@ -1151,48 +1232,191 @@ contains
         allocate(lg_idx(max(nl, 0_int64)), rg_idx(max(nr, 0_int64)))
         lg_off(1) = 1_int64
         rg_off(1) = 1_int64
-        ! ONE pass, not two. `lg_off(g)` and `rg_off(g)` are already final when group `g` is
-        ! entered -- the previous iteration set them -- so each group can fill its own slice of
-        ! `lg_idx`/`rg_idx` as it counts, instead of a second walk re-reading `perm` afterwards.
-        ! `perm(t)` is a scattered read over nl+nr elements, so the second walk was a full extra
-        ! random-access pass over the whole concatenation; removing it is worth several percent
-        ! of the join on a high-cardinality key, where there is nearly one group per row.
-        do g = 1_int64, ngroups
-            cl = 0_int64
-            cr = 0_int64
-            lc = lg_off(g) - 1_int64
-            rc = rg_off(g) - 1_int64
-            do t = go(g), go(g + 1_int64) - 1_int64
-                p = perm(t)
-                if (p <= nl) then
-                    cl = cl + 1_int64
-                    group_of_left(p) = g
-                    lc = lc + 1_int64
-                    lg_idx(lc) = p
-                else
-                    cr = cr + 1_int64
-                    rc = rc + 1_int64
-                    rg_idx(rc) = p - nl
-                end if
-            end do
-            nleft(g) = cl
-            nright(g) = cr
-            isnull = .false.
-            do j = 1, size(kc)
-                if (parquet_column_is_null(kc(j), perm(go(g)))) then
-                    isnull = .true.
-                    exit
-                end if
-            end do
-            ! A null-bearing group matches nothing in either direction: a null is UNKNOWN, and
-            ! `unknown = unknown` is not true. Its left rows are unmatched left rows and its
-            ! right rows are unmatched right rows.
-            lmatched(g) = (.not. isnull) .and. cr > 0_int64
-            rmatched(g) = (.not. isnull) .and. cl > 0_int64
-            lg_off(g + 1_int64) = lg_off(g) + cl
-            rg_off(g + 1_int64) = rg_off(g) + cr
+        ! Asked once per key column rather than once per group: a column with no null at all
+        ! cannot make any group null-bearing, and on a key without nulls -- the usual case --
+        ! this removes one `parquet_column_is_null` per group, which was 1.7% of a 10M x 10M
+        ! join. On a temporal kind whose cached answer is stale it is one serial sweep, made
+        ! here rather than by whichever thread asks first inside the team below.
+        allocate(hasnull(size(kc, kind=int64)))
+        do j = 1, size(kc)
+            hasnull(j) = parquet_column_any_null(kc(j))
         end do
+        ! And hoisted once more: with no null in any key column no group can be null-bearing,
+        ! so neither arm below makes the call at all -- measured at 5% of a 10M-row lookup join
+        ! at one thread as a call per group that looped over `hasnull` and returned.
+        anynull = any(hasnull)
+        if (nt <= 1 .or. ngroups < int(nt, int64)) then
+            ! ONE pass, not two. `lg_off(g)` and `rg_off(g)` are already final when group `g` is
+            ! entered -- the previous iteration set them -- so each group can fill its own slice of
+            ! `lg_idx`/`rg_idx` as it counts, instead of a second walk re-reading `perm` afterwards.
+            ! `perm(t)` is a scattered read over nl+nr elements, so the second walk was a full extra
+            ! random-access pass over the whole concatenation; removing it is worth several percent
+            ! of the join on a high-cardinality key, where there is nearly one group per row.
+            do g = 1_int64, ngroups
+                cl = 0_int64
+                cr = 0_int64
+                lc = lg_off(g) - 1_int64
+                rc = rg_off(g) - 1_int64
+                do t = go(g), go(g + 1_int64) - 1_int64
+                    p = perm(t)
+                    if (p <= nl) then
+                        cl = cl + 1_int64
+                        group_of_left(p) = g
+                        lc = lc + 1_int64
+                        lg_idx(lc) = p
+                    else
+                        cr = cr + 1_int64
+                        rc = rc + 1_int64
+                        rg_idx(rc) = p - nl
+                    end if
+                end do
+                nleft(g) = cl
+                nright(g) = cr
+                isnull = .false.
+                if (anynull) isnull = join_group_null(kc, hasnull, perm(go(g)))
+                ! A null-bearing group matches nothing in either direction: a null is UNKNOWN, and
+                ! `unknown = unknown` is not true. Its left rows are unmatched left rows and its
+                ! right rows are unmatched right rows.
+                lmatched(g) = (.not. isnull) .and. cr > 0_int64
+                rmatched(g) = (.not. isnull) .and. cl > 0_int64
+                lg_off(g + 1_int64) = lg_off(g) + cl
+                rg_off(g + 1_int64) = rg_off(g) + cr
+            end do
+            return
+        end if
+        ! ON A TEAM, three passes over contiguous ranges of groups, one range per thread, cut by
+        ! ROWS of `perm` rather than by group count so that a run of duplicates costs its thread
+        ! no more than its share of the concatenation (`join_chunk_groups`). Pass 1 walks each
+        ! group's slice of `perm` for its two counts, writes `group_of_left` (every left row is
+        ! named exactly once in `perm`, so no two threads write one element), settles the null
+        ! test, and totals its range's left and right rows. A serial prefix over the ranges then
+        ! gives each its first slot in `lg_idx`/`rg_idx`, and pass 3 walks `perm` again to fill
+        ! them and to write `lg_off`/`rg_off` for its own groups; the sentinels are set once at
+        ! the end. The second walk over `perm` is what the single pass above avoids -- on a team
+        ! it is a sequential sweep split `nt` ways, and the scatter into `group_of_left` is paid
+        ! once, not twice.
+        call join_chunk_groups(go, ngroups, nl + nr, nt, glo, ghi)
+        allocate(tot_l(nt), tot_r(nt))
+        !$omp parallel do num_threads(nt) default(shared) private(c, g, t, p, cl, cr, tl, tr, isnull) &
+        !$omp schedule(static)
+        do c = 1_int64, int(nt, int64)
+            tl = 0_int64
+            tr = 0_int64
+            do g = glo(c), ghi(c)
+                cl = 0_int64
+                cr = 0_int64
+                do t = go(g), go(g + 1_int64) - 1_int64
+                    p = perm(t)
+                    if (p <= nl) then
+                        cl = cl + 1_int64
+                        group_of_left(p) = g
+                    else
+                        cr = cr + 1_int64
+                    end if
+                end do
+                nleft(g) = cl
+                nright(g) = cr
+                isnull = .false.
+                if (anynull) isnull = join_group_null(kc, hasnull, perm(go(g)))
+                lmatched(g) = (.not. isnull) .and. cr > 0_int64
+                rmatched(g) = (.not. isnull) .and. cl > 0_int64
+                tl = tl + cl
+                tr = tr + cr
+            end do
+            tot_l(c) = tl
+            tot_r(c) = tr
+        end do
+        !$omp end parallel do
+        lc = 0_int64
+        rc = 0_int64
+        do c = 1_int64, int(nt, int64)
+            tl = tot_l(c)
+            tr = tot_r(c)
+            tot_l(c) = lc
+            tot_r(c) = rc
+            lc = lc + tl
+            rc = rc + tr
+        end do
+        !$omp parallel do num_threads(nt) default(shared) private(c, g, t, p, lc, rc) schedule(static)
+        do c = 1_int64, int(nt, int64)
+            lc = tot_l(c)
+            rc = tot_r(c)
+            do g = glo(c), ghi(c)
+                lg_off(g) = lc + 1_int64
+                rg_off(g) = rc + 1_int64
+                do t = go(g), go(g + 1_int64) - 1_int64
+                    p = perm(t)
+                    if (p <= nl) then
+                        lc = lc + 1_int64
+                        lg_idx(lc) = p
+                    else
+                        rc = rc + 1_int64
+                        rg_idx(rc) = p - nl
+                    end if
+                end do
+            end do
+        end do
+        !$omp end parallel do
+        ! Every left row is in exactly one group, and so is every right row.
+        lg_off(ngroups + 1_int64) = nl + 1_int64
+        rg_off(ngroups + 1_int64) = nr + 1_int64
     end subroutine join_classify
+    !
+    !> Whether the group whose first member is `row` is null-bearing: any key column that holds
+    !! a null at all (`hasnull`) is asked about that row. Shared by both arms of `join_classify`
+    !! so the two cannot answer differently.
+    logical function join_group_null(kc, hasnull, row) result(isnull)
+        type(parquet_column), intent(in) :: kc(:)  !! the concatenated key columns.
+        logical, intent(in) :: hasnull(:)          !! per key column: it holds at least one null.
+        integer(int64), intent(in) :: row          !! the group's first member, a concatenation row.
+        integer :: j
+        !
+        isnull = .false.
+        do j = 1, size(kc)
+            if (.not. hasnull(j)) cycle
+            if (parquet_column_is_null(kc(j), row)) then
+                isnull = .true.
+                return
+            end if
+        end do
+    end function join_group_null
+    !
+    !> Cuts groups `1..ngroups` into `nt` contiguous ranges of about equal ROW count: range `c`
+    !! starts at the first group whose slice of `perm` begins at or past row `(c-1)*n/nt + 1`,
+    !! found by binary search over `go`. A range may be empty (`glo > ghi`) when one group spans
+    !! several cut points; the loops over it then do not run, and the prefix passes carry a 0.
+    subroutine join_chunk_groups(go, ngroups, n, nt, glo, ghi)
+        integer(int64), intent(in) :: go(:)                    !! group offsets, length ngroups+1.
+        integer(int64), intent(in) :: ngroups                  !! number of groups.
+        integer(int64), intent(in) :: n                        !! rows of `perm`, `go(ngroups+1) - 1`.
+        integer, intent(in) :: nt                              !! ranges to cut.
+        integer(int64), allocatable, intent(out) :: glo(:)     !! per range: its first group.
+        integer(int64), allocatable, intent(out) :: ghi(:)     !! per range: its last group.
+        integer(int64) :: c, target, lo, hi, mid
+        !
+        allocate(glo(nt), ghi(nt))
+        glo(1) = 1_int64
+        do c = 2_int64, int(nt, int64)
+            target = ((c - 1_int64) * n) / int(nt, int64) + 1_int64
+            ! The smallest g at or after the previous range's start with go(g) >= target; the
+            ! sentinel go(ngroups+1) = n + 1 is always past `target`, so the search ends by then.
+            lo = glo(c - 1_int64)
+            hi = ngroups + 1_int64
+            do while (lo < hi)
+                mid = (lo + hi) / 2_int64
+                if (go(mid) < target) then
+                    lo = mid + 1_int64
+                else
+                    hi = mid
+                end if
+            end do
+            glo(c) = lo
+        end do
+        do c = 1_int64, int(nt, int64) - 1_int64
+            ghi(c) = glo(c + 1_int64) - 1_int64
+        end do
+        ghi(nt) = ngroups
+    end subroutine join_chunk_groups
     !
     !> Phase C's cardinality assertion, and the reason a lookup-table join can be trusted.
     !!
@@ -1205,7 +1429,7 @@ contains
     !! The message names the two offending ROW indices rather than the key value: the engine holds
     !! indices, a key may be several columns, and a row index is what a caller can look up.
     subroutine join_check_require(req_id, nleft, nright, lmatched, rmatched, lg_off, lg_idx, &
-            rg_off, rg_idx, ngroups)
+            rg_off, rg_idx, ngroups, nt)
         integer, intent(in) :: req_id            !! REQ_* token.
         integer(int64), intent(in) :: nleft(:)   !! left rows per group.
         integer(int64), intent(in) :: nright(:)  !! right rows per group.
@@ -1216,33 +1440,65 @@ contains
         integer(int64), intent(in) :: rg_off(:)  !! group -> slice of rg_idx.
         integer(int64), intent(in) :: rg_idx(:)  !! right rows, grouped.
         integer(int64), intent(in) :: ngroups    !! number of groups.
-        integer(int64) :: g
+        integer, intent(in) :: nt                !! team; 1 is the serial loop.
+        integer(int64) :: g, c, glo, ghi, bad_l, bad_r
+        integer(int64), allocatable :: first_l(:), first_r(:)
         !
         if (req_id == REQ_MM) return
-        do g = 1_int64, ngroups
-            if (req_id == REQ_11 .or. req_id == REQ_1M) then
-                ! A null-bearing group has lmatched .false. AND cannot violate anything, so the
-                ! same test excludes both it and a group whose right side is empty. The latter
-                ! genuinely has duplicate left keys -- but with nothing to match, they contribute
-                ! no output row at all, so they cannot produce the wrong-sized result this
-                ! assertion exists to catch. That is the whole reason, and it is worth stating
-                ! plainly: `require=` asserts something about the rows that TOOK PART in the
-                ! match, not about either table's own uniqueness, so its outcome legitimately
-                ! depends on both tables. (An earlier version of this comment argued the reverse
-                ! -- that refusing them would make the assertion depend on the other table --
-                ! which is backwards and invites a reader to "fix" the lmatched test away.)
-                if (lmatched(g) .and. nleft(g) > 1_int64) then
-                    call join_refuse_require("1:m", "left", "on=", lg_idx(lg_off(g)), &
-                        lg_idx(lg_off(g) + 1_int64), nleft(g))
+        ! Each thread notes the FIRST group of its range that violates each side and stops there;
+        ! the abort is raised after the region for the lowest of them -- the group the serial
+        ! loop stopped at, with the left side's message where one group violates both, exactly
+        ! as the order of the two tests inside the loop gives. An `error stop` inside the region
+        ! would name whichever thread got there first.
+        !
+        ! A null-bearing group has lmatched .false. AND cannot violate anything, so the
+        ! same test excludes both it and a group whose right side is empty. The latter
+        ! genuinely has duplicate left keys -- but with nothing to match, they contribute
+        ! no output row at all, so they cannot produce the wrong-sized result this
+        ! assertion exists to catch. That is the whole reason, and it is worth stating
+        ! plainly: `require=` asserts something about the rows that TOOK PART in the
+        ! match, not about either table's own uniqueness, so its outcome legitimately
+        ! depends on both tables. (An earlier version of this comment argued the reverse
+        ! -- that refusing them would make the assertion depend on the other table --
+        ! which is backwards and invites a reader to "fix" the lmatched test away.)
+        allocate(first_l(nt), first_r(nt))
+        !$omp parallel do num_threads(nt) default(shared) private(c, g, glo, ghi, bad_l, bad_r) &
+        !$omp schedule(static) if (nt > 1)
+        do c = 1_int64, int(nt, int64)
+            glo = ((c - 1_int64) * ngroups) / int(nt, int64) + 1_int64
+            ghi = (c * ngroups) / int(nt, int64)
+            bad_l = 0_int64
+            bad_r = 0_int64
+            do g = glo, ghi
+                if (req_id == REQ_11 .or. req_id == REQ_1M) then
+                    if (lmatched(g) .and. nleft(g) > 1_int64) bad_l = g
                 end if
-            end if
-            if (req_id == REQ_11 .or. req_id == REQ_M1) then
-                if (rmatched(g) .and. nright(g) > 1_int64) then
-                    call join_refuse_require("m:1", "right", "other_on=", rg_idx(rg_off(g)), &
-                        rg_idx(rg_off(g) + 1_int64), nright(g))
+                if (req_id == REQ_11 .or. req_id == REQ_M1) then
+                    if (rmatched(g) .and. nright(g) > 1_int64) bad_r = g
                 end if
+                if (bad_l /= 0_int64 .or. bad_r /= 0_int64) exit
+            end do
+            first_l(c) = bad_l
+            first_r(c) = bad_r
+        end do
+        !$omp end parallel do
+        bad_l = 0_int64
+        bad_r = 0_int64
+        do c = 1_int64, int(nt, int64)
+            if (first_l(c) /= 0_int64 .or. first_r(c) /= 0_int64) then
+                bad_l = first_l(c)
+                bad_r = first_r(c)
+                exit
             end if
         end do
+        if (bad_l == 0_int64 .and. bad_r == 0_int64) return
+        if (bad_l /= 0_int64 .and. (bad_r == 0_int64 .or. bad_l <= bad_r)) then
+            call join_refuse_require("1:m", "left", "on=", lg_idx(lg_off(bad_l)), &
+                lg_idx(lg_off(bad_l) + 1_int64), nleft(bad_l))
+        else
+            call join_refuse_require("m:1", "right", "other_on=", rg_idx(rg_off(bad_r)), &
+                rg_idx(rg_off(bad_r) + 1_int64), nright(bad_r))
+        end if
     end subroutine join_check_require
     !
     !> The `require=` abort, factored out so the two sides produce the same shape of message.
@@ -1269,7 +1525,7 @@ contains
     !! `biggest` is the largest single group's pair count, which is what makes a refused join
     !! actionable: "the join wanted 4 100 000 000 rows" is not, without "one key value has 64 000
     !! matches on each side".
-    subroutine join_count(how_id, nleft, nright, lmatched, rmatched, ngroups, nl, &
+    subroutine join_count(how_id, nleft, nright, lmatched, rmatched, ngroups, nl, nt, &
             n_pairs, n_lunm, n_runm, biggest, n_out)
         integer, intent(in) :: how_id            !! HOW_* token.
         integer(int64), intent(in) :: nleft(:)   !! left rows per group.
@@ -1278,40 +1534,77 @@ contains
         logical, intent(in) :: rmatched(:)       !! per group: its right rows found a match.
         integer(int64), intent(in) :: ngroups    !! number of groups.
         integer(int64), intent(in) :: nl         !! left rows.
+        integer, intent(in) :: nt                !! team; 1 is the serial loop.
         integer(int64), intent(out) :: n_pairs   !! matched left-right pairs.
         integer(int64), intent(out) :: n_lunm    !! left rows with no counterpart.
         integer(int64), intent(out) :: n_runm    !! right rows with no counterpart.
         integer(int64), intent(out) :: biggest   !! the largest group's pair count.
         integer(int64), intent(out) :: n_out     !! rows this `how` will emit.
-        integer(int64) :: g, prod
+        integer(int64) :: g, prod, c, glo, ghi, pp, pl, pr, pb, bad
+        integer(int64), allocatable :: part_pairs(:), part_lunm(:), part_runm(:), part_big(:), part_bad(:)
         character(len=32) :: tl, tr
         !
+        ! One contiguous range of groups per thread, each summed on its own through the same
+        ! guarded addition the total then goes through, so no addition anywhere is unguarded;
+        ! the overflowing PRODUCT is noted rather than raised inside the region, and raised
+        ! afterwards for the lowest such group, as the serial loop would have.
+        allocate(part_pairs(nt), part_lunm(nt), part_runm(nt), part_big(nt), part_bad(nt))
+        !$omp parallel do num_threads(nt) default(shared) private(c, g, glo, ghi, pp, pl, pr, pb, bad, prod) &
+        !$omp schedule(static) if (nt > 1)
+        do c = 1_int64, int(nt, int64)
+            glo = ((c - 1_int64) * ngroups) / int(nt, int64) + 1_int64
+            ghi = (c * ngroups) / int(nt, int64)
+            pp = 0_int64
+            pl = 0_int64
+            pr = 0_int64
+            pb = 0_int64
+            bad = 0_int64
+            do g = glo, ghi
+                if (lmatched(g)) then
+                    ! Guarded rather than trusted: a wrapped product would make n_out negative,
+                    ! the allocation fail somewhere unrelated, and the cause invisible. The
+                    ! division is one per group and only on the groups that contribute pairs.
+                    if (nleft(g) > huge(0_int64) / nright(g)) then
+                        if (bad == 0_int64) bad = g
+                        cycle
+                    end if
+                    prod = nleft(g) * nright(g)
+                    ! The SUM is guarded as well as the product: n_lunm and n_runm are bounded by
+                    ! the two row counts, but n_pairs is not, and a wrapped total would make n_out
+                    ! negative and the join return an empty pair list without a word.
+                    pp = join_add_checked(pp, prod)
+                    if (prod > pb) pb = prod
+                else
+                    pl = pl + nleft(g)
+                end if
+                if (.not. rmatched(g)) pr = pr + nright(g)
+            end do
+            part_pairs(c) = pp
+            part_lunm(c) = pl
+            part_runm(c) = pr
+            part_big(c) = pb
+            part_bad(c) = bad
+        end do
+        !$omp end parallel do
+        do c = 1_int64, int(nt, int64)
+            if (part_bad(c) /= 0_int64) then
+                g = part_bad(c)
+                write(tl, "(I0)") nleft(g)
+                write(tr, "(I0)") nright(g)
+                error stop EP // "join: one key value has " // trim(tl) // " rows on the " // &
+                    "left and " // trim(tr) // " on the right; their product overflows a " // &
+                    "64-bit row count. Deduplicate a side, or add require='m:1'."
+            end if
+        end do
         n_pairs = 0_int64
         n_lunm = 0_int64
         n_runm = 0_int64
         biggest = 0_int64
-        do g = 1_int64, ngroups
-            if (lmatched(g)) then
-                ! Guarded rather than trusted: a wrapped product would make n_out negative, the
-                ! allocation fail somewhere unrelated, and the cause invisible. The division is
-                ! one per group and only on the groups that actually contribute pairs.
-                if (nleft(g) > huge(0_int64) / nright(g)) then
-                    write(tl, "(I0)") nleft(g)
-                    write(tr, "(I0)") nright(g)
-                    error stop EP // "join: one key value has " // trim(tl) // " rows on the " // &
-                        "left and " // trim(tr) // " on the right; their product overflows a " // &
-                        "64-bit row count. Deduplicate a side, or add require='m:1'."
-                end if
-                prod = nleft(g) * nright(g)
-                ! The SUM is guarded as well as the product: n_lunm and n_runm are bounded by the
-                ! two row counts, but n_pairs is not, and a wrapped total would make n_out
-                ! negative and the join return an empty pair list without a word.
-                n_pairs = join_add_checked(n_pairs, prod)
-                if (prod > biggest) biggest = prod
-            else
-                n_lunm = n_lunm + nleft(g)
-            end if
-            if (.not. rmatched(g)) n_runm = n_runm + nright(g)
+        do c = 1_int64, int(nt, int64)
+            n_pairs = join_add_checked(n_pairs, part_pairs(c))
+            n_lunm = n_lunm + part_lunm(c)
+            n_runm = n_runm + part_runm(c)
+            if (part_big(c) > biggest) biggest = part_big(c)
         end do
         select case (how_id)
         case (HOW_LEFT)
@@ -1380,16 +1673,19 @@ contains
     end subroutine join_refuse_size
     !
     !> Fills `matched` over the PRE-join left rows -- the diagnostic a cross-match script prints.
-    subroutine join_fill_matched(group_of_left, lmatched, nl, matched)
+    subroutine join_fill_matched(group_of_left, lmatched, nl, nt, matched)
         integer(int64), intent(in) :: group_of_left(:) !! per left row: its group.
         logical, intent(in) :: lmatched(:)             !! per group: its left rows found a match.
         integer(int64), intent(in) :: nl               !! left rows.
+        integer, intent(in) :: nt                      !! team; 1 is the serial loop.
         logical, intent(out) :: matched(:)             !! per left row: it found a counterpart.
         integer(int64) :: i
         !
+        !$omp parallel do num_threads(nt) default(shared) private(i) schedule(static) if (nt > 1)
         do i = 1_int64, nl
             matched(i) = lmatched(group_of_left(i))
         end do
+        !$omp end parallel do
     end subroutine join_fill_matched
     !
     !> Phase D, `order="left"`: the left table's rows in their own order, matches within each.
@@ -1399,7 +1695,7 @@ contains
     !! one. Unmatched RIGHT rows have no place in a left-major walk, so they follow at the end in
     !! right-table order.
     subroutine join_emit_left_order(how_id, nl, group_of_left, lmatched, rmatched, &
-            rg_off, rg_idx, ngroups, il, ir)
+            rg_off, rg_idx, ngroups, nt, il, ir)
         integer, intent(in) :: how_id                  !! HOW_* token.
         integer(int64), intent(in) :: nl               !! left rows.
         integer(int64), intent(in) :: group_of_left(:) !! per left row: its group.
@@ -1408,47 +1704,117 @@ contains
         integer(int64), intent(in) :: rg_off(:)        !! group -> slice of rg_idx.
         integer(int64), intent(in) :: rg_idx(:)        !! right rows, grouped, ascending.
         integer(int64), intent(in) :: ngroups          !! number of groups.
+        integer, intent(in) :: nt                      !! team; 1 is the single-cursor loop.
         integer(int64), intent(out) :: il(:)           !! per output row: left row, or 0.
         integer(int64), intent(out) :: ir(:)           !! per output row: right row, or 0.
-        integer(int64) :: i, g, t, o
+        integer(int64) :: i, g, t, o, c, lo, hi, cnt
+        integer(int64), allocatable :: base(:)
         !
-        o = 0_int64
-        do i = 1_int64, nl
-            g = group_of_left(i)
-            if (lmatched(g)) then
-                if (how_id == HOW_ANTI) cycle
-                if (how_id == HOW_SEMI) then
+        if (nt <= 1 .or. nl < int(nt, int64)) then
+            o = 0_int64
+            do i = 1_int64, nl
+                g = group_of_left(i)
+                if (lmatched(g)) then
+                    if (how_id == HOW_ANTI) cycle
+                    if (how_id == HOW_SEMI) then
+                        o = o + 1_int64
+                        il(o) = i
+                        ir(o) = 0_int64
+                        cycle
+                    end if
+                    do t = rg_off(g), rg_off(g + 1_int64) - 1_int64
+                        o = o + 1_int64
+                        il(o) = i
+                        ir(o) = rg_idx(t)
+                    end do
+                else
+                    if (how_id == HOW_INNER .or. how_id == HOW_RIGHT .or. how_id == HOW_SEMI) cycle
                     o = o + 1_int64
                     il(o) = i
                     ir(o) = 0_int64
-                    cycle
                 end if
-                do t = rg_off(g), rg_off(g + 1_int64) - 1_int64
-                    o = o + 1_int64
-                    il(o) = i
-                    ir(o) = rg_idx(t)
+            end do
+        else
+            ! ON A TEAM: one contiguous range of left rows per thread, its output rows counted
+            ! first (the rule below is the one the single-cursor loop above applies), a serial
+            ! prefix over the ranges giving each its first output slot, then each range emitted
+            ! by its own cursor into its own slice. The count is a second sweep over the range,
+            ! reading `lmatched` and `rg_off` through `group_of_left` as the fill does -- on a
+            ! team it is split `nt` ways, which is why the serial arm is not written this way.
+            allocate(base(nt))
+            !$omp parallel do num_threads(nt) default(shared) private(c, lo, hi, i, g, cnt) schedule(static)
+            do c = 1_int64, int(nt, int64)
+                lo = ((c - 1_int64) * nl) / int(nt, int64) + 1_int64
+                hi = (c * nl) / int(nt, int64)
+                cnt = 0_int64
+                do i = lo, hi
+                    g = group_of_left(i)
+                    if (lmatched(g)) then
+                        if (how_id == HOW_ANTI) cycle
+                        if (how_id == HOW_SEMI) then
+                            cnt = cnt + 1_int64
+                        else
+                            cnt = cnt + (rg_off(g + 1_int64) - rg_off(g))
+                        end if
+                    else
+                        if (how_id == HOW_INNER .or. how_id == HOW_RIGHT .or. how_id == HOW_SEMI) cycle
+                        cnt = cnt + 1_int64
+                    end if
                 end do
-            else
-                if (how_id == HOW_INNER .or. how_id == HOW_RIGHT .or. how_id == HOW_SEMI) cycle
-                o = o + 1_int64
-                il(o) = i
-                ir(o) = 0_int64
-            end if
-        end do
+                base(c) = cnt
+            end do
+            !$omp end parallel do
+            o = 0_int64
+            do c = 1_int64, int(nt, int64)
+                cnt = base(c)
+                base(c) = o
+                o = o + cnt
+            end do
+            !$omp parallel do num_threads(nt) default(shared) private(c, lo, hi, i, g, t, cnt) schedule(static)
+            do c = 1_int64, int(nt, int64)
+                lo = ((c - 1_int64) * nl) / int(nt, int64) + 1_int64
+                hi = (c * nl) / int(nt, int64)
+                cnt = base(c)
+                do i = lo, hi
+                    g = group_of_left(i)
+                    if (lmatched(g)) then
+                        if (how_id == HOW_ANTI) cycle
+                        if (how_id == HOW_SEMI) then
+                            cnt = cnt + 1_int64
+                            il(cnt) = i
+                            ir(cnt) = 0_int64
+                            cycle
+                        end if
+                        do t = rg_off(g), rg_off(g + 1_int64) - 1_int64
+                            cnt = cnt + 1_int64
+                            il(cnt) = i
+                            ir(cnt) = rg_idx(t)
+                        end do
+                    else
+                        if (how_id == HOW_INNER .or. how_id == HOW_RIGHT .or. how_id == HOW_SEMI) cycle
+                        cnt = cnt + 1_int64
+                        il(cnt) = i
+                        ir(cnt) = 0_int64
+                    end if
+                end do
+            end do
+            !$omp end parallel do
+        end if
         if (how_id /= HOW_RIGHT .and. how_id /= HOW_OUTER) return
         ! The unmatched right rows, in right-table order. Walked group by group and then sorted
         ! back into row order by construction: rg_idx is ascending WITHIN a group but not across
         ! groups, so a plain walk would emit them in key order instead. A counting sweep over the
         ! right rows is the cheapest way to keep the promise the argument name makes.
-        call join_emit_unmatched_right(rmatched, rg_off, rg_idx, ngroups, o, il, ir)
+        call join_emit_unmatched_right(rmatched, rg_off, rg_idx, ngroups, nt, o, il, ir)
     end subroutine join_emit_left_order
     !
     !> Appends every right row with no counterpart, in RIGHT-TABLE order.
-    subroutine join_emit_unmatched_right(rmatched, rg_off, rg_idx, ngroups, o, il, ir)
+    subroutine join_emit_unmatched_right(rmatched, rg_off, rg_idx, ngroups, nt, o, il, ir)
         logical, intent(in) :: rmatched(:)       !! per group: its right rows found a match.
         integer(int64), intent(in) :: rg_off(:)  !! group -> slice of rg_idx.
         integer(int64), intent(in) :: rg_idx(:)  !! right rows, grouped.
         integer(int64), intent(in) :: ngroups    !! number of groups.
+        integer, intent(in) :: nt                !! team for the mark pass; the sweep is serial.
         integer(int64), intent(inout) :: o       !! output cursor; advanced by what is emitted.
         integer(int64), intent(out) :: il(:)     !! per output row: left row, or 0.
         integer(int64), intent(out) :: ir(:)     !! per output row: right row, or 0.
@@ -1457,12 +1823,15 @@ contains
         !
         allocate(unm(max(size(rg_idx, kind=int64), 1_int64)))
         unm = .false.
+        ! Every right row is in exactly one group, so the marks are disjoint writes.
+        !$omp parallel do num_threads(nt) default(shared) private(g, t) schedule(static) if (nt > 1)
         do g = 1_int64, ngroups
             if (rmatched(g)) cycle
             do t = rg_off(g), rg_off(g + 1_int64) - 1_int64
                 unm(rg_idx(t)) = .true.
             end do
         end do
+        !$omp end parallel do
         do r = 1_int64, size(rg_idx, kind=int64)
             if (.not. unm(r)) cycle
             o = o + 1_int64

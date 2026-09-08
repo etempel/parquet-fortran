@@ -853,8 +853,10 @@ contains
         do k = 1_int64, nrows
             perm(k) = k
         end do
+        if (present(resolved_threads)) resolved_threads = 1_int64
         if (nrows < 2_int64) return
         call resolve_thread_count(threads, nrows, nthreads)
+        if (present(resolved_threads)) resolved_threads = nthreads
         ! Resolved HERE, never in C++: the boundary carries a real count, never a "0 means all"
         ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
         gek = int(size(keys), int64)
@@ -883,6 +885,7 @@ contains
     !
     module procedure drive_engine_grouped
         integer(c_int8_t), allocatable :: tie(:)
+        integer(int64) :: nt !! the builder's resolved count, for the offsets pass.
         !
         if (.not. present(group_offsets)) then
             ! Nothing to report, so nothing is given up: this is drive_engine exactly, one-shot
@@ -891,13 +894,64 @@ contains
             call drive_engine(keys, nrows, proc, perm, threads=threads)
             return
         end if
-        call engine_build_runs(keys, nrows, proc, perm, tie, threads=threads, group_ekeys=group_ekeys)
-        call runs_to_offsets(tie, nrows, group_offsets)
+        call engine_build_runs(keys, nrows, proc, perm, tie, threads=threads, group_ekeys=group_ekeys, &
+            resolved_threads=nt)
+        ! The count the builder resolved, handed on rather than resolved a second time: one
+        ! resolution per call is what keeps the sort, the tie pass and this pass on one team,
+        ! and a second `resolve_thread_count` would re-run the affinity clamp for nothing.
+        call runs_to_offsets(tie, nrows, group_offsets, nt)
     end procedure drive_engine_grouped
     !
     module procedure runs_to_offsets
-        integer(int64) :: k, ngroups, pos
+        integer(int64) :: k, ngroups, pos, c, lo, hi, chunk
+        integer(int64), allocatable :: cnt(:) !! per chunk: its groups, then its first slot.
+        integer :: team
         !
+        team = 1
+        if (present(nthreads)) team = tail_team(nthreads, nrows)
+        dbg_sort_offsets_threads_used = int(team, int64)
+        if (team > 1) then
+            ! Three passes on a team: each chunk of ROWS counts the groups that start inside it,
+            ! a serial prefix over the chunks turns the counts into each chunk's first slot, and
+            ! each chunk fills its own slice. No two chunks write one slot, and the answer is the
+            ! serial one below exactly. Chunked by rows rather than by group so that a long run
+            ! of ties costs its thread only the flags it reads.
+            chunk = (nrows + int(team, int64) - 1_int64) / int(team, int64)
+            allocate(cnt(team))
+            !$omp parallel do num_threads(team) default(shared) private(c, k, lo, hi, pos) schedule(static)
+            do c = 1_int64, int(team, int64)
+                lo = (c - 1_int64) * chunk + 1_int64
+                hi = min(c * chunk, nrows)
+                pos = 0_int64
+                do k = lo, hi
+                    if (tie(k) == 0_c_int8_t) pos = pos + 1_int64
+                end do
+                cnt(c) = pos
+            end do
+            !$omp end parallel do
+            ngroups = 0_int64
+            do c = 1_int64, int(team, int64)
+                pos = cnt(c)
+                cnt(c) = ngroups
+                ngroups = ngroups + pos
+            end do
+            allocate(offsets(ngroups + 1_int64))
+            !$omp parallel do num_threads(team) default(shared) private(c, k, lo, hi, pos) schedule(static)
+            do c = 1_int64, int(team, int64)
+                lo = (c - 1_int64) * chunk + 1_int64
+                hi = min(c * chunk, nrows)
+                pos = cnt(c)
+                do k = lo, hi
+                    if (tie(k) == 0_c_int8_t) then
+                        pos = pos + 1_int64
+                        offsets(pos) = k
+                    end if
+                end do
+            end do
+            !$omp end parallel do
+            offsets(ngroups + 1_int64) = nrows + 1_int64
+            return
+        end if
         ! Bounded by nrows, NEVER by size(tie): engine_build_runs allocates tie with a
         ! max(nrows, 1) floor, so a zero-row sort leaves one element in it that describes no row
         ! and would otherwise be counted as a group.

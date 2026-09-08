@@ -941,6 +941,8 @@ scenarios=(
     "join_require_1m:1"
     "join_require_m1_hash:1"
     "join_require_1m_hash:1"
+    "join_require_m1_threaded:1"
+    "join_require_1m_threaded:1"
     "join_max_rows_hash:1"
     "join_max_rows_arr_i32_hash:1"
     "join_max_rows_arr_i64_hash:1"

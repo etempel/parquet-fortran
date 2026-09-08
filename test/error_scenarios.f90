@@ -1110,6 +1110,10 @@ program error_scenarios
         call scenario_join_engine_twin("hash", "require_m1")
     case ("join_require_1m_hash")
         call scenario_join_engine_twin("hash", "require_1m")
+    case ("join_require_m1_threaded")
+        call scenario_join_engine_twin("sort", "require_m1", threads=4)
+    case ("join_require_1m_threaded")
+        call scenario_join_engine_twin("sort", "require_1m", threads=4)
     case ("join_max_rows_hash")
         call scenario_join_engine_twin("hash", "max_rows")
     case ("join_max_rows_arr_i32_hash")
@@ -19703,15 +19707,16 @@ contains
     !> `require="m:1"` asserts the RIGHT key is unique -- the lookup-table annotation, and the one
     !! that turns "the output is 40x the size you expected" into a named error at the call site.
     !! The unique right key first is the control.
-    subroutine scenario_join_require_m1()
+    subroutine scenario_join_require_m1(threads)
+        integer, intent(in), optional :: threads !! forwarded to both joins; absent = automatic.
         type(parquet_table) :: a, b, w
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call join_fixture(b, [20_int64, 30_int64])
         call a%clone(w)
-        call w%join(b, ["id"], require="m:1")
+        call w%join(b, ["id"], require="m:1", threads=threads)
         print '(a,i0)', "a unique right key satisfied require=m:1, rows=", w%nrows()
         call join_fixture(b, [20_int64, 20_int64])
-        call a%join(b, ["id"], require="m:1")
+        call a%join(b, ["id"], require="m:1", threads=threads)
         print '(a,i0)', "unexpectedly accepted a duplicate right key, rows=", a%nrows()
     end subroutine scenario_join_require_m1
 
@@ -19772,14 +19777,15 @@ contains
     !> `require="1:m"` asserts the LEFT key is unique -- the mirror of `join_require_m1`, and the
     !! branch that scenario cannot reach, since the two sides are separate call sites. A left
     !! table with no duplicate is the control.
-    subroutine scenario_join_require_1m()
+    subroutine scenario_join_require_1m(threads)
+        integer, intent(in), optional :: threads !! forwarded to both joins; absent = automatic.
         type(parquet_table) :: a, b
         call join_fixture(a, [10_int64, 20_int64])
         call join_fixture(b, [10_int64, 10_int64])
-        call a%join(b, "id", require="1:m")
+        call a%join(b, "id", require="1:m", threads=threads)
         print '(a,i0)', "a unique left key satisfied require=1:m, rows=", a%nrows()
         call join_fixture(a, [10_int64, 10_int64, 20_int64])
-        call a%join(b, "id", require="1:m")   ! -> aborts (two left rows share key 10)
+        call a%join(b, "id", require="1:m", threads=threads)   ! -> aborts (two left rows share key 10)
         print '(a,i0)', "unexpectedly accepted a duplicate left key, rows=", a%nrows()
     end subroutine scenario_join_require_1m
 
@@ -19797,10 +19803,17 @@ contains
     !! scenario's abort came -- without that line, a twin whose hook did nothing would pass on
     !! the other engine's abort. The hook is reached through a local `bind(C)` interface, as every
     !! `parquet_debug_*` hook is.
-    subroutine scenario_join_engine_twin(engine, which)
+    !!
+    !! **With `threads`, the sort engine's cardinality check is driven on a TEAM**: the tail floor
+    !! is lowered so a three-row fixture opens one, a control join prints the team the engine's
+    !! group passes recorded, and the base scenario's joins take the same `threads=` -- so the
+    !! abort that follows comes from the chunked check and its post-region raise, which the
+    !! serial twin never reaches. The wrapper asserts the printed team as it asserts the engine.
+    subroutine scenario_join_engine_twin(engine, which, threads)
         use iso_c_binding, only : c_int64_t
         character(len=*), intent(in) :: engine !! "sort" or "hash".
         character(len=*), intent(in) :: which  !! the base scenario, by the tail of its name.
+        integer, intent(in), optional :: threads !! a team for the base scenario's joins.
         interface
             subroutine set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
                 import :: c_int64_t
@@ -19810,6 +19823,10 @@ contains
                 import :: c_int64_t
                 integer(c_int64_t) :: e !! the engine the last join ran on.
             end function join_engine_used
+            function join_group_threads() result(n) bind(C, name="parquet_debug_get_join_group_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: n !! the team the sort engine's group passes ran on.
+            end function join_group_threads
         end interface
         type(parquet_table) :: a, b
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
@@ -19825,11 +19842,17 @@ contains
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call a%join(b, ["id"])
         print '(a,i0)', "join engine used with the hook set=", join_engine_used()
+        if (present(threads)) then
+            call parquet_debug_set_sort_tail_min_rows(1_int64)
+            call join_fixture(a, [10_int64, 20_int64, 30_int64])
+            call a%join(b, ["id"], threads=threads)
+            print '(a,i0)', "join group passes team=", join_group_threads()
+        end if
         select case (which)
         case ("require_m1")
-            call scenario_join_require_m1()
+            call scenario_join_require_m1(threads)
         case ("require_1m")
-            call scenario_join_require_1m()
+            call scenario_join_require_1m(threads)
         case ("max_rows")
             call scenario_join_max_rows()
         case ("max_rows_arr_i32")

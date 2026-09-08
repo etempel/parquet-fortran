@@ -103,6 +103,25 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: mode !! 0, 1 or 2.
         end subroutine parquet_debug_set_colwork_level
+        !> The team the sort engine's passes over the runs ran on for the last join; 0 after a
+        !! hash-engine join, which has no such passes.
+        function parquet_debug_get_join_group_threads_used() result(res) &
+            bind(C, name="parquet_debug_get_join_group_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! the team; 1 means serial, 0 the hash engine.
+        end function parquet_debug_get_join_group_threads_used
+        !> The team the last join's two side-index passes ran on, whatever its engine.
+        function parquet_debug_get_join_side_threads_used() result(res) &
+            bind(C, name="parquet_debug_get_join_side_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! the team; 1 means serial.
+        end function parquet_debug_get_join_side_threads_used
+        !> Forces the join's pair-list engine: 0 automatic, 1 the sort engine, 2 the hash engine.
+        subroutine parquet_debug_set_join_engine(mode) &
+            bind(C, name="parquet_debug_set_join_engine")
+            import :: c_int64_t
+            integer(c_int64_t), value :: mode !! 0, 1 or 2.
+        end subroutine parquet_debug_set_join_engine
         !> Threads the last internally-parallel PREFETCH was given; 0 when it ran serially.
         function parquet_debug_get_prefetch_threads_used() result(res) &
             bind(C, name="parquet_debug_get_prefetch_threads_used")
@@ -194,6 +213,8 @@ contains
                 test_has_nulls_survives_concurrent_null), &
             new_unittest("a join's threads= reaches the sort and not the column rewrite", &
                 test_join_thread_split), &
+            new_unittest("a join's group passes and its side index run on the join's team", &
+                test_join_group_passes_threads), &
             new_unittest("a gather's team goes inside the column when the columns are fewer than the threads", &
                 test_colwork_level_rule), &
             new_unittest("bounded= reads correctly through both parallel paths", &
@@ -2209,6 +2230,220 @@ contains
             "and this is the mirror of arm 3")
 #endif
     end subroutine test_join_thread_split
+    !
+    !> **The sort engine's passes over the runs, and the side-index passes of the apply, run on
+    !! the join's team -- and give the serial answer.** Since feature_join.md stage 5 the sort
+    !! engine resolves ONE team by the sort's own rule and runs the classification, the
+    !! cardinality check, the counting, `matched=` and the left-order emission on it, and
+    !! `join_apply` turns the pair list into gather indices on the same team. Nothing in a result
+    !! can see any of that -- the pair list is identical at every team size -- so the two records
+    !! `parquet_debug_get_join_group_threads_used` and `parquet_debug_get_join_side_threads_used`
+    !! are the only observables, and the A/B against `threads=1` is what proves the threaded
+    !! passes right (feature_risks.md Risk-189, Risk-220).
+    !!
+    !! **Five arms.** `threads=1` on the sort engine pins both records to 1; `threads=nt` records
+    !! nt in both; `parquet_set_table_threads(1)` moves neither -- the mirror of the thread-split
+    !! test's arm 3; the hash engine records 0 for the group passes it does not have and nt for
+    !! the side index; and every `how` under both orderings, joined with `threads=nt`, equals the
+    !! same join with `threads=1` -- rows, values, nulls, the carried column, `matched=` and both
+    !! pair lists. The fixture has duplicate keys on both sides, a null key on each, and rows that
+    !! match nothing on either, so every branch of the classification, the counting and the
+    !! emission runs. The sort engine is forced through the hook for the `order="left"` arms (the
+    !! automatic choice is the hash engine) and the tail floor is lowered so the passes over an
+    !! anti join's few output rows still open the team; both are restored, and the A/B's verdict
+    !! is carried in a string, so that no `check` can return with either still in force.
+    subroutine test_join_group_passes_threads(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: NL = 3000, NR = 2000 !! rows a side; every branch below is reached.
+        type(parquet_table) :: a, b, c
+        integer(int32) :: lk(NL), ln(NL), rk(NR), rp(NR)
+        logical :: lvalid(NL), rvalid(NR)
+        integer :: nt, i, h, o
+        integer(int64) :: g_one, s_one, g_nt, s_nt, g_cap, s_cap, g_hash, s_hash
+        logical, allocatable :: gm(:), wm(:)
+        integer(int64), allocatable :: gp(:), wp(:), gq(:), wq(:)
+        character(len=8) :: hows(6), ords(2)
+        character(len=:), allocatable :: fail
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: no pass here can open a team, so every record would " // &
+            "read 1 and the A/B would compare serial against serial")
+        return
+#else
+        nt = min(4, omp_get_num_procs())
+        if (nt < 2) then
+            call skip_test(error, "needs at least two processors: both engines clamp an explicit " // &
+                "threads= to omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+#endif
+        hows = [character(len=8) :: "inner", "left", "right", "outer", "semi", "anti"]
+        ords = [character(len=8) :: "left", "key"]
+        ! Left keys 0..1399, about twice each; right keys 300..1699, about once or twice each:
+        ! so 0..299 match nothing on the left, 1400..1699 nothing on the right, the overlap has
+        ! duplicates on both sides, and every 97th left and 89th right key is null.
+        do i = 1, NL
+            lk(i) = int(mod(i * 7919, 1400), int32)
+            ln(i) = int(i, int32)
+            lvalid(i) = mod(i, 97) /= 0
+        end do
+        do i = 1, NR
+            rk(i) = int(300 + mod(i * 104729, 1400), int32)
+            rp(i) = int(i, int32)
+            rvalid(i) = mod(i, 89) /= 0
+        end do
+        call build_keyed_table(b, rk, "p", rp, rvalid)
+        !
+        ! Lowered and forced around every join, and restored BEFORE the first assertion.
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
+        call parquet_debug_set_join_engine(1_c_int64_t)
+        ! ---- Arm 1: threads=1 pins both records to 1, so every later read is discriminating.
+        call build_keyed_table(a, lk, "n", ln, lvalid)
+        call a%join(b, "k", how="left", threads=1)
+        g_one = parquet_debug_get_join_group_threads_used()
+        s_one = parquet_debug_get_join_side_threads_used()
+        ! ---- Arm 2: threads=nt reaches both.
+        call build_keyed_table(a, lk, "n", ln, lvalid)
+        call a%join(b, "k", how="left", threads=nt)
+        g_nt = parquet_debug_get_join_group_threads_used()
+        s_nt = parquet_debug_get_join_side_threads_used()
+        ! ---- Arm 3: the column cap moves neither.
+        call build_keyed_table(a, lk, "n", ln, lvalid)
+        call parquet_set_table_threads(1)
+        call a%join(b, "k", how="left", threads=nt)
+        g_cap = parquet_debug_get_join_group_threads_used()
+        s_cap = parquet_debug_get_join_side_threads_used()
+        call parquet_reset_settings()
+        ! ---- Arm 4: the hash engine.
+        call parquet_debug_set_join_engine(2_c_int64_t)
+        call build_keyed_table(a, lk, "n", ln, lvalid)
+        call a%join(b, "k", how="left", threads=nt)
+        g_hash = parquet_debug_get_join_group_threads_used()
+        s_hash = parquet_debug_get_join_side_threads_used()
+        ! ---- Arm 5: the A/B, every how under both orderings, on the sort engine.
+        call parquet_debug_set_join_engine(1_c_int64_t)
+        fail = ""
+        outer: do h = 1, 6
+            do o = 1, 2
+                call build_keyed_table(a, lk, "n", ln, lvalid)
+                call a%join(b, "k", how=trim(hows(h)), order=trim(ords(o)), threads=nt, &
+                    matched=gm, pairs=gp, other_pairs=gq)
+                call build_keyed_table(c, lk, "n", ln, lvalid)
+                call c%join(b, "k", how=trim(hows(h)), order=trim(ords(o)), threads=1, &
+                    matched=wm, pairs=wp, other_pairs=wq)
+                call compare_joined(a, c, gm, wm, gp, wp, gq, wq, &
+                    "how=" // trim(hows(h)) // " order=" // trim(ords(o)), fail)
+                if (len(fail) > 0) exit outer
+            end do
+        end do outer
+        call parquet_debug_set_join_engine(0_c_int64_t)
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        !
+        call check(error, g_one == 1_int64 .and. s_one == 1_int64, &
+            "threads=1 must run the sort engine's group passes and the side-index passes " // &
+            "serially, pinning both records to 1 -- or the reads that follow could see a team " // &
+            "an earlier join left behind")
+        if (allocated(error)) return
+        call check(error, g_nt == int(nt, int64), &
+            "threads= must reach the sort engine's group passes: the engine resolves the team " // &
+            "the sort's own rule gives and runs the classification, the counting, the " // &
+            "cardinality check and the emission on it")
+        if (allocated(error)) return
+        call check(error, s_nt == int(nt, int64), &
+            "threads= must reach the side-index passes: join_apply is handed the engine's team")
+        if (allocated(error)) return
+        call check(error, g_cap == int(nt, int64) .and. s_cap == int(nt, int64), &
+            "parquet_set_table_threads must NOT move the group passes' team or the side index's " // &
+            "-- it caps the column work, and this is the mirror of the thread-split test's arm 3")
+        if (allocated(error)) return
+        call check(error, g_hash == 0_int64, &
+            "a hash-engine join must record 0 for the group passes it does not have -- a team " // &
+            "left by an earlier sort-engine join would otherwise read as this join's")
+        if (allocated(error)) return
+        call check(error, s_hash == int(nt, int64), &
+            "the side-index passes must run on the hash engine's team too: join_apply is handed " // &
+            "that engine's team as it is handed the sort engine's")
+        if (allocated(error)) return
+        call check(error, len(fail) == 0, &
+            "the threaded sort-engine join must equal the serial one: " // fail)
+    end subroutine test_join_group_passes_threads
+    !
+    !> A two-column int32 table -- the key `k`, nulled where `valid` is .false., and one more
+    !! column -- for the group-pass test's two sides.
+    subroutine build_keyed_table(t, keys, oname, other, valid)
+        type(parquet_table), intent(out) :: t         !! receives the table.
+        integer(int32), intent(in) :: keys(:)         !! the `k` column's values.
+        character(len=*), intent(in) :: oname         !! the other column's name.
+        integer(int32), intent(in) :: other(:)        !! its values.
+        logical, intent(in) :: valid(:)               !! validity of `k`, per row.
+        !
+        call parquet_new_table(t)
+        call t%add_column("k", keys)
+        call t%add_column(oname, other)
+        call t%set_null("k", valid)
+    end subroutine build_keyed_table
+    !
+    !> Compares two joined tables of `build_keyed_table` rows and everything a join reports
+    !! beside them: row and column counts, every column of the three that is present (values
+    !! where valid, and the validity itself), `matched=`, `pairs=` and `other_pairs=`. `fail`
+    !! is empty when they agree and names the first difference otherwise -- a string rather
+    !! than a `check`, so the caller can restore its hooks before asserting.
+    subroutine compare_joined(got, want, gm, wm, gp, wp, gq, wq, what, fail)
+        type(parquet_table), intent(inout) :: got     !! the table joined on a team.
+        type(parquet_table), intent(inout) :: want    !! the table joined serially.
+        logical, intent(in) :: gm(:), wm(:)           !! the two `matched=` answers.
+        integer(int64), intent(in) :: gp(:), wp(:)    !! the two `pairs=` answers.
+        integer(int64), intent(in) :: gq(:), wq(:)    !! the two `other_pairs=` answers.
+        character(len=*), intent(in) :: what          !! the arm, for the message.
+        character(len=:), allocatable, intent(out) :: fail !! empty, or the first difference.
+        character(len=1), parameter :: cols(3) = ["k", "n", "p"]
+        integer(int32), allocatable :: gv(:), wv(:)
+        logical, allocatable :: gvalid(:), wvalid(:)
+        integer :: j
+        !
+        fail = ""
+        if (got%nrows() /= want%nrows()) then
+            fail = what // ": the row counts differ"
+            return
+        end if
+        if (got%ncols() /= want%ncols()) then
+            fail = what // ": the column counts differ"
+            return
+        end if
+        do j = 1, size(cols)
+            if (.not. want%has_column(cols(j))) cycle
+            if (.not. got%has_column(cols(j))) then
+                fail = what // ": column " // cols(j) // " is missing on the team"
+                return
+            end if
+            call got%get(cols(j), gv, is_valid=gvalid)
+            call want%get(cols(j), wv, is_valid=wvalid)
+            if (any(gvalid .neqv. wvalid)) then
+                fail = what // ": the nulls of column " // cols(j) // " differ"
+                return
+            end if
+            if (any(gv /= wv .and. gvalid)) then
+                fail = what // ": the values of column " // cols(j) // " differ"
+                return
+            end if
+        end do
+        if (size(gm) /= size(wm)) then
+            fail = what // ": matched= has a different length"
+            return
+        end if
+        if (any(gm .neqv. wm)) then
+            fail = what // ": matched= differs"
+            return
+        end if
+        if (size(gp) /= size(wp) .or. size(gq) /= size(wq)) then
+            fail = what // ": the pair lists have different lengths"
+            return
+        end if
+        if (any(gp /= wp) .or. any(gq /= wq)) then
+            fail = what // ": the pair lists differ"
+            return
+        end if
+    end subroutine compare_joined
     !
     !> **Where a gather's team goes is a rule, and this pins it in both directions.** `colwork_plan`
     !! (`src/parquet_tables_parallel.f90`) spends a gather's team ACROSS the columns when there are

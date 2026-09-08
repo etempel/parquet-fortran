@@ -4626,6 +4626,36 @@ extern "C"
 		return g_debug_join_engine_used;
 	}
 
+	// Test-only: the team the SORT engine's own passes over the runs -- the classification, the
+	// cardinality check, the counting, matched= and the left-order emission -- ran on for the last
+	// join, written by that engine's body on every route (1 when it ran serially) and as 0 by the
+	// hash engine, which has no such passes. And the team join_apply's two side-index passes ran
+	// on, written on every join whatever the engine. The pair list is identical at every team
+	// size, so these records are the only observation that `threads=` reached the passes at all
+	// (feature_risks.md Risk-189); std::atomic for the reason g_debug_join_engine_used is.
+	static std::atomic<int64_t> g_debug_join_group_threads_used{0};
+	static std::atomic<int64_t> g_debug_join_side_threads_used{0};
+
+	void parquet_debug_set_join_group_threads_used(int64_t n)
+	{
+		g_debug_join_group_threads_used = n;
+	}
+
+	int64_t parquet_debug_get_join_group_threads_used(void)
+	{
+		return g_debug_join_group_threads_used;
+	}
+
+	void parquet_debug_set_join_side_threads_used(int64_t n)
+	{
+		g_debug_join_side_threads_used = n;
+	}
+
+	int64_t parquet_debug_get_join_side_threads_used(void)
+	{
+		return g_debug_join_side_threads_used;
+	}
+
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		g_debug_last_use_threads = use_threads;

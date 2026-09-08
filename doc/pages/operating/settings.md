@@ -173,8 +173,8 @@ simultaneous.
 `threads=`. It covers every sort in the library at once — `pf_sort`/`pf_argsort` and friends, a
 read-time `parquet_open_reader(..., sort_by=)`, and `parquet_table%sort_by` — because all three run
 on one engine and ask one question. A `%join` that builds its match on that engine —
-`order="key"`, a logical key, a string key beside another — sorts under it too; every other join
-answers to `index_threads` below (see
+`order="key"`, a logical key, a string key beside another — sorts under it too, and runs its passes
+over the sorted runs on the same team; every other join answers to `index_threads` below (see
 [How the match is built](../tables/table-join.html#how-the-match-is-built)).
 
 **It also governs the threaded statistics**, which is why there is no `stats_threads` beside it.

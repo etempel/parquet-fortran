@@ -239,6 +239,7 @@ DEBUG_HOOKS = [
     "parquet_debug_sort_refine_runs", "parquet_debug_set_sort_split_min_card",
     "parquet_debug_set_sort_radix_fail_alloc", "parquet_debug_reset_sort_radix_passes",
     "parquet_debug_sort_radix_passes", "parquet_debug_sort_threads_used",
+    "parquet_debug_sort_tie_threads_used", "parquet_debug_sort_offsets_threads_used",
     "parquet_debug_sort_split_buckets", "parquet_debug_sort_design",
 ]
 
@@ -743,6 +744,8 @@ module parquet_sorting
     public :: parquet_debug_reset_sort_radix_passes
     public :: parquet_debug_sort_radix_passes
     public :: parquet_debug_sort_threads_used
+    public :: parquet_debug_sort_tie_threads_used
+    public :: parquet_debug_sort_offsets_threads_used
     public :: parquet_debug_sort_split_buckets
     public :: parquet_debug_sort_design
     !
@@ -932,6 +935,15 @@ module parquet_sorting
     !! this one, and that repointing is the whole of Group 2 in `feature_sort.md` §6 Stage 6, 6a --
     !! the three failures that reversed the stage ordering. Repoint them; do not delete them.
     integer(int64), save :: dbg_sort_threads_used = 1_int64
+    !> Threads the last tie pass (`sort_build_runs_permutation`) ran on; 1 = serial. Written on
+    !! every run detection, so a test reads the pass it just asked for. The same reasoning as
+    !! `dbg_sort_threads_used`: the flags are identical at every team size, so this is the only
+    !! thing that can see whether the pass threaded -- feature_risks.md Risk-189.
+    integer(int64), save :: dbg_sort_tie_threads_used = 1_int64
+    !> Threads the last `runs_to_offsets` ran on; 1 = serial. Its own record rather than a
+    !! share of the tie pass's, because the two are handed the count separately -- a driver
+    !! that drops it on the way to one and not the other has to be visible (Risk-189's shape).
+    integer(int64), save :: dbg_sort_offsets_threads_used = 1_int64
     !> Buckets Design B's split produced on the last permutation build; 0 means B did not run.
     !!
     !! Stage 4, and the same reasoning as `dbg_sort_threads_used`: Design B and the serial LSD loop
@@ -1493,10 +1505,18 @@ module parquet_sorting
     w("        !> Turns `engine_build_runs`' tie flags into the offsets `group_offsets` promises:")
     w("        !! length `ngroups + 1`, last entry `nrows + 1`, so group g is `perm(o(g):o(g+1)-1)`")
     w("        !! for every g with no last-iteration special case.")
-    w("        module subroutine runs_to_offsets(tie, nrows, offsets)")
+    w("        !!")
+    w("        !! On a team (`nthreads` above 1 and `nrows` past `tail_team`'s floor) the flags are")
+    w("        !! counted per chunk of rows, the chunk starts prefixed, and each chunk fills its own")
+    w("        !! slice -- the answer is the serial one exactly, and")
+    w("        !! `parquet_debug_sort_offsets_threads_used` reports the team.")
+    w("        module subroutine runs_to_offsets(tie, nrows, offsets, nthreads)")
     w("            integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the previous one.")
     w("            integer(int64), intent(in) :: nrows     !! rows sorted; `tie` may be longer.")
     w("            integer(int64), allocatable, intent(out) :: offsets(:) !! the group offsets.")
+    w("            !> resolved thread count (`resolve_thread_count`'s answer, never a request); absent")
+    w("            !! or 1 runs serially.")
+    w("            integer(int64), intent(in), optional :: nthreads")
     w("        end subroutine runs_to_offsets")
     w("        !> Resolves how many threads a sort should use. **This is the only place the auto rule")
     w("        !! lives**, and the only place in this module carrying OpenMP plumbing at all -- the")
@@ -1632,7 +1652,7 @@ module parquet_sorting
     w("        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output")
     w("        !! position k holds a row comparing equal to the one before it. One call, because")
     w("        !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.")
-    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads, group_ekeys)")
+    w("        module subroutine engine_build_runs(keys, nrows, proc, perm, tie, threads, group_ekeys, resolved_threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
     w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
@@ -1644,6 +1664,11 @@ module parquet_sorting
     w("            !! differ because one `%add` of a `parquet_timestamp` contributes two engine keys.")
     w("            !! The sort itself always uses every key; only the tie test is narrowed.")
     w("            integer, intent(in), optional :: group_ekeys")
+    w("            !> Receives the count `resolve_thread_count` produced, for a caller's own pass over")
+    w("            !! the result (`drive_engine_grouped` hands it to `runs_to_offsets`); 1 for fewer")
+    w("            !! than two rows, where nothing is resolved. Resolved once and handed to every")
+    w("            !! branch, which is the rule feature_risks.md Risk-189 states.")
+    w("            integer(int64), intent(out), optional :: resolved_threads")
     w("        end subroutine engine_build_runs")
     W.to_a = False
     w("        !> Binary-searches `keys`, whose LAST row is the target the caller appended.")
@@ -2852,12 +2877,16 @@ def emit_engine_interfaces(w):
     w("        !! `group_keys` is how many LEADING keys decide a tie; the sort itself always uses every")
     w("        !! key. That asymmetry is what produces \"grouped by field, ordered within group\".")
     w("        !!")
-    w("        !! **The SORT half is threaded and the tie half is not**, which is deliberate and matches")
-    w("        !! `parquet_sort_builder_build_runs` (`src/parquet_wrapper.cpp`) statement for statement --")
-    w("        !! the C++ engine has always built its permutation with the threaded builder and then")
-    w("        !! walked the flags serially. Keeping the two structurally identical is what lets the")
-    w("        !! engine A/B in `test/test_sorting_cpp.f90` mean anything. Threading the tie pass would")
-    w("        !! be a divergence from that reference and needs its own measurement, not a tidy-up.")
+    w("        !! **Both halves are threaded on `nthreads`**: the sort through")
+    w("        !! `sort_build_permutation_threaded`, the tie pass as one static `parallel do` over the")
+    w("        !! output positions past `tail_team`'s floor. The flags are a pure function of `perm` --")
+    w("        !! each is one comparison of the two rows the permutation names -- so the pass has no")
+    w("        !! shared state and gives the serial answer exactly. `parquet_sort_builder_build_runs`")
+    w("        !! (`src/parquet_wrapper.cpp`) still walks its flags serially after its threaded build,")
+    w("        !! and the engine A/B in `test/test_sorting_cpp.f90` compares that walk against this")
+    w("        !! pass on a team -- which is what the A/B rests on now, rather than the two being")
+    w("        !! statement-for-statement identical. `parquet_debug_sort_tie_threads_used` reports the")
+    w("        !! team, since no answer can.")
     w("        module subroutine sort_build_runs_permutation(keys, n, group_keys, nthreads, perm, tie)")
     w("            type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.")
     w("            integer(int64), intent(in) :: n            !! rows.")
@@ -3089,6 +3118,22 @@ def emit_engine_interfaces(w):
     w("        module function parquet_debug_sort_threads_used() result(n)")
     w("            integer(int64) :: n !! threads resolved for the last build; 1 means serial.")
     w("        end function parquet_debug_sort_threads_used")
+    w("        !> Test-only count of threads the last tie pass -- the run detection of")
+    w("        !! `sort_build_runs_permutation`, behind `pf_unique`, `pf_rank`, `pf_match` and the")
+    w("        !! grouped `pf_argsort` -- ran on; 1 = serial. The flags are identical at every team")
+    w("        !! size, so this is what makes a threading test of that pass non-vacuous, and it is")
+    w("        !! separate from `parquet_debug_sort_threads_used` because the sort and the pass are")
+    w("        !! handed the count separately. Says nothing about the C++ engine, whose walk is")
+    w("        !! serial.")
+    w("        module function parquet_debug_sort_tie_threads_used() result(n)")
+    w("            integer(int64) :: n !! threads the last tie pass ran on; 1 means serial.")
+    w("        end function parquet_debug_sort_tie_threads_used")
+    w("        !> Test-only count of threads the last `runs_to_offsets` ran on; 1 = serial. The")
+    w("        !! offsets are identical at every team size, so this is the only observation that the")
+    w("        !! resolved count reached the pass at all.")
+    w("        module function parquet_debug_sort_offsets_threads_used() result(n)")
+    w("            integer(int64) :: n !! threads the last offsets pass ran on; 1 means serial.")
+    w("        end function parquet_debug_sort_offsets_threads_used")
     w("        !> Test-only count of buckets Design B's split produced; 0 means it did not run.")
     w("        !!")
     w("        !! Design B and the serial LSD loop answer identically by construction, so this is the")
@@ -4627,8 +4672,10 @@ contains
         do k = 1_int64, nrows
             perm(k) = k
         end do
+        if (present(resolved_threads)) resolved_threads = 1_int64
         if (nrows < 2_int64) return
         call resolve_thread_count(threads, nrows, nthreads)
+        if (present(resolved_threads)) resolved_threads = nthreads
         ! Resolved HERE, never in C++: the boundary carries a real count, never a "0 means all"
         ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
         gek = int(size(keys), int64)
@@ -4657,6 +4704,7 @@ contains
     !
     module procedure drive_engine_grouped
         integer(c_int8_t), allocatable :: tie(:)
+        integer(int64) :: nt !! the builder's resolved count, for the offsets pass.
         !
         if (.not. present(group_offsets)) then
             ! Nothing to report, so nothing is given up: this is drive_engine exactly, one-shot
@@ -4665,13 +4713,64 @@ contains
             call drive_engine(keys, nrows, proc, perm, threads=threads)
             return
         end if
-        call engine_build_runs(keys, nrows, proc, perm, tie, threads=threads, group_ekeys=group_ekeys)
-        call runs_to_offsets(tie, nrows, group_offsets)
+        call engine_build_runs(keys, nrows, proc, perm, tie, threads=threads, group_ekeys=group_ekeys, &
+            resolved_threads=nt)
+        ! The count the builder resolved, handed on rather than resolved a second time: one
+        ! resolution per call is what keeps the sort, the tie pass and this pass on one team,
+        ! and a second `resolve_thread_count` would re-run the affinity clamp for nothing.
+        call runs_to_offsets(tie, nrows, group_offsets, nt)
     end procedure drive_engine_grouped
     !
     module procedure runs_to_offsets
-        integer(int64) :: k, ngroups, pos
+        integer(int64) :: k, ngroups, pos, c, lo, hi, chunk
+        integer(int64), allocatable :: cnt(:) !! per chunk: its groups, then its first slot.
+        integer :: team
         !
+        team = 1
+        if (present(nthreads)) team = tail_team(nthreads, nrows)
+        dbg_sort_offsets_threads_used = int(team, int64)
+        if (team > 1) then
+            ! Three passes on a team: each chunk of ROWS counts the groups that start inside it,
+            ! a serial prefix over the chunks turns the counts into each chunk's first slot, and
+            ! each chunk fills its own slice. No two chunks write one slot, and the answer is the
+            ! serial one below exactly. Chunked by rows rather than by group so that a long run
+            ! of ties costs its thread only the flags it reads.
+            chunk = (nrows + int(team, int64) - 1_int64) / int(team, int64)
+            allocate(cnt(team))
+            !$omp parallel do num_threads(team) default(shared) private(c, k, lo, hi, pos) schedule(static)
+            do c = 1_int64, int(team, int64)
+                lo = (c - 1_int64) * chunk + 1_int64
+                hi = min(c * chunk, nrows)
+                pos = 0_int64
+                do k = lo, hi
+                    if (tie(k) == 0_c_int8_t) pos = pos + 1_int64
+                end do
+                cnt(c) = pos
+            end do
+            !$omp end parallel do
+            ngroups = 0_int64
+            do c = 1_int64, int(team, int64)
+                pos = cnt(c)
+                cnt(c) = ngroups
+                ngroups = ngroups + pos
+            end do
+            allocate(offsets(ngroups + 1_int64))
+            !$omp parallel do num_threads(team) default(shared) private(c, k, lo, hi, pos) schedule(static)
+            do c = 1_int64, int(team, int64)
+                lo = (c - 1_int64) * chunk + 1_int64
+                hi = min(c * chunk, nrows)
+                pos = cnt(c)
+                do k = lo, hi
+                    if (tie(k) == 0_c_int8_t) then
+                        pos = pos + 1_int64
+                        offsets(pos) = k
+                    end if
+                end do
+            end do
+            !$omp end parallel do
+            offsets(ngroups + 1_int64) = nrows + 1_int64
+            return
+        end if
         ! Bounded by nrows, NEVER by size(tie): engine_build_runs allocates tie with a
         ! max(nrows, 1) floor, so a zero-row sort leaves one element in it that describes no row
         ! and would otherwise be counted as a group.

@@ -882,7 +882,10 @@ rather than truncated.
 `pf_value_counts`, `pf_rank`, `pf_match`, `pf_match_all`, `pf_in` and `pf_remap` all use the
 machine automatically, as do the
 read-time `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. There is nothing to
-switch on. `pf_partial_sort`, `pf_partial_argsort`, `pf_nth_element` and `pf_nth_quantile` take
+switch on. The run detection behind `pf_unique_count`, `pf_unique`, `pf_value_counts`, `pf_rank`,
+the match family and a grouped `pf_argsort(..., group_offsets=)` — the flags that say where the
+runs of equal rows begin, and the group offsets built from them — runs on the same team as the sort.
+`pf_partial_sort`, `pf_partial_argsort`, `pf_nth_element` and `pf_nth_quantile` take
 `threads=` too, but thread less of their work — see
 [What `threads=` reaches in a selection](#what-threads-reaches-in-a-selection) below.
 

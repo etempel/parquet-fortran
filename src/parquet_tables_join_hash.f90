@@ -71,6 +71,13 @@ contains
         nullify(lsc, rsc)
         nl = self%nrows()
         nr = other%nrows()
+        ! This engine's team for its own pass (the emission): the index tier's rule, as the
+        ! multimap's build and probe resolve theirs. Handed back for the caller's passes over
+        ! the pair list. The sort engine's group-pass record is written as 0 here: this engine
+        ! has no such passes, and a value left by an earlier sort-engine join would otherwise
+        ! read as this join's.
+        team = index_team(nl, threads)
+        call join_note_group_threads(0)
         call hash_key_codes(self, lslots, nl, threads, lkeys, ltup, lvalid, lsc)
         call hash_key_codes(other, rslots, nr, threads, rkeys, rtup, rvalid, rsc)
         call hash_build_and_probe(mm, nl, nr, threads, lkeys, rkeys, ltup, rtup, lvalid, rvalid, &
@@ -111,7 +118,7 @@ contains
         end if
         allocate(il(n_out), ir(n_out))
         if (n_out < 1_int64) return
-        call hash_emit(how_id, nl, nr, offsets, matches, unm, index_team(nl, threads), il, ir)
+        call hash_emit(how_id, nl, nr, offsets, matches, unm, team, il, ir)
     end procedure join_pairs_hash
     !
     !> Clause 2: one side's key codes, in whichever of the three shapes the multimap takes.

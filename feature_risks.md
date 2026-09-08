@@ -104,6 +104,7 @@ something a reader is expected to have.
 | [Risk-217](#risk-217--two-join-engines-assert-require-and-count-the-output-and-only-the-suite-run-under-both-can-see-them-disagree) | Two join engines assert `require=` and count the output, and only the suite run under both can see them disagree | 4 — covered |
 | [Risk-218](#risk-218--the-joins-engine-choice-reads-the-key-kinds-and-order-alone-and-a-data-dependent-choice-would-hide-behind-the-floor) | The join's engine choice reads the key kinds and `order=` alone, and a data-dependent choice would hide behind the floor | 4 — covered |
 | [Risk-219](#risk-219--a-gathers-team-goes-across-the-columns-or-inside-one-and-a-plan-that-always-picks-one-level-answers-every-test-right) | A gather's team goes ACROSS the columns or INSIDE one, and a plan that always picks one level answers every test right | 4 — covered |
+| [Risk-220](#risk-220--the-sort-engines-passes-over-the-runs-have-a-serial-arm-and-a-threaded-arm-and-only-a-fixture-with-duplicates-nulls-and-unmatched-rows-on-both-sides-can-see-them-disagree) | The sort engine's passes over the runs have a serial arm and a threaded arm, and only a fixture with duplicates, nulls and unmatched rows on both sides can see them disagree | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8067,8 +8068,16 @@ the ungrouped path only. The cost was silent, and so was the false promise.
 **Covered by** `the grouped path really opens the team threads= asked for` and `a threaded grouped
 sort equals the serial one` (`test/test_sorting.f90`), the fourth arm of `a join's threads= reaches
 the sort and not the column rewrite` (`test/test_table_parallel.f90`), and `engine: the two engines
-agree on the runs path with BOTH threaded` (`test/test_sorting_cpp.f90`). Two design details are
-why this entry is kept rather than deleted:
+agree on the runs path with BOTH threaded` (`test/test_sorting_cpp.f90`). Since `feature_join.md`
+stage 5 the count also has to reach the tie pass, the offsets pass and the sort engine's own passes
+over the runs, each handed it separately and each with a record of its own —
+`parquet_debug_sort_tie_threads_used`, `parquet_debug_sort_offsets_threads_used`,
+`parquet_debug_get_join_group_threads_used` and `parquet_debug_get_join_side_threads_used` —
+covered by `engine: the tie pass and the offsets pass run on the team and give the serial answer`
+(`test/test_sorting_cpp.f90`, with the runs A/B above now lowering the tail floor so the Fortran
+arm's tie pass is the threaded one), `a join's group passes and its side index run on the join's
+team` (`test/test_table_parallel.f90`) and the two `join_require_*_threaded` error scenarios. Two
+design details are why this entry is kept rather than deleted:
 
 - **`unique and rank take threads too` (`test/test_sorting.f90`) was the pre-existing test over
   this exact path, and it passed throughout.** It compares `threads=8` against a serial arm and
@@ -8468,3 +8477,36 @@ column stays serial and forced within on a sort stays across; the serial cap wri
 every threaded table is compared with a serially capped one. `bench/benchmark_join.sh
 --mode=payload` prints the two levels side by side per column count, tagged with the level and
 team that actually ran, which is how the rule was fixed and how a change to it is re-measured.
+
+### Risk-220 — The sort engine's passes over the runs have a serial arm and a threaded arm, and only a fixture with duplicates, nulls and unmatched rows on both sides can see them disagree
+
+Since `feature_join.md` stage 5 the sort engine of `parquet_table%join`
+(`src/parquet_tables_join.f90`) runs its passes over the sorted runs on one team: `join_classify`
+and `join_emit_left_order` each keep their single-cursor serial loop and add a three-pass threaded
+arm (count per contiguous range, a serial prefix over the ranges, a fill by each range's own
+cursor), `join_check_require` and `join_count` note per range and raise after the region for the
+LOWEST offending group, and `join_fill_matched` and `join_side_index` are plain element-wise
+sweeps. The two arms of each pair are meant to produce the same eleven arrays, the same abort with
+the same message, and the same pair list — and **nothing in a result distinguishes them**: the team
+is chosen by `tail_team`'s floor and by `threads=`, so a test-sized fixture takes the serial arm
+whatever the test asserts, and a fixture without duplicate keys, without a null key, or without
+rows that match nothing on each side lets a wrong prefix, a wrong base slot or a dropped chunk total
+agree with the serial arm by accident (every group of size one, every row matched, no null group).
+
+**Rule.** The threaded arm is written beside the serial arm, not instead of it; each range writes
+only its own slice, and every cross-range total goes through the same guarded addition the serial
+loop used; an abort inside a region is never raised there but noted and raised afterwards for the
+group the serial loop would have stopped at, left side first where one group violates both; and the
+team the passes ran on is recorded on every route (`parquet_debug_get_join_group_threads_used`, 0
+by the hash engine; `parquet_debug_get_join_side_threads_used` on every join), since the record is
+the only observation that a pass threaded at all (Risk-189).
+
+**Covered by** `a join's group passes and its side index run on the join's team`
+(`test/test_table_parallel.f90`, `test_join_group_passes_threads`): the tail floor lowered and the
+sort engine forced, the two records at `threads=1` and `threads=nt`, unmoved by
+`parquet_set_table_threads`, the hash engine writing 0 and its own side team; and every `how` under
+both orderings joined on the team compared with the same join serial — rows, values, nulls, the
+carried column, `matched=` and both pair lists — on a fixture with duplicate keys on both sides, a
+null key on each, and rows that match nothing on either. The abort's ordering is covered by the
+`join_require_m1_threaded` and `join_require_1m_threaded` scenarios (`test/error_scenarios.f90`),
+which lower the floor, print the team the group passes recorded, and abort with the serial message.

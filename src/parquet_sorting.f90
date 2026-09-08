@@ -129,6 +129,8 @@ module parquet_sorting
     public :: parquet_debug_reset_sort_radix_passes
     public :: parquet_debug_sort_radix_passes
     public :: parquet_debug_sort_threads_used
+    public :: parquet_debug_sort_tie_threads_used
+    public :: parquet_debug_sort_offsets_threads_used
     public :: parquet_debug_sort_split_buckets
     public :: parquet_debug_sort_design
     ! These four take a `pf_sort_keys`, so they are declared and implemented HERE rather than

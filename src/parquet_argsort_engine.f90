@@ -3602,6 +3602,7 @@ contains
     !! `tie(1)` is always 0; the first row starts a run by definition.
     module procedure sort_build_runs_permutation
         integer(int64) :: k !! output position.
+        integer :: team     !! the tie pass's team; 1 is the serial loop.
         !
         ! **Threaded, on the same count and the same floor as every ungrouped sort.** `nthreads` is
         ! already resolved -- `resolve_thread_count` has applied the caller's `threads=`, the
@@ -3611,14 +3612,27 @@ contains
         ! Calling the serial `sort_build_permutation` here is what made `threads=` a no-op on the
         ! whole grouped family; feature_risks.md Risk-189 records the shape.
         call sort_build_permutation_threaded(keys, n, nthreads, perm)
+        dbg_sort_tie_threads_used = 1_int64
         if (n < 1_int64) return
-        ! **The tie pass stays SERIAL, deliberately.** `parquet_sort_builder_build_runs`
-        ! (src/parquet_wrapper.cpp) is the same operation on the C++ side and walks these flags
-        ! serially after a threaded build, so the two engines are structurally identical here --
-        ! which is the property the engine A/B in test/test_sorting_cpp.f90 rests on. This loop is
-        ! embarrassingly parallel and threading it may well pay, but it would be a divergence from
-        ! that reference and needs a measurement of its own rather than being tidied in.
+        ! **The tie pass is threaded on the same count**, as one static `parallel do` over the
+        ! output positions: each flag is one comparison of the two rows `perm` names at `k - 1`
+        ! and `k`, a pure function of the finished permutation, so a chunk reads its lower
+        ! neighbour's last row across the boundary and writes nothing but its own flags. That is
+        ! what makes the answer the serial one exactly, and it is what the engine A/B in
+        ! test/test_sorting_cpp.f90 rests on now: `parquet_sort_builder_build_runs`
+        ! (src/parquet_wrapper.cpp) still walks its flags serially after its threaded build, and
+        ! the A/B compares that walk against this pass on a team, rather than the two being
+        ! statement-for-statement identical as they were while this loop stayed serial. The
+        ! measurement the old "stays SERIAL, deliberately" note asked for came from the join:
+        ! this loop was the largest single serial item in a join on an integer key -- 54% of a
+        ! 10M-row lookup join at one thread (feature_join.md section 5.2), scattered loads
+        ! through `perm` -- and it is what a `threads=` on `pf_unique`, `pf_rank`, `pf_match` or
+        ! a sort-engine `%join` was otherwise buying nothing on. `tail_team` applies the tail
+        ! floor; the team is recorded because no answer can show it (feature_risks.md Risk-189).
+        team = tail_team(nthreads, n)
+        dbg_sort_tie_threads_used = int(team, int64)
         tie(1) = 0_c_int8_t
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static) if (team > 1)
         do k = 2_int64, n
             ! `int()` because `sort_keys_compare` takes a default-kind `nkeys` and the drivers carry
             ! the group width as int64. A key count cannot overflow int32, and the callee clamps it
@@ -3629,6 +3643,7 @@ contains
                 tie(k) = 0_c_int8_t
             end if
         end do
+        !$omp end parallel do
     end procedure sort_build_runs_permutation
 
     !> Binary search for the target row, which the caller has APPENDED as row `n_search + 1`.
@@ -3811,6 +3826,14 @@ contains
     module procedure parquet_debug_sort_threads_used
         n = dbg_sort_threads_used
     end procedure parquet_debug_sort_threads_used
+
+    module procedure parquet_debug_sort_tie_threads_used
+        n = dbg_sort_tie_threads_used
+    end procedure parquet_debug_sort_tie_threads_used
+
+    module procedure parquet_debug_sort_offsets_threads_used
+        n = dbg_sort_offsets_threads_used
+    end procedure parquet_debug_sort_offsets_threads_used
 
     module procedure parquet_debug_sort_split_buckets
         n = dbg_sort_split_buckets

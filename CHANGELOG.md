@@ -137,6 +137,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   team when the columns are fewer than the threads, under `parquet_set_table_threads` as before. See
   [How the match is built](doc/pages/tables/table-join.md#how-the-match-is-built) and
   [Threads for mutating a table](doc/pages/operating/settings.md#threads-for-mutating-a-table).
+- **The sort tier's run detection threads.** The pass that flags where runs of equal rows begin
+  and the pass that turns the flags into group offsets now run on the team the sort resolved, so
+  `pf_unique_count`, `pf_unique`, `pf_value_counts`, `pf_rank`, `pf_match`, `pf_match_all`,
+  `pf_in`, `pf_argsort(..., group_offsets=)`, `%drop_duplicates`, `%duplicated`, `%value_counts`
+  and a `%join` on the sort engine thread it; every answer is unchanged. A `%join` on the sort
+  engine also classifies the runs, checks `require=`, counts and emits its rows on that team, and
+  every join turns its match into row indices on its engine's team. See
+  [Sorting in parallel](doc/pages/utilities/sorting.md#sorting-in-parallel).
 - **`pf_index_map%get_many` threads.** A bulk lookup now cuts its keys into one chunk per thread,
   by the rule a build follows (automatic, capped by `index_threads`, serial inside a parallel
   region), and takes `threads=` to say otherwise; it is no longer `pure`. See

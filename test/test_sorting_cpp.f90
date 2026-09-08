@@ -150,9 +150,94 @@ contains
             new_unittest("engine: the string refine threads, at both of its two levels", &
                 test_refine_threads), &
             new_unittest("engine: the two engines agree on the runs path with BOTH threaded", &
-                test_runs_threaded_conformance) &
+                test_runs_threaded_conformance), &
+            new_unittest("engine: the tie pass and the offsets pass run on the team and give the serial answer", &
+                test_runs_tail_passes_threads) &
             ]
     end subroutine collect_tests_sorting_cpp
+    !
+    !> The tie pass and the offsets pass of the grouped path run on the team `threads=` asked for,
+    !! give the serial answer, and agree with the C++ engine's serial walk of the same flags.
+    !!
+    !! **Both passes are invisible in any answer**: the flags and the offsets are pure functions of
+    !! the permutation, identical at every team size, so `parquet_debug_sort_tie_threads_used` and
+    !! `parquet_debug_sort_offsets_threads_used` are the only observations that the resolved count
+    !! reached them -- feature_risks.md Risk-189: the count was resolved and dropped on this very
+    !! path once, and the two passes are handed it separately, hence two records. Four arms: the
+    !! Fortran engine at `threads=4` records 4 in both; at `threads=1` it records 1 in both -- the
+    !! control, without which a pass that always opened the machine would pass the first; the
+    !! offsets of the two agree element for element, which is the serial-against-threaded A/B of
+    !! `runs_to_offsets` and, through them, of the tie pass; and the C++ engine at `threads=4`,
+    !! whose own tie walk is serial, gives the same offsets again -- the cross-engine A/B of the
+    !! threaded tie pass. Ties are dense on purpose: run detection over distinct values detects
+    !! nothing. The tail floor is lowered so a 4096-element fixture opens the team at all, and
+    !! restored with the engine floors before the first assertion.
+    subroutine test_runs_tail_passes_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64          !! rows; 97 distinct values, dense ties.
+        real(real64) :: v(n)
+        integer(int64), allocatable :: perm(:), go4(:), go1(:), goc(:)
+        integer(int64) :: tie4, off4, tie1, off1, i
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: neither pass can open a team, so every record would " // &
+            "read 1 and the equalities would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is " // &
+                "clamped to omp_get_num_procs(), so both passes would run serially")
+            return
+        end if
+#endif
+        do i = 1_int64, n
+            v(i) = real(mod(i * 7919_int64, 97_int64), real64) * 0.5_real64
+        end do
+        ! Lowered around every arm and restored BEFORE the first assertion: every `check` can
+        ! return early, and a leaked floor would rethread every later test in this suite.
+        call force_parallel_threshold(4_int64)
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
+        call restore_engine_default()
+        call pf_argsort(v, perm, group_offsets=go4, threads=4)
+        tie4 = parquet_debug_sort_tie_threads_used()
+        off4 = parquet_debug_sort_offsets_threads_used()
+        call pf_argsort(v, perm, group_offsets=go1, threads=1)
+        tie1 = parquet_debug_sort_tie_threads_used()
+        off1 = parquet_debug_sort_offsets_threads_used()
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_argsort(v, perm, group_offsets=goc, threads=4)
+        call restore_engine_default()
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        call force_parallel_threshold(0_int64)
+        !
+        call check(error, tie4 == 4_int64, &
+            "the tie pass must run on the team threads= asked for: sort_build_runs_permutation " // &
+            "is handed the resolved count and has to open it past the tail floor")
+        if (allocated(error)) return
+        call check(error, off4 == 4_int64, &
+            "runs_to_offsets must run on the team: drive_engine_grouped has to hand it the count " // &
+            "engine_build_runs resolved, not leave it to run serially")
+        if (allocated(error)) return
+        ! The control: without it a pass that ignored threads= and always opened the machine
+        ! would pass both lines above.
+        call check(error, tie1 == 1_int64 .and. off1 == 1_int64, &
+            "threads=1 must run the tie pass and the offsets pass serially")
+        if (allocated(error)) return
+        call check(error, size(go4) == size(go1), &
+            "the threaded and the serial offsets must describe the same number of groups")
+        if (allocated(error)) return
+        call check(error, all(go4 == go1), &
+            "the threaded offsets must equal the serial ones element for element: the chunked " // &
+            "count, prefix and fill of runs_to_offsets, and the threaded tie flags they read")
+        if (allocated(error)) return
+        call check(error, size(goc) == size(go4), &
+            "the C++ engine's serial tie walk must find the same number of groups as the " // &
+            "threaded Fortran tie pass")
+        if (allocated(error)) return
+        call check(error, all(goc == go4), &
+            "the C++ engine's serial tie walk must give the offsets the threaded Fortran tie " // &
+            "pass gives, element for element -- the cross-engine A/B the pass rests on")
+    end subroutine test_runs_tail_passes_threads
     !
     !> The grouped (runs) path must give the same answer on both engines when both really thread.
     !!
@@ -171,10 +256,18 @@ contains
     !!
     !! The oracle is the usual one: every comparator ends in a row-index tiebreaker, so exactly one
     !! permutation is correct and a disagreement is a defect rather than a variation.
+    !!
+    !! **Since the Fortran tie pass threads (feature_join.md stage 5), this A/B is the one the two
+    !! engines' structural identity was replaced by.** The C++ engine still walks its flags
+    !! serially after its threaded build; the Fortran engine flags its runs on the team. The tail
+    !! floor is lowered here so a 2000-element fixture reaches that team, and the Fortran tie
+    !! record is asserted as a third precondition -- without it a tie pass that quietly declined
+    !! would leave this comparing two serial walks again, exactly the vacuous shape above.
     subroutine test_runs_threaded_conformance(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         real(real64) :: v(2000)                             !! ties are dense; runs are the point.
         integer(int64) :: cpp_team, ftn_team                !! each engine's own team counter.
+        integer(int64) :: ftn_tie                           !! the Fortran tie pass's own record.
         real(real64), allocatable :: cd(:), fd(:)           !! per-engine distinct values.
         integer, allocatable :: cr(:), fr(:)                !! per-engine ranks.
         integer :: cc, fc                                   !! per-engine distinct counts.
@@ -194,6 +287,7 @@ contains
         ! Lowered around BOTH arms and restored before the first assertion -- every `check` can
         ! return early, and a leaked floor would rethread every later test in this suite.
         call force_parallel_threshold(4_int64)
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
         call parquet_debug_use_fortran_sort_engine(.false.)
         call pf_unique_count(v, cc, threads=4)
         call pf_unique(v, cd, threads=4)
@@ -204,7 +298,9 @@ contains
         call pf_unique(v, fd, threads=4)
         call pf_rank(v, fr, threads=4)
         ftn_team = parquet_debug_sort_threads_used()
+        ftn_tie = parquet_debug_sort_tie_threads_used()
         call restore_engine_default()
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
         call force_parallel_threshold(0_int64)
         !
         call check(error, cpp_team == 4_int64, &
@@ -214,6 +310,10 @@ contains
         call check(error, ftn_team == 4_int64, &
             "precondition: the Fortran engine must really thread the runs path -- it resolved a " // &
             "thread count and dropped it for as long as the grouped path existed")
+        if (allocated(error)) return
+        call check(error, ftn_tie == 4_int64, &
+            "precondition: the Fortran engine's tie pass must run on the team -- it is what this " // &
+            "A/B compares against the C++ engine's serial walk of the same flags")
         if (allocated(error)) return
         call check(error, cc == fc, "unique_count: the two threaded engines disagreed")
         if (allocated(error)) return

@@ -2439,7 +2439,11 @@ contains
             new_unittest("string column gather_from with an out-of-range index aborts", &
                 test_string_column_gather_from_out_of_range_aborts), &
             new_unittest("string column gather_from with a short mask aborts", &
-                test_string_column_gather_from_length_mismatch_aborts) &
+                test_string_column_gather_from_length_mismatch_aborts), &
+            new_unittest("join: require='m:1' aborts from the sort engine's check on a team", &
+                test_join_require_m1_threaded_aborts), &
+            new_unittest("join: require='1:m' aborts from the sort engine's check on a team", &
+                test_join_require_1m_threaded_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17]
     end subroutine collect_tests_parquet_errors
@@ -8480,6 +8484,37 @@ contains
         call check_scenario_streams(error, scenario, "join engine used with the hook set=" // engine, &
             "stdout", "the scenario must show engine " // engine // " in force before its abort")
     end subroutine check_engine_was_forced
+
+    !> join abort path, the sort engine's cardinality check on a TEAM: see scenario_join_engine_twin
+    !> in test/error_scenarios.f90 for the tail floor it lowers and the team line it prints, which
+    !> is asserted here so the abort is known to come from the chunked check and not its serial arm.
+    subroutine test_join_require_m1_threaded_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_require_m1_threaded", expect_abort=.true., &
+            failure_message="a duplicate right key under require='m:1' was expected to abort on a team", &
+            required_stderr="asserts the right key is unique")
+        if (allocated(error)) return
+        call check_engine_was_forced(error, "join_require_m1_threaded", "1")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "join_require_m1_threaded", "join group passes team=4", "stdout", &
+            "the scenario must show the sort engine's group passes on a team of 4 before its abort")
+    end subroutine test_join_require_m1_threaded_aborts
+
+    !> join abort path, the sort engine's cardinality check on a TEAM, left side: the mirror of
+    !> the test above, on the other clause of the chunked check.
+    subroutine test_join_require_1m_threaded_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_require_1m_threaded", expect_abort=.true., &
+            failure_message="a duplicate left key under require='1:m' was expected to abort on a team", &
+            required_stderr="asserts the left key is unique")
+        if (allocated(error)) return
+        call check_engine_was_forced(error, "join_require_1m_threaded", "1")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "join_require_1m_threaded", "join group passes team=4", "stdout", &
+            "the scenario must show the sort engine's group passes on a team of 4 before its abort")
+    end subroutine test_join_require_1m_threaded_aborts
 
     !> join abort path, hash engine: see scenario_join_hash_twin in test/error_scenarios.f90 for
     !> the two engine controls it prints before the base scenario runs.

@@ -50,7 +50,8 @@ array of names — the two forms behave identically, and `other_on` takes whiche
 | `threads` | the team size for the engine that builds the match, and for nothing else; see below and [How the match is built](#how-the-match-is-built) |
 
 That last row is narrow on purpose, and a join has **two** thread controls that are not
-interchangeable. `threads=` sizes the engine that builds the match, and nothing else. The column
+interchangeable. `threads=` sizes the engine that builds the match — everything up to the pair list
+and its conversion into row indices — and nothing else. The column
 work a join does — this table's own columns rewritten, `other`'s copied in beside them — belongs to
 the table layer and is capped by
 [`parquet_set_table_threads(n)`](../operating/settings.html#threads-for-mutating-a-table), as every
@@ -168,7 +169,10 @@ lookup-table join; `bench/benchmark_join.sh` times a join under each engine side
 
 `threads=` sizes whichever engine builds the match: the multimap's build and probe, under
 [`parquet_set_index_threads`](../operating/settings.html#threads-for-an-index-build-or-a-bulk-lookup),
-or the sort, under [`parquet_set_sort_threads`](../operating/settings.html#threads-for-sorting).
+or the sort, under [`parquet_set_sort_threads`](../operating/settings.html#threads-for-sorting) —
+and, with the sort, the passes that read its runs of equal keys (the classification, the `require=`
+check, the counting and the emission), which run on the sort's team. On either engine the two passes
+that turn the pair list into row indices run on that team too.
 The column work that follows still answers to `parquet_set_table_threads`, as above. That team
 divides across the columns when there are at least as many as threads, and goes inside each column
 in turn otherwise, so a join carrying one column uses it too; each incoming column is built in one

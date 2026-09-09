@@ -331,3 +331,63 @@ Six rules:
 survives detaching for the same reason. To see everything a file carries, before or without a
 table, use
 [`parquet_get_metadata_items`](../io/reading.html#listing-every-metadata-entry).
+
+## The schema a schema-less write builds: `parquet_derive_schema` and `parquet_open_writer_like`
+
+A schema-less write [builds a schema internally](#writing-without-a-schema) from the resident
+columns. `parquet_derive_schema` hands that schema back, so it can be adjusted and used with the
+writer directly — for a file written one row group at a time, or one that needs `protected_cols:`,
+provenance metadata or a dropped column without writing the MAML out by hand:
+
+```fortran
+type(parquet_schema) :: s
+type(parquet_writer) :: w
+
+call parquet_derive_schema(t, s)          ! one field per resident column, in slot order
+call s%set_protected("flux")              ! this column never holds a Null
+call s%add_metadata("pipeline", "v3.2")
+call parquet_open_writer(w, "out.parquet", s, write_maml=.true.)
+...
+call parquet_close_writer(w)
+```
+
+The schema is exactly the one the schema-less write would have used: one field per **resident**
+column, in slot order, under the column's own internal name; `col_size:`/`array_size:` declared
+`auto`, so the writer resolves them from the data; the `unit:` key present only where the column has
+one; the automatic `parquet_row_index` never included. It comes back parsed. Nothing is read to
+build it, and nothing is measured from the values — in particular, whether a column currently holds
+a Null says nothing about the file, and the schema does not pretend otherwise: a column that must be
+written non-nullable is declared so with `%set_protected` (or `protected_cols:`), in advance.
+
+The optional third argument is the MAML `table:` name: `parquet_derive_schema(t, s, name="dr4")`.
+Omitted, it is the stem of the file the table was opened from, or `table` for one built in memory.
+A table with no resident column is an error rather than an empty schema, because MAML has no way to
+declare zero fields; materialize something first.
+
+**`parquet_open_writer_like` does the derive and the open in one call**, and takes every writer
+option `parquet_write_table` takes, under the same name and with the same default:
+
+`call parquet_open_writer_like(writer, filename, table, [schema], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite])`
+
+```fortran
+call parquet_open_writer_like(w, "out.parquet", t, chunk_size=200000, write_maml=.true.)
+call parquet_write_column(w, "id", ids)      ! ...or a parquet_new_row_group loop
+call parquet_close_writer(w)
+```
+
+- **`schema=` means "use this one instead of deriving"**, so a hand-written or MAML-loaded schema
+  goes through the same call; the writer then declares that schema's fields, whatever the table
+  holds. As with `parquet_write_table`, a schema built with `%init`/`%add_field` is parsed here if
+  it has not been.
+- **`copy_metadata=`/`metadata_keys=`** carry the table's source-file metadata into the output
+  under the rules [above](#carrying-the-source-files-metadata-to-the-output), onto a private copy
+  of the schema — the next open with the same schema carries nothing unless asked again.
+- **The derived schema's `table:` name is the output file's stem**, as a schema-less
+  `parquet_write_table` names it, and `write_maml=.true.` writes the sidecar at close, once every
+  `auto` size has been resolved.
+- **Without `schema=`, a table with no resident column is refused** — an open writer with no
+  column is nothing you can use — where a schema-less `parquet_write_table` writes an empty file.
+
+Once the writer is open, `parquet_get_column_names(writer, names)` and
+`parquet_is_column_enabled(writer, name)` report what it declares — see [Writer
+options](../io/writing.html#writer-options) in the I/O guide.

@@ -1148,6 +1148,34 @@ module parquet_core
         module procedure parquet_get_chunk_size_reader_int64
     end interface parquet_get_chunk_size
 
+    !> Returns every column `writer_or_reader` knows, in schema order, in `names`: a
+    !> `character(len=:), allocatable` array allocated to exactly the column count, each element
+    !> blank-padded to the longest name present, so `trim(names(i))` is the name to pass on. A
+    !> zero-column file, or a writer opened without a schema, yields a zero-size `names`.
+    !>
+    !> For a `parquet_reader`: the same (possibly dotted) names every other column-name argument
+    !> in this module accepts -- a nested STRUCT field contributes one entry per leaf beneath it
+    !> ("addr.city"), never its own bare name, and every other field contributes one entry under
+    !> its own name. LIST/MAP columns (and any leaf beneath a struct that is itself a LIST/MAP)
+    !> ARE listed, even though no read entry point supports them: the purpose here is to report
+    !> what the file actually holds. Pass a listed name to parquet_column_exists (no `types`) or
+    !> parquet_get_column_type to find out whether it can be read.
+    !>
+    !> For a `parquet_writer`: the INTERNAL name of every field the writer's schema declares, in
+    !> the schema's own order (`schema%get_num_fields()` of them), disabled fields included -- the
+    !> name parquet_write_column and parquet_write_column_chunk take, never a col_map: output name.
+    !> A user MAML validated against a base declares the base's excluded fields too (deactivated),
+    !> so they are listed as well. Pair it with parquet_is_column_enabled to skip whatever is not
+    !> enabled, set_column_unavailable's fields and the deactivated ones alike. A writer
+    !> opened without a schema answers zero names: its columns are whatever the writes define,
+    !> and nothing is declared in advance. This is what lets a caller holding only the writer --
+    !> a table-level chunk loop, say -- follow the schema's column selection without a schema
+    !> object of its own. Reads no column data on either side.
+    interface parquet_get_column_names
+        module procedure parquet_get_column_names_reader
+        module procedure parquet_get_column_names_writer
+    end interface parquet_get_column_names
+
     !> Returns `reader`'s row-group count in `num_row_groups`, dispatched by its
     !> integer(int32)/integer(int64) kind (the int32 specific also error stops if the actual
     !> count overflows int32 -- vanishingly unlikely in practice, but kept for consistency with
@@ -1592,6 +1620,7 @@ module parquet_core
     public :: parquet_write_chunk_row_mask
     public :: parquet_finish_row_group
     public :: parquet_get_chunk_size
+    public :: parquet_is_column_enabled
     public :: parquet_close_writer
     public :: parquet_parse_maml
     public :: parquet_load_maml_file
@@ -2549,9 +2578,12 @@ module parquet_core
             character(len=*), intent(in), optional :: context !! calling procedure named in the error
             !! message; defaults to "parquet_write_column", the chunked path passes its own name.
         end subroutine parquet_assert_column_type
-        !> True if `name` is a currently enabled/set column of a schema-
-        !> enforced writer (see parquet_column_type%is_set); always .true.
-        !> for a schema-less writer once the column has been defined.
+        !> True if `name` is a currently enabled field of `writer`'s schema (see
+        !> parquet_column_type%is_set): .false. for a field disabled with set_column_unavailable,
+        !> and for a name the schema does not declare at all. Always .true. for a schema-less
+        !> writer, which declares nothing in advance and so disables nothing. The companion of
+        !> parquet_get_column_names's writer form: together they let a caller holding only the
+        !> writer walk the schema's enabled fields. error stops if `writer` is not open.
         module logical function parquet_is_column_enabled(writer, name)
             type(parquet_writer), intent(in) :: writer !! open writer to check.
             character(len=*), intent(in) :: name !! column name to look up.
@@ -2625,6 +2657,12 @@ module parquet_core
             type(parquet_writer), intent(inout) :: writer !! open writer.
             integer(int64), intent(out) :: chunk_size !! writer's resolved/authoritative row-group size.
         end subroutine parquet_get_chunk_size_writer_int64
+        !> Writer specific of parquet_get_column_names -- see the generic interface above.
+        module subroutine parquet_get_column_names_writer(writer, names)
+            type(parquet_writer), intent(in) :: writer !! open writer.
+            character(len=:), allocatable, intent(out) :: names(:) !! one entry per declared field, schema
+            !! order, internal names; zero-size for a schema-less writer.
+        end subroutine parquet_get_column_names_writer
         !> Flushes and closes `writer`; error stops if SOME (but not all) of a schema-enforced
         !> writer's declared/enabled columns were written -- naming the column that was missed.
         !>
@@ -3608,22 +3646,11 @@ module parquet_core
             character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
             logical, intent(out) :: is_nullable !! .true. if the stored field is declared nullable.
         end subroutine parquet_get_column_nullable
-        !> Returns every column `reader`'s file contains, in schema order, as the same
-        !> (possibly dotted) names every other column-name argument in this module accepts:
-        !> a nested STRUCT field contributes one entry per leaf beneath it ("addr.city"), never
-        !> its own bare name, and every other field contributes one entry under its own name.
-        !> `names` comes back allocated to exactly the column count, each element trimmed to the
-        !> longest name present (blank-padded), so `trim(names(i))` is the name to pass on.
-        !> A zero-column file yields a zero-size `names`.
-        !>
-        !> LIST/MAP columns (and any leaf beneath a struct that is itself a LIST/MAP) ARE listed,
-        !> even though no read entry point supports them: the purpose here is to report what the
-        !> file actually holds. Pass a listed name to parquet_column_exists (no `types`) or
-        !> parquet_get_column_type to find out whether it can be read.
-        module subroutine parquet_get_column_names(reader, names)
+        !> Reader specific of parquet_get_column_names -- see the generic interface above.
+        module subroutine parquet_get_column_names_reader(reader, names)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=:), allocatable, intent(out) :: names(:) !! one entry per column, schema order.
-        end subroutine parquet_get_column_names
+        end subroutine parquet_get_column_names_reader
         !> The 1-based PHYSICAL file row index of each row this reader currently returns, in the
         !> order it returns them.
         !>

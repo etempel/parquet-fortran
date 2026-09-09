@@ -1540,6 +1540,10 @@ program error_scenarios
         call scenario_set_random_parallel_min_elements_negative()
     case ("write_table_schema_init_no_fields")
         call scenario_write_table_schema_init_no_fields()
+    case ("derive_schema_needs_a_resident_column")
+        call scenario_derive_schema_needs_a_resident_column()
+    case ("open_writer_like_needs_a_resident_column")
+        call scenario_open_writer_like_needs_a_resident_column()
     case ("concurrent_calls_into_shared_reader")
         call scenario_concurrent_calls_into_shared_reader()
     case ("concurrent_calls_into_shared_writer")
@@ -12955,6 +12959,53 @@ contains
         call parquet_write_table(t, "test_run/error_scenario_write_table_bare.parquet", bare)
         print '(a)', "unexpectedly wrote a table through a schema declaring no fields"
     end subroutine scenario_write_table_schema_init_no_fields
+
+    !> parquet_derive_schema builds one field per RESIDENT column, and MAML requires at least one
+    !> field -- so a table that has read nothing has no schema to hand back. A schema-less
+    !> parquet_write_table of the same table writes an empty file instead; this is the one place
+    !> the two answer differently, because a schema with no field is not a valid schema.
+    !>
+    !> The control derives a schema from the same data with one column resident, and the abort is
+    !> provoked on a lazily opened file-backed table that has touched no column.
+    subroutine scenario_derive_schema_needs_a_resident_column()
+        type(parquet_table) :: t, lazy
+        type(parquet_schema) :: s
+        character(len=*), parameter :: src = "test_run/error_scenario_derive_schema_needs_column.parquet"
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call parquet_derive_schema(t, s)
+        print '(a)', "control: a table with a resident column derived a schema"
+        call parquet_write_table(t, src)
+        call parquet_open_table(lazy, src)
+        call parquet_derive_schema(lazy, s)
+        print '(a)', "unexpectedly derived a schema from a table with no resident column"
+    end subroutine scenario_derive_schema_needs_a_resident_column
+
+    !> parquet_open_writer_like with no schema= derives one from the table's resident columns and
+    !> refuses a table with none: an open writer with no column is nothing a caller can use, and
+    !> the refusal names the alternative (materialize, or pass schema=). The control opens, writes
+    !> and closes a writer from the same data with the column resident.
+    subroutine scenario_open_writer_like_needs_a_resident_column()
+        type(parquet_table) :: t, lazy
+        type(parquet_writer) :: w
+        integer(int32) :: a(2)
+        character(len=*), parameter :: src = "test_run/error_scenario_open_writer_like_needs_column.parquet"
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_open_writer_like_control.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_open_writer_like_bad.parquet"
+
+        a = [1_int32, 2_int32]
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        call parquet_open_writer_like(w, ctrl, t)
+        call parquet_write_column(w, "a", a)
+        call parquet_close_writer(w)
+        print '(a)', "control: a table with a resident column opened a writer"
+        call parquet_write_table(t, src)
+        call parquet_open_table(lazy, src)
+        call parquet_open_writer_like(w, bad, lazy)
+        print '(a)', "unexpectedly opened a writer from a table with no resident column"
+    end subroutine scenario_open_writer_like_needs_a_resident_column
 
     !> A schema-enforced writer (cinfo given) already error stops on this via
     !> parquet_mark_column_written's write_counts tracking. A schema-less

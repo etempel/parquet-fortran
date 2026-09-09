@@ -28,55 +28,14 @@ contains
         type(parquet_schema) :: own
         integer :: nfields
         logical :: want_metadata, use_own
+        character(len=:), allocatable :: stem
         !
         call table_check_open(table, "parquet_write_table")
         ! release= evicts columns as it writes, which replaces their storage -- so a write is a
         ! structural change to the table as far as another thread is concerned, not a read.
         call table_check_not_shared(table, "parquet_write_table")
-        if (present(schema)) then
-            ! %get_num_fields on an unpopulated %cinfo reads uninitialized state, which turns the
-            ! write loop into a runaway allocation and an OOM kill rather than any kind of
-            ! diagnosable failure. So a schema that has not been parsed is stopped here, one way
-            ! or the other.
-            !
-            ! **Which schema lands in which arm follows from what the two queries actually read**
-            ! -- %is_parsed() is `allocated(%cinfo%col)` and %is_init() is that OR the %init flag:
-            !
-            !   * built with %init/%add_field -- %add_field parses as it goes, so %is_parsed() is
-            !     already .true. after the first field and neither arm runs;
-            !   * from parquet_parse_maml, parquet_load_maml_file or an embedded get_parquet_maml
-            !     -- parsed on arrival, likewise neither arm;
-            !   * %maml%lines assigned DIRECTLY and never parsed -- %init was never called, so
-            !     %is_init() is .false. and this is the error stop below, not the parse;
-            !   * %init called and no field added yet -- %is_init() .true., %is_parsed() .false.,
-            !     which is the ONE state reaching the parse call.
-            !
-            ! That last one is header-only MAML, so the parse always fails validation with
-            ! "no fields defined" naming the schema. Keeping the call rather than adding a second
-            ! bespoke guard is deliberate: the parser's own message is the accurate one, and the
-            ! call is also what makes `schema` intent(inout) rather than intent(in).
-            !
-            ! A schema that was never built at all is a different mistake and still an error:
-            ! parsing empty MAML text would report something about the text rather than the call.
-            if (.not. schema%is_parsed()) then
-                if (.not. schema%is_init()) then
-                    error stop EP // "parquet_write_table: this schema has not been built; call " // &
-                        "schema%init/%add_field (or load a MAML file) before writing with it"
-                end if
-                call parquet_parse_maml(schema)
-            end if
-        end if
-        !
-        want_metadata = present(metadata_keys)
-        if (present(copy_metadata)) then
-            if (present(metadata_keys) .and. copy_metadata) then
-                error stop EP // "parquet_write_table: copy_metadata=.true. and metadata_keys= " // &
-                    "cannot both be given; copy_metadata=.true. carries every key, metadata_keys= " // &
-                    "only the listed ones (copy_metadata=.false. alongside metadata_keys= is " // &
-                    "accepted, and carries the listed keys)"
-            end if
-            want_metadata = want_metadata .or. copy_metadata
-        end if
+        if (present(schema)) call ensure_schema_parsed(schema, "parquet_write_table")
+        call resolve_metadata_request(copy_metadata, metadata_keys, "parquet_write_table", want_metadata)
         ! `own` is used in two unrelated situations, and only one of them existed before: a
         ! schema-less write has to BUILD a schema, and a metadata carry-over has to write onto a
         ! COPY of the caller's rather than the caller's own -- otherwise writing a second table
@@ -84,7 +43,8 @@ contains
         ! permanently. Both end up wanting a local schema, so they share one.
         use_own = want_metadata .or. .not. present(schema)
         if (.not. present(schema)) then
-            call build_table_schema(table, trim(filename), own, nfields)
+            call output_stem(trim(filename), stem)
+            call build_table_schema(table, stem, own, nfields)
             ! Nothing resident is not an error -- it writes a genuinely empty file, which Arrow
             ! accepts and this library reopens as a 0-column, 0-row table. It cannot go through
             ! the generated schema, though: MAML requires at least one field, so there is no
@@ -97,7 +57,7 @@ contains
         else if (want_metadata) then
             own = schema
         end if
-        if (want_metadata) call carry_source_metadata(table, own, metadata_keys)
+        if (want_metadata) call carry_source_metadata(table, own, metadata_keys, "parquet_write_table")
         !
         if (use_own) then
             call write_through_schema(table, own, filename, row_mask, write_maml, qc,         &
@@ -107,6 +67,162 @@ contains
                 compression, compression_level, chunk_size, use_threads, overwrite, release)
         end if
     end procedure parquet_write_table
+    !
+    !> Hands back the schema a schema-less `parquet_write_table` would build for `table` -- see
+    !! the interface's doc-comment for what goes in and what never does.
+    !!
+    !! A thin wrapper over `build_table_schema`, deliberately: that procedure is the one place
+    !! the descriptor-to-field rules live (`feature_risks.md` Risk-2 pins its `auto` sizes with a
+    !! lint check), and a second copy here would be free to drift from the write path. What this
+    !! adds is the `table:` name rule and the refusal: the schema-less write's answer to "nothing
+    !! resident" is an empty file, which is a valid output, while a schema with no field is not
+    !! a valid schema, so there is nothing to hand back and the caller is told so.
+    module procedure parquet_derive_schema
+        integer :: nfields
+        character(len=:), allocatable :: tname, sfx
+        !
+        call table_check_open(table, "parquet_derive_schema")
+        if (present(name)) then
+            ! Refused here rather than left to %init, whose message would name a procedure the
+            ! caller never called. MAML requires a table: value.
+            if (len_trim(name) == 0) then
+                call table_context_suffix(table%cache, "", sfx)
+                error stop EP // "parquet_derive_schema: name= must not be blank (MAML requires a " // &
+                    "table: value)" // sfx
+            end if
+            tname = trim(name)
+        else
+            call source_stem(table, tname)
+        end if
+        call build_table_schema(table, tname, schema, nfields)
+        if (nfields == 0) then
+            call table_context_suffix(table%cache, "", sfx)
+            error stop EP // "parquet_derive_schema: this table has no resident column to build a " // &
+                "schema from; materialize a column first" // sfx
+        end if
+    end procedure parquet_derive_schema
+    !
+    !> `parquet_derive_schema` plus `parquet_open_writer` -- see the interface's doc-comment.
+    !!
+    !! The body is `parquet_write_table`'s own opening half, with the write loop and the close
+    !! left to the caller: the same parse guard, the same metadata rules on the same private copy,
+    !! the same forwarding of every writer option still absent when the caller omitted it. Kept
+    !! in step with it by sharing the helpers (`ensure_schema_parsed`, `resolve_metadata_request`,
+    !! `build_table_schema`, `carry_source_metadata`) rather than by care.
+    !!
+    !! The derived schema takes the OUTPUT file's stem as its `table:` name, as the schema-less
+    !! write does: this call names an output file, so the name a sidecar records should be that
+    !! file's, not the template's source. `parquet_derive_schema` alone, which names no file,
+    !! takes the source stem instead.
+    module procedure parquet_open_writer_like
+        type(parquet_schema) :: own
+        integer :: nfields
+        logical :: want_metadata, use_own
+        character(len=:), allocatable :: stem, sfx
+        !
+        call table_check_open(table, "parquet_open_writer_like")
+        if (present(schema)) call ensure_schema_parsed(schema, "parquet_open_writer_like")
+        call resolve_metadata_request(copy_metadata, metadata_keys, "parquet_open_writer_like", want_metadata)
+        use_own = want_metadata .or. .not. present(schema)
+        if (.not. present(schema)) then
+            call output_stem(trim(filename), stem)
+            call build_table_schema(table, stem, own, nfields)
+            ! Unlike the schema-less write, which has a valid empty file to fall back on, an open
+            ! writer with no column is nothing a caller can use -- every write into it would be
+            ! refused as undeclared -- so the refusal happens here, before any file exists.
+            if (nfields == 0) then
+                call table_context_suffix(table%cache, "", sfx)
+                error stop EP // "parquet_open_writer_like: this table has no resident column to " // &
+                    "derive a schema from; materialize the columns the output should have, or " // &
+                    "pass schema=" // sfx
+            end if
+        else if (want_metadata) then
+            own = schema
+        end if
+        if (want_metadata) call carry_source_metadata(table, own, metadata_keys, "parquet_open_writer_like")
+        ! Every writer option is forwarded untouched, absent ones included (see
+        ! write_through_schema for why that is the whole point).
+        if (use_own) then
+            call parquet_open_writer(writer, trim(filename), own, write_maml=write_maml, qc=qc,   &
+                compression=compression, compression_level=compression_level,                     &
+                chunk_size=chunk_size, use_threads=use_threads, overwrite=overwrite)
+        else
+            call parquet_open_writer(writer, trim(filename), schema, write_maml=write_maml, qc=qc, &
+                compression=compression, compression_level=compression_level,                     &
+                chunk_size=chunk_size, use_threads=use_threads, overwrite=overwrite)
+        end if
+    end procedure parquet_open_writer_like
+    !
+    !> Parses a caller-supplied schema that was built with `%init`/`%add_field` and never parsed,
+    !! and refuses one that was never built at all; `context` is the public procedure's name.
+    !!
+    !! `%get_num_fields` on an unpopulated `%cinfo` reads uninitialized state, which turns the
+    !! write loop into a runaway allocation and an OOM kill rather than any kind of diagnosable
+    !! failure. So a schema that has not been parsed is stopped here, one way or the other.
+    !!
+    !! **Which schema lands in which arm follows from what the two queries actually read** --
+    !! `%is_parsed()` is `allocated(%cinfo%col)` and `%is_init()` is that OR the `%init` flag:
+    !!
+    !! * built with `%init`/`%add_field` -- `%add_field` parses as it goes, so `%is_parsed()` is
+    !!   already `.true.` after the first field and neither arm runs;
+    !! * from `parquet_parse_maml`, `parquet_load_maml_file` or an embedded `get_parquet_maml` --
+    !!   parsed on arrival, likewise neither arm;
+    !! * `%maml%lines` assigned DIRECTLY and never parsed -- `%init` was never called, so
+    !!   `%is_init()` is `.false.` and this is the error stop below, not the parse;
+    !! * `%init` called and no field added yet -- `%is_init()` `.true.`, `%is_parsed()` `.false.`,
+    !!   which is the ONE state reaching the parse call.
+    !!
+    !! That last one is header-only MAML, so the parse always fails validation with "no fields
+    !! defined" naming the schema. Keeping the call rather than adding a second bespoke guard is
+    !! deliberate: the parser's own message is the accurate one, and the call is also what makes
+    !! the callers' `schema` `intent(inout)` rather than `intent(in)`.
+    !!
+    !! A schema that was never built at all is a different mistake and still an error: parsing
+    !! empty MAML text would report something about the text rather than the call.
+    subroutine ensure_schema_parsed(schema, context)
+        type(parquet_schema), intent(inout) :: schema !! the caller's schema.
+        character(len=*), intent(in) :: context       !! calling procedure, for the message.
+        !
+        if (.not. schema%is_parsed()) then
+            if (.not. schema%is_init()) then
+                error stop EP // context // ": this schema has not been built; call " // &
+                    "schema%init/%add_field (or load a MAML file) before using it here"
+            end if
+            call parquet_parse_maml(schema)
+        end if
+    end subroutine ensure_schema_parsed
+    !
+    !> Turns the `copy_metadata=`/`metadata_keys=` pair into one flag, refusing the combination
+    !! that says two things at once; `context` is the public procedure's name.
+    subroutine resolve_metadata_request(copy_metadata, metadata_keys, context, want_metadata)
+        logical, intent(in), optional :: copy_metadata             !! .true.: carry every key.
+        character(len=*), intent(in), optional :: metadata_keys(:) !! carry only these keys.
+        character(len=*), intent(in) :: context                    !! calling procedure, for the message.
+        logical, intent(out) :: want_metadata                      !! whether anything is to be carried.
+        !
+        want_metadata = present(metadata_keys)
+        if (present(copy_metadata)) then
+            if (present(metadata_keys) .and. copy_metadata) then
+                error stop EP // context // ": copy_metadata=.true. and metadata_keys= " // &
+                    "cannot both be given; copy_metadata=.true. carries every key, metadata_keys= " // &
+                    "only the listed ones (copy_metadata=.false. alongside metadata_keys= is " // &
+                    "accepted, and carries the listed keys)"
+            end if
+            want_metadata = want_metadata .or. copy_metadata
+        end if
+    end subroutine resolve_metadata_request
+    !
+    !> The `table:` name `parquet_derive_schema` uses when the caller gives none: the stem of the
+    !! file the table was opened from, or "table" for one built in memory.
+    subroutine source_stem(table, stem)
+        class(parquet_table), intent(in) :: table          !! the table.
+        character(len=:), allocatable, intent(out) :: stem !! the name, never empty.
+        !
+        stem = "table"
+        if (.not. table%cache%file_backed) return
+        if (.not. allocated(table%cache%source_file)) return
+        call output_stem(trim(table%cache%source_file), stem)
+    end subroutine source_stem
     !
     !> Opens the writer, writes every enabled column of `sch`, and closes -- the whole write, for
     !! whichever schema the caller's arguments resolved to.
@@ -197,20 +313,20 @@ contains
     !!   procedure cannot get them wrong -- and the sidecar MAML, emitted at close, records the
     !!   resolved values.
     !!
-    !! The `table:` name is the output file's stem, since a schema-less table has no schema name to
-    !! take one from and MAML requires the key.
-    subroutine build_table_schema(table, filename, sch, nfields)
+    !! The `table:` name is the caller's, since a schema-less table has no schema name to take one
+    !! from and MAML requires the key: the output file's stem for a write, the source file's stem
+    !! or the caller's own choice for `parquet_derive_schema`.
+    subroutine build_table_schema(table, tname, sch, nfields)
         type(parquet_table), intent(in) :: table    !! the table being written.
-        character(len=*), intent(in) :: filename    !! output parquet file, for the table: name.
+        character(len=*), intent(in) :: tname       !! the MAML table: name; never blank.
         type(parquet_schema), intent(out) :: sch    !! the schema built from the descriptors.
-        integer, intent(out) :: nfields             !! fields added; 0 means "write an empty file".
-        character(len=:), allocatable :: stem, dtype, u
+        integer, intent(out) :: nfields             !! fields added; 0 means "no field to declare".
+        character(len=:), allocatable :: dtype, u
         logical :: is_vec, is_str
         integer :: i
         !
         nfields = 0
-        call output_stem(filename, stem)
-        call sch%init(stem)
+        call sch%init(tname)
         do i = 1, table%cache%ncols
             associate (slot => table%cache%cols(i))
                 if (slot%residency /= RES_FULL) cycle
@@ -229,10 +345,12 @@ contains
                 end if
                 ! An UNALLOCATED allocatable actual makes an optional dummy absent (F2018
                 ! 15.5.2.12), which is how a column with no unit gets no `unit:` key at all rather
-                ! than an empty one -- deallocated first, since the previous column may have left
-                ! one behind.
-                if (allocated(u)) deallocate(u)
-                if (allocated(slot%unit)) u = slot%unit
+                ! than an empty one. The unit is resolved the way every %unit query resolves it
+                ! (table_slot_unit: the descriptor, then the values), never from the descriptor
+                ! alone -- a column built with %add_column(unit=) keeps its unit on its values, and
+                ! reading the descriptor only wrote such a column's sidecar without its unit.
+                call table_slot_unit(table%cache, i, u)
+                if (len_trim(u) == 0) deallocate(u)
                 if (is_vec .and. is_str) then
                     call sch%add_field(slot%name, dtype, unit=u, col_size=parquet_size_auto, &
                         array_size=parquet_size_auto)
@@ -489,10 +607,11 @@ contains
     !!   through `metadata_keys=` is an error. See `writer_regenerates_key`.
     !! * **It works after a detach**, because the metadata was snapshotted at open. That is the
     !!   whole point: the natural shape is read, mutate rows, write, and the reader is gone by then.
-    subroutine carry_source_metadata(table, sch, keys)
+    subroutine carry_source_metadata(table, sch, keys, context)
         type(parquet_table), intent(in) :: table                   !! the table being written.
         type(parquet_schema), intent(inout) :: sch                 !! private schema copy to add to.
         character(len=*), intent(in), optional :: keys(:)          !! only these keys, if given.
+        character(len=*), intent(in) :: context                    !! calling procedure, for the messages.
         character(len=:), allocatable :: sfx
         integer :: i, k
         !> How many entries `sch` declared BEFORE this loop started adding to it. The loop mutates
@@ -505,7 +624,7 @@ contains
         !
         if (.not. allocated(table%cache%meta_keys)) then
             call table_context_suffix(table%cache, "", sfx)
-            error stop EP // "parquet_write_table: this table was not opened from a file, so it " // &
+            error stop EP // context // ": this table was not opened from a file, so it " // &
                 "has no source metadata to copy" // sfx
         end if
         ! Every requested key is checked BEFORE anything is added, so a typo fails with the output
@@ -514,7 +633,7 @@ contains
             do k = 1, size(keys)
                 if (.not. source_has_key(table, trim(keys(k)))) then
                     call table_context_suffix(table%cache, "", sfx)
-                    error stop EP // "parquet_write_table: metadata_keys names '" // trim(keys(k)) // &
+                    error stop EP // context // ": metadata_keys names '" // trim(keys(k)) // &
                         "', which this table's source file does not have" // sfx
                 end if
                 ! Refused rather than skipped: the source file HAS this key, so the check above
@@ -523,7 +642,7 @@ contains
                 ! writer_regenerates_key.
                 if (writer_regenerates_key(trim(keys(k)))) then
                     call table_context_suffix(table%cache, "", sfx)
-                    error stop EP // "parquet_write_table: metadata_keys names '" // trim(keys(k)) // &
+                    error stop EP // context // ": metadata_keys names '" // trim(keys(k)) // &
                         "', which the writer generates itself from the output schema -- the output " // &
                         "carries its own value for it, so it cannot also be copied from the source" // sfx
                 end if

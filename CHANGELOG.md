@@ -159,6 +159,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   values names the stored type in the abort message, and `%print_stat(all=.true.)` shows it in that
   column's `kind` cell instead of `PK_NONE`. See
   [What a column is actually stored as](doc/pages/io/reading.md#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type).
+- **The schema a schema-less table write builds is reachable: `parquet_derive_schema` and
+  `parquet_open_writer_like`.** `call parquet_derive_schema(t, s, [name])` hands back the
+  `parquet_schema` a schema-less `parquet_write_table(t, file)` builds — one field per resident
+  column, `auto` sizes, a `unit:` where the column has one, `parquet_row_index` never — parsed and
+  ready for `%set_protected`, `%add_metadata` or `parquet_open_writer`.
+  `call parquet_open_writer_like(writer, file, t)` derives it and opens the writer in one call,
+  taking `schema=`, `copy_metadata=`/`metadata_keys=` and every writer option under
+  `parquet_write_table`'s names. `parquet_get_column_names` also takes a writer, listing the
+  internal name of every field its schema declares in schema order, and
+  `parquet_is_column_enabled(writer, name)` is public. See
+  [The schema a schema-less write builds](doc/pages/tables/table-write.md#the-schema-a-schema-less-write-builds-parquet_derive_schema-and-parquet_open_writer_like).
 
 ### Changed
 
@@ -203,6 +214,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- A schema-less `parquet_write_table(t, file, write_maml=.true.)` dropped the unit of a column
+  built with `%add_column(unit=)` from the sidecar `.maml`; the unit is now carried, as it already
+  was for a column read from a file with a MAML.
 - `pf_chord2_from_angle` is now monotone in the angle over its whole domain: an angle at or above
   pi gives 4 rather than the falling half of the sine, and a negative angle gives -1 rather than the
   bound for the positive one. The documented substitution of a squared-chord comparison for

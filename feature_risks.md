@@ -291,6 +291,7 @@ something a reader is expected to have.
 | [Risk-189](#risk-189--a-driver-that-resolves-a-thread-count-and-then-drops-it-threads-nothing-silently) | A driver that RESOLVES a thread count and then drops it threads nothing, silently | 4 — covered |
 | [Risk-223](#risk-223--a-decoded-dictionary-columns-schema-type-and-its-cached-array-disagree-and-only-code-that-reads-the-array-is-right) | A decoded dictionary column's schema type and its cached array disagree | 1 — new |
 | [Risk-224](#risk-224--resolve_column_types-fixed-buffer-is-safe-only-while-the-c-side-emits-nothing-but-tokens) | `resolve_column_type`'s fixed buffer is safe only while the C++ side emits nothing but tokens | 1 — new |
+| [Risk-225](#risk-225--a-schema-derived-from-a-table-that-measures-nullability-from-that-one-batch-declares-it-for-every-later-batch) | A schema derived from a table that measures nullability from that one batch declares it for every later batch | 1 — new |
 
 ---
 
@@ -354,6 +355,33 @@ a type needs its own query with a length-then-allocate pair of bindings (the sha
 **Test:** not testable from the Fortran side — a truncation is indistinguishable from a short
 answer, and no input can produce one while the C++ side keeps its contract. Held by construction and
 by this entry.
+
+### Risk-225 — A schema derived from a table that measures nullability from that one batch declares it for every later batch
+
+`parquet_derive_schema` (`src/parquet_tables_write.f90`, a wrapper over `build_table_schema`)
+reads a column's DESCRIPTOR — kind, width, unit — and never its values. The temptation to improve it
+by asking each column whether it currently holds a Null is real: it would produce a tighter schema
+(`protected_cols:` for every Null-free column) and a faster write for the common case, and every
+round-trip test would still pass. It is also wrong in a way nothing reports. The table a schema is
+derived from is one batch of many — the template of a row-group loop, the first chunk of a stream —
+so a column that is Null-free in it is not Null-free in the output, and a field declared
+non-nullable from that one batch is a field a later row group has to fill with a Null. That is
+Risk-82's invariant break: this library's own reader round-trips the file perfectly (it answers from
+the data's null count, not the schema flag), a schema-trusting Arrow reader may hand back wrong
+values, and if the mismatch reaches `Table::Validate()` the failure is an abort at close, thousands
+of rows from the cause.
+
+**Rule:** nullability is DECLARED, never measured. The derivation path reads no value and calls no
+`%has_nulls`/`is_null`/`any_null`; the caller's declaration is `protected_cols:`/`%set_protected`
+(null-free, enforced), and the affirmative direction is `extra: nullable_cols:` once it exists
+(`feature_pandas_S2.md`, P5).
+
+**Test:** proposed — `test_derive_schema_does_not_measure_nullability` in `test/test_table_stream.f90`
+(`feature_pandas_S2.md`, P3): a Null-free template, then appended batches holding Nulls through the
+`parquet_table_writer` sink; the Nulls read back and `parquet_get_column_nullable` answers `.true.`.
+The mutation to catch is any null query added to `build_table_schema`. A static check in the shape of
+Risk-2's `check_schemaless_write_declares_auto` (no `is_null`/`has_nulls` in that body) would forbid
+it outright.
 
 ## 2. Risks with a proposed testing scenario
 

@@ -2596,7 +2596,7 @@ contains
         call check_column_exists(reader, name, "parquet_get_column_nullable")
         is_nullable = parquet_reader_get_column_nullable(reader%handle, trim(name)//char(0)) /= 0_c_long_long
     end procedure parquet_get_column_nullable
-    module procedure parquet_get_column_names
+    module procedure parquet_get_column_names_reader
         integer(c_int32_t) :: ncols, i
         integer(c_long_long) :: name_len, max_len
         character(len=:), allocatable :: buf
@@ -2619,7 +2619,7 @@ contains
             call parquet_reader_get_column_name(reader%handle, i, buf, max_len)
             names(i + 1) = buf
         end do
-    end procedure parquet_get_column_names
+    end procedure parquet_get_column_names_reader
     !
     module procedure parquet_get_physical_row_indices
         integer(c_long_long) :: n

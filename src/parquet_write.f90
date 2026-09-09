@@ -288,6 +288,7 @@ contains
         end if
     end subroutine parquet_check_and_mark_written_name
     module procedure parquet_is_column_enabled
+        call check_writer_open(writer, "parquet_is_column_enabled")
         parquet_is_column_enabled = .true.
         if (.not. allocated(writer%enabled_columns)) return
 
@@ -1365,6 +1366,29 @@ contains
         call lk%claim(writer)
         chunk_size = parquet_writer_get_chunk_size(writer%handle)
     end procedure parquet_get_chunk_size_writer_int64
+    !> The writer form of parquet_get_column_names. Answers from `all_columns`, the writer's own
+    !> copy of the schema's fields in MAML source order (enabled or not), which parquet_open_writer
+    !> fills exactly when it is given a schema -- so a schema-less writer, which has none, answers
+    !> a zero-size array rather than the names already written: nothing was declared in advance,
+    !> and a caller following "the declared columns" has to be told that there are none. Reaches
+    !> no C++ and takes no lock: `all_columns` is fixed at open and never written again.
+    module procedure parquet_get_column_names_writer
+        integer :: i, n, max_len
+
+        call check_writer_open(writer, "parquet_get_column_names")
+        n = 0
+        if (allocated(writer%all_columns)) n = size(writer%all_columns)
+        ! Same two-pass shape as the reader form: one length for the whole array, found first, so
+        ! no name is truncated and none is padded further than the longest needs.
+        max_len = 0
+        do i = 1, n
+            max_len = max(max_len, len_trim(writer%all_columns(i)%name))
+        end do
+        allocate(character(len=max_len) :: names(n))
+        do i = 1, n
+            names(i) = writer%all_columns(i)%name
+        end do
+    end procedure parquet_get_column_names_writer
     !> Writes every enabled column as a ZERO-ROW column when parquet_close_writer finds that a
     !> schema-enforced writer had nothing written to it at all -- an analysis stage that legitimately
     !> produced no rows, which used to abort with "missing write for enabled column".

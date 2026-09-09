@@ -552,23 +552,27 @@ contains
         wdt = slot_width(self, idx)
     end procedure table_column_width_at
     !
-    !> A resolved slot's unit string ("" when it has none).
-    !!
-    !! The descriptor first, because it answers for a column nothing has read yet -- a file-backed
-    !! column's unit comes from the read-in MAML at open, not from its values. The values are asked
-    !! only for a column that has no descriptor unit, which is every column built with
-    !! %add_column(unit=).
+    !> A resolved slot's unit string ("" when it has none) -- `table_slot_unit` on this table's
+    !! cache, kept as the shape the queries below were written against.
     subroutine slot_unit(self, idx, u)
         class(parquet_table), intent(in) :: self        !! the table.
         integer, intent(in) :: idx                      !! a validated slot index.
         character(len=:), allocatable, intent(out) :: u !! the unit, or "".
         !
-        if (allocated(self%cache%cols(idx)%unit)) then
-            u = self%cache%cols(idx)%unit
+        call table_slot_unit(self%cache, idx, u)
+    end subroutine slot_unit
+    !
+    !> The descriptor first, because it answers for a column nothing has read yet -- a file-backed
+    !! column's unit comes from the read-in MAML at open, not from its values. The values are asked
+    !! only for a column that has no descriptor unit, which is every column built with
+    !! %add_column(unit=). Shared with the schema-less write (see the interface's doc-comment).
+    module procedure table_slot_unit
+        if (allocated(cache%cols(idx)%unit)) then
+            u = cache%cols(idx)%unit
             return
         end if
-        call self%cache%cols(idx)%values%unit_string(u)
-    end subroutine slot_unit
+        call cache%cols(idx)%values%unit_string(u)
+    end procedure table_slot_unit
     !
     module procedure table_column_unit
         integer :: idx

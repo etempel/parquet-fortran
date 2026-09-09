@@ -83,7 +83,7 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:), p16(:), p17(:), p18(:)
+                                            p15(:), p16(:), p17(:), p18(:), p19(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2475,7 +2475,13 @@ contains
             new_unittest("column row_validity_range with a mask shorter than the range aborts", &
                 test_column_row_validity_range_short_mask_aborts) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18]
+        p19 = [ &
+            new_unittest("parquet_derive_schema on a table with no resident column aborts", &
+                test_derive_schema_needs_a_resident_column_aborts), &
+            new_unittest("parquet_open_writer_like on a table with no resident column aborts", &
+                test_open_writer_like_needs_a_resident_column_aborts) &
+            ]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19]
     end subroutine collect_tests_parquet_errors
 
 
@@ -12819,6 +12825,52 @@ contains
         call check(error, found, &
             "the abort must come from validating the header-only MAML and name the real problem")
     end subroutine test_write_table_schema_init_no_fields_aborts
+
+    !> The control (one resident column) must derive first, or the abort says nothing about
+    !> residency; then the lazily opened table with nothing read aborts with the library's message.
+    subroutine test_derive_schema_needs_a_resident_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("derive_schema_needs_a_resident_column", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "parquet_derive_schema on a table with no resident column was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "control: a table with a resident column derived a schema", found)
+        call check(error, found, "the control must derive a schema first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_derive_schema: this table has no resident column to build a schema from", found)
+        call check(error, found, "the abort must name parquet_derive_schema and the missing resident column")
+    end subroutine test_derive_schema_needs_a_resident_column_aborts
+
+    !> Same shape for parquet_open_writer_like: the control opens, writes and closes; the lazily
+    !> opened table aborts before any output file exists, naming the alternative (schema=).
+    subroutine test_open_writer_like_needs_a_resident_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("open_writer_like_needs_a_resident_column", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "parquet_open_writer_like on a table with no resident column was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "control: a table with a resident column opened a writer", found)
+        call check(error, found, "the control must open a writer first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_open_writer_like: this table has no resident column to derive a schema from", found)
+        call check(error, found, "the abort must name parquet_open_writer_like and the missing resident column")
+    end subroutine test_open_writer_like_needs_a_resident_column_aborts
 
     subroutine test_set_max_threads_below_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error

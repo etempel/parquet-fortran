@@ -1555,6 +1555,8 @@ scenarios=(
     "bounded_qc_hard_at_first_touch:1"
     "bounded_qc_soft_warns:0"
     "bounded_arrow_pool:0"
+    "derive_schema_needs_a_resident_column:1"
+    "open_writer_like_needs_a_resident_column:1"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy

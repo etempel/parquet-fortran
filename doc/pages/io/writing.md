@@ -229,6 +229,15 @@ call parquet_open_writer(writer, "data.parquet", compression="zstd", compression
   process-wide with `parquet_set_default_use_threads(flag)` ([Writer
   defaults](../operating/settings.html#writer-defaults)), and it applies to `parquet_open_reader`
   in exactly the same way.
+- **Asking a writer what it declares** — `parquet_get_column_names(writer, names)` lists the
+  internal name of every field the writer's schema declares, in schema order, disabled fields
+  included (`names` comes back allocated to the count, blank-padded to the longest name, as the
+  reader form does); `parquet_is_column_enabled(writer, name)` is `.false.` for a field disabled
+  with `set_column_unavailable`, for a base field a user MAML excluded, and for a name the schema
+  does not declare. Together they let code
+  that holds only the writer follow its column selection — a loop writing one row group per batch,
+  say — without carrying the schema object. A writer opened without a schema answers zero names
+  and disables nothing: its columns are whatever the writes define.
 
 Quality control (`qc:` range/miss checks run automatically against what's being written, when a
 schema is given) is its own topic — the `qc` argument defaults to on whenever a `schema` is given

@@ -254,12 +254,80 @@ contains
             new_unittest("a parquet_string_column write longer than the declared array_size is accepted, " // &
                 "and the sidecar reports what was written", test_compact_write_exceeds_declared_array_size), &
             new_unittest("the reconciled array_size reaches the file's own metadata, not just the sidecar", &
-                test_reconciled_array_size_reaches_file_metadata) &
+                test_reconciled_array_size_reaches_file_metadata), &
+            new_unittest("parquet_get_column_names on a writer lists the schema's internal names in order", &
+                test_writer_column_names_follow_the_schema) &
             ]
         !
         testsuite = [p1, p2]
     end subroutine collect_tests_parquet_writing
     !
+    !> The writer form of parquet_get_column_names lists every declared field's INTERNAL name in
+    !> schema order, a disabled field included, and parquet_is_column_enabled says which to skip.
+    !> The col_map: rename is what separates "internal" from "output" here (id0 -> my_id): listing
+    !> output names, or enabled fields only, both fail. A schema-less writer answers zero names and
+    !> refuses nothing.
+    subroutine test_writer_column_names_follow_the_schema(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer, bare
+        character(len=:), allocatable :: names(:)
+        character(len=*), parameter :: out_file = "test_run/test_writer_column_names.parquet"
+        character(len=*), parameter :: bare_file = "test_run/test_writer_column_names_bare.parquet"
+
+        base_maml = get_parquet_maml("maml_example.maml")
+        schema%maml%name = "user_writer_column_names.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - id0: my_id", &
+            "fields:", &
+            "- name: my_id", &
+            "  data_type: int32", &
+            "- name: idlong", &
+            "  data_type: int64", &
+            "- name: val", &
+            "  data_type: float32" ]
+        call parquet_validate_user_maml(base_maml, schema%maml)
+        call parquet_parse_maml(schema)
+        call schema%set_column_unavailable("idlong")
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_get_column_names(writer, names)
+        ! A user MAML validated against a base declares the base's excluded fields too, deactivated
+        ! (is_set .false.), so the list is the merged schema's: the user's three first, in their
+        ! order, then every excluded base field -- exactly %get_num_fields() of them.
+        call check(error, size(names) == schema%get_num_fields(), &
+            "every declared field is listed, disabled and deactivated ones included")
+        if (allocated(error)) return
+        call check(error, size(names) > 3, "precondition: the merge declared the base's excluded fields")
+        if (allocated(error)) return
+        call check(error, trim(names(1)) == "id0", "the INTERNAL name, not the col_map: output name")
+        if (allocated(error)) return
+        call check(error, trim(names(2)) == "idlong" .and. trim(names(3)) == "val", "...in schema order")
+        if (allocated(error)) return
+        call check(error, parquet_is_column_enabled(writer, "id0"), "an enabled field answers .true.")
+        if (allocated(error)) return
+        call check(error, .not. parquet_is_column_enabled(writer, "idlong"), "the disabled field answers .false.")
+        if (allocated(error)) return
+        call check(error, .not. parquet_is_column_enabled(writer, trim(names(4))), &
+            "an excluded base field is listed and answers .false.")
+        if (allocated(error)) return
+        call check(error, .not. parquet_is_column_enabled(writer, "nowhere"), "an undeclared name answers .false.")
+        if (allocated(error)) return
+        call parquet_close_writer(writer)
+
+        call parquet_open_writer(bare, bare_file)
+        call parquet_get_column_names(bare, names)
+        call check(error, size(names) == 0, "a schema-less writer declares no column in advance")
+        if (allocated(error)) return
+        call check(error, parquet_is_column_enabled(bare, "anything"), "...and disables none")
+        if (allocated(error)) return
+        call parquet_close_writer(bare)
+    end subroutine test_writer_column_names_follow_the_schema
+
     subroutine test_write_simple_parquet(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error

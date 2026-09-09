@@ -117,6 +117,8 @@ module parquet_tables
     public :: parquet_open_table
     public :: parquet_new_table
     public :: parquet_write_table
+    public :: parquet_derive_schema
+    public :: parquet_open_writer_like
     public :: parquet_table_row_group_bounds
     !> Re-exported from parquet_settings so that a `use parquet_tables` program can report
     !! which Arrow/Parquet C++ it is linked against without a second import. The library's
@@ -2154,6 +2156,17 @@ module parquet_tables
             character(len=:), allocatable, intent(out) :: u      !! the unit, or "".
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine table_column_unit
+        !> A validated slot's unit string ("" when it has none): the descriptor first, which
+        !! answers for a column nothing has read yet (a file-backed column's unit comes from the
+        !! read-in MAML at open), then the values, which is where a column built with
+        !! `%add_column(unit=)` keeps its unit. The ONE resolution every unit query and the
+        !! schema-less write's `build_table_schema` share -- a caller reading the descriptor alone
+        !! silently drops the unit of every in-memory column.
+        module subroutine table_slot_unit(cache, idx, u)
+            type(parquet_table_cache), intent(in) :: cache       !! the column store.
+            integer, intent(in) :: idx                           !! a validated slot index.
+            character(len=:), allocatable, intent(out) :: u      !! the unit, or "".
+        end subroutine table_slot_unit
         !> Copies out a column's unit string, by 1-based position.
         module subroutine table_column_unit_at(self, j, u, found)
             class(parquet_table), intent(in) :: self             !! the table.
@@ -4653,6 +4666,65 @@ module parquet_tables
             logical, intent(in), optional :: overwrite !! allow truncating an existing file; default .true.
             logical, intent(in), optional :: release !! evict columns this write materialized; default .true.
         end subroutine parquet_write_table
+        !> Builds the `parquet_schema` a schema-less `parquet_write_table(table, file)` would build
+        !! for `table`, and hands it back in `schema`: one field per RESIDENT column, in slot order,
+        !! under the column's own internal name; `col_size:`/`array_size:` declared `auto` (the
+        !! writer resolves both from the data); the `unit:` key present only where the column has
+        !! one; the automatic `parquet_row_index` never included. The result is parsed and ready
+        !! for `parquet_open_writer`, and it is where every adjustment lives: `schema%set_protected`
+        !! recovers the unmasked write path for a column that never holds a Null, `%add_metadata`
+        !! puts provenance in the file, `%set_column_unavailable` drops a column from the output.
+        !!
+        !! Reads no column data, and never asks a column whether it currently holds a Null: a
+        !! table is one batch of many, so nothing about nullability is derived from it
+        !! (`protected_cols:`/`%set_protected` is the caller's declaration, made in advance).
+        !!
+        !! `name` is the MAML `table:` key; omitted, it is the stem of the file this table was
+        !! opened from, or `"table"` for a table built in memory. error stops when the table has
+        !! no resident column: MAML requires at least one field, so there is no schema to hand
+        !! back (a schema-less `parquet_write_table` of such a table writes an empty file instead).
+        module subroutine parquet_derive_schema(table, schema, name)
+            class(parquet_table), intent(in) :: table   !! the table to take the shape of (any extending type too).
+            type(parquet_schema), intent(out) :: schema !! receives the derived schema, parsed.
+            character(len=*), intent(in), optional :: name !! the MAML table: name; default: the source
+            !! file's stem, or "table" for an in-memory table.
+        end subroutine parquet_derive_schema
+        !> `parquet_derive_schema` plus `parquet_open_writer`, in one call: opens `writer` on
+        !! `filename` with the schema derived from `table`'s resident columns -- or with `schema`
+        !! when one is given, in which case nothing is derived and that schema decides what the
+        !! writer accepts -- and hands the open writer back, for `parquet_write_column`, a
+        !! `parquet_new_row_group` loop or `parquet_write_column_chunk`, to be closed by
+        !! `parquet_close_writer`. The derived schema's `table:` name is the output file's stem,
+        !! exactly as a schema-less `parquet_write_table` names it.
+        !!
+        !! `copy_metadata=`/`metadata_keys=` carry the TABLE's source-file metadata into the output
+        !! under `parquet_write_table`'s rules (mutually exclusive; a key the schema declares
+        !! itself wins; a named key the source lacks is an error; a key the writer generates itself
+        !! is never carried), onto a private copy of the schema, never the caller's own. Every
+        !! writer option is a pass-through to `parquet_open_writer`, absent ones included, so its
+        !! defaults apply unchanged; `write_maml=.true.` emits the sidecar at close, once every
+        !! `auto` size is resolved. A schema built with `%init`/`%add_field` and never parsed is
+        !! parsed here, which is why `schema` is `intent(inout)`.
+        !!
+        !! error stops when no `schema` is given and the table has no resident column: an open
+        !! writer with no column is nothing a caller can use.
+        module subroutine parquet_open_writer_like(writer, filename, table, schema, copy_metadata, &
+                metadata_keys, write_maml, qc, compression, compression_level, chunk_size,          &
+                use_threads, overwrite)
+            type(parquet_writer), intent(out) :: writer  !! writer to open.
+            character(len=*), intent(in) :: filename     !! output parquet file.
+            class(parquet_table), intent(in) :: table    !! the table whose shape the output takes (any extending type too).
+            type(parquet_schema), intent(inout), optional :: schema !! use this schema instead of deriving one.
+            logical, intent(in), optional :: copy_metadata !! .true.: carry every source-file metadata entry.
+            character(len=*), intent(in), optional :: metadata_keys(:) !! carry only these source-file keys.
+            logical, intent(in), optional :: write_maml !! also save a sidecar .maml next to filename.
+            logical, intent(in), optional :: qc !! run the schema's qc: checks on write; defaults to on.
+            character(len=*), intent(in), optional :: compression !! Arrow compression codec name (e.g. "snappy").
+            integer, intent(in), optional :: compression_level !! codec-specific compression level.
+            integer, intent(in), optional :: chunk_size !! Parquet row-group size, in rows.
+            logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
+            logical, intent(in), optional :: overwrite !! allow truncating an existing file; default .true.
+        end subroutine parquet_open_writer_like
     end interface
     !
     ! ---- Zero-copy pointer access (parquet_tables_access) ----

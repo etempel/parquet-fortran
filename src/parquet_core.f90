@@ -725,6 +725,11 @@ module parquet_core
     !> absent from `from` is left alone rather than rejected, since only the caller knows which
     !> names are supposed to exist. A rule that does not parse is also left untouched, so a
     !> malformed rule is still reported by the reader that applies it, with the file named.
+    !>
+    !> %clear() drops every rule and every bound set, returning the filter to its initial state
+    !> (no filtering), so that one variable can be reused for a second read. A filter is copied
+    !> into whatever consumes it rather than referenced, so clearing one after a reader has been
+    !> opened with it changes nothing about that reader.
     type parquet_filter
         !> Raw, unvalidated rule text, one entry per %add call. Deferred-length: every entry
         !! shares the length of the longest rule added so far (%add grows it as needed), so a
@@ -759,6 +764,7 @@ module parquet_core
         integer :: gen_sets = 0 !! Sets named by %add_in so far; the counter behind the `__in<k>` names.
     contains
         procedure :: add => parquet_filter_add !! Appends one AND-combined filter expression.
+        procedure :: clear => parquet_filter_clear !! Drops every rule and every bound set.
         !> Renames the columns every rule refers to, in place: `from(k)` becomes `to(k)`.
         procedure :: remap_column_names => parquet_filter_remap_column_names
         procedure, private :: bind_i32 !! %bind specific taking an int32 array.
@@ -923,6 +929,9 @@ module parquet_core
     !> from(k) with to(k); each key's direction and nulls_first setting are carried across
     !> unchanged. It is the sort twin of parquet_filter%remap_column_names and follows the same
     !> rules -- see that type's doc comment.
+    !>
+    !> %clear() drops every key -- and each key's null placement with it -- returning the object
+    !> to its initial state (no ordering), the same way parquet_filter%clear does.
     type parquet_sortkey
         !> Raw, unvalidated key text, one entry per %add call. Deferred-length, the same way
         !! parquet_filter%rules is: every entry shares the length of the longest key added so far.
@@ -933,6 +942,7 @@ module parquet_core
         integer :: n = 0 !! Number of keys actually in use.
     contains
         procedure :: add => parquet_sortkey_add !! Appends one sort key, applied after those already added.
+        procedure :: clear => parquet_sortkey_clear !! Drops every sort key and its null placement.
         !> Renames the column every key orders by, in place: `from(k)` becomes `to(k)`.
         procedure :: remap_column_names => parquet_sortkey_remap_column_names
     end type parquet_sortkey
@@ -956,6 +966,9 @@ module parquet_core
     !>
     !> Entries are unvalidated here -- exactly like parquet_filter%add and parquet_sortkey%add,
     !> every check happens when the entry is actually composed into a schema.
+    !>
+    !> %clear() drops every entry, returning the object to its initial state, the same way
+    !> parquet_filter%clear does.
     type parquet_read_qc
         !> Raw, unvalidated entry text, one per %add call. Deferred-length: every entry shares the
         !! length of the longest added so far, the same way parquet_filter%rules does.
@@ -963,6 +976,7 @@ module parquet_core
         integer :: n = 0 !! Number of entries actually in use.
     contains
         procedure :: add => parquet_read_qc_add !! Appends one "col, min, max, miss" declaration.
+        procedure :: clear => parquet_read_qc_clear !! Drops every QC declaration.
         !> Renames the column each entry declares, in place: `from(k)` becomes `to(k)`.
         procedure :: remap_column_names => parquet_read_qc_remap_column_names
     end type parquet_read_qc
@@ -5521,6 +5535,37 @@ contains
         this%n = this%n + 1
     end subroutine parquet_filter_add
 
+    !> Drops every rule and every bound set, returning this filter to the state
+    !> a freshly declared one is in: no filtering at all. It exists so that one
+    !> variable can be reused for a second read rather than redeclared --
+    !> assigning a fresh value with the default structure constructor is not a
+    !> portable alternative here, because the set_text component's own type has
+    !> private components in another module, which ifx rejects (error #6053).
+    !>
+    !> Idempotent, and safe at any time: a filter is COPIED into whatever
+    !> consumes it (a reader turns it into an installed row mask and keeps no
+    !> reference to the filter; parquet_table copies it into its cache), so
+    !> clearing one after a reader has been opened with it changes nothing
+    !> about that reader.
+    subroutine parquet_filter_clear(this)
+        class(parquet_filter), intent(inout) :: this !! filter being returned to its pristine state.
+
+        ! Every component of the type: the three counters, then the seven allocatables. A
+        ! component added later without a line here would silently survive a %clear;
+        ! test_filter_clear_drops_bound_sets catches that for the set half, by re-binding a name
+        ! %bind would otherwise refuse.
+        this%n = 0
+        this%nsets = 0
+        this%gen_sets = 0
+        if (allocated(this%rules)) deallocate(this%rules)
+        if (allocated(this%set_name)) deallocate(this%set_name)
+        if (allocated(this%set_family)) deallocate(this%set_family)
+        if (allocated(this%set_lo)) deallocate(this%set_lo)
+        if (allocated(this%set_hi)) deallocate(this%set_hi)
+        if (allocated(this%set_keys)) deallocate(this%set_keys)
+        if (allocated(this%set_text)) deallocate(this%set_text)
+    end subroutine parquet_filter_clear
+
     !> Appends one sort key; see parquet_sortkey's own doc comment for the key
     !> grammar and the null-placement rule. Unvalidated here -- the reader
     !> parses each key and checks the column when it actually applies the sort.
@@ -5568,6 +5613,23 @@ contains
         this%n = this%n + 1
     end subroutine parquet_sortkey_add
 
+    !> Drops every sort key, returning this object to the state a freshly
+    !> declared one is in: no ordering at all. The sort twin of
+    !> parquet_filter%clear, and it exists for the same reason.
+    !>
+    !> Releases nulls_first alongside keys. %add keeps the two parallel arrays
+    !> in step -- its first-key branch tests `allocated(keys)` and rebuilds
+    !> both, its grow branch copies `nulls_first(1:n)` -- so releasing one
+    !> without the other breaks that pairing: clearing only nulls_first leaves
+    !> the grow branch reading an array that is no longer allocated.
+    subroutine parquet_sortkey_clear(this)
+        class(parquet_sortkey), intent(inout) :: this !! sort spec being returned to its pristine state.
+
+        this%n = 0
+        if (allocated(this%keys)) deallocate(this%keys)
+        if (allocated(this%nulls_first)) deallocate(this%nulls_first)
+    end subroutine parquet_sortkey_clear
+
     !> Appends one read-time QC declaration; see parquet_read_qc's own doc
     !> comment for the "col, min, max, miss" grammar, which is
     !> parquet_schema%add_col_qc's verbatim. Unvalidated here -- every check
@@ -5602,5 +5664,16 @@ contains
         call move_alloc(tmp, this%entries)
         this%n = this%n + 1
     end subroutine parquet_read_qc_add
+
+    !> Drops every read-time QC declaration, returning this object to the state
+    !> a freshly declared one is in: nothing declared. The qc twin of
+    !> parquet_filter%clear and parquet_sortkey%clear, and it exists for the
+    !> same reason.
+    subroutine parquet_read_qc_clear(this)
+        class(parquet_read_qc), intent(inout) :: this !! qc declarations being returned to their pristine state.
+
+        this%n = 0
+        if (allocated(this%entries)) deallocate(this%entries)
+    end subroutine parquet_read_qc_clear
 
 end module

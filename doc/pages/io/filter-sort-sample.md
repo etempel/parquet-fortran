@@ -407,6 +407,40 @@ range have no mask bits, so nothing later can return them. See
 [Memory-bounded filtering with a row-group scope](reading.html#memory-bounded-filtering-with-a-row-group-scope)
 for the full treatment, including the row-range form and pairing it with a chunked loop.
 
+### Reusing a filter: `%clear`
+
+`filt%clear()` drops every rule and every bound set, returning the filter to its initial state —
+no filtering at all — so one variable can serve a second read instead of being redeclared:
+
+```fortran
+type(parquet_filter) :: filt
+
+call filt%add("ra > 180")
+call parquet_open_reader(reader, "first.parquet", filter=filt)
+! ... read, close ...
+
+call filt%clear()
+call filt%add('survey == "wide"')                ! this rule alone, not AND-ed with the first
+call parquet_open_reader(reader, "second.parquet", filter=filt)
+```
+
+Without the `%clear` the second read would be filtered by `(ra > 180) and (survey == "wide")`,
+since several `%add` calls are AND-combined.
+
+Three things are worth knowing:
+
+- **A cleared filter filters nothing.** Passing one to `filter=` reads the whole file, which is
+  the same as passing no `filter=` at all. That is what "initial state" means here.
+- **Clearing a filter never disturbs a reader already open on it.** A filter is *copied* into
+  whatever consumes it — opening a reader parses the rules and installs a row mask, and the reader
+  keeps no reference to the filter object — so a reader opened before the `%clear` goes on
+  returning exactly the rows it was opened for.
+- **It can be called at any time, including twice or on a filter nothing was ever added to.**
+  There is no "already cleared" error.
+
+`type(parquet_sortkey)` and `type(parquet_read_qc)` have the same binding, for the same reason —
+see [Sort keys](#sort-keys) and [Quality control](../schema/quality-control.html).
+
 ### The same rules against rows already in memory
 
 Everything on this page describes filtering *while reading*. The identical grammar also applies to
@@ -462,6 +496,10 @@ break its ties:
 Direction words are case-insensitive. Combining the `-` shorthand with an explicit direction
 (`"-dec desc"`) is rejected rather than silently resolved, since it reads equally as agreement or
 as cancellation.
+
+`srt%clear()` drops every key — and each key's null placement with it — returning the object to
+its initial state so one variable can serve a second read, exactly as
+[`parquet_filter%clear`](#reusing-a-filter-clear) does.
 
 ### Null and NaN placement
 

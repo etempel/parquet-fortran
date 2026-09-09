@@ -74,6 +74,8 @@ contains
                 test_two_keys_different_families), &
             new_unittest("the same column as two keys binds twice, correctly", test_same_column_twice), &
             new_unittest("a released key column re-reads in sorted order", test_sort_key_read_back), &
+            new_unittest("clear: a reused sort key orders by its second key alone", &
+                test_sortkey_clear_resets_keys_and_nulls_first), &
             new_unittest("the install releases its key columns, and keeps them under prefetch", &
                 test_sort_releases_key_columns) &
             ]
@@ -1163,4 +1165,52 @@ contains
         call check(error, all(ids == [2, 4, 6, 1, 3, 5]), &
             "the same column as both keys must order the rows 2,4,6,1,3,5")
     end subroutine test_same_column_twice
+    !
+    !> %clear returns a sort spec to its pristine state, releasing BOTH of its parallel arrays.
+    !>
+    !> %add keeps `keys` and `nulls_first` in step: its first-key branch tests `allocated(keys)`
+    !> and rebuilds both, its grow branch copies `nulls_first(1:n)`. Releasing one without the
+    !> other therefore does not show up in any row order -- the next %add rebuilds whichever half
+    !> is missing -- but leaves the grow branch reading an array that is no longer allocated. The
+    !> two `allocated` assertions are what catch that; the read afterwards is what says the
+    !> object is genuinely reusable.
+    !>
+    !> The discarded key contradicts its replacement on both axes (descending against ascending,
+    !> nulls first against nulls last), so any part of it surviving changes the answer.
+    subroutine test_sortkey_clear_resets_keys_and_nulls_first(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32), allocatable :: ids(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/sort_sortkey_clear.parquet"
+
+        call write_null_key_fixture(file)
+        call srt%add("v desc", nulls_first=.true.)
+        call check(error, srt%n == 1, "precondition: one key stored before the clear")
+        if (allocated(error)) return
+
+        call srt%clear()
+        call check(error, srt%n == 0, "%clear left the key count behind")
+        if (allocated(error)) return
+        call check(error, .not. allocated(srt%keys), "%clear left the key text allocated")
+        if (allocated(error)) return
+        call check(error, .not. allocated(srt%nulls_first), &
+            "%clear released keys but not nulls_first, leaving the two parallel arrays out of step")
+        if (allocated(error)) return
+
+        call srt%add("v asc")
+        call check(error, srt%n == 1, "%add after %clear appended to the cleared keys")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(ids(nrows))
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        ! Ascending with nulls last -- what test_nulls_last_default asserts for a freshly declared
+        ! sort key, and the reverse of what the discarded key asked for on both axes.
+        call check(error, all(ids == [1, 6, 3, 5, 2, 4]), &
+            "a reused sort key did not order as a freshly declared one would")
+    end subroutine test_sortkey_clear_resets_keys_and_nulls_first
 end module test_sort

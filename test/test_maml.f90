@@ -133,6 +133,8 @@ contains
                 test_set_array_size_force_overrides), &
             new_unittest("parquet_read_qc: %add stores entries verbatim and %remap renames the column", &
                 test_read_qc_add_and_remap), &
+            new_unittest("parquet_read_qc: %clear drops every entry, leaving the object reusable", &
+                test_read_qc_clear_drops_entries), &
             new_unittest("compose_read_qc: the MAML wins in full for any column with a qc: block", &
                 test_compose_read_qc_maml_wins), &
             new_unittest("compose_read_qc: an EMPTY qc: block still wins (Nulls stay banned)", &
@@ -1979,6 +1981,34 @@ contains
         call check(error, trim(qc%entries(4)) == "m_200c", &
             "remap_column_names did not rename a bound-less entry, whose whole text is the column")
     end subroutine test_read_qc_add_and_remap
+    !
+    !> %clear drops every entry, so one variable can be reused for a second read instead of
+    !> redeclared -- the qc twin of parquet_filter%clear and parquet_sortkey%clear.
+    !>
+    !> The second round re-adds a rule for a column the first round never mentioned, so an entry
+    !> surviving the clear shows up as the wrong count AND the wrong entry 1, rather than as a
+    !> composed schema that merely looks plausible.
+    subroutine test_read_qc_clear_drops_entries(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_read_qc) :: qc
+
+        call qc%add("mass, >0, <=1000, Null")
+        call qc%add("flag, , , NA")
+        call check(error, qc%n == 2, "precondition: two entries stored before the clear")
+        if (allocated(error)) return
+
+        call qc%clear()
+        call check(error, qc%n == 0, "%clear left the entry count behind")
+        if (allocated(error)) return
+        call check(error, .not. allocated(qc%entries), "%clear left the entry text allocated")
+        if (allocated(error)) return
+
+        call qc%add("column_y, >=1")
+        call check(error, qc%n == 1, "%add after %clear appended to the cleared entries")
+        if (allocated(error)) return
+        call check(error, trim(qc%entries(1)) == "column_y, >=1", &
+            "the re-added entry did not land in slot 1 of a cleared object")
+    end subroutine test_read_qc_clear_drops_entries
     !
     !> The headline rule: a MAML that declares any qc for a column wins for that column IN FULL --
     !> including the bounds it deliberately left empty -- while a column it says nothing about

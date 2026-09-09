@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The filter, sort-key and read-QC specification types gain `%clear`.** `filt%clear()`,
+  `srt%clear()` and `qc%clear()` drop everything added so far — every rule and bound set, every
+  sort key and its null placement, every QC entry — returning the object to its initial state so
+  one variable can serve a second read instead of being redeclared. A cleared filter filters
+  nothing, and clearing one never disturbs a reader already open on it. See
+  [Reusing a filter](doc/pages/io/filter-sort-sample.md#reusing-a-filter-clear).
 - **`parquet_utils` gains eight numeric helpers**, `pure` and in both real kinds like everything
   else there. `pf_safe_div(a, b)` is `a/b` with the IEEE value a zero denominator would have
   produced, returned by construction so that no exception flag is raised. `pf_wrap_deg`,

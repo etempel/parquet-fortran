@@ -176,7 +176,16 @@ contains
             new_unittest("not (x is_finite) does not admit null rows", &
                 test_not_of_is_finite_keeps_nulls_out), &
             new_unittest("in: a set clause on a float32 column, bound and literal", &
-                test_set_on_float32_column) &
+                test_set_on_float32_column), &
+            new_unittest("clear: a reused filter rules by its second expression alone", &
+                test_filter_clear_resets_rules), &
+            new_unittest("clear: every bound set goes, and a set name may be bound again", &
+                test_filter_clear_drops_bound_sets), &
+            new_unittest("clear: a cleared filter filters nothing", test_cleared_filter_is_a_no_op), &
+            new_unittest("clear: clearing twice, and clearing an untouched filter", &
+                test_filter_clear_is_idempotent), &
+            new_unittest("clear: clearing a filter does not disturb a reader already open on it", &
+                test_filter_clear_does_not_disturb_an_open_reader) &
             ]
     end subroutine collect_tests_filter
     !
@@ -3207,5 +3216,181 @@ contains
         call d%set_null()
         call check(error, parquet_date_key(d) == 0_int64, "a null element keys as 0 (every caller masks it)")
     end subroutine test_real_key_helpers_split_on_nan_only
+    !
+    ! ------------------------------------------------------------------------------
+    ! %clear -- reusing one filter variable for a second read
+    !
+    ! The whole point of the binding is that round two behaves like a freshly declared object
+    ! rather than like an append to round one, so every test here makes the two rounds
+    ! CONTRADICT each other: an expression that would select nothing if the first rule survived,
+    ! a set name that %bind refuses to accept twice, a filter whose second life is "no filter at
+    ! all". A %clear that forgot a component shows up as the first round leaking into the second.
+    ! ------------------------------------------------------------------------------
+    !
+    !> Round two selects by its own rule alone. `v > 7` and `v < 3` are disjoint, and two %add
+    !> calls are AND-combined, so a surviving first rule would leave nothing at all -- which is
+    !> what makes the row count here evidence rather than coincidence.
+    subroutine test_filter_clear_resets_rules(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_clear_resets_rules.parquet"
+
+        call write_grid_fixture(file)
+        call filt%add("v > 7")
+        call check(error, filt%n == 1, "precondition: one rule stored before the clear")
+        if (allocated(error)) return
+
+        call filt%clear()
+        call check(error, filt%n == 0, "%clear left the rule count behind")
+        if (allocated(error)) return
+        call check(error, .not. allocated(filt%rules), "%clear left the rule text allocated")
+        if (allocated(error)) return
+
+        call filt%add("v < 3")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a reused filter did not select by its second rule alone")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 2]), "expected rows v = 1, 2")
+    end subroutine test_filter_clear_resets_rules
+    !
+    !> The set half: every one of the seven components behind an `in` clause goes, and the three
+    !> counters with them.
+    !>
+    !> Binding `wanted` a SECOND time is the load-bearing step -- parquet_filter_check_bind walks
+    !> set_name(1:nsets) and error stops on a name already bound, so a %clear that left `nsets`
+    !> or `set_name` behind aborts here rather than failing quietly. The counter assertions before
+    !> it are what name the component when that happens.
+    subroutine test_filter_clear_drops_bound_sets(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_clear_drops_sets.parquet"
+
+        call write_grid_fixture(file)
+        ! %add_in bumps gen_sets (the counter behind the generated `__in<k>` names) as well as
+        ! nsets, so the two are exercised by different calls rather than by the same one.
+        call filt%add_in("v", [3, 7])
+        call filt%bind("wanted", [4, 8])
+        call check(error, filt%n == 1 .and. filt%nsets == 2 .and. filt%gen_sets == 1, &
+            "precondition: one rule, two bound sets and one generated name before the clear")
+        if (allocated(error)) return
+
+        call filt%clear()
+        call check(error, filt%nsets == 0, "%clear left the bound-set count behind")
+        if (allocated(error)) return
+        call check(error, filt%gen_sets == 0, "%clear left the generated-set counter behind")
+        if (allocated(error)) return
+        call check(error, .not. allocated(filt%set_name) .and. .not. allocated(filt%set_family), &
+            "%clear left a per-set descriptor array allocated")
+        if (allocated(error)) return
+        call check(error, .not. allocated(filt%set_lo) .and. .not. allocated(filt%set_hi) &
+            .and. .not. allocated(filt%set_keys), "%clear left a set's slice or keys allocated")
+        if (allocated(error)) return
+
+        ! Aborts inside %bind if nsets or set_name survived the clear.
+        call filt%bind("wanted", [2, 5])
+        call filt%add("v in @wanted")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a reused filter did not select by its second set alone")
+        if (allocated(error)) return
+        call check(error, all(got == [2, 5]), "expected rows v = 2, 5")
+    end subroutine test_filter_clear_drops_bound_sets
+    !
+    !> A cleared filter is a filter with no rules, which every consumer already treats as "no
+    !> filtering" -- parquet_open_reader installs no mask when %n is zero. So the request's own
+    !> phrasing, "sets the filter to initial state (no filtering)", is literally true.
+    subroutine test_cleared_filter_is_a_no_op(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_clear_no_op.parquet"
+
+        call write_grid_fixture(file)
+        call filt%add("v > 7")
+        call filt%clear()
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 10, "a cleared filter still removed rows")
+    end subroutine test_cleared_filter_is_a_no_op
+    !
+    !> %clear guards every deallocation with `allocated`, so it neither needs nor has a
+    !> called-twice guard: clearing an untouched filter, and clearing the same one again, are
+    !> both no-ops rather than errors. That is deliberate -- a reset a caller may only perform
+    !> once would not answer the request this binding exists for.
+    subroutine test_filter_clear_is_idempotent(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt, fresh
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_clear_idempotent.parquet"
+
+        call write_grid_fixture(file)
+        ! Never added to, never bound to: nothing is allocated, so every guard takes its false arm.
+        call fresh%clear()
+        call check(error, fresh%n == 0 .and. fresh%nsets == 0 .and. fresh%gen_sets == 0, &
+            "clearing an untouched filter did not leave it pristine")
+        if (allocated(error)) return
+
+        call filt%add("v > 7")
+        call filt%bind("wanted", [4, 8])
+        call filt%clear()
+        call filt%clear()
+        call check(error, filt%n == 0 .and. filt%nsets == 0, "the second %clear disturbed the first")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 10, "a twice-cleared filter still removed rows")
+    end subroutine test_filter_clear_is_idempotent
+    !
+    !> Clearing a filter a reader was opened with changes nothing about that reader.
+    !>
+    !> A filter is COPIED into whatever consumes it -- parquet_open_reader parses the rules and
+    !> installs a row mask, keeping no reference to the object -- so this holds by construction
+    !> today. It is tested because it is the first thing a caller reusing one variable will do,
+    !> and because a future change that made a reader hold the filter instead would break it
+    !> silently: the reader would simply start answering for the whole file.
+    subroutine test_filter_clear_does_not_disturb_an_open_reader(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_clear_open_reader.parquet"
+
+        call write_grid_fixture(file)
+        call filt%add("v > 7")
+        call parquet_open_reader(reader, file, filter=filt)
+        call filt%clear()
+
+        ! Every query AFTER the clear, so nothing was cached by an earlier call on this reader.
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 3, "clearing the filter changed the open reader's row count")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        allocate(got(nrows))
+        call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, all(got == [8, 9, 10]), &
+            "clearing the filter changed which rows the open reader returns")
+    end subroutine test_filter_clear_does_not_disturb_an_open_reader
 
 end module test_filter

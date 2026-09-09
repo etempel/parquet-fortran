@@ -129,6 +129,10 @@ call qc%add("mass, >0, <=1000, Null")
 call qc%add("flag, , , NA")
 ```
 
+`call qc%clear()` drops every entry, returning the object to its initial state so one variable can
+serve a second read instead of being redeclared — the qc sibling of
+[`parquet_filter%clear`](../io/filter-sort-sample.html#reusing-a-filter-clear).
+
 Two things can then be done with it, in this order:
 
 - **`call qc%remap_column_names(from, to)`** renames the column each entry declares — the qc sibling

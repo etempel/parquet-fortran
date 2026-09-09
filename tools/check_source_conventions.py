@@ -5482,6 +5482,247 @@ def check_no_doc_block_opens_with_a_ford_metadata_key():
     return problems
 
 
+#: The filter operators' four CONSUMING sites, as (label, path, spans). `spans` names the C++
+#: procedures whose bodies together form the site; an empty tuple means the whole file; a Markdown
+#: path means the guide's grammar-table **Operators** row.
+#:
+#: Nothing here names an OPERATOR. The vocabulary is derived from the tokenizer that defines it, so
+#: a new operator cannot make the check pass by being left out of a list -- which is the whole
+#: reason this check can exist at all. What IS enumerated is these four entries, and CLAUDE.md's
+#: "A static check that enumerates names goes stale silently" applies to exactly them:
+#: `feature_filter.md` section 2.1 tabulates every site that knows the vocabulary and points back
+#: here, so a fifth consuming site is added in both places or in neither.
+FILTER_OPERATOR_SITES = (
+    ("the reader's per-row evaluation", "src/parquet_wrapper.cpp",
+     ("eval_filter_clause", "cmp_op_of")),
+    ("the row-group statistics screen", "src/parquet_wrapper.cpp",
+     ("resolve_screen_leaf", "screen_compare_from_bounds")),
+    ("the in-memory (parquet_table) evaluation", "src/parquet_read_eval.f90",
+     ("parquet_eval_filter_leaf", "parquet_filter_cmp_of")),
+    ("the published vocabulary", "doc/pages/io/filter-sort-sample.md", ()),
+)
+
+
+def cpp_function_body(text, name):
+    """Return the text of C++ function `name`'s body, braces matched, or None if it is not found.
+
+    Brace counting skips string and character literals and both comment forms, so a `{` inside a
+    diagnostic message cannot end a body early. Matched on the DEFINITION -- a signature line
+    followed by a body -- rather than on every mention of the name.
+    """
+    for m in re.finditer(r"^[ \t]*(?:static\s+)?[A-Za-z_][\w:<>,&* \t]*?\b%s\s*\(" % re.escape(name),
+                         text, re.M):
+        open_brace = text.find("{", m.end())
+        if open_brace < 0:
+            continue
+        # A declaration without a body (`;` before the next `{`) is not the definition.
+        semicolon = text.find(";", m.end())
+        if 0 <= semicolon < open_brace:
+            continue
+        i = open_brace
+        depth = 0
+        while i < len(text):
+            ch = text[i]
+            if ch in ('"', "'"):
+                quote = ch
+                i += 1
+                while i < len(text) and text[i] != quote:
+                    i += 2 if text[i] == "\\" else 1
+            elif text.startswith("//", i):
+                i = text.find("\n", i)
+                if i < 0:
+                    break
+            elif text.startswith("/" + "*", i):
+                i = text.find("*" + "/", i)
+                if i < 0:
+                    break
+                i += 1
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[open_brace:i + 1]
+            i += 1
+        return None
+    return None
+
+
+def fortran_procedure_body(text, name):
+    """Return the text of Fortran procedure `name`'s body, or None if it is not found.
+
+    Matched from its opening statement to the matching `end subroutine <name>` / `end function
+    <name>`, so a helper further down the file that happens to mention the same literal is outside
+    the span. That precision is the point: a whole-file search would still find an operator's name
+    in a worker the dispatch no longer calls.
+    """
+    # The abbreviated separate-module-procedure form first: `module procedure NAME` has no
+    # argument list to match on, and closes with `end procedure NAME`.
+    abbreviated = re.search(r"^[ \t]*module procedure\s+%s\s*$" % re.escape(name), text, re.M)
+    if abbreviated is not None:
+        closing = re.search(r"^[ \t]*end procedure\s+%s\s*$" % re.escape(name),
+                            text[abbreviated.end():], re.M)
+        if closing is None:
+            return None
+        return text[abbreviated.start():abbreviated.end() + closing.end()]
+    opening = re.search(r"^[ \t]*(?:module\s+)?(?:pure\s+|elemental\s+|recursive\s+)*"
+                        r"(?:[\w()=\s,*]*?\s)?(subroutine|function)\s+%s\s*\(" % re.escape(name),
+                        text, re.M)
+    if opening is None:
+        return None
+    kind = opening.group(1)
+    closing = re.search(r"^[ \t]*end\s+%s\s+%s\s*$" % (kind, re.escape(name)),
+                        text[opening.end():], re.M)
+    if closing is None:
+        return None
+    return text[opening.start():opening.end() + closing.end()]
+
+
+def check_filter_operators_are_handled_everywhere():
+    """Every operator the filter grammar accepts must be handled at each site that consumes one.
+
+    The filter vocabulary is known in six places (`feature_filter.md` section 2.1). One of them --
+    `parquet_tokenize_filter_rule` -- DEFINES it: an operator exists exactly when that subroutine's
+    `select case (trim(op))` has an arm for it. The other five consume it, and they fail very
+    differently when one is missed. Four refuse what they do not know, loudly and at the right
+    moment. **One guesses**: `cmp_op_of` maps everything that is not one of the five ordering
+    spellings to `CmpOp::Ne`, so an operator that reaches it turns into `/=` and the read returns a
+    plausible, complete and wrong row set with no diagnostic anywhere (feature_risks.md Risk-231).
+
+    That asymmetry is what makes this a static check rather than a test. A test can only exercise
+    an operator someone remembered to write a test for, and the failure being guarded against is
+    precisely the one where a site was forgotten -- so the test would be forgotten with it.
+
+    The vocabulary is DERIVED, never listed here. Adding an operator to the tokenizer therefore
+    makes this check fail until every consuming site handles it, which is the opposite of the usual
+    static-check failure mode where a new name is silently not covered.
+
+    Set-valued operators are exempt from the two C++ sites, and the exemption is derived too, from
+    `is_set_valued_op`: an `in`/`not_in` clause is answered in Fortran by `pf_index_map` before the
+    reader ever sees it, arriving at the screen as a pre-evaluated verdict (`ScreenLeaf::pre_index`)
+    rather than as an operator. Neither C++ site can name them, and requiring it would be wrong.
+
+    The third requirement has nothing to do with coverage: `convert_temporal_filter_values` must
+    decide which operators take an ISO-8601 literal with a POSITIVE test
+    (`parquet_op_takes_a_temporal_literal`), never a skip list. A skip list is the shape a new
+    operator falls THROUGH -- `s starts_with "S18"` on a date column then reports that `"S18"` is
+    not a valid ISO-8601 value instead of that `starts_with` needs a string column. Loud, but
+    naming the wrong thing, and nothing about it fails.
+    """
+    problems = []
+    read_src = SRC / "parquet_read.f90"
+    text = read_src.read_text()
+
+    # (1) The vocabulary, from the one site that defines it.
+    tok = re.search(r"subroutine parquet_tokenize_filter_rule\b(.*?)"
+                    r"end subroutine parquet_tokenize_filter_rule", text, re.S)
+    if tok is None:
+        return ["src/parquet_read.f90: could not find parquet_tokenize_filter_rule -- this check "
+                "needs updating"]
+    body = tok.group(1)
+    select = re.search(r"^([ \t]*)select case \(trim\(op\)\)\s*$", body, re.M)
+    if select is None:
+        return ["src/parquet_read.f90: parquet_tokenize_filter_rule has no "
+                "`select case (trim(op))` -- the operator vocabulary is no longer defined where "
+                "this check reads it, so this check needs updating"]
+    indent = select.group(1)
+    arms = body[select.end():]
+    stop = re.search(r"^%scase default\s*$" % re.escape(indent), arms, re.M)
+    if stop is None:
+        return ["src/parquet_read.f90: parquet_tokenize_filter_rule's `select case (trim(op))` has "
+                "no `case default` -- this check needs updating"]
+    operators = set()
+    for line in arms[:stop.start()].split("\n"):
+        if re.match(r"^%scase \(" % re.escape(indent), line):
+            operators.update(re.findall(r'"([^"]*)"', line))
+    if not operators:
+        return ["src/parquet_read.f90: read no operator from parquet_tokenize_filter_rule's "
+                "`select case (trim(op))` arms -- this check needs updating"]
+
+    # (2) The set-valued operators, derived from the lexer's own classifier: these are answered in
+    # Fortran before the C++ side sees them, so neither C++ site names them.
+    lexer = (SRC / "parquet_read_filter.f90").read_text()
+    setop = re.search(r"function is_set_valued_op\b(.*?)end function is_set_valued_op", lexer, re.S)
+    if setop is None:
+        return ["src/parquet_read_filter.f90: could not find is_set_valued_op -- this check needs "
+                "updating"]
+    set_valued = set(re.findall(r'last == "([^"]*)"', setop.group(1)))
+    if not set_valued:
+        return ["src/parquet_read_filter.f90: is_set_valued_op names no operator in the "
+                "`last == \"...\"` shape this check reads -- this check needs updating"]
+    if not set_valued <= operators:
+        return ["src/parquet_read_filter.f90: is_set_valued_op names %s, which the tokenizer does "
+                "not accept -- one of the two is wrong"
+                % ", ".join(sorted(set_valued - operators))]
+
+    # (3) Every consuming site handles every operator it can see.
+    for label, relpath, spans in FILTER_OPERATOR_SITES:
+        path = REPO_ROOT / relpath
+        is_cpp = relpath.endswith(".cpp")
+        wanted = operators - set_valued if is_cpp else operators
+        if relpath.endswith(".md"):
+            row = None
+            for line in path.read_text().split("\n"):
+                if line.strip().startswith("| **Operators** |"):
+                    row = line
+                    break
+            if row is None:
+                problems.append(
+                    "%s: found no `| **Operators** |` row in the grammar table -- either the table "
+                    "was reshaped or it is gone; this check needs updating" % relpath)
+                continue
+            present = set(re.findall(r"`([^`]*)`", row))
+        else:
+            source = path.read_text()
+            if spans:
+                extract = cpp_function_body if is_cpp else fortran_procedure_body
+                chunks = []
+                for name in spans:
+                    chunk = extract(source, name)
+                    if chunk is None:
+                        problems.append(
+                            "%s: could not find the body of `%s`, one of the procedures that make "
+                            "up %s -- this check needs updating" % (relpath, name, label))
+                        chunks = None
+                        break
+                    chunks.append(chunk)
+                if chunks is None:
+                    continue
+                source = "\n".join(chunks)
+            present = set(re.findall(r'"([^"]*)"', source))
+            present.update(re.findall(r"'([^']*)'", source))
+        for op in sorted(wanted - present):
+            problems.append(
+                "%s: the filter grammar accepts `%s`, but %s never names it%s. Every operator "
+                "%s accepts must be handled at all four sites in feature_filter.md section 2.1."
+                % (relpath, op, label,
+                   " (searched %s)" % ", ".join(spans) if spans else "",
+                   "parquet_tokenize_filter_rule"))
+
+    # (4) The temporal-literal decision is a positive test, not a skip list.
+    conv = re.search(r"subroutine convert_temporal_filter_values\b(.*?)"
+                     r"end subroutine convert_temporal_filter_values", text, re.S)
+    if conv is None:
+        problems.append("src/parquet_read.f90: could not find convert_temporal_filter_values -- "
+                        "this check needs updating")
+    else:
+        conv_body = "\n".join(strip_comment(line) for line in conv.group(1).split("\n"))
+        if "parquet_op_takes_a_temporal_literal" not in conv_body:
+            problems.append(
+                "src/parquet_read.f90: convert_temporal_filter_values does not call "
+                "parquet_op_takes_a_temporal_literal -- it must decide which operators take an "
+                "ISO-8601 literal with a positive test, so an operator added later is skipped by "
+                "default rather than falling through into the temporal conversion")
+        for literal in sorted(set(re.findall(r'\bop == "([^"]*)"', conv_body))):
+            problems.append(
+                "src/parquet_read.f90: convert_temporal_filter_values compares `op == \"%s\"` "
+                "directly. A skip list here is the shape a new operator falls THROUGH: it would be "
+                "handed to the ISO-8601 parser and reported as an invalid date rather than as an "
+                "operator the column type does not accept. Extend "
+                "parquet_op_takes_a_temporal_literal instead." % literal)
+    return problems
+
+
 CHECKS = (
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
     ("pf_index_map components are adopted and reset",
@@ -5573,6 +5814,8 @@ CHECKS = (
      check_view_call_sites_declare_target),
     ("every %join specific forwards every argument it takes",
      check_join_specifics_forward_every_argument),
+    ("every filter operator is handled at every consuming site",
+     check_filter_operators_are_handled_everywhere),
 )
 
 

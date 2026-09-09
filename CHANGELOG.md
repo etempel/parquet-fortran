@@ -14,8 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   byte-exact and case-sensitive over a `string` column, the pattern is a literal rather than a
   wildcard pattern, and a Null row is unknown for all three exactly as it is for a comparison.
   Negation is `not (...)`, and the three compose with `and`/`or`/parentheses, a bound set, a dotted
-  struct-leaf path and a dictionary-encoded column like any other clause. They read every row group
-  the filter's other clauses leave alive, since footer statistics cannot rule out a substring. The
+  struct-leaf path and a dictionary-encoded column like any other clause. A `starts_with` clause
+  skips the row groups its footer statistics rule out, the way an ordinary comparison does;
+  `ends_with` and `contains` read every row group the filter's other clauses leave alive. The
   same operators work on a `parquet_table` through `%filter_rows`/`%row_mask`. See
   [Matching part of a
   string](doc/pages/io/filter-sort-sample.md#matching-part-of-a-string-starts_with-ends_with-and-contains).

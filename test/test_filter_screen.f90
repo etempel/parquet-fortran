@@ -142,6 +142,13 @@ contains
             new_unittest("is_finite / is_not_finite never prune on bounds", test_is_finite_declines), &
             new_unittest("is_finite / is_not_finite prune a row group whose column is entirely null", &
                 test_is_finite_prunes_all_null_row_group), &
+            new_unittest("starts_with prunes the row groups its prefix range rules out", &
+                test_starts_with_prunes), &
+            new_unittest("a prefix ending in the maximum byte prunes without overflowing", &
+                test_starts_with_prefix_at_max_byte), &
+            new_unittest("ends_with and contains never prune", test_ends_with_and_contains_never_prune), &
+            new_unittest("starts_with on a scattered column prunes nothing", &
+                test_starts_with_scattered_prunes_nothing), &
             new_unittest("a dictionary column is screened like the string column it reads as", &
                 test_dictionary_column_prunes) &
             ]
@@ -1962,5 +1969,187 @@ contains
         call check(error, pruned == 0_int64, &
             "an all-null dictionary column has no min/max, so the screen must decline rather than prune")
     end subroutine test_dictionary_column_prunes
+    !
+    !> Writes the prefix fixture: 100 names `obj001` .. `obj100` and a matching `u`, in ten row
+    !> groups of ten.
+    !>
+    !> `scattered` picks WHICH name lands in which row group, and that is the whole point of the
+    !> argument. Clustered (`.false.`) lays them down in order, so row group k owns the disjoint
+    !> range obj((k-1)*10+1) .. obj(k*10) and a prefix rules most of them out from the footer alone.
+    !> Scattered (`.true.`) transposes that: row group k holds obj00k, obj01k, ... obj09k, so every
+    !> row group's min/max span nearly the whole column and no prefix can rule any of them out. The
+    !> two fixtures hold the SAME hundred values and answer every rule identically -- only the
+    !> pruned count differs, which is what makes the scattered one a negative control rather than a
+    !> second variation.
+    subroutine write_prefix_fixture(file, scattered)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        logical, intent(in) :: scattered !! .true. spreads each prefix across every row group.
+        type(parquet_writer) :: writer
+        character(len=8) :: name(100)
+        integer(int32) :: u(100)
+        integer :: i, j
+
+        do i = 1, 100
+            if (scattered) then
+                j = mod(i - 1, 10) * 10 + (i - 1) / 10 + 1
+            else
+                j = i
+            end if
+            write(name(i), '(a,i3.3)') "obj", j
+            u(i) = j
+        end do
+        call parquet_open_writer(writer, file, chunk_size=10)
+        call parquet_write_column(writer, "name", name)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+    end subroutine write_prefix_fixture
+    !
+    !> The headline case for the prefix screen: a value begins with `p` exactly when it lies in
+    !> [p, p+), so a clustered string column prunes on a `starts_with` clause the way it prunes on
+    !> a comparison.
+    !>
+    !> The equality half passes whether or not the screen ever prunes -- declining is the safe
+    !> direction -- so the PRUNED COUNT is the only assertion that can tell a working rule from one
+    !> that never fires. The third rule is the other direction: a prefix wide enough to reach every
+    !> row group must prune nothing, so a rule that prunes on something other than the bounds is
+    !> caught here rather than passing by luck.
+    subroutine test_starts_with_prunes(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_starts_with.parquet"
+
+        call write_prefix_fixture(file, .false.)
+
+        ! obj040 .. obj049 span row groups 4 and 5 (rows 40 and 41..49), so eight of ten go.
+        call compare_screened(file, 'name starts_with "obj04"', "u", agree, pruned, nrows)
+        call check(error, agree, "starts_with: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 10, "starts_with obj04: expected the ten obj040..obj049 rows")
+        if (allocated(error)) return
+        call check(error, pruned == 8_int64, &
+            "starts_with obj04: expected 8 of 10 row groups pruned -- a count of 0 means the " // &
+            "prefix leaf never became usable and the screen declined")
+        if (allocated(error)) return
+
+        ! obj100 alone, in the last row group.
+        call compare_screened(file, 'name starts_with "obj1"', "u", agree, pruned, nrows)
+        call check(error, agree, "starts_with obj1: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 1, "starts_with obj1: only obj100 begins with it")
+        if (allocated(error)) return
+        call check(error, pruned == 9_int64, "starts_with obj1: expected 9 of 10 row groups pruned")
+        if (allocated(error)) return
+
+        ! Every row group holds a match, so nothing may be pruned.
+        call compare_screened(file, 'name starts_with "obj0"', "u", agree, pruned, nrows)
+        call check(error, agree, "starts_with obj0: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 99, "starts_with obj0: every name but obj100")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "starts_with obj0: every row group holds a match, so none may be pruned")
+    end subroutine test_starts_with_prunes
+    !
+    !> The upper bound of a prefix range is `p` with its last byte BELOW 0xFF incremented and every
+    !> byte after it dropped -- never a blind increment of the last byte, which overflows on 0xFF
+    !> and yields a bound below `p` itself.
+    !>
+    !> Both assertions here are pruned counts, and they have to be: neither fixture value begins
+    !> with a 0xFF byte, so the surviving row set is empty under either rule and stays empty under
+    !> a wrong `p+` too. A blind increment turns `"obj0" // char(255)` into `"obj0" // char(0)`, an
+    !> upper bound BELOW the pattern and therefore an empty range that prunes all ten row groups
+    !> instead of nine -- visible only in the count.
+    !>
+    !> The first rule is the has_upper = .false. case: every byte of the pattern is 0xFF, so no
+    !> upper bound exists at all and the range is [0xFF, +infinity). Every name here begins with
+    !> `o`, so the whole file is ruled out from the footer.
+    subroutine test_starts_with_prefix_at_max_byte(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_starts_with_maxbyte.parquet"
+
+        call write_prefix_fixture(file, .false.)
+
+        call compare_screened(file, 'name starts_with "' // char(255) // '"', "u", agree, pruned, nrows)
+        call check(error, agree, "0xFF prefix: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 0, "0xFF prefix: no name begins with the maximum byte")
+        if (allocated(error)) return
+        call check(error, pruned == 10_int64, &
+            "0xFF prefix: the range is [0xFF, +inf) and every name is below it, so the whole " // &
+            "file must be ruled out")
+        if (allocated(error)) return
+
+        ! p+ is "obj1": the last byte below 0xFF is the "0", incremented, with the 0xFF dropped.
+        call compare_screened(file, 'name starts_with "obj0' // char(255) // '"', "u", agree, pruned, nrows)
+        call check(error, agree, "trailing 0xFF: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 0, "trailing 0xFF: no name holds that byte")
+        if (allocated(error)) return
+        call check(error, pruned == 9_int64, &
+            "trailing 0xFF: the range is [obj0<FF>, obj1), which only the last row group " // &
+            "(obj091..obj100) overlaps -- a pruned count of 10 means p+ was computed by " // &
+            "incrementing the last byte and overflowed")
+    end subroutine test_starts_with_prefix_at_max_byte
+    !
+    !> `ends_with` and `contains` are not ranges under byte-lexicographic order: min and max bound
+    !> the WHOLE value and say nothing whatever about its tail or its interior. Both must therefore
+    !> decline, on the same clustered fixture the prefix rule prunes eight row groups of.
+    !>
+    !> The `contains` rule is deliberately the same pattern as the prefix test's first rule, and
+    !> selects the same ten rows: same fixture, same answer, and a pruned count of 8 against 0 is
+    !> the whole difference between the two operators.
+    subroutine test_ends_with_and_contains_never_prune(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_ends_with.parquet"
+
+        call write_prefix_fixture(file, .false.)
+
+        call compare_screened(file, 'name contains "obj04"', "u", agree, pruned, nrows)
+        call check(error, agree, "contains: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 10, "contains obj04: the same ten rows starts_with selects")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "contains: an interior match is invisible to min/max, so nothing may be pruned")
+        if (allocated(error)) return
+
+        call compare_screened(file, 'name ends_with "9"', "u", agree, pruned, nrows)
+        call check(error, agree, "ends_with: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 10, "ends_with 9: obj009, obj019, ... obj099")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "ends_with: a tail match is invisible to min/max, so nothing may be pruned")
+    end subroutine test_ends_with_and_contains_never_prune
+    !
+    !> The negative control for the prefix rule: the same hundred names, laid down so that every
+    !> row group spans nearly the whole column. No prefix can then be ruled out from any row group's
+    !> bounds, so a screen that prunes here is pruning on something other than the statistics -- and
+    !> the answer must still be exactly the clustered fixture's.
+    subroutine test_starts_with_scattered_prunes_nothing(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_starts_with_scattered.parquet"
+
+        call write_prefix_fixture(file, .true.)
+
+        call compare_screened(file, 'name starts_with "obj04"', "u", agree, pruned, nrows)
+        call check(error, agree, "scattered: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 10, "scattered: the same ten obj040..obj049 rows")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "scattered: every row group's bounds span the prefix, so none may be pruned")
+    end subroutine test_starts_with_scattered_prunes_nothing
 
 end module test_filter_screen

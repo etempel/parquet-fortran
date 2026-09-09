@@ -235,8 +235,10 @@ A few practical notes:
 - **The three combine like any other clause** — with `and`, `or`, `not`, parentheses, a bound set,
   a sort and a sample — and work on a dotted struct-leaf path (`main.inner.name starts_with "Ali"`)
   and on a dictionary-encoded column (a pandas `category`) alike.
-- **They do not prune row groups.** A clause using one of them reads every row group the rest of the
-  filter leaves alive; see [Row groups a filter cannot match are never
+- **`starts_with` prunes row groups, the other two do not.** A prefix is a range, so a
+  `starts_with` clause skips the row groups the footer statistics rule out exactly as an ordinary
+  comparison does; a clause using `ends_with` or `contains` reads every row group the rest of the
+  filter leaves alive. See [Row groups a filter cannot match are never
   read](#row-groups-a-filter-cannot-match-are-never-read).
 
 ### Null values follow SQL's three-valued logic
@@ -365,10 +367,13 @@ same rows come back in the same order, with the same nulls. The only difference 
 file was read to produce them, and it applies to the whole read, not just the filter's own
 columns: a payload column you read afterwards skips the same row groups.
 
-Not every clause can prune. `starts_with`, `ends_with` and `contains` never do: a row group's
-statistics bound its values from below and above, which says nothing about what sits inside one. A
-filter using them still prunes on its *other* clauses — `s contains "x" and id > 8123456` skips
-whatever the `id` comparison rules out — and reads every row group those leave alive.
+Not every clause can prune. `ends_with` and `contains` never do: a row group's statistics bound its
+values from below and above, which says nothing about how one ends or what sits inside it. A filter
+using them still prunes on its *other* clauses — `s contains "x" and id > 8123456` skips whatever
+the `id` comparison rules out — and reads every row group those leave alive. `starts_with` is the
+exception among the three, because a prefix is a range: a value begins with `"S18"` exactly when it
+falls between `"S18"` and the next string above every value that begins with it, so the same min and
+max that screen a comparison screen a prefix.
 
 ```fortran
 type(parquet_filter) :: filt

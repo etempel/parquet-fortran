@@ -299,6 +299,7 @@ something a reader is expected to have.
 | [Risk-230](#risk-230--a-nullable_cols-declaration-that-stops-reaching-the-writer-changes-the-file-and-nothing-fails) | A `nullable_cols:` declaration that stops reaching the writer changes the file, and nothing fails | 4 — covered |
 | [Risk-231](#risk-231--a-filter-operator-that-reaches-cmp_op_of-unhandled-silently-becomes-) | A filter operator that reaches `cmp_op_of` unhandled silently becomes `/=` | 4 — covered |
 | [Risk-232](#risk-232--a-rule-literals-trailing-spaces-are-trimmed-in-two-places-and-untrimming-one-makes-the-engines-disagree) | A rule literal's trailing spaces are trimmed in TWO places, and untrimming one makes the engines disagree | 4 — covered |
+| [Risk-233](#risk-233--the-prefix-screen-turns-starts_with-into-a-range-and-a-wrong-upper-bound-prunes-row-groups-that-hold-matching-rows) | The prefix screen turns `starts_with` into a range, and a wrong upper bound prunes row groups that hold matching rows | 4 — covered |
 
 ---
 
@@ -1318,6 +1319,51 @@ neither, and extend the A/B sweep with a trailing-space *literal* in the same ch
 both sides — that the stored trailing space IS significant, and that the rule literal's is not — so
 a one-sided change fails it. The A/B sweep's `test_ab_strings`/`test_ab_string_match` read the
 `"ab "` value on both engines.
+
+### Risk-233 — The prefix screen turns `starts_with` into a range, and a wrong upper bound prunes row groups that hold matching rows
+
+`starts_with` is the one substring operator the row-group statistics screen accepts, and it accepts
+it by rewriting the clause as a range: a value begins with `p` exactly when it lies in `[p, p+)`,
+where `p+` is `p` with its last byte below `0xFF` incremented and every byte after it dropped
+(`prefix_upper_bound`, `src/parquet_wrapper.cpp`). `screen_prefix_from_bounds` then answers
+`may_true` from whether that half-open interval MEETS the row group's `[min, max]`, and `may_false`
+from whether the row group is not provably contained in it.
+
+This inherits the whole screen's failure mode: **nothing about the answer is supposed to change, so
+every error here is a silently short row set** — a row group that holds matching rows is skipped,
+the read returns fewer rows than it should, and nothing aborts. The three ways it goes quiet:
+
+- **`p+` computed by blindly incrementing the last byte.** On `0xFF` that wraps to `0x00`, producing
+  an upper bound BELOW `p` itself: an empty range that prunes every row group in the file. A pattern
+  whose bytes are ALL `0xFF` has no `p+` at all — the range is `[p, +infinity)` and `has_upper` is
+  false — so reading `sval_upper` without checking `has_upper` is the same defect by another route.
+- **Tightening `may_true`.** As with `screen_combine`'s AND, the rule is allowed to be an
+  over-approximation and must stay one; anything that makes it more selective than "the two
+  intervals meet" prunes on something the bounds do not prove.
+- **Adding an `exact` term to match the comparison rules next door.** It does not belong here, and
+  the reason is worth keeping: `exact` exists in `==`/`/=` because those use a bound as a proof of
+  EQUALITY, while truncation only ever WIDENS `[lo, hi]` — which makes `may_true` more permissive
+  and the containment behind `may_false` harder to prove, both in the prune-nothing direction.
+
+**What a future change must keep.** `ends_with` and `contains` stay declined in `resolve_screen_leaf`
+— neither is a range under byte-lexicographic order, and no bound rule can be written for them. A
+prefix leaf is routed to `screen_prefix_from_bounds` before `screen_compare_from_bounds` is called,
+which is also what keeps that function's `default:` arm unreachable and its `GCOVR_EXCL` comment
+true. An empty pattern declines rather than screening the whole order. And `p+` is computed by
+scanning back past the `0xFF` bytes, never by incrementing the last one.
+
+**Test.** Four tests in `test/test_filter_screen.f90`, each asserting BOTH halves — element-for-
+element equality against a `parquet_set_statistics_prescreen(.false.)` read, and an exact
+`parquet_debug_get_row_groups_pruned()` count. The pair is load-bearing and neither half is
+redundant: a screen that never prunes passes every equality assertion, and a screen that prunes
+wrongly on a fixture whose answer is empty either way passes every count-free one.
+`test_starts_with_prunes` covers a clustered column in both directions (a prefix that prunes eight
+of ten row groups, and one wide enough to prune none); `test_starts_with_prefix_at_max_byte` covers
+`has_upper` false and the trailing-`0xFF` scan, where a blind increment shows up ONLY as a pruned
+count of 10 against the correct 9; `test_ends_with_and_contains_never_prune` pins the two declines
+against the same fixture the prefix rule prunes eight row groups of;
+`test_starts_with_scattered_prunes_nothing` is the negative control — the same hundred values laid
+down so no row group's bounds rule the prefix out.
 
 ### Risk-198 — Two filter engines answer one grammar, and only an A/B can see them disagree
 

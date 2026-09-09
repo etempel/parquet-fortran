@@ -6956,6 +6956,12 @@ extern "C"
 		bool is_value_class_test = false;
 		bool want_null = false;          // for is_null (true) vs is_not_null (false)
 		bool is_float = false;           // FLOAT/DOUBLE: NaN makes the bounds one-directional
+		// starts_with, screened as the half-open range [sval, sval_upper). has_upper false means
+		// every byte of the pattern is 0xFF, so no upper bound exists and the range is [sval, +inf);
+		// sval_upper is then empty and must not be read. See prefix_upper_bound.
+		bool is_prefix_test = false;
+		std::string sval_upper;
+		bool has_upper = false;
 		std::string op;
 		int64_t ival = 0;
 		double dval = 0.0;
@@ -7009,7 +7015,9 @@ extern "C"
 		}
 		else
 		{ // GCOVR_EXCL_START -- every operator reaching here is one of the six above; the null and
-		  // NaN tests never call this, and an unknown operator is rejected by the Fortran lexer.
+		  // NaN tests never call this, an unknown operator is rejected by the Fortran lexer, and of
+		  // the three substring operators two are declined by resolve_screen_leaf while starts_with
+		  // is routed to screen_prefix_from_bounds before this is called.
 			return kScreenAnything;
 		}
 		// GCOVR_EXCL_STOP
@@ -7035,6 +7043,54 @@ extern "C"
 			res.may_false = nn > 0;
 			if (op == "/=") res.may_true = nn > 0;
 		}
+		return res;
+	}
+
+	// The exclusive upper bound of a prefix range: `p` with its last byte below 0xFF incremented
+	// and every byte after that one dropped, so that a value begins with `p` exactly when it lies
+	// in [p, p_up) under unsigned byte order. Returns false when EVERY byte of `p` is 0xFF (and for
+	// an empty `p`): no such string exists then, the range is [p, +infinity), and `out` is left
+	// empty for the caller not to read. Never a blind increment of the last byte -- that overflows
+	// on 0xFF and would produce a bound below `p` itself.
+	static bool prefix_upper_bound(const std::string &p, std::string &out)
+	{
+		out = p;
+		for (size_t i = out.size(); i > 0; --i)
+		{
+			auto b = static_cast<unsigned char>(out[i - 1]);
+			if (b != 0xFF)
+			{
+				out[i - 1] = static_cast<char>(b + 1);
+				out.resize(i);
+				return true;
+			}
+		}
+		out.clear();
+		return false;
+	}
+
+	// The screen's rule for `starts_with`, over the two BOUNDS themselves rather than the three-way
+	// comparison screen_compare_from_bounds takes: a prefix test needs both bounds against both
+	// ends of [p, p_up), which the single literal of a comparison cannot express.
+	//
+	//   * may_true: some value could begin with `p`, i.e. [lo, hi] meets [p, p_up).
+	//   * may_false: some value could NOT, i.e. it is not provable that [lo, hi] lies wholly
+	//     inside [p, p_up).
+	//
+	// TRUNCATED BOUNDS NEED NO `exact` TERM HERE, and that is worth stating because the comparison
+	// rules next door do carry one. `exact` exists there for `==`/`/=` alone -- the one place a
+	// bound is used as a proof of EQUALITY (min == max == v proving every value equals v).
+	// Truncation only ever WIDENS [lo, hi] (a truncated min is still <= every value, a truncated
+	// max still >=), and widening makes may_true more permissive and makes the containment behind
+	// may_false harder to prove -- both in the "prune nothing" direction. Both rules therefore stay
+	// sound without it, keeping this file's invariant that any doubt returns kScreenAnything.
+	static KleenePossible screen_prefix_from_bounds(const std::string &lo, const std::string &hi,
+		const std::string &p, const std::string &p_up, bool has_upper, int64_t nn, int64_t nc)
+	{
+		KleenePossible res{true, true, nc > 0};
+		res.may_true = nn > 0 && !(hi.compare(p) < 0) && !(has_upper && lo.compare(p_up) >= 0);
+		res.may_false = nn > 0
+			&& !(lo.compare(p) >= 0 && (!has_upper || hi.compare(p_up) < 0));
 		return res;
 	}
 
@@ -7069,18 +7125,20 @@ extern "C"
 			leaf.want_null = (op == "is_null");
 			return leaf;
 		}
-		// The three SUBSTRING operators DECLINE, leaving leaf.usable false so they contribute
-		// kScreenAnything to every row group and prune nothing. Returning here rather than falling
-		// through is what keeps screen_compare_from_bounds' `default:` arm unreachable, and its
-		// GCOVR_EXCL comment ("every operator reaching here is one of the six above") true: a
-		// string leaf with a quoted value would otherwise be marked usable and arrive there.
+		// `ends_with` and `contains` DECLINE, leaving leaf.usable false so they contribute
+		// kScreenAnything to every row group and prune nothing. Neither can EVER be screened from
+		// min/max: the bounds order the whole value lexicographically and say nothing whatever
+		// about its tail or its interior. Returning here rather than falling through is also what
+		// keeps screen_compare_from_bounds' `default:` arm unreachable and its GCOVR_EXCL comment
+		// ("every operator reaching here is one of the six above") true -- a string leaf with a
+		// quoted value would otherwise be marked usable and arrive there.
 		//
-		// Declining is right for two of the three and merely provisional for the first. A prefix
-		// IS a range -- a value starts with `p` exactly when it lies in [p, p+) -- so min/max can
-		// screen `starts_with`, and that is a separate change with its own rules and its own risk
-		// entry. `ends_with` and `contains` can never be screened this way: min/max bound the whole
-		// value lexicographically and say nothing whatever about its tail or its interior.
-		if (op == "starts_with" || op == "ends_with" || op == "contains") return leaf;
+		// `starts_with` is deliberately NOT in this list. A prefix IS a range -- a value begins
+		// with `p` exactly when it lies in [p, p+) -- so it falls through to the kString arm below,
+		// which computes p+ and marks the leaf a prefix test; screen_leaf_in_row_group then routes
+		// it to screen_prefix_from_bounds instead, keeping that `default:` arm unreached either
+		// way. See feature_risks.md Risk-233.
+		if (op == "ends_with" || op == "contains") return leaf;
 		if (op == "is_nan" || op == "is_not_nan" || op == "is_finite" || op == "is_not_finite")
 		{
 			leaf.usable = true;
@@ -7198,6 +7256,15 @@ extern "C"
 		case ScreenFamily::kString:
 			if (!is_string) return leaf;
 			leaf.sval = value_text;
+			if (op == "starts_with")
+			{
+				// An EMPTY pattern declines. It matches every non-null row, so there is nothing to
+				// prune, and its range would be the whole order -- saying so here is clearer than
+				// leaving screen_prefix_from_bounds to answer "anything" for every row group.
+				if (leaf.sval.empty()) return leaf;
+				leaf.is_prefix_test = true;
+				leaf.has_upper = prefix_upper_bound(leaf.sval, leaf.sval_upper);
+			}
 			break;
 		default: // GCOVR_EXCL_LINE -- kNone returned above; every other value is handled.
 			return leaf; // GCOVR_EXCL_LINE
@@ -7369,6 +7436,15 @@ extern "C"
 			auto typed = std::static_pointer_cast<parquet::ByteArrayStatistics>(stats);
 			std::string lo(reinterpret_cast<const char *>(typed->min().ptr), typed->min().len);
 			std::string hi(reinterpret_cast<const char *>(typed->max().ptr), typed->max().len);
+			// A prefix test needs both bounds against both ends of its range, which the three-way
+			// cmp_lo/cmp_hi pair below cannot carry. Routed here rather than at the top of the
+			// function so it shares every gate above: statistics present, null count known, bounds
+			// present, unsigned sort order, BYTE_ARRAY physical type.
+			if (leaf.is_prefix_test)
+			{
+				return screen_prefix_from_bounds(lo, hi, leaf.sval, leaf.sval_upper, leaf.has_upper,
+					nn, nc);
+			}
 			int lo_cmp = lo.compare(leaf.sval);
 			int hi_cmp = hi.compare(leaf.sval);
 			cmp_lo = (lo_cmp < 0) ? -1 : (lo_cmp > 0 ? 1 : 0);

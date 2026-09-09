@@ -785,10 +785,13 @@ so a batch can be cloned from a freshly opened table without touching a column. 
 `resident_only=.true.` to clone only the columns that have been read.
 
 `%append` requires the appended table's columns to be a subset of this table's, with matching
-kinds, widths and units. A column this table has and the batch does not is **null-filled**; a
-column the batch has and this table does not is an error rather than being silently dropped; a
-kind mismatch is an error too, and `%cast` is the way round it. There is no unit
-conversion, so appending "km/h" rows to an "m/s" column is refused.
+kinds, widths and units. A column this table has and the batch does not is **null-filled**, and so
+is a column the batch has but has never read — on both forms of the append, a column that is not
+resident is absent; `%prefetch` it first if its values belong in the rows. A column the batch has
+and this table does not is an error rather than being silently dropped, with one exception: a
+`parquet_row_index` this table lacks is dropped, since it is the library's own provenance column
+and nothing would ever write it. A kind mismatch is an error too, and `%cast` is the way round it.
+There is no unit conversion, so appending "km/h" rows to an "m/s" column is refused.
 
 `%append(row)` adds one row from a `parquet_table_row` handle, copying just that row out of the
 handle's table. The batch form above is still cheaper per row — a row append takes the table's lock,

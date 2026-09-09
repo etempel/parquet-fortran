@@ -2487,7 +2487,22 @@ contains
             new_unittest("parquet_write_table_chunk through a schema naming a column the table lacks aborts", &
                 test_write_table_chunk_schema_names_a_missing_column_aborts), &
             new_unittest("a Null in a protected column aborts a chunk write, naming parquet_write_column_chunk", &
-                test_write_table_chunk_protected_null_aborts) &
+                test_write_table_chunk_protected_null_aborts), &
+            new_unittest("a sink refuses an appended column its template did not declare", &
+                test_sink_extra_column_refused_aborts), &
+            new_unittest("a sink refuses a kind mismatch with %append's own message", &
+                test_sink_kind_mismatch_refused_aborts), &
+            new_unittest("closing a sink twice aborts", test_sink_double_close_aborts), &
+            new_unittest("appending to a closed sink aborts", test_sink_use_after_close_aborts), &
+            new_unittest("assigning a parquet_table_writer aborts", test_sink_assignment_refused_aborts), &
+            new_unittest("a sink's schema naming a column the template lacks aborts at open", &
+                test_sink_schema_names_a_missing_column_aborts), &
+            new_unittest("appending to a sink that was never opened aborts", test_sink_never_opened_aborts), &
+            new_unittest("a sink with chunk_size <= 0 aborts", test_sink_chunk_size_not_positive_aborts), &
+            new_unittest("a sink over a template with no resident column and no schema aborts", &
+                test_sink_template_has_no_column_aborts), &
+            new_unittest("appending to a shared sink from inside a parallel region aborts", &
+                test_sink_shared_in_parallel_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19]
     end subroutine collect_tests_parquet_errors
@@ -12964,6 +12979,212 @@ contains
             found)
         call check(error, found, "the abort must name parquet_write_column_chunk and the protected column")
     end subroutine test_write_table_chunk_protected_null_aborts
+
+    !> The sink's own refusal of an undeclared resident column, naming the column and the file.
+    subroutine test_sink_extra_column_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_extra_column_refused", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_extra_column_refused was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: a table with the template's columns was appended", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "append: this output file has no column 'b' -- the output's columns were fixed when it was opened", found)
+        call check(error, found, "the abort must be the sink's own message, naming the column")
+    end subroutine test_sink_extra_column_refused_aborts
+
+    !> A kind mismatch keeps %append's own message: no silent widening.
+    subroutine test_sink_kind_mismatch_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_kind_mismatch_refused", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_kind_mismatch_refused was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: a table of the template's kind was appended", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "append: this column is PK_INT32 here but PK_FLOAT64 in the appended table", found)
+        call check(error, found, "the abort must be %append's kind message")
+    end subroutine test_sink_kind_mismatch_refused_aborts
+
+    !> A second close is refused, not idempotent.
+    subroutine test_sink_double_close_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_double_close", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_double_close was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: the sink was closed once", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_close_table_writer: this output file has already been closed", found)
+        call check(error, found, "the abort must name parquet_close_table_writer and the closed file")
+    end subroutine test_sink_double_close_aborts
+
+    !> An append after the close is refused, naming the call and the file.
+    subroutine test_sink_use_after_close_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_use_after_close", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_use_after_close was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: the sink accepted rows and was closed", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "append: this output file has already been closed", found)
+        call check(error, found, "the abort must name append and the closed file")
+    end subroutine test_sink_use_after_close_aborts
+
+    !> Assignment of a sink is blocked: the writer's handle has no reference counting.
+    subroutine test_sink_assignment_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_assignment_refused", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_assignment_refused was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: the sink was opened", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "assignment is not supported (it would leave two writers sharing one output file)", found)
+        call check(error, found, "the abort must be the assignment guard's message")
+    end subroutine test_sink_assignment_refused_aborts
+
+    !> A schema field the template lacks is refused at open, before any file exists.
+    subroutine test_sink_schema_names_a_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_schema_names_a_missing_column", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_schema_names_a_missing_column was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: the schema opened over a template that has every field", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_open_table_writer: the schema declares a column the template table does not have", found)
+        call check(error, found, "the abort must name parquet_open_table_writer and the missing column")
+    end subroutine test_sink_schema_names_a_missing_column_aborts
+
+    !> An append on a never-opened sink names the call that has to come first.
+    subroutine test_sink_never_opened_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_never_opened", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_never_opened was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: an opened sink accepted rows", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "append: this output file has not been opened; call parquet_open_table_writer first", found)
+        call check(error, found, "the abort must say the sink was never opened")
+    end subroutine test_sink_never_opened_aborts
+
+    !> chunk_size is the flush threshold and must be positive.
+    subroutine test_sink_chunk_size_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_chunk_size_not_positive", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_chunk_size_not_positive was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: chunk_size=1 opened, wrote and closed", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_open_table_writer: chunk_size must be positive", found)
+        call check(error, found, "the abort must name chunk_size")
+    end subroutine test_sink_chunk_size_not_positive_aborts
+
+    !> A template that has read nothing, with no schema, gives the output no column: refused.
+    subroutine test_sink_template_has_no_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("sink_template_has_no_column", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario sink_template_has_no_column was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: a template with one resident column opened a sink", found)
+        call check(error, found, "the control must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_open_table_writer: the template table has no resident column, so there is nothing to write", found)
+        call check(error, found, "the abort must say the template has no resident column and name the alternatives")
+    end subroutine test_sink_template_has_no_column_aborts
+
+    !> A sink opened outside a parallel region and appended to from inside it is refused with the
+    !! sink's own message; the marker proves the guard keys on ownership, not on the region --
+    !! the sink this thread opened inside the region went through first.
+    subroutine test_sink_shared_in_parallel_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without a parallel region the sink cannot be shared, so " // &
+            "both appends succeed and the scenario exits 0")
+        return
+#endif
+        call run_error_scenario("sink_shared_in_parallel", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "appending to a shared sink from inside a parallel region was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "private sink inside the region succeeded", found)
+        call check(error, found, "the sink this thread opened inside the region must go through first")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "append: this output file is being used from more than one thread", found)
+        call check(error, found, "the abort must be the sink's own shared-use message")
+    end subroutine test_sink_shared_in_parallel_aborts
 
     subroutine test_set_max_threads_below_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error

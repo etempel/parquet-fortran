@@ -3,8 +3,8 @@
 !===========================================
 !
 !> Unit tests for writing a `parquet_table` out one row group at a time (`feature_pandas_S2.md`):
-!> `parquet_derive_schema`, `parquet_open_writer_like` and `parquet_write_table_chunk` here, the
-!> `parquet_table_writer` sink in the stage that follows.
+!> `parquet_derive_schema`, `parquet_open_writer_like`, `parquet_write_table_chunk` and the
+!> `parquet_table_writer` sink.
 !>
 !> Every test writes its own fixtures under `test_run/` -- the tests of one suite run
 !> concurrently. Abort paths live in test/error_scenarios.f90, driven from test_errors.f90.
@@ -61,7 +61,41 @@ contains
             new_unittest("a field disabled with set_column_unavailable is skipped by a chunk write", &
                 test_chunked_write_skips_a_disabled_field), &
             new_unittest("a schema-less writer takes every resident column in slot order, per chunk", &
-                test_chunked_write_on_a_schemaless_writer) &
+                test_chunked_write_on_a_schemaless_writer), &
+            new_unittest("the sink writes the whole buffer after the append that crosses the threshold", &
+                test_sink_uneven_batches), &
+            new_unittest("the sink's automatic threshold sees a vector column's width", &
+                test_sink_auto_chunk_size), &
+            new_unittest("chunk_size= reaches the flush rule and %chunk_size()", &
+                test_sink_explicit_chunk_size), &
+            new_unittest("%flush writes the pending rows and does nothing with none pending", &
+                test_sink_flush_boundary), &
+            new_unittest("the close writes the rows below the threshold", &
+                test_sink_close_writes_the_last_rows), &
+            new_unittest("a sink that accepted no rows closes to a valid zero-row file", &
+                test_sink_close_with_no_rows), &
+            new_unittest("a missing column is null-filled on both sides of a flush", &
+                test_sink_null_fill_across_a_flush), &
+            new_unittest("a zero-row template gives the output its columns", &
+                test_sink_zero_row_template), &
+            new_unittest("the buffer keeps chunk_size rows of capacity across a flush", &
+                test_sink_buffer_keeps_capacity), &
+            new_unittest("a run of %append(row) calls reallocates nothing", &
+                test_sink_row_appends_do_not_reallocate), &
+            new_unittest("parquet_derive_schema does not measure nullability from the template", &
+                test_derive_schema_does_not_measure_nullability), &
+            new_unittest("the sink reads a declared column the appended table has not read, and gives it back", &
+                test_sink_reads_an_unread_column), &
+            new_unittest("%append(row) reads a declared column once and keeps it", &
+                test_sink_row_append_keeps_what_it_read), &
+            new_unittest("with schema= the schema selects the columns and an extra one is ignored", &
+                test_sink_schema_selects_the_columns), &
+            new_unittest("a string-only template resolves to the estimator's ceiling", &
+                test_sink_string_template_auto_chunk_size), &
+            new_unittest("an appended table's parquet_row_index is dropped, not refused", &
+                test_sink_row_index_ignored), &
+            new_unittest("a filtered slice serves as a template; its rows are not written", &
+                test_sink_template_slice_accepted) &
             ]
     end subroutine collect_tests_table_stream
     !
@@ -1293,5 +1327,600 @@ contains
         if (allocated(error)) return
         call check(error, all(cback == c), "so does the second")
     end subroutine test_chunked_write_on_a_schemaless_writer
+    !
+    !> A two-column in-memory table over rows `lo..hi` of one deterministic fixture (`id` is the
+    !! row number, `x` ten times it), so the batches of a sink test are pieces of one sequence.
+    subroutine batch_table(lo, hi, t, without_x)
+        integer, intent(in) :: lo                     !! first fixture row.
+        integer, intent(in) :: hi                     !! last fixture row.
+        type(parquet_table), intent(out) :: t         !! receives the batch.
+        logical, intent(in), optional :: without_x    !! .true.: only the id column.
+        integer(int64), allocatable :: ids(:)
+        real(real64), allocatable :: x(:)
+        integer :: i, n
+        logical :: with_x
+        !
+        with_x = .true.
+        if (present(without_x)) with_x = .not. without_x
+        n = max(hi - lo + 1, 0)
+        allocate(ids(n), x(n))
+        do i = 1, n
+            ids(i) = int(lo + i - 1, int64)
+            x(i) = 10.0_real64 * real(lo + i - 1, real64)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        if (with_x) call t%add_column("x", x)
+    end subroutine batch_table
+    !
+    !> Seven appends of uneven size against `chunk_size=64`: every row present and in order, and
+    !! the row groups are exactly 103, 251 and 10 -- the whole buffer written after the append
+    !! that crossed the threshold, the last by the close (contract 3). The counters are asserted
+    !! after every append, so a flush before the threshold, or on an append that did not cross
+    !! it, is caught at the step it happens.
+    subroutine test_sink_uneven_batches(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b, back
+        integer(int64), allocatable :: ids(:), bounds(:,:)
+        integer, parameter :: sizes(7) = [3, 100, 1, 50, 200, 1, 9]
+        integer(int64), parameter :: pending(7) = [3_int64, 0_int64, 1_int64, 51_int64, 0_int64, 1_int64, 10_int64]
+        integer(int64), parameter :: groups(7) = [0_int64, 1_int64, 1_int64, 1_int64, 2_int64, 2_int64, 2_int64]
+        integer :: k, lo, hi, i
+        character(len=*), parameter :: f = "test_run/table_stream_sink_uneven.parquet"
+        !
+        call batch_table(1, 3, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=64)
+        call check(error, out%is_open(), "the sink is open")
+        if (allocated(error)) return
+        call check(error, out%chunk_size() == 64, "chunk_size= is the threshold")
+        if (allocated(error)) return
+        call check(error, out%nrows() == 0_int64, "the template's rows are not written")
+        if (allocated(error)) return
+        lo = 1
+        do k = 1, size(sizes)
+            hi = lo + sizes(k) - 1
+            call batch_table(lo, hi, b)
+            call out%append(b)
+            call check(error, out%rows_pending() == pending(k), "rows pending after an append")
+            if (allocated(error)) return
+            call check(error, out%row_groups() == groups(k), "row groups written after an append")
+            if (allocated(error)) return
+            call check(error, out%nrows() == int(hi, int64), "rows accepted so far")
+            if (allocated(error)) return
+            lo = hi + 1
+        end do
+        call parquet_close_table_writer(out)
+        call check(error, .not. out%is_open(), "the sink is closed")
+        if (allocated(error)) return
+        !
+        call parquet_table_row_group_bounds(f, bounds)
+        call check(error, size(bounds, 2) == 3, "three row groups: two flushes and the close")
+        if (allocated(error)) return
+        call check(error, bounds(2, 1) == 103_int64, "the first row group is the 103 rows that crossed the threshold")
+        if (allocated(error)) return
+        call check(error, bounds(2, 2) == 354_int64, "the second is the next 251")
+        if (allocated(error)) return
+        call check(error, bounds(2, 3) == 364_int64, "the last is the 10 rows the close wrote")
+        if (allocated(error)) return
+        call parquet_open_table(back, f)
+        call back%get("id", ids)
+        call check(error, size(ids) == 364, "every row is in the file")
+        if (allocated(error)) return
+        do i = 1, 364
+            call check(error, ids(i) == int(i, int64), "...in order")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sink_uneven_batches
+    !
+    !> Without `chunk_size=` the threshold is the library's estimate from the schema, with every
+    !! vector column's width resolved from the template first: a wide vector column gives a
+    !! threshold far below the one a width-1 reading of the same schema gives (feature_risks.md
+    !! Risk-228).
+    subroutine test_sink_auto_chunk_size(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed
+        type(parquet_schema) :: s
+        type(parquet_writer) :: w
+        integer, parameter :: WIDE = 100
+        real(real64) :: v(WIDE, 2)
+        integer(int64) :: ids(2)
+        integer :: c_sink, c_width1, cs
+        character(len=:), allocatable :: fname
+        character(len=*), parameter :: f = "test_run/table_stream_sink_auto.parquet"
+        character(len=*), parameter :: f1 = "test_run/table_stream_sink_auto_width1.parquet"
+        !
+        v = 1.0_real64
+        ids = [1_int64, 2_int64]
+        call parquet_new_table(seed)
+        call seed%add_column("id", ids)
+        call seed%add_column("v", v)
+        call parquet_open_table_writer(out, f, seed)
+        c_sink = out%chunk_size()
+        call parquet_close_table_writer(out)
+        ! The width-1 reading: the derived schema as it stands, col_size still auto.
+        call parquet_derive_schema(seed, s)
+        call s%get_field(2, fname, col_size=cs)
+        call check(error, cs == parquet_size_auto, "precondition: the derived schema leaves col_size auto")
+        if (allocated(error)) return
+        call parquet_open_writer(w, f1, s)
+        call parquet_get_chunk_size(w, c_width1)
+        call parquet_write_column(w, "id", ids)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        call check(error, c_sink >= 1000, "the estimate is clamped from below")
+        if (allocated(error)) return
+        call check(error, c_sink * 10 < c_width1, &
+            "the sink's threshold sees the vector width, so it is far below the width-1 estimate")
+    end subroutine test_sink_auto_chunk_size
+    !
+    !> `chunk_size=` reaches both the flush rule and `%chunk_size()`.
+    subroutine test_sink_explicit_chunk_size(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b
+        character(len=*), parameter :: f = "test_run/table_stream_sink_explicit.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=5)
+        call check(error, out%chunk_size() == 5, "%chunk_size() reports the explicit value")
+        if (allocated(error)) return
+        call batch_table(1, 4, b)
+        call out%append(b)
+        call check(error, out%row_groups() == 0_int64, "four rows against five: nothing written yet")
+        if (allocated(error)) return
+        call batch_table(5, 5, b)
+        call out%append(b)
+        call check(error, out%row_groups() == 1_int64, "the fifth row crosses the threshold and flushes")
+        if (allocated(error)) return
+        call check(error, out%rows_pending() == 0_int64, "...leaving nothing pending")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+    end subroutine test_sink_explicit_chunk_size
+    !
+    !> `%flush()` makes a row group of exactly the pending rows, and a second `%flush()` with
+    !! nothing pending writes nothing (an empty row group would be the writer's abort).
+    subroutine test_sink_flush_boundary(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b
+        integer(int64), allocatable :: bounds(:,:)
+        character(len=*), parameter :: f = "test_run/table_stream_sink_flush.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=100)
+        call batch_table(1, 3, b)
+        call out%append(b)
+        call out%flush()
+        call check(error, out%row_groups() == 1_int64, "a flush writes the pending rows as a row group")
+        if (allocated(error)) return
+        call check(error, out%rows_pending() == 0_int64, "...and empties the buffer")
+        if (allocated(error)) return
+        call out%flush()
+        call check(error, out%row_groups() == 1_int64, "a flush with nothing pending writes nothing")
+        if (allocated(error)) return
+        call batch_table(4, 5, b)
+        call out%append(b)
+        call parquet_close_table_writer(out)
+        call parquet_table_row_group_bounds(f, bounds)
+        call check(error, size(bounds, 2) == 2, "the flush and the close made one row group each")
+        if (allocated(error)) return
+        call check(error, bounds(2, 1) == 3_int64, "the flushed row group holds exactly the pending rows")
+        if (allocated(error)) return
+        call check(error, bounds(2, 2) == 5_int64, "the close wrote the rest")
+    end subroutine test_sink_flush_boundary
+    !
+    !> Rows below the threshold at close are in the file, as the final row group.
+    subroutine test_sink_close_writes_the_last_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b, back
+        type(parquet_reader) :: r
+        integer(int32) :: nrg
+        character(len=*), parameter :: f = "test_run/table_stream_sink_last.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=100)
+        call batch_table(1, 7, b)
+        call out%append(b)
+        call check(error, out%row_groups() == 0_int64, "precondition: nothing written before the close")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+        call parquet_open_reader(r, f)
+        call parquet_get_num_row_groups(r, nrg)
+        call check(error, nrg == 1, "the close wrote one row group")
+        if (allocated(error)) return
+        call parquet_close_reader(r)
+        call parquet_open_table(back, f)
+        call check(error, back%nrows() == 7_int64, "...holding every pending row")
+    end subroutine test_sink_close_writes_the_last_rows
+    !
+    !> A sink that accepted no rows closes to a valid file carrying every column and zero rows
+    !! (the writer warns; the file is right).
+    subroutine test_sink_close_with_no_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, back
+        character(len=:), allocatable :: cn(:)
+        character(len=*), parameter :: f = "test_run/table_stream_sink_norows.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed)
+        call parquet_close_table_writer(out)
+        call parquet_open_table(back, f)
+        call check(error, back%nrows() == 0_int64, "no rows")
+        if (allocated(error)) return
+        call back%column_names(cn)
+        call check(error, size(cn) == 2, "...but every column the template declared")
+        if (allocated(error)) return
+        call check(error, trim(cn(1)) == "id" .and. trim(cn(2)) == "x", "...by name and in order")
+    end subroutine test_sink_close_with_no_rows
+    !
+    !> A column the appended table lacks is null in exactly those rows, on both sides of a flush
+    !! boundary: the first row group is Null-free, the second is the null-filled one, and the
+    !! always-present mask is what lets the second carry Nulls at all.
+    subroutine test_sink_null_fill_across_a_flush(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b, back
+        type(parquet_reader) :: r
+        real(real64), allocatable :: x(:)
+        logical :: nullable
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_sink_nullfill.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=4)
+        call batch_table(1, 4, b)
+        call out%append(b)
+        call check(error, out%row_groups() == 1_int64, "precondition: the Null-free batch was flushed on its own")
+        if (allocated(error)) return
+        call batch_table(5, 7, b, without_x=.true.)
+        call out%append(b)
+        call parquet_close_table_writer(out)
+        !
+        call parquet_open_reader(r, f)
+        call parquet_get_column_nullable(r, "x", nullable)
+        call check(error, nullable, "the null-filled column is nullable although its first row group held no Null")
+        if (allocated(error)) return
+        call parquet_close_reader(r)
+        call parquet_open_table(back, f)
+        call check(error, back%nrows() == 7_int64, "every row is in the file")
+        if (allocated(error)) return
+        do i = 1, 4
+            call check(error, .not. back%is_null("x", int(i, int64)), "the rows the batch supplied are not null")
+            if (allocated(error)) return
+        end do
+        do i = 5, 7
+            call check(error, back%is_null("x", int(i, int64)), "the rows the batch lacked are null")
+            if (allocated(error)) return
+        end do
+        call back%get("x", x)
+        call check(error, x(4) == 40.0_real64, "a supplied value survives the flush")
+    end subroutine test_sink_null_fill_across_a_flush
+    !
+    !> A template built with zero-length arrays gives the output the right columns: only its
+    !! descriptors are read.
+    subroutine test_sink_zero_row_template(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b, back
+        integer(int64) :: no_ids(0)
+        real(real64) :: no_x(0)
+        character(len=:), allocatable :: cn(:)
+        character(len=*), parameter :: f = "test_run/table_stream_sink_zero_template.parquet"
+        !
+        call parquet_new_table(seed)
+        call seed%add_column("id", no_ids)
+        call seed%add_column("x", no_x)
+        call check(error, seed%nrows() == 0_int64, "precondition: a zero-row template")
+        if (allocated(error)) return
+        call parquet_open_table_writer(out, f, seed)
+        call batch_table(1, 5, b)
+        call out%append(b)
+        call parquet_close_table_writer(out)
+        call parquet_open_table(back, f)
+        call back%column_names(cn)
+        call check(error, size(cn) == 2, "the zero-row template's two columns")
+        if (allocated(error)) return
+        call check(error, back%kind("id") == PK_INT64 .and. back%kind("x") == PK_FLOAT64, "...with their kinds")
+        if (allocated(error)) return
+        call check(error, back%nrows() == 5_int64, "...and the appended rows")
+    end subroutine test_sink_zero_row_template
+    !
+    !> The buffer keeps at least `chunk_size` rows of capacity across a flush, through the debug
+    !! observer -- a reset without the reserve leaves it at zero, and every later append then
+    !! grows it geometrically at full correctness (feature_risks.md Risk-227).
+    subroutine test_sink_buffer_keeps_capacity(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b
+        integer(int64) :: cap0, cap1, cap2
+        character(len=*), parameter :: f = "test_run/table_stream_sink_capacity.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=8)
+        call parquet_debug_table_writer_capacity(out, cap0)
+        call check(error, cap0 >= 8_int64, "reserved to chunk_size at open")
+        if (allocated(error)) return
+        call batch_table(1, 8, b)
+        call out%append(b)
+        call check(error, out%row_groups() == 1_int64, "precondition: the append flushed")
+        if (allocated(error)) return
+        call parquet_debug_table_writer_capacity(out, cap1)
+        call check(error, cap1 >= 8_int64, "reserved to chunk_size again after the flush")
+        if (allocated(error)) return
+        call batch_table(9, 11, b)
+        call out%append(b)
+        call parquet_debug_table_writer_capacity(out, cap2)
+        call check(error, cap2 == cap1, "an append below the threshold reallocates nothing")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+    end subroutine test_sink_buffer_keeps_capacity
+    !
+    !> Capacity is unchanged across `chunk_size` consecutive `%append(row)` calls, before and after
+    !! a flush (contract 7): no row append reallocates.
+    subroutine test_sink_row_appends_do_not_reallocate(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, src
+        integer(int64) :: cap0, cap, cap1
+        integer :: i
+        integer, parameter :: CHUNK = 6
+        character(len=*), parameter :: f = "test_run/table_stream_sink_rowcap.parquet"
+        !
+        call batch_table(1, 2, seed)
+        call batch_table(1, 2 * CHUNK, src)
+        call parquet_open_table_writer(out, f, seed, chunk_size=CHUNK)
+        call parquet_debug_table_writer_capacity(out, cap0)
+        do i = 1, CHUNK - 1
+            call out%append(src%row(i))
+            call parquet_debug_table_writer_capacity(out, cap)
+            call check(error, cap == cap0, "a row append below the threshold reallocates nothing")
+            if (allocated(error)) return
+        end do
+        call out%append(src%row(CHUNK))
+        call check(error, out%row_groups() == 1_int64, "the chunk_size-th row flushes")
+        if (allocated(error)) return
+        call parquet_debug_table_writer_capacity(out, cap1)
+        call check(error, cap1 >= int(CHUNK, int64), "the buffer is reserved again after the flush")
+        if (allocated(error)) return
+        do i = CHUNK + 1, 2 * CHUNK - 1
+            call out%append(src%row(i))
+            call parquet_debug_table_writer_capacity(out, cap)
+            call check(error, cap == cap1, "...and the next row group's appends reallocate nothing either")
+            if (allocated(error)) return
+        end do
+        call check(error, out%nrows() == int(2 * CHUNK - 1, int64), "every row was accepted")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+    end subroutine test_sink_row_appends_do_not_reallocate
+    !
+    !> A Null-free template, then batches holding Nulls: the Nulls read back and the field is
+    !! nullable. The derived schema reads descriptors only; a derivation that measured the
+    !! template's null state would have declared the column non-nullable and the second batch
+    !! would abort inside the writer (feature_risks.md Risk-225, contract 8).
+    subroutine test_derive_schema_does_not_measure_nullability(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, b, back
+        type(parquet_reader) :: r
+        logical :: nullable
+        character(len=*), parameter :: f = "test_run/table_stream_sink_nomeasure.parquet"
+        !
+        call batch_table(1, 3, seed)
+        call parquet_open_table_writer(out, f, seed, chunk_size=3)
+        call out%append(seed)
+        call check(error, out%row_groups() == 1_int64, "precondition: the Null-free batch is its own row group")
+        if (allocated(error)) return
+        call batch_table(4, 5, b)
+        call b%set_null("x", 1_int64)
+        call out%append(b)
+        call parquet_close_table_writer(out)
+        call parquet_open_reader(r, f)
+        call parquet_get_column_nullable(r, "x", nullable)
+        call check(error, nullable, "a column Null-free in the template is still nullable in the file")
+        if (allocated(error)) return
+        call parquet_close_reader(r)
+        call parquet_open_table(back, f)
+        call check(error, back%is_null("x", 4_int64), "the later Null reads back")
+        if (allocated(error)) return
+        call check(error, .not. back%is_null("x", 3_int64), "...and only it")
+    end subroutine test_derive_schema_does_not_measure_nullability
+    !
+    !> A file-backed slice with a never-read column is appended: the output names the column, so
+    !! the append reads it, the file holds its values, and the slice's residency is what it was
+    !! afterwards (read and given back).
+    subroutine test_sink_reads_an_unread_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: src, tmpl, sl, back
+        real(real64), allocatable :: x(:)
+        integer :: i
+        character(len=*), parameter :: fsrc = "test_run/table_stream_sink_unread_src.parquet"
+        character(len=*), parameter :: f = "test_run/table_stream_sink_unread_out.parquet"
+        !
+        call batch_table(1, NROW, src)
+        call parquet_write_table(src, fsrc)
+        call parquet_open_table(tmpl, fsrc)
+        call tmpl%materialize_all()
+        call parquet_open_table_writer(out, f, tmpl)
+        call parquet_open_table(sl, fsrc, 1, 5)
+        call sl%prefetch("id")
+        call check(error, sl%residency("x") == RES_EMPTY, "precondition: x is not read")
+        if (allocated(error)) return
+        call out%append(sl)
+        call check(error, sl%residency("x") == RES_EMPTY, "what the append read, it gave back")
+        if (allocated(error)) return
+        call check(error, sl%residency("id") == RES_FULL, "what the caller had read stays")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+        call parquet_open_table(back, f)
+        call back%get("x", x)
+        call check(error, size(x) == 5, "the slice's rows are in the file")
+        if (allocated(error)) return
+        do i = 1, 5
+            call check(error, .not. back%is_null("x", int(i, int64)), "the unread column was read, not null-filled")
+            if (allocated(error)) return
+            call check(error, x(i) == 10.0_real64 * real(i, real64), "...with its values")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sink_reads_an_unread_column
+    !
+    !> `%append(row)` over an unread column reads it once and leaves it resident: the values are
+    !! in the file, and the source table holds the column after the first row.
+    subroutine test_sink_row_append_keeps_what_it_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: src, tmpl, lazy, back
+        real(real64), allocatable :: x(:)
+        character(len=*), parameter :: fsrc = "test_run/table_stream_sink_rowread_src.parquet"
+        character(len=*), parameter :: f = "test_run/table_stream_sink_rowread_out.parquet"
+        !
+        call batch_table(1, NROW, src)
+        call parquet_write_table(src, fsrc)
+        call parquet_open_table(tmpl, fsrc)
+        call tmpl%materialize_all()
+        call parquet_open_table_writer(out, f, tmpl)
+        call parquet_open_table(lazy, fsrc)
+        call lazy%prefetch("id")
+        call out%append(lazy%row(1))
+        call check(error, lazy%residency("x") == RES_FULL, "the row append read the column and kept it")
+        if (allocated(error)) return
+        call out%append(lazy%row(2))
+        call parquet_close_table_writer(out)
+        call parquet_open_table(back, f)
+        call back%get("x", x)
+        call check(error, size(x) == 2, "both rows are in the file")
+        if (allocated(error)) return
+        call check(error, x(1) == 10.0_real64 .and. x(2) == 20.0_real64, "...with the read column's values")
+    end subroutine test_sink_row_append_keeps_what_it_read
+    !
+    !> With `schema=` naming two of a template's three columns, an appended table's third column
+    !! is ignored and absent from the file, in the schema's order; without `schema=` the same
+    !! append is refused (the `sink_extra_column_refused` scenario).
+    subroutine test_sink_schema_selects_the_columns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: t, back
+        type(parquet_schema) :: s
+        integer(int32) :: a(NROW), b(NROW), c(NROW)
+        integer(int32), allocatable :: got(:)
+        character(len=:), allocatable :: cn(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_sink_schema_select.parquet"
+        !
+        do i = 1, NROW
+            a(i) = i
+            b(i) = 10 * i
+            c(i) = 100 * i
+        end do
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        call t%add_column("b", b)
+        call t%add_column("c", c)
+        call s%init("picked")
+        call s%add_field("c", "int32")
+        call s%add_field("a", "int32")
+        call parquet_open_table_writer(out, f, t, schema=s)
+        call out%append(t)
+        call parquet_close_table_writer(out)
+        call parquet_open_table(back, f)
+        call back%column_names(cn)
+        call check(error, size(cn) == 2, "the schema's two fields, the third column ignored")
+        if (allocated(error)) return
+        call check(error, trim(cn(1)) == "c" .and. trim(cn(2)) == "a", "...in the schema's order")
+        if (allocated(error)) return
+        call back%get("c", got)
+        call check(error, all(got == c), "the selected columns carry their values")
+    end subroutine test_sink_schema_selects_the_columns
+    !
+    !> A string-only template with no `chunk_size=` resolves to the estimator's ceiling, because
+    !! the estimate counts a string column as one byte per row (question 16). The day the
+    !! estimator sizes strings, this assertion becomes an upper bound rather than an equality.
+    subroutine test_sink_string_template_auto_chunk_size(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed
+        character(len=8) :: names(NROW)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_sink_string_auto.parquet"
+        !
+        names(1) = "a"
+        do i = 2, NROW
+            write(names(i), '(a, i0)') "obj_", i
+        end do
+        call parquet_new_table(seed)
+        call seed%add_column("name", names)
+        call parquet_open_table_writer(out, f, seed)
+        call check(error, out%chunk_size() == 10000000, &
+            "a string-only template resolves to the estimator's 10,000,000-row ceiling")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+    end subroutine test_sink_string_template_auto_chunk_size
+    !
+    !> A template without the row index and an appended table with it resident: accepted, and the
+    !! file has no such column.
+    subroutine test_sink_row_index_ignored(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: src, seed, lazy
+        type(parquet_reader) :: r
+        character(len=:), allocatable :: cn(:)
+        character(len=*), parameter :: fsrc = "test_run/table_stream_sink_rowidx_src.parquet"
+        character(len=*), parameter :: f = "test_run/table_stream_sink_rowidx_out.parquet"
+        !
+        call batch_table(1, NROW, src)
+        call parquet_write_table(src, fsrc)
+        call batch_table(1, 2, seed)
+        call parquet_open_table_writer(out, f, seed)
+        call parquet_open_table(lazy, fsrc)
+        call lazy%prefetch(PARQUET_ROW_INDEX)
+        call lazy%materialize_all()
+        call check(error, lazy%residency(PARQUET_ROW_INDEX) == RES_FULL, "precondition: the row index is resident")
+        if (allocated(error)) return
+        call out%append(lazy)
+        call parquet_close_table_writer(out)
+        call parquet_open_reader(r, f)
+        call parquet_get_column_names(r, cn)
+        call check(error, size(cn) == 2, "the two data columns and nothing else")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(r, PARQUET_ROW_INDEX), "the row index was dropped, not refused")
+        call parquet_close_reader(r)
+    end subroutine test_sink_row_index_ignored
+    !
+    !> A slice with an active row filter serves as a template: only its descriptors are read,
+    !! its rows are not written, and appending it afterwards writes exactly its surviving rows.
+    subroutine test_sink_template_slice_accepted(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: src, sl, back
+        logical, allocatable :: keep(:)
+        integer(int64), allocatable :: ids(:)
+        character(len=*), parameter :: fsrc = "test_run/table_stream_sink_slice_src.parquet"
+        character(len=*), parameter :: f = "test_run/table_stream_sink_slice_out.parquet"
+        !
+        call batch_table(1, NROW, src)
+        call parquet_write_table(src, fsrc)
+        call parquet_open_table(sl, fsrc, 3, 8)
+        call sl%materialize_all()
+        allocate(keep(sl%nrows()))
+        keep = .true.
+        keep(2) = .false.
+        call sl%filter_rows(keep)
+        call check(error, sl%nrows() == 5_int64, "precondition: a filtered slice of five rows")
+        if (allocated(error)) return
+        call parquet_open_table_writer(out, f, sl)
+        call check(error, out%nrows() == 0_int64, "the template's rows are not written")
+        if (allocated(error)) return
+        call out%append(sl)
+        call parquet_close_table_writer(out)
+        call parquet_open_table(back, f)
+        call back%get("id", ids)
+        call check(error, size(ids) == 5, "the surviving rows, and only those")
+        if (allocated(error)) return
+        call check(error, ids(1) == 3_int64 .and. ids(2) == 5_int64 .and. ids(5) == 8_int64, "...in order")
+    end subroutine test_sink_template_slice_accepted
     !
 end module test_table_stream

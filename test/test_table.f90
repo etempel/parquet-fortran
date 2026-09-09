@@ -244,6 +244,10 @@ contains
             new_unittest("append_null_rows supports the extend-fill-append workflow", &
                 test_append_null_rows_workflow), &
             new_unittest("append takes a single row through a row handle", test_append_row), &
+            new_unittest("append(table) null-fills a source column that was never read", &
+                test_append_null_fills_an_unread_column), &
+            new_unittest("append drops a source parquet_row_index this table lacks", &
+                test_append_drops_a_source_row_index), &
             new_unittest("append(row) does not scale with the source table's size", &
                 test_append_row_source_independent), &
             new_unittest("append(row) carries every kind, nulls included", test_append_row_kinds), &
@@ -8605,6 +8609,95 @@ contains
         call parquet_write_column(w, "s", s, is_valid=s_ok)
         call parquet_close_writer(w)
     end subroutine write_sort_equiv_fixture
+    !
+    !> Writes the two-column fixture the two append-rule tests below open lazily.
+    subroutine write_append_rule_fixture(f)
+        character(len=*), intent(in) :: f !! file to write.
+        type(parquet_writer) :: w
+        integer(int32) :: a(NROW)
+        real(real64) :: b(NROW)
+        integer :: i
+        !
+        do i = 1, NROW
+            a(i) = i
+            b(i) = real(10 * i, real64)
+        end do
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "a", a)
+        call parquet_write_column(w, "b", b)
+        call parquet_close_writer(w)
+    end subroutine write_append_rule_fixture
+    !
+    !> A source column that exists but was never read is absent to the table form of `%append`,
+    !! exactly as it is to the row form: this table's column is null-filled for those rows and the
+    !! resident columns copy. It used to abort with a message about kinds (feature_pandas_S2.md,
+    !! question 14).
+    subroutine test_append_null_fills_an_unread_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: dest, src
+        integer(int32), allocatable :: a(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_append_unread.parquet"
+        !
+        call write_append_rule_fixture(f)
+        call parquet_open_table(dest, f)
+        call dest%materialize_all()
+        call parquet_open_table(src, f)
+        call src%prefetch("a")
+        call check(error, src%residency("b") == RES_EMPTY, "precondition: b was never read on the source")
+        if (allocated(error)) return
+        call dest%append(src)
+        call check(error, dest%nrows() == int(2 * NROW, int64), "the source's rows were appended")
+        if (allocated(error)) return
+        call dest%get("a", a)
+        call check(error, a(NROW + 1) == 1_int32 .and. a(2 * NROW) == int(NROW, int32), "the resident column copied")
+        if (allocated(error)) return
+        do i = 1, NROW
+            call check(error, dest%is_null("b", int(NROW + i, int64)), "the unread column is null-filled")
+            if (allocated(error)) return
+            call check(error, .not. dest%is_null("b", int(i, int64)), "...and only for the appended rows")
+            if (allocated(error)) return
+        end do
+        call check(error, src%residency("b") == RES_EMPTY, "the append read nothing on the source")
+    end subroutine test_append_null_fills_an_unread_column
+    !
+    !> A source `parquet_row_index` is dropped when this table lacks it, for every table, and a
+    !! destination that has the column still copies it (feature_pandas_S2.md, question 17).
+    subroutine test_append_drops_a_source_row_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: dest, src, with_index
+        integer(int64), allocatable :: ridx(:)
+        integer(int32) :: a(NROW)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_append_rowidx.parquet"
+        !
+        do i = 1, NROW
+            a(i) = i
+        end do
+        call write_append_rule_fixture(f)
+        call parquet_open_table(src, f)
+        call src%prefetch("a")
+        call src%prefetch(PARQUET_ROW_INDEX)
+        call check(error, src%residency(PARQUET_ROW_INDEX) == RES_FULL, "precondition: the row index is resident")
+        if (allocated(error)) return
+        ! A destination without the row index: the column is dropped, the rest is appended.
+        call parquet_new_table(dest)
+        call dest%add_column("a", a)
+        call dest%append(src)
+        call check(error, dest%nrows() == int(2 * NROW, int64), "the append was accepted")
+        if (allocated(error)) return
+        call check(error, .not. dest%has_column(PARQUET_ROW_INDEX), "...and the destination gained no row index")
+        if (allocated(error)) return
+        ! A destination with it copies it, as before.
+        call parquet_open_table(with_index, f)
+        call with_index%prefetch(PARQUET_ROW_INDEX)
+        call with_index%materialize_all()
+        call with_index%append(src)
+        call with_index%get(PARQUET_ROW_INDEX, ridx)
+        call check(error, size(ridx) == 2 * NROW, "a destination that has the column keeps copying it")
+        if (allocated(error)) return
+        call check(error, ridx(NROW + 1) == ridx(1), "...with the source's own row numbers")
+    end subroutine test_append_drops_a_source_row_index
     !
     !> Appending another table concatenates matching columns and null-fills the ones the appended
     !! table does not have.

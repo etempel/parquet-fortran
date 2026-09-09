@@ -43,7 +43,11 @@
 !! read everything it has before it could drop a single row, which is exactly the memory cost
 !! laziness and the slice regime exist to avoid. The skipped column is then unreadable for good --
 !! detaching sees to that -- so a caller who wants it must `%prefetch` it BEFORE mutating, and the
-!! detach guard is what says so if they did not.
+!! detach guard is what says so if they did not. On the SOURCE side of `%append` the same rule
+!! reads: a column the appended table has but has not read is absent, and this table's column is
+!! null-filled for those rows -- on both forms of the append (feature_pandas_S2.md, question 14).
+!! A source `parquet_row_index` this table lacks is dropped rather than refused (question 17):
+!! it is this library's own provenance column, and nothing would ever write it.
 !!
 !! **`%append` is the one mutation a SHARED table permits**, and the split between its two public
 !! entry points and the private `append_table_worker` is what makes that safe: each entry point
@@ -418,6 +422,21 @@ contains
     ! ---- append -----------------------------------------------------------------------------
     !
     module procedure table_append_table
+        call append_table_entry(self, other, .false.)
+    end procedure table_append_table
+    !
+    !> `%append(table)` with the sink's flag -- see the interface. The same entry, checks, lock
+    !! and worker; only the unknown-column rule differs.
+    module procedure table_append_table_ext
+        call append_table_entry(self, other, ignore_unknown)
+    end procedure table_append_table_ext
+    !
+    !> The body of `%append(table)`: the self-append refusal, the lock, the worker.
+    subroutine append_table_entry(self, other, ignore_unknown)
+        class(parquet_table), intent(inout) :: self !! the table to grow.
+        class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
+        logical, intent(in) :: ignore_unknown       !! .true.: skip, never refuse, an unknown column.
+        !
         call table_check_open(self, "append")
         ! Refused BEFORE the lock, and before anything is written. Appending a table to itself
         ! argument-associates one object with an intent(inout) and an intent(in) dummy, which
@@ -432,10 +451,10 @@ contains
         end if
         call table_lock(self%cache)
         call append_begin(self)
-        call append_table_worker(self, other)
+        call append_table_worker(self, other, ignore_unknown)
         call append_end(self)
         call table_unlock(self%cache)
-    end procedure table_append_table
+    end subroutine append_table_entry
     !
     !> Marks an append as in progress, and refuses to start one while a read is in flight.
     !!
@@ -509,29 +528,40 @@ contains
     !! Runs in full before a single value is written, which is rule 1 of this file's own header --
     !! a mutation that aborts halfway leaves some columns longer than others, with no diagnostic
     !! and no way back.
-    subroutine append_validate_source(self, src)
+    subroutine append_validate_source(self, src, ignore_unknown)
         class(parquet_table), intent(in) :: self     !! the destination table.
         type(parquet_table_cache), intent(in) :: src !! the source table's column store.
+        logical, intent(in) :: ignore_unknown        !! .true.: skip, never refuse, an unknown column.
         integer :: i, j
         !
         do j = 1, src%ncols
             if (.not. cache_column_usable(src, j)) cycle
             i = table_find(self, src%cols(j)%name)
-            if (i == 0) call append_unknown_column(self, src%cols(j)%name)
+            if (i == 0) then
+                ! This library's own provenance column is dropped rather than refused when the
+                ! destination lacks it: a source read from a file may carry it resident, and
+                ! nothing would ever write it (feature_pandas_S2.md, question 17). The sink's flag
+                ! widens the same skip to every column its explicit schema does not name
+                ! (question 18); the plain %append keeps refusing.
+                if (src%cols(j)%name == PARQUET_ROW_INDEX) cycle
+                if (ignore_unknown) cycle
+                call append_unknown_column(self, src%cols(j)%name)
+            end if
             if (.not. table_mutable_column(self, i)) cycle
             call append_check_compatible(self, i, src, j)
         end do
     end subroutine append_validate_source
     !
-    subroutine append_table_worker(self, other)
+    subroutine append_table_worker(self, other, ignore_unknown)
         class(parquet_table), intent(inout) :: self !! the table to grow.
         class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
+        logical, intent(in) :: ignore_unknown       !! .true.: skip, never refuse, an unknown column.
         integer :: i, j
         integer(int64) :: added
         !
         call table_check_open(self, "append")
         call table_check_open(other, "append")
-        call append_validate_source(self, other%cache)
+        call append_validate_source(self, other%cache, ignore_unknown)
         added = other%row_count
         ! Appending no rows adds nothing, so the table keeps its columns' storage and its file --
         ! but only after the compatibility checks above have run, so an incompatible zero-row
@@ -540,6 +570,13 @@ contains
         do i = 1, self%cache%ncols
             if (.not. table_mutable_column(self, i)) cycle
             j = cache_find(other%cache, self%cache%cols(i)%name)
+            ! A source column that exists but has not been read is treated as ABSENT, exactly as
+            ! the validation above already treats it and as the row path does -- so this table's
+            ! column is null-filled rather than handed a column with no values, which used to
+            ! abort with a message about kinds (feature_pandas_S2.md, question 14).
+            if (j > 0) then
+                if (.not. cache_column_usable(other%cache, j)) j = 0
+            end if
             if (j == 0) then
                 ! M1's default fill: a column this table has and `other` does not gets nulls for
                 ! the appended rows, rather than the append being refused.
@@ -565,9 +602,10 @@ contains
     !! validation above, the null fill for a column the row's table does not have, the refusal of a
     !! column it has and this table does not, the skip of a column that is not resident, and the
     !! row-count / generation / detach bookkeeping at the end.
-    subroutine append_row_worker(self, r)
+    subroutine append_row_worker(self, r, ignore_unknown)
         class(parquet_table), intent(inout) :: self !! the table to grow.
         type(parquet_table_row), intent(in) :: r    !! the row to append.
+        logical, intent(in) :: ignore_unknown       !! .true.: skip, never refuse, an unknown column.
         integer :: i, j, matched
         !
         call table_check_open(self, "append")
@@ -580,7 +618,7 @@ contains
         end do
         if (matched == 0) error stop EP // "append: the row's table has no column in common " // &
             "with this table, so there is nothing to append"
-        call append_validate_source(self, r%cache)
+        call append_validate_source(self, r%cache, ignore_unknown)
         do i = 1, self%cache%ncols
             if (.not. table_mutable_column(self, i)) cycle
             j = cache_find(r%cache, self%cache%cols(i)%name)
@@ -604,6 +642,20 @@ contains
     end subroutine append_row_worker
     !
     module procedure table_append_row
+        call append_row_entry(self, r, .false.)
+    end procedure table_append_row
+    !
+    !> `%append(row)` with the sink's flag -- see the interface.
+    module procedure table_append_row_ext
+        call append_row_entry(self, r, ignore_unknown)
+    end procedure table_append_row_ext
+    !
+    !> The body of `%append(row)`: the staleness checks, the lock, the worker.
+    subroutine append_row_entry(self, r, ignore_unknown)
+        class(parquet_table), intent(inout) :: self !! the table to grow.
+        type(parquet_table_row), intent(in) :: r    !! the row to append.
+        logical, intent(in) :: ignore_unknown       !! .true.: skip, never refuse, an unknown column.
+        !
         call table_check_open(self, "append")
         ! Validated BEFORE the lock and before anything is written, so a rejected append leaves
         ! the destination exactly as it was.
@@ -639,10 +691,10 @@ contains
         ! middle of changing.
         call table_lock(self%cache)
         call append_begin(self)
-        call append_row_worker(self, r)
+        call append_row_worker(self, r, ignore_unknown)
         call append_end(self)
         call table_unlock(self%cache)
-    end procedure table_append_row
+    end subroutine append_row_entry
     !
     module procedure table_append_null_rows_i32
         call self%append_null_rows(int(n, int64))

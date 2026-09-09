@@ -159,8 +159,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   values names the stored type in the abort message, and `%print_stat(all=.true.)` shows it in that
   column's `kind` cell instead of `PK_NONE`. See
   [What a column is actually stored as](doc/pages/io/reading.md#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type).
-- **A table can be written one row group at a time: `parquet_write_table_chunk`,
-  `parquet_derive_schema` and `parquet_open_writer_like`.**
+- **An output file that stays open: `parquet_table_writer`.** `parquet_open_table_writer(out,
+  file, template)` opens a parquet file for writing, `out%append(t)` hands it any number of rows
+  at a time (or one `parquet_table_row`), and `parquet_close_table_writer(out)` finishes it — the
+  rows are buffered and written one row group at a time, so a result far larger than memory can be
+  produced by a loop that never holds more than one row group of it. `chunk_size=` sets the rows
+  per row group and is resolved from the schema when omitted; `schema=` selects and names the
+  columns; `%flush()` forces a row-group boundary; `%nrows()`, `%rows_pending()`, `%row_groups()`,
+  `%chunk_size()`, `%filename()` and `%is_open()` report on it. A column the output declares that
+  an appended table has not read is read for the copy. See
+  [An output file that stays open](doc/pages/tables/table-write.md#an-output-file-that-stays-open-parquet_table_writer).
+  The same write is available a row group at a time:
   `call parquet_write_table_chunk(writer, t, [row_mask])` writes a table's rows as one complete
   row group of an open writer, every column the writer's schema declares, so a loop over the row
   groups of a file larger than memory can open each as a table, transform it and write it out.
@@ -178,6 +187,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`parquet_table%append`** treats a column the appended table has but has not read as absent on
+  both forms (null-filled, as `%append(row)` already did; the table form aborted), and drops an
+  appended table's `parquet_row_index` when this table has none instead of refusing it.
 - **`parquet_table%print_stat` computes its statistics in one pass per column, and scans the
   columns in parallel** on a large table, capped by `parquet_set_table_threads`. The listing is
   unchanged.

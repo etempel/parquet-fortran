@@ -956,8 +956,10 @@ contains
         ! Its own filename: tests in a suite run concurrently and test_module_surface_io already
         ! writes test_run/module_surface_io.parquet.
         character(len=*), parameter :: out_file = "test_run/module_surface_tables.parquet"
-        type(parquet_table) :: t, back
+        character(len=*), parameter :: sink_file = "test_run/module_surface_tables_sink.parquet"
+        type(parquet_table) :: t, back, streamed
         type(parquet_table_index) :: ix
+        type(parquet_table_writer) :: out
         integer(int64) :: ids(3), row
         real(real64) :: mass(3)
         real(real64), allocatable :: got(:)
@@ -986,6 +988,15 @@ contains
         if (what == "" .and. size(got) /= 3) what = "%get returned the wrong size"
         if (what == "" .and. got(2) /= 2.5_real64) what = "%get did not round-trip the value"
         if (what == "" .and. back%residency("mass") /= RES_FULL) what = "%residency after %get"
+        ! The output file that stays open: a parquet_tables type over the writer, reachable and
+        ! usable through this one import -- open, append, close, reopen.
+        call parquet_open_table_writer(out, sink_file, t, chunk_size=2)
+        call out%append(t)
+        if (what == "" .and. out%row_groups() /= 1_int64) what = "the sink did not flush at its threshold"
+        call parquet_close_table_writer(out)
+        if (what == "" .and. out%is_open()) what = "%is_open after parquet_close_table_writer"
+        call parquet_open_table(streamed, sink_file)
+        if (what == "" .and. streamed%nrows() /= 3_int64) what = "%nrows after reopening a sink's file"
         ! REGIME_FULL/REGIME_SLICE were named here for the same build-breaking reason as every
         ! other reference in this file, and they are gone: row 30 made them private, because
         ! `regime` is a private component and no binding exposes it, so no caller could ever obtain

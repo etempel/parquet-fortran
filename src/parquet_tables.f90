@@ -122,6 +122,9 @@ module parquet_tables
     public :: parquet_derive_schema
     public :: parquet_open_writer_like
     public :: parquet_write_table_chunk
+    public :: parquet_table_writer
+    public :: parquet_open_table_writer
+    public :: parquet_close_table_writer
     public :: parquet_table_row_group_bounds
     !> Re-exported from parquet_settings so that a `use parquet_tables` program can report
     !! which Arrow/Parquet C++ it is linked against without a second import. The library's
@@ -141,6 +144,7 @@ module parquet_tables
     public :: parquet_debug_colread_block_rows
     public :: parquet_debug_table_drop_name_index
     public :: parquet_debug_join_add_checked
+    public :: parquet_debug_table_writer_capacity
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -1708,6 +1712,82 @@ module parquet_tables
         ! NO `final` -- the same decision as parquet_table_row and parquet_table_col, for the
         ! same reasons; the two engines free their own arrays at scope exit.
     end type parquet_table_index
+    !
+    !> An output parquet file that stays open and accepts tables of any length: the rows are
+    !! buffered and written one row group at a time, so a result far larger than memory is
+    !! produced by a loop that never holds more than about one row group of it. Opened by
+    !! `parquet_open_table_writer(out, file, template)`, fed by `out%append(table)` or
+    !! `out%append(row)`, finished by `parquet_close_table_writer(out)` -- which writes the last
+    !! row group and then the file's footer. **A sink that is not closed leaves no readable file
+    !! at all**, not a truncated one: a Parquet file's footer is written at close, and `%flush()`
+    !! puts rows on disk without making the file readable.
+    !!
+    !! **The template decides the columns, once, at open.** Its RESIDENT columns -- or, with
+    !! `schema=`, exactly the schema's enabled fields, each checked against the template before
+    !! the file is created -- fix the output's columns, kinds, widths and units; its rows are not
+    !! written, and a slice, a filtered table or a zero-row table serves as a template as well as
+    !! any other. Every appended table is matched against that set under `%append`'s rules: a
+    !! column the output has and the table lacks is null-filled for those rows; a kind, width or
+    !! unit mismatch is refused; a column the table has but has not read is READ for the copy --
+    !! the output naming it is the request -- and given back afterwards by the table form, kept
+    !! resident by the row form. A resident column the output does not declare is refused when
+    !! the columns came from the template and ignored when they came from `schema=`;
+    !! `parquet_row_index` is dropped either way and never written.
+    !!
+    !! **`chunk_size` is the flush threshold.** An append that leaves at least that many rows
+    !! buffered writes the whole buffer as one row group, so a row group holds between
+    !! `chunk_size` rows and `chunk_size - 1` plus the rows of the one append that crossed it, and
+    !! the buffer never holds more. Omitted, it is `parquet_get_chunk_size`'s estimate from the
+    !! schema, every vector column's width resolved from the template first; that estimate counts
+    !! a string column as one byte per row, so a string-heavy output should pass `chunk_size=`.
+    !! The buffer is reserved to `chunk_size` rows at open and again after every flush, so no
+    !! append between two flushes reallocates a column's rows (a string column's characters still
+    !! grow on their own). A validity mask is written for every column that takes one, so a Null
+    !! may arrive in any row group; `protected_cols:` opts a column out.
+    !!
+    !! **One thread owns a sink.** `%append`, `%flush` and the close refuse a sink another thread
+    !! may share, on the ownership test a shared `parquet_table` refuses a structural change
+    !! with; one sink per thread, each writing its own file, is the supported parallel shape.
+    !! Assignment is refused (two sinks would share and double-close one file). There is no
+    !! finalizer beyond the components' own: an abandoned sink frees its memory, abandons the
+    !! file and loses its pending rows, exactly as an abandoned `parquet_writer` does. Handing an
+    !! open sink to a second `parquet_open_table_writer` abandons the first file incomplete
+    !! rather than refusing, as `parquet_open_writer` does.
+    type :: parquet_table_writer
+        private
+        type(parquet_writer) :: w                    !! the open writer; a plain handle, hence the assignment guard.
+        type(parquet_table) :: buf                   !! the row buffer; never handed out.
+        integer :: chunk_rows = 0                    !! the resolved flush threshold, in rows.
+        integer(int64) :: rows_written = 0_int64     !! rows written to the file so far.
+        integer(int64) :: groups_written = 0_int64   !! row groups written so far.
+        logical :: opened = .false.                  !! .true. once parquet_open_table_writer has run.
+        logical :: closed = .false.                  !! .true. once parquet_close_table_writer has run.
+        logical :: from_schema = .false.             !! .true.: the column set came from schema=.
+        character(len=:), allocatable :: file        !! the output path, for %filename and every message.
+    contains
+        procedure, private :: sink_append_table     !! %append specific taking a table.
+        procedure, private :: sink_append_row       !! %append specific taking one row handle.
+        !> Hands rows to the output -- a whole table's worth, or one row -- and writes a row group
+        !! when the buffer reaches the threshold. See the type's own note for what is read,
+        !! null-filled and refused.
+        generic :: append => sink_append_table, sink_append_row
+        procedure :: flush => sink_flush            !! Writes the pending rows as a row group now; a no-op with none pending.
+        procedure :: nrows => sink_nrows            !! Rows accepted so far: written plus pending.
+        procedure :: rows_pending => sink_rows_pending !! Rows buffered and not yet in the file.
+        procedure :: row_groups => sink_row_groups  !! Row groups written so far.
+        procedure :: chunk_size => sink_chunk_size  !! The resolved flush threshold, in rows.
+        procedure :: filename => sink_filename      !! The output file's path.
+        procedure :: is_open => sink_is_open        !! Whether the sink is open and not yet closed; never aborts.
+        !> Always error stops: a copy would leave two sinks sharing one open file, and there is
+        !! no deep copy to offer -- open a second output with `parquet_open_table_writer`.
+        !!
+        !! The binding is named `assign_guard` for the same reason `parquet_table`'s is: the name
+        !! sorts early, and flang stores a special binding's index in one byte (`code-style.md`).
+        generic :: assignment(=) => assign_guard
+        procedure, private :: assign_guard => sink_assign_guard !! The blocking defined assignment.
+        ! NO `final` of its own, deliberately: `w` and `buf` each clean themselves up, and a
+        ! flush is a write that may abort, which a finalizer may never do (api-conventions.md).
+    end type parquet_table_writer
     !
     ! ---- Lifecycle (parquet_tables_lifecycle) ----
     interface
@@ -4770,6 +4850,147 @@ module parquet_tables
             class(parquet_table), intent(in) :: table     !! the rows to write as this row group (any extending type too).
             logical, intent(in), optional :: row_mask(:)  !! per-row write mask; .false. drops the row entirely.
         end subroutine parquet_write_table_chunk
+        !> Parses a caller-supplied schema that was built with `%init`/`%add_field` and never
+        !! parsed, and refuses one that was never built at all; `context` is the public
+        !! procedure's name. Shared by every table-level open and write that takes `schema=`.
+        module subroutine ensure_schema_parsed(schema, context)
+            type(parquet_schema), intent(inout) :: schema !! the caller's schema.
+            character(len=*), intent(in) :: context       !! calling procedure, for the message.
+        end subroutine ensure_schema_parsed
+        !> The output file's stem -- its basename with any directory part and a trailing
+        !! ".parquet" removed -- used as a generated schema's `table:` name, which MAML requires.
+        module subroutine output_stem(filename, stem)
+            character(len=*), intent(in) :: filename           !! output parquet path.
+            character(len=:), allocatable, intent(out) :: stem !! the stem, never empty.
+        end subroutine output_stem
+        !> Gives back a column a write had to read: its values are released and the slot returns
+        !! to RES_EMPTY, so the table is left in the residency state the write found it in. Only
+        !! for a slot that was RES_EMPTY before `table_touch` made it resident.
+        module subroutine release_written_column(cache, idx)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+            integer, intent(in) :: idx                        !! slot just written.
+        end subroutine release_written_column
+    end interface
+    !
+    ! ---- Output file that stays open (parquet_tables_stream) ----
+    interface
+        !> Opens `out` on `filename` for a buffered, row-group-at-a-time write: `template`'s
+        !! RESIDENT columns become the output's columns (their kinds, widths and units), with the
+        !! schema a schema-less `parquet_write_table` would build, named after the output file's
+        !! stem -- or, with `schema=`, that schema's enabled fields, every one of which must name a
+        !! column of `template`, checked before the file is created. `template`'s rows are not
+        !! written; append it afterwards if they belong in the output. See `parquet_table_writer`
+        !! for what an append reads, null-fills and refuses, and for the flush rule.
+        !!
+        !! `chunk_size` is the rows per row group and the flush threshold; omitted, it is resolved
+        !! from the schema by `parquet_get_chunk_size` after every vector column's width has been
+        !! filled in from the template (pass it for a string-heavy output). `copy_metadata=`/
+        !! `metadata_keys=` carry the template's source-file metadata into the output under
+        !! `parquet_write_table`'s rules. `write_maml`, `qc`, `compression`, `compression_level`,
+        !! `use_threads` and `overwrite` are pass-throughs to `parquet_open_writer`, still absent
+        !! when omitted. A schema built with `%init`/`%add_field` and never parsed is parsed here,
+        !! which is why `schema` is `intent(inout)`; the caller's schema is otherwise untouched.
+        !!
+        !! error stops when `template` has no resident column and no `schema=` was given (there
+        !! would be nothing to write), when a schema field names a column the template lacks,
+        !! and when `chunk_size` is not positive. `out` is `intent(out)`: handing an open sink
+        !! here abandons its file incomplete rather than refusing, as `parquet_open_writer` does.
+        module subroutine parquet_open_table_writer(out, filename, template, schema, copy_metadata, &
+                metadata_keys, write_maml, qc, compression, compression_level, chunk_size, use_threads, &
+                overwrite)
+            type(parquet_table_writer), intent(out) :: out !! the sink to open.
+            character(len=*), intent(in) :: filename       !! output parquet file.
+            class(parquet_table), intent(in) :: template   !! the shape of every table that may be appended
+            !! (any extending type too); its rows are not written.
+            type(parquet_schema), intent(inout), optional :: schema !! use this schema instead of deriving one.
+            logical, intent(in), optional :: copy_metadata !! .true.: carry every source-file metadata entry.
+            character(len=*), intent(in), optional :: metadata_keys(:) !! carry only these source-file keys.
+            logical, intent(in), optional :: write_maml !! also save a sidecar .maml next to filename.
+            logical, intent(in), optional :: qc !! run the schema's qc: checks on write; defaults to on.
+            character(len=*), intent(in), optional :: compression !! Arrow compression codec name (e.g. "snappy").
+            integer, intent(in), optional :: compression_level !! codec-specific compression level.
+            integer, intent(in), optional :: chunk_size !! rows per row group, i.e. the flush threshold; a
+            !! plain default integer, since a row group cannot hold more than huge(1_int32) rows.
+            logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
+            logical, intent(in), optional :: overwrite !! allow truncating an existing file; default .true.
+        end subroutine parquet_open_table_writer
+        !> Writes the pending rows as a final row group, then closes the file -- the step that
+        !! writes the footer and makes the file readable. A sink that accepted no rows at all
+        !! produces a valid file carrying every column and zero rows, with the writer's own
+        !! warning. error stops on a sink that was never opened, on one already closed, and on a
+        !! sink another thread may share.
+        module subroutine parquet_close_table_writer(out)
+            type(parquet_table_writer), intent(inout) :: out !! the sink to close.
+        end subroutine parquet_close_table_writer
+        !> `%append` specific taking a table: any number of rows, including none (a no-op after
+        !! the compatibility checks, so an incompatible empty table is still refused). See
+        !! `parquet_table_writer` for what is read, null-filled and refused.
+        module subroutine sink_append_table(self, table)
+            class(parquet_table_writer), intent(inout) :: self !! the sink.
+            class(parquet_table), intent(in) :: table          !! the rows to hand over (any extending type too).
+        end subroutine sink_append_table
+        !> `%append` specific taking one row handle -- the same buffer and the same flush rule. A
+        !! column the output declares that the row's table has but has not read is read and kept
+        !! resident there, so a loop over one table's rows reads it once.
+        module subroutine sink_append_row(self, row)
+            class(parquet_table_writer), intent(inout) :: self !! the sink.
+            type(parquet_table_row), intent(in) :: row         !! the row to hand over.
+        end subroutine sink_append_row
+        !> Writes the pending rows as one row group now and empties the buffer; a no-op when
+        !! nothing is pending. For a row-group boundary at a place the caller chooses.
+        module subroutine sink_flush(self)
+            class(parquet_table_writer), intent(inout) :: self !! the sink.
+        end subroutine sink_flush
+        !> Rows accepted so far: written plus pending.
+        module function sink_nrows(self) result(n)
+            class(parquet_table_writer), intent(in) :: self !! the sink.
+            integer(int64) :: n                             !! rows accepted so far.
+        end function sink_nrows
+        !> Rows buffered and not yet in the file.
+        module function sink_rows_pending(self) result(n)
+            class(parquet_table_writer), intent(in) :: self !! the sink.
+            integer(int64) :: n                             !! rows pending.
+        end function sink_rows_pending
+        !> Row groups written so far.
+        module function sink_row_groups(self) result(n)
+            class(parquet_table_writer), intent(in) :: self !! the sink.
+            integer(int64) :: n                             !! row groups written.
+        end function sink_row_groups
+        !> The resolved flush threshold: the caller's `chunk_size=`, or the library's estimate.
+        module function sink_chunk_size(self) result(n)
+            class(parquet_table_writer), intent(in) :: self !! the sink.
+            integer :: n                                    !! rows per row group; a plain default integer,
+            !! since a row group cannot hold more than huge(1_int32) rows.
+        end function sink_chunk_size
+        !> The output file's path. A subroutine with an allocatable argument, never a
+        !! character-returning function (fortran-gotchas.md).
+        module subroutine sink_filename(self, name)
+            class(parquet_table_writer), intent(in) :: self    !! the sink.
+            character(len=:), allocatable, intent(out) :: name !! receives the path.
+        end subroutine sink_filename
+        !> Whether the sink is open and not yet closed. The one query that never aborts, so a
+        !! cleanup path can ask it of any sink.
+        module function sink_is_open(self) result(ok)
+            class(parquet_table_writer), intent(in) :: self !! the sink.
+            logical :: ok                                   !! .true. between open and close.
+        end function sink_is_open
+        !> Always error stops: see the `assignment(=)` binding.
+        module subroutine sink_assign_guard(lhs, rhs)
+            class(parquet_table_writer), intent(out) :: lhs !! unused -- this procedure never returns.
+            class(parquet_table_writer), intent(in) :: rhs  !! unused -- this procedure never returns.
+        end subroutine sink_assign_guard
+        !> Reports the sink's buffer capacity: the smallest row capacity over its columns.
+        !!
+        !! **This is a debug hook, not API**, public for the same reason
+        !! `parquet_debug_table_set_inflight` is: the buffer is a private component nothing
+        !! exposes, and the property it observes -- the buffer keeps `chunk_size` rows of
+        !! capacity across a flush, so a run of appends reallocates nothing (feature_risks.md
+        !! Risk-227) -- is invisible to every assertion on the output file. No library code
+        !! calls it. 0 for a sink that was never opened.
+        module subroutine parquet_debug_table_writer_capacity(out, cap)
+            type(parquet_table_writer), intent(in) :: out !! the sink to observe.
+            integer(int64), intent(out) :: cap            !! rows every buffer column has room for.
+        end subroutine parquet_debug_table_writer_capacity
     end interface
     !
     ! ---- Zero-copy pointer access (parquet_tables_access) ----
@@ -8465,6 +8686,21 @@ module parquet_tables
             class(parquet_table), intent(inout) :: self !! the table to grow.
             type(parquet_table_row), intent(in) :: r    !! the row to append.
         end subroutine table_append_row
+        !> `%append(table)` for `parquet_table_writer`'s buffer: the same lock, checks and worker,
+        !! with one rule the sink decides -- `ignore_unknown=.true.` skips a resident source
+        !! column this table lacks instead of refusing it, which is what an explicit `schema=`
+        !! means (feature_pandas_S2.md, question 18). Private to the module.
+        module subroutine table_append_table_ext(self, other, ignore_unknown)
+            class(parquet_table), intent(inout) :: self !! the table to grow.
+            class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
+            logical, intent(in) :: ignore_unknown       !! .true.: skip, never refuse, an unknown column.
+        end subroutine table_append_table_ext
+        !> `%append(row)` for `parquet_table_writer`'s buffer -- see `table_append_table_ext`.
+        module subroutine table_append_row_ext(self, r, ignore_unknown)
+            class(parquet_table), intent(inout) :: self !! the table to grow.
+            type(parquet_table_row), intent(in) :: r    !! the row to append.
+            logical, intent(in) :: ignore_unknown       !! .true.: skip, never refuse, an unknown column.
+        end subroutine table_append_row_ext
         !> Appends `n` all-null rows (int32 count) to every column, so they can be filled in
         !! afterwards. Row-structural, so it DETACHES; `n = 0` appends nothing and does not.
         module subroutine table_append_null_rows_i32(self, n)
@@ -8914,6 +9150,19 @@ module parquet_tables
             class(parquet_table), intent(out) :: out  !! receives the empty table.
             logical, intent(in), optional :: resident_only !! .true.: only columns already read.
         end subroutine table_clone_structure
+        !> Builds `out` as an empty table holding the NAMED columns of `self`, in the order given:
+        !! descriptors copied (kind, width, unit), values empty, no file -- the loop
+        !! `%clone_structure` runs, reachable for a template of ANY dynamic type, which that
+        !! binding's same-type check deliberately refuses. `parquet_table_writer`'s buffer is
+        !! built with it. An extending type's own components are not carried: they are not
+        !! columns. `out` must be a fresh table, and every name must exist in `self` and hold
+        !! values, which the caller has checked. Private to the module.
+        module subroutine table_clone_columns(self, out, names, proc)
+            class(parquet_table), intent(in) :: self     !! the table to take the shape of.
+            type(parquet_table), intent(inout) :: out    !! receives the empty table; must be fresh.
+            character(len=*), intent(in) :: names(:)     !! the columns to carry, in this order.
+            character(len=*), intent(in) :: proc         !! calling procedure, for messages.
+        end subroutine table_clone_columns
         !> Copies the components an EXTENDING type added, which `%clone` cannot know about.
         !!
         !! `parquet_table` is designed to be extended -- a generated table type

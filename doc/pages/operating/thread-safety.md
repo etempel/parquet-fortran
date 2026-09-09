@@ -15,6 +15,12 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
   parallel region, and every other change to a shared table, is a hard error — see
   [What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently) below and
   [Reading a table from several threads](#reading-a-table-from-several-threads).
+- A `parquet_table_writer` belongs to the thread that opened it: `%append`, `%flush` and the close
+  refuse a sink another thread may share. One sink per thread, each writing its own file, is the
+  supported shape — as elements of an array declared **before** the region, one per thread, since
+  the type is finalizable (so not a `private()` copy) and has allocatable components (so not a
+  block-local under ifx). See [Growing one table from several
+  threads](#growing-one-table-from-several-threads) for the ownership test it shares.
 - A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
   See [Logging from several threads](#logging-from-several-threads) below.
 - The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, index maps, TOML — have
@@ -223,6 +229,12 @@ Three things to know:
 Declare per-thread tables inside a `block`, **never** in an OpenMP `private()` clause:
 `parquet_table` is finalizable, and a `private` copy of such a type is not reliably initialised —
 the first finalization then frees an undefined pointer.
+
+A `parquet_table_writer` keys on the same ownership test — the thread that opened it inside the
+region owns it, anything else may be shared and is refused — but takes a third shape: neither a
+`private()` copy (it is finalizable through its components) nor a block-local (it has allocatable
+components, which ifx cannot privatize in a block), but an element of an array declared before the
+region, one per thread, each opened, fed and closed by its own thread on its own file.
 
 The full per-operation table is in
 [What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently).

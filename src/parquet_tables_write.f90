@@ -7,9 +7,10 @@
 !! Deliberately thin. The schema decides which columns are written, in what order, and under
 !! what output names; the existing writer decides everything else -- type agreement, QC, row
 !! groups, compression -- so this file adds no validation of its own beyond "the schema names a
-!! column the table does not have". Reusing `parquet_open_writer`/`parquet_write_column` rather
-!! than reimplementing them is what keeps a table write and a hand-written write path identical
-!! in behaviour.
+!! column the table does not have", the chunk write's zero-row refusal, and the one rule the
+!! chunk write adds (its always-present validity mask, explained at `write_one_column`). Reusing
+!! `parquet_open_writer`/`parquet_write_column` rather than reimplementing them is what keeps a
+!! table write and a hand-written write path identical in behaviour.
 !!
 !! **A schema-less write BUILDS a schema rather than taking a second path.** `build_table_schema`
 !! turns the resident columns' descriptors into an ordinary `parquet_schema` and everything below
@@ -29,6 +30,86 @@ submodule (parquet_tables) parquet_tables_write
     implicit none
     !
 contains
+    !
+    !> Parses a caller-supplied schema that was built with `%init`/`%add_field` and never parsed,
+    !! and refuses one that was never built at all; `context` is the public procedure's name.
+    !!
+    !! `%get_num_fields` on an unpopulated `%cinfo` reads uninitialized state, which turns the
+    !! write loop into a runaway allocation and an OOM kill rather than any kind of diagnosable
+    !! failure. So a schema that has not been parsed is stopped here, one way or the other.
+    !!
+    !! **Which schema lands in which arm follows from what the two queries actually read** --
+    !! `%is_parsed()` is `allocated(%cinfo%col)` and `%is_init()` is that OR the `%init` flag:
+    !!
+    !! * built with `%init`/`%add_field` -- `%add_field` parses as it goes, so `%is_parsed()` is
+    !!   already `.true.` after the first field and neither arm runs;
+    !! * from `parquet_parse_maml`, `parquet_load_maml_file` or an embedded `get_parquet_maml` --
+    !!   parsed on arrival, likewise neither arm;
+    !! * `%maml%lines` assigned DIRECTLY and never parsed -- `%init` was never called, so
+    !!   `%is_init()` is `.false.` and this is the error stop below, not the parse;
+    !! * `%init` called and no field added yet -- `%is_init()` `.true.`, `%is_parsed()` `.false.`,
+    !!   which is the ONE state reaching the parse call.
+    !!
+    !! That last one is header-only MAML, so the parse always fails validation with "no fields
+    !! defined" naming the schema. Keeping the call rather than adding a second bespoke guard is
+    !! deliberate: the parser's own message is the accurate one, and the call is also what makes
+    !! the callers' `schema` `intent(inout)` rather than `intent(in)`.
+    !!
+    !! A schema that was never built at all is a different mistake and still an error: parsing
+    !! empty MAML text would report something about the text rather than the call.
+    module procedure ensure_schema_parsed
+        !
+        if (.not. schema%is_parsed()) then
+            if (.not. schema%is_init()) then
+                error stop EP // context // ": this schema has not been built; call " // &
+                    "schema%init/%add_field (or load a MAML file) before using it here"
+            end if
+            call parquet_parse_maml(schema)
+        end if
+    end procedure ensure_schema_parsed
+    !
+    !> The output file's stem -- its basename with any directory part and a trailing ".parquet"
+    !! removed -- used as the generated schema's `table:` name, which MAML requires.
+    module procedure output_stem
+        integer :: i, first
+        !
+        first = 1
+        do i = len_trim(filename), 1, -1
+            if (filename(i:i) == "/" .or. filename(i:i) == "\") then
+                first = i + 1
+                exit
+            end if
+        end do
+        stem = trim(filename(first:))
+        if (len(stem) > 8) then
+            if (stem(len(stem)-7:) == ".parquet") stem = stem(1:len(stem)-8)
+        end if
+        ! A path that is nothing but a directory separator or an extension would leave nothing to
+        ! name the schema with, and MAML requires a table: value.
+        if (len_trim(stem) == 0) stem = "table"
+    end procedure output_stem
+    !
+    !> Gives back a column this write had to materialize, leaving the descriptor alone so the
+    !! slot stays listed, queryable and re-readable -- `%evict_column`'s body, without its checks.
+    !!
+    !! The checks are not needed and are deliberately not repeated: every caller runs this
+    !! solely for a slot that was `RES_EMPTY` before `table_touch` and is `RES_FULL` after, and
+    !! `table_touch` itself has already rejected a slot with no file column behind it and a table
+    !! detached from its file. So there is no unreleasable case left to skip silently here -- a
+    !! column that could not be released could not have been read either, and the write would
+    !! have aborted before reaching this point.
+    !!
+    !! The generation counter advances because storage a `%col` pointer could alias really has
+    !! been freed. No pointer a caller can hold is ever affected (taking one materializes the
+    !! column, which puts it outside the released set), so the signal is conservative rather than
+    !! precise -- and it does not move at all when nothing was released.
+    module procedure release_written_column
+        !
+        call cache%cols(idx)%values%clear()
+        cache%cols(idx)%residency = RES_EMPTY
+        cache%cols(idx)%user_populated = .false.
+        cache%generation = cache%generation + 1_int64
+    end procedure release_written_column
     !
     module procedure parquet_write_table
         type(parquet_schema) :: own
@@ -217,46 +298,6 @@ contains
         end if
         call parquet_finish_row_group(writer)
     end procedure parquet_write_table_chunk
-    !
-    !> Parses a caller-supplied schema that was built with `%init`/`%add_field` and never parsed,
-    !! and refuses one that was never built at all; `context` is the public procedure's name.
-    !!
-    !! `%get_num_fields` on an unpopulated `%cinfo` reads uninitialized state, which turns the
-    !! write loop into a runaway allocation and an OOM kill rather than any kind of diagnosable
-    !! failure. So a schema that has not been parsed is stopped here, one way or the other.
-    !!
-    !! **Which schema lands in which arm follows from what the two queries actually read** --
-    !! `%is_parsed()` is `allocated(%cinfo%col)` and `%is_init()` is that OR the `%init` flag:
-    !!
-    !! * built with `%init`/`%add_field` -- `%add_field` parses as it goes, so `%is_parsed()` is
-    !!   already `.true.` after the first field and neither arm runs;
-    !! * from `parquet_parse_maml`, `parquet_load_maml_file` or an embedded `get_parquet_maml` --
-    !!   parsed on arrival, likewise neither arm;
-    !! * `%maml%lines` assigned DIRECTLY and never parsed -- `%init` was never called, so
-    !!   `%is_init()` is `.false.` and this is the error stop below, not the parse;
-    !! * `%init` called and no field added yet -- `%is_init()` `.true.`, `%is_parsed()` `.false.`,
-    !!   which is the ONE state reaching the parse call.
-    !!
-    !! That last one is header-only MAML, so the parse always fails validation with "no fields
-    !! defined" naming the schema. Keeping the call rather than adding a second bespoke guard is
-    !! deliberate: the parser's own message is the accurate one, and the call is also what makes
-    !! the callers' `schema` `intent(inout)` rather than `intent(in)`.
-    !!
-    !! A schema that was never built at all is a different mistake and still an error: parsing
-    !! empty MAML text would report something about the text rather than the call.
-    subroutine ensure_schema_parsed(schema, context)
-        type(parquet_schema), intent(inout) :: schema !! the caller's schema.
-        character(len=*), intent(in) :: context       !! calling procedure, for the message.
-        !
-        if (.not. schema%is_parsed()) then
-            if (.not. schema%is_init()) then
-                error stop EP // context // ": this schema has not been built; call " // &
-                    "schema%init/%add_field (or load a MAML file) before using it here"
-            end if
-            call parquet_parse_maml(schema)
-        end if
-    end subroutine ensure_schema_parsed
-    !
     !> Turns the `copy_metadata=`/`metadata_keys=` pair into one flag, refusing the combination
     !! that says two things at once; `context` is the public procedure's name.
     subroutine resolve_metadata_request(copy_metadata, metadata_keys, context, want_metadata)
@@ -634,54 +675,6 @@ contains
         if (allow_utc .and. slot%time_utc) sfx = sfx // ",utc"
         sfx = sfx // "]"
     end subroutine temporal_suffix
-    !
-    !> The output file's stem -- its basename with any directory part and a trailing ".parquet"
-    !! removed -- used as the generated schema's `table:` name, which MAML requires.
-    subroutine output_stem(filename, stem)
-        character(len=*), intent(in) :: filename           !! output parquet path.
-        character(len=:), allocatable, intent(out) :: stem !! the stem, never empty.
-        integer :: i, first
-        !
-        first = 1
-        do i = len_trim(filename), 1, -1
-            if (filename(i:i) == "/" .or. filename(i:i) == "\") then
-                first = i + 1
-                exit
-            end if
-        end do
-        stem = trim(filename(first:))
-        if (len(stem) > 8) then
-            if (stem(len(stem)-7:) == ".parquet") stem = stem(1:len(stem)-8)
-        end if
-        ! A path that is nothing but a directory separator or an extension would leave nothing to
-        ! name the schema with, and MAML requires a table: value.
-        if (len_trim(stem) == 0) stem = "table"
-    end subroutine output_stem
-    !
-    !> Gives back a column this write had to materialize, leaving the descriptor alone so the
-    !! slot stays listed, queryable and re-readable -- `%evict_column`'s body, without its checks.
-    !!
-    !! The checks are not needed and are deliberately not repeated: the only caller runs this
-    !! solely for a slot that was `RES_EMPTY` before `table_touch` and is `RES_FULL` after, and
-    !! `table_touch` itself has already rejected a slot with no file column behind it and a table
-    !! detached from its file. So there is no unreleasable case left to skip silently here -- a
-    !! column that could not be released could not have been read either, and the write would
-    !! have aborted before reaching this point.
-    !!
-    !! The generation counter advances because storage a `%col` pointer could alias really has
-    !! been freed. No pointer a caller can hold is ever affected (taking one materializes the
-    !! column, which puts it outside the released set), so the signal is conservative rather than
-    !! precise -- and it does not move at all when nothing was released.
-    subroutine release_written_column(cache, idx)
-        type(parquet_table_cache), intent(inout) :: cache !! the column store.
-        integer, intent(in) :: idx                        !! slot just written.
-        !
-        call cache%cols(idx)%values%clear()
-        cache%cols(idx)%residency = RES_EMPTY
-        cache%cols(idx)%user_populated = .false.
-        cache%generation = cache%generation + 1_int64
-    end subroutine release_written_column
-    !
     !> Copies the table's source-file metadata onto `sch`, which is already a private copy.
     !!
     !! Three rules, all deliberate:

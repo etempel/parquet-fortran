@@ -291,8 +291,11 @@ something a reader is expected to have.
 | [Risk-189](#risk-189--a-driver-that-resolves-a-thread-count-and-then-drops-it-threads-nothing-silently) | A driver that RESOLVES a thread count and then drops it threads nothing, silently | 4 — covered |
 | [Risk-223](#risk-223--a-decoded-dictionary-columns-schema-type-and-its-cached-array-disagree-and-only-code-that-reads-the-array-is-right) | A decoded dictionary column's schema type and its cached array disagree | 1 — new |
 | [Risk-224](#risk-224--resolve_column_types-fixed-buffer-is-safe-only-while-the-c-side-emits-nothing-but-tokens) | `resolve_column_type`'s fixed buffer is safe only while the C++ side emits nothing but tokens | 1 — new |
-| [Risk-225](#risk-225--a-schema-derived-from-a-table-that-measures-nullability-from-that-one-batch-declares-it-for-every-later-batch) | A schema derived from a table that measures nullability from that one batch declares it for every later batch | 1 — new |
+| [Risk-225](#risk-225--a-schema-derived-from-a-table-that-measures-nullability-from-that-one-batch-declares-it-for-every-later-batch) | A schema derived from a table that measures nullability from that one batch declares it for every later batch | 4 — covered |
 | [Risk-226](#risk-226--a-chunked-table-write-that-stops-passing-is_valid-for-a-null-free-column-corrupts-a-file-that-still-round-trips-here) | A chunked table write that stops passing `is_valid=` for a null-free column corrupts a file that still round-trips here | 4 — covered |
+| [Risk-227](#risk-227--a-sink-that-resets-its-buffer-with-truncate0-alone-silently-loses-its-capacity-and-nothing-fails) | A sink that resets its buffer with `%truncate(0)` alone silently loses its capacity, and nothing fails | 4 — covered |
+| [Risk-228](#risk-228--a-sink-whose-col_size-is-left-auto-picks-a-row-group-size-that-counts-every-vector-column-as-width-1) | A sink whose `col_size:` is left `auto` picks a row-group size that counts every vector column as width 1 | 4 — covered |
+| [Risk-229](#risk-229--a-sink-used-from-more-than-one-thread-interleaves-two-row-groups-and-the-file-is-structurally-wrong) | A sink used from more than one thread interleaves two row groups and the file is structurally wrong | 4 — covered |
 
 ---
 
@@ -356,33 +359,6 @@ a type needs its own query with a length-then-allocate pair of bindings (the sha
 **Test:** not testable from the Fortran side — a truncation is indistinguishable from a short
 answer, and no input can produce one while the C++ side keeps its contract. Held by construction and
 by this entry.
-
-### Risk-225 — A schema derived from a table that measures nullability from that one batch declares it for every later batch
-
-`parquet_derive_schema` (`src/parquet_tables_write.f90`, a wrapper over `build_table_schema`)
-reads a column's DESCRIPTOR — kind, width, unit — and never its values. The temptation to improve it
-by asking each column whether it currently holds a Null is real: it would produce a tighter schema
-(`protected_cols:` for every Null-free column) and a faster write for the common case, and every
-round-trip test would still pass. It is also wrong in a way nothing reports. The table a schema is
-derived from is one batch of many — the template of a row-group loop, the first chunk of a stream —
-so a column that is Null-free in it is not Null-free in the output, and a field declared
-non-nullable from that one batch is a field a later row group has to fill with a Null. That is
-Risk-82's invariant break: this library's own reader round-trips the file perfectly (it answers from
-the data's null count, not the schema flag), a schema-trusting Arrow reader may hand back wrong
-values, and if the mismatch reaches `Table::Validate()` the failure is an abort at close, thousands
-of rows from the cause.
-
-**Rule:** nullability is DECLARED, never measured. The derivation path reads no value and calls no
-`%has_nulls`/`is_null`/`any_null`; the caller's declaration is `protected_cols:`/`%set_protected`
-(null-free, enforced), and the affirmative direction is `extra: nullable_cols:` once it exists
-(`feature_pandas_S2.md`, P5).
-
-**Test:** proposed — `test_derive_schema_does_not_measure_nullability` in `test/test_table_stream.f90`
-(`feature_pandas_S2.md`, P3): a Null-free template, then appended batches holding Nulls through the
-`parquet_table_writer` sink; the Nulls read back and `parquet_get_column_nullable` answers `.true.`.
-The mutation to catch is any null query added to `build_table_schema`. A static check in the shape of
-Risk-2's `check_schemaless_write_declares_auto` (no `is_null`/`has_nulls` in that body) would forbid
-it outright.
 
 ## 2. Risks with a proposed testing scenario
 
@@ -8729,3 +8705,83 @@ a Null-free first chunk, a Null in the second, the Null read back and `parquet_g
 `.true.` for the column that never held one -- the mutation it catches is `force` dropped from the
 chunked arm, which aborts inside the writer on the second row group;
 `test_chunked_write_protected_column_is_unmasked` pins the opt-out in the other direction.
+
+### Risk-225 — A schema derived from a table that measures nullability from that one batch declares it for every later batch
+
+`parquet_derive_schema` (`src/parquet_tables_write.f90`, a wrapper over `build_table_schema`)
+reads a column's DESCRIPTOR — kind, width, unit — and never its values. The temptation to improve it
+by asking each column whether it currently holds a Null is real: it would produce a tighter schema
+(`protected_cols:` for every Null-free column) and a faster write for the common case, and every
+round-trip test would still pass. It is also wrong in a way nothing reports. The table a schema is
+derived from is one batch of many — the template of a row-group loop, the first chunk of a stream —
+so a column that is Null-free in it is not Null-free in the output, and a field declared
+non-nullable from that one batch is a field a later row group has to fill with a Null. That is
+Risk-82's invariant break: this library's own reader round-trips the file perfectly (it answers from
+the data's null count, not the schema flag), a schema-trusting Arrow reader may hand back wrong
+values, and if the mismatch reaches `Table::Validate()` the failure is an abort at close, thousands
+of rows from the cause.
+
+**Rule:** nullability is DECLARED, never measured. The derivation path reads no value and calls no
+`%has_nulls`/`is_null`/`any_null`; the caller's declaration is `protected_cols:`/`%set_protected`
+(null-free, enforced), and the affirmative direction is `extra: nullable_cols:` once it exists
+(`feature_pandas_S2.md`, P5).
+
+**Test:** proposed — `test_derive_schema_does_not_measure_nullability` in `test/test_table_stream.f90`
+(`feature_pandas_S2.md`, P3): a Null-free template, then appended batches holding Nulls through the
+`parquet_table_writer` sink; the Nulls read back and `parquet_get_column_nullable` answers `.true.`.
+The mutation to catch is any null query added to `build_table_schema`. A static check in the shape of
+Risk-2's `check_schemaless_write_declares_auto` (no `is_null`/`has_nulls` in that body) would forbid
+it outright.
+
+### Risk-227 — A sink that resets its buffer with `%truncate(0)` alone silently loses its capacity, and nothing fails
+
+`parquet_table_writer`'s flush (`sink_flush_worker`, `src/parquet_tables_stream.f90`) empties the
+buffer with `%truncate(0)` and then `%reserve(chunk_size)`. The reserve looks redundant -- the
+buffer was reserved at open -- but `table_apply_keep` rebuilds every column exact-fit, so without it
+the next row group's appends grow each column geometrically from zero: about a dozen reallocations
+and roughly twice the data in copies per column per row group, at full correctness and with no
+assertion on the output able to see it (`feature_pandas_S2.md`, contract 7).
+
+**Rule:** every reset of the buffer is followed by the reserve; the capacity is observed through
+`parquet_debug_table_writer_capacity`, the only way to see it.
+
+**Covered by** `test_sink_buffer_keeps_capacity` and `test_sink_row_appends_do_not_reallocate`
+(`test/test_table_stream.f90`): the capacity is at least `chunk_size` after a flush, and unchanged
+across every append between two flushes. The mutation to catch is the reserve deleted from the
+flush.
+
+### Risk-228 — A sink whose `col_size:` is left `auto` picks a row-group size that counts every vector column as width 1
+
+`estimate_chunk_size_from_schema` (`src/parquet_wrapper.cpp`) reads `col.col_size > 0 ? col.col_size
+: 1`, so a derived schema handed to the writer with its vector `col_size:` still `auto` makes the
+automatic threshold overshoot the byte target by the vector width, and skips the estimator's own
+clamp against Arrow's per-row-group list-element ceiling. Loud when it trips the ceiling, silent when
+it merely writes far too much per row group. `parquet_open_table_writer` resolves every vector
+column's `auto` `col_size:` from the template's width before the open (`feature_pandas_S2.md`,
+contract 4); the writer would resolve the same value from the first chunk, so no output changes.
+
+**Rule:** the resolution stays in the sink's open, before `parquet_open_writer_like`, and reads the
+template's descriptor width, never a value.
+
+**Covered by** `test_sink_auto_chunk_size` (`test/test_table_stream.f90`): a width-100 vector
+template's threshold is at least an order of magnitude below the width-1 estimate of the same
+schema. The mutation to catch is the `set_col_size` loop deleted.
+
+### Risk-229 — A sink used from more than one thread interleaves two row groups and the file is structurally wrong
+
+The writer's own guard serialises the C++ calls and the buffer's lock serialises the appends, but
+the sink's read-decide-flush sequence is not atomic: two threads can both decide to flush, or one
+can append into a buffer another is draining. The result is a row group with the wrong rows, or a
+chunk count mismatch that aborts far from the cause. Refused by `sink_check_not_shared`
+(`src/parquet_tables_stream.f90`), on `unsafe_shared_mutation`: a sink this thread opened inside
+the current region is its own, anything else may be shared.
+
+**Rule:** the guard keys on ownership, never on `omp_in_parallel()` alone (test-drive runs every
+test inside a region, so that would fire suite-wide), and every entry that touches the buffer takes
+it: `%append`, `%flush`, the close.
+
+**Covered by** `test_sink_shared_in_parallel_aborts` (`test/test_errors.f90`, over the
+`sink_shared_in_parallel` scenario in the concurrency bucket): a sink opened outside a region and
+appended to from inside it aborts with the sink's message, after a sink opened inside the region by
+the same thread went through; and `test_sink_per_thread_allowed` (`test/test_openmp.f90`), the
+negative control: one sink per thread, each its own file, every row present.

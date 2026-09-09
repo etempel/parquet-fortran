@@ -179,6 +179,35 @@ contains
         call self%clone_extra(out, .true.)
     end procedure table_clone_structure
     !
+    !> Builds `out` from the named columns of `self` -- see the interface. The loop is
+    !! `%clone_structure`'s, with the column set given rather than derived: the same descriptor
+    !! copy, the same empty column from the descriptor, the same width resolution for a plain
+    !! LIST column whose width lives in the data. Nothing here reads a value except that
+    !! resolution, exactly as `%clone_structure` does.
+    module procedure table_clone_columns
+        integer :: k, i, n
+        !
+        call clone_new_cache(self, out)
+        n = 0
+        do k = 1, size(names)
+            i = table_find(self, trim(names(k)))
+            call table_resolve_width(self%cache, table_scope_of(self), i, .true., proc)
+            n = n + 1
+            call clone_copy_descriptor(self%cache%cols(i), out%cache%cols(n))
+            call clone_empty_column(self%cache%cols(i), out%cache%cols(n)%values)
+            out%cache%cols(n)%file_source = .false.
+            out%cache%cols(n)%user_populated = .false.
+            out%cache%cols(n)%residency = RES_FULL
+        end do
+        out%cache%ncols = n
+        call cache_name_index_rebuild(out%cache)
+        out%detached = .false.
+        out%regime = REGIME_FULL
+        out%row_lo = 1_int64
+        out%row_hi = 0_int64
+        out%row_count = 0_int64
+    end procedure table_clone_columns
+    !
     module procedure table_clone_extra
         ! Deliberately does nothing. `parquet_table` itself has no components an extension could
         ! have added, so the base case really is a no-op -- see this procedure's interface in

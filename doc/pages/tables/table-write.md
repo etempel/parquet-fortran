@@ -474,3 +474,94 @@ close the writer as usual.
 - **One thread, in order.** The call inherits the writer's rule: one writer's row groups are
   written from one thread, in row-group order. Parallelize the work that produces each chunk, not
   the write.
+
+## An output file that stays open: `parquet_table_writer`
+
+The loop in the recipe above knows its own row-group boundaries. A loop that does not — one that
+produces a smallish table per iteration, of whatever size the analysis yields, and wants them all in
+one file — hands each result to an output that stays open and decides the row groups itself:
+
+```fortran
+type(parquet_table)        :: t, seed
+type(parquet_table_writer) :: out
+integer :: i
+
+call build_one_chunk(seed, 1)                       ! your own work: the first result
+call parquet_open_table_writer(out, "merged.parquet", seed, write_maml=.true.)
+call out%append(seed)                               ! the first result is data too
+do i = 2, nchunks
+    call build_one_chunk(t, i)
+    call out%append(t)                              ! a row group is written whenever enough rows have arrived
+end do
+call parquet_close_table_writer(out)                ! the last row group, then the footer
+```
+
+Peak memory is one row group's worth of buffer plus whatever `build_one_chunk` holds. The loop body
+has no lifecycle logic, no `opened` flag and no knowledge of row groups. When the shape of the
+output is known up front, the template is a table built and left empty — `%add_column` with
+zero-length arrays — and the first iteration stops being special.
+
+`call parquet_open_table_writer(out, filename, template, [schema], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite])`
+
+The arguments are `parquet_write_table`'s, minus `row_mask=` and `release=` (neither has a meaning
+for a file that stays open), and the writer options are the same pass-throughs with the same
+defaults; the page does not repeat them.
+
+- **The template decides the columns, once, at open.** Its **resident** columns fix the output's
+  columns, kinds, widths and units, with the schema a schema-less write would build, named after the
+  output file's stem; its rows are not written (append it afterwards if they belong in the file). A
+  slice, a filtered table and a zero-row table all serve as templates: only their descriptors are
+  read. With `schema=`, the schema's enabled fields are the column set — each is checked against the
+  template before the file is created, and `col_map:`, `qc:` and `protected_cols:` apply as for
+  `parquet_write_table`. A template with nothing resident and no `schema=` is refused: there would be
+  nothing to write.
+- **`%append(table)` accepts any number of rows, including zero**, under `%append`'s own rules:
+  matching kinds, widths and units, or an error; a column the output has and the table lacks is
+  **null-filled** for those rows. Two things are decided here rather than inherited. A column the
+  output declares that the appended table has but has not read is **read** for the copy — the output
+  naming it is the request, exactly as `parquet_write_table` reads what its schema names — and given
+  back afterwards, so the table is left in the residency state it arrived in. A resident column the
+  output does not declare is **refused**, naming the file, when the columns came from the template
+  (silently dropping data is the worse answer), and **ignored** when they came from `schema=` (the
+  schema is the selection, as for `parquet_write_table`). `parquet_row_index` is dropped either way.
+- **`%append(row)` takes a `parquet_table_row` handle**, for a loop that builds rows rather than
+  tables: the same buffer and the same flush rule. A declared column the row's table has not read is
+  read once and **kept** resident there, so a loop over one table's rows does not read it once per
+  row; `%evict_column` gives the memory back afterwards.
+- **`chunk_size` is the flush threshold.** An append that leaves at least `chunk_size` rows buffered
+  writes the whole buffer as one row group, so a row group holds between `chunk_size` rows and
+  `chunk_size - 1` plus the rows of the one append that crossed it — and the buffer never holds
+  more. Omitted, it is the library's estimate from the schema
+  ([`parquet_get_chunk_size`](../io/writing.html#writer-options)), with every vector column's width
+  resolved from the template first. That estimate counts a string column as one byte per row, so a
+  string-heavy output resolves to its ceiling of ten million rows: **pass `chunk_size=` for a
+  string-heavy output.**
+- **`%flush()` writes the pending rows as a row group now**, and does nothing when none are pending.
+  It is for a row-group boundary at a place you choose — one row group per input file, say — without
+  giving up the automatic flushing elsewhere. It puts rows on disk; it does not make the file
+  readable.
+- **You must close it.** `parquet_close_table_writer` writes the pending rows as the final row group
+  and then the footer, which is what makes a Parquet file readable. A run that ends without closing
+  leaves **no readable file at all** — not a truncated one — however many row groups were flushed,
+  because the footer describing them was never written. A sink that accepted no rows closes to a
+  valid file carrying every column and zero rows, with the writer's warning.
+- **Six queries**: `%nrows()` (rows accepted: written plus pending), `%rows_pending()`,
+  `%row_groups()`, `%chunk_size()` (the resolved threshold), `%filename(name)` and `%is_open()`, the
+  one that never aborts. `%nrows()`, `%rows_pending()` and `%row_groups()` are `integer(int64)`;
+  `chunk_size` and `%chunk_size()` are a plain `integer`, for the reason `parquet_write_table`'s is.
+- **The buffer is reserved to `chunk_size` rows at open and again after every flush**, so a run of
+  `%append(row)` calls between two flushes reallocates nothing (a string column's characters still
+  grow on their own, since no row count can size them). A validity mask is written for every column
+  that takes one, so a Null may arrive in any row group; `protected_cols:` opts a column out, as in
+  the recipe above.
+- **A sink belongs to one thread.** `%append`, `%flush` and the close refuse a sink another thread
+  may share, on the ownership test a shared `parquet_table` refuses a structural change with — see
+  [Thread safety](../operating/thread-safety.html#rules-at-a-glance) for the supported per-thread
+  shape. Assignment is refused (two sinks would share and double-close one file); open a second
+  output instead. Closing twice, or using a closed or never-opened sink, is an error naming the call
+  and the file. There is no finalizer of its own: an abandoned sink loses its pending rows and leaves
+  an unreadable file, exactly as an abandoned `parquet_writer` does.
+
+Which of the two shapes to use: the sink, for most loops — it costs one copy of every row through
+the buffer and gives automatic re-chunking, null-filling and the always-present mask for free. The
+recipe above, when the input already comes in row groups and the copy matters.

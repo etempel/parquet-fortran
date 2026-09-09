@@ -382,6 +382,7 @@ parquet_tables_row.f90
 parquet_tables_rowmutate.f90
 parquet_tables_slice.f90
 parquet_tables_sort.f90
+parquet_tables_stream.f90
 parquet_tables_verbs.f90
 parquet_tables_write.f90
 parquet_temporal.f90
@@ -497,6 +498,7 @@ parquet_tables_row.f90
 parquet_tables_rowmutate.f90
 parquet_tables_slice.f90
 parquet_tables_sort.f90
+parquet_tables_stream.f90
 parquet_tables_verbs.f90
 parquet_tables_write.f90
 parquet_temporal.f90

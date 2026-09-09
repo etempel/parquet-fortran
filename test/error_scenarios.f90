@@ -1552,6 +1552,26 @@ program error_scenarios
         call scenario_write_table_chunk_schema_names_a_missing_column()
     case ("write_table_chunk_protected_null")
         call scenario_write_table_chunk_protected_null()
+    case ("sink_extra_column_refused")
+        call scenario_sink_extra_column_refused()
+    case ("sink_kind_mismatch_refused")
+        call scenario_sink_kind_mismatch_refused()
+    case ("sink_double_close")
+        call scenario_sink_double_close()
+    case ("sink_use_after_close")
+        call scenario_sink_use_after_close()
+    case ("sink_assignment_refused")
+        call scenario_sink_assignment_refused()
+    case ("sink_schema_names_a_missing_column")
+        call scenario_sink_schema_names_a_missing_column()
+    case ("sink_never_opened")
+        call scenario_sink_never_opened()
+    case ("sink_chunk_size_not_positive")
+        call scenario_sink_chunk_size_not_positive()
+    case ("sink_template_has_no_column")
+        call scenario_sink_template_has_no_column()
+    case ("sink_shared_in_parallel")
+        call scenario_sink_shared_in_parallel()
     case ("concurrent_calls_into_shared_reader")
         call scenario_concurrent_calls_into_shared_reader()
     case ("concurrent_calls_into_shared_writer")
@@ -13103,6 +13123,206 @@ contains
         call parquet_write_table_chunk(w, dirty)
         print '(a)', "unexpectedly wrote a Null into a protected column through a chunk write"
     end subroutine scenario_write_table_chunk_protected_null
+
+    !> A two-column in-memory table for the sink scenarios: `a` int32, and `b` float64 unless
+    !> `only_a`.
+    subroutine sink_scenario_table(t, only_a)
+        type(parquet_table), intent(out) :: t
+        logical, intent(in), optional :: only_a
+        logical :: with_b
+        with_b = .true.
+        if (present(only_a)) with_b = .not. only_a
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        if (with_b) call t%add_column("b", [1.5_real64, 2.5_real64])
+    end subroutine sink_scenario_table
+
+    !> With the columns fixed from the template, an appended table's resident column the output
+    !> does not declare is refused with the sink's own message naming the file -- silently
+    !> dropping data is the worse answer. The control is an append with exactly the template's
+    !> columns.
+    subroutine scenario_sink_extra_column_refused()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, same, wider
+        character(len=*), parameter :: f = "test_run/error_scenario_sink_extra.parquet"
+
+        call sink_scenario_table(seed, only_a=.true.)
+        call sink_scenario_table(same, only_a=.true.)
+        call sink_scenario_table(wider)
+        call parquet_open_table_writer(out, f, seed)
+        call out%append(same)
+        print '(a)', "control: a table with the template's columns was appended"
+        call out%append(wider)
+        print '(a)', "unexpectedly appended a table with a column the output does not declare"
+    end subroutine scenario_sink_extra_column_refused
+
+    !> A kind mismatch is `%append`'s own refusal, with its own message: no silent widening.
+    subroutine scenario_sink_kind_mismatch_refused()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, same, other
+        character(len=*), parameter :: f = "test_run/error_scenario_sink_kind.parquet"
+
+        call sink_scenario_table(seed, only_a=.true.)
+        call sink_scenario_table(same, only_a=.true.)
+        call parquet_new_table(other)
+        call other%add_column("a", [1.0_real64, 2.0_real64])
+        call parquet_open_table_writer(out, f, seed)
+        call out%append(same)
+        print '(a)', "control: a table of the template's kind was appended"
+        call out%append(other)
+        print '(a)', "unexpectedly appended a column of another kind"
+    end subroutine scenario_sink_kind_mismatch_refused
+
+    !> A second close is refused, not idempotent (api-conventions.md's mutation-guard rule).
+    subroutine scenario_sink_double_close()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed
+        character(len=*), parameter :: f = "test_run/error_scenario_sink_double_close.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_open_table_writer(out, f, seed)
+        call out%append(seed)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: the sink was closed once"
+        call parquet_close_table_writer(out)
+        print '(a)', "unexpectedly closed a sink twice"
+    end subroutine scenario_sink_double_close
+
+    !> Every mutating entry point refuses a closed sink, naming the call and the file.
+    subroutine scenario_sink_use_after_close()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed
+        character(len=*), parameter :: f = "test_run/error_scenario_sink_after_close.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_open_table_writer(out, f, seed)
+        call out%append(seed)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: the sink accepted rows and was closed"
+        call out%append(seed)
+        print '(a)', "unexpectedly appended to a closed sink"
+    end subroutine scenario_sink_use_after_close
+
+    !> The writer's handle is a plain pointer with no reference counting, so a copy would
+    !> double-close the file: assignment aborts and names the way to have a second output.
+    subroutine scenario_sink_assignment_refused()
+        type(parquet_table_writer) :: out, copy
+        type(parquet_table) :: seed
+        character(len=*), parameter :: f = "test_run/error_scenario_sink_assign.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_open_table_writer(out, f, seed)
+        print '(a)', "control: the sink was opened"
+        copy = out   ! -> aborts
+        print '(a)', "unexpectedly assigned a parquet_table_writer"
+    end subroutine scenario_sink_assignment_refused
+
+    !> With `schema=`, every enabled field must name a template column, checked at open --
+    !> field by field, before the writer is opened -- so the abort names the column and no
+    !> output file exists (question 15). The control opens the same schema over a template that
+    !> has both columns.
+    subroutine scenario_sink_schema_names_a_missing_column()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: full, part
+        type(parquet_schema) :: s
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_sink_schema_control.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_sink_schema_bad.parquet"
+
+        call s%init("sink")
+        call s%add_field("a", "int32")
+        call s%add_field("b", "float64")
+        call sink_scenario_table(full)
+        call sink_scenario_table(part, only_a=.true.)
+        call parquet_open_table_writer(out, ctrl, full, schema=s)
+        call out%append(full)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: the schema opened over a template that has every field"
+        call parquet_open_table_writer(out, bad, part, schema=s)
+        print '(a)', "unexpectedly opened a sink whose schema names a column the template lacks"
+    end subroutine scenario_sink_schema_names_a_missing_column
+
+    !> An append on a sink that was never opened names the call that has to come first.
+    subroutine scenario_sink_never_opened()
+        type(parquet_table_writer) :: out, fresh
+        type(parquet_table) :: seed
+        character(len=*), parameter :: f = "test_run/error_scenario_sink_never_opened.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_open_table_writer(out, f, seed)
+        call out%append(seed)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: an opened sink accepted rows"
+        call fresh%append(seed)
+        print '(a)', "unexpectedly appended to a sink that was never opened"
+    end subroutine scenario_sink_never_opened
+
+    !> `chunk_size` is the flush threshold, so it must be positive; the control is 1.
+    subroutine scenario_sink_chunk_size_not_positive()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_sink_chunk_control.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_sink_chunk_bad.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_open_table_writer(out, ctrl, seed, chunk_size=1)
+        call out%append(seed)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: chunk_size=1 opened, wrote and closed"
+        call parquet_open_table_writer(out, bad, seed, chunk_size=0)
+        print '(a)', "unexpectedly opened a sink with chunk_size=0"
+    end subroutine scenario_sink_chunk_size_not_positive
+
+    !> Without `schema=` the template's resident columns are the output's; a template that has
+    !> read nothing has none, so there is nothing to write, and the refusal names the two ways
+    !> out. The control is the same file with a column read.
+    subroutine scenario_sink_template_has_no_column()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed, read_one, lazy
+        character(len=*), parameter :: src = "test_run/error_scenario_sink_template_src.parquet"
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_sink_template_control.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_sink_template_bad.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_write_table(seed, src)
+        call parquet_open_table(read_one, src)
+        call read_one%prefetch("a")
+        call parquet_open_table_writer(out, ctrl, read_one)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: a template with one resident column opened a sink"
+        call parquet_open_table(lazy, src)
+        call parquet_open_table_writer(out, bad, lazy)
+        print '(a)', "unexpectedly opened a sink from a template with no resident column"
+    end subroutine scenario_sink_template_has_no_column
+
+    !> A sink is single-thread-owned: one opened OUTSIDE a parallel region and appended to from
+    !> inside it may be shared between threads, so the append is refused with the sink's own
+    !> message. The negative control is in the same process and has to be: the guard keys on
+    !> OWNERSHIP, not on `omp_in_parallel()`, so a sink this thread opened inside the region is
+    !> appended to first and prints a marker the wrapper checks for.
+    subroutine scenario_sink_shared_in_parallel()
+        type(parquet_table_writer) :: shared
+        type(parquet_table) :: seed
+        character(len=*), parameter :: out_shared = "test_run/es_sink_omp_shared.parquet"
+        character(len=*), parameter :: out_mine = "test_run/es_sink_omp_mine.parquet"
+
+        call sink_scenario_table(seed)
+        call parquet_open_table_writer(shared, out_shared, seed)
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        block
+            type(parquet_table_writer) :: mine   ! block-local; see the wrapper for the shape a program uses
+            type(parquet_table) :: rows
+            call sink_scenario_table(rows)
+            call parquet_open_table_writer(mine, out_mine, rows)
+            call mine%append(rows)
+            call parquet_close_table_writer(mine)
+            print '(a)', "private sink inside the region succeeded"
+            call shared%append(rows)
+        end block
+        !$omp end single
+        !$omp end parallel
+        print '(a)', "unexpectedly appended to a shared sink from inside a parallel region"
+    end subroutine scenario_sink_shared_in_parallel
 
     !> A schema-enforced writer (cinfo given) already error stops on this via
     !> parquet_mark_column_written's write_counts tracking. A schema-less

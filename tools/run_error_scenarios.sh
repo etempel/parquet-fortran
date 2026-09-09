@@ -1561,6 +1561,15 @@ scenarios=(
     "write_table_chunk_row_group_already_open:1"
     "write_table_chunk_schema_names_a_missing_column:1"
     "write_table_chunk_protected_null:1"
+    "sink_extra_column_refused:1"
+    "sink_kind_mismatch_refused:1"
+    "sink_double_close:1"
+    "sink_use_after_close:1"
+    "sink_assignment_refused:1"
+    "sink_schema_names_a_missing_column:1"
+    "sink_never_opened:1"
+    "sink_chunk_size_not_positive:1"
+    "sink_template_has_no_column:1"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy
@@ -1623,6 +1632,7 @@ concurrency_scenarios=(
     "table_row_index_shared_in_parallel"
     "table_set_null_no_validity_in_parallel"
     "table_string_write_shared_in_parallel"
+    "sink_shared_in_parallel"
     "table_reserve_columns_shared_in_parallel"
     "table_filter_rows_shared"
     "fillna_shared"

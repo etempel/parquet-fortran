@@ -63,6 +63,8 @@ contains
                 test_table_parallel_append), &
             new_unittest("materialize_all reads columns in parallel and agrees with the serial path", &
                 test_table_parallel_prefetch_agrees), &
+            new_unittest("one parquet_table_writer per thread, each writing its own file, is allowed", &
+                test_sink_per_thread_allowed), &
             new_unittest("a thread-private table may still be mutated inside a parallel region", &
                 test_table_private_mutation_allowed) &
             ]
@@ -598,6 +600,63 @@ contains
     !>
     !> Without this, a guard that fired unconditionally would pass every error scenario written
     !> for it while making the slice regime unusable.
+    !> The negative control for the sink's shared-use refusal (`sink_shared_in_parallel`,
+    !! test/error_scenarios.f90): a sink this thread opened inside the region is its own, so one
+    !! sink per thread, each writing its own file, must go through. The sinks are elements of an
+    !! array declared BEFORE the region, not block-locals and not `private()` copies: the type has
+    !! allocatable components (ifx cannot privatize such a type in a block) and is finalizable
+    !! through them (gfortran's `private()` copy is not reliably initialised) -- see
+    !! doc/pages/operating/thread-safety.md.
+    subroutine test_sink_per_thread_allowed(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: fname = "test_run/test_openmp_sink_src.parquet"
+        integer, parameter :: nrows = 200, nchunk = 4
+        type(parquet_table_writer) :: sinks(nchunk)
+        integer(int64) :: counts(nchunk)
+        character(len=48) :: outs(nchunk)
+        integer :: g
+        logical :: ok
+
+        call write_table_fixture(fname, nrows)
+        counts = -1_int64
+        do g = 1, nchunk
+            write(outs(g), '(a, i0, a)') "test_run/test_openmp_sink_", g, ".parquet"
+        end do
+
+        !$omp parallel do default(shared) private(g)
+        do g = 1, nchunk
+            block
+                type(parquet_table) :: mine
+                integer(int64) :: lo, hi
+                lo = int((g - 1)*(nrows/nchunk) + 1, int64)
+                hi = int(g*(nrows/nchunk), int64)
+                call parquet_open_table(mine, fname, lo, hi)
+                call mine%materialize_all()
+                call parquet_open_table_writer(sinks(g), trim(outs(g)), mine, chunk_size=10)
+                call sinks(g)%append(mine)
+                call sinks(g)%append(mine)
+                counts(g) = sinks(g)%nrows()
+                call parquet_close_table_writer(sinks(g))
+            end block
+        end do
+        !$omp end parallel do
+
+        ok = .true.
+        do g = 1, nchunk
+            if (counts(g) /= int(2*(nrows/nchunk), int64)) ok = .false.
+        end do
+        call check(error, ok, "a sink opened and used by one thread inside a region must be allowed")
+        if (allocated(error)) return
+        do g = 1, nchunk
+            block
+                type(parquet_table) :: back
+                call parquet_open_table(back, trim(outs(g)))
+                if (back%nrows() /= int(2*(nrows/nchunk), int64)) ok = .false.
+            end block
+        end do
+        call check(error, ok, "every per-thread file holds the rows its thread appended")
+    end subroutine test_sink_per_thread_allowed
+
     subroutine test_table_private_mutation_allowed(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: fname = "test_run/test_openmp_table_private.parquet"

@@ -557,8 +557,9 @@ contains
         character(len=:), allocatable :: errors
         character(len=:), allocatable :: cur_name
         character(len=:), allocatable :: protected_names(:)
+        character(len=:), allocatable :: nullable_names(:)
         character(len=32) :: idx_buf
-        integer :: i, j
+        integer :: i, j, k
         logical :: has_table, found
         real(real64) :: qc_bound_value
 
@@ -609,6 +610,10 @@ contains
         ! Relayed through parquet_parse_protected_cols_relay (parquet_metadata.f90) rather than
         ! called directly -- see that wrapper's own comment for the gfortran 15.2.0 ICE it avoids.
         call parquet_parse_protected_cols_relay(maml%lines, protected_names)
+        ! extra: nullable_cols: is the opposite declaration and is checked against the same
+        ! fields:, by the same rule (parquet_parse_nullable_cols, reached by host association from
+        ! parquet_metadata -- the shape the relay comment above explains).
+        call parquet_parse_nullable_cols(maml%lines, nullable_names)
         if (allocated(cinfo%col)) then
             do i = 1, size(protected_names)
                 found = .false.
@@ -622,7 +627,32 @@ contains
                     errors = errors // "protected_cols: unknown column '" // trim(protected_names(i)) // "'; "
                 end if
             end do
+            do i = 1, size(nullable_names)
+                found = .false.
+                do j = 1, size(cinfo%col)
+                    if (trim(nullable_names(i)) == trim(cinfo%col(j)%output_name)) then
+                        found = .true.
+                        exit
+                    end if
+                end do
+                if (.not. found) then
+                    errors = errors // "nullable_cols: unknown column '" // trim(nullable_names(i)) // "'; "
+                end if
+            end do
         end if
+        ! One column in both lists is a contradiction with no defensible reading -- one says the
+        ! field must reject every Null, the other that it must be written able to hold one -- so it
+        ! is refused rather than resolved by a precedence nobody wrote down. Checked whether or not
+        ! the names are declared fields, so a MAML with both mistakes reports both.
+        do i = 1, size(protected_names)
+            do k = 1, size(nullable_names)
+                if (trim(protected_names(i)) == trim(nullable_names(k))) then
+                    errors = errors // "column '" // trim(protected_names(i)) // &
+                        "' is listed under both protected_cols: and nullable_cols:; "
+                    exit
+                end if
+            end do
+        end do
 
         call parquet_validate_maml_sections(maml%lines, errors)
 

@@ -1408,6 +1408,10 @@ program error_scenarios
         call scenario_write_string_exceeds_array_size()
     case ("validate_protected_cols_unknown_name")
         call scenario_validate_protected_cols_unknown_name()
+    case ("validate_nullable_cols_unknown_name")
+        call scenario_validate_nullable_cols_unknown_name()
+    case ("validate_protected_and_nullable_overlap")
+        call scenario_validate_protected_and_nullable_overlap()
     case ("write_protected_column_with_null")
         call scenario_write_protected_column_with_null()
     case ("write_protected_vector_element_null")
@@ -1426,6 +1430,12 @@ program error_scenarios
         call scenario_chunk_mask_added_after_first_row_group()
     case ("set_protected_unknown_column")
         call scenario_set_protected_unknown_column()
+    case ("set_nullable_unknown_column")
+        call scenario_set_nullable_unknown_column()
+    case ("set_nullable_on_protected_column")
+        call scenario_set_nullable_on_protected_column()
+    case ("set_protected_on_nullable_column")
+        call scenario_set_protected_on_nullable_column()
     case ("set_protected_unprotect_warns")
         call scenario_set_protected_unprotect_warns()
     case ("validate_qc_min_not_numeric")
@@ -11626,6 +11636,49 @@ contains
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_protected_cols_unknown_name
 
+    !> extra: nullable_cols: is checked against this MAML's own fields: exactly as protected_cols:
+    !> is -- an unknown name is a typo or a dangling reference, and a declaration nobody can see
+    !> take effect is worse than a refusal.
+    subroutine scenario_validate_nullable_cols_unknown_name()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "nullable_unknown.maml"
+        maml%lines = [character(len=40) :: &
+            "table: nullable_table", &
+            "extra:", &
+            "  nullable_cols: not_a_real_column", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_nullable_cols_unknown_name
+
+    !> One column under BOTH extra: protected_cols: and extra: nullable_cols: is a contradiction:
+    !> one says the field must reject every Null, the other that it must be written able to hold
+    !> one. Refused rather than resolved by a precedence nobody wrote down.
+    !>
+    !> `b` is the control: it is listed under nullable_cols: only, so a build that refused the
+    !> whole file whenever both keys appear would fail this scenario's own premise rather than
+    !> catch the overlap.
+    subroutine scenario_validate_protected_and_nullable_overlap()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "nullable_overlap.maml"
+        maml%lines = [character(len=40) :: &
+            "table: overlap_table", &
+            "extra:", &
+            "  protected_cols: a", &
+            "  nullable_cols: a;b", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_protected_and_nullable_overlap
+
     subroutine scenario_write_protected_column_with_null()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
@@ -11893,6 +11946,63 @@ contains
         call schema%set_protected("no_such")    ! -> aborts
         print '(a)', "unexpectedly accepted set_protected on an unknown column"
     end subroutine scenario_set_protected_unknown_column
+
+    !> schema%set_nullable resolves its column through the same get_column_index as every other
+    !> setter, so an unknown name aborts there rather than declaring nothing quietly.
+    subroutine scenario_set_nullable_unknown_column()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "set_nullable_unknown.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: sn_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call schema%set_nullable("a")           ! control: a real column, must succeed
+        call schema%set_nullable("no_such")     ! -> aborts
+        print '(a)', "unexpectedly accepted set_nullable on an unknown column"
+    end subroutine scenario_set_nullable_unknown_column
+
+    !> The two declarations are opposites, so raising one while the other is up is refused in code
+    !> exactly as a MAML naming one column in both lists is. This is the set_nullable side.
+    subroutine scenario_set_nullable_on_protected_column()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "set_nullable_protected.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: sn_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call schema%set_protected("a")
+        call schema%set_nullable("b")   ! control: an unprotected column takes the declaration
+        call schema%set_nullable("a")   ! -> aborts
+        print '(a)', "unexpectedly declared a protected column nullable"
+    end subroutine scenario_set_nullable_on_protected_column
+
+    !> ...and the set_protected side of the same rule, which is a separate guard in a separate
+    !> procedure and would otherwise be untested.
+    subroutine scenario_set_protected_on_nullable_column()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "set_protected_nullable.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: sp_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call schema%set_nullable("a")
+        call schema%set_protected("b")   ! control: an undeclared column takes the protection
+        call schema%set_protected("a")   ! -> aborts
+        print '(a)', "unexpectedly protected a column declared nullable"
+    end subroutine scenario_set_protected_on_nullable_column
 
     subroutine scenario_validate_qc_min_not_numeric()
         type(parquet_maml_file) :: maml

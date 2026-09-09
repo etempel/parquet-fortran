@@ -71,7 +71,7 @@ module parquet_bindings
     public :: parquet_reader_get_column_type_name, parquet_reader_get_column_nullable
     public :: parquet_reader_get_column_shape_name, parquet_reader_get_map_value_type_name
     public :: parquet_reader_get_column_arrow_type_length, parquet_reader_get_column_arrow_type
-    public :: parquet_writer_set_protected_column
+    public :: parquet_writer_set_protected_column, parquet_writer_set_nullable_column
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_has_chunk_reads
     public :: parquet_reader_has_sort
@@ -995,6 +995,18 @@ module parquet_bindings
         !> protected column by parquet_open_writer, before any write.
         subroutine parquet_writer_set_protected_column(writer, name) &
                 bind(C, name="parquet_writer_set_protected_column")
+            import
+            type(c_ptr), value :: writer !! opaque writer handle.
+            character(kind=c_char) :: name(*) !! null-terminated output column name.
+        end subroutine
+
+        !> Declares `name` nullable on this writer: its Arrow field is written
+        !> nullable whatever the values it receives contain. Pushed once per
+        !> declared column by parquet_open_writer, from extra: nullable_cols:
+        !> or schema%set_nullable. The counterpart of
+        !> parquet_writer_set_protected_column, and mutually exclusive with it.
+        subroutine parquet_writer_set_nullable_column(writer, name) &
+                bind(C, name="parquet_writer_set_nullable_column")
             import
             type(c_ptr), value :: writer !! opaque writer handle.
             character(kind=c_char) :: name(*) !! null-terminated output column name.

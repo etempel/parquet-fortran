@@ -24,6 +24,8 @@
       "Bash(wc:*)",
       "Bash(awk:*)",
       "Bash(sed -n:*)",
+      "Bash(export:*)",
+      "Bash(echo:*)",
       "Bash(NAGFOR_OMP:*)",
       "Bash(ford docs.md)"
     ],

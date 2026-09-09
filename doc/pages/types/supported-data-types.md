@@ -448,6 +448,40 @@ a warning naming it: someone wrote that declaration down deliberately, and overr
 should be visible in the program's output. See
 [Building a schema in code](../schema/building-schema-in-code.html).
 
+### Declaring that a column MAY hold a Null: `extra: nullable_cols:`
+
+`protected_cols:` says a column holds no Null and the library enforces it. `nullable_cols:` says the
+opposite, and the library obeys it: the named columns are written with a **nullable** field whatever
+the values handed over happen to contain.
+
+```
+extra:
+  nullable_cols: mag_err;redshift
+```
+
+or as a dash-list, exactly like `protected_cols:`, and matched the same way — against this MAML's
+own `fields:`, by the **output** name where a `col_map:` entry renames a field. An unknown name
+fails `parquet_validate_maml`. A column named under *both* keys fails validation too, naming the
+column: the two are contradictory declarations, and one silently winning would make the schema say
+something nobody wrote.
+
+**What it is for is agreement between the two write paths.** A whole-column
+`parquet_write_column` sees every value before it writes anything, so a batch with no Null in it
+produces a non-nullable field; the next batch, of the same shape but with one Null, produces a
+nullable one. The two files then have different schemas although one schema wrote both, which a
+consumer reading the schema rather than the data can see. Declaring the column here settles it in
+advance: nullable in both, whatever each batch holds. On the streamed path it changes nothing that
+was not already true — [a table write](../tables/table-write.html#writing-a-table-one-row-group-at-a-time)
+passes a mask for every column it can, so those fields are nullable already — but the declaration is
+what carries the intent into the sidecar MAML and into the next program that reads it.
+
+Nothing is checked and nothing is refused: a declared column may hold Nulls or not, as the data
+turns out. **From code** it is `call schema%set_nullable(name [, nullable])`, with `nullable`
+defaulting to `.true.` and `.false.` taking the declaration back off; call it before
+`parquet_open_writer`, as with every schema change. Undeclaring is silent, where *unprotecting*
+warns — an undeclared column simply goes back to letting the values decide, and relaxes nothing
+anyone relied on.
+
 ## Reading a nested struct field
 
 **There are two ways to reach a `STRUCT` column, and this section is about the first of them.**

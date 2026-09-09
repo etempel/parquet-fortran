@@ -298,9 +298,9 @@ fields:
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for
   inspection.
 - Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its
-  own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null
-  values](../types/supported-data-types.html#null-values)); anything else nested inside `extra:` is
-  accepted unvalidated and otherwise unused.
+  own (nor do `protected_cols:` and `nullable_cols:`, `extra:`'s other write-side specifically-parsed
+  keys — see [Null values](../types/supported-data-types.html#null-values)); anything else nested
+  inside `extra:` is accepted unvalidated and otherwise unused.
 
 ## Renaming columns for reading with `extra: remap:`
 
@@ -407,17 +407,18 @@ metadata](building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata
 ### `extra:` produces no metadata entry, but is not ignored
 
 `extra:` is the one section whose contents never become table-level metadata — which is what makes
-it the right home for anything the fixed key list does not cover. It is still read, though: five
-nested keys are parsed specifically out of it, and everything else in it is accepted unvalidated and
-otherwise unused.
+it the right home for anything the fixed key list does not cover. It is still read, though: the
+nested keys in the table below are parsed specifically out of it, and everything else in it is
+accepted unvalidated and otherwise unused.
 
-Which five depends on what the MAML is *for*, and that is the distinction to hold on to when reading
-the sections above:
+Which of them applies depends on what the MAML is *for*, and that is the distinction to hold on to
+when reading the sections above:
 
 | nested key | belongs to | what it does |
 |---|---|---|
 | `col_map:` | a **write** schema | renames a column on the way out — [Renaming columns for output](#renaming-columns-for-output-with-col_map) |
 | `protected_cols:` | a **write** schema | forbids Nulls in the named columns — [Null values](../types/supported-data-types.html#null-values) |
+| `nullable_cols:` | a **write** schema | declares that the named columns may hold a Null, so their fields are written nullable whatever the values are — [Null values](../types/supported-data-types.html#null-values) |
 | `remap:` | a **read-in** MAML (`parquet_table`) | gives a file's columns table-facing names — [Renaming columns for reading](#renaming-columns-for-reading-with-extra-remap) |
 | `filter:` | a **read-in** MAML (`parquet_table`) | keeps only the rows a rule matches — [Filtering and sorting on read](#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort) |
 | `sort:` | a **read-in** MAML (`parquet_table`) | returns the rows in a chosen order — same section |

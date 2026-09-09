@@ -440,6 +440,17 @@ extern "C"
 		// rather than in a mask (temporal, and a parquet_string_column) and which are otherwise
 		// unconditionally nullable.
 		std::unordered_set<std::string> protected_columns;
+		// Output names of the columns this writer's schema declares nullable
+		// (extra: nullable_cols:, or schema%set_nullable). Pushed once by parquet_open_writer at
+		// open time, before any write, exactly as protected_columns is. It is the OPPOSITE
+		// declaration and the two are mutually exclusive -- the Fortran side refuses a name that
+		// appears in both lists -- so nothing here has to resolve a precedence. A declared column's
+		// field is built NULLABLE whatever the values in hand contain, which is the whole point:
+		// on the whole-column path a null-free batch would otherwise produce a non-nullable field,
+		// and the same schema would then describe two different file layouts depending on which
+		// batch was written. Forcing a field nullable never breaks build_field's SAFETY INVARIANT,
+		// which is about the other direction (a NON-nullable field receiving nulls).
+		std::unordered_set<std::string> nullable_columns;
 
 		// --- STRUCT column staging (see the "STRUCT column writes" section) ---
 		//
@@ -4296,6 +4307,18 @@ extern "C"
 		return false;
 	}
 
+	// Whether a WHOLE-COLUMN write must build this column's field nullable. Every whole-column path
+	// asks this rather than has_any_null directly, because a column the schema declared nullable
+	// (extra: nullable_cols: / schema%set_nullable) is nullable whatever this batch's values are --
+	// the declaration is about the COLUMN, the values are about one batch. Otherwise the values
+	// decide, as they always have. The streamed path's counterpart is resolve_chunk_nullability.
+	static bool whole_column_nullable(ParquetWriterHandle *writer_handle, const char *name,
+		const int8_t *valid_in, int64_t n)
+	{
+		if (writer_handle->nullable_columns.count(name) != 0) return true;
+		return has_any_null(valid_in, n);
+	}
+
 	// Stores `field`/`array` for `name`, at its schema-declared position if the writer has a
 	// schema (error stops on a repeat write), or appended in write order for a schema-less writer.
 	static void append_column(
@@ -4873,6 +4896,23 @@ extern "C"
 	{
 		auto writer_handle = as_handle(handle);
 		writer_handle->protected_columns.insert(std::string(name));
+	}
+
+	// Declares `name` (the column's OUTPUT name) as nullable on this writer: its Arrow field is
+	// built nullable whatever the values written into it contain. Pushed once per declared column
+	// by parquet_open_writer, before any write, from the schema's own is_nullable flags --
+	// extra: nullable_cols: or schema%set_nullable.
+	//
+	// This is what makes one schema produce one file layout on both write paths. The streamed path
+	// already writes every non-protected column nullable (a table write passes a mask for every
+	// column that takes one); the whole-column path decides from the values it can see, so a
+	// null-free batch produced a non-nullable field and a later batch of the same shape did not.
+	// A column named here is nullable on either path. See resolve_chunk_nullability and
+	// whole_column_nullable.
+	void parquet_writer_set_nullable_column(void *handle, const char *name)
+	{
+		auto writer_handle = as_handle(handle);
+		writer_handle->nullable_columns.insert(std::string(name));
 	}
 
 	// Resizes Arrow's global CPU thread pool -- the single pool shared by
@@ -11323,6 +11363,7 @@ static bool resolve_chunk_nullability(ParquetWriterHandle *writer_handle, const 
 	bool first_chunk_ever, bool mask_present, bool always_nullable = false)
 {
 	if (writer_handle->protected_columns.count(name) != 0) return false;
+	if (writer_handle->nullable_columns.count(name) != 0) return true;
 	if (always_nullable) return true;
 
 	if (first_chunk_ever)
@@ -13619,7 +13660,8 @@ static void append_typed_column(void *handle, const char *name, const ValueType 
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
-	append_column(writer_handle, name, build_field(name, value_type, col_size, has_any_null(valid_in, nrows * col_size)), array);
+	append_column(writer_handle, name, build_field(name, value_type, col_size,
+		whole_column_nullable(writer_handle, name, valid_in, nrows * col_size)), array);
 }
 
 // Shared precondition checks for every parquet_write_*_column_chunk entry point below.
@@ -14012,8 +14054,11 @@ static void append_list_column_common(void *handle, const char *name, int64_t nr
 	auto writer_handle = as_handle(handle);
 	check_list_row_length_fits_arrow_limit(list_max_row_length(nrows, offsets), name, context);
 	bool large = nelems > effective_list_offset_limit();
-	auto field = build_list_field(name, child->type(), has_any_null(row_valid, nrows),
-		has_any_null(elem_valid, nelems), large);
+	// Both levels, mirroring what a protected column does in the other direction: the declaration
+	// is about the column, and a list column's Null may be a null row or a null element.
+	auto field = build_list_field(name, child->type(),
+		whole_column_nullable(writer_handle, name, row_valid, nrows),
+		whole_column_nullable(writer_handle, name, elem_valid, nelems), large);
 	auto array = assemble_list_array(field->type(), nrows, nelems, offsets, row_valid, child, name, context);
 	append_column(writer_handle, name, field, array);
 }
@@ -14454,6 +14499,16 @@ extern "C"
 		{
 			field_nullable[i] = writer_handle->struct_staging_children[i]->null_count() > 0;
 		}
+		if (writer_handle->nullable_columns.count(name) != 0)
+		{
+			// A declared-nullable column is nullable at EVERY level, the exact mirror of the
+			// protected block below. The two lists are mutually exclusive (the Fortran side
+			// refuses a name in both), so the order of these two blocks decides nothing; it is
+			// written protected-last so that protection would still win if that guard were ever
+			// lost, protection being the rule the library enforces rather than merely obeys.
+			row_nullable = true;
+			for (size_t i = 0; i < field_nullable.size(); ++i) field_nullable[i] = true;
+		}
 		if (writer_handle->protected_columns.count(name) != 0)
 		{
 			// A protected column is non-nullable at EVERY level. Fortran has already refused a
@@ -14527,6 +14582,13 @@ extern "C"
 		if (writer_handle->struct_staging_children.size() == 2)
 		{
 			value_nullable = writer_handle->struct_staging_children[1]->null_count() > 0;
+		}
+		if (writer_handle->nullable_columns.count(name) != 0)
+		{
+			// A declared-nullable column is nullable at EVERY level it has -- the mirror of the
+			// protected block below, and written in the same order for the same reason.
+			row_nullable = true;
+			value_nullable = true;
 		}
 		if (writer_handle->protected_columns.count(name) != 0)
 		{
@@ -14626,7 +14688,7 @@ extern "C"
 		auto array = build_time_array(data, nrows, col_size, unit, valid_in, name, "parquet_append_time_column");
 		append_column(writer_handle, name,
 			build_field(name, temporal_time_value_type(unit, "parquet_append_time_column"), col_size,
-				has_any_null(valid_in, nrows * col_size)), array);
+				whole_column_nullable(writer_handle, name, valid_in, nrows * col_size)), array);
 	}
 
 	void parquet_append_timestamp_column(void *handle, const char *name, const int64_t *data, int64_t nrows, int64_t col_size,
@@ -14636,7 +14698,7 @@ extern "C"
 		auto array = build_timestamp_array(data, nrows, col_size, unit, is_utc, valid_in, name, "parquet_append_timestamp_column");
 		append_column(writer_handle, name,
 			build_field(name, temporal_timestamp_value_type(unit, is_utc, "parquet_append_timestamp_column"), col_size,
-				has_any_null(valid_in, nrows * col_size)), array);
+				whole_column_nullable(writer_handle, name, valid_in, nrows * col_size)), array);
 	}
 
 	// Appends one scalar string column's values to `handle`. Auto-selects arrow::utf8()
@@ -14692,7 +14754,8 @@ extern "C"
 		}
 
 		append_column(writer_handle, name,
-			build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), 1, has_any_null(valid_in, nrows)), array);
+			build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), 1,
+				whole_column_nullable(writer_handle, name, valid_in, nrows)), array);
 	}
 
 	// Appends one vector string column's values to `handle`. Same arrow::utf8()/large_utf8()
@@ -14746,7 +14809,7 @@ extern "C"
 		// the loop above happily appends nulls into them -- the exact invariant break build_field's
 		// own comment warns about. Matches its scalar sibling and the temporal columns.
 		append_column(writer_handle, name, build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), col_size,
-			has_any_null(valid_in, nrows * col_size)), array);
+			whole_column_nullable(writer_handle, name, valid_in, nrows * col_size)), array);
 	}
 
 	// Appends one scalar string column straight from a parquet_string_column's own raw buffers
@@ -14798,7 +14861,11 @@ extern "C"
 		if (!status.ok())
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
-		append_column(writer_handle, name, build_field(name, arrow::large_utf8(), 1, any_null), array);
+		// The declaration wins over what this column's elements happen to hold, exactly as it does
+		// on every other whole-column path (whole_column_nullable); there is no is_valid mask here
+		// to hand that helper, the null state living inside the column itself.
+		bool nullable = any_null || writer_handle->nullable_columns.count(name) != 0;
+		append_column(writer_handle, name, build_field(name, arrow::large_utf8(), 1, nullable), array);
 	}
 
 	// ==== Variable-length LIST column writes (see the section banner above) ====

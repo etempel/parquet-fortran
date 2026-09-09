@@ -123,6 +123,14 @@ contains
                 test_vector_element_nullability_follows_mask), &
             new_unittest("a protected column is written non-nullable, even a temporal one", &
                 test_protected_column_is_non_nullable), &
+            new_unittest("extra: nullable_cols: declares a null-free column nullable anyway", &
+                test_nullable_cols_declares_a_column_nullable), &
+            new_unittest("a nullable_cols: column has the same nullability on both write paths", &
+                test_nullable_cols_agrees_across_write_paths), &
+            new_unittest("schema%set_nullable declares a column nullable, and undeclares it", &
+                test_set_nullable_declares_and_undeclares), &
+            new_unittest("extra: nullable_cols: survives a write_maml=.true. sidecar", &
+                test_nullable_cols_survives_the_maml_sidecar), &
             new_unittest("parquet_open_reader(filter=) ANDs multiple rules and updates nrows", &
                 test_open_reader_filter_ands_rules), &
             new_unittest("parquet_open_reader(filter=) supports is_null/is_not_null and quoted strings", &
@@ -2045,6 +2053,257 @@ contains
             "a protected column given an all-.true. is_valid mask must still be non-nullable -- " // &
             "the mask is erased once the protection check has passed")
     end subroutine test_protected_column_is_non_nullable
+
+    !> `extra: nullable_cols:` makes a column's field NULLABLE on the whole-column path, whatever
+    !> the values in hand contain -- the opposite declaration to `protected_cols:`, and the one
+    !> that lets a caller say in advance that a column may hold a Null.
+    !>
+    !> Every column here is written whole and null-free, with no `is_valid` mask anywhere, which is
+    !> exactly the case the values-based rule calls non-nullable. So each declared column has an
+    !> undeclared twin of the same kind in the same file: the twins are the control, and without
+    !> them an implementation that had simply stopped deciding from the values would pass. Three
+    !> kinds, because the whole-column path decides nullability in three different places (the
+    !> numeric/date family, the string family and the temporal family).
+    subroutine test_nullable_cols_declares_a_column_nullable(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/nullable_cols_declared.parquet"
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: ts(3)
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        character(len=6) :: s(3) = [character(len=6) :: "alpha", "beta", "gamma"]
+        logical :: dint_n, cint_n, dstr_n, cstr_n, dts_n, cts_n
+
+        schema%maml%name = "nullable_cols_declared.maml"
+        schema%maml%lines = [character(len=48) :: &
+            "table: nullable_decl_table", &
+            "extra:", &
+            "  nullable_cols: dint;dstr;dts", &
+            "fields:", &
+            "- name: dint", &
+            "  data_type: int32", &
+            "- name: cint", &
+            "  data_type: int32", &
+            "- name: dstr", &
+            "  data_type: string", &
+            "  array_size: 6", &
+            "- name: cstr", &
+            "  data_type: string", &
+            "  array_size: 6", &
+            "- name: dts", &
+            "  data_type: timestamp[us]", &
+            "- name: cts", &
+            "  data_type: timestamp[us]" ]
+        call parquet_parse_maml(schema)
+
+        call ts(1)%set(2024, 1, 31, 12, 0, 0)
+        call ts(2)%set(2024, 2, 1, 12, 0, 0)
+        call ts(3)%set(2024, 2, 2, 12, 0, 0)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "dint", v)
+        call parquet_write_column(writer, "cint", v)
+        call parquet_write_column(writer, "dstr", s)
+        call parquet_write_column(writer, "cstr", s)
+        call parquet_write_column(writer, "dts", ts)
+        call parquet_write_column(writer, "cts", ts)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_column_nullable(reader, "dint", dint_n)
+        call parquet_get_column_nullable(reader, "cint", cint_n)
+        call parquet_get_column_nullable(reader, "dstr", dstr_n)
+        call parquet_get_column_nullable(reader, "cstr", cstr_n)
+        call parquet_get_column_nullable(reader, "dts", dts_n)
+        call parquet_get_column_nullable(reader, "cts", cts_n)
+        call parquet_close_reader(reader)
+
+        call check(error, dint_n .and. dstr_n .and. dts_n, &
+            "a column listed under extra: nullable_cols: must be written nullable even though " // &
+            "the values handed over held no Null")
+        if (allocated(error)) return
+        call check(error, .not. (cint_n .or. cstr_n .or. cts_n), &
+            "an UNDECLARED null-free column written whole must stay non-nullable -- otherwise " // &
+            "nullable_cols: is not what made the declared ones nullable")
+    end subroutine test_nullable_cols_declares_a_column_nullable
+
+    !> One schema, one file layout, on BOTH write paths. This is what the declaration is for.
+    !>
+    !> The same schema is written twice into two files: once whole-column, once through a
+    !> row-group loop that passes no `is_valid` mask. Those two paths decide nullability by
+    !> different rules -- the values in hand, and whether the first row group carried a mask -- and
+    !> a declared column must come out the same either way. The undeclared column is the control:
+    !> it is non-nullable in both files, which is the two rules agreeing by accident on a null-free,
+    !> unmasked column, and is what shows the declared column's answer came from the declaration.
+    subroutine test_nullable_cols_agrees_across_write_paths(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: whole_file = "test_run/nullable_cols_whole.parquet"
+        character(len=*), parameter :: chunk_file = "test_run/nullable_cols_chunked.parquet"
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: whole_d, whole_c, chunk_d, chunk_c
+
+        schema%maml%name = "nullable_cols_paths.maml"
+        schema%maml%lines = [character(len=48) :: &
+            "table: nullable_paths_table", &
+            "extra:", &
+            "  nullable_cols:", &
+            "  - d", &
+            "fields:", &
+            "- name: d", &
+            "  data_type: int32", &
+            "- name: c", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, whole_file, schema)
+        call parquet_write_column(writer, "d", v)
+        call parquet_write_column(writer, "c", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_writer(writer, chunk_file, schema)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "d", v)
+        call parquet_write_column_chunk(writer, "c", v)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, whole_file)
+        call parquet_get_column_nullable(reader, "d", whole_d)
+        call parquet_get_column_nullable(reader, "c", whole_c)
+        call parquet_close_reader(reader)
+
+        call parquet_open_reader(reader, chunk_file)
+        call parquet_get_column_nullable(reader, "d", chunk_d)
+        call parquet_get_column_nullable(reader, "c", chunk_c)
+        call parquet_close_reader(reader)
+
+        call check(error, whole_d .and. chunk_d, &
+            "a column declared under extra: nullable_cols: must be nullable on both write " // &
+            "paths -- that agreement is the whole point of the declaration")
+        if (allocated(error)) return
+        call check(error, .not. whole_c .and. .not. chunk_c, &
+            "the undeclared control column must be non-nullable on both paths; if it is not, " // &
+            "the declared column's nullability proves nothing")
+    end subroutine test_nullable_cols_agrees_across_write_paths
+
+    !> `schema%set_nullable(name)` is the code-level spelling, and `set_nullable(name, .false.)`
+    !> takes the declaration back off -- after which the values decide again, as they always did.
+    !>
+    !> Two files rather than two columns, because the second one is about undoing what the first
+    !> one did: the same column, same schema object, same null-free values.
+    subroutine test_set_nullable_declares_and_undeclares(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: on_file = "test_run/set_nullable_on.parquet"
+        character(len=*), parameter :: off_file = "test_run/set_nullable_off.parquet"
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: declared, undeclared, other
+
+        call schema%init("set_nullable_table")
+        call schema%add_field("a", "int32")
+        call schema%add_field("b", "int32")
+        call schema%set_nullable("a")
+
+        call parquet_open_writer(writer, on_file, schema)
+        call parquet_write_column(writer, "a", v)
+        call parquet_write_column(writer, "b", v)
+        call parquet_close_writer(writer)
+
+        call schema%set_nullable("a", .false.)
+
+        call parquet_open_writer(writer, off_file, schema)
+        call parquet_write_column(writer, "a", v)
+        call parquet_write_column(writer, "b", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, on_file)
+        call parquet_get_column_nullable(reader, "a", declared)
+        call parquet_get_column_nullable(reader, "b", other)
+        call parquet_close_reader(reader)
+
+        call parquet_open_reader(reader, off_file)
+        call parquet_get_column_nullable(reader, "a", undeclared)
+        call parquet_close_reader(reader)
+
+        call check(error, declared .and. .not. other, &
+            "schema%set_nullable must declare exactly the named column nullable")
+        if (allocated(error)) return
+        call check(error, .not. undeclared, &
+            "set_nullable(name, .false.) must take the declaration off again, leaving the " // &
+            "values to decide as they do for any undeclared column")
+    end subroutine test_set_nullable_declares_and_undeclares
+
+    !> The declaration survives a `write_maml=.true.` sidecar and still works when that sidecar is
+    !> the next run's schema. `extra:` is copied through verbatim, so this is a round trip of the
+    !> KEY rather than of a flag the builder would have to learn to emit -- which is exactly why it
+    !> is worth pinning: a future sidecar writer that starts rebuilding `extra:` instead of copying
+    !> it would drop this silently, and the file it then wrote would still read back fine here.
+    subroutine test_nullable_cols_survives_the_maml_sidecar(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/nullable_cols_sidecar.parquet"
+        character(len=*), parameter :: sidecar = "test_run/nullable_cols_sidecar.maml"
+        character(len=*), parameter :: again_file = "test_run/nullable_cols_sidecar_again.parquet"
+        type(parquet_schema) :: schema, from_sidecar
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: exists, declared_again, control_again
+        integer :: i
+
+        schema%maml%name = "nullable_cols_sidecar.maml"
+        schema%maml%lines = [character(len=48) :: &
+            "table: nullable_sidecar_table", &
+            "extra:", &
+            "  nullable_cols: d", &
+            "fields:", &
+            "- name: d", &
+            "  data_type: int32", &
+            "- name: c", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "d", v)
+        call parquet_write_column(writer, "c", v)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar, exist=exists)
+        call check(error, exists, "write_maml=.true. did not create the expected sidecar .maml file")
+        if (allocated(error)) return
+
+        call parquet_parse_maml(sidecar, from_sidecar)
+        do i = 1, size(from_sidecar%cinfo%col)
+            if (trim(from_sidecar%cinfo%col(i)%name) == "d") then
+                call check(error, from_sidecar%cinfo%col(i)%is_nullable, &
+                    "the sidecar .maml lost its extra: nullable_cols: entry")
+            else
+                call check(error, .not. from_sidecar%cinfo%col(i)%is_nullable, &
+                    "the sidecar .maml declared a column nullable that was never listed")
+            end if
+            if (allocated(error)) return
+        end do
+
+        ! ...and the recovered schema still produces the same file.
+        call parquet_open_writer(writer, again_file, from_sidecar)
+        call parquet_write_column(writer, "d", v)
+        call parquet_write_column(writer, "c", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, again_file)
+        call parquet_get_column_nullable(reader, "d", declared_again)
+        call parquet_get_column_nullable(reader, "c", control_again)
+        call parquet_close_reader(reader)
+
+        call check(error, declared_again .and. .not. control_again, &
+            "a file written from the recovered sidecar schema must have the same column " // &
+            "nullability as the file that produced it")
+    end subroutine test_nullable_cols_survives_the_maml_sidecar
 
 
     !> Every parquet_filter%add rule ANDs together: "ra > 200", "ra <= 360",

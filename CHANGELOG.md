@@ -184,6 +184,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   takes a writer, listing the internal name of every field its schema declares in schema order,
   and `parquet_is_column_enabled(writer, name)` is public. See
   [Writing a table one row group at a time](doc/pages/tables/table-write.md#writing-a-table-one-row-group-at-a-time).
+- **A schema can declare that a column may hold Nulls: `extra: nullable_cols:`.** The counterpart of
+  `protected_cols:` — one forbids a Null and aborts if it finds one, the other declares that a Null
+  is expected, so the column is written with a nullable field even when the values in hand have
+  none, and one schema then produces one file layout whether it is written whole or a row group at a
+  time. `schema%set_nullable(name, [nullable])` sets it in code. A column named under both keys is
+  refused, naming it. See [Null values](doc/pages/types/supported-data-types.md#null-values).
 
 ### Changed
 

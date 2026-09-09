@@ -562,8 +562,35 @@ contains
                 "' is currently protected and is being unprotected in code; it may now be " // &
                 "written with Null values")
         end if
+        ! The two declarations are opposites, so a column may carry at most one of them. Refused
+        ! rather than resolved, exactly as a MAML naming one column in both lists is refused --
+        ! silently dropping either half would make the schema say something nobody wrote.
+        if (want .and. this%col(idx)%is_nullable) then
+            error stop "parquet_column_info%set_protected: column '" // trim(name) // &
+                "' is declared nullable (extra: nullable_cols:, or set_nullable); a column " // &
+                "cannot be both protected and declared nullable"
+        end if
         this%col(idx)%is_protected = want
     end procedure set_protected
+
+    module procedure set_nullable
+        integer :: idx
+        logical :: want
+
+        want = .true.
+        if (present(nullable)) want = nullable
+
+        idx = this%get_column_index(name)
+        ! The mirror of set_protected's guard above, and worded from this side. Undeclaring is
+        ! silent: it relaxes nothing a caller could have relied on -- see the interface's
+        ! doc-comment in parquet_core.f90.
+        if (want .and. this%col(idx)%is_protected) then
+            error stop "parquet_column_info%set_nullable: column '" // trim(name) // &
+                "' is protected (extra: protected_cols:, or set_protected); a column cannot be " // &
+                "both protected and declared nullable"
+        end if
+        this%col(idx)%is_nullable = want
+    end procedure set_nullable
 
     module procedure set_array_size
         integer :: idx

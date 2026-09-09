@@ -385,7 +385,8 @@ The other schema keys apply as follows, and the refusals are narrower than "not 
 
 `extra: protected_cols:` applies and means the column holds no Null at *either* level — neither a
 null row nor a null element — which is also what makes a streamed list column's fields
-non-nullable.
+non-nullable. Its opposite, `extra: nullable_cols:`, applies at both levels too: a declared list
+column's row field and element field are both written nullable, whatever the values contain.
 
 A `write_maml=.true.` sidecar carries **neither** size key for a list column, even where the source
 MAML declared one: what says the width is per-row is the `data_type:` token.

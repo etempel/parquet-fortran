@@ -296,6 +296,7 @@ something a reader is expected to have.
 | [Risk-227](#risk-227--a-sink-that-resets-its-buffer-with-truncate0-alone-silently-loses-its-capacity-and-nothing-fails) | A sink that resets its buffer with `%truncate(0)` alone silently loses its capacity, and nothing fails | 4 — covered |
 | [Risk-228](#risk-228--a-sink-whose-col_size-is-left-auto-picks-a-row-group-size-that-counts-every-vector-column-as-width-1) | A sink whose `col_size:` is left `auto` picks a row-group size that counts every vector column as width 1 | 4 — covered |
 | [Risk-229](#risk-229--a-sink-used-from-more-than-one-thread-interleaves-two-row-groups-and-the-file-is-structurally-wrong) | A sink used from more than one thread interleaves two row groups and the file is structurally wrong | 4 — covered |
+| [Risk-230](#risk-230--a-nullable_cols-declaration-that-stops-reaching-the-writer-changes-the-file-and-nothing-fails) | A `nullable_cols:` declaration that stops reaching the writer changes the file, and nothing fails | 4 — covered |
 
 ---
 
@@ -8789,3 +8790,29 @@ it: `%append`, `%flush`, the close.
 appended to from inside it aborts with the sink's message, after a sink opened inside the region by
 the same thread went through; and `test_sink_per_thread_allowed` (`test/test_openmp.f90`), the
 negative control: one sink per thread, each its own file, every row present.
+
+### Risk-230 — A `nullable_cols:` declaration that stops reaching the writer changes the file, and nothing fails
+
+`extra: nullable_cols:` (and `schema%set_nullable`) travels a four-step path with no assertion
+anywhere along it except at the end: `parquet_parse_extra_name_list` reads the key,
+`parquet_parse_maml_lines` sets `is_nullable` on the matching field by OUTPUT name,
+`parquet_open_writer` pushes it into the writer's `nullable_columns` set, and the C++ side consults
+that set in `whole_column_nullable` and `resolve_chunk_nullability`. Break any step -- a renamed
+key, a match against `%name` instead of `%output_name`, a dropped push, a whole-column path that
+still calls `has_any_null` directly -- and the column is written NON-nullable, which is exactly what
+it would have been before the feature existed. Every value round-trips, every row count matches,
+every other test passes; only `parquet_get_column_nullable` on the written file can see it, and only
+a consumer that reads the schema rather than the data is harmed.
+
+**Rule:** every whole-column write asks `whole_column_nullable`, never `has_any_null` directly (the
+grep is `grep -n "has_any_null(" src/parquet_wrapper.cpp` -- the helper's own body is the only
+remaining caller); the two container paths force nullability at EVERY level, mirroring what
+`protected_columns` does in the other direction; the declaration is matched by output name, so a
+`col_map:` rename is applied first.
+
+**Covered by** `test_nullable_cols_declares_a_column_nullable` (three kinds, each with an undeclared
+twin as its control, all written whole and null-free),
+`test_nullable_cols_agrees_across_write_paths` (the same schema written whole and streamed, which is
+what the feature is for), `test_set_nullable_declares_and_undeclares` and
+`test_nullable_cols_survives_the_maml_sidecar` (all `test/test_writing.f90`). The mutation to catch
+is the push at `parquet_open_writer` deleted, or one whole-column site left on `has_any_null`.

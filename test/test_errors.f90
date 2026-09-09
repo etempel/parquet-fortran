@@ -83,7 +83,7 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:), p16(:), p17(:), p18(:), p19(:)
+                                            p15(:), p16(:), p17(:), p18(:), p19(:), p20(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1029,6 +1029,10 @@ contains
                 test_write_string_exceeds_array_size_aborts), &
             new_unittest("protected_cols: referencing an unknown field aborts", &
                 test_validate_protected_cols_unknown_name_aborts), &
+            new_unittest("nullable_cols: referencing an unknown field aborts", &
+                test_validate_nullable_cols_unknown_name_aborts), &
+            new_unittest("one column under both protected_cols: and nullable_cols: aborts", &
+                test_validate_protected_and_nullable_overlap_aborts), &
             new_unittest("a capitalized Extra: block is read, so its protected_cols: is still checked", &
                 test_extra_section_capitalized_aborts), &
             new_unittest("the lowercase extra: twin behaves identically (the case control)", &
@@ -1053,8 +1057,19 @@ contains
                 test_chunk_mask_added_after_first_row_group_aborts), &
             new_unittest("schema%set_protected on an unknown column aborts", &
                 test_set_protected_unknown_column_aborts), &
+            new_unittest("schema%set_nullable on an unknown column aborts", &
+                test_set_nullable_unknown_column_aborts), &
+            new_unittest("schema%set_nullable on a protected column aborts", &
+                test_set_nullable_on_protected_column_aborts), &
+            new_unittest("schema%set_protected on a column declared nullable aborts", &
+                test_set_protected_on_nullable_column_aborts), &
             new_unittest("unprotecting a protected column warns without naming a MAML, and " // &
-                "never warns for a column that was not protected", test_set_protected_unprotect_warns), &
+                "never warns for a column that was not protected", test_set_protected_unprotect_warns) &
+            ]
+        ! Split out of p4, which reached the 255-continuation-line ceiling nagfor enforces
+        ! (CLAUDE.md's source conventions: close the part and open a new one rather than growing
+        ! this one). Nothing else distinguishes the two halves.
+        p20 = [ &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
             new_unittest("qc: max value that does not parse as a number aborts", &
@@ -2504,7 +2519,7 @@ contains
             new_unittest("appending to a shared sink from inside a parallel region aborts", &
                 test_sink_shared_in_parallel_aborts) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19]
     end subroutine collect_tests_parquet_errors
 
 
@@ -12306,6 +12321,33 @@ contains
                 "was expected to error stop")
     end subroutine test_validate_protected_cols_unknown_name_aborts
 
+    !> The nullable_cols: counterpart of the check above: an unknown name is refused rather than
+    !! quietly declaring nothing. The message is asserted, since "validation rejected this MAML"
+    !! is something several unrelated defects also produce.
+    subroutine test_validate_nullable_cols_unknown_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "validate_nullable_cols_unknown_name", &
+            expect_abort=.true., &
+            failure_message="nullable_cols: referencing a column not declared in fields: " // &
+                "was expected to error stop", &
+            required_stderr="nullable_cols: unknown column")
+    end subroutine test_validate_nullable_cols_unknown_name_aborts
+
+    !> protected_cols: and nullable_cols: are opposite declarations, so one column under both is a
+    !! contradiction and is refused rather than resolved by an invented precedence. The message
+    !! must name the column: a MAML carrying both keys legitimately (different columns) is the
+    !! ordinary case, and rejecting THAT would be the regression this asserts against.
+    subroutine test_validate_protected_and_nullable_overlap_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "validate_protected_and_nullable_overlap", &
+            expect_abort=.true., &
+            failure_message="a column listed under both protected_cols: and nullable_cols: was " // &
+                "expected to error stop", &
+            required_stderr="is listed under both protected_cols: and nullable_cols:")
+    end subroutine test_validate_protected_and_nullable_overlap_aborts
+
     !> A MAML key is case-insensitive, block headers included -- so `Extra:` must be read as the
     !! `extra:` section, and the `protected_cols:` inside it must still be validated. Before this
     !! was fixed the capitalized spelling validated cleanly, because the block was never found:
@@ -12477,6 +12519,39 @@ contains
             failure_message="schema%set_protected on an unknown column was expected to abort", &
             required_stderr="no_such")
     end subroutine test_set_protected_unknown_column_aborts
+
+    !> set_nullable resolves its column through the same get_column_index every other setter uses,
+    !! so an unknown name aborts there. The scenario declares a real column first, so a build that
+    !! aborted on ANY set_nullable call would fail its own control rather than pass this.
+    subroutine test_set_nullable_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "set_nullable_unknown_column", expect_abort=.true., &
+            failure_message="schema%set_nullable on a column that does not exist was expected " // &
+                "to error stop")
+    end subroutine test_set_nullable_unknown_column_aborts
+
+    !> The two declarations are mutually exclusive in code as well as in a MAML. Both directions
+    !! are asserted because they are separate guards in separate procedures: one would keep
+    !! passing while the other was deleted.
+    subroutine test_set_nullable_on_protected_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_nullable_on_protected_column", &
+            expect_abort=.true., &
+            failure_message="declaring a protected column nullable was expected to error stop", &
+            required_stderr="cannot be both protected and declared nullable")
+    end subroutine test_set_nullable_on_protected_column_aborts
+
+    !> The other direction of the same rule -- see the test above.
+    subroutine test_set_protected_on_nullable_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_protected_on_nullable_column", &
+            expect_abort=.true., &
+            failure_message="protecting a column already declared nullable was expected to error stop", &
+            required_stderr="cannot be both protected and declared nullable")
+    end subroutine test_set_protected_on_nullable_column_aborts
 
     !> Relaxing a protection warns and does not abort, and the message must not blame a MAML: the
     !! scenario's schema is built entirely with %init/%add_field, so there is no .maml file for the

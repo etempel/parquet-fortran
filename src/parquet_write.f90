@@ -705,6 +705,16 @@ contains
                     if (eff_schema%cinfo%col(i)%is_protected) then
                         call parquet_writer_set_protected_column(writer%handle, trim(col_out_name)//char(0))
                     end if
+                    ! The opposite declaration (extra: nullable_cols:, or schema%set_nullable):
+                    ! this column's field is written NULLABLE whatever the values reaching it
+                    ! contain, so one schema describes one file layout on both write paths -- the
+                    ! whole-column path would otherwise decide from the values it can see. Pushed
+                    ! here, once, under the OUTPUT name, exactly as protection is. The two are
+                    ! mutually exclusive, which set_protected/set_nullable and parquet_validate_maml
+                    ! enforce, so both branches can never fire for one column.
+                    if (eff_schema%cinfo%col(i)%is_nullable) then
+                        call parquet_writer_set_nullable_column(writer%handle, trim(col_out_name)//char(0))
+                    end if
                 end if
             end do
 

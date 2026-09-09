@@ -1265,6 +1265,10 @@ contains
         call this%cinfo%set_protected(name, protected)
     end procedure schema_set_protected
 
+    module procedure schema_set_nullable
+        call this%cinfo%set_nullable(name, nullable)
+    end procedure schema_set_nullable
+
     module procedure schema_set_col_size
         call this%cinfo%set_col_size(name, col_size, force)
     end procedure schema_set_col_size
@@ -2144,6 +2148,23 @@ contains
             end do
         end block
 
+        ! extra: nullable_cols: is its exact counterpart, matched the same way (by output_name)
+        ! and for the opposite purpose: the column's Arrow field is written nullable whatever the
+        ! values reaching it contain. A name in both lists is refused by parquet_validate_maml,
+        ! so nothing here has to decide which one wins.
+        block
+            character(len=:), allocatable :: nullable_names(:)
+            call parquet_parse_nullable_cols(lines, nullable_names)
+            do i = 1, n
+                do j = 1, size(nullable_names)
+                    if (trim(nullable_names(j)) == trim(tmp(i)%output_name)) then
+                        tmp(i)%is_nullable = .true.
+                        exit
+                    end if
+                end do
+            end do
+        end block
+
         call move_alloc(tmp, cinfo%col)
 
         call parquet_maml_unlock()
@@ -2401,6 +2422,38 @@ contains
     module subroutine parquet_parse_protected_cols(lines, names)
         character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
         character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted protected column names.
+
+        call parquet_parse_extra_name_list(lines, "protected_cols", names)
+    end subroutine parquet_parse_protected_cols
+
+    !> The `extra: nullable_cols:` counterpart of parquet_parse_protected_cols, in both accepted
+    !> spellings, returning a zero-size array when the key is absent.
+    !>
+    !> A plain contained subroutine rather than a module procedure with an interface two levels up,
+    !> for the reason parquet_parse_protected_cols_relay below exists: a descendant submodule
+    !> reaches this by host association, which is the shape gfortran 15.2.0 compiles. Its callers
+    !> are parquet_parse_maml_lines in this file and parquet_validate_maml_internal one level down.
+    subroutine parquet_parse_nullable_cols(lines, names)
+        character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+        character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted nullable column names.
+
+        call parquet_parse_extra_name_list(lines, "nullable_cols", names)
+    end subroutine parquet_parse_nullable_cols
+
+    !> Reads one `extra:` sub-key that holds a LIST OF COLUMN NAMES -- `protected_cols:` and
+    !> `nullable_cols:` are the two -- in either accepted spelling, and hands the names back
+    !> trimmed and unquoted, in declaration order.
+    !>
+    !> One body for both keys deliberately: the two lists differ only in what the caller does with
+    !> the names, and a second copy of this scanner is a second place for the `extra:` block
+    !> boundary, the quoting and the two spellings to drift.
+    !>
+    !> `names` is a zero-size array when there is no `extra:` section, when it holds no such key,
+    !> or when the key is present but empty.
+    subroutine parquet_parse_extra_name_list(lines, want_key, names)
+        character(len=*), intent(in) :: lines(:) !! raw MAML source lines to scan.
+        character(len=*), intent(in) :: want_key !! the extra: sub-key to read, lowercase and without its colon.
+        character(len=:), allocatable, intent(out) :: names(:) !! trimmed, unquoted names, in declaration order.
         character(len=:), allocatable :: tmp(:)
         character(len=:), allocatable :: tline, key, cvalue, token
         character(len=:), allocatable :: key_lower, unquoted
@@ -2438,7 +2491,7 @@ contains
             tline = trim(adjustl(lines(i)))
             call parquet_split_key_value(tline, key, cvalue)
             call parquet_to_lower(trim(key), key_lower)
-            if (key_lower == "protected_cols") then
+            if (key_lower == want_key) then
                 idx_key = i
                 exit
             end if
@@ -2448,7 +2501,7 @@ contains
         ! See g_maml_mutex in parquet_wrapper.cpp.
         call parquet_maml_lock()
         if (len_trim(cvalue) > 0) then
-            ! Scalar semicolon-separated form: protected_cols: col1;col2; col3
+            ! Scalar semicolon-separated form: <key>: col1;col2; col3
             cvalue = trim(adjustl(cvalue))
             p = 1
             do while (p <= len(cvalue))
@@ -2474,7 +2527,7 @@ contains
             return
         end if
 
-        ! Dash-list form: protected_cols: (empty) followed by "- col1" lines.
+        ! Dash-list form: <key>: (empty) followed by "- col1" lines.
         do i = idx_key + 1, extra_end
             if (len_trim(lines(i)) == 0) cycle
             tline = trim(adjustl(lines(i)))
@@ -2491,7 +2544,7 @@ contains
             call move_alloc(tmp, names)
         end do
         call parquet_maml_unlock()
-    end subroutine parquet_parse_protected_cols
+    end subroutine parquet_parse_extra_name_list
 
     !> gfortran 15.2.0 ICE workaround: a direct call to parquet_parse_protected_cols from a
     !> submodule nested two levels under parquet (e.g. parquet:parquet_metadata:parquet_metadata_maml)

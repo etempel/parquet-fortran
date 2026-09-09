@@ -181,6 +181,17 @@ Each refusal names the column and the kind, so a `list` column's message differs
   overrides a declaration someone made deliberately. Where the protection came from makes no
   difference: a MAML's `extra: protected_cols:` and an earlier `%set_protected` call in code both
   warn on the way back out. `error stop`s if `name` isn't a declared field.
+- **`call schema%set_nullable(name, [nullable])`** — declares a column nullable, the code-level
+  equivalent of listing it under a MAML's `extra: nullable_cols:`; `nullable` defaults to `.true.`,
+  and `.false.` takes the declaration off again. The column's Arrow field is then written nullable
+  whatever the values handed over contain, so one schema produces one file layout on both write
+  paths instead of letting a null-free batch decide (see [Null
+  values](../types/supported-data-types.html#null-values)). Nothing is checked and nothing is
+  refused — this is a declaration the writer obeys, where `%set_protected` is a promise the library
+  enforces — and undeclaring is silent, since it relaxes nothing a caller could have relied on. The
+  two are opposites and a column may carry at most one: declaring a protected column nullable, or
+  protecting one already declared nullable, `error stop`s naming both, rather than resolving a
+  precedence. Call it before `parquet_open_writer`. `error stop`s if `name` isn't a declared field.
 - **`call schema%get_field(name, [data_type], [unit], [info], [ucd], [array_size], [col_size], [qc_min],
   [qc_max], [qc_miss])`** / **`call schema%get_field(index, name, [...])`** — reads back an
   already-parsed field's full definition, the same shape of values `%add_field` accepts; every

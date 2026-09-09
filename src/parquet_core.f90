@@ -278,6 +278,11 @@ module parquet_core
         logical :: is_protected = .false. !! true if this column's name is listed under extra: protected_cols: in
         !! whichever MAML built this cinfo; parquet_write_column error stops if an is_valid mask with any
         !! .false. entry is passed for such a column.
+        logical :: is_nullable = .false. !! true if this column's name is listed under extra: nullable_cols: in
+        !! whichever MAML built this cinfo (or was named in schema%set_nullable); the column's Arrow field is
+        !! written NULLABLE whatever the values it receives contain. The opposite declaration to is_protected,
+        !! and mutually exclusive with it -- a name in both lists fails MAML validation, and each setter
+        !! refuses to raise its own flag while the other is up.
         logical :: has_qc_min = .false. !! true if a qc: min: bound was declared for this field.
         logical :: has_qc_max = .false. !! true if a qc: max: bound was declared for this field.
         character(len=2) :: qc_min_op = ">=" !! one of ">", ">="; default when qc: min: has no operator prefix.
@@ -344,6 +349,7 @@ module parquet_core
         procedure :: set_column_available => set_available !! Enables a column, or every column if no name is given.
         procedure :: set_col_size !! Resolves a column's col_size (only if currently "auto" unless force=.true.).
         procedure :: set_protected !! Marks/unmarks a column Null-protected (extra: protected_cols:).
+        procedure :: set_nullable !! Marks/unmarks a column as declared nullable (extra: nullable_cols:).
         procedure :: set_array_size !! Resolves a string column's array_size (only if currently "auto" unless force=.true.).
     end type parquet_column_info
 
@@ -437,6 +443,7 @@ module parquet_core
         procedure :: set_column_unavailable !! Disables a column, or every column if no name is given.
         procedure :: set_col_size => schema_set_col_size !! Resolves a column's col_size before parquet_open_writer.
         procedure :: set_protected => schema_set_protected !! Marks/unmarks a column Null-protected.
+        procedure :: set_nullable => schema_set_nullable !! Marks/unmarks a column as declared nullable.
         procedure :: set_array_size => schema_set_array_size !! Resolves a string column's array_size before
         !! parquet_open_writer.
         procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by
@@ -2011,6 +2018,12 @@ module parquet_core
             character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
             logical, intent(in), optional :: protected !! .false. to unprotect; default .true.
         end subroutine schema_set_protected
+        !> Forwards to %cinfo%set_nullable.
+        module subroutine schema_set_nullable(this, name, nullable)
+            class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
+            character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
+            logical, intent(in), optional :: nullable !! .false. to undeclare; default .true.
+        end subroutine schema_set_nullable
         !> Forwards to %cinfo%set_col_size.
         module subroutine schema_set_col_size(this, name, col_size, force)
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
@@ -2404,6 +2417,27 @@ module parquet_core
             character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
             logical, intent(in), optional :: protected !! .false. to unprotect; default .true.
         end subroutine set_protected
+        !> Declares `name` nullable, or (nullable=.false.) undeclares it -- the code-level
+        !> equivalent of listing it under a MAML's extra: nullable_cols:. The column's Arrow field
+        !> is then written NULLABLE whatever values reach it, so a batch that happens to hold no
+        !> Null still produces the same file layout as one that does. Nothing is enforced and
+        !> nothing is refused: this is a declaration the writer obeys, where protected_cols: is a
+        !> promise the library checks.
+        !>
+        !> It is the opposite of set_protected and the two are mutually exclusive: declaring a
+        !> protected column nullable error stops naming both, rather than resolving a precedence.
+        !> Undeclaring is silent (unlike unprotecting, which warns) -- an undeclared column simply
+        !> goes back to the default, where the values decide on the whole-column path and the
+        !> is_valid mask does on the streamed one, and nothing a caller relied on is relaxed.
+        !>
+        !> Error stops if `name` is not found. Call it before parquet_open_writer: the writer
+        !> takes its copy of the schema at open time, so a later change has no effect on a writer
+        !> that is already open.
+        module subroutine set_nullable(this, name, nullable)
+            class(parquet_column_info), intent(inout) :: this !! column_info being updated.
+            character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
+            logical, intent(in), optional :: nullable !! .false. to undeclare; default .true.
+        end subroutine set_nullable
         !> Resolves `name`'s array_size to `array_size`. Error stops if array_size < 1, if `name`
         !> is not found, if `name`'s data_type is not "string" (array_size only applies to string
         !> columns), or if `name`'s array_size is not currently "auto" and force is absent/.false.

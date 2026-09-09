@@ -8726,15 +8726,15 @@ of rows from the cause.
 
 **Rule:** nullability is DECLARED, never measured. The derivation path reads no value and calls no
 `%has_nulls`/`is_null`/`any_null`; the caller's declaration is `protected_cols:`/`%set_protected`
-(null-free, enforced), and the affirmative direction is `extra: nullable_cols:` once it exists
-(`feature_pandas_S2.md`, P5).
+(null-free, enforced) or `extra: nullable_cols:`/`%set_nullable` (may hold a Null, obeyed), and
+those two are what a caller reaches for instead.
 
-**Test:** proposed — `test_derive_schema_does_not_measure_nullability` in `test/test_table_stream.f90`
-(`feature_pandas_S2.md`, P3): a Null-free template, then appended batches holding Nulls through the
-`parquet_table_writer` sink; the Nulls read back and `parquet_get_column_nullable` answers `.true.`.
-The mutation to catch is any null query added to `build_table_schema`. A static check in the shape of
-Risk-2's `check_schemaless_write_declares_auto` (no `is_null`/`has_nulls` in that body) would forbid
-it outright.
+**Covered by** `test_derive_schema_does_not_measure_nullability` (`test/test_table_stream.f90`): a
+Null-free template, then appended batches holding Nulls through the `parquet_table_writer` sink; the
+Nulls read back and `parquet_get_column_nullable` answers `.true.`. The mutation to catch is any null
+query added to `build_table_schema`. **Still open:** a static check in the shape of Risk-2's
+`check_schemaless_write_declares_auto` (no `is_null`/`has_nulls` in that body) would forbid it
+outright, and nothing enforces the rule statically today.
 
 ### Risk-227 — A sink that resets its buffer with `%truncate(0)` alone silently loses its capacity, and nothing fails
 

@@ -7732,9 +7732,9 @@ end if""".format(elem="p(i)" if rank == 1 else "p(e, i)")
             mx = nanv
         end if
         write(buf, "{fmt}") mn
-        min_s = trim(adjustl(buf))
+        call stat_real_text(buf, min_s)
         write(buf, "{fmt}") mx
-        max_s = trim(adjustl(buf))
+        call stat_real_text(buf, max_s)
     end subroutine stat_{tag}
 """
     if cat == "tmp":
@@ -7967,6 +7967,27 @@ def stat_dispatch():
             n = 0_int64
         end select ! GCOVR_EXCL_STOP
     end subroutine container_row_length
+    !
+    !> One float extreme as text, carrying the leading zero a value below one needs.
+    !!
+    !! `G0.d` leaves that zero to the processor -- gfortran and nagfor write `0.500000`, flang and
+    !! ifx write `.500000` -- so without this the same table prints a different report per
+    !! compiler. `parquet_qc_format_real` (`src/parquet_write_numeric.f90`) puts it back for the
+    !! qc-violation warning and `real_text` (`src/parquet_tables_display.f90`) for `%print_rows`;
+    !! keep the three in step.
+    subroutine stat_real_text(buf, text)
+        character(len=*), intent(in) :: buf                !! the `G0.d` rendering, as written.
+        character(len=:), allocatable, intent(out) :: text !! that rendering, trimmed.
+        !
+        text = trim(adjustl(buf))
+        if (len(text) > 0) then
+            if (text(1:1) == ".") then
+                text = "0" // text ! GCOVR_EXCL_LINE
+            else if (len(text) > 1) then
+                if (text(1:2) == "-.") text = "-0" // text(2:)
+            end if
+        end if
+    end subroutine stat_real_text
     !"""
 
 

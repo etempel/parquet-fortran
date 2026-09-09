@@ -81,6 +81,14 @@ in `code-style.md`.
 - **A list-directed `read(text, *, iostat=ios) n` is not a strict parse**: `"5 6"` yields 5 with
   `iostat == 0`. Parse caller-supplied text by hand (trim, one optional sign, digits and nothing
   else), then convert (`env_int64`, `src/parquet_settings.f90`; `settings_env_two_numbers` scenario).
+- **The leading zero of a `G0.d` rendering below one is PROCESSOR-DEPENDENT** (F2018 13.7.2.3.2
+  makes it optional): gfortran and nagfor write `0.500000`, flang and ifx write `.500000`, and
+  every one of them drops it for `F0.d`. Put it back in any text a user reads or a test asserts
+  (`stat_real_text`, `src/parquet_tables_access.f90`; `parquet_qc_format_real`,
+  `src/parquet_write_numeric.f90`; `real_text`, `src/parquet_tables_display.f90` — keep the three
+  in step). `G0.d`'s EXPONENT form differs too (`0.100000E+07` under nagfor, `.100000E+7` under
+  gfortran and flang), so keep an asserted value inside its fixed-point range. Audit:
+  `grep -rn "[gG]0\.[0-9]" src/*.f90`.
 - **`ATAN2(0.0, 0.0)` is prohibited** (F2018 16.9.16); gfortran/ifx/flang return 0, **nagfor returns
   NaN and raises `IEEE_INVALID`** (fatal under its default `-ieee=stop`). The reachable input rarely
   looks like "both zero" (a pole, a zero-length vector). `grep -n "atan2" src/*.f90` is the audit;

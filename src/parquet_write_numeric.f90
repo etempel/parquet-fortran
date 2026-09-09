@@ -1281,7 +1281,7 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask, protected)
+            call parquet_check_protected(writer, name, vmask, protected, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, vmask)
             ! A protected column's mask is all-.true. by the check above, so it carries no
             ! information -- drop it, and the write proceeds exactly as an unmasked one (no
@@ -1337,7 +1337,7 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask, protected)
+            call parquet_check_protected(writer, name, vmask, protected, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, vmask)
             ! A protected column's mask is all-.true. by the check above, so it carries no
             ! information -- drop it, and the write proceeds exactly as an unmasked one (no
@@ -1393,7 +1393,7 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask, protected)
+            call parquet_check_protected(writer, name, vmask, protected, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, vmask)
             ! A protected column's mask is all-.true. by the check above, so it carries no
             ! information -- drop it, and the write proceeds exactly as an unmasked one (no
@@ -1449,7 +1449,7 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask, protected)
+            call parquet_check_protected(writer, name, vmask, protected, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, vmask)
             ! A protected column's mask is all-.true. by the check above, so it carries no
             ! information -- drop it, and the write proceeds exactly as an unmasked one (no
@@ -1513,7 +1513,7 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask, protected)
+            call parquet_check_protected(writer, name, vmask, protected, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, vmask)
             ! A protected column's mask is all-.true. by the check above, so it carries no
             ! information -- drop it, and the write proceeds exactly as an unmasked one (no

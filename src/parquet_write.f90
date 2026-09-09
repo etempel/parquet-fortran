@@ -1092,12 +1092,15 @@ contains
     !> ordinary mask-presence rule, instead of needing a precedence rule between "protected" and
     !> "a mask was passed". Passing an all-.true. mask for a protected column is explicitly
     !> allowed -- declaring a column protected must not make the is_valid keyword unusable.
-    subroutine parquet_check_protected(writer, name, is_valid_flat, protected)
+    subroutine parquet_check_protected(writer, name, is_valid_flat, protected, context)
         type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
         character(len=*), intent(in) :: name !! column name.
         logical, intent(in) :: is_valid_flat(:) !! flattened validity mask for this write call.
         logical, intent(out), optional :: protected !! .true. if this column is protected (mask may be erased).
+        character(len=*), intent(in), optional :: context !! the public procedure the abort names; default
+        !! parquet_write_column, and every row-group chunk worker passes parquet_write_column_chunk.
         integer :: idx
+        character(len=:), allocatable :: who
 
         if (present(protected)) protected = .false.
         if (.not. writer%is_schema_enforced) return
@@ -1106,7 +1109,9 @@ contains
         if (.not. writer%all_columns(idx)%is_protected) return
         if (present(protected)) protected = .true.
         if (.not. all(is_valid_flat)) then
-            error stop "parquet_write_column: column '" // trim(name) // &
+            who = "parquet_write_column"
+            if (present(context)) who = context
+            error stop who // ": column '" // trim(name) // &
                 "' is protected (extra: protected_cols:) and cannot contain Null values"
         end if
     end subroutine parquet_check_protected

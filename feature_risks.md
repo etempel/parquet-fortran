@@ -292,6 +292,7 @@ something a reader is expected to have.
 | [Risk-223](#risk-223--a-decoded-dictionary-columns-schema-type-and-its-cached-array-disagree-and-only-code-that-reads-the-array-is-right) | A decoded dictionary column's schema type and its cached array disagree | 1 — new |
 | [Risk-224](#risk-224--resolve_column_types-fixed-buffer-is-safe-only-while-the-c-side-emits-nothing-but-tokens) | `resolve_column_type`'s fixed buffer is safe only while the C++ side emits nothing but tokens | 1 — new |
 | [Risk-225](#risk-225--a-schema-derived-from-a-table-that-measures-nullability-from-that-one-batch-declares-it-for-every-later-batch) | A schema derived from a table that measures nullability from that one batch declares it for every later batch | 1 — new |
+| [Risk-226](#risk-226--a-chunked-table-write-that-stops-passing-is_valid-for-a-null-free-column-corrupts-a-file-that-still-round-trips-here) | A chunked table write that stops passing `is_valid=` for a null-free column corrupts a file that still round-trips here | 4 — covered |
 
 ---
 
@@ -8702,3 +8703,29 @@ through `parquet_set_table_threads(1)` and once on a team the scenario proves wa
 `test_row_validity_range_matches_is_null` (`test/test_columns.f90`) pins the ranged mask against the
 per-row `is_null` across word boundaries; and `test_argminmax_matches_compare`
 (`test/test_parquet_string.f90`) pins the string extremes against the `%compare` scan they replaced.
+
+### Risk-226 — A chunked table write that stops passing `is_valid=` for a null-free column corrupts a file that still round-trips here
+
+`parquet_write_table_chunk` (`src/parquet_tables_write.f90`) passes a validity mask for every
+column that takes one, whether or not the column holds a Null (`write_one_column`'s `chunked` arm,
+`scalar_validity`/`vector_validity` with `force`). The whole-column path deliberately does the
+opposite -- `scalar_validity` leaves the mask unallocated for a null-free column, and Risk-8 records
+that detail as the whole of an earlier ~2.5x gap -- so the chunked rule reads like a pointless
+allocation to remove. It is not: a streamed column's Arrow field is fixed nullable or not by its
+FIRST row group, from whether a mask was passed (`resolve_chunk_nullability`, Risk-82), and every
+later row group must use the same form. Drop the mask for a null-free chunk and two failures become
+possible, neither at the line that caused it: a hard C++ abort on the first row group whose nullness
+differs from the first's, or, when the Nulls arrive in the first row group and vanish later, a
+non-nullable field whose definition levels describe Nulls -- which this library's own reader
+round-trips perfectly and a schema-trusting reader may not.
+
+**Rule:** the chunked arm of `write_one_column` passes `force=.true.` (spelled `chunked`) to both
+validity helpers, for every mask-carrying kind; the opt-out is the caller's `protected_cols:`
+declaration, which `parquet_check_protected` turns back into an unmasked, non-nullable write. Never
+pass `force` from the whole-column path, and never decide it from `%any_null`.
+
+**Covered by** `test_chunked_write_nullability_survives_a_late_null` (`test/test_table_stream.f90`):
+a Null-free first chunk, a Null in the second, the Null read back and `parquet_get_column_nullable`
+`.true.` for the column that never held one -- the mutation it catches is `force` dropped from the
+chunked arm, which aborts inside the writer on the second row group;
+`test_chunked_write_protected_column_is_unmasked` pins the opt-out in the other direction.

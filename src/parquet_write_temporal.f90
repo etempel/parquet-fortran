@@ -70,16 +70,18 @@ contains
     !> written non-nullable (c_null_ptr); otherwise a 1=valid/0=null buffer is built from the
     !> per-element null mask, and (for a schema-enforced writer) parquet_check_protected enforces
     !> that no protected column receives a null.
-    subroutine temporal_valid_ptr(writer, name, is_null_mask, valid_buf, valid_ptr)
+    subroutine temporal_valid_ptr(writer, name, is_null_mask, valid_buf, valid_ptr, context)
         type(parquet_writer), intent(in) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name (for the protected-column check).
         logical, intent(in) :: is_null_mask(:) !! .true. where the element is null.
         integer(c_int8_t), allocatable, target, intent(out) :: valid_buf(:) !! backing buffer for valid_ptr.
         type(c_ptr), intent(out) :: valid_ptr !! c_loc(valid_buf), or c_null_ptr if no nulls.
+        character(len=*), intent(in), optional :: context !! the public name the protected abort carries
+        !! (parquet_check_protected's own default when absent).
 
         if (any(is_null_mask)) then
             if (writer%is_schema_enforced) then
-                call parquet_check_protected(writer, name, .not. is_null_mask)
+                call parquet_check_protected(writer, name, .not. is_null_mask, context=context)
                 call parquet_check_qc_miss(writer, name, .not. is_null_mask)
             end if
             call parquet_make_valid_buf_write(.not. is_null_mask, valid_buf, valid_ptr)
@@ -314,7 +316,7 @@ contains
         end if
         allocate(days(size(fv, kind=int64)))
         days = fv%raw()
-        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr, context="parquet_write_column_chunk")
         if (size(fv, kind=int64) > 0_int64) &
             call parquet_append_date_column_chunk(writer%handle, trim(outname)//char(0), days, asize, valid_ptr)
     end subroutine write_date_chunk_flat
@@ -352,7 +354,7 @@ contains
         end if
         allocate(ns(size(fv, kind=int64)))
         ns = fv%raw()
-        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr, context="parquet_write_column_chunk")
         if (size(fv, kind=int64) > 0_int64) &
             call parquet_append_time_column_chunk(writer%handle, trim(outname)//char(0), ns, asize, &
                 int(unit, c_int32_t), valid_ptr)
@@ -399,7 +401,7 @@ contains
                 vals(i) = fv(i)%to_unix(unit)
             end if
         end do
-        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr, context="parquet_write_column_chunk")
         if (m > 0_int64) call parquet_append_timestamp_column_chunk(writer%handle, trim(outname)//char(0), vals, asize, &
             int(unit, c_int32_t), is_utc, valid_ptr)
     end subroutine write_timestamp_chunk_flat

@@ -77,6 +77,8 @@ module parquet_tables
         parquet_release_column, parquet_read_column, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
+        parquet_new_row_group, parquet_write_column_chunk, parquet_finish_row_group, &
+        parquet_write_chunk_row_mask, parquet_is_column_enabled, &
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &
         parquet_load_qc_maml_file, parquet_filter, parquet_sortkey, parquet_read_qc, &
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
@@ -119,6 +121,7 @@ module parquet_tables
     public :: parquet_write_table
     public :: parquet_derive_schema
     public :: parquet_open_writer_like
+    public :: parquet_write_table_chunk
     public :: parquet_table_row_group_bounds
     !> Re-exported from parquet_settings so that a `use parquet_tables` program can report
     !! which Arrow/Parquet C++ it is linked against without a second import. The library's
@@ -4725,6 +4728,48 @@ module parquet_tables
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
             logical, intent(in), optional :: overwrite !! allow truncating an existing file; default .true.
         end subroutine parquet_open_writer_like
+        !> Writes `table`'s rows as ONE complete row group of `writer`, an open `parquet_writer`
+        !! with no row group open: one `parquet_new_row_group(writer, table%nrows())`, one
+        !! `parquet_write_column_chunk` per column the writer declares, one
+        !! `parquet_finish_row_group`. Call it once per row group -- typically in a loop over the
+        !! `parquet_table_row_group_bounds` slices of a file larger than memory, each opened,
+        !! transformed and handed here -- and close the writer afterwards as usual.
+        !!
+        !! The columns are the WRITER's, under `parquet_write_table`'s rules: every enabled field
+        !! of its schema in schema order, a field disabled with `%set_column_unavailable` skipped,
+        !! the lookup by internal name so a `col_map:` rename is applied by the writer; a field
+        !! naming a column the table does not have is an error. A column the table has but has
+        !! not read is read here -- the schema naming it is the request -- and stays resident:
+        !! there is no `release=`, since the next row group is another table. A schema-less
+        !! writer takes every resident column in slot order, `parquet_row_index` never, and fixes
+        !! the file's columns from that first row group.
+        !!
+        !! **A validity mask is passed for every column that takes one, whether or not the column
+        !! holds a Null** -- the one place a table write deliberately differs from a hand-written
+        !! loop and from `parquet_write_table`. A streamed column's nullability is fixed by its
+        !! FIRST row group from whether a mask was passed, and every later row group must match,
+        !! so a mask passed only when a Null happens to be present would make a later Null abort
+        !! rows away from anything the caller did wrong. It costs one mask per column per row
+        !! group and the null bitmap the writer builds from it; declaring a column
+        !! `protected_cols:` (`schema%set_protected`) removes both, since the writer drops a
+        !! protected column's all-`.true.` mask and stores the field non-nullable -- and a Null in
+        !! it is then an error naming the column, never a corrupt file.
+        !!
+        !! `row_mask` (`size(row_mask) == table%nrows()`) drops every `.false.` row from the
+        !! output entirely, through `parquet_write_chunk_row_mask` and under its rules: used on a
+        !! writer's first row group, it must be used on every one, and it is unavailable once a
+        !! column was written whole with `parquet_write_column`. A Null still occupies a row; a
+        !! dropped row leaves no trace.
+        !!
+        !! error stops when the table has no rows (a Parquet row group holds at least one; skip
+        !! the call), and with the writer's own messages when the writer is not open, a row group
+        !! is already open, or the mask breaks one of its rules. The whole call runs on the
+        !! calling thread: one writer's row groups are written from one thread, in order.
+        module subroutine parquet_write_table_chunk(writer, table, row_mask)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with no row group open.
+            class(parquet_table), intent(in) :: table     !! the rows to write as this row group (any extending type too).
+            logical, intent(in), optional :: row_mask(:)  !! per-row write mask; .false. drops the row entirely.
+        end subroutine parquet_write_table_chunk
     end interface
     !
     ! ---- Zero-copy pointer access (parquet_tables_access) ----

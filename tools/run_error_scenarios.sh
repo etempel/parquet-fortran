@@ -1557,6 +1557,10 @@ scenarios=(
     "bounded_arrow_pool:0"
     "derive_schema_needs_a_resident_column:1"
     "open_writer_like_needs_a_resident_column:1"
+    "write_table_chunk_zero_rows:1"
+    "write_table_chunk_row_group_already_open:1"
+    "write_table_chunk_schema_names_a_missing_column:1"
+    "write_table_chunk_protected_null:1"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy

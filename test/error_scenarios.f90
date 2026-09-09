@@ -1544,6 +1544,14 @@ program error_scenarios
         call scenario_derive_schema_needs_a_resident_column()
     case ("open_writer_like_needs_a_resident_column")
         call scenario_open_writer_like_needs_a_resident_column()
+    case ("write_table_chunk_zero_rows")
+        call scenario_write_table_chunk_zero_rows()
+    case ("write_table_chunk_row_group_already_open")
+        call scenario_write_table_chunk_row_group_already_open()
+    case ("write_table_chunk_schema_names_a_missing_column")
+        call scenario_write_table_chunk_schema_names_a_missing_column()
+    case ("write_table_chunk_protected_null")
+        call scenario_write_table_chunk_protected_null()
     case ("concurrent_calls_into_shared_reader")
         call scenario_concurrent_calls_into_shared_reader()
     case ("concurrent_calls_into_shared_writer")
@@ -13006,6 +13014,95 @@ contains
         call parquet_open_writer_like(w, bad, lazy)
         print '(a)', "unexpectedly opened a writer from a table with no resident column"
     end subroutine scenario_open_writer_like_needs_a_resident_column
+
+    !> parquet_write_table_chunk refuses a table with no rows: a Parquet row group holds at least
+    !> one, and quietly writing nothing would hide a loop that produced no rows. The control
+    !> writes a two-row table as the first row group; the empty table is the same table truncated
+    !> to nothing.
+    subroutine scenario_write_table_chunk_zero_rows()
+        type(parquet_table) :: t, empty
+        type(parquet_writer) :: w
+        character(len=*), parameter :: out = "test_run/error_scenario_write_table_chunk_zero_rows.parquet"
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call parquet_new_table(empty)
+        call empty%add_column("a", [3_int32, 4_int32])
+        call empty%truncate(0)
+        call parquet_open_writer_like(w, out, t)
+        call parquet_write_table_chunk(w, t)
+        print '(a)', "control: a two-row table was written as a row group"
+        call parquet_write_table_chunk(w, empty)
+        print '(a)', "unexpectedly wrote a zero-row table as a row group"
+    end subroutine scenario_write_table_chunk_zero_rows
+
+    !> A row group already open is the WRITER's refusal, and parquet_write_table_chunk leaves it
+    !> that way: the message names parquet_finish_row_group, the call that has to come first. The
+    !> control is a complete chunk write on the same writer.
+    subroutine scenario_write_table_chunk_row_group_already_open()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=*), parameter :: out = "test_run/error_scenario_write_table_chunk_rg_open.parquet"
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call parquet_open_writer_like(w, out, t)
+        call parquet_write_table_chunk(w, t)
+        print '(a)', "control: a chunk was written while no row group was open"
+        call parquet_new_row_group(w, 2)
+        call parquet_write_table_chunk(w, t)
+        print '(a)', "unexpectedly wrote a chunk into a writer with a row group already open"
+    end subroutine scenario_write_table_chunk_row_group_already_open
+
+    !> A schema field naming a column the table does not have is refused with the chunk write's
+    !> own name in the message -- the same refusal parquet_write_table raises, through the shared
+    !> locator. The control writes a table that has both columns through the same schema.
+    subroutine scenario_write_table_chunk_schema_names_a_missing_column()
+        type(parquet_table) :: full, part
+        type(parquet_schema) :: s
+        type(parquet_writer) :: w
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_write_table_chunk_missing_control.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_write_table_chunk_missing_bad.parquet"
+
+        call s%init("chunked")
+        call s%add_field("a", "int32")
+        call s%add_field("b", "int32")
+        call parquet_new_table(full)
+        call full%add_column("a", [1_int32, 2_int32])
+        call full%add_column("b", [3_int32, 4_int32])
+        call parquet_new_table(part)
+        call part%add_column("a", [5_int32, 6_int32])
+        call parquet_open_writer(w, ctrl, s)
+        call parquet_write_table_chunk(w, full)
+        call parquet_close_writer(w)
+        print '(a)', "control: a table holding every declared column was written as a row group"
+        call parquet_open_writer(w, bad, s)
+        call parquet_write_table_chunk(w, part)
+        print '(a)', "unexpectedly wrote a chunk through a schema naming a column the table lacks"
+    end subroutine scenario_write_table_chunk_schema_names_a_missing_column
+
+    !> A Null in a protected column aborts on the chunked path as on the whole-column one, and the
+    !> message names parquet_write_column_chunk rather than parquet_write_column. The control is a
+    !> Null-free chunk through the same protected schema, on the same writer.
+    subroutine scenario_write_table_chunk_protected_null()
+        type(parquet_table) :: clean, dirty
+        type(parquet_schema) :: s
+        type(parquet_writer) :: w
+        character(len=*), parameter :: out = "test_run/error_scenario_write_table_chunk_protected.parquet"
+
+        call parquet_new_table(clean)
+        call clean%add_column("x", [1.0_real64, 2.0_real64])
+        call parquet_new_table(dirty)
+        call dirty%add_column("x", [3.0_real64, 4.0_real64])
+        call dirty%set_null("x", 1_int64)
+        call parquet_derive_schema(clean, s)
+        call s%set_protected("x")
+        call parquet_open_writer_like(w, out, clean, schema=s)
+        call parquet_write_table_chunk(w, clean)
+        print '(a)', "control: a Null-free chunk of a protected column was written"
+        call parquet_write_table_chunk(w, dirty)
+        print '(a)', "unexpectedly wrote a Null into a protected column through a chunk write"
+    end subroutine scenario_write_table_chunk_protected_null
 
     !> A schema-enforced writer (cinfo given) already error stops on this via
     !> parquet_mark_column_written's write_counts tracking. A schema-less

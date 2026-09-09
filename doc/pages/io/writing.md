@@ -346,7 +346,10 @@ call parquet_close_writer(writer)
 known to the writer must then receive exactly one `parquet_write_column_chunk` call with exactly
 `nrows` rows (dispatched by type/kind exactly like `parquet_write_column` — scalar `values(:)` or
 matrix `values(:,:)`) before `parquet_finish_row_group` closes it out. Repeat for as many row
-groups as needed, then `parquet_close_writer` as usual.
+groups as needed, then `parquet_close_writer` as usual. When each row group's data is a
+`parquet_table`, `parquet_write_table_chunk(writer, table)` makes the three calls for every column
+the writer declares — see [Writing a table one row group at a
+time](../tables/table-write.html#writing-a-table-one-row-group-at-a-time).
 
 **Picking `rows_per_group`:** `parquet_get_chunk_size(writer, chunk_size)` returns a usable
 row-group size at any point after `parquet_open_writer` — your own explicit `chunk_size=` if you

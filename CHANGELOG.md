@@ -159,17 +159,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   values names the stored type in the abort message, and `%print_stat(all=.true.)` shows it in that
   column's `kind` cell instead of `PK_NONE`. See
   [What a column is actually stored as](doc/pages/io/reading.md#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type).
-- **The schema a schema-less table write builds is reachable: `parquet_derive_schema` and
-  `parquet_open_writer_like`.** `call parquet_derive_schema(t, s, [name])` hands back the
-  `parquet_schema` a schema-less `parquet_write_table(t, file)` builds — one field per resident
-  column, `auto` sizes, a `unit:` where the column has one, `parquet_row_index` never — parsed and
-  ready for `%set_protected`, `%add_metadata` or `parquet_open_writer`.
-  `call parquet_open_writer_like(writer, file, t)` derives it and opens the writer in one call,
-  taking `schema=`, `copy_metadata=`/`metadata_keys=` and every writer option under
-  `parquet_write_table`'s names. `parquet_get_column_names` also takes a writer, listing the
-  internal name of every field its schema declares in schema order, and
-  `parquet_is_column_enabled(writer, name)` is public. See
-  [The schema a schema-less write builds](doc/pages/tables/table-write.md#the-schema-a-schema-less-write-builds-parquet_derive_schema-and-parquet_open_writer_like).
+- **A table can be written one row group at a time: `parquet_write_table_chunk`,
+  `parquet_derive_schema` and `parquet_open_writer_like`.**
+  `call parquet_write_table_chunk(writer, t, [row_mask])` writes a table's rows as one complete
+  row group of an open writer, every column the writer's schema declares, so a loop over the row
+  groups of a file larger than memory can open each as a table, transform it and write it out.
+  A validity mask is passed for every column that takes one, whether or not it holds a Null, so a
+  Null may appear in any row group; `protected_cols:` opts a column out.
+  `call parquet_derive_schema(t, s, [name])` hands back the `parquet_schema` a schema-less
+  `parquet_write_table(t, file)` builds — one field per resident column, `auto` sizes, a `unit:`
+  where the column has one, `parquet_row_index` never — parsed and ready for `%set_protected`,
+  `%add_metadata` or `parquet_open_writer`; `call parquet_open_writer_like(writer, file, t)`
+  derives it and opens the writer in one call, taking `schema=`, `copy_metadata=`/`metadata_keys=`
+  and every writer option under `parquet_write_table`'s names. `parquet_get_column_names` also
+  takes a writer, listing the internal name of every field its schema declares in schema order,
+  and `parquet_is_column_enabled(writer, name)` is public. See
+  [Writing a table one row group at a time](doc/pages/tables/table-write.md#writing-a-table-one-row-group-at-a-time).
 
 ### Changed
 

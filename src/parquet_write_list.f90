@@ -220,7 +220,7 @@ contains
         ! null elements -- which is exactly the invariant build_field's safety comment forbids.
         ! The row half is parquet_check_protected's ordinary job; the element half is checked here
         ! so that its message names which level failed.
-        call parquet_check_protected(writer, name, row_valid(1_int64:nrows), protected)
+        call parquet_check_protected(writer, name, row_valid(1_int64:nrows), protected, context=context)
         if (protected .and. any_elem_null) then
             error stop context // ": column '" // trim(name) // &
                 "' is protected (extra: protected_cols:) and cannot contain Null values" // &

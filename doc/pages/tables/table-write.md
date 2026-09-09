@@ -332,7 +332,42 @@ survives detaching for the same reason. To see everything a file carries, before
 table, use
 [`parquet_get_metadata_items`](../io/reading.html#listing-every-metadata-entry).
 
-## The schema a schema-less write builds: `parquet_derive_schema` and `parquet_open_writer_like`
+## Writing a table one row group at a time
+
+`parquet_write_table` holds the whole output in memory as one table. For a result larger than
+memory — a catalogue transformed row group by row group — the same write is available one row group
+at a time: open a writer whose columns are the table's, hand it one table per row group, close it.
+Three calls make that a loop with no schema written by hand:
+
+```fortran
+type(parquet_writer) :: w
+integer(int64), allocatable :: b(:,:)
+integer :: rg
+
+call parquet_table_row_group_bounds("in.parquet", b)
+do rg = 1, int(size(b, 2))
+    block
+        type(parquet_table) :: t
+        logical, allocatable :: keep(:)
+        call parquet_open_table(t, "in.parquet", b(1, rg), b(2, rg))
+        call derive_columns(t)                       ! your own work on this row group
+        allocate(keep(t%nrows()))
+        call t%row_mask("mag <= 21.5", keep)
+        if (rg == 1) call parquet_open_writer_like(w, "out.parquet", t)
+        call parquet_write_table_chunk(w, t, row_mask=keep)
+    end block
+end do
+call parquet_close_writer(w)
+```
+
+The writer is opened from the first prepared chunk, because that is the first moment the derived
+columns exist; every later chunk has the same columns; and `row_mask=` is passed on every iteration
+or on none. The output's columns are the ones **resident** at the open — `parquet_derive_schema`
+reads nothing — so an input column the work never touched is in the file only if `t%materialize`
+read it before the open. From then on, a chunk's unread column is read by the chunk write itself,
+because the schema names it.
+
+### The schema a schema-less write builds: `parquet_derive_schema`
 
 A schema-less write [builds a schema internally](#writing-without-a-schema) from the resident
 columns. `parquet_derive_schema` hands that schema back, so it can be adjusted and used with the
@@ -364,8 +399,11 @@ Omitted, it is the stem of the file the table was opened from, or `table` for on
 A table with no resident column is an error rather than an empty schema, because MAML has no way to
 declare zero fields; materialize something first.
 
-**`parquet_open_writer_like` does the derive and the open in one call**, and takes every writer
-option `parquet_write_table` takes, under the same name and with the same default:
+### Opening the writer from a table: `parquet_open_writer_like`
+
+`parquet_open_writer_like` does the derive and the open in one call, and takes every writer option
+`parquet_write_table` takes, under the same name and with the same default (the brackets mark the
+optional arguments, as [above](#writer-options)):
 
 `call parquet_open_writer_like(writer, filename, table, [schema], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite])`
 
@@ -391,3 +429,48 @@ call parquet_close_writer(w)
 Once the writer is open, `parquet_get_column_names(writer, names)` and
 `parquet_is_column_enabled(writer, name)` report what it declares — see [Writer
 options](../io/writing.html#writer-options) in the I/O guide.
+
+### One table, one row group: `parquet_write_table_chunk`
+
+`call parquet_write_table_chunk(writer, table, [row_mask])`
+
+writes `table`'s rows as **one complete row group** of an open writer: one
+[`parquet_new_row_group`](../io/writing.html#streamingchunked-writes), one
+`parquet_write_column_chunk` per column the writer declares, one `parquet_finish_row_group`. Call
+it once per row group, as many times as there are row groups, on a writer with no row group open;
+close the writer as usual.
+
+- **The columns are the writer's, under `parquet_write_table`'s rules.** Every enabled field of
+  the writer's schema is written, in schema order; a field disabled with
+  `%set_column_unavailable` is skipped and the table need not carry it; the lookup key is the
+  internal name, so a `col_map:` rename is applied by the writer on the way out. A field naming a
+  column the table does not have is an error. A column the table has but has not read is read by
+  the call — the schema naming it is the request — and stays resident; there is no `release=`,
+  since the next row group is another table (`%evict_column` if you want it gone).
+- **A schema-less writer works too**, with the schema-less write's rule: every resident column in
+  slot order, `parquet_row_index` never, the file's columns fixed by the first row group. Pass an
+  explicit `chunk_size=` to such a writer, as the I/O guide advises.
+- **The first row group fixes the file.** Every column that will ever appear must be in the first
+  row group, and every later chunk must have the same columns. A column that becomes resident only
+  later is refused by the writer, naming the column.
+- **A validity mask is passed for every column that takes one, whether or not the column holds a
+  Null.** This is the one place a table write deliberately does what a hand-written loop need not.
+  A streamed column's nullability is fixed by its first row group from whether a mask was passed,
+  and every later row group must match — so a mask passed only when a Null happens to be present
+  would make a later Null abort rows away from anything you did wrong. The always-present mask
+  costs measurably more than an unmasked write (one mask per column per row group, plus the null
+  bitmap the writer builds from it; `bench/benchmark_table.f90` measures it). Declaring a column
+  `protected_cols:` — `s%set_protected(name)` on the derived schema — removes the cost and the
+  nullability question together: the writer drops a protected column's all-`.true.` mask, stores
+  the field non-nullable, and a Null in it is an error naming the column, never a corrupt file.
+- **`row_mask=`** (`size(row_mask) == table%nrows()`) drops every `.false.` row from the output
+  entirely, per chunk, under
+  [`parquet_write_chunk_row_mask`](../io/writing.html#row-groups)'s rules: used on a writer's
+  first row group, it must be used on every one, and it is unavailable once a column was written
+  whole with `parquet_write_column`. A Null still occupies a row; a dropped row leaves no trace.
+- **A table with no rows is an error**, because a Parquet row group holds at least one row; skip
+  the call for an empty result. A row group already open is refused by the writer, naming
+  `parquet_finish_row_group` as the call that has to come first.
+- **One thread, in order.** The call inherits the writer's rule: one writer's row groups are
+  written from one thread, in row-group order. Parallelize the work that produces each chunk, not
+  the write.

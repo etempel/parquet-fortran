@@ -2479,7 +2479,15 @@ contains
             new_unittest("parquet_derive_schema on a table with no resident column aborts", &
                 test_derive_schema_needs_a_resident_column_aborts), &
             new_unittest("parquet_open_writer_like on a table with no resident column aborts", &
-                test_open_writer_like_needs_a_resident_column_aborts) &
+                test_open_writer_like_needs_a_resident_column_aborts), &
+            new_unittest("parquet_write_table_chunk on a table with no rows aborts", &
+                test_write_table_chunk_zero_rows_aborts), &
+            new_unittest("parquet_write_table_chunk with a row group already open aborts with the writer's message", &
+                test_write_table_chunk_row_group_already_open_aborts), &
+            new_unittest("parquet_write_table_chunk through a schema naming a column the table lacks aborts", &
+                test_write_table_chunk_schema_names_a_missing_column_aborts), &
+            new_unittest("a Null in a protected column aborts a chunk write, naming parquet_write_column_chunk", &
+                test_write_table_chunk_protected_null_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19]
     end subroutine collect_tests_parquet_errors
@@ -12871,6 +12879,91 @@ contains
             "parquet_open_writer_like: this table has no resident column to derive a schema from", found)
         call check(error, found, "the abort must name parquet_open_writer_like and the missing resident column")
     end subroutine test_open_writer_like_needs_a_resident_column_aborts
+
+    !> The zero-row refusal is the chunk write's own; the control is a two-row chunk first.
+    subroutine test_write_table_chunk_zero_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("write_table_chunk_zero_rows", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "parquet_write_table_chunk on a table with no rows was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "control: a two-row table was written as a row group", found)
+        call check(error, found, "the control must write a row group first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_write_table_chunk: this table has no rows", found)
+        call check(error, found, "the abort must name parquet_write_table_chunk and the empty table")
+    end subroutine test_write_table_chunk_zero_rows_aborts
+
+    !> The already-open refusal is the writer's, kept with its own message.
+    subroutine test_write_table_chunk_row_group_already_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("write_table_chunk_row_group_already_open", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "a chunk write into a writer with a row group open was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "control: a chunk was written while no row group was open", found)
+        call check(error, found, "the control must write a chunk first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_new_row_group: a row group is already open -- call parquet_finish_row_group first", found)
+        call check(error, found, "the abort must be the writer's own, naming the call that has to come first")
+    end subroutine test_write_table_chunk_row_group_already_open_aborts
+
+    !> The shared locator names the calling procedure: the chunk write, not parquet_write_table.
+    subroutine test_write_table_chunk_schema_names_a_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("write_table_chunk_schema_names_a_missing_column", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "a chunk write through a schema naming a missing column was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "control: a table holding every declared column was written as a row group", found)
+        call check(error, found, "the control must write through the same schema first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_write_table_chunk: the schema declares a column the table does not have", found)
+        call check(error, found, "the abort must name parquet_write_table_chunk, not parquet_write_table")
+    end subroutine test_write_table_chunk_schema_names_a_missing_column_aborts
+
+    !> The protected check names the chunk specific it was reached through.
+    subroutine test_write_table_chunk_protected_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("write_table_chunk_protected_null", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "a Null in a protected column was expected to abort a chunk write")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "control: a Null-free chunk of a protected column was written", found)
+        call check(error, found, "the control must write a Null-free chunk first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_write_column_chunk: column 'x' is protected (extra: protected_cols:) and cannot contain Null values", &
+            found)
+        call check(error, found, "the abort must name parquet_write_column_chunk and the protected column")
+    end subroutine test_write_table_chunk_protected_null_aborts
 
     subroutine test_set_max_threads_below_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error

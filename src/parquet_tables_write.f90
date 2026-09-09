@@ -19,6 +19,12 @@
 !! generated schema declares `col_size:`/`array_size:` as `auto`, so the writer resolves them from
 !! the data exactly as it would with no schema at all -- and because the sidecar is emitted at
 !! CLOSE, it records the resolved values rather than `auto`.
+!!
+!! **A row-group-at-a-time write (`parquet_write_table_chunk`) drives the SAME dispatch.**
+!! `write_one_column` takes a `chunked` flag and each kind's arm chooses between
+!! `parquet_write_column` and `parquet_write_column_chunk`; a second copy of the dispatch would be
+!! free to drift from the first. The one deliberate difference between the two paths -- the chunked
+!! one passes a validity mask whether or not the column holds a Null -- is explained there.
 submodule (parquet_tables) parquet_tables_write
     implicit none
     !
@@ -153,6 +159,65 @@ contains
         end if
     end procedure parquet_open_writer_like
     !
+    !> Writes `table`'s rows as one complete row group of an open writer -- see the interface's
+    !! doc-comment for the contract, and `write_one_column` for the one place this path
+    !! deliberately differs from `parquet_write_table` (the always-present validity mask).
+    !!
+    !! The column set is the WRITER's, asked for through its public query rather than walked from
+    !! a schema object this call never sees: every declared field in schema order, the disabled
+    !! and deactivated ones skipped, each looked up in the table under its internal name exactly
+    !! as `write_through_schema` does. A schema-less writer answers no names and gets the
+    !! schema-less table write's own rule -- every resident column in slot order, the row index
+    !! never -- through the same predicate `build_table_schema` uses, so the two cannot disagree
+    !! about what a schema-less write takes.
+    !!
+    !! Only the zero-row refusal is this procedure's own. Every other failure is the writer's and
+    !! keeps the writer's message, deliberately: a writer that is not open, a row group already
+    !! open (the message names the call that has to come first), a mask whose size is not the row
+    !! count, a mask introduced or dropped after the first row group, a column absent from the
+    !! first row group.
+    module procedure parquet_write_table_chunk
+        character(len=:), allocatable :: names(:), fname, sfx
+        integer :: i, idx
+        integer(int64) :: nrows
+        !
+        call table_check_open(table, "parquet_write_table_chunk")
+        nrows = table%nrows()
+        if (nrows == 0_int64) then
+            call table_context_suffix(table%cache, "", sfx)
+            error stop EP // "parquet_write_table_chunk: this table has no rows; a Parquet row group " // &
+                "must hold at least one row (skip the call, or write nothing at all for an empty " // &
+                "result)" // sfx
+        end if
+        ! The query doubles as the writer-open check, with the writer's own message.
+        call parquet_get_column_names(writer, names)
+        call parquet_new_row_group(writer, nrows)
+        ! The per-row-group mask, under the writer's own rules (used on the first row group means
+        ! used on every one; unavailable after a whole-column write; sized to the row count).
+        if (present(row_mask)) call parquet_write_chunk_row_mask(writer, row_mask)
+        if (size(names) > 0) then
+            do i = 1, size(names)
+                fname = trim(names(i))
+                if (.not. parquet_is_column_enabled(writer, fname)) cycle
+                call locate_column_to_write(table, fname, "parquet_write_table_chunk", idx)
+                ! A column the caller never read is read here, as the whole-table write reads it:
+                ! the schema naming it is the request. Nothing is released afterwards -- the next
+                ! row group is another table, and this one's residency is the caller's to manage.
+                call table_touch(table%cache, table_scope_of(table), idx, "parquet_write_table_chunk")
+                call write_one_column(writer, table, idx, fname, chunked=.true.)
+            end do
+        else
+            do idx = 1, table%cache%ncols
+                if (.not. schemaless_writes_slot(table%cache%cols(idx))) cycle
+                ! Copied out first: the name is reached through the table, and a component and
+                ! its parent may not both be actual arguments of one call.
+                fname = table%cache%cols(idx)%name
+                call write_one_column(writer, table, idx, fname, chunked=.true.)
+            end do
+        end if
+        call parquet_finish_row_group(writer)
+    end procedure parquet_write_table_chunk
+    !
     !> Parses a caller-supplied schema that was built with `%init`/`%add_field` and never parsed,
     !! and refuses one that was never built at all; `context` is the public procedure's name.
     !!
@@ -251,7 +316,7 @@ contains
         logical, intent(in), optional :: overwrite                 !! allow truncating an existing file.
         logical, intent(in), optional :: release                   !! give back what this write read.
         type(parquet_writer) :: writer
-        character(len=:), allocatable :: fname, sfx
+        character(len=:), allocatable :: fname
         integer :: i, nfields, idx
         logical :: do_release, was_empty
         !
@@ -267,19 +332,7 @@ contains
             ! A schema may deliberately disable a field (set_column_unavailable); skip those
             ! rather than demanding the table carry a column nobody is going to write.
             if (.not. sch%is_column_set(fname)) cycle
-            ! The lookup key is the INTERNAL name. A col_map: rename lives in the schema and is
-            ! applied by the writer on the way out, so nothing here ever sees the output name.
-            idx = table_find(table, fname)
-            if (idx == 0) then
-                call table_context_suffix(table%cache, fname, sfx)
-                error stop EP // "parquet_write_table: the schema declares a column the table " // &
-                    "does not have" // sfx
-            end if
-            if (.not. table%cache%cols(idx)%supported) then
-                call table_context_suffix(table%cache, fname, sfx)
-                error stop EP // "parquet_write_table: the schema declares a column that holds " // &
-                    "no values" // sfx
-            end if
+            call locate_column_to_write(table, fname, "parquet_write_table", idx)
             ! Writing a column the caller never read is a first touch like any other: the schema
             ! naming it IS the request to read it. Nothing has to be pre-materialized to write.
             ! Whether it WAS is the whole of release=: what the caller had already read is theirs
@@ -287,13 +340,36 @@ contains
             ! write names only resident columns, so nothing is ever released on that path.)
             was_empty = table%cache%cols(idx)%residency == RES_EMPTY
             call table_touch(table%cache, table_scope_of(table), idx, "parquet_write_table")
-            call write_one_column(writer, table, idx, fname)
+            call write_one_column(writer, table, idx, fname, chunked=.false.)
             ! Released here rather than after the loop, so peak residency is one column rather
             ! than every column the schema names.
             if (do_release .and. was_empty) call release_written_column(table%cache, idx)
         end do
         call parquet_close_writer(writer)
     end subroutine write_through_schema
+    !
+    !> Finds the slot that field `fname` names, refusing a field the table has no column for and
+    !! one whose column holds no values; `context` is the public procedure's name, so that the
+    !! same two refusals name whichever table write raised them.
+    subroutine locate_column_to_write(table, fname, context, idx)
+        type(parquet_table), intent(in) :: table   !! the table being written.
+        character(len=*), intent(in) :: fname      !! the field's internal name.
+        character(len=*), intent(in) :: context    !! calling procedure, for the message.
+        integer, intent(out) :: idx                !! the slot; never 0.
+        character(len=:), allocatable :: sfx
+        !
+        ! The lookup key is the INTERNAL name. A col_map: rename lives in the schema and is
+        ! applied by the writer on the way out, so nothing here ever sees the output name.
+        idx = table_find(table, fname)
+        if (idx == 0) then
+            call table_context_suffix(table%cache, fname, sfx)
+            error stop EP // context // ": the schema declares a column the table does not have" // sfx
+        end if
+        if (.not. table%cache%cols(idx)%supported) then
+            call table_context_suffix(table%cache, fname, sfx)
+            error stop EP // context // ": the schema declares a column that holds no values" // sfx
+        end if
+    end subroutine locate_column_to_write
     !
     !> Builds the schema a SCHEMA-LESS write uses: one field per resident column, in slot order,
     !! under the column's own internal name.
@@ -329,9 +405,7 @@ contains
         call sch%init(tname)
         do i = 1, table%cache%ncols
             associate (slot => table%cache%cols(i))
-                if (slot%residency /= RES_FULL) cycle
-                if (.not. slot%supported) cycle
-                if (slot%name == PARQUET_ROW_INDEX) cycle
+                if (.not. schemaless_writes_slot(slot)) cycle
                 call schema_type_token(slot, dtype)
                 is_vec = slot%width > 1
                 is_str = slot%declared_kind == PK_STRING .or. slot%declared_kind == PK_STRING_VEC
@@ -368,6 +442,21 @@ contains
         ! built. MAML still requires at least one field, so the caller checks `nfields` and takes
         ! the empty-file path instead of this one.
     end subroutine build_table_schema
+    !
+    !> Whether a schema-less write takes `slot`: resident, supported, and not the row index --
+    !! the three rules `build_table_schema`'s doc-comment gives. One predicate for the two callers
+    !! that must agree on it: `build_table_schema`, which decides what a schema-less
+    !! `parquet_write_table` declares, and `parquet_write_table_chunk`'s schema-less arm, which
+    !! decides what such a chunk writes.
+    pure logical function schemaless_writes_slot(slot) result(yes)
+        type(parquet_table_column), intent(in) :: slot !! the descriptor.
+        !
+        yes = .false.
+        if (slot%residency /= RES_FULL) return
+        if (.not. slot%supported) return
+        if (slot%name == PARQUET_ROW_INDEX) return
+        yes = .true.
+    end function schemaless_writes_slot
     !
     !> Writes a valid parquet file with no columns and no rows, for a schema-less write of a table
     !! that holds nothing resident.
@@ -762,16 +851,36 @@ contains
         end do
     end function schema_declares_key
     !
-    !> Writes slot `idx` through the `parquet_write_column` specific matching its stored kind.
+    !> Writes slot `idx` through the `parquet_write_column` specific matching its stored kind --
+    !! or, with `chunked`, through the `parquet_write_column_chunk` specific, as one row group's
+    !! worth of the column. ONE dispatch for both paths, deliberately: a second copy of the
+    !! twenty-one arms would be free to drift from this one, and drift between the table write
+    !! and a hand-written one is exactly what `feature_risks.md` Risk-8 is about.
     !!
     !! Validity is passed as `is_valid=` for every kind that accepts one; the temporal kinds take
-    !! no mask because their null state lives inside each element, and the string kind carries
-    !! its own validity inside the `parquet_string_column`.
-    subroutine write_one_column(writer, table, idx, name)
+    !! no mask because their null state lives inside each element, the string kind carries its
+    !! own validity inside the `parquet_string_column`, and so does a container.
+    !!
+    !! **The chunked path passes a mask whether or not the column holds a Null** (`force` on the
+    !! validity helpers), and this is the one place a table write deliberately does what a
+    !! hand-written loop need not. A streamed column's Arrow field is fixed nullable or not by
+    !! its FIRST row group, from whether a mask was passed, and every later row group must use
+    !! the same form -- a mismatch is a hard C++ abort in both directions. Carry the whole-column
+    !! path's null-free-means-no-mask rule into a loop and that abort becomes data-dependent: row
+    !! group 1 happens to be Null-free, row group 7 holds one Null, and the write dies rows away
+    !! from anything the caller did wrong. So the mask is always there, the field is always
+    !! nullable, and a Null may arrive in any row group. The cost is one mask per column per row
+    !! group plus the null bitmap the writer builds from it (Risk-8's measured ~2.5x, bounded to
+    !! one row group's worth); a column declared `protected_cols:` pays neither, because
+    !! `parquet_check_protected` erases a protected column's all-`.true.` mask before the write
+    !! and the field is stored non-nullable -- a Null in it is then an abort naming the column
+    !! rather than a corrupt file. `feature_risks.md` Risk-226 pins the rule.
+    subroutine write_one_column(writer, table, idx, name, chunked)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         type(parquet_table), intent(in) :: table      !! the table being written.
         integer, intent(in) :: idx                    !! slot to write.
         character(len=*), intent(in) :: name          !! the column's internal name.
+        logical, intent(in) :: chunked                !! .true.: one row group of an open writer.
         !
         integer(int32), pointer :: p_i32(:), p_i32v(:,:)
         integer(int64), pointer :: p_i64(:), p_i64v(:,:)
@@ -784,114 +893,201 @@ contains
         type(parquet_string_column), pointer :: p_str
         class(parquet_container_column), pointer :: p_cont
         logical, allocatable :: valid(:), validv(:,:)
-        character(len=:), allocatable :: sfx, kname, chr(:,:)
+        character(len=:), allocatable :: sfx, kname, who, chr(:,:)
         !
         associate (col => table%cache%cols(idx)%values)
             select case (col%kindof())
             case (PK_INT32)
                 call col%data_ptr(p_i32)
-                call scalar_validity(table, idx, valid)
-                call parquet_write_column(writer, name, p_i32, is_valid=valid)
+                call scalar_validity(table, idx, valid, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_i32, is_valid=valid)
+                else
+                    call parquet_write_column(writer, name, p_i32, is_valid=valid)
+                end if
             case (PK_INT64)
                 call col%data_ptr(p_i64)
-                call scalar_validity(table, idx, valid)
-                call parquet_write_column(writer, name, p_i64, is_valid=valid)
+                call scalar_validity(table, idx, valid, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_i64, is_valid=valid)
+                else
+                    call parquet_write_column(writer, name, p_i64, is_valid=valid)
+                end if
             case (PK_FLOAT32)
                 call col%data_ptr(p_f32)
-                call scalar_validity(table, idx, valid)
-                call parquet_write_column(writer, name, p_f32, is_valid=valid)
+                call scalar_validity(table, idx, valid, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_f32, is_valid=valid)
+                else
+                    call parquet_write_column(writer, name, p_f32, is_valid=valid)
+                end if
             case (PK_FLOAT64)
                 call col%data_ptr(p_f64)
-                call scalar_validity(table, idx, valid)
-                call parquet_write_column(writer, name, p_f64, is_valid=valid)
+                call scalar_validity(table, idx, valid, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_f64, is_valid=valid)
+                else
+                    call parquet_write_column(writer, name, p_f64, is_valid=valid)
+                end if
             case (PK_LOGICAL)
                 call col%data_ptr(p_bool)
-                call scalar_validity(table, idx, valid)
-                call parquet_write_column(writer, name, p_bool, is_valid=valid)
+                call scalar_validity(table, idx, valid, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_bool, is_valid=valid)
+                else
+                    call parquet_write_column(writer, name, p_bool, is_valid=valid)
+                end if
             case (PK_STRING)
                 call col%string_column(p_str)
-                call parquet_write_column(writer, name, p_str)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_str)
+                else
+                    call parquet_write_column(writer, name, p_str)
+                end if
             case (PK_DATE)
                 call col%data_ptr(p_dt)
-                call parquet_write_column(writer, name, p_dt)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_dt)
+                else
+                    call parquet_write_column(writer, name, p_dt)
+                end if
             case (PK_TIME)
                 call col%data_ptr(p_tm)
-                call parquet_write_column(writer, name, p_tm)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_tm)
+                else
+                    call parquet_write_column(writer, name, p_tm)
+                end if
             case (PK_TIMESTAMP)
                 call col%data_ptr(p_ts)
-                call parquet_write_column(writer, name, p_ts)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_ts)
+                else
+                    call parquet_write_column(writer, name, p_ts)
+                end if
             case (PK_INT32_VEC)
                 call col%data_ptr(p_i32v)
-                call vector_validity(table, idx, validv)
-                call parquet_write_column(writer, name, p_i32v, is_valid=validv)
+                call vector_validity(table, idx, validv, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_i32v, is_valid=validv)
+                else
+                    call parquet_write_column(writer, name, p_i32v, is_valid=validv)
+                end if
             case (PK_INT64_VEC)
                 call col%data_ptr(p_i64v)
-                call vector_validity(table, idx, validv)
-                call parquet_write_column(writer, name, p_i64v, is_valid=validv)
+                call vector_validity(table, idx, validv, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_i64v, is_valid=validv)
+                else
+                    call parquet_write_column(writer, name, p_i64v, is_valid=validv)
+                end if
             case (PK_FLOAT32_VEC)
                 call col%data_ptr(p_f32v)
-                call vector_validity(table, idx, validv)
-                call parquet_write_column(writer, name, p_f32v, is_valid=validv)
+                call vector_validity(table, idx, validv, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_f32v, is_valid=validv)
+                else
+                    call parquet_write_column(writer, name, p_f32v, is_valid=validv)
+                end if
             case (PK_FLOAT64_VEC)
                 call col%data_ptr(p_f64v)
-                call vector_validity(table, idx, validv)
-                call parquet_write_column(writer, name, p_f64v, is_valid=validv)
+                call vector_validity(table, idx, validv, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_f64v, is_valid=validv)
+                else
+                    call parquet_write_column(writer, name, p_f64v, is_valid=validv)
+                end if
             case (PK_LOGICAL_VEC)
                 call col%data_ptr(p_boolv)
-                call vector_validity(table, idx, validv)
-                call parquet_write_column(writer, name, p_boolv, is_valid=validv)
+                call vector_validity(table, idx, validv, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_boolv, is_valid=validv)
+                else
+                    call parquet_write_column(writer, name, p_boolv, is_valid=validv)
+                end if
             case (PK_STRING_VEC)
                 ! No compact rank-2 string write path exists, so this goes through the
                 ! fixed-width form -- the same asymmetry the read side has.
                 call table%get(name, chr)
-                call vector_validity(table, idx, validv)
-                call parquet_write_column(writer, name, chr, is_valid=validv)
+                call vector_validity(table, idx, validv, chunked)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, chr, is_valid=validv)
+                else
+                    call parquet_write_column(writer, name, chr, is_valid=validv)
+                end if
             case (PK_DATE_VEC)
                 call col%data_ptr(p_dtv)
-                call parquet_write_column(writer, name, p_dtv)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_dtv)
+                else
+                    call parquet_write_column(writer, name, p_dtv)
+                end if
             case (PK_TIME_VEC)
                 call col%data_ptr(p_tmv)
-                call parquet_write_column(writer, name, p_tmv)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_tmv)
+                else
+                    call parquet_write_column(writer, name, p_tmv)
+                end if
             case (PK_TIMESTAMP_VEC)
                 call col%data_ptr(p_tsv)
-                call parquet_write_column(writer, name, p_tsv)
+                if (chunked) then
+                    call parquet_write_column_chunk(writer, name, p_tsv)
+                else
+                    call parquet_write_column(writer, name, p_tsv)
+                end if
             case (PK_LIST, PK_MAP, PK_STRUCT)
                 ! No `is_valid=`, exactly as the temporal kinds take none: a container carries its
                 ! own per-row nullness inside itself, and adopt_container deliberately leaves the
                 ! surrounding parquet_column's bitmap unallocated so there is only one answer.
                 call parquet_column_container(col, p_cont)
-                call write_container_column(writer, name, p_cont)
+                call write_container_column(writer, name, p_cont, chunked)
             case default
                 ! Not reachable through the public API: by the time write_one_column runs, the
-                ! caller (parquet_write_table) has already rejected an unsupported slot and
-                ! table_touch has resolved/materialized this one, so col%kindof() is always one
-                ! of the 18 kinds handled above.
+                ! caller has already rejected an unsupported slot and table_touch has
+                ! resolved/materialized this one, so col%kindof() is always one of the 18 kinds
+                ! handled above.
+                who = "parquet_write_table" ! GCOVR_EXCL_LINE
+                if (chunked) who = "parquet_write_table_chunk" ! GCOVR_EXCL_LINE
                 call table_context_suffix(table%cache, name, sfx) ! GCOVR_EXCL_LINE
                 call parquet_kind_name(col%kindof(), kname) ! GCOVR_EXCL_LINE
-                error stop EP // "parquet_write_table: column kind " // kname // & ! GCOVR_EXCL_LINE
+                error stop EP // who // ": column kind " // kname // & ! GCOVR_EXCL_LINE
                     " cannot be written" // sfx ! GCOVR_EXCL_LINE
             end select
         end associate
     end subroutine write_one_column
     !
-    !> Writes a container column through the `parquet_write_column` specific matching its concrete
-    !! type.
+    !> Writes a container column through the `parquet_write_column` (or, with `chunked`, the
+    !! `parquet_write_column_chunk`) specific matching its concrete type.
     !!
     !! The downcast is unavoidable and belongs here rather than at the call site: the three
-    !! `parquet_write_column` specifics take a `type(parquet_list_column)` / `type(parquet_map_column)`
+    !! specifics of either generic take a `type(parquet_list_column)` / `type(parquet_map_column)`
     !! / `type(parquet_struct_column)`, so a generic reference needs the concrete type to resolve.
-    subroutine write_container_column(writer, name, c)
+    subroutine write_container_column(writer, name, c, chunked)
         type(parquet_writer), intent(inout) :: writer            !! open writer.
         character(len=*), intent(in) :: name                     !! the column's internal name.
         class(parquet_container_column), pointer, intent(in) :: c !! the container to write.
+        logical, intent(in) :: chunked                           !! .true.: one row group of an open writer.
         !
         select type (c)
         type is (parquet_list_column)
-            call parquet_write_column(writer, name, c)
+            if (chunked) then
+                call parquet_write_column_chunk(writer, name, c)
+            else
+                call parquet_write_column(writer, name, c)
+            end if
         type is (parquet_map_column)
-            call parquet_write_column(writer, name, c)
+            if (chunked) then
+                call parquet_write_column_chunk(writer, name, c)
+            else
+                call parquet_write_column(writer, name, c)
+            end if
         type is (parquet_struct_column)
-            call parquet_write_column(writer, name, c)
+            if (chunked) then
+                call parquet_write_column_chunk(writer, name, c)
+            else
+                call parquet_write_column(writer, name, c)
+            end if
         class default ! GCOVR_EXCL_START -- unreachable: adopt_container is the only writer of a
             ! container kind and takes the kind FROM the container, so a PK_LIST/PK_MAP/PK_STRUCT
             ! column always holds the matching concrete type.
@@ -901,7 +1097,7 @@ contains
     end subroutine write_container_column
     !
     !> Builds a per-row validity mask for a scalar column, or leaves `valid` UNALLOCATED when the
-    !! column holds no nulls.
+    !! column holds no nulls -- unless `force`, which hands back an all-`.true.` mask instead.
     !!
     !! Every call site passes the result straight on as `is_valid=`, and an unallocated allocatable
     !! actual makes an `optional` dummy absent (F2018 15.5.2.12) -- so a null-free column reaches
@@ -910,28 +1106,42 @@ contains
     !! mask instead costs an nrows-long allocation here AND makes the writer build an Arrow null
     !! bitmap it did not need, which together were measured as the whole of `parquet_write_table`'s
     !! ~2.5x gap against a hand-written per-column loop.
-    subroutine scalar_validity(table, idx, valid)
+    !!
+    !! `force` is the chunked path's, and buys exactly that cost on purpose -- see
+    !! `write_one_column` for why a row group's mask has to be present whether or not it carries
+    !! a Null. Never pass it from the whole-column path.
+    subroutine scalar_validity(table, idx, valid, force)
         type(parquet_table), intent(in) :: table            !! the table.
         integer, intent(in) :: idx                          !! slot index.
         logical, allocatable, intent(out) :: valid(:)       !! .true. where the row is not null; see above.
+        logical, intent(in) :: force                        !! .true.: an all-.true. mask, never unallocated.
         !
         call table%cache%cols(idx)%values%row_validity(valid)
+        if (.not. force) return
+        if (allocated(valid)) return
+        allocate(valid(table%cache%cols(idx)%values%length()))
+        valid = .true.
     end subroutine scalar_validity
     !
     !> Builds a per-element validity mask for a vector column, shaped (width, nrows) to match
     !! the stored orientation -- or leaves `valid` unallocated when there are no nulls, exactly as
-    !! `scalar_validity` does and for the same reason.
+    !! `scalar_validity` does and for the same reason, with the same `force` for the chunked path.
     !!
     !! A pass-through, and that is the point: `parquet_column` stores validity per element and
     !! `parquet_write_column` accepts it per element, so the writer records exactly the nulls the
     !! table holds. It used to read the row bit and broadcast it back across the row, which turned
     !! one null element into a null row in the output file.
-    subroutine vector_validity(table, idx, valid)
+    subroutine vector_validity(table, idx, valid, force)
         type(parquet_table), intent(in) :: table            !! the table.
         integer, intent(in) :: idx                          !! slot index.
         logical, allocatable, intent(out) :: valid(:,:)     !! .true. where the element is not null.
+        logical, intent(in) :: force                        !! .true.: an all-.true. mask, never unallocated.
         !
         call table%cache%cols(idx)%values%element_validity(valid)
+        if (.not. force) return
+        if (allocated(valid)) return
+        allocate(valid(table%cache%cols(idx)%values%colwidth(), table%cache%cols(idx)%values%length()))
+        valid = .true.
     end subroutine vector_validity
     !
 end submodule parquet_tables_write

@@ -359,7 +359,7 @@ contains
         ! is exactly the invariant build_field's safety comment forbids. The row half is
         ! parquet_check_protected's ordinary job; the field half is checked below so that its
         ! message names which level, and which field, failed.
-        call parquet_check_protected(writer, name, row_valid(1_int64:nrows), protected)
+        call parquet_check_protected(writer, name, row_valid(1_int64:nrows), protected, context=context)
         call parquet_check_qc_miss(writer, name, row_valid(1_int64:nrows))
 
         if (any_row_null) then

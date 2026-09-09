@@ -307,7 +307,7 @@ contains
             vmask => valid_c
         end if
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask, protected)
+            call parquet_check_protected(writer, name, vmask, protected, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, vmask)
         end if
         call parquet_check_qc_string(writer, name, flat(1:nitems), vmask)
@@ -379,7 +379,7 @@ contains
             do i = 1_int64, nrows
                 is_valid_flat(i) = .not. col%is_null(i)
             end do
-            call parquet_check_protected(writer, name, is_valid_flat)
+            call parquet_check_protected(writer, name, is_valid_flat, context="parquet_write_column_chunk")
             call parquet_check_qc_miss(writer, name, is_valid_flat)
         end if
         call parquet_check_qc_string_compact(writer, name, col)

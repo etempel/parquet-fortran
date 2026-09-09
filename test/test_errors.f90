@@ -660,6 +660,8 @@ contains
                 test_row_mask_unquoted_string_aborts), &
             new_unittest("row_mask: is_nan on an integer column aborts", &
                 test_row_mask_is_nan_on_int_aborts), &
+            new_unittest("row_mask: starts_with on an integer column aborts", &
+                test_row_mask_starts_with_on_int_aborts), &
             new_unittest("row_mask: an unbound @name aborts through the table too", &
                 test_row_mask_unbound_set_aborts), &
             new_unittest("row_mask: a quoted list element on a numeric column aborts", &
@@ -876,6 +878,12 @@ contains
                 test_filter_bool_ordering_not_supported_aborts), &
             new_unittest("filter: is_nan against a non-floating-point column aborts", &
                 test_filter_is_nan_non_float_column_aborts), &
+            new_unittest("filter: starts_with against a non-string column aborts", &
+                test_filter_starts_with_non_string_column_aborts), &
+            new_unittest("filter: an unquoted starts_with pattern aborts", &
+                test_filter_starts_with_unquoted_value_aborts), &
+            new_unittest("filter: starts_with against a date column aborts naming the operator", &
+                test_filter_starts_with_on_temporal_column_aborts), &
             new_unittest("filter: a NaN literal as a comparison value aborts", &
                 test_filter_nan_literal_rejected_aborts), &
             new_unittest("filter: a clause after is_nan with no combinator aborts", &
@@ -10063,6 +10071,15 @@ contains
             required_stderr="is only supported for floating-point columns, and column 'id' is not one")
     end subroutine test_row_mask_is_nan_on_int_aborts
 
+    !> The in-memory engine refuses a matcher on a non-string column, in the reader's words.
+    subroutine test_row_mask_starts_with_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_starts_with_on_int", expect_abort=.true., &
+            failure_message="starts_with on an integer column was expected to abort", &
+            required_stderr="is only supported for string columns, and column 'id' is not one")
+    end subroutine test_row_mask_starts_with_on_int_aborts
+
     subroutine test_row_mask_unbound_set_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -11408,6 +11425,40 @@ contains
             failure_message="is_nan against an integer filter column was expected to abort", &
             required_stderr="only supported for floating-point columns")
     end subroutine test_filter_is_nan_non_float_column_aborts
+
+    !> The three matchers match part of a STRING; a numeric column is refused, naming the operator
+    !> and the column's actual type.
+    subroutine test_filter_starts_with_non_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_starts_with_non_string_column", &
+            expect_abort=.true., &
+            failure_message="starts_with against an integer filter column was expected to abort", &
+            required_stderr="only supported for string columns")
+    end subroutine test_filter_starts_with_non_string_column_aborts
+
+    !> A pattern is a string literal and must be double-quoted, exactly as an equality value is.
+    subroutine test_filter_starts_with_unquoted_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_starts_with_unquoted_value", &
+            expect_abort=.true., &
+            failure_message="an unquoted starts_with pattern was expected to abort", &
+            required_stderr="must be double-quoted")
+    end subroutine test_filter_starts_with_unquoted_value_aborts
+
+    !> The negative control for convert_temporal_filter_values' positive operator test: the message
+    !> must be about starts_with and the column's type, NOT about a malformed ISO-8601 literal. If
+    !> the temporal conversion ever stops skipping the matchers, the pattern below parses as a real
+    !> date and this assertion is what notices.
+    subroutine test_filter_starts_with_on_temporal_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_starts_with_on_temporal_column", &
+            expect_abort=.true., &
+            failure_message="starts_with against a date filter column was expected to abort", &
+            required_stderr="only supported for string columns")
+    end subroutine test_filter_starts_with_on_temporal_column_aborts
 
     !> A bare "nan" parses as a number but can never be a meaningful comparison bound, so it is
     !> rejected with a pointer at the operators that say what the caller meant.

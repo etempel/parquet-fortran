@@ -61,6 +61,8 @@ contains
             new_unittest("row_mask matches the reader on a literal list", test_ab_literal_list), &
             new_unittest("row_mask matches the reader on a bound set", test_ab_bound_set), &
             new_unittest("row_mask matches the reader on is_finite", test_ab_is_finite), &
+            new_unittest("row_mask matches the reader on starts_with/ends_with/contains", &
+                test_ab_string_match), &
             new_unittest("row_mask equals the equality-chain oracle", test_oracle_equality_chain), &
             new_unittest("row_mask reads a column nothing has touched", test_row_mask_touches), &
             new_unittest("row_mask neither mutates nor detaches", test_row_mask_is_a_read), &
@@ -453,6 +455,33 @@ contains
         call expect_rule(error, file, "x is_not_finite"); if (allocated(error)) return
         call expect_rule(error, file, "not (x is_finite)")
     end subroutine test_ab_is_finite
+
+    !> The three substring operators, on both engines.
+    !>
+    !> Risk-198 makes this obligatory rather than optional: the reader answers them in
+    !> eval_filter_clause over Arrow arrays and the table answers them in
+    !> parquet_eval_string_match_leaf over resident storage, and the two bodies do not even look
+    !> alike -- C++ && short-circuits so the length guard is one expression there, while Fortran's
+    !> .and. does not, so the guard has to be a nested if. Nothing but an A/B can see them
+    !> disagree; a single-engine test is satisfied by either one being wrong on a case the fixture
+    !> does not contain.
+    !>
+    !> write_string_fixture stores `"ab "` beside `"ab"`, so the trailing-space value that Risk-199
+    !> exists for is in every rule below. `"aa"` and the empty value keep each rule off the
+    !> degenerate answers expect_rule refuses.
+    subroutine test_ab_string_match(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        character(len=*), parameter :: file = "test_run/test_verbs_string_match.parquet"
+        call write_string_fixture(file)
+        call expect_rule(error, file, 's starts_with "ab"'); if (allocated(error)) return
+        call expect_rule(error, file, 's starts_with "a"'); if (allocated(error)) return
+        ! Only "ab" and "b" end with b -- "ab " ends with the space, which is the one row the two
+        ! engines could differ on if either of them trimmed.
+        call expect_rule(error, file, 's ends_with "b"'); if (allocated(error)) return
+        call expect_rule(error, file, 's contains "b"'); if (allocated(error)) return
+        ! Under `not`, where an engine that answered false instead of unknown would show up.
+        call expect_rule(error, file, 'not (s starts_with "ab")')
+    end subroutine test_ab_string_match
 
     ! ---- Independent oracles and behaviour ------------------------------------------------------
 

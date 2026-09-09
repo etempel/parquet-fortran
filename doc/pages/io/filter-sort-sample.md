@@ -53,18 +53,20 @@ parentheses:
 |---|---|
 | **Precedence** | `not` binds tightest, then `and`, then `or` — so `a or b and c` means `a or (b and c)`, and `not a and b` means `(not a) and b`. Parentheses override. |
 | **Keywords** | `and` / `or` / `not`, in any case (`AND`, `And`, `and`). Only whole tokens are keywords, so a column named `android` or `nothing` is unaffected. Fortran-style `.and.` and C-style `&&` are *not* accepted. |
-| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `in`, `not_in`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`, `is_finite`, `is_not_finite`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. The four value-class operators — `is_nan`/`is_not_nan`/`is_finite`/`is_not_finite` — are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool); any other column type is rejected, since no value of it could ever be a NaN or an infinity. |
-| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). The four value-class operators take no value, and `in`/`not_in` take a **set** rather than a single literal — either the name of one attached with `%bind` (`ID in @wanted`) or a list written out in the rule (`ID in (3, 5, 9)`); see [Membership in a set](#membership-in-a-set-in-and-not_in) below. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
+| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `in`, `not_in`, `starts_with`, `ends_with`, `contains`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`, `is_finite`, `is_not_finite`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. The four value-class operators — `is_nan`/`is_not_nan`/`is_finite`/`is_not_finite` — are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool); any other column type is rejected, since no value of it could ever be a NaN or an infinity. The three matchers — `starts_with`/`ends_with`/`contains` — are accepted only for a `string` column, and take a double-quoted literal pattern; see [Matching part of a string](#matching-part-of-a-string-starts_with-ends_with-and-contains) below. |
+| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). The four value-class operators take no value, and `in`/`not_in` take a **set** rather than a single literal — either the name of one attached with `%bind` (`ID in @wanted`) or a list written out in the rule (`ID in (3, 5, 9)`); see [Membership in a set](#membership-in-a-set-in-and-not_in) below. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. **Trailing spaces in a quoted value are not preserved**: `name == "ab "` asks what `name == "ab"` asks, because a rule's values reach the evaluators in fixed-width slots and are right-trimmed there. A trailing space in the stored *data* is significant as ever — it is only the rule's own literal that cannot carry one. |
 | **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
 | **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. So a filter written as one clause per call means the conjunction of its clauses; write `or` inside a single rule when you want alternatives. |
 | **Limits** | 32 levels of nesting, 1024 expression terms per filter, 64 bound sets per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first three are published constants you can check a rule against beforehand; see [Read-only limits](../operating/settings.html#read-only-limits). |
 
 `between` and wildcard/`like` matching are not supported: the first is shorthand for what the
-grammar already expresses (`x between 1 and 9` is `x >= 1 and x <= 9`), and pattern matching is
-genuinely different work. `in` and `not_in` **are** supported, over a set you attach as an array and
-over a list written out in the rule; a list is not merely shorthand for an `==` chain, because the
-whole set is answered in one pass over the column rather than one pass per member. That is the next
-section.
+grammar already expresses (`x between 1 and 9` is `x >= 1 and x <= 9`), and glob or regular-expression
+matching is genuinely different work. What *is* supported for strings is the literal half of it —
+`starts_with`, `ends_with` and `contains`, over a plain pattern with no wildcard characters in it;
+see [Matching part of a string](#matching-part-of-a-string-starts_with-ends_with-and-contains).
+`in` and `not_in` **are** supported too, over a set you attach as an array and over a list written
+out in the rule; a list is not merely shorthand for an `==` chain, because the whole set is answered
+in one pass over the column rather than one pass per member. That is the next section.
 
 ### Membership in a set: `in` and `not_in`
 
@@ -186,6 +188,56 @@ is, like the filter's own row mask, one of the things that still scale with the 
 one's results** — see [Opening a table](../tables/table-open.html#reading-a-file-larger-than-memory-bounded).
 The in-memory alternatives (`pf_in` then `%filter_rows`, or a semi `%join`) both need the key column
 resident in full and both detach the table, which is exactly the cost `bounded=` exists to avoid.
+
+### Matching part of a string: `starts_with`, `ends_with` and `contains`
+
+Three operators ask where a literal sits inside a `string` column's value, rather than how the whole
+value compares:
+
+```fortran
+call filt%add('field starts_with "S18"')      ! S1801, S1802, ... S1809
+call filt%add('name ends_with "_ok"')         ! ball_ok, point_ok
+call filt%add('note contains "urgent"')       ! anywhere in the value
+```
+
+| rule | keeps the rows whose value |
+|---|---|
+| `s starts_with "p"` | begins with the bytes of `p` |
+| `s ends_with "p"` | ends with the bytes of `p` |
+| `s contains "p"` | holds the bytes of `p` at any position |
+
+**The pattern is a literal, not a wildcard pattern.** `*`, `?`, `%`, `_` and `.` are ordinary
+characters, matched as themselves. There is no escape character, because there is nothing to escape.
+
+**The match is byte-exact and case-sensitive**, exactly like `==` on the same column: `"AB"` does not
+start with `"ab"`, and a value with a trailing space does not end with its last visible letter. (A
+trailing space in the *rule's own* pattern is a different matter — see the **Values** row of the
+grammar table above.)
+
+**A Null row is unknown for all three**, exactly as it is for a comparison. So a Null row is left out
+by `s contains "x"` *and* by `not (s contains "x")`, and `is_null`/`is_not_null` remain the only way
+to select on nullness.
+
+**Negation is spelled with `not`.** There is no `not_starts_with`: write `not (s starts_with "x")`,
+which excludes the non-matching rows and the Null rows alike.
+
+**An empty pattern matches every non-null row** — every value begins with, ends with and contains
+the empty string.
+
+A few practical notes:
+
+- **Only a `string` column.** A numeric, boolean or temporal column is rejected naming the operator
+  and the column's type, since none of them holds text to match against. A `date` column stores an
+  integer, not the text you would write it as, so `day starts_with "2024"` is refused rather than
+  matched against a rendering.
+- **Several prefixes** are an `or`, the way pandas' `str.startswith(("A", "B"))` is:
+  `filt%add('s starts_with "A" or s starts_with "B"')`.
+- **The three combine like any other clause** — with `and`, `or`, `not`, parentheses, a bound set,
+  a sort and a sample — and work on a dotted struct-leaf path (`main.inner.name starts_with "Ali"`)
+  and on a dictionary-encoded column (a pandas `category`) alike.
+- **They do not prune row groups.** A clause using one of them reads every row group the rest of the
+  filter leaves alive; see [Row groups a filter cannot match are never
+  read](#row-groups-a-filter-cannot-match-are-never-read).
 
 ### Null values follow SQL's three-valued logic
 
@@ -312,6 +364,11 @@ This is automatic, has no option to turn it on, and **changes nothing about the 
 same rows come back in the same order, with the same nulls. The only difference is how much of the
 file was read to produce them, and it applies to the whole read, not just the filter's own
 columns: a payload column you read afterwards skips the same row groups.
+
+Not every clause can prune. `starts_with`, `ends_with` and `contains` never do: a row group's
+statistics bound its values from below and above, which says nothing about what sits inside one. A
+filter using them still prunes on its *other* clauses — `s contains "x" and id > 8123456` skips
+whatever the `id` comparison rules out — and reads every row group those leave alive.
 
 ```fortran
 type(parquet_filter) :: filt

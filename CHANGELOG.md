@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Row filters match part of a string: `starts_with`, `ends_with` and `contains`.**
+  `filt%add('field starts_with "S18"')` keeps the rows whose value begins with those bytes,
+  `ends_with` those that end with them, and `contains` those that hold them anywhere. The match is
+  byte-exact and case-sensitive over a `string` column, the pattern is a literal rather than a
+  wildcard pattern, and a Null row is unknown for all three exactly as it is for a comparison.
+  Negation is `not (...)`, and the three compose with `and`/`or`/parentheses, a bound set, a dotted
+  struct-leaf path and a dictionary-encoded column like any other clause. They read every row group
+  the filter's other clauses leave alive, since footer statistics cannot rule out a substring. The
+  same operators work on a `parquet_table` through `%filter_rows`/`%row_mask`. See
+  [Matching part of a
+  string](doc/pages/io/filter-sort-sample.md#matching-part-of-a-string-starts_with-ends_with-and-contains).
 - **The filter, sort-key and read-QC specification types gain `%clear`.** `filt%clear()`,
   `srt%clear()` and `qc%clear()` drop everything added so far — every rule and bound set, every
   sort key and its null placement, every QC entry — returning the object to its initial state so

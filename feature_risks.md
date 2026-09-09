@@ -297,6 +297,8 @@ something a reader is expected to have.
 | [Risk-228](#risk-228--a-sink-whose-col_size-is-left-auto-picks-a-row-group-size-that-counts-every-vector-column-as-width-1) | A sink whose `col_size:` is left `auto` picks a row-group size that counts every vector column as width 1 | 4 — covered |
 | [Risk-229](#risk-229--a-sink-used-from-more-than-one-thread-interleaves-two-row-groups-and-the-file-is-structurally-wrong) | A sink used from more than one thread interleaves two row groups and the file is structurally wrong | 4 — covered |
 | [Risk-230](#risk-230--a-nullable_cols-declaration-that-stops-reaching-the-writer-changes-the-file-and-nothing-fails) | A `nullable_cols:` declaration that stops reaching the writer changes the file, and nothing fails | 4 — covered |
+| [Risk-231](#risk-231--a-filter-operator-that-reaches-cmp_op_of-unhandled-silently-becomes-) | A filter operator that reaches `cmp_op_of` unhandled silently becomes `/=` | 4 — covered |
+| [Risk-232](#risk-232--a-rule-literals-trailing-spaces-are-trimmed-in-two-places-and-untrimming-one-makes-the-engines-disagree) | A rule literal's trailing spaces are trimmed in TWO places, and untrimming one makes the engines disagree | 4 — covered |
 
 ---
 
@@ -1262,6 +1264,60 @@ rows' elements.
 
 
 ## 4. Risks already covered, kept for what they still forbid
+
+### Risk-231 — A filter operator that reaches `cmp_op_of` unhandled silently becomes `/=`
+
+`cmp_op_of` (`src/parquet_wrapper.cpp`) maps `>`, `>=`, `<`, `<=` and `==` to their `CmpOp`, and
+**everything else to `CmpOp::Ne`**. That residual is safe only because of a premise its own comment
+states: every operator that is not a comparison is rejected, or returns from its own arm, before
+this is reached.
+
+Adding an operator to the Fortran grammar (`parquet_tokenize_filter_rule`) removes that premise
+unless an arm is added to `eval_filter_clause` **above** the `cmp_op_of` call. The clause then does
+not fail — it becomes `column /= value`, which parses, evaluates, screens, reads, and returns a
+plausible and completely wrong row set.
+
+**Why this one is different from every other site.** The filter vocabulary is known in five places
+(the tokenizer, the temporal-literal test, the two evaluators and the screen's resolver). Four of
+them refuse an operator they do not know: the Fortran engine's `parquet_filter_cmp_of` returns
+`CMP_NONE` and the leaf is refused, the tokenizer reports an unknown operator, the screen declines.
+Only this one guesses.
+
+**What a future change must keep.** An operator that is not one of the six comparisons returns from
+its own arm before `cmp_op_of` is called — as `is_null`, the four value-class operators and the
+three substring operators all do — and never falls through to it.
+
+**Test.** `test_ab_string_match` (`test/test_table_verbs.f90`) is the direct one: the in-memory
+engine refuses what the reader would silently answer as `/=`, so the two engines disagree and the
+A/B fails. `test_starts_with_equals_range_oracle` (`test/test_filter.f90`) catches it a second and
+independent way, by comparing the operator against the range expression it is equivalent to.
+Confirmed by mutation: deleting the substring arm from `eval_filter_clause` fails both.
+
+### Risk-232 — A rule literal's trailing spaces are trimmed in TWO places, and untrimming one makes the engines disagree
+
+A filter leaf's value reaches both evaluators in a **fixed-width** slot (`filter_leaf_value_len`),
+so trailing spaces cannot be told from padding and are trimmed on arrival — by
+`trim_right_spaces_and_nuls` in `src/parquet_wrapper.cpp` for the reader, and by `trim(leaf_value(i))`
+at the call site in `src/parquet_tables_filter.f90` for the in-memory engine. `name == "ab "`
+therefore asks what `name == "ab"` asks, on both engines alike, for every operator.
+
+That is a **limitation**, and being a limitation it is not itself the risk: it is consistent, it is
+documented in the guide's grammar table, and no caller gets a different answer from the two paths.
+
+**The risk is the fix.** The two trims are independent, and a change that removed or narrowed one of
+them — widening the slot, passing a length alongside, switching to a deferred-length carrier on the
+Fortran side only — makes the engines answer differently for any rule whose literal ends in a space,
+while every other rule keeps agreeing. Nothing aborts, and a fixture without such a literal cannot
+see it. The stored *data*'s trailing spaces are significant on both engines already (Risk-199), so
+the disagreement is reachable with ordinary data the moment the rule side changes on one path only.
+
+**What a future change must keep.** The two trims are one decision: change both together, or
+neither, and extend the A/B sweep with a trailing-space *literal* in the same change.
+
+**Test.** `test_string_match_is_byte_exact` (`test/test_filter.f90`) pins the current behaviour from
+both sides — that the stored trailing space IS significant, and that the rule literal's is not — so
+a one-sided change fails it. The A/B sweep's `test_ab_strings`/`test_ab_string_match` read the
+`"ab "` value on both engines.
 
 ### Risk-198 — Two filter engines answer one grammar, and only an A/B can see them disagree
 

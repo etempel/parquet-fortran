@@ -354,7 +354,12 @@ contains
             end if
             value = rest
             is_string = .false.
-        case (">", ">=", "<", "<=", "==", "/=")
+        ! The six comparisons and the three SUBSTRING operators share this arm: all nine take one
+        ! value, quoted or not, and the quoting rules are identical. What a substring operator does
+        ! with its value differs (it is a literal pattern, matched at a position rather than
+        ! compared as a whole), but that is the evaluators' business, not the tokenizer's -- here
+        ! the only question is how the value is spelled.
+        case (">", ">=", "<", "<=", "==", "/=", "starts_with", "ends_with", "contains")
             if (len(rest) == 0) then ! GCOVR_EXCL_START -- gcov attribution artifact
                 errmsg = "filter rule '" // t // "' is missing a value after '" // trim(op) // "'"
                 return
@@ -695,6 +700,25 @@ contains
         call parquet_lower_op(op, low)
         res = (low == "in" .or. low == "not_in")
     end function parquet_op_is_set_valued
+
+    !> Whether `op` carries a single literal that a `date`/`time`/`timestamp` column could convert
+    !> -- that is, whether it is one of the six comparison operators. Matched case-insensitively.
+    !>
+    !> A POSITIVE test on purpose, and convert_temporal_filter_values is written against it rather
+    !> than against a list of operators to skip. The difference is which way a NEW operator fails:
+    !> with a skip list it falls through into the temporal conversion unless somebody remembers to
+    !> add it, and its value is then reported as a malformed ISO-8601 literal (or, worse, converted
+    !> successfully into a raw integer it was never meant to be); with this test it is left alone
+    !> by default and has to be added here deliberately. The valueless operators carry no literal,
+    !> the set-valued ones carry a set, and the substring ones carry a pattern that is not an
+    !> instant -- none of the three is convertible, and none is listed.
+    pure logical function parquet_op_takes_a_temporal_literal(op) result(res)
+        character(len=*), intent(in) :: op !! a parsed leaf's operator.
+        character(len=:), allocatable :: low
+        call parquet_lower_op(op, low)
+        res = (low == ">" .or. low == ">=" .or. low == "<" .or. low == "<=" .or. &
+            low == "==" .or. low == "/=")
+    end function parquet_op_takes_a_temporal_literal
 
     !> `op` trimmed and lowercased -- the filter grammar's keywords are case-insensitive.
     !>
@@ -1706,17 +1730,15 @@ contains
         do i = 1, nleaves
             name = trim(leaf_name(i))
             op = trim(leaf_op(i))
-            ! Every valueless operator is skipped, not just the two null tests: the four
-            ! value-class operators carry no literal to convert, and letting one through here would
-            ! report a temporal column's missing ISO-8601 literal instead of the real reason (the
-            ! C++ side rejects them on any non-floating-point column, with a message naming that).
-            if (op == "is_null" .or. op == "is_not_null" .or. op == "is_nan" .or. op == "is_not_nan" .or. &
-                op == "is_finite" .or. op == "is_not_finite") cycle
-            ! A set-valued clause carries a set, not a literal, so there is nothing here to convert
-            ! either -- and letting one through would report a temporal column's missing ISO-8601
-            ! literal instead of the real reason, which parquet_check_set_column_type states
-            ! (a temporal set arrives with the temporal index key, not before).
-            if (parquet_op_is_set_valued(op)) cycle
+            ! Only the six comparison operators carry a literal this can convert. Everything else
+            ! -- valueless, set-valued, or matching part of a string -- is left exactly as the
+            ! parser produced it, and each would otherwise be reported as a temporal column's
+            ! malformed ISO-8601 literal instead of by the arm that actually refuses it: the C++
+            ! side names the real reason for a value-class operator on a non-floating-point column,
+            ! parquet_check_set_column_type does for a set, and the substring arm does for a
+            ! pattern. Asking what the operator IS, rather than listing what to skip, is what keeps
+            ! a future operator from falling through here by omission.
+            if (.not. parquet_op_takes_a_temporal_literal(op)) cycle
             if (parquet_reader_has_column(reader%handle, name//char(0)) == 0) cycle
             call resolve_column_type(reader, name, type_name, recognized)
             if (.not. recognized) cycle

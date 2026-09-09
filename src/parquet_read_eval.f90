@@ -68,6 +68,12 @@ submodule (parquet_core:parquet_read) parquet_read_eval
     integer, parameter :: CMP_GT = 5
     integer, parameter :: CMP_GE = 6
 
+    !> The three substring operators, resolved ONCE per leaf for the same reason the CMP_* codes
+    !! are: the alternative is a text comparison against three spellings on every row.
+    integer, parameter :: SM_PREFIX = 1
+    integer, parameter :: SM_SUFFIX = 2
+    integer, parameter :: SM_CONTAINS = 3
+
 contains
 
     !> The `parquet_get_column_type`/`parquet_get_column_shape` tokens a resident column of PK kind
@@ -177,6 +183,13 @@ contains
             negate = (low == "not_in")
             call parquet_eval_set_leaf_column(col, kind, nrows, fam, keys, negate, out)
             ok = .true.
+            return
+        end if
+
+        ! ---- The three SUBSTRING operators, string columns only -----------------------------------
+        if (low == "starts_with" .or. low == "ends_with" .or. low == "contains") then
+            call parquet_eval_string_match_leaf(col, kind, nrows, column, low, value, is_string, &
+                out, ok, errmsg)
             return
         end if
 
@@ -622,6 +635,94 @@ contains
                 0_int64, cmp))
         end do
     end subroutine parquet_eval_string_leaf
+
+    !> The three substring operators over a string column: starts_with, ends_with and contains.
+    !>
+    !> Byte-exact and case-sensitive, like the ordering comparison beside it and for the same
+    !> reason (Risk-199): the reader compares the stored bytes through std::string_view, so
+    !> anything here that trimmed, blank-padded or case-folded would make the two engines disagree
+    !> about every value with a trailing space. Nothing in this body may call `trim` on either
+    !> operand. The pattern is a literal, never a wildcard pattern.
+    !>
+    !> Kleene-honest about nullness -- a Null row is unknown for all three, exactly as it is for a
+    !> comparison -- so nullness stays governed solely by is_null/is_not_null even under `not`.
+    !>
+    !> An EMPTY pattern matches every non-null row: `v(1:0) == ""` is true, and `index(v, "")` is
+    !> 1, so all three branches give it for free rather than by a special case.
+    subroutine parquet_eval_string_match_leaf(col, kind, nrows, column, low, pattern, is_string, &
+            out, ok, errmsg)
+        type(parquet_column), intent(in), target :: col !! the resident column.
+        integer, intent(in) :: kind !! its PK_* kind.
+        integer(int64), intent(in) :: nrows !! rows to answer.
+        character(len=*), intent(in) :: column !! the column's name, for the message.
+        character(len=*), intent(in) :: low !! the operator, already lower-cased.
+        character(len=*), intent(in) :: pattern !! the literal, quotes already stripped.
+        logical, intent(in) :: is_string !! .true. if the value was double-quoted in the rule.
+        integer(int8), intent(out) :: out(:) !! one KL_* verdict per row.
+        logical, intent(out) :: ok !! .false. when the column or the value is refused.
+        character(len=:), allocatable, intent(out) :: errmsg !! that refusal; "" when ok.
+        type(parquet_string_column), pointer :: sc
+        character(len=:), allocatable :: v
+        integer :: mode, plen, lo
+        integer(int64) :: i
+        logical :: hit
+
+        ok = .false.
+        errmsg = ""
+        if (kind /= PK_STRING) then
+            errmsg = "operator '" // trim(low) // "' is only supported for string columns, " // &
+                "and column '" // trim(column) // "' is not one"
+            return
+        end if
+        if (.not. is_string) then
+            errmsg = "value for string column '" // trim(column) // "' must be double-quoted"
+            return
+        end if
+
+        if (low == "starts_with") then
+            mode = SM_PREFIX
+        else if (low == "ends_with") then
+            mode = SM_SUFFIX
+        else
+            mode = SM_CONTAINS
+        end if
+        plen = len(pattern)
+
+        nullify(sc)
+        call parquet_column_string_column(col, sc)
+        do i = 1_int64, nrows
+            if (parquet_string_column_is_null(sc, i)) then
+                out(i) = KL_UNKNOWN
+                cycle
+            end if
+            call parquet_string_column_get(sc, i, v)
+            hit = .false.
+            select case (mode)
+            case (SM_PREFIX)
+                ! NESTED, never `len(v) >= plen .and. v(1:plen) == pattern`: .and. does not
+                ! short-circuit, so the section would be formed for every value shorter than the
+                ! pattern -- which is the ordinary case here, not an edge case.
+                if (len(v) >= plen) then
+                    hit = v(1:plen) == pattern
+                end if
+            case (SM_SUFFIX)
+                if (len(v) >= plen) then
+                    ! The start index goes into a named variable and the substring carries an
+                    ! explicit upper bound. `v(len(v)-plen+1:)` is the expression-lower-bound shape
+                    ! nagfor gets wrong (CLAUDE.md's fortran-gotchas), and this procedure compares
+                    ! against len() elsewhere, which is the half that turns it into a wrong answer.
+                    lo = len(v) - plen + 1
+                    hit = v(lo:len(v)) == pattern
+                end if
+            case default
+                ! index() is defined over the characters actually present in each operand, with no
+                ! blank padding, so it agrees with std::string_view::find byte for byte.
+                hit = index(v, pattern) > 0
+            end select
+            out(i) = parquet_kleene_of(hit)
+        end do
+        ok = .true.
+    end subroutine parquet_eval_string_match_leaf
 
     !> -1, 0 or +1 for `a` before, equal to or after `b` in byte-lexicographic order -- what
     !> std::string_view's own comparison gives, and what Fortran's blank-padding operators do not.

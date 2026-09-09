@@ -268,6 +268,13 @@ enum class CmpOp
 
 // Every other operator string is rejected long before this is reached (parquet_parse_filter_rule
 // and the qc validators both restrict it), so "/=" is the residual case rather than a guess.
+//
+// THAT PREMISE IS WHAT MAKES THE RESIDUAL SAFE, and a new filter operator can remove it silently:
+// an operator that is not one of the six and reaches here becomes `column /= value` -- no error,
+// no warning, just a plausible and wrong row set. Every operator that is not a comparison must
+// therefore return from its own arm ABOVE the cmp_op_of call in eval_filter_clause, as is_null,
+// the four value-class operators and the three substring operators all do. feature_risks.md
+// Risk-231.
 static CmpOp cmp_op_of(const std::string &op)
 {
 	if (op == ">") return CmpOp::Gt;
@@ -6537,9 +6544,68 @@ extern "C"
 			return true;
 		}
 
+		if (op == "starts_with" || op == "ends_with" || op == "contains")
+		{
+			// The three SUBSTRING operators. They ask where a literal sits inside a value rather
+			// than how the whole value compares, so they share one arm and one accessor.
+			//
+			// THIS ARM MUST STAY ABOVE cmp_op_of. That function maps every string it does not
+			// recognise to CmpOp::Ne (see its own comment), so an operator reaching it unhandled
+			// does not fail -- it silently becomes `column /= value`, a plausible and completely
+			// wrong row set. Every other site in the filter path refuses an unknown operator
+			// loudly; this one does not. feature_risks.md Risk-231.
+			arrow::Type::type tid = array->type_id();
+			if (tid != arrow::Type::STRING && tid != arrow::Type::LARGE_STRING &&
+				tid != arrow::Type::STRING_VIEW)
+			{
+				err = "'" + op + "' is only supported for string columns, and column '" + colname +
+					"' is " + array->type()->ToString();
+				return false;
+			}
+			if (!is_string)
+			{
+				err = "value for string column '" + colname + "' must be double-quoted";
+				return false;
+			}
+			auto acc = make_string_like_accessor(array);
+			// Byte-exact and case-sensitive, matching the ordering comparisons on the same column:
+			// the pattern is a literal, never a wildcard pattern, so '*', '?', '%' and '_' are
+			// ordinary bytes. An EMPTY pattern matches every non-null row, which is the identity
+			// of the family and what every branch below already gives it for free.
+			const std::string_view pat(value_text);
+			const bool prefix = (op == "starts_with");
+			const bool suffix = (op == "ends_with");
+			for (int64_t i = 0; i < n; ++i)
+			{
+				if (acc.is_null(i))
+				{
+					// A Null row is unknown, exactly as it is for a comparison -- so is_null and
+					// is_not_null stay the only way a Null row enters a result, including under a
+					// negated substring test.
+					out[static_cast<size_t>(i)] = kUnknown;
+					continue;
+				}
+				const std::string_view v = acc.get_view(i);
+				bool hit;
+				// The size guard is load-bearing on both fixed-position branches, not merely an
+				// optimization: string_view::compare throws std::out_of_range for a position past
+				// the end, and an escaping C++ exception is undefined behaviour across this file's
+				// extern "C" boundary. C++ && short-circuits, so the guard is sufficient here;
+				// its Fortran twin has to be written as a nested if, which is why the two bodies
+				// do not look alike.
+				if (prefix) hit = v.size() >= pat.size() && v.compare(0, pat.size(), pat) == 0;
+				else if (suffix) hit = v.size() >= pat.size() &&
+					v.compare(v.size() - pat.size(), pat.size(), pat) == 0;
+				else hit = v.find(pat) != std::string_view::npos;
+				out[static_cast<size_t>(i)] = kleene_of(hit);
+			}
+			return true;
+		}
+
 		// Resolved ONCE for this clause, then used by every row loop below -- see CmpOp's own
-		// comment for the measurement that made this worth doing. Placed after the is_null/is_nan
-		// arms above, which are not comparisons and return before reaching it.
+		// comment for the measurement that made this worth doing. Placed after the
+		// is_null/is_nan/substring arms above, which are not comparisons and return before
+		// reaching it.
 		const CmpOp cmp = cmp_op_of(op);
 
 		switch (array->type_id())
@@ -7003,6 +7069,18 @@ extern "C"
 			leaf.want_null = (op == "is_null");
 			return leaf;
 		}
+		// The three SUBSTRING operators DECLINE, leaving leaf.usable false so they contribute
+		// kScreenAnything to every row group and prune nothing. Returning here rather than falling
+		// through is what keeps screen_compare_from_bounds' `default:` arm unreachable, and its
+		// GCOVR_EXCL comment ("every operator reaching here is one of the six above") true: a
+		// string leaf with a quoted value would otherwise be marked usable and arrive there.
+		//
+		// Declining is right for two of the three and merely provisional for the first. A prefix
+		// IS a range -- a value starts with `p` exactly when it lies in [p, p+) -- so min/max can
+		// screen `starts_with`, and that is a separate change with its own rules and its own risk
+		// entry. `ends_with` and `contains` can never be screened this way: min/max bound the whole
+		// value lexicographically and say nothing whatever about its tail or its interior.
+		if (op == "starts_with" || op == "ends_with" || op == "contains") return leaf;
 		if (op == "is_nan" || op == "is_not_nan" || op == "is_finite" || op == "is_not_finite")
 		{
 			leaf.usable = true;

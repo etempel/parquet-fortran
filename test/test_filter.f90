@@ -185,7 +185,27 @@ contains
             new_unittest("clear: clearing twice, and clearing an untouched filter", &
                 test_filter_clear_is_idempotent), &
             new_unittest("clear: clearing a filter does not disturb a reader already open on it", &
-                test_filter_clear_does_not_disturb_an_open_reader) &
+                test_filter_clear_does_not_disturb_an_open_reader), &
+            new_unittest("starts_with keeps the rows beginning with the pattern", &
+                test_starts_with_selects), &
+            new_unittest("starts_with equals the range 'x >= p and x < p-successor'", &
+                test_starts_with_equals_range_oracle), &
+            new_unittest("ends_with keeps the rows ending with the pattern", test_ends_with_selects), &
+            new_unittest("a value shorter than the pattern is false, not a bounds error", &
+                test_ends_with_value_shorter_than_pattern), &
+            new_unittest("contains keeps the rows holding the pattern anywhere", test_contains_selects), &
+            new_unittest("starts_with or ends_with implies contains, row for row", &
+                test_contains_is_implied_by_starts_and_ends), &
+            new_unittest("the three matchers answer UNKNOWN for a null row, negated too", &
+                test_string_match_null_is_unknown), &
+            new_unittest("matching is byte-exact: case and a trailing space both count", &
+                test_string_match_is_byte_exact), &
+            new_unittest("an empty pattern matches every non-null row", test_string_match_empty_pattern), &
+            new_unittest("the matchers compose with and/or/not and with a set clause", &
+                test_string_match_in_expression), &
+            new_unittest("a dictionary column matches like its plain twin", &
+                test_string_match_on_dictionary_column), &
+            new_unittest("starts_with on a dotted struct-leaf path", test_starts_with_on_struct_leaf) &
             ]
     end subroutine collect_tests_filter
     !
@@ -3392,5 +3412,407 @@ contains
         call check(error, all(got == [8, 9, 10]), &
             "clearing the filter changed which rows the open reader returns")
     end subroutine test_filter_clear_does_not_disturb_an_open_reader
+    !
+    ! ------------------------------------------------------------------------------
+    ! starts_with / ends_with / contains -- matching part of a string
+    !
+    ! Every fixture here stores its strings through a parquet_string_column rather than as a
+    ! character array, because that is the only path that keeps the bytes VERBATIM: a
+    ! character(len=N) array is trimmed on the way out, so a value whose point is a trailing space
+    ! cannot be written that way at all.
+    ! ------------------------------------------------------------------------------
+    !
+    !> Writes the shared fixture the matcher tests use, carrying the request's own data: a `code`
+    !> column of S1801..S1809 plus one T1801, and a `tag` column of _raw/_ok suffixes.
+    !>
+    !> Two rows are deliberate awkward cases rather than filler. Row 9's tag is `"ok"`, which is
+    !> SHORTER than the pattern `"_ok"` -- the case a fixed-position match reads out of bounds on.
+    !> Row 10's code is `"T1801"`, which differs from the wanted prefix only in the first byte, so
+    !> a matcher comparing the wrong number of bytes admits it.
+    subroutine write_match_fixture(file)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: code, tag
+        integer(int32) :: id(10)
+        integer :: i
+
+        do i = 1, 10
+            id(i) = i
+        end do
+        call code%clear()
+        call code%append_string("S1801")
+        call code%append_string("S1802")
+        call code%append_string("S1803")
+        call code%append_string("S1804")
+        call code%append_string("S1805")
+        call code%append_string("S1806")
+        call code%append_string("S1807")
+        call code%append_string("S1808")
+        call code%append_string("S1809")
+        call code%append_string("T1801")
+        call tag%clear()
+        call tag%append_string("ball_raw")
+        call tag%append_string("ball_ok")
+        call tag%append_string("point_raw")
+        call tag%append_string("point_ok")
+        call tag%append_string("ball_raw")
+        call tag%append_string("ball_ok")
+        call tag%append_string("point_raw")
+        call tag%append_string("point_ok")
+        call tag%append_string("ok")
+        call tag%append_string("raw")
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "code", code)
+        call parquet_write_column(writer, "tag", tag)
+        call parquet_close_writer(writer)
+    end subroutine write_match_fixture
+    !
+    !> The request's own example: nine codes begin with `S18`, and the tenth does not.
+    subroutine test_starts_with_selects(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_starts_with.parquet"
+
+        call write_match_fixture(file)
+        call filtered_ids(file, 'code starts_with "S18"', ids)
+        call check(error, size(ids) == 9, "starts_with ""S18"" must keep the nine S18xx rows")
+        if (allocated(error)) return
+        call check(error, all(ids == [1, 2, 3, 4, 5, 6, 7, 8, 9]), &
+            "starts_with must keep exactly rows 1..9, leaving T1801 out")
+        if (allocated(error)) return
+        ! The whole prefix, so only one row can match -- a matcher stopping short admits nine.
+        call filtered_ids(file, 'code starts_with "S1804"', ids)
+        call check(error, size(ids) == 1, "a prefix as long as the value must match one row")
+    end subroutine test_starts_with_selects
+    !
+    !> The independent oracle: a value has prefix `p` exactly when it lies in the half-open range
+    !> `[p, p-successor)`, so `code starts_with "S18"` must select precisely what
+    !> `code >= "S18" and code < "S19"` does.
+    !>
+    !> This is the pattern CLAUDE.md's reader-writer rule prescribes for an operator that is sugar
+    !> over the existing grammar (`x is_nan` == `not (x >= 0 or x < 0)`), and it is the strongest
+    !> test in this group: the two sides go through completely different arms of the evaluator, so
+    !> it fails if the prefix comparison is off by a byte in either direction -- and, because the
+    !> right-hand side is an ordinary comparison, it also fails if the operator ever falls through
+    !> to cmp_op_of and becomes `/=` (feature_risks.md Risk-231).
+    subroutine test_starts_with_equals_range_oracle(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:), want(:)
+        character(len=*), parameter :: file = "test_run/filter_starts_with_oracle.parquet"
+
+        call write_match_fixture(file)
+        call filtered_ids(file, 'code starts_with "S18"', got)
+        call filtered_ids(file, 'code >= "S18" and code < "S19"', want)
+        call check(error, size(got) == size(want), &
+            "starts_with and its range oracle selected different numbers of rows")
+        if (allocated(error)) return
+        call check(error, size(got) > 0 .and. size(got) < 10, &
+            "the oracle comparison is vacuous unless it selects some rows but not all")
+        if (allocated(error)) return
+        call check(error, all(got == want), "starts_with disagreed with its range oracle")
+    end subroutine test_starts_with_equals_range_oracle
+    !
+    !> The request's second example: the `_ok` rows, and not the `_raw` ones.
+    subroutine test_ends_with_selects(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_ends_with.parquet"
+
+        call write_match_fixture(file)
+        call filtered_ids(file, 'tag ends_with "_ok"', ids)
+        call check(error, size(ids) == 4, "ends_with ""_ok"" must keep the four _ok rows")
+        if (allocated(error)) return
+        ! Row 9 is "ok": it ends with those two bytes but not with the pattern's three, so it is
+        ! excluded here and is the row the next test is about.
+        call check(error, all(ids == [2, 4, 6, 8]), &
+            "ends_with must keep exactly the _ok rows, excluding the bare ""ok""")
+    end subroutine test_ends_with_selects
+    !
+    !> A value SHORTER than the pattern is false, and reads nothing it should not.
+    !>
+    !> This is the guard that has to be nested rather than `.and.`-ed on the Fortran engine: `.and.`
+    !> does not short-circuit, so `len(v) >= plen .and. v(lo:) == pattern` forms the section for
+    !> every short value. It is the ordinary case, not an edge case -- row 9's `"ok"` is shorter
+    !> than `"_ok"` -- and under --profile debug a bounds check turns it into a hard failure.
+    subroutine test_ends_with_value_shorter_than_pattern(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_ends_short.parquet"
+
+        call write_match_fixture(file)
+        ! Longer than every value in the column, so every row takes the short arm.
+        call filtered_ids(file, 'tag ends_with "_a_very_long_suffix_indeed"', ids)
+        call check(error, size(ids) == 0, "a pattern longer than every value must match nothing")
+        if (allocated(error)) return
+        call filtered_ids(file, 'code starts_with "S1801_and_more"', ids)
+        call check(error, size(ids) == 0, "a prefix longer than every value must match nothing")
+    end subroutine test_ends_with_value_shorter_than_pattern
+    !
+    !> contains finds the pattern anywhere: at the start, at the end and in the middle.
+    subroutine test_contains_selects(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_contains.parquet"
+
+        call write_match_fixture(file)
+        ! In the middle of four values, and at neither end of any of them.
+        call filtered_ids(file, 'tag contains "l_"', ids)
+        call check(error, all(ids == [1, 2, 5, 6]), "contains ""l_"" must find the four ball_ rows")
+        if (allocated(error)) return
+        ! At the START of two values: contains must not be a suffix test in disguise.
+        call filtered_ids(file, 'tag contains "point"', ids)
+        call check(error, all(ids == [3, 4, 7, 8]), "contains must match at the start of a value too")
+        if (allocated(error)) return
+        ! At the END of five values: nor a prefix test.
+        call filtered_ids(file, 'tag contains "raw"', ids)
+        call check(error, all(ids == [1, 3, 5, 7, 10]), "contains must match at the end of a value too")
+    end subroutine test_contains_selects
+    !
+    !> The algebraic relation between the three: anything the prefix or suffix test keeps, the
+    !> containment test must keep too. Checked row for row over the same pattern, which is what
+    !> catches the three modes being wired to the wrong branches.
+    subroutine test_contains_is_implied_by_starts_and_ends(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: pre(:), suf(:), con(:)
+        character(len=*), parameter :: file = "test_run/filter_match_implication.parquet"
+        integer :: i
+
+        call write_match_fixture(file)
+        call filtered_ids(file, 'tag starts_with "ball"', pre)
+        call filtered_ids(file, 'tag ends_with "ball"', suf)
+        call filtered_ids(file, 'tag contains "ball"', con)
+        call check(error, size(pre) > 0 .and. size(con) > 0, &
+            "the implication is vacuous unless both sides select something")
+        if (allocated(error)) return
+        do i = 1, size(pre)
+            call check(error, any(con == pre(i)), "a row starts_with keeps must be kept by contains")
+            if (allocated(error)) return
+        end do
+        do i = 1, size(suf)
+            call check(error, any(con == suf(i)), "a row ends_with keeps must be kept by contains")
+            if (allocated(error)) return
+        end do
+        ! And the implication is strict here: "ball" starts four values and ends none of them,
+        ! so contains keeps rows the prefix test does not reach only if the three really differ.
+        call check(error, size(suf) == 0, """ball"" ends no value in this fixture")
+    end subroutine test_contains_is_implied_by_starts_and_ends
+    !
+    !> A Null row is UNKNOWN for all three, exactly as it is for a comparison -- so it is excluded
+    !> by the clause AND by its negation, and `is_null` remains the only way in.
+    !>
+    !> Collapsing unknown to false would pass the first half of this test and fail the second; that
+    !> asymmetry is the whole reason the negation is asserted beside the plain form.
+    subroutine test_string_match_null_is_unknown(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: sc
+        integer(int32) :: id(4) = [1, 2, 3, 4]
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_match_null.parquet"
+
+        call sc%clear()
+        call sc%append_string("ball_ok")
+        call sc%append_null()
+        call sc%append_string("ball_raw")
+        call sc%append_null()
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+
+        call filtered_ids(file, 's starts_with "ball"', ids)
+        call check(error, all(ids == [1, 3]), "starts_with must exclude the null rows")
+        if (allocated(error)) return
+        call filtered_ids(file, 'not (s starts_with "ball")', ids)
+        call check(error, size(ids) == 0, &
+            "not (starts_with) must not admit a null row -- unknown stays unknown under not")
+        if (allocated(error)) return
+        call filtered_ids(file, 'not (s ends_with "_ok")', ids)
+        call check(error, all(ids == [3]), "not (ends_with) keeps the non-matching value, not the nulls")
+        if (allocated(error)) return
+        call filtered_ids(file, 'not (s contains "a")', ids)
+        call check(error, size(ids) == 0, "not (contains) must not admit a null row either")
+        if (allocated(error)) return
+        ! The escape hatch still works, which is what says the rows were there all along.
+        call filtered_ids(file, 's is_null', ids)
+        call check(error, all(ids == [2, 4]), "is_null remains the only way a null row enters a result")
+    end subroutine test_string_match_null_is_unknown
+    !
+    !> The match is over BYTES: case is significant, and so is a trailing space.
+    !>
+    !> Fortran's own `==` blank-pads the shorter operand, so `"AB " == "AB"` is true there while the
+    !> reader's std::string_view says otherwise (feature_risks.md Risk-199). A matcher written with
+    !> the intrinsic operators, or one that trimmed either operand, passes every ordinary fixture
+    !> and fails this one.
+    subroutine test_string_match_is_byte_exact(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: sc
+        integer(int32) :: id(4) = [1, 2, 3, 4]
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_match_bytes.parquet"
+
+        call sc%clear()
+        call sc%append_string("AB")
+        call sc%append_string("AB ")    ! a real trailing space, not padding
+        call sc%append_string("ab")
+        call sc%append_string("Ab")
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+
+        ! Case: three values differ only in case, and only one is an exact byte match.
+        call filtered_ids(file, 's starts_with "ab"', ids)
+        call check(error, all(ids == [3]), "starts_with must be case-sensitive")
+        if (allocated(error)) return
+        call filtered_ids(file, 's contains "A"', ids)
+        call check(error, all(ids == [1, 2, 4]), "contains must be case-sensitive")
+        if (allocated(error)) return
+        ! The STORED trailing space is significant, which is the half Risk-199 is about. Rows 1 and
+        ! 2 both begin with "AB", but only row 1 ends with "B" -- row 2's last byte is the space.
+        ! Fortran's own == calls those two values equal, so a matcher written with the intrinsic
+        ! operators, or one that trimmed the value, keeps both rows here.
+        call filtered_ids(file, 's starts_with "AB"', ids)
+        call check(error, all(ids == [1, 2]), "both AB values must begin with AB")
+        if (allocated(error)) return
+        call filtered_ids(file, 's ends_with "B"', ids)
+        call check(error, all(ids == [1]), &
+            "the value with a trailing space must NOT end with B (Fortran's own == says it does)")
+        if (allocated(error)) return
+
+        ! A trailing space in the RULE's literal, by contrast, is NOT representable, and this is a
+        ! property of the filter grammar rather than of these operators: every leaf crosses into
+        ! the evaluators in a fixed-width slot and is right-trimmed on arrival (C++
+        ! trim_right_spaces_and_nuls; trim(leaf_value(i)) on the in-memory side), so both engines
+        ! see the same shortened pattern and agree. `s == "AB "` therefore asks what `s == "AB"`
+        ! asks. Asserted rather than left implicit because it is silent -- the rule is accepted and
+        ! answers for a pattern the caller did not write. feature_risks.md Risk-232.
+        call filtered_ids(file, 's == "AB "', ids)
+        call check(error, all(ids == [1]), &
+            "a trailing space in a rule literal is dropped at the packed-leaf boundary")
+        if (allocated(error)) return
+        call filtered_ids(file, 's ends_with "B "', ids)
+        call check(error, all(ids == [1]), &
+            "and the same for a matcher's pattern -- it is the grammar's limit, not the operator's")
+    end subroutine test_string_match_is_byte_exact
+    !
+    !> An empty pattern matches every non-null row, for all three operators.
+    !>
+    !> It is the identity of the family rather than a special case: every value begins with, ends
+    !> with and contains the empty string. Accepted rather than refused (design decision Q3), and
+    !> asserted here so that the choice is pinned rather than incidental -- including that it still
+    !> leaves the null rows out, since an empty pattern is not an escape from the Kleene rule.
+    subroutine test_string_match_empty_pattern(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: sc
+        integer(int32) :: id(3) = [1, 2, 3]
+        integer(int32), allocatable :: ids(:)
+        character(len=*), parameter :: file = "test_run/filter_match_empty.parquet"
+
+        call sc%clear()
+        call sc%append_string("value")
+        call sc%append_null()
+        call sc%append_string("")       ! an empty VALUE, which is not a null
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+
+        call filtered_ids(file, 's starts_with ""', ids)
+        call check(error, all(ids == [1, 3]), "an empty prefix must keep every non-null row")
+        if (allocated(error)) return
+        call filtered_ids(file, 's ends_with ""', ids)
+        call check(error, all(ids == [1, 3]), "an empty suffix must keep every non-null row")
+        if (allocated(error)) return
+        call filtered_ids(file, 's contains ""', ids)
+        call check(error, all(ids == [1, 3]), "an empty pattern must be contained in every non-null row")
+    end subroutine test_string_match_empty_pattern
+    !
+    !> The three are ordinary leaves, so they combine with and/or/not, parentheses and a set clause
+    !> exactly as a comparison does -- nothing about them is special-cased in the parser.
+    subroutine test_string_match_in_expression(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: ids(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_match_expr.parquet"
+
+        call write_match_fixture(file)
+        ! Both branches of the `or` select something, and the `and` narrows it: the ball_ok rows.
+        call filtered_ids(file, '(tag starts_with "ball" or tag starts_with "point") and tag ends_with "_ok"', ids)
+        call check(error, all(ids == [2, 4, 6, 8]), &
+            "the matchers must combine under and/or/parentheses like any other clause")
+        if (allocated(error)) return
+        ! Mixed with a comparison on another column.
+        call filtered_ids(file, 'tag ends_with "_ok" and id > 4', ids)
+        call check(error, all(ids == [6, 8]), "a matcher must combine with a comparison on another column")
+        if (allocated(error)) return
+        ! Mixed with a set clause, which is answered on a different path entirely.
+        call filt%bind("wanted", [2, 3, 4])
+        call filt%add('id in @wanted and tag ends_with "_ok"')
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        if (allocated(ids)) deallocate(ids)
+        allocate(ids(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, all(ids == [2, 4]), "a matcher must combine with a bound-set clause")
+    end subroutine test_string_match_in_expression
+    !
+    !> A dictionary-encoded column -- what pandas writes for a Categorical -- matches exactly as
+    !> its plain twin does, because it is decoded to its values before the evaluator sees it. No
+    !> code in the matcher knows about dictionaries; this test says so rather than assuming it.
+    subroutine test_string_match_on_dictionary_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: cat_ids(:), plain_ids(:)
+        character(len=*), parameter :: file = "test/fixtures/dictionary_types.parquet"
+
+        call filtered_ids(file, 'cat starts_with "b"', cat_ids)
+        call filtered_ids(file, 'plain starts_with "b"', plain_ids)
+        call check(error, size(cat_ids) > 0, "the fixture must have rows beginning with b, or this proves nothing")
+        if (allocated(error)) return
+        call check(error, size(cat_ids) == size(plain_ids) .and. all(cat_ids == plain_ids), &
+            "starts_with on a dictionary column must select the same rows as on its plain twin")
+        if (allocated(error)) return
+        call filtered_ids(file, 'cat contains "a"', cat_ids)
+        call filtered_ids(file, 'plain contains "a"', plain_ids)
+        call check(error, size(cat_ids) > 0 .and. size(cat_ids) == size(plain_ids) .and. &
+            all(cat_ids == plain_ids), &
+            "contains on a dictionary column must select the same rows as on its plain twin")
+    end subroutine test_string_match_on_dictionary_column
+    !
+    !> A dotted struct-leaf path is one name token, so a matcher reaches a nested string leaf the
+    !> same way a comparison does -- the struct path is resolved before the operator is looked at.
+    subroutine test_starts_with_on_struct_leaf(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows_match, nrows_eq
+        character(len=*), parameter :: file = "test/fixtures/nested_struct.parquet"
+
+        ! "Ali" is a genuine prefix of the fixture's only matching value, "Alice", so the prefix
+        ! clause must select exactly what the equality clause on the whole value does.
+        call filt%add('main.inner.name starts_with "Ali"')
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows_match)
+        call parquet_close_reader(reader)
+
+        block
+            type(parquet_filter) :: eq_filter
+            call eq_filter%add('main.inner.name == "Alice"')
+            call parquet_open_reader(reader, file, filter=eq_filter)
+            call parquet_get_nrows(reader, nrows_eq)
+            call parquet_close_reader(reader)
+        end block
+
+        call check(error, nrows_match > 0, "the struct-leaf fixture must hold a matching row")
+        if (allocated(error)) return
+        call check(error, nrows_match == nrows_eq, &
+            "a prefix on a struct leaf must select what the equality clause on the whole value does")
+    end subroutine test_starts_with_on_struct_leaf
 
 end module test_filter

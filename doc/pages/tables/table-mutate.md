@@ -330,6 +330,7 @@ To keep rows by *rank* rather than by position or by mask — the best hundred b
 call t%filter_rows("n_obs >= 8 and score > 3")
 call t%filter_rows('survey == "wide" or mag_r < 19.5')
 call t%filter_rows("field_id in (3, 5, 9)")
+call t%filter_rows('tile_name starts_with "S18"')
 ```
 
 A rule selects the same rows here as it would at the reader. That is not a coincidence: both run

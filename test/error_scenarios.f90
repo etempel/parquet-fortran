@@ -632,6 +632,8 @@ program error_scenarios
         call scenario_row_mask_unquoted_string()
     case ("row_mask_is_nan_on_int")
         call scenario_row_mask_is_nan_on_int()
+    case ("row_mask_starts_with_on_int")
+        call scenario_row_mask_starts_with_on_int()
     case ("row_mask_unbound_set")
         call scenario_row_mask_unbound_set()
     case ("row_mask_list_quoted")
@@ -928,6 +930,12 @@ program error_scenarios
         call scenario_filter_boolean_value_must_be_unquoted()
     case ("filter_bool_ordering_not_supported")
         call scenario_filter_bool_ordering_not_supported()
+    case ("filter_starts_with_non_string_column")
+        call scenario_filter_starts_with_non_string_column()
+    case ("filter_starts_with_unquoted_value")
+        call scenario_filter_starts_with_unquoted_value()
+    case ("filter_starts_with_on_temporal_column")
+        call scenario_filter_starts_with_on_temporal_column()
     case ("filter_is_nan_non_float_column")
         call scenario_filter_is_nan_non_float_column()
     case ("filter_nan_literal_rejected")
@@ -8795,6 +8803,14 @@ contains
         call row_mask_scenario("test_run/row_mask_is_nan_on_int.parquet", "id is_nan")
     end subroutine scenario_row_mask_is_nan_on_int
 
+    !> The in-memory twin of filter_starts_with_non_string_column: the table's engine refuses a
+    !> matcher on a non-string column too, and says the same thing about it. Two engines answer one
+    !> grammar (feature_risks.md Risk-198), so a refusal proved on the reader alone is proved on
+    !> half the library.
+    subroutine scenario_row_mask_starts_with_on_int()
+        call row_mask_scenario("test_run/row_mask_starts_with_on_int.parquet", 'id starts_with "1"')
+    end subroutine scenario_row_mask_starts_with_on_int
+
     !> A `@name` clause needs the set bound to it, and a bare expression cannot carry one -- so the
     !> string form of %row_mask reports the unbound name exactly as the reader does.
     subroutine scenario_row_mask_unbound_set()
@@ -9956,6 +9972,71 @@ contains
     !> (float32/float64/half_float). An integer column can never hold one, so the operator would
     !> answer a constant for every row -- rejected instead, since it is far more likely to be a
     !> mistyped column name than a deliberate request for "all rows"/"no rows".
+    !> starts_with/ends_with/contains match part of a STRING, so a numeric column is refused
+    !> rather than answered. The message names the operator and the column's actual type, exactly
+    !> as the is_nan family's does for a non-floating-point column.
+    subroutine scenario_filter_starts_with_non_string_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call parquet_open_writer(writer, "test_run/filter_starts_with_non_string.parquet")
+        call parquet_write_column(writer, "id", [1_int32, 2_int32])
+        call parquet_close_writer(writer)
+
+        call filt%add('id starts_with "1"')
+        call parquet_open_reader(reader, "test_run/filter_starts_with_non_string.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with starts_with against an integer filter column"
+    end subroutine scenario_filter_starts_with_non_string_column
+
+    !> A matcher's pattern is a string literal and must be double-quoted, exactly as an equality
+    !> comparison's value on the same column must be. An unquoted pattern is refused rather than
+    !> read as a bare token.
+    subroutine scenario_filter_starts_with_unquoted_value()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=4) :: s(2) = ["ab  ", "cd  "]
+
+        call parquet_open_writer(writer, "test_run/filter_starts_with_unquoted.parquet")
+        call parquet_write_column(writer, "s", s)
+        call parquet_close_writer(writer)
+
+        call filt%add("s starts_with ab")
+        call parquet_open_reader(reader, "test_run/filter_starts_with_unquoted.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unquoted starts_with pattern"
+    end subroutine scenario_filter_starts_with_unquoted_value
+
+    !> A matcher on a date/time/timestamp column is refused for NOT BEING A STRING COLUMN, and the
+    !> message says so.
+    !>
+    !> This is the negative control for convert_temporal_filter_values' positive operator test. That
+    !> routine rewrites a temporal column's quoted ISO-8601 literal into the raw integer the column
+    !> stores; a new value-carrying operator that fell through it would have its pattern converted
+    !> too -- reporting a malformed ISO-8601 literal for a pattern the caller never meant as an
+    !> instant, or, for a pattern that happens to parse, silently converting it into an integer.
+    !> Asking what the operator IS, rather than listing what to skip, is what keeps this message
+    !> about starts_with instead of about ISO-8601.
+    subroutine scenario_filter_starts_with_on_temporal_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_date) :: day(2)
+        character(len=*), parameter :: out_file = "test_run/filter_starts_with_temporal.parquet"
+
+        call day(1)%set(2024, 1, 1)
+        call day(2)%set(2024, 1, 2)
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "day", day)
+        call parquet_close_writer(writer)
+
+        ! A pattern that WOULD parse as a valid ISO-8601 date if it reached the temporal
+        ! conversion, so the scenario fails loudly if the skip is ever lost.
+        call filt%add('day starts_with "2024-01-01"')
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with starts_with against a date filter column"
+    end subroutine scenario_filter_starts_with_on_temporal_column
+
     subroutine scenario_filter_is_nan_non_float_column()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader

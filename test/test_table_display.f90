@@ -739,7 +739,7 @@ contains
             id(i) = i
             x(i) = real(i, real64) * 0.0123456789_real64
         end do
-        ! An IEEE quiet NaN, built by division rather than written as a literal: gfortran rejects
+        ! An IEEE quiet NaN, constructed rather than written as a literal: gfortran rejects
         ! 0.0/0.0 as a constant expression, and this keeps the value a genuine NaN on every
         ! compiler rather than a large finite number.
         x(2) = nan_value()
@@ -755,11 +755,14 @@ contains
     end subroutine write_wide_value_fixture
 
     !> A quiet NaN, as a value rather than a literal.
+    !!
+    !! Built with `ieee_value` rather than by dividing zero by zero: the division raises
+    !! `IEEE_INVALID`, and nagfor unmasks that trap by default, so the arithmetic form aborts the
+    !! runner before the value it produces is ever printed.
     real(real64) function nan_value() result(v)
-        real(real64) :: zero
+        use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
         !
-        zero = 0.0_real64
-        v = zero/zero
+        v = ieee_value(0.0_real64, ieee_quiet_nan)
     end function nan_value
 
     !> `ncol` int32 columns named `c01`, `c02`, ... -- enough of them to exceed `max_columns`.

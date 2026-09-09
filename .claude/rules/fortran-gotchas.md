@@ -257,6 +257,14 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   raises `FE_INVALID` benignly on every non-empty float array. Mask the traps around a foreign call
   known to raise with `feholdexcept` + `feclearexcept` + `fesetenv` (never `feupdateenv`), scoped
   to the one call. `-ieee=full` is a diagnosis, not the fix (`feature_risks.md` Risk-124).
+- **A test FIXTURE's own arithmetic trips those traps too.** Build a NaN or an Infinity with
+  `ieee_value`, never as `0/0` or an overflowing quotient, and keep a reference expression a test
+  computes beside the procedure under test (`a(i)/b(i)`) inside the finite range — it raises exactly
+  what the procedure does. The abort takes the whole runner, so one fixture hides every later suite
+  in it, and test-drive's concurrent output leaves the message beside whichever test was printing:
+  re-run the suite at `OMP_NUM_THREADS=1`, then
+  `lldb -b -o "process handle SIGFPE --stop true --pass false" -o run -o bt -- <binary> <suite>`
+  names the frame.
 - **An array-valued ordered comparison against a NaN raises invalid** (`count(a > 0.0)`,
   `sum(a, mask=a > 0.0)`, vectorised path only — a five-element reproducer does not show it); the
   scalar loop, `count(a /= a)` and `ieee_is_nan` never do. Reported only as a line at program exit.

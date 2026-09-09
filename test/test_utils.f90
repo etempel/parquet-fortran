@@ -103,10 +103,14 @@ contains
         real(real32) :: a4(6), b4(6)
         integer :: i, nbad
 
+        ! The fifth pair spans the exponent range deliberately, but its QUOTIENT must stay finite:
+        ! an overflowing quotient is raised by `a(i)/b(i)` on the assertion's own side as much as
+        ! inside the procedure, and nagfor unmasks the overflow trap by default, so the pair that
+        ! overflows aborts the runner instead of testing anything.
         a = [1.0_real64, -1.0_real64, 3.0_real64, -7.5_real64, 1.0e300_real64, 0.0_real64]
-        b = [3.0_real64, 7.0_real64, -11.0_real64, 0.25_real64, 1.0e-300_real64, 5.0_real64]
+        b = [3.0_real64, 7.0_real64, -11.0_real64, 0.25_real64, 1.0e-7_real64, 5.0_real64]
         a4 = [1.0_real32, -1.0_real32, 3.0_real32, -7.5_real32, 1.0e30_real32, 0.0_real32]
-        b4 = [3.0_real32, 7.0_real32, -11.0_real32, 0.25_real32, 1.0e-30_real32, 5.0_real32]
+        b4 = [3.0_real32, 7.0_real32, -11.0_real32, 0.25_real32, 1.0e-7_real32, 5.0_real32]
 
         nbad = 0
         do i = 1, size(a)

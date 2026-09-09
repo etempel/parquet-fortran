@@ -3124,10 +3124,12 @@ reach for.
   vector column, not merely a wholly-null row. It needed no change when validity became
   element-granular. Do not confuse it with the qc `miss:` check a few lines below it in the same file:
   `protected_cols:` **aborts**, `qc: miss:` **warns**.
-- **Every column that will ever appear must appear in the first row group**, chunked writes require
-  exact type agreement with the schema (no int32-into-float64 conversion), and the triplet runs on one
-  thread in row-group order. These constrain any future streaming write — see the chunked-write entry
-  in `feature_table.md` §2.4.
+- **Every column that will ever appear must appear in the first row group**, and the triplet runs on
+  one thread in row-group order. These constrain every streamed write, `parquet_write_table_chunk`
+  and `parquet_table_writer` included — see "Streaming/chunked writes" in `doc/pages/io/writing.md`.
+  A chunked write does NOT require exact type agreement with the schema: it converts to the declared
+  type exactly as a whole-column write does (`parquet_append_as_schema_chunk_int32` and its family,
+  `src/parquet_write_numeric.f90`).
 
 **Test.** Covered, though not all of it at the table layer — and the reason is worth knowing.
 
@@ -8748,7 +8750,9 @@ assertion on the output able to see it (`feature_pandas_S2.md`, contract 7).
 **Covered by** `test_sink_buffer_keeps_capacity` and `test_sink_row_appends_do_not_reallocate`
 (`test/test_table_stream.f90`): the capacity is at least `chunk_size` after a flush, and unchanged
 across every append between two flushes. The mutation to catch is the reserve deleted from the
-flush.
+flush. `bench/benchmark_table.sh`'s streamed-write mode is the end-to-end backstop: it times the sink
+against the same buffer loop written by hand, and a lost capacity shows there as a gap where the two
+should be at parity.
 
 ### Risk-228 — A sink whose `col_size:` is left `auto` picks a row-group size that counts every vector column as width 1
 

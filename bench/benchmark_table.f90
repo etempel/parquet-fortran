@@ -25,6 +25,10 @@
 !!                           a null-free table (where the writer needs no validity mask) and again
 !!                           on one with nulls (where it does, and building that mask is the whole
 !!                           cost).
+!!   * **write stream**   -- the parquet_table_writer sink against the hand-written buffer loop
+!!                           it replaces (they should be at parity), and the same loop with every
+!!                           column declared protected_cols:, which is the only way to write a
+!!                           streamed table without a validity mask per column per row group.
 !!
 !! Maintainer tool, never run by `fpm test` (CLAUDE.md: anything needing this much memory/time
 !! lives under app/ with a shell wrapper under tools/). Drive it with bench/benchmark_table.sh.
@@ -82,11 +86,11 @@ program benchmark_table
 
     character(len=:), allocatable :: mode, file
     real(real64) :: size_gb, nullfrac, select_frac
-    integer :: ncols, touch, slices, threads, scatter, chunk, bounded
+    integer :: ncols, touch, slices, threads, scatter, chunk, bounded, batches
     integer(int64) :: nrows_arg
 
     call parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg, &
-        select_frac, scatter, chunk, bounded)
+        select_frac, scatter, chunk, bounded, batches)
 
     select case (mode)
     case ("write_fixture")
@@ -107,6 +111,8 @@ program benchmark_table
         call bench_write(file)
     case ("write_nulls")
         call bench_write_nulls(file, nullfrac)
+    case ("write_stream")
+        call bench_write_stream(file, batches, chunk)
     case ("sort")
         call bench_sort(size_gb, ncols)
     case ("peakmem")
@@ -124,7 +130,7 @@ contains
 
     subroutine print_usage()
         write(output_unit, '(a)') "Usage: benchmark_table --mode=<write_fixture|read_raw|read_table|" // &
-            "read_lazy|read_slice|access|write|write_nulls|sort|argsort>"
+            "read_lazy|read_slice|access|write|write_nulls|write_stream|sort|argsort>"
         write(output_unit, '(a)') "                       [--size=<GB>] [--file=<path>] [--ncols=<n>]"
         write(output_unit, '(a)') ""
         write(output_unit, '(a)') "  --mode=write_fixture  generate the synthetic input file"
@@ -136,6 +142,7 @@ contains
         write(output_unit, '(a)') "  --mode=access         time %get vs. %col, and arithmetic through each"
         write(output_unit, '(a)') "  --mode=write          time parquet_write_table vs. a hand-written loop"
         write(output_unit, '(a)') "  --mode=write_nulls    the same, on a table with nulls (three ways)"
+        write(output_unit, '(a)') "  --mode=write_stream   the sink vs the hand-written buffer it replaces"
         write(output_unit, '(a)') "  --mode=sort           what %sort_by spends re-validating one permutation"
         write(output_unit, '(a)') "  --mode=argsort        pf_argsort at one thread count, split by sort phase"
         write(output_unit, '(a)') "  --mode=peakmem        build a table and sort it ONCE, for external peak-RSS"
@@ -149,6 +156,7 @@ contains
         write(output_unit, '(a)') "  --touch=<n>           columns to read in read_lazy (default 2)"
         write(output_unit, '(a)') "  --slices=<n>          equal slices to divide the file into (default 4)"
         write(output_unit, '(a)') "  --nullfrac=<f>        fraction of rows to null in write_nulls (default 0.1)"
+        write(output_unit, '(a)') "  --batches=<n>         batches write_stream hands over (default 32)"
         write(output_unit, '(a)') "  --scatter=<n>         write_fixture: add an int32 'key' column cycling"
         write(output_unit, '(a)') "                        0..n-1, so no row group's key range excludes any"
         write(output_unit, '(a)') "                        filter value and the statistics screen prunes"
@@ -157,13 +165,15 @@ contains
         write(output_unit, '(a)') "  --select=<f>          fraction of rows read_filtered's filter keeps"
         write(output_unit, '(a)') "                        (default 0.01)"
         write(output_unit, '(a)') "  --chunk=<n>           write_fixture: rows per row group (0, the default,"
-        write(output_unit, '(a)') "                        leaves the writer's own auto-sizing alone)"
+        write(output_unit, '(a)') "                        leaves the writer's own auto-sizing alone);"
+        write(output_unit, '(a)') "                        write_stream: the flush threshold every arm uses"
+        write(output_unit, '(a)') "                        (0, the default, is a quarter of the rows)"
         write(output_unit, '(a)') "  --bounded=<0|1>       read_filtered: open with bounded=.true. (default 0);"
         write(output_unit, '(a)') "                        run each arm in its OWN process, never both here"
     end subroutine print_usage
 
     subroutine parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg, &
-            select_frac, scatter, chunk, bounded)
+            select_frac, scatter, chunk, bounded, batches)
         character(len=:), allocatable, intent(out) :: mode !! which measurement to run.
         real(real64), intent(out) :: size_gb               !! target fixture size in GB.
         character(len=:), allocatable, intent(out) :: file !! fixture path.
@@ -177,6 +187,7 @@ contains
         integer, intent(out) :: scatter                    !! scattered key column's period; 0 = none.
         integer, intent(out) :: chunk                      !! explicit row-group size; 0 = auto.
         integer, intent(out) :: bounded                    !! 1 = open read_filtered with bounded=.true.
+        integer, intent(out) :: batches                    !! batches the write_stream run hands over.
 
         integer :: i, nargs, eq_pos, ios
         character(len=512) :: arg, key, val
@@ -194,6 +205,7 @@ contains
         scatter = 0
         chunk = 0
         bounded = 0
+        batches = 32
 
         nargs = command_argument_count()
         if (nargs == 0) then
@@ -279,6 +291,12 @@ contains
                 read(val, *, iostat=ios) bounded
                 if (ios /= 0) then
                     write(error_unit, '(a)') "benchmark_table: --bounded must be 0 or 1"
+                    error stop 1
+                end if
+            case ("--batches")
+                read(val, *, iostat=ios) batches
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --batches must be an integer"
                     error stop 1
                 end if
             case default
@@ -1082,6 +1100,224 @@ contains
         write(output_unit, '(a)') "Compare with --mode=write on the same fixture for the null-free"
         write(output_unit, '(a)') "path, where no mask is built or passed at all."
     end subroutine bench_write_nulls
+
+    !> The `parquet_table_writer` sink against the hand-written buffer loop it replaces, and the
+    !! always-present validity mask against a write that carries none. Three arms over the same
+    !! prepared batches, one output file each:
+    !!
+    !!   1. **the sink** -- open it on the first batch, `%append` every batch, close.
+    !!   2. **a hand-written buffer** -- `%clone_structure` a buffer, `%append` into it, and
+    !!      `parquet_write_table_chunk` it whenever it reaches the threshold, emptying and
+    !!      re-reserving afterwards. That is what the sink does internally, written out, so the
+    !!      two should be at PARITY. A sink slower than this loop is the reset-and-reserve after
+    !!      a flush having regressed (feature_risks.md Risk-227): without the reserve, every
+    !!      append after a flush grows the buffer's columns again.
+    !!   3. **the same loop with every column declared `protected_cols:`** -- identical Fortran,
+    !!      one schema call different. The writer drops a protected column's all-`.true.` mask,
+    !!      stores the field non-nullable and builds no null bitmap, so (2) minus (3) is what the
+    !!      always-present mask costs. That is the figure doc/pages/tables/table-write.md sends
+    !!      the reader here for.
+    !!
+    !! **Read the control before the timings.** Arms (2) and (3) run the same code over the same
+    !! rows; had `%set_protected` not reached the writer they would measure one configuration
+    !! twice and print a ratio of 1.00 -- which is also what "the mask costs nothing" looks like.
+    !! So the mode reads each output's stored nullability back and prints all three: the sink's and
+    !! arm (2)'s must be nullable and arm (3)'s must not, and no figure here means anything if they
+    !! are not. Same shape, and for the same reason, as `--mode=read_one`'s use_threads control.
+    !!
+    !! The batches are opened and materialized before anything is timed, for the reason
+    !! `--mode=write` materializes first: an append that had to decode a column from the file
+    !! would charge that read to whichever arm ran first. The three arms alternate within each of
+    !! three rounds and the best of the three is kept, so the cold first round -- the one that
+    !! opens this process's first writer -- falls out rather than landing on arm 1. All three arms are given the SAME
+    !! explicit `chunk_size`, a quarter of the rows unless `--chunk` says otherwise: the sink's
+    !! own estimate for a narrow float64 table is larger than any fixture this program writes, so
+    !! taking it would leave the buffer below the threshold from start to finish and measure a
+    !! flush path that never ran.
+    subroutine bench_write_stream(file, nbatch, chunk_arg)
+        character(len=*), intent(in) :: file !! fixture to slice into batches.
+        integer, intent(in) :: nbatch        !! batches to hand over, i.e. how many %append calls.
+        integer, intent(in) :: chunk_arg     !! explicit rows per row group; 0 = a quarter of the rows.
+        character(len=*), parameter :: f_sink = "benchmark_table_out1.parquet"
+        character(len=*), parameter :: f_hand = "benchmark_table_out2.parquet"
+        character(len=*), parameter :: f_prot = "benchmark_table_out3.parquet"
+        type(parquet_table), allocatable :: batch(:)
+        type(parquet_table) :: buf, bufp
+        type(parquet_table_writer) :: out
+        type(parquet_schema) :: s, sp
+        type(parquet_writer) :: w
+        character(len=:), allocatable :: names(:)
+        integer(int64), allocatable :: bounds(:,:)
+        integer(int64) :: nrows_file, per, lo, hi, n_sink, n_hand, n_prot, g_sink, g_hand, g_prot
+        real(real64) :: t0, t_sink, t_hand, t_prot
+        integer, parameter :: NROUNDS = 3
+        integer :: b, i, chunk, rnd
+        logical :: null_sink, null_hand, null_prot
+
+        if (nbatch < 1) then
+            write(error_unit, '(a)') "benchmark_table: --batches must be at least 1"
+            error stop 1
+        end if
+
+        ! --- preparation, deliberately untimed --------------------------------------------------
+        call parquet_table_row_group_bounds(file, bounds)
+        nrows_file = bounds(2, size(bounds, 2))
+        if (nrows_file < int(nbatch, int64)) then
+            write(error_unit, '(a)') "benchmark_table: fewer rows than batches -- nothing to measure"
+            error stop 1
+        end if
+        per = nrows_file / int(nbatch, int64)
+        allocate(batch(nbatch))
+        do b = 1, nbatch
+            lo = 1_int64 + int(b - 1, int64)*per
+            hi = lo + per - 1_int64
+            if (b == nbatch) hi = nrows_file
+            call parquet_open_table(batch(b), file, lo, hi)
+            call batch(b)%materialize_all()
+        end do
+        call batch(1)%column_names(names)
+        ! The threshold every arm uses, fixed here so all three chunk the same rows the same way.
+        ! Without a --chunk the sink resolves its own estimate from the schema, which for a narrow
+        ! float64 table is millions of rows -- more than a fixture of any reasonable size holds, so
+        ! the buffer would never reach it and the flush path the parity arm exists to measure would
+        ! never run at all. A quarter of the rows crosses it three times.
+        if (chunk_arg > 0) then
+            chunk = chunk_arg
+        else
+            chunk = int(min(max(1_int64, nrows_file/4_int64), int(huge(1), int64)))
+        end if
+
+        ! Three rounds, the arms alternating within each and the best of the three kept. The first
+        ! round is the cold one -- this process has opened no writer yet, and the untimed
+        ! materialization above has just left the allocator in a state arm 1 alone would be charged
+        ! for -- and taking the minimum is what discards it.
+        t_sink = huge(1.0_real64)
+        t_hand = huge(1.0_real64)
+        t_prot = huge(1.0_real64)
+        do rnd = 1, NROUNDS
+            ! --- 1: the sink --------------------------------------------------------------------
+            t0 = now()
+            call parquet_open_table_writer(out, f_sink, batch(1), chunk_size=chunk)
+            do b = 1, nbatch
+                call out%append(batch(b))
+            end do
+            call parquet_close_table_writer(out)
+            t_sink = min(t_sink, now() - t0)
+
+            ! --- 2: the same loop written out, carrying the always-present mask ------------------
+            t0 = now()
+            call parquet_derive_schema(batch(1), s)
+            call parquet_open_writer_like(w, f_hand, batch(1), schema=s, chunk_size=chunk)
+            call batch(1)%clone_structure(buf)
+            call buf%reserve(int(chunk, int64))
+            do b = 1, nbatch
+                call buf%append(batch(b))
+                if (buf%nrows() >= int(chunk, int64)) then
+                    call parquet_write_table_chunk(w, buf)
+                    call buf%truncate(0_int64)
+                    call buf%reserve(int(chunk, int64))
+                end if
+            end do
+            if (buf%nrows() > 0_int64) call parquet_write_table_chunk(w, buf)
+            call parquet_close_writer(w)
+            t_hand = min(t_hand, now() - t0)
+
+            ! --- 3: the same again, every column protected, so no mask is passed -----------------
+            t0 = now()
+            call parquet_derive_schema(batch(1), sp)
+            do i = 1, size(names)
+                call sp%set_protected(trim(names(i)))
+            end do
+            call parquet_open_writer_like(w, f_prot, batch(1), schema=sp, chunk_size=chunk)
+            call batch(1)%clone_structure(bufp)
+            call bufp%reserve(int(chunk, int64))
+            do b = 1, nbatch
+                call bufp%append(batch(b))
+                if (bufp%nrows() >= int(chunk, int64)) then
+                    call parquet_write_table_chunk(w, bufp)
+                    call bufp%truncate(0_int64)
+                    call bufp%reserve(int(chunk, int64))
+                end if
+            end do
+            if (bufp%nrows() > 0_int64) call parquet_write_table_chunk(w, bufp)
+            call parquet_close_writer(w)
+            t_prot = min(t_prot, now() - t0)
+        end do
+
+        ! --- what the three files actually hold ---------------------------------------------------
+        call stream_file_facts(f_sink, trim(names(1)), n_sink, g_sink, null_sink)
+        call stream_file_facts(f_hand, trim(names(1)), n_hand, g_hand, null_hand)
+        call stream_file_facts(f_prot, trim(names(1)), n_prot, g_prot, null_prot)
+        if (n_sink /= nrows_file .or. n_hand /= nrows_file .or. n_prot /= nrows_file) then
+            write(error_unit, '(a)') "benchmark_table: the arms wrote different row counts -- one path is wrong"
+            error stop 1
+        end if
+
+        write(output_unit, '(a)') "--- write: streamed, sink vs hand-written buffer ---"
+        write(output_unit, '(a,i0,a,i0,a,i0,a,i0)') "rows: ", nrows_file, "   batches: ", nbatch, &
+            "   chunk_size: ", chunk, "   best of ", NROUNDS
+        if (chunk_arg <= 0) then
+            write(output_unit, '(a)') "no --chunk given, so the threshold is a quarter of the rows and"
+            write(output_unit, '(a)') "every arm crosses three flush boundaries. The sink's OWN estimate,"
+            write(output_unit, '(a)') "which is what a caller passing no chunk_size= gets, is much larger"
+            write(output_unit, '(a)') "for a table this narrow -- pass --chunk to measure at any other."
+        end if
+        write(output_unit, '(a,f10.3,a)') "parquet_table_writer        : ", t_sink, " s"
+        write(output_unit, '(a,f10.3,a)') "hand-written buffer + chunk : ", t_hand, " s"
+        write(output_unit, '(a,f10.3,a)') "the same, columns protected : ", t_prot, " s"
+        if (t_hand > 0.0_real64) then
+            write(output_unit, '(a,f10.2,a)') "sink / hand-written         : ", t_sink / t_hand, " x"
+        end if
+        if (t_prot > 0.0_real64) then
+            write(output_unit, '(a,f10.2,a)') "masked / unmasked           : ", t_hand / t_prot, " x"
+        end if
+        write(output_unit, '(a,i0,a,i0,a,i0)') "row groups: sink ", g_sink, ", buffer ", g_hand, &
+            ", protected ", g_prot
+        write(output_unit, '(a,l1,a,l1,a,l1)') "CONTROL, stored nullability: sink ", null_sink, &
+            ", masked ", null_hand, ", protected ", null_prot
+        if (.not. null_sink .or. .not. null_hand .or. null_prot) then
+            write(output_unit, '(a)') "CONTROL FAILED: the first two must be T and the third F. The"
+            write(output_unit, '(a)') "protected arm wrote the same field nullability as the masked"
+            write(output_unit, '(a)') "one, so the two measured one configuration twice and the mask"
+            write(output_unit, '(a)') "ratio above means nothing -- or the sink stopped passing a mask"
+            write(output_unit, '(a)') "at all, which is a defect, not a measurement. Fix it before"
+            write(output_unit, '(a)') "reading any figure here."
+        end if
+        if (g_sink /= g_hand) then
+            write(output_unit, '(a)') "NOTE: the sink and the buffer loop wrote different row-group"
+            write(output_unit, '(a)') "counts, so they did not chunk the same rows the same way and"
+            write(output_unit, '(a)') "the parity comparison above is not one. The loop here mirrors"
+            write(output_unit, '(a)') "the sink's flush rule; one of the two has changed."
+        end if
+        write(output_unit, '(a)') "The first two lines should be at parity: the sink IS the second"
+        write(output_unit, '(a)') "loop, with the bookkeeping inside. A slower sink means the empty"
+        write(output_unit, '(a)') "and re-reserve after a flush regressed, and every append after"
+        write(output_unit, '(a)') "the first row group is growing the buffer again."
+        write(output_unit, '(a)') "The third line is the same write with no validity mask, which is"
+        write(output_unit, '(a)') "what protected_cols: buys: a streamed table write passes a mask"
+        write(output_unit, '(a)') "for every column it can, because a streamed column's nullability"
+        write(output_unit, '(a)') "is fixed by its FIRST row group and a later Null could not then"
+        write(output_unit, '(a)') "be written at all. Compare with --mode=write, whose hand-written"
+        write(output_unit, '(a)') "loop passes no mask either."
+    end subroutine bench_write_stream
+
+    !> Reads one written file's row count, row-group count and one column's STORED nullability
+    !! back -- the three facts `--mode=write_stream` compares its arms on. Its own reader, closed
+    !! before it returns, so nothing it opens is alive during a timed arm.
+    subroutine stream_file_facts(path, name, nrows, ngroups, nullable)
+        character(len=*), intent(in) :: path   !! written file to inspect.
+        character(len=*), intent(in) :: name   !! column whose stored nullability to report.
+        integer(int64), intent(out) :: nrows   !! rows the file holds.
+        integer(int64), intent(out) :: ngroups !! row groups the file holds.
+        logical, intent(out) :: nullable       !! .true. when that field was stored nullable.
+        type(parquet_reader) :: r
+
+        call parquet_open_reader(r, path)
+        call parquet_get_nrows(r, nrows)
+        call parquet_get_num_row_groups(r, ngroups)
+        call parquet_get_column_nullable(r, name, nullable)
+        call parquet_close_reader(r)
+    end subroutine stream_file_facts
 
     !> What `%sort_by` spends re-validating one permutation it produced itself:
     !! `parquet_column%reindex` validates its permutation unconditionally, and `%sort_by`

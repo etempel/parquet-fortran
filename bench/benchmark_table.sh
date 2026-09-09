@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Benchmarks the parquet_table layer against reading/writing columns directly, on one synthetic
-# float64 file. It drives bench/benchmark_table.f90 through eight runs plus two sweeps -- a raw
+# float64 file. It drives bench/benchmark_table.f90 through nine runs plus two sweeps -- a raw
 # reader baseline, a table open+materialize_all, a lazy open reading only TOUCH of the columns, a
 # slice-regime open covering one of SLICES equal row ranges, an access comparison, a write
-# comparison on a null-free table, the same on one where NULLFRAC of the rows are null, a sort run,
-# a peak-memory pair and an argsort thread sweep. A ninth mode, read_one, is not part of the
-# sequence and is run on its own (see below).
+# comparison on a null-free table, the same on one where NULLFRAC of the rows are null, a streamed
+# write handing BATCHES tables to a sink, a sort run, a peak-memory pair and an argsort thread
+# sweep. A tenth mode, read_one, is not part of the sequence and is run on its own (see below).
 #
 # ALWAYS pass --profile release for anything measured here; the wrapper already does. See CLAUDE.md's
 # "Manual (never-`fpm test`) large-scale/benchmark tools" for why, and for the FPM_FFLAGS rules.
@@ -73,6 +73,24 @@
 #   hoist it. It builds its null-carrying input itself (an untimed extra write plus read) rather
 #   than asking the fixture writer for one, because parquet_table exposes no way to mark a row null
 #   in memory.
+#
+# write_stream -- the streamed counterpart to write, and the only run that measures the
+#   parquet_table_writer sink. Three arms over the same BATCHES tables: the sink; the hand-written
+#   buffer loop it replaces (%clone_structure, %append into it, parquet_write_table_chunk at the
+#   threshold, empty and re-reserve); and that same loop with every column declared
+#   protected_cols:. The first two should be at PARITY -- the sink is the second loop with its
+#   bookkeeping inside -- and a slower sink means the re-reserve after a flush regressed, so every
+#   append after the first row group is growing the buffer again. The third arm is the same write
+#   with no validity mask, so the gap above it is what the always-present mask costs: a streamed
+#   table write passes a mask for every column it can, because a streamed column's nullability is
+#   fixed by its first row group. That is the figure doc/pages/tables/table-write.md sends the
+#   reader here for.
+#
+#   READ ITS CONTROL FIRST, for the reason read_one's control exists: the second and third arms run
+#   identical Fortran over identical rows, so "the mask is free" and "%set_protected never reached
+#   the writer" produce the same 1.00 ratio. The run prints all three outputs' stored nullability --
+#   the sink's and the masked arm's must be T and the protected arm's F -- and says outright that a
+#   run where they do not means nothing.
 #
 # sort -- the only run that touches no file: it builds a table of SORT_SIZE_GB worth of float64
 #   columns plus one character column IN MEMORY, because what it measures is the cost of reordering
@@ -170,6 +188,13 @@
 #   TOUCH=2                   Columns the lazy-read mode actually reads, out of NCOLS.
 #   SLICES=4                  Equal row slices to divide the file into for the slice mode.
 #   NULLFRAC=0.1              Fraction of rows the write_nulls run marks null (0 < f < 1).
+#   BATCHES=32                Tables the write_stream run hands to the sink, one %append each.
+#                             The fixture is cut into that many equal row ranges.
+#   STREAM_CHUNK=0            Rows per row group every write_stream arm uses. 0, the default,
+#                             takes a quarter of the fixture's rows, so every arm crosses three
+#                             flush boundaries; the sink's own estimate is larger than any fixture
+#                             this script writes, and taking it would measure a flush that never
+#                             ran.
 #   FILTER_SELECT=0.01        Fraction of rows the read_filtered run's filter keeps.
 #   FILTER_SCATTER=1000       Period of that run's fixture `key` column. The filter threshold is
 #                             sized from it, and its whole job is that every row group holds the
@@ -235,6 +260,8 @@ NCOLS="${NCOLS:-8}"
 TOUCH="${TOUCH:-2}"
 SLICES="${SLICES:-4}"
 NULLFRAC="${NULLFRAC:-0.1}"
+BATCHES="${BATCHES:-32}"
+STREAM_CHUNK="${STREAM_CHUNK:-0}"
 FILTER_SELECT="${FILTER_SELECT:-0.01}"
 FILTER_SCATTER="${FILTER_SCATTER:-1000}"
 FILTER_CHUNK="${FILTER_CHUNK:-50000}"
@@ -306,6 +333,13 @@ echo
 # The write run above measures the null-free path, where the writer is handed no validity mask at
 # all. This one measures what a mask actually costs, which is the case the shortcut cannot help.
 fpm run benchmark_table --profile release -- --mode=write_nulls --file="$TEST_FILE" --nullfrac="$NULLFRAC"
+echo
+
+# Both runs above write the whole table in one call. This one writes it a row group at a time, and
+# compares the sink against the buffer loop it replaces (parity expected) and against the same loop
+# with no validity mask (which is what protected_cols: buys). Read its CONTROL line first.
+fpm run benchmark_table --profile release -- --mode=write_stream --file="$TEST_FILE" \
+    --batches="$BATCHES" --chunk="$STREAM_CHUNK"
 echo
 
 # The one run that uses no file at all: it builds its table in memory, because what it measures is

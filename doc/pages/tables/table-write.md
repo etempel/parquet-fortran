@@ -459,10 +459,11 @@ close the writer as usual.
   and every later row group must match — so a mask passed only when a Null happens to be present
   would make a later Null abort rows away from anything you did wrong. The always-present mask
   costs measurably more than an unmasked write (one mask per column per row group, plus the null
-  bitmap the writer builds from it; `bench/benchmark_table.f90` measures it). Declaring a column
-  `protected_cols:` — `s%set_protected(name)` on the derived schema — removes the cost and the
-  nullability question together: the writer drops a protected column's all-`.true.` mask, stores
-  the field non-nullable, and a Null in it is an error naming the column, never a corrupt file.
+  bitmap the writer builds from it; `bench/benchmark_table.sh`'s streamed-write mode measures the
+  pair). Declaring a column `protected_cols:` — `s%set_protected(name)` on the derived schema —
+  removes the cost and the nullability question together: the writer drops a protected column's
+  all-`.true.` mask, stores the field non-nullable, and a Null in it is an error naming the column,
+  never a corrupt file.
 - **`row_mask=`** (`size(row_mask) == table%nrows()`) drops every `.false.` row from the output
   entirely, per chunk, under
   [`parquet_write_chunk_row_mask`](../io/writing.html#row-groups)'s rules: used on a writer's
@@ -563,5 +564,7 @@ defaults; the page does not repeat them.
   an unreadable file, exactly as an abandoned `parquet_writer` does.
 
 Which of the two shapes to use: the sink, for most loops — it costs one copy of every row through
-the buffer and gives automatic re-chunking, null-filling and the always-present mask for free. The
-recipe above, when the input already comes in row groups and the copy matters.
+the buffer and gives automatic re-chunking, null-filling and the always-present mask for free, and
+measures at parity with the same buffer loop written by hand in `bench/benchmark_table.sh`'s
+streamed-write mode. The recipe above, when the input already comes in row groups and that copy is
+worth avoiding.

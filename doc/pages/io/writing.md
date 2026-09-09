@@ -349,7 +349,10 @@ matrix `values(:,:)`) before `parquet_finish_row_group` closes it out. Repeat fo
 groups as needed, then `parquet_close_writer` as usual. When each row group's data is a
 `parquet_table`, `parquet_write_table_chunk(writer, table)` makes the three calls for every column
 the writer declares — see [Writing a table one row group at a
-time](../tables/table-write.html#writing-a-table-one-row-group-at-a-time).
+time](../tables/table-write.html#writing-a-table-one-row-group-at-a-time). When the rows arrive in
+batches that do not line up with row groups, `parquet_table_writer` buffers them and picks the
+boundaries itself — see [An output file that stays
+open](../tables/table-write.html#an-output-file-that-stays-open-parquet_table_writer).
 
 **Picking `rows_per_group`:** `parquet_get_chunk_size(writer, chunk_size)` returns a usable
 row-group size at any point after `parquet_open_writer` — your own explicit `chunk_size=` if you
@@ -401,6 +404,14 @@ If you want to parallelize the work that *produces* each row group's data, do th
 `!$omp parallel do` (or similar) around the compute step only, then make the
 `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls afterward,
 serially, on one thread.
+
+The table-level forms inherit that rule. `parquet_write_table_chunk` makes the same three calls, so
+it is the same one thread in the same order. A `parquet_table_writer` makes them inside `%append`,
+and belongs to the thread that opened it: `%append`, `%flush` and the close refuse a sink another
+thread may share. One sink per thread, each writing its own file, is the supported shape, and each
+is an element of an array declared **before** the region — the type is finalizable, so not an OpenMP
+`private()` copy, and it has allocatable components, so not a block-local under ifx. See [Thread
+safety](../operating/thread-safety.html#rules-at-a-glance).
 
 ## Filtering rows with a mask
 

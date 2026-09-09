@@ -252,6 +252,13 @@ flang builds here are serial only and `--profile release` does not link (`build.
   `ulimit -s 65520`, scale the fixture, print the counter. **Hoist**: build each message once above
   the loop into a `character(len=:), allocatable`; never raise the limit (`-fno-stack-arrays` does
   not help).
+- **An INTERNAL procedure passed as an actual argument to a `procedure(...)` dummy SIGSEGVs
+  before the callee runs** (flang 22.1.8 on arm64 macOS, with or without a host reference; a
+  module procedure passed the same way runs, and gfortran, ifx and nagfor run both forms). Every
+  callback in `src/`, `test/`, `app/` and `bench/`, and every guide example, is a module procedure
+  with its context in module variables, or a type-bound procedure of an object passed as a
+  `class(...)` dummy with its context in components. Nothing enforces it beyond the serial flang
+  `fpm test` on a macOS machine (`build.md`).
 
 ## nagfor-specific gotchas
 

@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **115** of this library's Fortran files.
+also the largest: a project that imports it compiles **116** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -60,8 +60,8 @@ in every one of them.
 | `parquet_stats` | 28 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 92 | **yes** | the `parquet_table` container |
-| `parquet` | 115 | **yes** | everything above, through one `use` |
+| `parquet_tables` | 93 | **yes** | the `parquet_table` container |
+| `parquet` | 116 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 

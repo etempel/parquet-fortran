@@ -83,7 +83,7 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:), p16(:), p17(:), p18(:), p19(:), p20(:)
+                                            p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2527,7 +2527,42 @@ contains
             new_unittest("appending to a shared sink from inside a parallel region aborts", &
                 test_sink_shared_in_parallel_aborts) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19]
+        ! The grouping's scenarios (%group_by and parquet_grouping); its own part, so that
+        ! p20 keeps headroom below the continuation-line ceiling.
+        p21 = [ &
+            new_unittest("group_by with no key aborts", &
+                test_table_group_no_key_aborts), &
+            new_unittest("group_by on a missing column aborts", &
+                test_table_group_unknown_key_aborts), &
+            new_unittest("group_by on a key carrying a direction aborts", &
+                test_table_group_direction_token_aborts), &
+            new_unittest("group_by on a vector column aborts", &
+                test_table_group_vector_column_aborts), &
+            new_unittest("group_by on a list column aborts", &
+                test_table_group_container_column_aborts), &
+            new_unittest("size on a stale grouping aborts", &
+                test_table_group_stale_size_aborts), &
+            new_unittest("rows on a stale grouping aborts", &
+                test_table_group_stale_rows_aborts), &
+            new_unittest("csr on a stale grouping aborts", &
+                test_table_group_stale_csr_aborts), &
+            new_unittest("first_rows on a stale grouping aborts", &
+                test_table_group_stale_first_rows_aborts), &
+            new_unittest("group_ids on a stale grouping aborts", &
+                test_table_group_stale_group_ids_aborts), &
+            new_unittest("key_table on a stale grouping aborts", &
+                test_table_group_stale_key_table_aborts), &
+            new_unittest("count on a stale grouping aborts", &
+                test_table_group_stale_count_aborts), &
+            new_unittest("a query on a never-built grouping aborts", &
+                test_table_group_never_built_aborts), &
+            new_unittest("rows with a group number out of range aborts", &
+                test_table_group_out_of_range_aborts), &
+            new_unittest("key_table with a size_name that names a key aborts", &
+                test_table_group_size_name_clash_aborts) &
+            ]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19, &
+            p21]
     end subroutine collect_tests_parquet_errors
 
 
@@ -15677,6 +15712,126 @@ contains
             failure_message="every legal build_index and parquet_table_index call was expected to complete", &
             required_stderr="table index control finished")
     end subroutine test_table_index_control_completes
+    !
+    !> See `scenario_table_group_no_key` (test/error_scenarios.f90).
+    subroutine test_table_group_no_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_no_key", expect_abort=.true., &
+            failure_message="group_by with no key was expected to abort", &
+            required_stderr="parquet_table: group_by: no key column was given")
+    end subroutine test_table_group_no_key_aborts
+    !
+    !> See `scenario_table_group_unknown_key` (test/error_scenarios.f90).
+    subroutine test_table_group_unknown_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_unknown_key", expect_abort=.true., &
+            failure_message="group_by on a missing column was expected to abort", &
+            required_stderr="parquet_table: group_by: no column of this name")
+    end subroutine test_table_group_unknown_key_aborts
+    !
+    !> See `scenario_table_group_direction_token` (test/error_scenarios.f90).
+    subroutine test_table_group_direction_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_direction_token", expect_abort=.true., &
+            failure_message="group_by on a direction token was expected to abort", &
+            required_stderr="reads as a sort key, and a group key has no direction")
+    end subroutine test_table_group_direction_token_aborts
+    !
+    !> See `scenario_table_group_vector_column` (test/error_scenarios.f90).
+    subroutine test_table_group_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_vector_column", expect_abort=.true., &
+            failure_message="group_by on a vector column was expected to abort", &
+            required_stderr="cannot be a group key; there is no defined order on a whole vector row")
+    end subroutine test_table_group_vector_column_aborts
+    !
+    !> See `scenario_table_group_container_column` (test/error_scenarios.f90).
+    subroutine test_table_group_container_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_container_column", expect_abort=.true., &
+            failure_message="group_by on a list column was expected to abort", &
+            required_stderr="cannot be a group key; there is no defined order on a list, a map or a struct")
+    end subroutine test_table_group_container_column_aborts
+    !
+    !> See `scenario_table_group_stale_size` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_size", expect_abort=.true., &
+            failure_message="size on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: size: this table has changed structurally since the grouping was built")
+    end subroutine test_table_group_stale_size_aborts
+    !
+    !> See `scenario_table_group_stale_rows` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_rows", expect_abort=.true., &
+            failure_message="rows on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: rows: this table has changed structurally")
+    end subroutine test_table_group_stale_rows_aborts
+    !
+    !> See `scenario_table_group_stale_csr` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_csr_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_csr", expect_abort=.true., &
+            failure_message="csr on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: csr: this table has changed structurally")
+    end subroutine test_table_group_stale_csr_aborts
+    !
+    !> See `scenario_table_group_stale_first_rows` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_first_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_first_rows", expect_abort=.true., &
+            failure_message="first_rows on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: first_rows: this table has changed structurally")
+    end subroutine test_table_group_stale_first_rows_aborts
+    !
+    !> See `scenario_table_group_stale_group_ids` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_group_ids_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_group_ids", expect_abort=.true., &
+            failure_message="group_ids on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: group_ids: this table has changed structurally")
+    end subroutine test_table_group_stale_group_ids_aborts
+    !
+    !> See `scenario_table_group_stale_key_table` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_key_table_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_key_table", expect_abort=.true., &
+            failure_message="key_table on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: key_table: this table has changed structurally")
+    end subroutine test_table_group_stale_key_table_aborts
+    !
+    !> See `scenario_table_group_stale_count` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_count", expect_abort=.true., &
+            failure_message="count on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: count: this table has changed structurally")
+    end subroutine test_table_group_stale_count_aborts
+    !
+    !> See `scenario_table_group_never_built` (test/error_scenarios.f90).
+    subroutine test_table_group_never_built_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_never_built", expect_abort=.true., &
+            failure_message="a query on a never-built grouping was expected to abort", &
+            required_stderr="no grouping has been built into this object")
+    end subroutine test_table_group_never_built_aborts
+    !
+    !> See `scenario_table_group_out_of_range` (test/error_scenarios.f90).
+    subroutine test_table_group_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_out_of_range", expect_abort=.true., &
+            failure_message="rows with a group number out of range was expected to abort", &
+            required_stderr="parquet_grouping: rows: group 4 is out of range")
+    end subroutine test_table_group_out_of_range_aborts
+    !
+    !> See `scenario_table_group_size_name_clash` (test/error_scenarios.f90).
+    subroutine test_table_group_size_name_clash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_size_name_clash", expect_abort=.true., &
+            failure_message="key_table with a size_name naming a key was expected to abort", &
+            required_stderr="is already a key column's name")
+    end subroutine test_table_group_size_name_clash_aborts
     !
     !> See `scenario_filter_temporal_set_mismatch` (test/error_scenarios.f90).
     subroutine test_filter_temporal_set_mismatch_aborts(error)

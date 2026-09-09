@@ -3008,6 +3008,36 @@ program error_scenarios
         call scenario_table_index_threads_zero()
     case ("table_index_control")
         call scenario_table_index_control()
+    case ("table_group_no_key")
+        call scenario_table_group_no_key()
+    case ("table_group_unknown_key")
+        call scenario_table_group_unknown_key()
+    case ("table_group_direction_token")
+        call scenario_table_group_direction_token()
+    case ("table_group_vector_column")
+        call scenario_table_group_vector_column()
+    case ("table_group_container_column")
+        call scenario_table_group_container_column()
+    case ("table_group_stale_size")
+        call scenario_table_group_stale_size()
+    case ("table_group_stale_rows")
+        call scenario_table_group_stale_rows()
+    case ("table_group_stale_csr")
+        call scenario_table_group_stale_csr()
+    case ("table_group_stale_first_rows")
+        call scenario_table_group_stale_first_rows()
+    case ("table_group_stale_group_ids")
+        call scenario_table_group_stale_group_ids()
+    case ("table_group_stale_key_table")
+        call scenario_table_group_stale_key_table()
+    case ("table_group_stale_count")
+        call scenario_table_group_stale_count()
+    case ("table_group_never_built")
+        call scenario_table_group_never_built()
+    case ("table_group_out_of_range")
+        call scenario_table_group_out_of_range()
+    case ("table_group_size_name_clash")
+        call scenario_table_group_size_name_clash()
     case ("filter_temporal_set_mismatch")
         call scenario_filter_temporal_set_mismatch()
     case ("filter_temporal_literal_list")
@@ -26722,6 +26752,235 @@ contains
         if (ix%is_current()) error stop "clear left the index current"
         print '(a)', "table index control finished"
     end subroutine scenario_table_index_control
+    !
+    ! ---- %group_by and parquet_grouping ---------------------------------------------------------
+    !
+    !> A five-row in-memory table for the grouping scenarios: `key` (int32, with ties: 3 at rows
+    !! 2 and 4, 7 at rows 1 and 3, 9 at row 5), `x` (real64, row-distinct), `s` (string) and `v`
+    !! (a 2-wide int32 vector).
+    subroutine table_group_scenario_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table.
+        integer(int32) :: v(2, 5)
+        character(len=2) :: s(5)
+        v(1, :) = [1, 2, 3, 4, 5]
+        v(2, :) = [6, 7, 8, 9, 10]
+        s = ["aa", "bb", "cc", "dd", "ee"]
+        call parquet_new_table(t)
+        call t%add_column("key", [7_int32, 3_int32, 7_int32, 3_int32, 9_int32])
+        call t%add_column("x", [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64])
+        call t%add_column("s", s)
+        call t%add_column("v", v)
+    end subroutine table_group_scenario_fixture
+    !
+    !> No key at all is refused naming the verb, rather than answering one group of every row or
+    !! falling through to %argsort_by's own "no sort key" message. A grouping over a real key
+    !! first is the negative control.
+    subroutine scenario_table_group_no_key()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        print '(a,i0)', "group_by over one key ran, groups=", grp%ngroups()
+        call t%group_by("", grp)
+        print '(a,i0)', "unexpectedly grouped by no key, groups=", grp%ngroups()
+    end subroutine scenario_table_group_no_key
+    !
+    !> A column the table does not have is refused by the ordinary name lookup, naming group_by.
+    subroutine scenario_table_group_unknown_key()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by(["key"], grp)
+        print '(a,i0)', "group_by over a real column ran, groups=", grp%ngroups()
+        call t%group_by(["nope"], grp)
+        print '(a,i0)', "unexpectedly grouped by a missing column, groups=", grp%ngroups()
+    end subroutine scenario_table_group_unknown_key
+    !
+    !> A key that reads as a sort key is refused: the group order is a contract, not an option.
+    subroutine scenario_table_group_direction_token()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        print '(a,i0)', "group_by over a bare name ran, groups=", grp%ngroups()
+        call t%group_by("-key", grp)
+        print '(a,i0)', "unexpectedly accepted a direction token, groups=", grp%ngroups()
+    end subroutine scenario_table_group_direction_token
+    !
+    !> A vector column has no single value per row to group on -- the sort's refusal, worded
+    !! for a grouping.
+    subroutine scenario_table_group_vector_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by(["x"], grp)
+        print '(a,i0)', "group_by over a scalar column ran, groups=", grp%ngroups()
+        call t%group_by(["v"], grp)
+        print '(a,i0)', "unexpectedly grouped by a vector column, groups=", grp%ngroups()
+    end subroutine scenario_table_group_vector_column
+    !
+    !> A container column has no defined order, so no grouping either; the same table groups by
+    !! its scalar key first.
+    subroutine scenario_table_group_container_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        type(parquet_list_column) :: lc
+        call table_group_scenario_fixture(t)
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call lc%append_row([3_int32])
+        call lc%append_row([4_int32, 5_int32, 6_int32])
+        call lc%append_row([7_int32])
+        call lc%append_row([8_int32, 9_int32])
+        call t%add_column("tags", lc)
+        call t%group_by(["key"], grp)
+        print '(a,i0)', "group_by beside a list column ran, groups=", grp%ngroups()
+        call t%group_by(["tags"], grp)
+        print '(a,i0)', "unexpectedly grouped by a list column, groups=", grp%ngroups()
+    end subroutine scenario_table_group_container_column
+    !
+    !> The stale grouping, one scenario per query family: after a row change every per-group
+    !! query aborts naming the table and both generations (feature_risks.md Risk-210's rule).
+    !! The row change is a %filter_rows that keeps every row but one -- the answers would stay
+    !! in range, which is exactly the case a cached flag would answer wrongly. Each queries once
+    !! before the change, as its control.
+    subroutine scenario_table_group_stale_size()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: counts(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%size(counts)
+        print '(a,i0)', "size answered before the change, groups=", size(counts)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%size(counts)
+        print '(a,i0)', "a stale grouping answered size, groups=", size(counts)
+    end subroutine scenario_table_group_stale_size
+    !
+    !> See `scenario_table_group_stale_size`.
+    subroutine scenario_table_group_stale_rows()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: rows(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%rows(1_int64, rows)
+        print '(a,i0)', "rows answered before the change, n=", size(rows)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%rows(1_int64, rows)
+        print '(a,i0)', "a stale grouping answered rows, n=", size(rows)
+    end subroutine scenario_table_group_stale_rows
+    !
+    !> See `scenario_table_group_stale_size`.
+    subroutine scenario_table_group_stale_csr()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: offsets(:), rows(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%csr(offsets, rows)
+        print '(a,i0)', "csr answered before the change, n=", size(rows)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%csr(offsets, rows)
+        print '(a,i0)', "a stale grouping answered csr, n=", size(rows)
+    end subroutine scenario_table_group_stale_csr
+    !
+    !> See `scenario_table_group_stale_size`; `%last_rows` shares the guard with `%first_rows`.
+    subroutine scenario_table_group_stale_first_rows()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: rows(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%first_rows(rows)
+        call grp%last_rows(rows)
+        print '(a,i0)', "first_rows and last_rows answered before the change, n=", size(rows)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%first_rows(rows)
+        print '(a,i0)', "a stale grouping answered first_rows, n=", size(rows)
+    end subroutine scenario_table_group_stale_first_rows
+    !
+    !> See `scenario_table_group_stale_size`.
+    subroutine scenario_table_group_stale_group_ids()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: codes(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%group_ids(codes)
+        print '(a,i0)', "group_ids answered before the change, n=", size(codes)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%group_ids(codes)
+        print '(a,i0)', "a stale grouping answered group_ids, n=", size(codes)
+    end subroutine scenario_table_group_stale_group_ids
+    !
+    !> See `scenario_table_group_stale_size`.
+    subroutine scenario_table_group_stale_key_table()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        print '(a,i0)', "key_table answered before the change, rows=", kt%nrows()
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%key_table(kt)
+        print '(a,i0)', "a stale grouping answered key_table, rows=", kt%nrows()
+    end subroutine scenario_table_group_stale_key_table
+    !
+    !> See `scenario_table_group_stale_size`.
+    subroutine scenario_table_group_stale_count()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: counts(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%count("x", counts)
+        print '(a,i0)', "count answered before the change, groups=", size(counts)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%count("x", counts)
+        print '(a,i0)', "a stale grouping answered count, groups=", size(counts)
+    end subroutine scenario_table_group_stale_count
+    !
+    !> A per-group query on an object nothing has built into yet is refused rather than
+    !! answering zero groups -- which is what a default-initialised object would silently do. A
+    !! built grouping answering first is the control.
+    subroutine scenario_table_group_never_built()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp, fresh
+        integer(int64), allocatable :: counts(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%size(counts)
+        print '(a,i0)', "a built grouping answered size, groups=", size(counts)
+        call fresh%size(counts)
+        print '(a,i0)', "a never-built grouping answered size, groups=", size(counts)
+    end subroutine scenario_table_group_never_built
+    !
+    !> A group number past the last group is refused naming the range; the last group first.
+    subroutine scenario_table_group_out_of_range()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: rows(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%rows(3_int64, rows)
+        print '(a,i0)', "the last group answered, n=", size(rows)
+        call grp%rows(4_int64, rows)
+        print '(a,i0)', "unexpectedly answered a group past the last, n=", size(rows)
+    end subroutine scenario_table_group_out_of_range
+    !
+    !> A `size_name=` that is a key column's name would give the key table two columns of one
+    !! name; refused before anything is gathered. A distinct name first is the control.
+    subroutine scenario_table_group_size_name_clash()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt, size_name="n")
+        print '(a,i0)', "key_table with a distinct size_name ran, cols=", kt%ncols()
+        call grp%key_table(kt, size_name="key")
+        print '(a,i0)', "unexpectedly accepted a size_name that names a key, cols=", kt%ncols()
+    end subroutine scenario_table_group_size_name_clash
     !
     !> A date set against a timestamp column is refused at apply, naming both -- two temporal
     !! types are two families, and an element of the wrong type has no instant to convert.

@@ -8,7 +8,10 @@
 #
 # Triggers on:
 #   * `git clean` and `git stash` in any form -- both remove untracked files without naming them;
-#   * a delete/move verb (rm, mv, unlink, shred, truncate, git rm) in a command naming feature_*.md;
+#   * a delete/move verb (rm, mv, unlink, shred, truncate, git rm) in the SAME simple command as a
+#     feature_*.md name -- the command is split on newlines, `;`, `&&`, `||`, `|` and `&` first,
+#     so copying a document in one statement beside a script that mentions `rm` in another does
+#     not prompt, while `rm feature_x.md` on any line, a heredoc body included, still does;
 #   * a truncating `>` redirect onto a feature_*.md path (`>>` appends and is left alone).
 #
 # Reads the PreToolUse payload on stdin and prints a hookSpecificOutput decision, or nothing at
@@ -18,10 +21,15 @@ python3 -c '
 import json, re, sys
 c = json.load(sys.stdin).get("tool_input", {}).get("command", "")
 sweep = re.search(r"(^|[;&|(\s])git\s+(clean|stash)\b", c)
-verb  = re.search(r"(^|[;&|(\s])(rm|mv|unlink|shred|truncate|git\s+rm)\b", c)
-name  = re.search(r"feature_[A-Za-z0-9_.*-]*\.md", c)
 redir = re.search(r"(?<!>)>\s*[A-Za-z0-9_./-]*feature_[A-Za-z0-9_.-]*\.md", c)
-if sweep or (verb and name) or redir:
+hit = bool(sweep or redir)
+if not hit:
+    for seg in re.split(r"\n|;|&&|\|\||\||&", c):
+        if re.search(r"(^|[(\s])(rm|mv|unlink|shred|truncate|git\s+rm)\b", seg) and \
+           re.search(r"feature_[A-Za-z0-9_.*-]*\.md", seg):
+            hit = True
+            break
+if hit:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
         "permissionDecision": "ask",
         "permissionDecisionReason": "This command can delete, move, overwrite or stash a feature_*.md "

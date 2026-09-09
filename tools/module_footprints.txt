@@ -366,6 +366,7 @@ parquet_tables_convert.f90
 parquet_tables_display.f90
 parquet_tables_fill.f90
 parquet_tables_filter.f90
+parquet_tables_group.f90
 parquet_tables_index.f90
 parquet_tables_join.f90
 parquet_tables_join_hash.f90
@@ -482,6 +483,7 @@ parquet_tables_convert.f90
 parquet_tables_display.f90
 parquet_tables_fill.f90
 parquet_tables_filter.f90
+parquet_tables_group.f90
 parquet_tables_index.f90
 parquet_tables_join.f90
 parquet_tables_join_hash.f90

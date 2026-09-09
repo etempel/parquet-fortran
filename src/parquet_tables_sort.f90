@@ -331,9 +331,9 @@ contains
         character(len=*), intent(in) :: name     !! the key column's name.
         character(len=*), intent(in) :: proc     !! calling procedure, for messages.
         integer, intent(out) :: idx              !! its slot index.
-        !> `"sort"` (the default) or `"join"`; see `table_lookup_sort_key`'s own interface. It
-        !! decides two words of the refusal below and nothing else -- which column can be a key is
-        !! one rule, deliberately, and must stay one.
+        !> `"sort"` (the default), `"join"` or `"group"`; see `table_lookup_sort_key`'s own
+        !! interface. It decides two words of the refusal below and nothing else -- which column
+        !! can be a key is one rule, deliberately, and must stay one.
         character(len=*), intent(in), optional :: key_kind
         character(len=:), allocatable :: sfx, kname, kword, advice
         !
@@ -341,11 +341,12 @@ contains
         if (.not. sort_kind_is_orderable(self%cache%cols(idx)%values%kindof())) then
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             call table_context_suffix(self%cache, name, sfx)
-            ! The RULE is shared and the WORDING is not. A join reaches this guard through
-            ! table_lookup_sort_key for the reason that interface gives -- one answer to "which
-            ! columns can be a key" -- but a caller who wrote %join is not sorting, and the sort's
-            ! advice is actively wrong for them: a container cannot be carried across a join at
-            ! all, so "the container is carried along with it" would send them into a second abort.
+            ! The RULE is shared and the WORDING is not. A join or a grouping reaches this guard
+            ! through table_lookup_sort_key for the reason that interface gives -- one answer to
+            ! "which columns can be a key" -- but a caller who wrote %join or %group_by is not
+            ! sorting, and the sort's advice is actively wrong for the join: a container cannot be
+            ! carried across a join at all, so "the container is carried along with it" would send
+            ! them into a second abort.
             kword = "sort key"
             advice = "sort by a scalar column and the container is carried along with it"
             if (present(key_kind)) then
@@ -353,6 +354,10 @@ contains
                     kword = "join key"
                     advice = "join on a scalar column instead; a container cannot be carried " // &
                         "across a join either"
+                else if (key_kind == "group") then
+                    kword = "group key"
+                    advice = "group by a scalar column instead; the container rows are still " // &
+                        "reachable through each group's rows"
                 end if
             end if
             ! Two reasons, one refusal. A *_VEC row is several values and has no single one to

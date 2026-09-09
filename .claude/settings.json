@@ -1,6 +1,12 @@
 {
   "respectGitignore": false,
   "permissions": {
+    "allow": [
+      "Edit(//private/tmp/claude-501/**)",
+      "Edit(//tmp/claude-501/**)",
+      "Bash(mkdir -p /private/tmp/claude-501/*)",
+      "Bash(chmod +x /private/tmp/claude-501/*)"
+    ],
     "ask": [
       "Bash(git commit:*)",
       "Bash(git checkout:*)",
@@ -20,6 +26,7 @@
       "Edit(~/.bashrc)",
       "Edit(~/.activate_gcc.sh)",
       "Edit(~/.activate_nag.sh)",
+      "Edit(~/.activate_flang.sh)",
       "Edit(//opt/fortran/**)"
     ]
   },

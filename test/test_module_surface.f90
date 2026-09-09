@@ -959,6 +959,7 @@ contains
         character(len=*), parameter :: sink_file = "test_run/module_surface_tables_sink.parquet"
         type(parquet_table) :: t, back, streamed
         type(parquet_table_index) :: ix
+        type(parquet_grouping) :: grp
         type(parquet_table_writer) :: out
         integer(int64) :: ids(3), row
         real(real64) :: mass(3)
@@ -979,6 +980,10 @@ contains
         call ix%find(2_int64, row)
         if (what == "" .and. row /= 2_int64) what = "%build_index/%find on a table built in memory"
         if (what == "" .and. ix%count(9_int64) /= 0_int64) what = "%count on an absent key"
+        ! The grouping is a parquet_tables type over the sort engine's partition: reachable and
+        ! usable through this one import.
+        call t%group_by("id", grp)
+        if (what == "" .and. grp%ngroups() /= 3_int64) what = "%group_by/%ngroups on a table built in memory"
 
         call parquet_write_table(t, out_file, overwrite=.true.)
 

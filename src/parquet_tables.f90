@@ -113,6 +113,7 @@ module parquet_tables
     public :: parquet_table_row
     public :: parquet_table_col
     public :: parquet_table_index
+    public :: parquet_grouping
     public :: parquet_slice
     public :: parquet_slice_range
     public :: parquet_slice_list
@@ -1139,6 +1140,11 @@ module parquet_tables
         !> Builds a lookup index over one column into a `parquet_table_index`: "which row holds
         !! this key?" in a few nanoseconds, without reordering anything. A read; never detaches.
         procedure :: build_index => table_build_index
+        procedure, private :: table_group_by        !! %group_by specific, array of key names.
+        procedure, private :: table_group_by_string !! %group_by specific, separated key string.
+        !> Partitions the rows by the values of one or more key columns into a `parquet_grouping`,
+        !! which then answers per group (its rows, counts, key table). A read; never detaches.
+        generic :: group_by => table_group_by, table_group_by_string
         procedure, private :: table_delete_rows_i32   !! %delete_rows specific, int32 indices.
         procedure, private :: table_delete_rows_i64   !! %delete_rows specific, int64 indices.
         !> Removes the listed rows. A thin convenience over %filter_rows, and like it, detaching.
@@ -1712,6 +1718,108 @@ module parquet_tables
         ! NO `final` -- the same decision as parquet_table_row and parquet_table_col, for the
         ! same reasons; the two engines free their own arrays at scope exit.
     end type parquet_table_index
+    !
+    !> A partition of a table's rows by the values of one or more KEY columns -- "which rows
+    !! share this key?" -- built by `call t%group_by(keys, grp)` and answered per group: the rows
+    !! of a group (`%rows`, `%csr`), one row per group (`%first_rows`, `%last_rows`), the group
+    !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`) and the key
+    !! values as a table of their own (`%key_table`). The table is NOT reordered: this is
+    !! `%argsort_by(keys, perm, group_offsets=)` (doc/pages/tables/table-mutate.md) kept as an
+    !! object that knows when it has gone stale, and it keeps the file attached.
+    !!
+    !! **The order is a contract.** Groups come in ascending key order -- the sort comparator's,
+    !! so for each key in turn: values ascending, then the NaN group, then the null group -- and
+    !! the rows within a group are in ascending row order, so `rows(1)` of a group is its lowest
+    !! row. A NaN is a VALUE and forms one group under every setting; a null is subject to
+    !! `dropna`: under the default `dropna=.true.` a row whose value is null in ANY key column
+    !! belongs to no group (pandas' rule); under `dropna=.false.` the null is one more distinct
+    !! value of that key and its group comes last. Whether a group is the null one is decided by
+    !! asking the key column, never from where the sort placed it. Every group has at least one
+    !! row.
+    !!
+    !! **It goes stale LOUDLY.** The grouping stamps the table's `%generation()` when it is built
+    !! and re-checks it on EVERY per-group query -- never a cached "still valid" flag
+    !! (feature_risks.md Risk-210's rule) -- so after any row-structural change (`%filter_rows`,
+    !! `%sort_by`, `%delete_rows`, `%append`, ...) a query aborts naming the table and both
+    !! generations instead of handing out in-range row numbers that name the wrong rows;
+    !! `%is_current()` is the non-aborting way to ask. A change that moves no row (`%set`,
+    !! `%fillna`, an `%add_column` that relocated no column slot) leaves it usable. The five
+    !! introspection bindings (`%ngroups`, `%nrows`, `%max_size`, `%nkeys`, `%key_names`)
+    !! describe the object itself and answer without a check: 0, or no names, before a build.
+    !! It points at the table's column STORE, like the row and column handles, so the caller
+    !! need not declare the table `target`; like them it does not survive the table itself.
+    !!
+    !! **Every binding is a READ** of the table: none reorders, touches a row, detaches or
+    !! advances `%generation()`; the only side effect is that a key column, or the column
+    !! `%count` is asked about, is read from the file if nothing has read it yet. `%key_table`
+    !! gathers a deep COPY of each key column (feature_risks.md Risk-208).
+    !!
+    !! No finalizer: nothing it owns needs one, and a finalizable type may not be OpenMP-private
+    !! (.claude/rules/fortran-gotchas.md). It has allocatable components, so under ifx it must
+    !! not be declared block-local inside a parallel region; give each thread a slot of a shared
+    !! array allocated before the region instead.
+    type :: parquet_grouping
+        private
+        type(parquet_table_cache), pointer :: cache => null() !! the table's column store.
+        type(table_scope) :: scope                !! the table's row scope, by value, for a lazy first touch.
+        integer(int64) :: gen = -1_int64          !! cache%generation when the grouping was built.
+        logical :: built = .false.                !! .true. once %group_by has filled it.
+        logical :: drop = .true.                  !! the `dropna` the grouping was built with.
+        integer(int64) :: ngrp = 0_int64          !! how many groups.
+        integer(int64) :: nin = 0_int64           !! rows that belong to some group.
+        integer(int64) :: ntab = 0_int64          !! rows the table had when the grouping was built.
+        integer(int64) :: maxsz = 0_int64         !! rows in the largest group.
+        integer, allocatable :: slots(:)          !! the key columns' slot indices, in key order.
+        character(len=:), allocatable :: keys(:)  !! the key columns' names, in key order.
+        integer(int64), allocatable :: perm(:)    !! the row order: group g is perm(offsets(g) : offsets(g+1) - 1).
+        integer(int64), allocatable :: offsets(:) !! ngrp + 1 entries, 1-based, the last one nin + 1.
+    contains
+        procedure :: ngroups => grp_ngroups       !! How many groups; 0 before a build.
+        procedure :: nrows => grp_nrows           !! Rows that belong to some group; fewer than the table's under dropna.
+        procedure :: max_size => grp_max_size     !! Rows in the largest group.
+        procedure :: nkeys => grp_nkeys           !! How many key columns.
+        procedure :: key_names => grp_key_names   !! The key columns' names, in key order.
+        procedure, private :: grp_size_i32        !! %size specific, int32 counts.
+        procedure, private :: grp_size_i64        !! %size specific, int64 counts.
+        !> Rows per group, one entry per group in group order, into an array allocated here.
+        generic :: size => grp_size_i32, grp_size_i64
+        procedure, private :: grp_rows_i32        !! %rows specific, int32 rows.
+        procedure, private :: grp_rows_i64        !! %rows specific, int64 rows.
+        !> The rows of group `g` (an `int64` group number), ascending, into an array allocated
+        !! here: the readable form for a few groups, where `%csr` is the one-copy form for a
+        !! loop over all of them.
+        generic :: rows => grp_rows_i32, grp_rows_i64
+        !> The whole partition copied out: group g is `rows(offsets(g) : offsets(g+1) - 1)`, with
+        !! `offsets` 1-based and `ngroups + 1` long, its last entry `nrows + 1` -- `[1]` for an
+        !! empty grouping, so a loop over the groups runs zero times.
+        procedure :: csr => grp_csr
+        procedure, private :: grp_first_rows_i32  !! %first_rows specific, int32 rows.
+        procedure, private :: grp_first_rows_i64  !! %first_rows specific, int64 rows.
+        !> One row per group: its LOWEST row index, computed, never read off the permutation's
+        !! end. With `%get_slice(name, parquet_slice_list(rows), vals)` this is `first` for every
+        !! column kind.
+        generic :: first_rows => grp_first_rows_i32, grp_first_rows_i64
+        procedure, private :: grp_last_rows_i32   !! %last_rows specific, int32 rows.
+        procedure, private :: grp_last_rows_i64   !! %last_rows specific, int64 rows.
+        !> One row per group: its HIGHEST row index, computed. `last` for every column kind.
+        generic :: last_rows => grp_last_rows_i32, grp_last_rows_i64
+        procedure, private :: grp_group_ids_i32   !! %group_ids specific, int32 codes.
+        procedure, private :: grp_group_ids_i64   !! %group_ids specific, int64 codes.
+        !> One entry per TABLE row: the group it belongs to, 0 for a row in no group. pandas'
+        !! `ngroup()`, and the join-back key for anything computed per group.
+        generic :: group_ids => grp_group_ids_i32, grp_group_ids_i64
+        procedure :: is_current => grp_is_current !! Whether the grouping is built AND the table has not changed since.
+        procedure :: clear => grp_clear           !! Back to the never-built state.
+        !> One row per group, in group order: the key columns, whatever their kinds, plus an
+        !! `int64` count column when `size_name=` is given. The summary pattern: `%key_table`,
+        !! then `%add_column` the per-group answers onto it.
+        procedure :: key_table => grp_key_table
+        procedure, private :: grp_count_i32       !! %count specific, int32 counts.
+        procedure, private :: grp_count_i64       !! %count specific, int64 counts.
+        !> Non-null rows of a column per group, for a column of any kind.
+        generic :: count => grp_count_i32, grp_count_i64
+        ! NO `final` -- see the type's doc-comment.
+    end type parquet_grouping
     !
     !> An output parquet file that stays open and accepts tables of any length: the rows are
     !! buffered and written one row group at a time, so a result far larger than memory is
@@ -9276,10 +9384,11 @@ module parquet_tables
             character(len=*), intent(in) :: name     !! the key column's name.
             character(len=*), intent(in) :: proc     !! calling procedure, for messages.
             integer, intent(out) :: idx              !! its slot index.
-            !> what the message calls the key, and what it advises instead: `"sort"` (the default)
-            !! or `"join"`. A join is an equality test rather than an ordering, so telling its
-            !! caller a column "cannot be a sort key" and to "sort by a scalar column" names an
-            !! operation they did not ask for.
+            !> what the message calls the key, and what it advises instead: `"sort"` (the default),
+            !! `"join"` or `"group"`. A join is an equality test rather than an ordering, and a
+            !! grouping's order is a contract rather than a choice, so telling either caller a
+            !! column "cannot be a sort key" and to "sort by a scalar column" names an operation
+            !! they did not ask for.
             character(len=*), intent(in), optional :: key_kind
         end subroutine table_lookup_sort_key
     end interface
@@ -9755,6 +9864,165 @@ module parquet_tables
             integer, intent(in), optional :: threads !! the caller's request, or absent.
             integer :: nt                            !! threads to use; 1 means serial.
         end function index_team
+    end interface
+    ! ---- Grouping (parquet_tables_group -- HAND-WRITTEN, not generated) ----
+    interface
+        !> Partitions the table's rows by the values of the key columns into `grp`, a
+        !! `parquet_grouping`: "which rows share this key?", answered afterwards per group by
+        !! `grp%rows`, `%csr`, `%size`, `%count`, `%key_table` and the rest. See
+        !! `parquet_grouping` for the whole contract; in one paragraph:
+        !!
+        !! The table is not reordered and stays attached; this is a READ, and it materializes
+        !! each key column the table has not read yet, as every accessor does. `keys` are column
+        !! NAMES, primary first: any column `%argsort_by` accepts as a key is accepted here, a
+        !! direction token (`"-id"`, `"id desc"`) is refused naming the key, and a vector, list,
+        !! map or struct column is refused naming it and its kind. Groups come in ascending key
+        !! order and the rows within a group in ascending row order. `dropna=.true.` (the
+        !! default) leaves a row out of every group when its value is null in ANY key column;
+        !! `dropna=.false.` makes the null one more key value, its group last. A NaN is a value
+        !! under either. `grp` is `intent(out)`, so building into an object that already holds a
+        !! grouping replaces it; an empty table gives a grouping with zero groups. `threads=`
+        !! goes to the sort exactly as `%argsort_by`'s does; absent means automatic.
+        module subroutine table_group_by(self, keys, grp, dropna, threads)
+            class(parquet_table), intent(in) :: self       !! the table.
+            character(len=*), intent(in) :: keys(:)        !! key column names, primary first.
+            type(parquet_grouping), intent(out) :: grp     !! receives the grouping.
+            logical, intent(in), optional :: dropna        !! .false. keeps rows with a null key; default .true.
+            integer, intent(in), optional :: threads       !! threads the sort may use; absent = automatic.
+        end subroutine table_group_by
+        !> %group_by over a separated key string (`"field_id,class"`); see the array form.
+        module subroutine table_group_by_string(self, keys, grp, dropna, threads)
+            class(parquet_table), intent(in) :: self       !! the table.
+            character(len=*), intent(in) :: keys           !! key column names, separated; primary first.
+            type(parquet_grouping), intent(out) :: grp     !! receives the grouping.
+            logical, intent(in), optional :: dropna        !! .false. keeps rows with a null key; default .true.
+            integer, intent(in), optional :: threads       !! threads the sort may use; absent = automatic.
+        end subroutine table_group_by_string
+        !> How many groups the grouping holds: 0 before a build, after `%clear`, or over an empty
+        !! table. Describes the object, so it runs no staleness check.
+        module function grp_ngroups(self) result(n)
+            class(parquet_grouping), intent(in) :: self !! the grouping.
+            integer(int64) :: n                         !! the group count.
+        end function grp_ngroups
+        !> Rows that belong to some group -- the table's row count less the rows `dropna` left
+        !! out; 0 before a build. Describes the object, so it runs no staleness check.
+        module function grp_nrows(self) result(n)
+            class(parquet_grouping), intent(in) :: self !! the grouping.
+            integer(int64) :: n                         !! the grouped row count.
+        end function grp_nrows
+        !> Rows in the largest group -- the buffer size a per-group gather needs; 0 before a
+        !! build. Describes the object, so it runs no staleness check.
+        module function grp_max_size(self) result(n)
+            class(parquet_grouping), intent(in) :: self !! the grouping.
+            integer(int64) :: n                         !! the largest group's row count.
+        end function grp_max_size
+        !> How many key columns the grouping was built over; 0 before a build.
+        module function grp_nkeys(self) result(n)
+            class(parquet_grouping), intent(in) :: self !! the grouping.
+            integer(int64) :: n                         !! the key count.
+        end function grp_nkeys
+        !> The key columns' names, in key order, into an array allocated here; zero-size before
+        !! a build.
+        module subroutine grp_key_names(self, names)
+            class(parquet_grouping), intent(in) :: self            !! the grouping.
+            character(len=:), allocatable, intent(out) :: names(:) !! one entry per key.
+        end subroutine grp_key_names
+        !> %size specific, int32 counts; see the generic.
+        module subroutine grp_size_i32(self, counts)
+            class(parquet_grouping), intent(in) :: self           !! the grouping.
+            integer(int32), allocatable, intent(out) :: counts(:) !! rows per group, in group order.
+        end subroutine grp_size_i32
+        !> %size specific, int64 counts; see the generic.
+        module subroutine grp_size_i64(self, counts)
+            class(parquet_grouping), intent(in) :: self           !! the grouping.
+            integer(int64), allocatable, intent(out) :: counts(:) !! rows per group, in group order.
+        end subroutine grp_size_i64
+        !> %rows specific, int32 rows; see the generic.
+        module subroutine grp_rows_i32(self, g, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int64), intent(in) :: g                     !! the group number, 1 to %ngroups().
+            integer(int32), allocatable, intent(out) :: rows(:) !! the group's rows, ascending.
+        end subroutine grp_rows_i32
+        !> %rows specific, int64 rows; see the generic.
+        module subroutine grp_rows_i64(self, g, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int64), intent(in) :: g                     !! the group number, 1 to %ngroups().
+            integer(int64), allocatable, intent(out) :: rows(:) !! the group's rows, ascending.
+        end subroutine grp_rows_i64
+        !> The whole partition, copied out; see the binding.
+        module subroutine grp_csr(self, offsets, rows)
+            class(parquet_grouping), intent(in) :: self            !! the grouping.
+            integer(int64), allocatable, intent(out) :: offsets(:) !! ngroups + 1 long; group g is rows(offsets(g):offsets(g+1)-1).
+            integer(int64), allocatable, intent(out) :: rows(:)    !! every grouped row, group by group, ascending within a group.
+        end subroutine grp_csr
+        !> %first_rows specific, int32 rows; see the generic.
+        module subroutine grp_first_rows_i32(self, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int32), allocatable, intent(out) :: rows(:) !! one per group: its lowest row.
+        end subroutine grp_first_rows_i32
+        !> %first_rows specific, int64 rows; see the generic.
+        module subroutine grp_first_rows_i64(self, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int64), allocatable, intent(out) :: rows(:) !! one per group: its lowest row.
+        end subroutine grp_first_rows_i64
+        !> %last_rows specific, int32 rows; see the generic.
+        module subroutine grp_last_rows_i32(self, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int32), allocatable, intent(out) :: rows(:) !! one per group: its highest row.
+        end subroutine grp_last_rows_i32
+        !> %last_rows specific, int64 rows; see the generic.
+        module subroutine grp_last_rows_i64(self, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int64), allocatable, intent(out) :: rows(:) !! one per group: its highest row.
+        end subroutine grp_last_rows_i64
+        !> %group_ids specific, int32 codes; see the generic.
+        module subroutine grp_group_ids_i32(self, codes)
+            class(parquet_grouping), intent(in) :: self          !! the grouping.
+            integer(int32), allocatable, intent(out) :: codes(:) !! one per TABLE row: its group, or 0.
+        end subroutine grp_group_ids_i32
+        !> %group_ids specific, int64 codes; see the generic.
+        module subroutine grp_group_ids_i64(self, codes)
+            class(parquet_grouping), intent(in) :: self          !! the grouping.
+            integer(int64), allocatable, intent(out) :: codes(:) !! one per TABLE row: its group, or 0.
+        end subroutine grp_group_ids_i64
+        !> Whether the grouping is built AND the table has not changed structurally since -- one
+        !! predicate, because a caller can do nothing useful with a grouping that is one and not
+        !! the other. The non-aborting twin of the check every per-group query runs.
+        module function grp_is_current(self) result(ok)
+            class(parquet_grouping), intent(in) :: self !! the grouping.
+            logical :: ok                               !! .true. when every query would answer.
+        end function grp_is_current
+        !> Releases the partition and detaches from the table, so that `%is_current()` answers
+        !! .false., the counts answer 0 and every per-group query aborts as on a never-built
+        !! grouping. A scope exit does the same without being asked; this is for a grouping a
+        !! long-lived caller wants gone.
+        module subroutine grp_clear(self)
+            class(parquet_grouping), intent(inout) :: self !! the grouping.
+        end subroutine grp_clear
+        !> One row per group, in group order: each key column gathered at the group's first row,
+        !! so the result carries every key's kind, width and unit -- nothing here reads a value,
+        !! which is what lets one binding answer for every column kind. `size_name=` adds an
+        !! `int64` column of rows per group, refused when a key column already has that name.
+        !! The gathers are of deep COPIES, and the source table is untouched (feature_risks.md
+        !! Risk-208). An ordinary table: sort it, filter it, `%add_column` the aggregates onto
+        !! it, write it.
+        module subroutine grp_key_table(self, out, size_name)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            type(parquet_table), intent(out) :: out             !! receives one row per group.
+            character(len=*), intent(in), optional :: size_name !! name for a rows-per-group column; absent adds none.
+        end subroutine grp_key_table
+        !> %count specific, int32 counts; see the generic.
+        module subroutine grp_count_i32(self, name, out)
+            class(parquet_grouping), intent(in) :: self        !! the grouping.
+            character(len=*), intent(in) :: name               !! the column to count; read if not resident.
+            integer(int32), allocatable, intent(out) :: out(:) !! non-null rows of `name` per group, in group order.
+        end subroutine grp_count_i32
+        !> %count specific, int64 counts; see the generic.
+        module subroutine grp_count_i64(self, name, out)
+            class(parquet_grouping), intent(in) :: self        !! the grouping.
+            character(len=*), intent(in) :: name               !! the column to count; read if not resident.
+            integer(int64), allocatable, intent(out) :: out(:) !! non-null rows of `name` per group, in group order.
+        end subroutine grp_count_i64
     end interface
     ! ---- The join (parquet_tables_join -- HAND-WRITTEN, not generated) ----
     interface

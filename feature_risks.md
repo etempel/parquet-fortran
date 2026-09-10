@@ -320,6 +320,7 @@ something a reader is expected to have.
 | [Risk-249](#risk-249--a-rejection-envelope-anchored-at-the-wrong-point-returns-its-own-proposal-and-a-narrow-truncated-normal-is-nearly-uniform) | A rejection envelope anchored at the wrong point returns its own PROPOSAL | 4 — covered |
 | [Risk-250](#risk-250--a-truncated-draws-bounds-are-enforced-on-the-standardised-scale-and-de-standardising-rounds-back-outside) | A truncated draw's bounds are enforced on the STANDARDISED scale, and de-standardising rounds back outside | 4 — covered |
 | [Risk-251](#risk-251--a-case-threshold-formed-as-a-difference-of-nearly-equal-doubles-is-contracted-into-an-fma-and-the-draw-hangs) | A case threshold formed as a difference of nearly-equal doubles is contracted into an FMA, and the draw HANGS | 4 — covered |
+| [Risk-252](#risk-252--pf_probit075-and-the-frozen-mad_normal_scale-are-two-spellings-of-one-number-and-only-a-test-compares-them) | `pf_probit(0.75)` and the frozen `MAD_NORMAL_SCALE` are two spellings of one number | 4 — covered |
 
 ---
 
@@ -9495,3 +9496,34 @@ bounds that hung must report the tilted case in at most four proposals, the case
 against an independently recomputed threshold from `a = 0` up to `1e6`, and a wide arm runs to
 `1e16`, where only the tilted case exists. **Run it optimised** — under the default profile it
 cannot fail.
+
+
+### Risk-252 — `pf_probit(0.75)` and the frozen `MAD_NORMAL_SCALE` are two spellings of one number, and only a test compares them
+
+`src/parquet_stats_order.f90` freezes the scale `pf_mad(scale="normal")` multiplies by as the
+literal `1.482602218505602`, deliberately: `pf_mad` shipped in v2.2.0 and a constant re-derived at
+run time would make every number it has already published depend on whatever computes it. Now that
+`parquet_utils` carries `pf_probit`, **there are two spellings of `1/Phi^-1(3/4)` in one library and
+nothing structural keeps them together.**
+
+A kernel change that moves `pf_probit(0.75)` by an ulp leaves `pf_mad(scale="normal")` and anything
+built on `pf_probit` disagreeing in the last digit on the same data, with both answers plausible and
+neither path aborting. Nothing in the build notices: they are different modules, different tiers, and
+the statistics tier does not import the utility one.
+
+**They already differ by exactly one ulp, and that is the state to preserve rather than a defect to
+fix.** Sixteen decimal digits do not name that double uniquely — the literal is
+`0x3ff7b8bd1a975674` and the nearest double to the true value is `...673`. Correcting the last bit
+is a 1.5e-16 relative change to a released statistic and would move every `pf_mad(scale="normal")`
+number already published, so the literal stays as it is (feature_probit.md, Q8).
+
+**What it forbids.** The literal must not be replaced by a call to `pf_probit`, and it must not
+drift further than the one ulp it already sits at. A second consumer of the same constant — a
+quantile-based scale estimator, a normal-consistency factor for some other statistic — reaches for
+`pf_probit` rather than pasting the digits a third time.
+
+**Covered by** `test_probit_matches_mad_scale` (`test/test_utils.f90`), which asserts
+`1/pf_probit(0.75)` against the 50-digit oracle and the source literal against the same oracle at a
+bound of one ulp, and by `tools/generate_probit_reference.py --self-test`, which reads the literal
+out of `src/parquet_stats_order.f90` itself and applies the same bound — so a hand edit to the
+source is caught even if the test's own copy of the literal is edited to match.

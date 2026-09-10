@@ -351,3 +351,23 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   therefore declare `valid(*)` without `target` (one `logical` copy on the unmasked path); never
   give it back. A minimal reproducer for a codegen bug says what is sufficient to trigger it, never
   what is necessary — settle a flag question by building the real library.
+- **`ERF` and `ERFC` do not propagate a quiet NaN: `erfc(NaN)` is 0, `erf(NaN)` is 1 and
+  `erfc_scaled(NaN)` is 0** (7.2/arm64; gfortran and flang all return NaN, and C99 requires it).
+  Both infinities are handled correctly by all three, so only the NaN case bites — and it bites
+  silently, as a value in range: a survival function written straight onto `erfc` answers
+  "probability 0" for an unknown quantile. **Screen the NaN with `x /= x` before the call** in any
+  procedure over these three, as `pf_norm_cdf`/`pf_norm_sf` (`src/parquet_utils.f90`) do; `exp`,
+  `log` and ordinary arithmetic propagate correctly and need no screen.
+- **`SPACING` returns exactly 0 for some values near the bottom of the exponent range**, which
+  F2018 16.9.180 forbids — it may never return less than `TINY`. Measured: `spacing(1e-292)` is
+  `0` while `spacing(1e-291)` and `spacing(1e-293)` are ordinary subnormals; gfortran and flang
+  both clamp to `TINY` below about `1e-292`. A test expressing a tolerance in ulp
+  (`abs(got-want)/spacing(want)`) therefore divides by zero at one arbitrary point in the deep
+  tail: every gap becomes `Infinity`, the budget becomes unmeetable, and `IEEE_DIVIDE_BY_ZERO`
+  surfaces as one line at program exit attached to nothing. Floor it —
+  `sp = spacing(x); if (sp <= 0) sp = tiny(x)` (`ulp_gap`, `test/test_utils.f90`).
+- **A whole-array narrowing in a constant expression warns once per element**:
+  `real(real32), parameter :: C(6) = real(C64, real32)` produces six "Loss of accuracy in
+  double-real conversion" warnings, while the same conversion written per element inside an array
+  constructor, or on a scalar, produces none. Write the element-wise form; the values are
+  identical and the build stays warning-free (`ERFINV_C_R32`, `src/parquet_utils.f90`).

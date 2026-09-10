@@ -3,9 +3,9 @@ title: Text and path helpers with parquet_utils
 ---
 
 `parquet_utils` is a small module of things a program built on this library keeps needing and
-Fortran does not supply: division that does not raise a flag, angle wrapping and conversion, the
-cross product, ASCII case folding, turning a value into text and reading it back, and joining and
-taking apart POSIX paths.
+Fortran does not supply: division that does not raise a flag, the standard normal distribution
+and its quantile function, angle wrapping and conversion, the cross product, ASCII case folding,
+turning a value into text and reading it back, and joining and taking apart POSIX paths.
 
 It is a leaf. `use parquet_utils` compiles **one** of this library's Fortran files and imports
 nothing but the intrinsic modules `iso_fortran_env` and `ieee_arithmetic`, so its Fortran graph
@@ -75,6 +75,80 @@ frac = pf_safe_div(t_done, t_available)     ! NaN there, and the flags stay clea
 **It is deliberately not a "return zero when the denominator is zero" helper.** That would turn an
 unsatisfiable request into an unremarkable number, which is the failure this exists to prevent
 rather than to cause. If you want a fallback value, test the denominator yourself and say so.
+
+## The normal distribution: probit, CDF, density
+
+```fortran
+z = pf_probit(p)      ! the quantile with probability p below it
+p = pf_norm_cdf(z)    ! the probability of drawing at most z
+p = pf_norm_sf(z)     ! the probability of drawing more than z
+d = pf_norm_pdf(z)    ! the density at z
+```
+
+Four `pure elemental` functions over the standard normal, in `real32` and `real64`. `pf_probit` is
+the **probit** — the inverse of `pf_norm_cdf` — which is what turns a probability into an unbounded
+score, and back through `pf_norm_cdf`. Nothing here validates and nothing aborts.
+
+The intended use is a quantity that lives in `[0, 1]` and does not average, interpolate or fit
+sensibly there: a selection probability, a completeness fraction, a detection rate. On the probit
+scale it is an ordinary real number.
+
+```fortran
+! a completeness fraction per sky pixel, made linear before it is smoothed
+score = pf_probit(complete)          ! [0, 1] -> the whole real line
+call smooth(score)
+complete = pf_norm_cdf(score)        ! and back, still inside [0, 1] by construction
+```
+
+### What each answers at the edges
+
+| input | `pf_probit` | `pf_norm_cdf` | `pf_norm_sf` | `pf_norm_pdf` |
+|---|---|---|---|---|
+| `0.5` / `0.0` | exactly `0` | exactly `0.5` | exactly `0.5` | `0.3989422804014327` |
+| `p = 0` / `z = -Infinity` | `-Infinity` | exactly `0` | exactly `1` | exactly `0` |
+| `p = 1` / `z = +Infinity` | `+Infinity` | exactly `1` | exactly `0` | exactly `0` |
+| `p` outside `[0, 1]` | quiet NaN | — | — | — |
+| NaN | quiet NaN | quiet NaN | quiet NaN | quiet NaN |
+
+`pf_probit(0.5)` is exactly zero rather than nearly zero, and the result is **antisymmetric about
+`p = 0.5`**: `pf_probit(p)` and `-pf_probit(1-p)` agree bit for bit wherever `1-p` is itself an
+exact double, which is every `p` at or above one half and every dyadic one. The magnitude is
+computed from the smaller tail and the sign applied afterwards, which is what makes that exact
+rather than approximate.
+
+### Use `pf_norm_sf`, not `1 - pf_norm_cdf`
+
+An upper-tail probability written as `1 - pf_norm_cdf(z)` has no significant digits left by about
+`z = 8`, and is exactly zero from about `z = 9` — which is precisely the range an upper tail gets
+asked about. `pf_norm_sf` computes that tail in its own right:
+
+```fortran
+p = 1.0_real64 - pf_norm_cdf(20.0_real64)   ! exactly 0.0 -- every digit lost
+p = pf_norm_sf(20.0_real64)                 ! 2.7536241186062e-89
+```
+
+`pf_norm_sf(z)` is exactly `pf_norm_cdf(-z)` for every `z`, so the two are one function, not two
+approximations of one.
+
+### Accuracy, and where it changes
+
+**`pf_probit` is accurate to about 3 ulp over the whole range**, including into the subnormals:
+`pf_probit(5e-324)` is about `-38.47`, not `-Infinity`. The expectations are a 50-digit `mpmath`
+oracle (`tools/generate_probit_reference.py`), never another double-precision library, because a
+reference carrying the same number of digits as the answer cannot certify a claim of that size.
+
+**The two forward tails lose relative accuracy as `z*z`.** Around `z = -30` the answer is good to a
+few hundred ulp rather than a few — still about twelve significant digits of a probability near
+`1e-198`. That is a property of handing the function a `real64`, not something an implementation
+can avoid: a half-ulp rounding in `z/sqrt(2)` moves `erfc` by roughly `2*z*z` ulp.
+
+**`pf_probit` rises with `p` everywhere except within one ulp of the seam between its two internal
+branches**, where they meet at their own accuracy rather than at the last bit. If you need a
+strictly increasing map for sorting, sort by `p`.
+
+`pf_norm_pdf` underflows to zero past about `|z| = 38.6` in `real64` and `|z| = 13.3` in `real32`.
+That is a real answer rather than a failure, and it sets `IEEE_UNDERFLOW` as any gradual underflow
+does.
 
 ## Angles: wrapping and converting
 

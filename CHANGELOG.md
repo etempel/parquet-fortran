@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The standard normal distribution in `parquet_utils`: `pf_probit`, `pf_norm_cdf`, `pf_norm_sf`
+  and `pf_norm_pdf`.** Four `pure elemental` functions, `real32` and `real64`, computing in the
+  kind they are handed. `pf_probit(p)` is the probit, the quantile function of the standard
+  normal: `-Infinity` at 0, `+Infinity` at 1, a quiet NaN outside `[0, 1]`, exactly `0` at
+  `p = 0.5`, antisymmetric about it bit for bit wherever `1-p` is an exact double, and accurate to
+  about 3 ulp over the whole range including the subnormal tail, where `pf_probit(5e-324)` is
+  about `-38.47` rather than `-Infinity`. `pf_norm_sf(z)` is the upper tail computed in its own
+  right and never as `1 - pf_norm_cdf(z)`, which has no significant digits left past about
+  `z = 8`. Nothing in the family validates or aborts. See
+  [The normal distribution](doc/pages/utilities/utils.md#the-normal-distribution-probit-cdf-density).
 - **A cylinder along the line of sight: `pf_spatial_index%within_los` and `%pairs_within_los`.**
   `sx%pairs_within_los(b_perp, b_par, i, j)` returns every pair, once and with `i < j`, whose
   transverse separation about an observer is within `b_perp` and whose parallel separation is

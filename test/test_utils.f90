@@ -33,14 +33,30 @@ module test_utils
     use testdrive, only: new_unittest, unittest_type, error_type, check
     use parquet_utils
     use test_path_vectors
+    use test_probit_golden
     use iso_fortran_env, only: int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only: ieee_support_flag, ieee_get_flag, &
         ieee_set_flag, ieee_underflow, ieee_divide_by_zero, ieee_invalid, &
-        ieee_is_nan, ieee_is_finite
+        ieee_is_nan, ieee_is_finite, ieee_is_negative, ieee_value, ieee_quiet_nan, &
+        ieee_positive_inf, ieee_negative_inf
     implicit none
     private
 
     public :: collect_tests_utils
+
+    !> How far `pf_probit` may sit from the oracle, in ulp. Measured worst case is 3, identical
+    !! under gfortran, nagfor and flang; the budget leaves room for a fourth compiler's `erf` and
+    !! `erfc_scaled` without leaving room for a dropped refinement step.
+    real(real64), parameter :: PROBIT_ULP_BUDGET = 16.0_real64
+    !> How far `pf_norm_pdf` may sit from the oracle, in ulp. Measured worst case is 2.
+    real(real64), parameter :: PDF_ULP_BUDGET = 16.0_real64
+    !> How far the real32 arm may sit from the real64 kernel at the SAME input, in real32 ulp.
+    !! Measured worst case is 1 under gfortran and flang, 2 under nagfor.
+    real(real32), parameter :: PROBIT32_ULP_BUDGET = 8.0_real32
+    !> How far `pf_probit` may step BACKWARDS at a branch seam, in ulp. Measured worst case is 1.
+    !! Two branches meet at their own accuracy, not at the last bit; see the test for why this is
+    !! a property of the shape rather than slack.
+    real(real64), parameter :: SEAM_ULP_SLACK = 4.0_real64
 
 contains
 
@@ -55,6 +71,24 @@ contains
                          test_safe_div_zero_denominator), &
             new_unittest("safe_div raises no IEEE flag, which is the point of it", &
                          test_safe_div_raises_no_flag), &
+            new_unittest("pf_probit matches the 50-digit oracle across every branch", &
+                         test_probit_matches_oracle), &
+            new_unittest("pf_probit is exactly 0 at p=0.5 and antisymmetric where 1-p is exact", &
+                         test_probit_centre_and_symmetry), &
+            new_unittest("pf_probit is non-decreasing across every branch seam", &
+                         test_probit_is_monotone), &
+            new_unittest("pf_probit gives +/-Inf at the ends and NaN outside [0,1] and on NaN", &
+                         test_probit_ends_and_nan), &
+            new_unittest("pf_probit reaches the subnormal tail without underflowing", &
+                         test_probit_subnormal_tail), &
+            new_unittest("pf_norm_cdf and pf_norm_sf match the oracle, including where 1-Phi cancels", &
+                         test_norm_forward_matches_oracle), &
+            new_unittest("pf_norm_cdf(pf_probit(p)) round-trips to a few ulp", &
+                         test_probit_round_trips), &
+            new_unittest("the real32 normal family resolves to real32 and is not the narrowed real64", &
+                         test_normal_family_real32), &
+            new_unittest("pf_probit agrees with the frozen MAD normal scale", &
+                         test_probit_matches_mad_scale), &
             new_unittest("every wrap lands inside its advertised half-open range", test_wrap_ranges), &
             new_unittest("the wrap edge guard fires on the inputs that need it", test_wrap_edge_guard), &
             new_unittest("wrapping crosses several turns and is idempotent", test_wrap_turns), &
@@ -88,6 +122,527 @@ contains
             new_unittest("dirname and basename recompose the path", test_round_trip) &
             ]
     end subroutine collect_tests_utils
+
+    ! ================================================================================
+    ! The normal family
+    ! ================================================================================
+    !
+    ! Every expectation here comes from `test_probit_golden`, which
+    ! `tools/generate_probit_reference.py` derives at 50 digits. Nothing in this section compares
+    ! the library against another double-precision implementation, because a claim of a few ulp
+    ! cannot be certified by a reference carrying the same number of digits as the answer.
+    !
+    ! **The budgets below are measured, not guessed**, and each is set so that removing one
+    ! refinement step from `pf_probit` fails it: a kernel one step short lands around 5e-13
+    ! relative, which is some thousands of ulp, against a budget of sixteen.
+
+    !> How many ulp of `want` the value `got` sits away from it.
+    !!
+    !! `spacing` is the ulp at `want`, so this is the natural unit for an accuracy budget and does
+    !! not need a separate absolute and relative arm. A zero `want` is reported as a multiple of
+    !! the smallest positive value instead, which is what a caller asserting an exact zero wants.
+    !!
+    !! **The floor under `spacing` is not defensive.** F2018 16.9.180 says `SPACING` never returns
+    !! less than `TINY`, and gfortran and flang both clamp there -- but **nagfor 7.2 returns
+    !! exactly 0 for some values near the bottom of the exponent range**: measured,
+    !! `spacing(1e-292)` is `0` while `spacing(1e-291)` and `spacing(1e-293)` are ordinary
+    !! subnormals. Dividing by that raises `IEEE_DIVIDE_BY_ZERO` and makes the gap `Infinity`, so
+    !! every ulp budget in this file becomes unmeetable at one arbitrary point in the deep tail --
+    !! and the flag surfaces at the end of the whole run, attached to nothing.
+    pure function ulp_gap(got, want) result(res)
+        real(real64), intent(in) :: got  !! the value under test.
+        real(real64), intent(in) :: want !! the reference value.
+        real(real64) :: res !! the gap, in ulp of `want`.
+        real(real64) :: sp
+
+        sp = spacing(want)
+        if (sp <= 0.0_real64) sp = tiny(1.0_real64)
+        if (want == 0.0_real64) then
+            res = abs(got) / tiny(1.0_real64)
+        else
+            res = abs(got - want) / sp
+        end if
+    end function ulp_gap
+
+    !> Whether `x` is negative infinity. Written as its own predicate because the ordered
+    !! comparison it replaces would raise IEEE_INVALID on a NaN under nagfor, and this is called
+    !! on values that are sometimes one.
+    pure function is_neg_inf(x) result(res)
+        real(real64), intent(in) :: x !! the value to classify.
+        logical :: res !! `.true.` only for negative infinity.
+
+        res = .not. ieee_is_finite(x) .and. .not. ieee_is_nan(x) .and. ieee_is_negative(x)
+    end function is_neg_inf
+
+    !> Whether `x` is positive infinity. See `is_neg_inf`.
+    pure function is_pos_inf(x) result(res)
+        real(real64), intent(in) :: x !! the value to classify.
+        logical :: res !! `.true.` only for positive infinity.
+
+        res = .not. ieee_is_finite(x) .and. .not. ieee_is_nan(x) .and. .not. ieee_is_negative(x)
+    end function is_pos_inf
+
+    !> `pf_probit` against the 50-digit oracle at every grid point, both branches and the seam.
+    !!
+    !! The grid is `P_GRID`, which straddles the branch seam at `q = 0.1` by construction and runs
+    !! from the smallest subnormal double to `1 - 1e-16`. A kernel with a wrong seam, a wrong
+    !! starting estimate or one refinement step too few fails here by a factor of hundreds.
+    subroutine test_probit_matches_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad, worst_at
+        real(real64) :: gap, worst
+        character(len=:), allocatable :: wp, wg
+
+        nbad = 0
+        worst = 0.0_real64
+        worst_at = 1
+        do k = 1, NP
+            gap = ulp_gap(pf_probit(P_GRID(k)), PROBIT_GRID(k))
+            if (gap > worst) then
+                worst = gap
+                worst_at = k
+            end if
+            if (gap > PROBIT_ULP_BUDGET) nbad = nbad + 1
+        end do
+        call pf_to_str(P_GRID(worst_at), wp)
+        call pf_to_str(worst, wg)
+        call check(error, nbad, 0, "pf_probit is outside its ulp budget at " // wp // &
+            " (worst gap " // wg // " ulp); the oracle is test_probit_golden")
+    end subroutine test_probit_matches_oracle
+
+    !> `pf_probit(0.5)` is exactly zero, and the result is antisymmetric about it.
+    !!
+    !! **Both halves matter.** The magnitude is computed from `q = min(p, 1-p)` and the sign
+    !! applied afterwards, so antisymmetry is exact wherever `1 - p` is itself exact -- which is
+    !! every `p` in `[0.25, 0.75]` by Sterbenz, and every dyadic `p`. A reflection applied to `p`
+    !! rather than to `q`, or a starting estimate whose bias survives refinement, breaks it.
+    !! Asserting it only approximately would not see either.
+    subroutine test_probit_centre_and_symmetry(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad
+        real(real64) :: p, lo, hi
+
+        call check(error, pf_probit(0.5_real64) == 0.0_real64, &
+            "pf_probit(0.5) must be exactly zero")
+        if (allocated(error)) return
+        ! A positive zero, not a negative one: the sign rule would otherwise hand back -0.0 for
+        ! the one input where the difference is visible.
+        call check(error, .not. ieee_is_negative(pf_probit(0.5_real64)), &
+            "pf_probit(0.5) must be a POSITIVE zero")
+        if (allocated(error)) return
+        call check(error, pf_norm_cdf(0.0_real64) == 0.5_real64, &
+            "pf_norm_cdf(0) must be exactly one half")
+        if (allocated(error)) return
+
+        ! `1 - p` is exact exactly when p >= 1/2 (Sterbenz needs 1 within a factor of two of p),
+        ! and `1 - (1 - p)` is then p exactly, so both calls reduce to the same q and the two
+        ! sides must agree BIT FOR BIT rather than to a tolerance. Below 1/2 the subtraction
+        ! rounds -- 1 - 0.2575 is not the double 0.7425 -- and the two calls are then being asked
+        ! about probabilities that genuinely differ, which is a fact about doubles rather than
+        ! about pf_probit. Starting this loop at 0.25 makes it fail by one ulp at 31 points.
+        nbad = 0
+        do k = 0, 200
+            p = 0.5_real64 + 0.5_real64 * real(k, real64) / 201.0_real64
+            lo = pf_probit(p)
+            hi = pf_probit(1.0_real64 - p)
+            if (lo /= -hi) nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, &
+            "pf_probit must be exactly antisymmetric where 1-p is exact")
+        if (allocated(error)) return
+        ! And exactly antisymmetric on dyadic probabilities outside that range too.
+        nbad = 0
+        do k = 1, 40
+            p = 2.0_real64 ** (-k)
+            if (pf_probit(p) /= -pf_probit(1.0_real64 - p)) nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, &
+            "pf_probit must be exactly antisymmetric on a dyadic p, where 1-p is exact too")
+    end subroutine test_probit_centre_and_symmetry
+
+    !> `pf_probit` never decreases as `p` rises, across the branch seam included.
+    !!
+    !! A quantile function that steps backwards at a seam turns a sorted input into an unsorted
+    !! output, and **nothing downstream diagnoses that** -- the values stay finite, stay in range
+    !! and stay plausible. The walk is deliberately densest at the two seams (`q = 0.1` and its
+    !! mirror), which is where a branch defect lives and where a grid of round decimals would step
+    !! straight over it.
+    subroutine test_probit_is_monotone(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad
+        real(real64) :: p, prev, cur
+        character(len=:), allocatable :: txt
+
+        nbad = 0
+        prev = pf_probit(tiny(1.0_real64))
+        ! A dense sweep of the whole open interval.
+        do k = 1, 20000
+            p = real(k, real64) / 20001.0_real64
+            cur = pf_probit(p)
+            if (cur < prev) nbad = nbad + 1
+            prev = cur
+        end do
+        call check(error, nbad, 0, "pf_probit stepped backwards on a dense sweep of (0, 1)")
+        if (allocated(error)) return
+
+        ! And a walk of consecutive DOUBLES either side of each seam, where a real discontinuity
+        ! hides from any sweep made of round decimals. **One ulp of slack, and it is not laziness**:
+        ! the two branches meet at their own accuracy rather than at the last bit, so a backward
+        ! step of one ulp is what a correct two-branch kernel does (measured: 2 steps in 400, of
+        ! exactly 1 ulp). A wrong threshold or a branch reached with the wrong argument steps back
+        ! by millions of ulp, which is what this still catches.
+        nbad = 0
+        p = QSPLIT
+        do k = 1, 200
+            p = nearest(p, -1.0_real64)
+        end do
+        prev = pf_probit(p)
+        do k = 1, 400
+            p = nearest(p, 1.0_real64)
+            cur = pf_probit(p)
+            if (prev - cur > SEAM_ULP_SLACK * spacing(cur)) nbad = nbad + 1
+            prev = cur
+        end do
+        call pf_to_str(QSPLIT, txt)
+        call check(error, nbad, 0, "pf_probit stepped backwards across the seam at q = " // txt)
+        if (allocated(error)) return
+        nbad = 0
+        p = 1.0_real64 - QSPLIT
+        do k = 1, 200
+            p = nearest(p, -1.0_real64)
+        end do
+        prev = pf_probit(p)
+        do k = 1, 400
+            p = nearest(p, 1.0_real64)
+            cur = pf_probit(p)
+            if (prev - cur > SEAM_ULP_SLACK * spacing(cur)) nbad = nbad + 1
+            prev = cur
+        end do
+        call check(error, nbad, 0, "pf_probit stepped backwards across the upper seam")
+    end subroutine test_probit_is_monotone
+
+    !> The ends and the non-probabilities: `-/+Infinity`, and a quiet NaN outside `[0, 1]`.
+    !!
+    !! **The NaN cases are the ones with teeth.** An implementation that reaches an ordered
+    !! comparison before screening the NaN raises `IEEE_INVALID`, which nagfor's default
+    !! `-ieee=stop` turns into a dead process rather than a failed assertion -- so this test either
+    !! passes or takes the whole runner with it, and there is no third outcome to misread. The
+    !! infinities must come from `ieee_value` rather than from a division, which is the same rule.
+    subroutine test_probit_ends_and_nan(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64) :: nan64
+        real(real32) :: nan32
+        logical :: saved, supported, v(17)
+
+        ! Built with ieee_value, never as 0/0, which traps under nagfor before it can be stored.
+        nan64 = ieee_value(1.0_real64, ieee_quiet_nan)
+        nan32 = ieee_value(1.0_real32, ieee_quiet_nan)
+
+        ! nagfor's `erfc` raises IEEE_UNDERFLOW when handed an infinity, where the answer is an
+        ! exact zero and gfortran and flang raise nothing. The suite runs concurrently and the
+        ! flag surfaces at the end of the whole run, so it is saved and put back rather than left
+        ! for whatever test happens to be printing when the runner stops.
+        supported = ieee_support_flag(ieee_underflow, 1.0_real64)
+        saved = .false.
+        if (supported) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+
+        ! Every call is made and every verdict recorded BEFORE the first assertion, so that the
+        ! flag can be put back on the one path out of here. A `check` with an early return in the
+        ! middle would leave it cleared for whatever runs next.
+        v(1) = is_neg_inf(pf_probit(0.0_real64))
+        v(2) = is_pos_inf(pf_probit(1.0_real64))
+        v(3) = ieee_is_nan(pf_probit(-0.25_real64))
+        v(4) = ieee_is_nan(pf_probit(1.5_real64))
+        v(5) = ieee_is_nan(pf_probit(nan64))
+        ! -0.0 is a zero, so it takes the -Infinity arm rather than the out-of-range one.
+        v(6) = is_neg_inf(pf_probit(-0.0_real64))
+        v(7) = pf_norm_cdf(ieee_value(1.0_real64, ieee_negative_inf)) == 0.0_real64
+        v(8) = pf_norm_cdf(ieee_value(1.0_real64, ieee_positive_inf)) == 1.0_real64
+        v(9) = pf_norm_sf(ieee_value(1.0_real64, ieee_positive_inf)) == 0.0_real64
+        v(10) = pf_norm_sf(ieee_value(1.0_real64, ieee_negative_inf)) == 1.0_real64
+        v(11) = pf_norm_pdf(ieee_value(1.0_real64, ieee_positive_inf)) == 0.0_real64
+        v(12) = ieee_is_nan(pf_norm_cdf(nan64))
+        v(13) = ieee_is_nan(pf_norm_sf(nan64))
+        v(14) = ieee_is_nan(pf_norm_pdf(nan64))
+        ! The real32 arm obeys the same contract, and screens its NaN before comparing too.
+        v(15) = ieee_is_nan(pf_probit(nan32))
+        v(16) = ieee_is_nan(pf_probit(2.0_real32))
+        v(17) = pf_probit(0.5_real32) == 0.0_real32
+
+        if (supported) call ieee_set_flag(ieee_underflow, saved)
+
+        call check(error, v(1), "pf_probit(0) must be -Infinity")
+        if (allocated(error)) return
+        call check(error, v(2), "pf_probit(1) must be +Infinity")
+        if (allocated(error)) return
+        call check(error, v(3), "pf_probit below 0 must be a quiet NaN, not an abort")
+        if (allocated(error)) return
+        call check(error, v(4), "pf_probit above 1 must be a quiet NaN, not an abort")
+        if (allocated(error)) return
+        call check(error, v(5), "pf_probit(NaN) must be a quiet NaN")
+        if (allocated(error)) return
+        call check(error, v(6), "pf_probit(-0.0) must be -Infinity, as -0.0 is a zero")
+        if (allocated(error)) return
+        call check(error, v(7), "pf_norm_cdf(-Infinity) must be exactly 0")
+        if (allocated(error)) return
+        call check(error, v(8), "pf_norm_cdf(+Infinity) must be exactly 1")
+        if (allocated(error)) return
+        call check(error, v(9), "pf_norm_sf(+Infinity) must be exactly 0")
+        if (allocated(error)) return
+        call check(error, v(10), "pf_norm_sf(-Infinity) must be exactly 1")
+        if (allocated(error)) return
+        call check(error, v(11), "pf_norm_pdf(+Infinity) must be exactly 0")
+        if (allocated(error)) return
+        ! The three NaN verdicts together: nagfor's own `erfc` answers 0 for a NaN and its `erf`
+        ! answers 1, so without the screens in pf_norm_cdf/pf_norm_sf this line reports a
+        ! probability of zero for an unknown quantile -- in range, plausible and silent.
+        call check(error, v(12) .and. v(13) .and. v(14), &
+            "the forward three must pass a NaN through as a quiet NaN")
+        if (allocated(error)) return
+        call check(error, v(15) .and. v(16), &
+            "the real32 pf_probit must give a quiet NaN for a NaN and for p outside [0,1]")
+        if (allocated(error)) return
+        call check(error, v(17), "the real32 pf_probit(0.5) must be exactly zero too")
+    end subroutine test_probit_ends_and_nan
+
+    !> `pf_probit` answers a real number for a subnormal probability, rather than `-Infinity`.
+    !!
+    !! **This is what the log-domain tail buys.** An iteration written on `Phi` itself forms
+    !! `Phi(x) - q` with both terms below `1e-300`, and an implementation that reaches
+    !! `exp(-x*x/2)` directly underflows to zero and answers `-Infinity` for the whole range --
+    !! plausibly, and for every input a survey's faintest selection probabilities actually take.
+    !! The smallest subnormal double is about `4.94e-324` and its quantile is about `-38.47`.
+    subroutine test_probit_subnormal_tail(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad
+        logical :: saved, supported
+        real(real64) :: res
+
+        ! Reading and narrowing values at the bottom of the exponent range sets IEEE_UNDERFLOW,
+        ! and the suite runs concurrently, so the flag is saved and put back: leaving one raised
+        ! surfaces at the end of the whole run and reads as a defect in whatever ran last.
+        supported = ieee_support_flag(ieee_underflow, 1.0_real64)
+        saved = .false.
+        if (supported) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+
+        nbad = 0
+        do k = 1, NP
+            if (P_GRID(k) >= tiny(1.0_real64)) cycle       ! subnormal probabilities only
+            res = pf_probit(P_GRID(k))
+            if (.not. ieee_is_finite(res)) nbad = nbad + 1
+            if (ulp_gap(res, PROBIT_GRID(k)) > PROBIT_ULP_BUDGET) nbad = nbad + 1
+        end do
+
+        if (supported) call ieee_set_flag(ieee_underflow, saved)
+
+        call check(error, nbad, 0, &
+            "pf_probit must answer a finite, oracle-accurate quantile for a subnormal probability")
+        if (allocated(error)) return
+        ! The extreme point, asserted on its own so a grid that stopped short is visible.
+        call check(error, ieee_is_finite(pf_probit(4.9406564584124654e-324_real64)), &
+            "pf_probit of the smallest subnormal double must be finite")
+    end subroutine test_probit_subnormal_tail
+
+    !> The three forward functions against the oracle, including where `1 - Phi(z)` has no digits.
+    !!
+    !! **The upper tail is the point.** `SF_GRID` beyond about `z = 8` shares no significant digit
+    !! with `1 - CDF_GRID`, so a `pf_norm_sf` written as that subtraction fails here by any
+    !! measure -- at `z = 20` it would return zero where the answer is `2.75e-89`.
+    !!
+    !! The budget widens as `z*z` because the answer's own sensitivity to its argument does: a
+    !! half-ulp rounding in `z/sqrt(2)` moves `erfc` by roughly `2*z*z` ulp, and that is a property
+    !! of taking a `real64` argument rather than something an implementation can avoid. Measured
+    !! worst case at `z = -30` is 223 ulp under gfortran and flang and 759 under nagfor, against a
+    !! bound of 1832 there.
+    subroutine test_norm_forward_matches_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad
+        logical :: saved, supported
+        real(real64) :: budget
+        character(len=:), allocatable :: txt
+
+        supported = ieee_support_flag(ieee_underflow, 1.0_real64)
+        saved = .false.
+        if (supported) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+
+        nbad = 0
+        do k = 1, NZ
+            budget = 2.0_real64 * Z_GRID(k) * Z_GRID(k) + 32.0_real64
+            if (CDF_GRID(k) >= tiny(1.0_real64)) then
+                if (ulp_gap(pf_norm_cdf(Z_GRID(k)), CDF_GRID(k)) > budget) nbad = nbad + 1
+            end if
+            if (SF_GRID(k) >= tiny(1.0_real64)) then
+                if (ulp_gap(pf_norm_sf(Z_GRID(k)), SF_GRID(k)) > budget) nbad = nbad + 1
+            end if
+            if (PDF_GRID(k) >= tiny(1.0_real64)) then
+                if (ulp_gap(pf_norm_pdf(Z_GRID(k)), PDF_GRID(k)) > PDF_ULP_BUDGET) nbad = nbad + 1
+            end if
+        end do
+
+        if (supported) call ieee_set_flag(ieee_underflow, saved)
+
+        call check(error, nbad, 0, "a forward normal function is outside its ulp budget")
+        if (allocated(error)) return
+        ! The negative control for the sf claim: the subtraction really has nothing left, so a
+        ! test that passed with `pf_norm_sf` implemented that way would be proving nothing.
+        call pf_to_str(1.0_real64 - pf_norm_cdf(20.0_real64), txt)
+        call check(error, 1.0_real64 - pf_norm_cdf(20.0_real64) == 0.0_real64, &
+            "1 - pf_norm_cdf(20) is expected to be exactly 0 -- it came back as " // txt // &
+            ", so this test no longer shows what pf_norm_sf is for")
+        if (allocated(error)) return
+        call check(error, pf_norm_sf(20.0_real64) > 0.0_real64, &
+            "pf_norm_sf(20) must be a positive number where the subtraction gives zero")
+        if (allocated(error)) return
+        ! And the identity that ties the two together at every ordinary quantile.
+        call check(error, pf_norm_sf(1.25_real64) == pf_norm_cdf(-1.25_real64), &
+            "pf_norm_sf(z) must be exactly pf_norm_cdf(-z)")
+    end subroutine test_norm_forward_matches_oracle
+
+    !> `pf_norm_cdf(pf_probit(p))` returns `p`, which pins the two against each other.
+    !!
+    !! Either direction drifting alone shows here, and neither the oracle nor a tolerance on one
+    !! function alone would see it. **The range is deliberately not the whole interval**: above
+    !! about `p = 1 - 1e-15` the round trip cannot return `p`, because `Phi` is flat there and
+    !! consecutive doubles of `p` map to quantiles further apart than a double can resolve. That is
+    !! a property of the functions, not of this implementation, so the test states the range rather
+    !! than widening the tolerance until the flat part passes.
+    subroutine test_probit_round_trips(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad
+        real(real64) :: p, back
+
+        nbad = 0
+        do k = 1, 4000
+            p = real(k, real64) / 4001.0_real64
+            back = pf_norm_cdf(pf_probit(p))
+            if (ulp_gap(back, p) > 32.0_real64) nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, "pf_norm_cdf(pf_probit(p)) must return p over (0, 1)")
+        if (allocated(error)) return
+        ! Down the tail the budget widens as `z*z`, for the reason `pf_norm_cdf`'s own does: the
+        ! round trip inherits `Phi`'s sensitivity to its rounded argument, which is roughly
+        ! `2*z*z` ulp and is a property of the function rather than of either implementation.
+        ! Measured worst case is about 1180 ulp near p = 1e-182, against a bound of 6900 there.
+        nbad = 0
+        do k = 2, 300
+            p = 10.0_real64 ** (-k)
+            back = pf_probit(p)
+            if (ulp_gap(pf_norm_cdf(back), p) > 2.0_real64 * back * back + 32.0_real64) &
+                nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, &
+            "pf_norm_cdf(pf_probit(p)) must return p down the whole tail")
+    end subroutine test_probit_round_trips
+
+    !> The real32 arm resolves to `real32`, tracks the `real64` kernel, and is not that kernel.
+    !!
+    !! **The last clause is the one that needs explaining.** A `real32` specific implemented as
+    !! `real(pf_probit(real(p, real64)), real32)` would be the correctly rounded `real32` of the
+    !! `real64` answer at EVERY point, which is what `parquet_utils`' "computes in the kind it was
+    !! handed" rule forbids. Computing in `real32` throughout cannot be correctly rounded
+    !! everywhere, so a positive count of points where the two differ is exactly the evidence that
+    !! no widening happened; a count of zero is what a widened implementation would produce.
+    !! Measured counts are 22 of 112 under gfortran and flang and 25 under nagfor.
+    !!
+    !! **The reference is the `real64` kernel at the SAME real32 probability**, never
+    !! `real(PROBIT_GRID, real32)`. `Phi**(-1)` is ill-conditioned about `p = 1/2`, so narrowing
+    !! `p` first changes the true answer by far more than any ulp budget -- at `p = 0.49999999`
+    !! the `real32` input rounds to exactly `0.5`, whose quantile is genuinely zero.
+    subroutine test_normal_family_real32(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer :: k, nbad, ndiff, n
+        logical :: saved, supported
+        real(real32) :: p4, got, ref
+
+        call check(error, kind(pf_probit(0.3_real32)) == real32, &
+            "pf_probit of a real32 must resolve to the real32 specific")
+        if (allocated(error)) return
+        call check(error, kind(pf_norm_cdf(0.3_real32)) == real32 .and. &
+            kind(pf_norm_sf(0.3_real32)) == real32 .and. &
+            kind(pf_norm_pdf(0.3_real32)) == real32, &
+            "the forward three must resolve to their real32 specifics")
+        if (allocated(error)) return
+
+        ! Narrowing the deep-tail grid points underflows; the flag is saved and restored because
+        ! the suite runs concurrently.
+        supported = ieee_support_flag(ieee_underflow, 1.0_real32)
+        saved = .false.
+        if (supported) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+        nbad = 0
+        ndiff = 0
+        n = 0
+        do k = 1, NP
+            p4 = real(P_GRID(k), real32)
+            if (p4 <= 0.0_real32 .or. p4 >= 1.0_real32) cycle
+            n = n + 1
+            ref = real(pf_probit(real(p4, real64)), real32)
+            got = pf_probit(p4)
+            if (got /= ref) ndiff = ndiff + 1
+            if (ref /= 0.0_real32) then
+                if (abs(got - ref) / spacing(ref) > PROBIT32_ULP_BUDGET) nbad = nbad + 1
+            else if (got /= 0.0_real32) then
+                nbad = nbad + 1
+            end if
+        end do
+        if (supported) call ieee_set_flag(ieee_underflow, saved)
+
+        call check(error, nbad, 0, &
+            "the real32 pf_probit is outside its budget against the real64 kernel at the same input")
+        if (allocated(error)) return
+        call check(error, ndiff > 0, &
+            "the real32 pf_probit matched the narrowed real64 answer at EVERY point, which is what " // &
+            "a specific that widens to real64 and narrows back would do")
+        if (allocated(error)) return
+        call check(error, n > 50, &
+            "fewer real32 grid points survived than this test needs to mean anything")
+    end subroutine test_normal_family_real32
+
+    !> `1/pf_probit(0.75)` is the scale `pf_mad(scale="normal")` multiplies by.
+    !!
+    !! **`feature_risks.md` Risk-252.** `src/parquet_stats_order.f90` freezes that scale as the
+    !! literal `1.482602218505602`, deliberately, so that every `pf_mad` answer this library has
+    !! published stays bit-stable and independent of any kernel. Once `pf_probit` exists there are
+    !! two spellings of one number in one library and nothing structural keeps them together.
+    !!
+    !! **They are known to differ by exactly one ulp**, and that is not slack in this test. Sixteen
+    !! decimal digits do not name that double uniquely: the literal is `0x3ff7b8bd1a975674` and the
+    !! nearest double to `1/Phi**(-1)(3/4)` is `...673`. Correcting the last bit would move every
+    !! `pf_mad(scale="normal")` number already published, for a relative change of 1.5e-16, so it
+    !! stays as it is. What must not drift is anything larger, which is what the bound catches.
+    subroutine test_probit_matches_mad_scale(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        !> The literal `src/parquet_stats_order.f90` carries. Written out rather than imported:
+        !! `parquet_utils` is a leaf and this suite must not acquire an edge to the statistics
+        !! tier to read one constant. `tools/generate_probit_reference.py --self-test` compares the
+        !! two spellings from the other side, against the source file itself.
+        real(real64), parameter :: MAD_NORMAL_SCALE_IN_SOURCE = 1.482602218505602_real64
+        real(real64) :: computed
+        character(len=:), allocatable :: txt
+
+        computed = 1.0_real64 / pf_probit(0.75_real64)
+        call check(error, ulp_gap(computed, MAD_NORMAL_SCALE_REF) <= PROBIT_ULP_BUDGET, &
+            "1/pf_probit(0.75) must be the oracle's 1/Phi^-1(3/4)")
+        if (allocated(error)) return
+        call pf_to_str(ulp_gap(MAD_NORMAL_SCALE_IN_SOURCE, MAD_NORMAL_SCALE_REF), txt)
+        call check(error, ulp_gap(MAD_NORMAL_SCALE_IN_SOURCE, MAD_NORMAL_SCALE_REF) <= 1.0_real64, &
+            "the MAD normal scale frozen in src/parquet_stats_order.f90 is " // txt // &
+            " ulp from 1/Phi^-1(3/4); one is allowed and more is a drift")
+        if (allocated(error)) return
+        call check(error, PROBIT_Q3 > 0.674_real64 .and. PROBIT_Q3 < 0.675_real64, &
+            "the oracle's Phi^-1(3/4) is not where it should be, so this test proves nothing")
+    end subroutine test_probit_matches_mad_scale
 
     ! ================================================================================
     ! Total arithmetic

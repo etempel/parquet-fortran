@@ -1,6 +1,6 @@
 !> Small, self-contained numeric, text and path helpers for programs built on this library: total
-!> arithmetic and angle handling, ASCII case folding, value-to-text rendering, and POSIX path
-!> joining and splitting.
+!> arithmetic and angle handling, the standard normal distribution and its quantile function,
+!> ASCII case folding, value-to-text rendering, and POSIX path joining and splitting.
 !!
 !! `parquet_utils` is a **leaf**: it imports the two INTRINSIC modules `iso_fortran_env` and
 !! `ieee_arithmetic`, and nothing else -- no module of this library, not even
@@ -57,10 +57,18 @@
 !! "we follow Python" is checked rather than claimed.
 !!
 !! **Every numeric helper computes in the KIND it was handed, and none widens behind your back.**
-!! `pf_safe_div`, the four `pf_wrap_*`, `pf_deg2rad`/`pf_rad2deg` and `pf_cross_product` each have a
-!! `real32` and a `real64` specific, and the `real32` one does `real32` arithmetic throughout. That
+!! `pf_safe_div`, the four `pf_wrap_*`, `pf_deg2rad`/`pf_rad2deg`, `pf_cross_product`, `pf_probit`
+!! and `pf_norm_cdf`/`pf_norm_sf`/`pf_norm_pdf` each have a `real32` and a `real64` specific, and
+!! the `real32` one does `real32` arithmetic throughout. That
 !! is what lets `pf_safe_div` promise it returns *exactly* what `a/b` returns, which a form widening
 !! to `real64` and narrowing back could not. A caller wanting `real64` accuracy passes `real64`.
+!!
+!! **The normal family is TOTAL like everything else here: `pf_probit` answers `-Infinity` at 0,
+!! `+Infinity` at 1 and a quiet NaN outside `[0, 1]`**, rather than validating its argument. It is
+!! accurate to about 2 ulp over the whole range, including into the subnormal tail, and
+!! `tools/generate_probit_reference.py` is the 50-digit oracle that says so rather than a claim in
+!! this comment. See `pf_probit`'s own doc-comment for how it is computed and why the two branches
+!! are written on `erf` and on `log(Phi)` rather than both on `Phi`.
 !!
 !! **Both wrapping ranges are HALF-OPEN -- `[0, 360)` and `[-180, 180)` -- and the guard that keeps
 !! them so is load-bearing rather than defensive.** `modulo` is the whole computation, and `modulo`
@@ -79,6 +87,7 @@ module parquet_utils
     private
 
     public :: pf_safe_div
+    public :: pf_probit, pf_norm_cdf, pf_norm_sf, pf_norm_pdf
     public :: pf_wrap_deg, pf_wrap_180, pf_wrap_rad, pf_wrap_pi
     public :: pf_deg2rad, pf_rad2deg
     public :: pf_cross_product
@@ -106,6 +115,60 @@ module parquet_utils
     real(real64), parameter :: RAD2DEG_R64 = 180.0_real64 / PI_R64
     real(real32), parameter :: DEG2RAD_R32 = real(DEG2RAD_R64, real32)
     real(real32), parameter :: RAD2DEG_R32 = real(RAD2DEG_R64, real32)
+
+    !> The constants the normal family needs, in each kind. Written to more digits than either
+    !! kind can hold so that the compiler rounds them, and the `real32` ones narrowed from the
+    !! `real64` ones for the reason `PI_R32` is -- each is then the nearest `real32` to the true
+    !! value rather than a shorter decimal truncation of it.
+    real(real64), parameter :: SQRT2_R64 = 1.414213562373095048801689_real64
+    real(real64), parameter :: INV_SQRT2_R64 = 0.7071067811865475244008444_real64
+    !> `sqrt(2/pi)`, which is `phi(x)*Phi(x)**(-1)` times `erfc_scaled` in the tail step.
+    real(real64), parameter :: SQRT_2_OVER_PI_R64 = 0.7978845608028653558798921_real64
+    !> `1/sqrt(2*pi)`, the standard normal density's normalisation.
+    real(real64), parameter :: INV_SQRT_2PI_R64 = 0.3989422804014326779399461_real64
+    !> `2/sqrt(pi)`, which is `erf`'s own derivative factor.
+    real(real64), parameter :: TWO_OVER_SQRTPI_R64 = 1.128379167095512573896159_real64
+    !> `log(2*pi)`, which the tail's starting estimate needs.
+    real(real64), parameter :: LN_2PI_R64 = 1.837877066409345483560659_real64
+    real(real32), parameter :: INV_SQRT2_R32 = real(INV_SQRT2_R64, real32)
+    real(real32), parameter :: SQRT2_R32 = real(SQRT2_R64, real32)
+    real(real32), parameter :: SQRT_2_OVER_PI_R32 = real(SQRT_2_OVER_PI_R64, real32)
+    real(real32), parameter :: INV_SQRT_2PI_R32 = real(INV_SQRT_2PI_R64, real32)
+    real(real32), parameter :: TWO_OVER_SQRTPI_R32 = real(TWO_OVER_SQRTPI_R64, real32)
+    real(real32), parameter :: LN_2PI_R32 = real(LN_2PI_R64, real32)
+
+    !> Where `pf_probit` stops solving on `erf` and starts solving on `log(Phi)`, as a value of
+    !! `q = min(p, 1-p)`.
+    !!
+    !! **Not a tuning knob and not a fitted number: it is where each branch's starting estimate is
+    !! good enough for its own fixed step count**, which is the sweep recorded in feature_probit.md.
+    !! Below it the series start is too far out for two Halley steps to close; above it the tail's
+    !! asymptotic start is too far out for three. Moving it in either direction costs accuracy at
+    !! the edge it moves toward, and the golden-vector test is what reports that.
+    real(real64), parameter :: PROBIT_QSPLIT_R64 = 0.1_real64
+    real(real32), parameter :: PROBIT_QSPLIT_R32 = 0.1_real32
+
+    !> The Maclaurin coefficients of `erfinv`, `sqrt(pi)/2 * [1, pi/12, 7pi**2/480, ...]`.
+    !!
+    !! **Derived, not fitted and not copied**: they are the series reversion of `erf`'s own
+    !! Maclaurin series, so each has a closed form and `tools/generate_probit_reference.py`
+    !! re-derives all six by reversion in `--self-test` and compares them with these literals. That
+    !! matters for provenance as well as for correctness -- this library is BSD-3 and a published
+    !! minimax coefficient set is not (feature_probit.md, alternative A1).
+    !!
+    !! **They set only the SPEED of `pf_probit`, never its answer.** The refinement that follows
+    !! converges from any starting point; six terms is what makes two Halley steps enough.
+    real(real64), parameter :: ERFINV_C_R64(6) = [ &
+        0.8862269254527580136490837_real64, 0.2320136665346544935535341_real64, &
+        0.1275561753055979582539997_real64, 0.08655212924154753372964179_real64, &
+        0.06495961774538541338201467_real64, 0.05173128198461637411263189_real64]
+    !> The same six, narrowed one at a time rather than as `real(ERFINV_C_R64, real32)` --
+    !! nagfor warns "Loss of accuracy in double-real conversion" once per element for the
+    !! whole-array form and says nothing for this one (`fortran-gotchas.md`).
+    real(real32), parameter :: ERFINV_C_R32(6) = [ &
+        real(ERFINV_C_R64(1), real32), real(ERFINV_C_R64(2), real32), &
+        real(ERFINV_C_R64(3), real32), real(ERFINV_C_R64(4), real32), &
+        real(ERFINV_C_R64(5), real32), real(ERFINV_C_R64(6), real32)]
 
     !> The path separator. POSIX `/` on every platform, deliberately -- see the module header.
     character(len=1), parameter :: PATH_SEP = "/"
@@ -143,6 +206,111 @@ module parquet_utils
         module procedure pf_safe_div_r32 !! `real(real32)` numerator and denominator.
         module procedure pf_safe_div_r64 !! `real(real64)` numerator and denominator.
     end interface pf_safe_div
+
+    ! ---- The standard normal distribution ----
+
+    !> The probit function: the quantile function of the standard normal, `Phi**(-1)(p)`.
+    !!
+    !! `pf_probit(p)` is the `z` for which `pf_norm_cdf(z)` is `p`. `pure elemental`, so it applies
+    !! to whole arrays, and it computes in the kind it was handed.
+    !!
+    !! **Total, like everything else in this module: nothing validates and nothing aborts.**
+    !! `pf_probit(0.0)` is `-Infinity`, `pf_probit(1.0)` is `+Infinity`, and any `p` outside
+    !! `[0, 1]` -- or a NaN -- gives a quiet NaN. The NaN is screened with an equality test before
+    !! any ordered comparison is reached, because `<` and `>` are signalling comparisons that raise
+    !! `IEEE_INVALID` on a quiet NaN; the infinities are built with `ieee_value` rather than by
+    !! dividing, for the same reason.
+    !!
+    !! **Two exact properties and one near one, each of which has a test.** `pf_probit(0.5)` is
+    !! exactly `0` (a positive zero). The result is antisymmetric about `p = 0.5`, because the
+    !! magnitude is computed from `q = min(p, 1-p)` and the sign applied afterwards -- so
+    !! `pf_probit(p) == -pf_probit(1-p)` holds BIT FOR BIT wherever `1-p` is itself exact, which
+    !! is every `p` at or above `1/2` and every dyadic `p`, and to the accuracy below elsewhere.
+    !!
+    !! **The near one is monotonicity, and the exception is worth knowing.** The result rises with
+    !! `p` everywhere except within one ulp of the branch seam, where the two branches meet at
+    !! their own accuracy rather than at the last bit: walking consecutive doubles across it steps
+    !! backwards by one ulp at two points out of four hundred. No two-branch approximation can do
+    !! better without the branches agreeing exactly, and a real seam defect -- a wrong threshold,
+    !! a branch reached with the wrong argument -- is not one ulp but millions, which is what the
+    !! test's bound separates.
+    !!
+    !! **Accurate to about 2 ulp over the whole range**, including into the subnormal tail, where
+    !! `p = 5e-324` still gives roughly `-38.5` rather than `-Infinity`. The expectations come from
+    !! a 50-digit `mpmath` oracle (`tools/generate_probit_reference.py`), never from another
+    !! library's double-precision answer.
+    !!
+    !! **Two branches, and each is written to avoid the cancellation the other would suffer.**
+    !! Near the middle it solves `erf(w) = 1 - 2q` for `w` and returns `-sqrt(2)*w`: `erf` is ODD,
+    !! so `erf(w) - y` is a difference of two quantities that both vanish as `q` approaches `1/2`,
+    !! and the relative accuracy of a small answer survives. Solving `Phi(x) = q` there instead
+    !! would subtract two quantities near `1/2` and lose every digit of it. In the tail it solves
+    !! `log(Phi(x)) = log(q)` on `erfc_scaled`, where nothing underflows and the subtraction is
+    !! between two logarithms rather than between two nearly equal probabilities.
+    !!
+    !! **The starting estimates decide only the cost.** The tail's iteration is Newton on a
+    !! concave increasing function, whose tangent lies above it, so the first step lands at or
+    !! beyond the root from ANY start and every step after that is monotone; the remaining steps
+    !! are Halley for the extra order. The step counts are fixed rather than iterated to
+    !! convergence, so the answer does not depend on the data and the procedure has no loop whose
+    !! trip count a caller can observe.
+    interface pf_probit
+        module procedure pf_probit_r32 !! `real(real32)` probability.
+        module procedure pf_probit_r64 !! `real(real64)` probability.
+    end interface pf_probit
+
+    !> The standard normal distribution function, `Phi(z)` -- the probability of drawing at most
+    !! `z`.
+    !!
+    !! `0.5*erfc(-z/sqrt(2))`, so the tail is the intrinsic's rather than a subtraction's.
+    !! `pure elemental`. Exactly `0.5` at `z = 0`, exactly `0` at `-Infinity`, exactly `1` at
+    !! `+Infinity`, and a quiet NaN on a NaN. Nothing validates and nothing aborts.
+    !!
+    !! **The NaN is screened here rather than left to `erfc`**, because nagfor's `ERFC` answers
+    !! `0` for one -- a probability, in range and silent. See the comment above the bodies.
+    !!
+    !! **Relative accuracy in the far tail degrades as `z*z`**, and that is a property of taking a
+    !! `real64` argument rather than something an implementation can avoid: a half-ulp rounding in
+    !! `z/sqrt(2)` moves `erfc` by roughly `2*z*z` ulp. Around `z = -30` the answer is good to a
+    !! few hundred ulp, which is still 12 significant digits of a probability near `1e-198`.
+    !!
+    !! **Use `pf_norm_sf` rather than `1 - pf_norm_cdf(z)` for an upper-tail probability.** Above
+    !! about `z = 5` the subtraction has no significant digits left to give, which is exactly the
+    !! range an upper tail is asked about.
+    interface pf_norm_cdf
+        module procedure pf_norm_cdf_r32 !! `real(real32)` quantile.
+        module procedure pf_norm_cdf_r64 !! `real(real64)` quantile.
+    end interface pf_norm_cdf
+
+    !> The standard normal survival function, `1 - Phi(z)` -- the probability of drawing more than
+    !! `z`.
+    !!
+    !! `0.5*erfc(z/sqrt(2))`, computed as the upper tail in its own right and **never** as
+    !! `1 - pf_norm_cdf(z)`, which is the whole reason this exists: at `z = 6` the subtraction
+    !! keeps about nine digits and by `z = 9` it keeps none, while this stays accurate until the
+    !! result underflows. `pure elemental`.
+    !!
+    !! Exactly `0.5` at `z = 0`, exactly `1` at `-Infinity`, exactly `0` at `+Infinity`, and a
+    !! quiet NaN on a NaN -- screened here rather than left to `erfc`, for the reason
+    !! `pf_norm_cdf` gives. `pf_norm_sf(z)` is `pf_norm_cdf(-z)` for every `z`, and it carries the
+    !! same `z*z` widening of relative error in the far tail.
+    interface pf_norm_sf
+        module procedure pf_norm_sf_r32 !! `real(real32)` quantile.
+        module procedure pf_norm_sf_r64 !! `real(real64)` quantile.
+    end interface pf_norm_sf
+
+    !> The standard normal density, `phi(z) = exp(-z*z/2)/sqrt(2*pi)`.
+    !!
+    !! `pure elemental`. `phi(0)` is `0.3989422804014327`, the density is exactly `0` at either
+    !! infinity, and a NaN gives a quiet NaN. Nothing validates and nothing aborts.
+    !!
+    !! **It underflows to zero rather than clamping**, at about `|z| = 38.6` in `real64` and
+    !! `|z| = 13.3` in `real32`. That is a gradual underflow, which sets `IEEE_UNDERFLOW` and is
+    !! not a halting exception on any supported compiler; it is a real answer, not a failure.
+    interface pf_norm_pdf
+        module procedure pf_norm_pdf_r32 !! `real(real32)` quantile.
+        module procedure pf_norm_pdf_r64 !! `real(real64)` quantile.
+    end interface pf_norm_pdf
 
     ! ---- Angles ----
 
@@ -429,6 +597,287 @@ contains
             res = ieee_value(res, ieee_quiet_nan)
         end if
     end function pf_safe_div_r64
+
+    ! ================================================================================
+    ! The standard normal distribution
+    ! ================================================================================
+    !
+    ! The three forward functions are one intrinsic call each. `pf_probit` is the work, and its
+    ! two branches, its step counts and the seam between them are all recorded in feature_probit.md
+    ! with the sweep that chose them. What the code below must preserve, whatever is tuned:
+    !
+    !   * the NaN screen is an EQUALITY test and comes before every ordered comparison;
+    !   * the magnitude is computed from `q = min(p, 1-p)` and the sign applied last, which is
+    !     what makes the result antisymmetric rather than approximately so;
+    !   * the central branch iterates on `erf`, not on `Phi`;
+    !   * the tail branch iterates on `log(Phi)` through `erfc_scaled`, and its first step is
+    !     Newton (globally convergent here) before Halley takes over.
+
+    !> `erfinv(y)` to a few parts in 1e4 over `|y| <= 0.8`, from its Maclaurin series.
+    !!
+    !! The starting estimate for `pf_probit`'s central branch, and **only** a starting estimate:
+    !! the Halley steps that follow converge from anywhere, so this decides how many of them are
+    !! needed and nothing else. Horner in `y*y`, which is what makes it odd in `y` exactly.
+    pure function erfinv_series_r64(y) result(w)
+        real(real64), intent(in) :: y !! `erf`'s value, `1 - 2q`; meant for `|y| <= 0.8`.
+        real(real64) :: w !! the approximate `erfinv(y)`.
+        real(real64) :: y2
+        integer :: k
+
+        y2 = y * y
+        w = ERFINV_C_R64(size(ERFINV_C_R64))
+        do k = size(ERFINV_C_R64) - 1, 1, -1
+            w = w * y2 + ERFINV_C_R64(k)
+        end do
+        w = w * y
+    end function erfinv_series_r64
+
+    !> `erfinv(y)` in `real32`. See `erfinv_series_r64`.
+    pure function erfinv_series_r32(y) result(w)
+        real(real32), intent(in) :: y !! `erf`'s value, `1 - 2q`; meant for `|y| <= 0.8`.
+        real(real32) :: w !! the approximate `erfinv(y)`.
+        real(real32) :: y2
+        integer :: k
+
+        y2 = y * y
+        w = ERFINV_C_R32(size(ERFINV_C_R32))
+        do k = size(ERFINV_C_R32) - 1, 1, -1
+            w = w * y2 + ERFINV_C_R32(k)
+        end do
+        w = w * y
+    end function erfinv_series_r32
+
+    !> The standard normal quantile function. See `pf_probit`.
+    pure elemental function pf_probit_r64(p) result(res)
+        real(real64), intent(in) :: p !! the probability; outside `[0, 1]` gives a NaN, not an abort.
+        real(real64) :: res !! `Phi**(-1)(p)`; `-/+Infinity` at 0 and 1, a quiet NaN outside `[0, 1]`.
+        real(real64) :: q, y, w, f, u, r, t, x, sc, h, rr, lq
+        integer :: k
+
+        ! The NaN screen is first, and it is an EQUALITY test on purpose: `<` and `>` are
+        ! signalling comparisons and raise IEEE_INVALID on a quiet NaN, which is fatal under
+        ! nagfor's default -ieee=stop. `p /= p` is quiet and true only for a NaN.
+        if (p /= p) then
+            res = ieee_value(res, ieee_quiet_nan)
+            return
+        end if
+        ! `p` is a number from here, so every ordered comparison below raises nothing.
+        if (p == 0.5_real64) then
+            res = 0.0_real64          ! exact, and a POSITIVE zero: the sign rule below would
+            return                    ! otherwise hand back -0.0 for the one input where it shows.
+        end if
+        if (p <= 0.0_real64) then
+            if (p == 0.0_real64) then
+                res = ieee_value(res, ieee_negative_inf)
+            else
+                res = ieee_value(res, ieee_quiet_nan)
+            end if
+            return
+        end if
+        if (p >= 1.0_real64) then
+            if (p == 1.0_real64) then
+                res = ieee_value(res, ieee_positive_inf)
+            else
+                res = ieee_value(res, ieee_quiet_nan)
+            end if
+            return
+        end if
+        ! 0 < p < 1 and p /= 1/2. The magnitude comes from the SMALLER tail and the sign is
+        ! applied at the end, which is what makes the result exactly antisymmetric.
+        if (p < 0.5_real64) then
+            q = p
+        else
+            q = 1.0_real64 - p
+        end if
+
+        if (q >= PROBIT_QSPLIT_R64) then
+            ! Central: solve erf(w) = y for w >= 0. `1 - 2q` is exact for q >= 1/4 (Sterbenz) and
+            ! loses nothing above the seam either.
+            y = 1.0_real64 - 2.0_real64 * q
+            w = erfinv_series_r64(y)
+            do k = 1, 2
+                ! Halley on f = erf(w) - y, with f' = (2/sqrt(pi))*exp(-w*w) and f'' = -2w*f',
+                ! so the second-order term costs one multiply rather than another transcendental.
+                f = erf(w) - y
+                u = f / (TWO_OVER_SQRTPI_R64 * exp(-w * w))
+                w = w - u / (1.0_real64 + u * w)
+            end do
+            x = -SQRT2_R64 * w
+        else
+            ! Tail: solve log(Phi(x)) = log(q). With t = -x/sqrt(2) >= 0 and sc = erfc_scaled(t),
+            ! log(Phi(x)) is log(0.5*sc) - x*x/2 and phi(x)/Phi(x) is sqrt(2/pi)/sc, so nothing
+            ! underflows however small q is -- which is what carries this into the subnormals.
+            lq = log(q)
+            r = -2.0_real64 * lq
+            ! The starting estimate inverts q ~ phi(t)/t once. `r - log(r) - log(2*pi)` is
+            ! positive for every q below the seam: it increases with r and is already 1.24 at
+            ! r = -2*log(0.1), so it needs no guard before the square root.
+            t = sqrt(r - log(r) - LN_2PI_R64)
+            x = -t
+            ! One Newton step first. log(Phi) is concave and increasing, so its tangent lies above
+            ! it and this lands at or beyond the root from any start; every step after it is
+            ! monotone. That is what makes a FIXED step count safe rather than merely measured.
+            sc = erfc_scaled(-x * INV_SQRT2_R64)
+            h = log(0.5_real64 * sc) - 0.5_real64 * x * x - lq
+            x = x - h * sc / SQRT_2_OVER_PI_R64
+            do k = 1, 2
+                sc = erfc_scaled(-x * INV_SQRT2_R64)
+                h = log(0.5_real64 * sc) - 0.5_real64 * x * x - lq
+                rr = SQRT_2_OVER_PI_R64 / sc                      ! phi(x)/Phi(x)
+                x = x - 2.0_real64 * h / (2.0_real64 * rr + h * (x + rr))
+            end do
+        end if
+
+        if (p < 0.5_real64) then
+            res = x
+        else
+            res = -x
+        end if
+    end function pf_probit_r64
+
+    !> The standard normal quantile function in `real32`. See `pf_probit`.
+    !!
+    !! The same scheme with one fewer tail step: 24 bits of mantissa are reached by the Newton
+    !! step plus one Halley step, where `real64` needs two. The central branch keeps both, because
+    !! a single Halley step there lands at about 1e-7 relative, which is `real32`'s own precision
+    !! rather than comfortably inside it.
+    pure elemental function pf_probit_r32(p) result(res)
+        real(real32), intent(in) :: p !! the probability; outside `[0, 1]` gives a NaN, not an abort.
+        real(real32) :: res !! `Phi**(-1)(p)`; `-/+Infinity` at 0 and 1, a quiet NaN outside `[0, 1]`.
+        real(real32) :: q, y, w, f, u, r, t, x, sc, h, rr, lq
+        integer :: k
+
+        if (p /= p) then
+            res = ieee_value(res, ieee_quiet_nan)
+            return
+        end if
+        if (p == 0.5_real32) then
+            res = 0.0_real32
+            return
+        end if
+        if (p <= 0.0_real32) then
+            if (p == 0.0_real32) then
+                res = ieee_value(res, ieee_negative_inf)
+            else
+                res = ieee_value(res, ieee_quiet_nan)
+            end if
+            return
+        end if
+        if (p >= 1.0_real32) then
+            if (p == 1.0_real32) then
+                res = ieee_value(res, ieee_positive_inf)
+            else
+                res = ieee_value(res, ieee_quiet_nan)
+            end if
+            return
+        end if
+        if (p < 0.5_real32) then
+            q = p
+        else
+            q = 1.0_real32 - p
+        end if
+
+        if (q >= PROBIT_QSPLIT_R32) then
+            y = 1.0_real32 - 2.0_real32 * q
+            w = erfinv_series_r32(y)
+            do k = 1, 2
+                f = erf(w) - y
+                u = f / (TWO_OVER_SQRTPI_R32 * exp(-w * w))
+                w = w - u / (1.0_real32 + u * w)
+            end do
+            x = -SQRT2_R32 * w
+        else
+            lq = log(q)
+            r = -2.0_real32 * lq
+            t = sqrt(r - log(r) - LN_2PI_R32)
+            x = -t
+            sc = erfc_scaled(-x * INV_SQRT2_R32)
+            h = log(0.5_real32 * sc) - 0.5_real32 * x * x - lq
+            x = x - h * sc / SQRT_2_OVER_PI_R32
+            sc = erfc_scaled(-x * INV_SQRT2_R32)
+            h = log(0.5_real32 * sc) - 0.5_real32 * x * x - lq
+            rr = SQRT_2_OVER_PI_R32 / sc
+            x = x - 2.0_real32 * h / (2.0_real32 * rr + h * (x + rr))
+        end if
+
+        if (p < 0.5_real32) then
+            res = x
+        else
+            res = -x
+        end if
+    end function pf_probit_r32
+
+    ! The NaN screen in the four `erfc` bodies below is NOT redundant, however much it looks it.
+    ! **nagfor's `ERFC` returns 0 for a quiet NaN, and its `ERF` returns 1** (measured, 7.2 on
+    ! arm64; gfortran and flang both propagate). Without the screen `pf_norm_cdf(NaN)` is a
+    ! probability of exactly zero on the maintainer's default compiler -- in range, plausible, and
+    ! silent. `fortran-gotchas.md` carries the rule. `pf_norm_pdf` needs no screen because it goes
+    ! through arithmetic and `exp`, which propagate a NaN on every compiler measured, and its test
+    ! is what would say otherwise.
+
+    !> `Phi(z)`, the standard normal distribution function. See `pf_norm_cdf`.
+    pure elemental function pf_norm_cdf_r32(z) result(res)
+        real(real32), intent(in) :: z !! the quantile.
+        real(real32) :: res !! `Phi(z)`, in `[0, 1]`.
+
+        if (z /= z) then
+            res = ieee_value(res, ieee_quiet_nan)
+        else
+            res = 0.5_real32 * erfc(-z * INV_SQRT2_R32)
+        end if
+    end function pf_norm_cdf_r32
+
+    !> `Phi(z)`, the standard normal distribution function. See `pf_norm_cdf`.
+    pure elemental function pf_norm_cdf_r64(z) result(res)
+        real(real64), intent(in) :: z !! the quantile.
+        real(real64) :: res !! `Phi(z)`, in `[0, 1]`.
+
+        if (z /= z) then
+            res = ieee_value(res, ieee_quiet_nan)
+        else
+            res = 0.5_real64 * erfc(-z * INV_SQRT2_R64)
+        end if
+    end function pf_norm_cdf_r64
+
+    !> `1 - Phi(z)`, the standard normal survival function. See `pf_norm_sf`.
+    pure elemental function pf_norm_sf_r32(z) result(res)
+        real(real32), intent(in) :: z !! the quantile.
+        real(real32) :: res !! `1 - Phi(z)`, in `[0, 1]`; NOT formed by that subtraction.
+
+        if (z /= z) then
+            res = ieee_value(res, ieee_quiet_nan)
+        else
+            res = 0.5_real32 * erfc(z * INV_SQRT2_R32)
+        end if
+    end function pf_norm_sf_r32
+
+    !> `1 - Phi(z)`, the standard normal survival function. See `pf_norm_sf`.
+    pure elemental function pf_norm_sf_r64(z) result(res)
+        real(real64), intent(in) :: z !! the quantile.
+        real(real64) :: res !! `1 - Phi(z)`, in `[0, 1]`; NOT formed by that subtraction.
+
+        if (z /= z) then
+            res = ieee_value(res, ieee_quiet_nan)
+        else
+            res = 0.5_real64 * erfc(z * INV_SQRT2_R64)
+        end if
+    end function pf_norm_sf_r64
+
+    !> `phi(z)`, the standard normal density. See `pf_norm_pdf`.
+    pure elemental function pf_norm_pdf_r32(z) result(res)
+        real(real32), intent(in) :: z !! the quantile.
+        real(real32) :: res !! `exp(-z*z/2)/sqrt(2*pi)`; underflows to 0 in the far tail.
+
+        res = INV_SQRT_2PI_R32 * exp(-0.5_real32 * z * z)
+    end function pf_norm_pdf_r32
+
+    !> `phi(z)`, the standard normal density. See `pf_norm_pdf`.
+    pure elemental function pf_norm_pdf_r64(z) result(res)
+        real(real64), intent(in) :: z !! the quantile.
+        real(real64) :: res !! `exp(-z*z/2)/sqrt(2*pi)`; underflows to 0 in the far tail.
+
+        res = INV_SQRT_2PI_R64 * exp(-0.5_real64 * z * z)
+    end function pf_norm_pdf_r64
 
     ! ================================================================================
     ! Angles

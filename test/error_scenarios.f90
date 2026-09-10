@@ -3082,6 +3082,20 @@ program error_scenarios
         call scenario_table_group_agg_weights_ignored()
     case ("table_group_nunique_vector_column")
         call scenario_table_group_nunique_vector_column()
+    case ("table_group_stale_broadcast")
+        call scenario_table_group_stale_broadcast()
+    case ("table_group_stale_gather")
+        call scenario_table_group_stale_gather()
+    case ("table_group_gather_short_buffer")
+        call scenario_table_group_gather_short_buffer()
+    case ("table_group_gather_short_valid")
+        call scenario_table_group_gather_short_valid()
+    case ("table_group_gather_out_of_range")
+        call scenario_table_group_gather_out_of_range()
+    case ("table_group_gather_kind")
+        call scenario_table_group_gather_kind()
+    case ("table_group_broadcast_length")
+        call scenario_table_group_broadcast_length()
     case ("filter_temporal_set_mismatch")
         call scenario_filter_temporal_set_mismatch()
     case ("filter_temporal_literal_list")
@@ -27315,6 +27329,92 @@ contains
         call grp%nunique("v", out)
         print '(a,i0)', "unexpectedly counted a vector column, groups=", size(out)
     end subroutine scenario_table_group_nunique_vector_column
+    subroutine scenario_table_group_stale_broadcast()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: counts(:), per_row(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%size(counts)
+        call grp%broadcast(counts, per_row)
+        print '(a,i0)', "broadcast answered before the change, rows=", size(per_row)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%broadcast(counts, per_row)
+        print '(a,i0)', "a stale grouping answered broadcast, rows=", size(per_row)
+    end subroutine scenario_table_group_stale_broadcast
+    subroutine scenario_table_group_stale_gather()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64) :: buf(2)
+        integer(int64) :: n
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%gather("x", 1_int64, buf, n)
+        print '(a,i0)', "gather answered before the change, n=", n
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%gather("x", 1_int64, buf, n)
+        print '(a,i0)', "a stale grouping answered gather, n=", n
+    end subroutine scenario_table_group_stale_gather
+    subroutine scenario_table_group_gather_short_buffer()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64) :: buf2(2), buf1(1)
+        integer(int64) :: n
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%gather("x", 1_int64, buf2, n)
+        print '(a,i0)', "a buffer the size of the largest group answered, n=", n
+        call grp%gather("x", 1_int64, buf1, n)
+        print '(a,i0)', "unexpectedly truncated a two-row group into a one-entry buffer, n=", n
+    end subroutine scenario_table_group_gather_short_buffer
+    subroutine scenario_table_group_gather_short_valid()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64) :: buf(2)
+        logical :: ok2(2), ok1(1)
+        integer(int64) :: n
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%gather("x", 1_int64, buf, n, is_valid=ok2)
+        print '(a,i0)', "an is_valid the size of the group answered, n=", n
+        call grp%gather("x", 1_int64, buf, n, is_valid=ok1)
+        print '(a,i0)', "unexpectedly truncated the validity of a two-row group, n=", n
+    end subroutine scenario_table_group_gather_short_valid
+    subroutine scenario_table_group_gather_out_of_range()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64) :: buf(2)
+        integer(int64) :: n
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%gather("x", 3_int64, buf, n)
+        print '(a,i0)', "the last group answered, n=", n
+        call grp%gather("x", 4_int64, buf, n)
+        print '(a,i0)', "unexpectedly gathered a group past the last, n=", n
+    end subroutine scenario_table_group_gather_out_of_range
+    subroutine scenario_table_group_gather_kind()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int32) :: ibuf(2)
+        integer(int64) :: n
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%gather("key", 1_int64, ibuf, n)
+        print '(a,i0)', "the int32 key column gathered into an int32 buffer, n=", n
+        call grp%gather("x", 1_int64, ibuf, n)
+        print '(a,i0)', "unexpectedly narrowed a real64 column into an int32 buffer, n=", n
+    end subroutine scenario_table_group_gather_kind
+    subroutine scenario_table_group_broadcast_length()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: per_row(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%broadcast([10_int64, 20_int64, 30_int64], per_row)
+        print '(a,i0)', "one value per group broadcast, rows=", size(per_row)
+        call grp%broadcast([10_int64, 20_int64], per_row)
+        print '(a,i0)', "unexpectedly broadcast two values over three groups, rows=", size(per_row)
+    end subroutine scenario_table_group_broadcast_length
     !
     !> A date set against a timestamp column is refused at apply, naming both -- two temporal
     !! types are two families, and an element of the wrong type has no instant to convert.

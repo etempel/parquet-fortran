@@ -246,6 +246,8 @@ contains
                 test_apply_group_team), &
             new_unittest("a grouping's agg threads automatically, honours the cap and the request, and agrees", &
                 test_agg_group_team), &
+            new_unittest("a grouping's broadcast threads automatically, honours the cap and the request, and agrees", &
+                test_broadcast_group_team), &
             new_unittest("a gather's team goes inside the column when the columns are fewer than the threads", &
                 test_colwork_level_rule), &
             new_unittest("bounded= reads correctly through both parallel paths", &
@@ -2898,6 +2900,79 @@ contains
         end do
         call check(error, .true., "every token agreed at both thread counts")
     end subroutine test_agg_group_team
+
+    !> `%broadcast`'s team, and the A/B on it: absent `threads=` is automatic (the record reads
+    !! at least 1, and 1 under `parquet_set_table_threads(1)`), `threads=1` records 1 and
+    !! `threads=nt` records nt; then the int64 broadcast of `%size` and the real64 broadcast of
+    !! an `%agg` mean under `threads=nt` equal their serial runs bit for bit over about five
+    !! hundred unequal groups with dropped rows -- every grouped row is written once, by its
+    !! own group, and the fill before the team opens. Serial in this suite, so the team is real.
+    subroutine test_broadcast_group_team(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 20000 !! rows; about five hundred groups of unequal size.
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int32) :: k(N)
+        real(real64) :: v(N)
+        integer(int64), allocatable :: counts(:), one(:), team(:), codes(:)
+        real(real64), allocatable :: means(:), one_r(:), team_r(:)
+        integer(int64) :: r_abs, r_cap, r_one, r_team
+        integer :: nt, i
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: no team can open, so every record would read 1 and the A/B " // &
+            "would compare serial against serial")
+        return
+#else
+        nt = min(4, omp_get_num_procs())
+        if (nt < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is clamped " // &
+                "to omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+#endif
+        do i = 1, N
+            k(i) = int(sqrt(real(mod(i * 7919, 250000), real64)), int32)
+            v(i) = real(mod(i * 31, 997), real64) + real(i, real64) * 1.0e-6_real64
+        end do
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("v", v)
+        do i = 1, N, 41
+            call t%set_null("k", int(i, int64))
+        end do
+        call t%group_by("k", grp)
+        call grp%size(counts)
+        call grp%group_ids(codes)
+        ! ---- the records, one arm each.
+        call parquet_debug_set_group_threads_used(-1_c_int64_t)
+        call grp%broadcast(counts, one)
+        r_abs = parquet_debug_get_group_threads_used()
+        call parquet_set_table_threads(1)
+        call grp%broadcast(counts, one)
+        r_cap = parquet_debug_get_group_threads_used()
+        call parquet_reset_settings()
+        call grp%broadcast(counts, one, threads=1)
+        r_one = parquet_debug_get_group_threads_used()
+        call grp%broadcast(counts, team, threads=nt)
+        r_team = parquet_debug_get_group_threads_used()
+        call check(error, grp%ngroups() > 100_int64 .and. count(codes == 0_int64) > 0, &
+            "the fixture has a few hundred groups and some dropped rows")
+        if (allocated(error)) return
+        call check(error, r_abs >= 1_int64, "absent threads= resolves automatically")
+        if (allocated(error)) return
+        call check(error, r_cap == 1_int64, "parquet_set_table_threads(1) caps the automatic answer to 1")
+        if (allocated(error)) return
+        call check(error, r_one == 1_int64 .and. r_team == int(nt, int64), "threads=1 records 1, threads=nt records nt")
+        if (allocated(error)) return
+        call check(error, all(team == one), "the int64 broadcast on a team equals its serial run")
+        if (allocated(error)) return
+        call grp%agg("v", "mean", means)
+        call grp%broadcast(means, one_r, fill=-1.0_real64, threads=1)
+        call grp%broadcast(means, team_r, fill=-1.0_real64, threads=nt)
+        call check(error, all(team_r == one_r) .and. count(one_r == -1.0_real64) == count(codes == 0_int64), &
+            "the real64 broadcast on a team equals its serial run, the fill on exactly the dropped rows")
+    end subroutine test_broadcast_group_team
     !
     !> The mean of a group's valid values, for the procedure form's team arm.
     function par_col_mean(values, is_valid, weights) result(r)

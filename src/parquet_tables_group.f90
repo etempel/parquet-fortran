@@ -61,6 +61,15 @@
 !! **`%nunique` is one more sort**, over the keys and then the column, so that distinctness is
 !! the comparator's own equality and its outer groups are this grouping's; a walk over the
 !! finest runs counts them per group, skipping the null run unless `dropna=.false.`.
+!!
+!! **`%broadcast` and `%gather` are the two ends of the hot loop, and neither allocates per
+!! group.** `%broadcast` is one fill of `per_row` and one scatter over the partition: every
+!! grouped row is written exactly once, by its own group, and the fill lands before the team
+!! opens, so the loop threads automatically with nothing to order and the same bits at every
+!! team. `%gather` copies one group's run of the permutation into a buffer the caller sized once
+!! by `%max_size()`, widening as `%get` does, and ABORTS rather than truncates when the buffer is
+!! shorter than the group: a statistic over the first `size(buf)` rows of a group is a plausible
+!! wrong answer (feature_pandas_S5.md, R-e).
 submodule (parquet_tables) parquet_tables_group
     ! The ASCII fold the direction-token refusal and the statistic tokens use. parquet_utils is
     ! already in this module's footprint (the module itself imports it), so a submodule import
@@ -1439,4 +1448,221 @@ contains
         end if
     end subroutine grp_agg_func
     !
+    !
+    ! ---- %broadcast and %gather: the two ends of the hot loop ----------------------------------
+    !
+    !> Aborts unless `per_group` holds exactly one value per group, naming both counts.
+    subroutine bcast_check(self, nper, proc)
+        class(parquet_grouping), intent(in) :: self !! the grouping.
+        integer(int64), intent(in) :: nper          !! size(per_group).
+        character(len=*), intent(in) :: proc        !! calling binding, for the message.
+        character(len=32) :: a, b
+        !
+        if (nper == self%ngrp) return
+        write(a, "(I0)") nper
+        write(b, "(I0)") self%ngrp
+        error stop GP // trim(proc) // ": per_group has " // trim(a) // " entries and this grouping has " // &
+            trim(b) // " groups; it takes exactly one value per group, in group order, as %size, %agg and " // &
+            "%apply give it"
+    end subroutine bcast_check
+    !
+    module procedure grp_broadcast_f64
+        character(len=*), parameter :: PROC = "broadcast"
+        real(real64) :: f
+        integer(int64) :: g, i
+        integer :: nt, chunk
+        !
+        call grp_resolve(self, PROC)
+        call bcast_check(self, size(per_group, kind=int64), PROC)
+        call group_team(self%ngrp, threads, PROC, .true., nt)
+        f = ieee_value(0.0_real64, ieee_quiet_nan)
+        if (present(fill)) f = fill
+        allocate(per_row(self%ntab))
+        per_row = f
+        chunk = group_chunk(self%ngrp, nt)
+        ! Every grouped row is written exactly once, by its own group, and the fill was written
+        ! before the team opened: no race, no order, the same bits at every team.
+        !$omp parallel do num_threads(nt) default(shared) private(g, i) schedule(dynamic, chunk) if (nt > 1)
+        do g = 1_int64, self%ngrp
+            do i = self%offsets(g), self%offsets(g + 1_int64) - 1_int64
+                per_row(self%perm(i)) = per_group(g)
+            end do
+        end do
+        !$omp end parallel do
+    end procedure grp_broadcast_f64
+    !
+    module procedure grp_broadcast_i64
+        character(len=*), parameter :: PROC = "broadcast"
+        integer(int64) :: f
+        integer(int64) :: g, i
+        integer :: nt, chunk
+        !
+        call grp_resolve(self, PROC)
+        call bcast_check(self, size(per_group, kind=int64), PROC)
+        call group_team(self%ngrp, threads, PROC, .true., nt)
+        f = 0_int64
+        if (present(fill)) f = fill
+        allocate(per_row(self%ntab))
+        per_row = f
+        chunk = group_chunk(self%ngrp, nt)
+        ! As in the real64 form: one writer per row, the fill in place before the team.
+        !$omp parallel do num_threads(nt) default(shared) private(g, i) schedule(dynamic, chunk) if (nt > 1)
+        do g = 1_int64, self%ngrp
+            do i = self%offsets(g), self%offsets(g + 1_int64) - 1_int64
+                per_row(self%perm(i)) = per_group(g)
+            end do
+        end do
+        !$omp end parallel do
+    end procedure grp_broadcast_i64
+    !
+    !> `size(is_valid)` when it is present, else 0: the length `gather_prepare` checks.
+    integer(int64) function valid_size(is_valid) result(n)
+        logical, intent(in), optional :: is_valid(:) !! the caller's validity buffer, or absent.
+        n = 0_int64
+        if (present(is_valid)) n = size(is_valid, kind=int64)
+    end function valid_size
+    !
+    !> The checks every `%gather` specific runs before it copies: the grouping is current, `g`
+    !! names a group, the column resolves (read if not resident) and is of a kind this buffer
+    !! takes, and the buffer -- `is_valid` too, when given -- is at least as long as the group.
+    !! A shorter buffer ABORTS rather than truncates (this file's header). Hands back the
+    !! column's slot and kind and the group's run in the permutation.
+    subroutine gather_prepare(self, name, g, kinds, what, nbuf, has_valid, nvalid, idx, kind, lo, hi, n)
+        class(parquet_grouping), intent(in) :: self !! the grouping.
+        character(len=*), intent(in) :: name        !! the column.
+        integer(int64), intent(in) :: g             !! the group.
+        integer, intent(in) :: kinds(:)             !! the PK_* kinds this buffer takes, its own first.
+        character(len=*), intent(in) :: what        !! the buffer's declaration with its article, for the message.
+        integer(int64), intent(in) :: nbuf          !! size(buf).
+        logical, intent(in) :: has_valid            !! present(is_valid).
+        integer(int64), intent(in) :: nvalid        !! size(is_valid), or 0 when absent.
+        integer, intent(out) :: idx                 !! the column's slot.
+        integer, intent(out) :: kind                !! its PK_* kind.
+        integer(int64), intent(out) :: lo           !! the group's first position in perm.
+        integer(int64), intent(out) :: hi           !! the group's last position in perm.
+        integer(int64), intent(out) :: n            !! the group's row count.
+        character(len=*), parameter :: PROC = "gather"
+        character(len=:), allocatable :: kname, sfx
+        character(len=32) :: a, b, c
+        !
+        call grp_resolve(self, PROC)
+        call grp_check_group(self, g, PROC)
+        call grp_resolve_column(self, name, PROC, idx)
+        kind = self%cache%cols(idx)%values%kindof()
+        if (.not. any(kinds == kind)) then
+            call parquet_kind_name(kind, kname)
+            call table_context_suffix(self%cache, name, sfx)
+            error stop GP // PROC // ": column kind (" // kname // ") cannot be copied into " // what // &
+                " buffer; %gather widens exactly as %get does (an int32 column into an int64 buffer, a " // &
+                "float32 column into a real64 one) and nothing else -- %get_slice takes every kind" // sfx
+        end if
+        lo = self%offsets(g)
+        hi = self%offsets(g + 1_int64) - 1_int64
+        n = hi - lo + 1_int64
+        write(b, "(I0)") g
+        write(c, "(I0)") n
+        if (nbuf < n) then
+            write(a, "(I0)") nbuf
+            error stop GP // PROC // ": buf is " // trim(a) // " long and group " // trim(b) // " has " // &
+                trim(c) // " rows; the values are not truncated -- size the buffer once by %max_size()"
+        end if
+        if (has_valid) then
+            if (nvalid < n) then
+                write(a, "(I0)") nvalid
+                error stop GP // PROC // ": is_valid is " // trim(a) // " long and group " // trim(b) // &
+                    " has " // trim(c) // " rows; size it by %max_size(), as buf"
+            end if
+        end if
+    end subroutine gather_prepare
+    !
+    !> Fills `is_valid(1:n)` with whether each of the group's rows is non-null: `.true.`
+    !! throughout when the column holds no null at all, else asked of the column row by row.
+    subroutine gather_validity(self, idx, lo, hi, is_valid)
+        class(parquet_grouping), intent(in) :: self !! the grouping.
+        integer, intent(in) :: idx                  !! the column's slot.
+        integer(int64), intent(in) :: lo            !! the group's first position in perm.
+        integer(int64), intent(in) :: hi            !! the group's last position in perm.
+        logical, intent(inout) :: is_valid(:)       !! receives the validity in is_valid(1:hi-lo+1).
+        integer(int64) :: i
+        !
+        if (parquet_column_any_null(self%cache%cols(idx)%values)) then
+            do i = lo, hi
+                is_valid(i - lo + 1_int64) = .not. parquet_column_is_null(self%cache%cols(idx)%values, self%perm(i))
+            end do
+        else
+            is_valid(1:hi - lo + 1_int64) = .true.
+        end if
+    end subroutine gather_validity
+    !
+    module procedure grp_gather_i32
+        integer(int32), pointer :: p(:)
+        integer :: idx, kind
+        integer(int64) :: lo, hi
+        !
+        call gather_prepare(self, name, g, [PK_INT32], "an integer(int32)", size(buf, kind=int64), &
+            present(is_valid), valid_size(is_valid), idx, kind, lo, hi, n)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
+        buf(1:n) = p(self%perm(lo:hi))
+        if (present(is_valid)) call gather_validity(self, idx, lo, hi, is_valid)
+    end procedure grp_gather_i32
+    !
+    module procedure grp_gather_i64
+        integer(int32), pointer :: p32(:)
+        integer(int64), pointer :: p64(:)
+        integer :: idx, kind
+        integer(int64) :: lo, hi
+        !
+        call gather_prepare(self, name, g, [PK_INT64, PK_INT32], "an integer(int64)", size(buf, kind=int64), &
+            present(is_valid), valid_size(is_valid), idx, kind, lo, hi, n)
+        if (kind == PK_INT64) then
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p64)
+            buf(1:n) = p64(self%perm(lo:hi))
+        else
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p32)
+            buf(1:n) = int(p32(self%perm(lo:hi)), int64)
+        end if
+        if (present(is_valid)) call gather_validity(self, idx, lo, hi, is_valid)
+    end procedure grp_gather_i64
+    !
+    module procedure grp_gather_f32
+        real(real32), pointer :: p(:)
+        integer :: idx, kind
+        integer(int64) :: lo, hi
+        !
+        call gather_prepare(self, name, g, [PK_FLOAT32], "a real(real32)", size(buf, kind=int64), &
+            present(is_valid), valid_size(is_valid), idx, kind, lo, hi, n)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
+        buf(1:n) = p(self%perm(lo:hi))
+        if (present(is_valid)) call gather_validity(self, idx, lo, hi, is_valid)
+    end procedure grp_gather_f32
+    !
+    module procedure grp_gather_f64
+        real(real32), pointer :: p32(:)
+        real(real64), pointer :: p64(:)
+        integer :: idx, kind
+        integer(int64) :: lo, hi
+        !
+        call gather_prepare(self, name, g, [PK_FLOAT64, PK_FLOAT32], "a real(real64)", size(buf, kind=int64), &
+            present(is_valid), valid_size(is_valid), idx, kind, lo, hi, n)
+        if (kind == PK_FLOAT64) then
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p64)
+            buf(1:n) = p64(self%perm(lo:hi))
+        else
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p32)
+            buf(1:n) = real(p32(self%perm(lo:hi)), real64)
+        end if
+        if (present(is_valid)) call gather_validity(self, idx, lo, hi, is_valid)
+    end procedure grp_gather_f64
+    !
+    module procedure grp_gather_bool
+        logical, pointer :: p(:)
+        integer :: idx, kind
+        integer(int64) :: lo, hi
+        !
+        call gather_prepare(self, name, g, [PK_LOGICAL], "a logical", size(buf, kind=int64), &
+            present(is_valid), valid_size(is_valid), idx, kind, lo, hi, n)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
+        buf(1:n) = p(self%perm(lo:hi))
+        if (present(is_valid)) call gather_validity(self, idx, lo, hi, is_valid)
+    end procedure grp_gather_bool
 end submodule parquet_tables_group

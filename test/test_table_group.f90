@@ -33,11 +33,19 @@
 !! checked against int64 arithmetic over `%csr` on values above 2**53, where the real64 form is
 !! shown to differ. `%nunique`'s oracle is `pf_unique_count` per gathered group.
 !!
+!! **`%broadcast`'s oracle is the lookup through `%group_ids`** (`per_row(i)` is
+!! `per_group(codes(i))`, `fill` where the code is 0) **and `%gather`'s is `%get_slice` over
+!! the group's rows**, for each of the five buffer kinds, the typed slice widened by hand where
+!! the buffer is wider than the column; a canary past `n` pins that the buffer's tail is left
+!! alone.
+!!
 !! The ABORTS -- no key, an unknown or unorderable key, a direction token, every per-group
 !! query on a stale or never-built grouping, a group number out of range, `%apply` with `nout`
 !! or `threads` below 1, `%agg`'s refusals (an unknown token, an option a token does not take,
 !! the exact family on a real column, an overflowing exact sum, a group with no exact answer,
-!! a string column, bad weights) -- live in test/error_scenarios.f90 as `table_group_*`. Every
+!! a string column, bad weights), `%gather` with a short buffer or a kind its buffer cannot take,
+!! `%broadcast` with `per_group` of the wrong length -- live in test/error_scenarios.f90 as
+!! `table_group_*`. Every
 !! test that writes a file uses its own path, since the suite runs its tests concurrently.
 module test_table_group
     use parquet
@@ -137,7 +145,13 @@ contains
             new_unittest("nunique equals pf_unique_count per gathered group, under both dropna values", &
                 test_nunique_equals_pf_unique_count), &
             new_unittest("agg and nunique over an empty grouping allocate zero-length outputs", &
-                test_agg_empty_grouping) &
+                test_agg_empty_grouping), &
+            new_unittest("broadcast equals the lookup through group_ids; a dropped row takes fill, in both kinds", &
+                test_broadcast_equals_group_ids), &
+            new_unittest("gather equals get_slice over the group's rows for five kinds, widening as get does", &
+                test_gather_equals_get_slice), &
+            new_unittest("broadcast over an empty grouping is all fill, zero-length over an empty table", &
+                test_broadcast_empty_grouping) &
             ]
     end subroutine collect_tests_table_group
 
@@ -1602,6 +1616,175 @@ contains
             size(gr) == 0 .and. size(gi) == 0 .and. size(gf) == 0 .and. size(nu) == 0, &
             "every output is allocated at zero length")
     end subroutine test_agg_empty_grouping
+
+    ! ---- %broadcast and %gather ------------------------------------------------------------------
+
+    !> `%broadcast` against `%group_ids`: `per_row(i)` is `per_group(codes(i))` where `codes(i)`
+    !! names a group and `fill` where it is 0, for the int64 form over `%size` and the real64
+    !! form over an `%agg` mean, with the default fill (0, a NaN) and an explicit one; the call
+    !! is a read; and under `dropna=.false.` no row takes the fill.
+    subroutine test_broadcast_equals_group_ids(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: codes(:), counts(:), per_row(:)
+        real(real64), allocatable :: means(:), per_row_r(:)
+        integer(int64) :: gen, i
+        logical :: ok
+        !
+        call build_nullnan(t)
+        gen = t%generation()
+        call t%group_by(["k"], grp)
+        call grp%group_ids(codes)
+        call grp%size(counts)
+        call grp%broadcast(counts, per_row)
+        call check(error, size(per_row) == 8 .and. count(codes == 0_int64) == 2, &
+            "one entry per TABLE row, and the fixture drops two rows")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1_int64, 8_int64
+            if (codes(i) > 0_int64) then
+                ok = ok .and. per_row(i) == counts(codes(i))
+            else
+                ok = ok .and. per_row(i) == 0_int64
+            end if
+        end do
+        call check(error, ok, "each row carries its group's size, the two dropped rows the default 0")
+        if (allocated(error)) return
+        call grp%broadcast(counts, per_row, fill=-1_int64)
+        call check(error, all((per_row == -1_int64) .eqv. (codes == 0_int64)), &
+            "an explicit int64 fill lands on exactly the dropped rows")
+        if (allocated(error)) return
+        call grp%agg("payload", "mean", means)
+        call grp%broadcast(means, per_row_r)
+        ok = .true.
+        do i = 1_int64, 8_int64
+            if (codes(i) > 0_int64) then
+                ok = ok .and. per_row_r(i) == means(codes(i))
+            else
+                ok = ok .and. ieee_is_nan(per_row_r(i))
+            end if
+        end do
+        call check(error, ok, "the real64 form: each row its group's mean, a dropped row a NaN")
+        if (allocated(error)) return
+        call grp%broadcast(means, per_row_r, fill=-99.0_real64)
+        call check(error, all((per_row_r == -99.0_real64) .eqv. (codes == 0_int64)), &
+            "an explicit real64 fill lands on exactly the dropped rows")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen, "a broadcast is a read")
+        if (allocated(error)) return
+        call t%group_by(["k"], grp, dropna=.false.)
+        call grp%size(counts)
+        call grp%broadcast(counts, per_row, fill=-1_int64)
+        call check(error, all(per_row > 0_int64) .and. sum(per_row) == sum(counts * counts), &
+            "under dropna=.false. no row takes the fill, and the sizes broadcast sum to their squares")
+    end subroutine test_broadcast_equals_group_ids
+
+    !> `%gather` against `%get_slice` over the group's rows, for every group of the twelve-row
+    !! `%agg` fixture (one of them a single row) and each of the five buffer kinds: the real64
+    !! column with its NaN and nulls, `is_valid` against the slice's; the int32 column into an
+    !! int32 buffer and, widened, into an int64 one; the int64 column above 2**53; the real32
+    !! column into a real32 buffer and, widened, into a real64 one; the logical column with its
+    !! validity. `n` is the group's size, and the entries past `n` keep their canary.
+    subroutine test_gather_equals_get_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: rows(:), counts(:)
+        real(real64), allocatable :: xs(:), b64(:)
+        real(real32), allocatable :: fs(:), b32(:)
+        integer(int32), allocatable :: iv(:), i32(:)
+        integer(int64), allocatable :: bigs(:), i64(:)
+        logical, allocatable :: bs(:), bb(:), vm(:), mask(:)
+        integer(int64) :: g, n, m, cap
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%size(counts)
+        cap = grp%max_size() + 1_int64
+        allocate(b64(cap), b32(cap), i32(cap), i64(cap), bb(cap), mask(cap))
+        call check(error, grp%ngroups() == 4_int64 .and. cap == 6_int64 .and. minval(counts) == 1_int64, &
+            "four unequal groups, the largest of five rows, one of a single row")
+        if (allocated(error)) return
+        do g = 1_int64, grp%ngroups()
+            call grp%rows(g, rows)
+            b64 = -7.0_real64
+            mask = .false.
+            call t%get_slice("x", parquet_slice_list(rows), xs, is_valid=vm)
+            call grp%gather("x", g, b64, n, is_valid=mask)
+            if (n /= size(rows, kind=int64) .or. n /= counts(g)) then
+                call check(error, .false., "n is the group's size"); return
+            end if
+            if (.not. all(b64(1:n) == xs .or. (ieee_is_nan(b64(1:n)) .and. ieee_is_nan(xs)))) then
+                call check(error, .false., "the real64 values equal the slice's, NaN included"); return
+            end if
+            if (.not. all(mask(1:n) .eqv. vm)) then
+                call check(error, .false., "is_valid equals the slice's validity"); return
+            end if
+            if (.not. (all(b64(n + 1:) == -7.0_real64) .and. .not. any(mask(n + 1:)))) then
+                call check(error, .false., "the entries past n keep their canary"); return
+            end if
+            call t%get_slice("i", parquet_slice_list(rows), iv)
+            call grp%gather("i", g, i32, m)
+            if (m /= n .or. .not. all(i32(1:n) == iv)) then
+                call check(error, .false., "the int32 column into an int32 buffer"); return
+            end if
+            call grp%gather("i", g, i64, m)
+            if (.not. all(i64(1:n) == int(iv, int64))) then
+                call check(error, .false., "the int32 column widened into an int64 buffer"); return
+            end if
+            call t%get_slice("big", parquet_slice_list(rows), bigs)
+            call grp%gather("big", g, i64, m)
+            if (.not. all(i64(1:n) == bigs)) then
+                call check(error, .false., "the int64 column, exact above 2**53"); return
+            end if
+            call t%get_slice("f", parquet_slice_list(rows), fs)
+            call grp%gather("f", g, b32, m)
+            if (.not. all(b32(1:n) == fs)) then
+                call check(error, .false., "the real32 column into a real32 buffer"); return
+            end if
+            call grp%gather("f", g, b64, m)
+            if (.not. all(b64(1:n) == real(fs, real64))) then
+                call check(error, .false., "the real32 column widened into a real64 buffer"); return
+            end if
+            call t%get_slice("b", parquet_slice_list(rows), bs, is_valid=vm)
+            call grp%gather("b", g, bb, m, is_valid=mask)
+            if (.not. (all(bb(1:n) .eqv. bs) .and. all(mask(1:n) .eqv. vm))) then
+                call check(error, .false., "the logical column, and its validity"); return
+            end if
+        end do
+        call check(error, .true., "every kind agreed with get_slice over every group")
+    end subroutine test_gather_equals_get_slice
+
+    !> Zero groups: `%broadcast` of a zero-length `per_group` fills every row of a table whose
+    !! key is null throughout, in both kinds, and allocates zero rows over an empty table.
+    subroutine test_broadcast_empty_grouping(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, e
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: none(:), per_row(:)
+        real(real64), allocatable :: none_r(:), per_row_r(:)
+        integer(int64) :: i
+        !
+        call parquet_new_table(t)
+        call t%add_column("k", [1_int32, 2_int32, 3_int32])
+        do i = 1_int64, 3_int64
+            call t%set_null("k", i)
+        end do
+        call t%group_by("k", grp)
+        allocate(none(0), none_r(0))
+        call grp%broadcast(none, per_row)
+        call grp%broadcast(none_r, per_row_r, fill=2.5_real64)
+        call check(error, grp%ngroups() == 0_int64 .and. size(per_row) == 3 .and. all(per_row == 0_int64) .and. &
+            size(per_row_r) == 3 .and. all(per_row_r == 2.5_real64), &
+            "an all-null key: zero groups, every row the fill, in both kinds")
+        if (allocated(error)) return
+        call parquet_new_table(e)
+        call e%add_column("k", none)
+        call e%group_by("k", grp)
+        call grp%broadcast(none, per_row)
+        call check(error, allocated(per_row) .and. size(per_row) == 0, "an empty table: zero rows, allocated")
+    end subroutine test_broadcast_empty_grouping
 
     ! ---- the callbacks: module procedures, never internal ones (see the header) ----------------
 

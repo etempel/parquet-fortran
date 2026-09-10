@@ -1010,10 +1010,10 @@ contains
         procedure(parquet_group_reduce_i), pointer :: one => null()
         procedure(parquet_group_apply_i), pointer :: many => null()
         procedure(parquet_group_column_reduce_i), pointer :: colf => null()
-        integer(int64), allocatable :: per_group_exact(:), distinct(:)
+        integer(int64), allocatable :: per_group_exact(:), distinct(:), per_row(:)
         type(parquet_table_writer) :: out
-        integer(int64) :: ids(3), row
-        real(real64) :: mass(3)
+        integer(int64) :: ids(3), row, gn
+        real(real64) :: mass(3), gbuf(1)
         real(real64), allocatable :: got(:), per_group(:), per_group_two(:, :)
 
         what = ""
@@ -1062,6 +1062,11 @@ contains
         if (what == "" .and. any(per_group /= mass)) what = "%agg, procedure form"
         call grp%nunique("mass", distinct)
         if (what == "" .and. any(distinct /= 1_int64)) what = "%nunique"
+        ! %broadcast and %gather: the per-row and per-group ends of the hot loop.
+        call grp%broadcast(per_group_exact, per_row)
+        if (what == "" .and. any(per_row /= ids)) what = "%broadcast"
+        call grp%gather("mass", 2_int64, gbuf, gn)
+        if (what == "" .and. (gn /= 1_int64 .or. gbuf(1) /= mass(2))) what = "%gather"
 
         call parquet_write_table(t, out_file, overwrite=.true.)
 

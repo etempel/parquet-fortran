@@ -2599,7 +2599,19 @@ contains
             new_unittest("agg with weights on a statistic they cannot affect aborts", &
                 test_table_group_agg_weights_ignored_aborts), &
             new_unittest("nunique of a vector column aborts", &
-                test_table_group_nunique_vector_column_aborts) &
+                test_table_group_nunique_vector_column_aborts), &
+            new_unittest("broadcast on a stale grouping aborts", test_table_group_stale_broadcast_aborts), &
+            new_unittest("gather on a stale grouping aborts", test_table_group_stale_gather_aborts), &
+            new_unittest("gather into a buffer shorter than the group aborts", &
+                test_table_group_gather_short_buffer_aborts), &
+            new_unittest("gather with an is_valid shorter than the group aborts", &
+                test_table_group_gather_short_valid_aborts), &
+            new_unittest("gather of a group number out of range aborts", &
+                test_table_group_gather_out_of_range_aborts), &
+            new_unittest("gather of a real64 column into an int32 buffer aborts", &
+                test_table_group_gather_kind_aborts), &
+            new_unittest("broadcast of a per_group of the wrong length aborts", &
+                test_table_group_broadcast_length_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19, &
             p21]
@@ -16032,6 +16044,62 @@ contains
             failure_message="nunique of a vector column was expected to abort", &
             required_stderr="cannot be a column %nunique counts")
     end subroutine test_table_group_nunique_vector_column_aborts
+    !
+    !> See `scenario_table_group_stale_broadcast` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_broadcast_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_broadcast", expect_abort=.true., &
+            failure_message="broadcast on a stale grouping was expected to abort", &
+            required_stderr="has changed structurally since the grouping was built")
+    end subroutine test_table_group_stale_broadcast_aborts
+    !
+    !> See `scenario_table_group_stale_gather` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_gather_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_gather", expect_abort=.true., &
+            failure_message="gather on a stale grouping was expected to abort", &
+            required_stderr="has changed structurally since the grouping was built")
+    end subroutine test_table_group_stale_gather_aborts
+    !
+    !> See `scenario_table_group_gather_short_buffer` (test/error_scenarios.f90).
+    subroutine test_table_group_gather_short_buffer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_gather_short_buffer", expect_abort=.true., &
+            failure_message="a buffer shorter than the group was expected to abort, not truncate", &
+            required_stderr="buf is 1 long and group 1 has 2 rows")
+    end subroutine test_table_group_gather_short_buffer_aborts
+    !
+    !> See `scenario_table_group_gather_short_valid` (test/error_scenarios.f90).
+    subroutine test_table_group_gather_short_valid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_gather_short_valid", expect_abort=.true., &
+            failure_message="an is_valid shorter than the group was expected to abort", &
+            required_stderr="is_valid is 1 long and group 1 has 2 rows")
+    end subroutine test_table_group_gather_short_valid_aborts
+    !
+    !> See `scenario_table_group_gather_out_of_range` (test/error_scenarios.f90).
+    subroutine test_table_group_gather_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_gather_out_of_range", expect_abort=.true., &
+            failure_message="gather of a group past the last was expected to abort", &
+            required_stderr="group 4 is out of range")
+    end subroutine test_table_group_gather_out_of_range_aborts
+    !
+    !> See `scenario_table_group_gather_kind` (test/error_scenarios.f90).
+    subroutine test_table_group_gather_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_gather_kind", expect_abort=.true., &
+            failure_message="a real64 column into an int32 buffer was expected to abort", &
+            required_stderr="cannot be copied into an integer(int32) buffer")
+    end subroutine test_table_group_gather_kind_aborts
+    !
+    !> See `scenario_table_group_broadcast_length` (test/error_scenarios.f90).
+    subroutine test_table_group_broadcast_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_broadcast_length", expect_abort=.true., &
+            failure_message="a per_group of the wrong length was expected to abort", &
+            required_stderr="per_group has 2 entries and this grouping has 3 groups")
+    end subroutine test_table_group_broadcast_length_aborts
     !
     !> See `scenario_filter_temporal_set_mismatch` (test/error_scenarios.f90).
     subroutine test_filter_temporal_set_mismatch_aborts(error)

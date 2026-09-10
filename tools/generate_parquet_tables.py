@@ -106,6 +106,12 @@ FILL_VALUE_TAGS = [f[0] for f in FILL_VALUES]
 # and every *_VEC kind because a vector column is already a rank-2 %get of its own.
 MATRIX_KINDS = [k for k in KINDS if k[4] == 1 and k[5] == "num"]
 
+# parquet_grouping%gather's buffer kinds: the five scalar kinds `%get_slice` copies an array of
+# (int32, int64, real32, real64, logical), one specific each, widening as WIDEN says. Derived
+# from the kind table for the same reason as MATRIX_KINDS; the strings and the temporal kinds are
+# out because a caller-owned buffer of them has no fixed element -- they keep `%get_slice`.
+GATHER_KINDS = [k for k in KINDS if k[4] == 1 and k[5] == "num"]
+
 # %sort_by_values/%argsort_by_values' element kinds: the five types a caller can hand a column
 # of computed values in. They are exactly the types `pf_argsort` takes an ARRAY of and that a
 # caller is likely to have computed -- `logical` is left out because a boolean sort key orders
@@ -1738,8 +1744,10 @@ def gen_grouping_type():
     !! of a group (`%rows`, `%csr`), one row per group (`%first_rows`, `%last_rows`), the group
     !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`, `%nunique`), the
     !! key values as a table of their own (`%key_table`), one statistic of one column per group
-    !! (`%agg`, the `parquet_stats` vocabulary) and one answer per group from a procedure or an
-    !! object of the caller's own (`%apply`). The table is NOT reordered: this is
+    !! (`%agg`, the `parquet_stats` vocabulary), one answer per group from a procedure or an
+    !! object of the caller's own (`%apply`), a per-group array back onto the rows (`%broadcast`)
+    !! and one group's values into a buffer of the caller's (`%gather`). The table is NOT
+    !! reordered: this is
     !! `%argsort_by(keys, perm, group_offsets=)` (doc/pages/tables/table-mutate.md) kept as an
     !! object that knows when it has gone stale, and it keeps the file attached.
     !!
@@ -1784,6 +1792,12 @@ def gen_grouping_type():
     !! `integer(int64)` `out` selects the EXACT family (`"sum"`, `"min"`, `"max"`, `"first"`,
     !! `"last"`, the counts), which never goes through a real64 buffer. Its loop is automatic
     !! threading (library code, re-entrant by construction), unlike `%apply`'s.
+    !!
+    !! **`%broadcast` and `%gather` are the two ends of the hot loop**, and neither allocates per
+    !! group: `%broadcast` carries one value per group back onto every row of the group (pandas'
+    !! `transform`), a row in no group taking `fill`; `%gather` copies one group's values of a
+    !! column into a buffer the caller sized once by `%max_size()`, widening as `%get` does, and
+    !! aborts rather than truncates when the buffer is shorter than the group.
     !!
     !! No finalizer: nothing it owns needs one, and a finalizable type may not be OpenMP-private
     !! (.claude/rules/fortran-gotchas.md). It has allocatable components, so under ifx it must
@@ -1879,7 +1893,28 @@ def gen_grouping_type():
         !! your statement that the procedure may be called from several threads at once.
         generic :: apply => grp_apply_proc_scalar, grp_apply_proc_matrix, grp_apply_obj_scalar, &
             grp_apply_obj_matrix
-        ! NO `final` -- see the type's doc-comment.
+        procedure, private :: grp_broadcast_f64 !! %broadcast specific: real64 per-group values.
+        procedure, private :: grp_broadcast_i64 !! %broadcast specific: int64 per-group values.
+        !> A per-group array back onto the rows (pandas' `transform`): `per_row(r) = per_group(g)`
+        !! for every row `r` of group `g`, and `fill` -- absent: a quiet NaN for real64, 0 for
+        !! int64 -- on a row that belongs to no group. `per_row(t%nrows())` is allocated here;
+        !! `per_group` holds exactly one value per group, in group order (what `%size`, `%agg`
+        !! and `%apply` give), and any other length is refused naming both counts. `threads=`
+        !! absent is automatic, as on `%agg`'s token forms; every grouped row is written once, by
+        !! its own group, so the answer is the same at every thread count.
+        generic :: broadcast => grp_broadcast_f64, grp_broadcast_i64""")
+    for tag, pk, decl, comp, rank, cat in GATHER_KINDS:
+        art = "an" if decl[0] in "aeiou" else "a"
+        w(f"        procedure, private :: grp_gather_{tag:<4} !! %gather specific: {art} {decl} buffer.")
+    w("""        !> One group's values of a column into a buffer of YOURS: `buf(1:n)`, in row order,
+        !! widening exactly as `%get` does (an int32 column into an int64 buffer, a float32 column
+        !! into a real64 one) and nothing else, for a buffer of int32, int64, real32, real64 or
+        !! logical; `is_valid(1:n)`, when given, whether each value is non-null. Nothing is
+        !! allocated: `%max_size()` sizes the buffers once, the entries past `n` are left as they
+        !! were, and a buffer shorter than the group aborts naming both sizes rather than
+        !! truncating. The values form of the `%csr` loop.
+        generic :: gather => """ + ", ".join(f"grp_gather_{k[0]}" for k in GATHER_KINDS))
+    w("""        ! NO `final` -- see the type's doc-comment.
     end type parquet_grouping""")
     return "\n".join(o)
 
@@ -2583,7 +2618,43 @@ def group_interfaces():
             character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
             integer, intent(in), optional :: threads                !! the team; absent = serial.
         end subroutine grp_agg_func
-    end interface""")
+        !> %broadcast specific, real64 values; see the generic. `fill` absent is a quiet NaN.
+        module subroutine grp_broadcast_f64(self, per_group, per_row, fill, threads)
+            class(parquet_grouping), intent(in) :: self          !! the grouping.
+            real(real64), intent(in) :: per_group(:)             !! one value per group, in group order.
+            real(real64), allocatable, intent(out) :: per_row(:) !! one value per TABLE row: its group's, or fill.
+            real(real64), intent(in), optional :: fill           !! the value of a row in no group; default NaN.
+            integer, intent(in), optional :: threads             !! the team; absent = automatic.
+        end subroutine grp_broadcast_f64
+        !> %broadcast specific, int64 values; see the generic. `fill` absent is 0.
+        module subroutine grp_broadcast_i64(self, per_group, per_row, fill, threads)
+            class(parquet_grouping), intent(in) :: self             !! the grouping.
+            integer(int64), intent(in) :: per_group(:)              !! one value per group, in group order.
+            integer(int64), allocatable, intent(out) :: per_row(:)  !! one value per TABLE row: its group's, or fill.
+            integer(int64), intent(in), optional :: fill            !! the value of a row in no group; default 0.
+            integer, intent(in), optional :: threads                !! the team; absent = automatic.
+        end subroutine grp_broadcast_i64""")
+    for tag, pk, decl, comp, rank, cat in GATHER_KINDS:
+        art = "an" if decl[0] in "aeiou" else "a"
+        bufline = f"{decl}, intent(inout) :: buf(:)".ljust(47)
+        widens = WIDEN.get(tag, [])
+        if widens:
+            names = " or ".join(wk[0].replace("PK_", "").lower() for wk in widens)
+            also = (("An " if names[0] in "aeiou" else "A ") + names
+                    + " column is accepted too, widened on the way -- the set `%get` widens, and no more.")
+        else:
+            also = "The column must be of this kind: nothing widens into this buffer, as through `%get`."
+        w(f"""        !> %gather specific, {art} {decl} buffer; see the generic.
+        !! {also}
+        module subroutine grp_gather_{tag}(self, name, g, buf, n, is_valid)
+            class(parquet_grouping), intent(in) :: self     !! the grouping.
+            character(len=*), intent(in) :: name            !! the column; read if not resident.
+            integer(int64), intent(in) :: g                 !! the group number, 1 to %ngroups().
+            {bufline} !! receives the values in buf(1:n); the rest is left alone.
+            integer(int64), intent(out) :: n                !! the group's row count.
+            logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
+        end subroutine grp_gather_{tag}""")
+    w("    end interface")
     return "\n".join(o)
 
 

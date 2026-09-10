@@ -81,7 +81,8 @@ call grp%clear()                 ! back to the never-built state
 
 - **`%csr` is the hot-loop form**: one copy, then you walk it. `offsets` is 1-based, `ngroups + 1`
   long, its last entry `nrows + 1` — `[1]` for an empty grouping, so a loop over the groups runs
-  zero times. `%rows(g, rows)` allocates per call and is the readable form for a few groups.
+  zero times. `%rows(g, rows)` allocates per call and is the readable form for a few groups;
+  `%gather` (below) is the same loop over a column's values.
 - **`%first_rows` and `%last_rows` are how `first` and `last` work for every column kind**: the
   row indices, then `call t%get_slice(name, parquet_slice_list(rows), vals)`. They are the
   minimum and maximum of each group's rows, computed, never read off the ends of the sort.
@@ -403,6 +404,57 @@ pair with the group id a scalar column; then `%group_by` on that column is the m
 `%apply` sees each galaxy once per group it belongs to. See
 [Repeating rows: `%explode`](table-mutate.html#repeating-rows-explode).
 
+## Back onto the rows, and into your buffer: `%broadcast` and `%gather`
+
+```fortran
+call grp%broadcast(per_group, per_row, [fill], [threads])  ! per_group(ngroups) -> per_row(t%nrows()); real64 or int64
+call grp%gather(name, g, buf, n, [is_valid])               ! group g's values of `name` into buf(1:n); allocates nothing
+```
+
+`%broadcast` is pandas' `transform`: `per_row(r) = per_group(g)` for every row `r` of group `g`,
+and `fill` — absent: a quiet NaN for `real64`, 0 for `int64` — on a row that belongs to no group.
+It is how a per-group answer reaches the rows: the velocity dispersion of the group beside every
+member, the radius of each galaxy's own group, or "subtract each object's own group median", which
+is two calls:
+
+```fortran
+call grp%agg("mag", "median", med)      ! one per group
+call grp%broadcast(med, med_of_row)     ! one per row; a row in no group gets the NaN fill
+call t%get("mag", mag)
+mag = mag - med_of_row
+```
+
+`per_group` holds exactly one value per group, in group order — what `%size`, `%agg` and `%apply`
+give — and any other length is refused naming both counts. The loop threads automatically
+(`threads=` as on `%agg`); every grouped row is written once, by its own group, so the answer is
+the same at every thread count.
+
+`%gather` is the values form of the `%csr` loop: group `g`'s values of a column into the first `n`
+entries of a buffer **you own**, in row order, for a buffer of `int32`, `int64`, `real32`, `real64`
+or `logical`, widening exactly as `%get` does — an `int32` column into an `int64` buffer, a
+`float32` column into a `real64` one — and nothing else. Size the buffer once by `%max_size()`: the
+call allocates nothing, leaves the entries past `n` as they were, and **aborts rather than
+truncates** when the buffer is shorter than the group, naming both sizes, because a statistic over
+the first `size(buf)` rows of a group is a plausible wrong answer. `is_valid`, a logical buffer under
+the same rule, receives for each entry whether the value is non-null; without it a null row's entry
+is whatever the column stores there.
+
+```fortran
+real(real64), allocatable :: v(:)
+logical, allocatable :: ok(:)
+integer(int64) :: g, n
+
+allocate(v(grp%max_size()), ok(grp%max_size()))
+do g = 1_int64, grp%ngroups()
+    call grp%gather("vel", g, v, n, is_valid=ok)
+    ! v(1:n) are the group's velocities in row order, ok(1:n) which of them are values
+end do
+```
+
+It replaces `%get_slice(name, parquet_slice_list(rows), vals)` per group, which allocates `vals` on
+every call, and is what a loop over `%rows` that wants values rather than indices reaches for. A
+string, temporal or vector column keeps `%get_slice`.
+
 ## When a grouping goes stale
 
 A grouping describes the table *as it was built*. It stamps the table's `%generation()` when it is
@@ -429,6 +481,7 @@ each key column whether the group's representative row is null. Each per-group q
 over the partition, and `%key_table` one gather per key column. Each `%agg` statistic costs one
 pass over the column into a per-thread buffer the size of the largest group, allocated once, and
 one call of the statistic per group; `%nunique` costs one more sort. `%apply` costs whatever your
-procedure costs, times the number of groups, divided by the team you asked for. The object holds two
-`int64` arrays the length of the grouped rows and the group count — nothing per group, and nothing
-of the table's columns.
+procedure costs, times the number of groups, divided by the team you asked for. `%broadcast` costs
+one pass over the rows and `%gather` one copy of the group's rows into your buffer; neither
+allocates per group. The object holds two `int64` arrays the length of the grouped rows and the
+group count — nothing per group, and nothing of the table's columns.

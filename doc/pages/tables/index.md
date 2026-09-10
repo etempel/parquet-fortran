@@ -36,5 +36,6 @@ one answer per group.
   what the join carries and what the result is called.
 - [Grouping rows and aggregating per group](table-group.html) — partitioning a table's rows by one
   or more key columns into a `parquet_grouping`, what it answers per group, the key table as the
-  summary's skeleton, `%apply` for one answer per group from a procedure or an object of your own,
-  serially or on a team, and when a grouping goes stale.
+  summary's skeleton, `%agg` for one statistic of one column per group, `%apply` for one answer per
+  group from a procedure or an object of your own, serially or on a team, `%broadcast` and `%gather`
+  for the hot loop, and when a grouping goes stale.

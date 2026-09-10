@@ -35,6 +35,9 @@
 program benchmark_table
     use parquet
     use parquet_tables
+    ! The %apply callback of --mode=group, in a module because a callback may not be an internal
+    ! procedure of a program (.claude/rules/fortran-gotchas.md, flang).
+    use benchmark_group_callbacks, only : bench_group_payload, bench_group_sum
     use iso_fortran_env, only : int8, int32, int64, real64, error_unit, output_unit
     use iso_c_binding, only : c_int64_t, c_int
     implicit none
@@ -61,6 +64,17 @@ program benchmark_table
             import :: c_int64_t
             integer(c_int64_t) :: res !! resolved thread count of the last mutation.
         end function parquet_debug_get_table_threads_used
+        !> The team the last per-group loop of a `parquet_grouping` ran on; 1 when it ran serially.
+        !!
+        !! Used by `--mode=group` as the CONTROL of its `%apply` thread ladder: "the ladder does
+        !! not scale" and "no team ever opened" print the same times, and only this says which was
+        !! measured. It also shows a rung the affinity clamp lowered. Same local-declaration
+        !! convention as the hooks above.
+        function parquet_debug_get_group_threads_used() &
+                bind(C, name="parquet_debug_get_group_threads_used") result(res)
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! the team; 1 means serial.
+        end function parquet_debug_get_group_threads_used
         !> The resolved `use_threads` the most recently opened reader or writer was given.
         !!
         !! Used by `--mode=read_one` as its NEGATIVE CONTROL. That mode's whole result is "the two
@@ -87,10 +101,10 @@ program benchmark_table
     character(len=:), allocatable :: mode, file
     real(real64) :: size_gb, nullfrac, select_frac
     integer :: ncols, touch, slices, threads, scatter, chunk, bounded, batches
-    integer(int64) :: nrows_arg
+    integer(int64) :: nrows_arg, groups_arg
 
     call parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg, &
-        select_frac, scatter, chunk, bounded, batches)
+        select_frac, scatter, chunk, bounded, batches, groups_arg)
 
     select case (mode)
     case ("write_fixture")
@@ -121,6 +135,8 @@ program benchmark_table
         call bench_read_one(file)
     case ("argsort")
         call bench_argsort(nrows_arg, threads)
+    case ("group")
+        call bench_group(nrows_arg, groups_arg)
     case default
         write(error_unit, '(a)') "benchmark_table: unknown --mode '"//mode//"'"
         error stop 1
@@ -145,9 +161,13 @@ contains
         write(output_unit, '(a)') "  --mode=write_stream   the sink vs the hand-written buffer it replaces"
         write(output_unit, '(a)') "  --mode=sort           what %sort_by spends re-validating one permutation"
         write(output_unit, '(a)') "  --mode=argsort        pf_argsort at one thread count, split by sort phase"
+        write(output_unit, '(a)') "  --mode=group          %group_by and the grouping's verbs, against the"
+        write(output_unit, '(a)') "                        compositions they replace; needs --groups"
         write(output_unit, '(a)') "  --mode=peakmem        build a table and sort it ONCE, for external peak-RSS"
         write(output_unit, '(a)') "  --mode=read_one       time ONE column's read with Arrow's use_threads on/off"
-        write(output_unit, '(a)') "  --nrows=<n>           rows for argsort mode (default 20000000)"
+        write(output_unit, '(a)') "  --nrows=<n>           rows for argsort and group modes (default 20000000)"
+        write(output_unit, '(a)') "  --groups=<n>          distinct key values the group mode's fixture holds"
+        write(output_unit, '(a)') "                        (default 1000); the row count is --nrows"
         write(output_unit, '(a)') "  --threads=<n>         sort threads for argsort mode (1 = serial; default 1);"
         write(output_unit, '(a)') "                        in peakmem mode, the table-mutation thread cap"
         write(output_unit, '(a)') "                        (1 = serial, 0 = automatic)"
@@ -173,7 +193,7 @@ contains
     end subroutine print_usage
 
     subroutine parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg, &
-            select_frac, scatter, chunk, bounded, batches)
+            select_frac, scatter, chunk, bounded, batches, groups_arg)
         character(len=:), allocatable, intent(out) :: mode !! which measurement to run.
         real(real64), intent(out) :: size_gb               !! target fixture size in GB.
         character(len=:), allocatable, intent(out) :: file !! fixture path.
@@ -188,6 +208,7 @@ contains
         integer, intent(out) :: chunk                      !! explicit row-group size; 0 = auto.
         integer, intent(out) :: bounded                    !! 1 = open read_filtered with bounded=.true.
         integer, intent(out) :: batches                    !! batches the write_stream run hands over.
+        integer(int64), intent(out) :: groups_arg          !! distinct key values in group mode.
 
         integer :: i, nargs, eq_pos, ios
         character(len=512) :: arg, key, val
@@ -206,6 +227,7 @@ contains
         chunk = 0
         bounded = 0
         batches = 32
+        groups_arg = 1000_int64
 
         nargs = command_argument_count()
         if (nargs == 0) then
@@ -297,6 +319,12 @@ contains
                 read(val, *, iostat=ios) batches
                 if (ios /= 0) then
                     write(error_unit, '(a)') "benchmark_table: --batches must be an integer"
+                    error stop 1
+                end if
+            case ("--groups")
+                read(val, *, iostat=ios) groups_arg
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --groups must be an integer"
                     error stop 1
                 end if
             case default
@@ -1962,6 +1990,216 @@ contains
         if (seen(1) /= 0_int8) sink = sink + 1_int64
         deallocate(seen)
     end subroutine validate_bitpacked
+
+    !> `%group_by` and the grouping's verbs, each against the composition it replaces. File-free,
+    !! like the sort and argsort modes and for the same reason: what is measured is the cost of
+    !! partitioning and walking an already-resident table, and reading a fixture first would add
+    !! one decode to every arm.
+    !!
+    !! Four questions, in this order:
+    !!
+    !! 1. **What the OBJECT costs above the partition.** `%group_by` against a bare
+    !!    `%argsort_by(keys, perm, group_offsets=)` -- the same sort, without the object -- so the
+    !!    difference is the `dropna` pass and the two array copies, and nothing else. The
+    !!    `dropna=.false.` arm is the same call with that pass skipped.
+    !! 2. **What `%agg` costs against the compositions it replaces**, all three computing the same
+    !!    per-group mean: `%agg("mean")`; a `%gather` into one caller-owned buffer plus `pf_mean`;
+    !!    and `%get_slice(parquet_slice_list(rows))` plus `pf_mean`, which allocates twice per
+    !!    group. Run this mode at several `--groups` values: the per-group overheads the third arm
+    !!    carries are invisible at ten groups and dominate at a hundred thousand.
+    !! 3. **What the `%apply` loop costs on a team.** A trivial module-procedure callback -- one
+    !!    pass over the group's rows -- run with `threads=` absent (SERIAL by contract) and then at
+    !!    1, 2, 4 and 8. The callback is trivial on purpose: a heavier one would flatter every
+    !!    rung. Each rung prints the team the library actually resolved to, read back from the
+    !!    debug hook, because "the ladder does not scale" and "no team ever opened" print the same
+    !!    times otherwise; a rung whose recorded team is below the request was clamped to this
+    !!    process's CPU affinity.
+    !! 4. **What `%broadcast` costs per row**, against the `%group_ids` lookup a caller writes
+    !!    instead -- one gather through the codes, with the dropped rows filled.
+    !!
+    !! The answers are checksummed against each other where they should agree exactly: the three
+    !! mean arms and the two broadcast arms are printed as sums, and a mismatch there means the
+    !! run measured different work rather than the same work two ways.
+    subroutine bench_group(nrows, ngroups)
+        integer(int64), intent(in) :: nrows   !! rows in the in-memory table.
+        integer(int64), intent(in) :: ngroups !! distinct values of the key column.
+        integer, parameter :: nround = 5      !! timed rounds; the best of them is kept.
+        integer, parameter :: nladder = 4     !! rungs of the %apply thread ladder.
+        integer, parameter :: ladder(nladder) = [1, 2, 4, 8] !! the rungs themselves.
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int32), allocatable :: k(:)
+        real(real64), allocatable :: v(:), means(:), buf(:), slice(:), per_row(:), by_codes(:)
+        real(real64), pointer :: vp(:)
+        integer(int64), allocatable :: perm(:), go(:), rows(:), counts(:), codes(:)
+        integer(int64) :: i, g, n, used
+        integer :: round, r
+        real(real64) :: t0, dt, t_grp, t_grp_keep, t_arg, t_agg, t_gather, t_slice, t_bcast, t_codes
+        real(real64) :: s_agg, s_gather, s_slice, s_bcast, s_codes, t_apply_serial
+        real(real64) :: t_apply(nladder)
+        integer(int64) :: used_serial, used_rung(nladder)
+
+        if (nrows < 2_int64) error stop "benchmark_table: --mode=group needs --nrows >= 2"
+        if (ngroups < 1_int64) error stop "benchmark_table: --mode=group needs --groups >= 1"
+        write(output_unit, '(a,i0,a,i0,a)') "in-memory table: ", nrows, " rows, ", ngroups, &
+            " groups (int32 key + float64 payload)"
+
+        ! The key spreads its groups over the rows by a multiplicative walk, as the sort mode's
+        ! own fixture does: what these arms need is that a group's rows are scattered through the
+        ! table rather than contiguous, not that the sequence is a shuffle.
+        allocate(k(nrows), v(nrows))
+        do i = 1_int64, nrows
+            k(i) = int(mod(i * 2654435761_int64, ngroups), int32)
+            v(i) = real(mod(i * 31_int64, 997_int64), real64) + real(i, real64) * 1.0e-6_real64
+        end do
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("v", v)
+        deallocate(k, v)
+
+        ! ---- 1. the partition, and what the object adds to it.
+        t_grp = huge(1.0_real64)
+        t_grp_keep = huge(1.0_real64)
+        t_arg = huge(1.0_real64)
+        do round = 1, nround
+            t0 = now()
+            call t%group_by(["k"], grp)
+            dt = now() - t0
+            if (dt < t_grp) t_grp = dt
+            t0 = now()
+            call t%group_by(["k"], grp, dropna=.false.)
+            dt = now() - t0
+            if (dt < t_grp_keep) t_grp_keep = dt
+            t0 = now()
+            call t%argsort_by(["k"], perm, group_offsets=go)
+            dt = now() - t0
+            if (dt < t_arg) t_arg = dt
+        end do
+        call t%group_by(["k"], grp)
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,i0,a,i0,a)') "groups built: ", grp%ngroups(), " (largest ", grp%max_size(), " rows)"
+        write(output_unit, '(a,f9.4,a)') "argsort_by(group_offsets=)  : ", t_arg, " s   the partition, no object"
+        write(output_unit, '(a,f9.4,a)') "group_by (dropna=.false.)   : ", t_grp_keep, " s   + the object"
+        write(output_unit, '(a,f9.4,a)') "group_by (dropna=.true.)    : ", t_grp, " s   + the dropna pass"
+
+        ! ---- 2. one statistic per group, three ways. The buffers of the two composition arms are
+        ! allocated and written before the timers start, as a reference must be.
+        allocate(buf(grp%max_size()))
+        buf = 0.0_real64
+        allocate(means(grp%ngroups()))
+        means = 0.0_real64
+        t_agg = huge(1.0_real64)
+        t_gather = huge(1.0_real64)
+        t_slice = huge(1.0_real64)
+        do round = 1, nround
+            t0 = now()
+            call grp%agg("v", "mean", means, threads=1)
+            dt = now() - t0
+            if (dt < t_agg) t_agg = dt
+            if (round == 1) s_agg = sum(means)
+            t0 = now()
+            do g = 1_int64, grp%ngroups()
+                call grp%gather("v", g, buf, n)
+                call pf_mean(buf(1:n), means(g))
+            end do
+            dt = now() - t0
+            if (dt < t_gather) t_gather = dt
+            if (round == 1) s_gather = sum(means)
+            t0 = now()
+            do g = 1_int64, grp%ngroups()
+                call grp%rows(g, rows)
+                call t%get_slice("v", parquet_slice_list(rows), slice)
+                call pf_mean(slice, means(g))
+            end do
+            dt = now() - t0
+            if (dt < t_slice) t_slice = dt
+            if (round == 1) s_slice = sum(means)
+        end do
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,f9.4,a)') "agg(""mean""), threads=1      : ", t_agg, " s   one pass, no allocation"
+        write(output_unit, '(a,f9.4,a,f6.2,a)') "gather + pf_mean            : ", t_gather, " s   = ", &
+            t_gather / t_agg, "x agg"
+        write(output_unit, '(a,f9.4,a,f6.2,a)') "rows + get_slice + pf_mean  : ", t_slice, " s   = ", &
+            t_slice / t_agg, "x agg  (2 allocations per group)"
+
+        ! ---- 3. the %apply loop, serial and on a ladder. The payload the callback reads is a
+        ! pointer into the table's own store, taken once: nothing in this loop moves it.
+        call t%col("v", vp)
+        bench_group_payload => vp
+        t_apply_serial = huge(1.0_real64)
+        do round = 1, nround
+            t0 = now()
+            call grp%apply(bench_group_sum, means)
+            dt = now() - t0
+            if (dt < t_apply_serial) t_apply_serial = dt
+        end do
+        used_serial = parquet_debug_get_group_threads_used()
+        do r = 1, nladder
+            t_apply(r) = huge(1.0_real64)
+            do round = 1, nround
+                t0 = now()
+                call grp%apply(bench_group_sum, means, threads=ladder(r))
+                dt = now() - t0
+                if (dt < t_apply(r)) t_apply(r) = dt
+            end do
+            used_rung(r) = parquet_debug_get_group_threads_used()
+        end do
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,f9.4,a,i0,a)') "apply, threads absent       : ", t_apply_serial, &
+            " s   team recorded ", used_serial, " (the serial default; 1 or the run means nothing)"
+        do r = 1, nladder
+            write(output_unit, '(a,i2,a,f9.4,a,f6.2,a,i0)') "apply, threads=", ladder(r), "           : ", &
+                t_apply(r), " s   = ", t_apply_serial / t_apply(r), "x serial, team recorded ", used_rung(r)
+        end do
+        bench_group_payload => null()
+
+        ! ---- 4. the per-group answer back onto the rows, against the lookup it replaces.
+        call grp%size(counts)
+        allocate(per_row(t%nrows()), by_codes(t%nrows()))
+        per_row = 0.0_real64
+        by_codes = 0.0_real64
+        call grp%agg("v", "mean", means, threads=1)
+        t_bcast = huge(1.0_real64)
+        t_codes = huge(1.0_real64)
+        do round = 1, nround
+            t0 = now()
+            call grp%broadcast(means, per_row, fill=0.0_real64, threads=1)
+            dt = now() - t0
+            if (dt < t_bcast) t_bcast = dt
+            t0 = now()
+            call grp%group_ids(codes)
+            do i = 1_int64, t%nrows()
+                if (codes(i) > 0_int64) then
+                    by_codes(i) = means(codes(i))
+                else
+                    by_codes(i) = 0.0_real64
+                end if
+            end do
+            dt = now() - t0
+            if (dt < t_codes) t_codes = dt
+        end do
+        s_bcast = sum(per_row)
+        s_codes = sum(by_codes)
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,f9.4,a,f7.2,a)') "broadcast, threads=1        : ", t_bcast, " s   = ", &
+            1.0e9_real64 * t_bcast / real(t%nrows(), real64), " ns/row"
+        write(output_unit, '(a,f9.4,a,f7.2,a)') "group_ids + lookup          : ", t_codes, " s   = ", &
+            1.0e9_real64 * t_codes / real(t%nrows(), real64), " ns/row"
+
+        ! ---- the checksums. Arms that computed the same thing must agree exactly; a run whose
+        ! sums differ measured different work and its ratios say nothing.
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,3(1x,es22.15))') "mean checksums (agg, gather, get_slice):", s_agg, s_gather, s_slice
+        write(output_unit, '(a,2(1x,es22.15))') "broadcast checksums (broadcast, codes) :", s_bcast, s_codes
+        if (s_agg /= s_gather .or. s_agg /= s_slice) then
+            write(output_unit, '(a)') "  *** the three mean arms disagree: they did not compute the same thing"
+        end if
+        if (s_bcast /= s_codes) then
+            write(output_unit, '(a)') "  *** the two broadcast arms disagree: they did not compute the same thing"
+        end if
+        used = grp%nrows()
+        write(output_unit, '(a,i0,a,i0,a)') "(grouped rows ", used, ", counts sum ", sum(counts), ")"
+    end subroutine bench_group
 
     !> First row the mask marks null; 1 if it marks none (the caller has already rejected that).
     function first_null_row(mask) result(i)

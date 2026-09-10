@@ -2611,7 +2611,22 @@ contains
             new_unittest("gather of a real64 column into an int32 buffer aborts", &
                 test_table_group_gather_kind_aborts), &
             new_unittest("broadcast of a per_group of the wrong length aborts", &
-                test_table_group_broadcast_length_aborts) &
+                test_table_group_broadcast_length_aborts), &
+            new_unittest("group_by with a blank key name aborts", test_table_group_blank_key_aborts), &
+            new_unittest("group_by with a direction word aborts", test_table_group_direction_word_aborts), &
+            new_unittest("a query naming a column that does not exist aborts", &
+                test_table_group_query_unknown_column_aborts), &
+            new_unittest("a query naming an unsupported column aborts", &
+                test_table_group_query_unsupported_column_aborts), &
+            new_unittest("agg's exact form with a real64-only token aborts", &
+                test_table_group_agg_exact_unknown_token_aborts), &
+            new_unittest("agg with method= on a statistic that takes none aborts", &
+                test_table_group_agg_method_refused_aborts), &
+            new_unittest("agg with ddof= on a statistic that takes none aborts", &
+                test_table_group_agg_ddof_refused_aborts), &
+            new_unittest("agg with scale= outside mad aborts", test_table_group_agg_scale_refused_aborts), &
+            new_unittest("agg with a NaN weight aborts", test_table_group_agg_nan_weight_aborts), &
+            new_unittest("agg with an infinite weight aborts", test_table_group_agg_infinite_weight_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19, &
             p21]
@@ -16100,6 +16115,84 @@ contains
             failure_message="a per_group of the wrong length was expected to abort", &
             required_stderr="per_group has 2 entries and this grouping has 3 groups")
     end subroutine test_table_group_broadcast_length_aborts
+    !
+    !> See `scenario_table_group_blank_key` (test/error_scenarios.f90).
+    subroutine test_table_group_blank_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_blank_key", expect_abort=.true., &
+            failure_message="a blank key name was expected to abort", required_stderr="a key name is blank")
+    end subroutine test_table_group_blank_key_aborts
+    !
+    !> See `scenario_table_group_direction_word` (test/error_scenarios.f90).
+    subroutine test_table_group_direction_word_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_direction_word", expect_abort=.true., &
+            failure_message="a trailing direction word was expected to abort", &
+            required_stderr="reads as a sort key")
+    end subroutine test_table_group_direction_word_aborts
+    !
+    !> See `scenario_table_group_query_unknown_column` (test/error_scenarios.f90).
+    subroutine test_table_group_query_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_query_unknown_column", &
+            expect_abort=.true., failure_message="an unknown query column was expected to abort", &
+            required_stderr="no column of this name")
+    end subroutine test_table_group_query_unknown_column_aborts
+    !
+    !> See `scenario_table_group_query_unsupported_column` (test/error_scenarios.f90).
+    subroutine test_table_group_query_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_query_unsupported_column", &
+            expect_abort=.true., failure_message="an unsupported query column was expected to abort", &
+            required_stderr="grouping count")
+    end subroutine test_table_group_query_unsupported_column_aborts
+    !
+    !> See `scenario_table_group_agg_exact_unknown_token` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_exact_unknown_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_exact_unknown_token", &
+            expect_abort=.true., failure_message="a real64-only token in the exact form was expected to abort", &
+            required_stderr="is not a statistic of the exact int64 family")
+    end subroutine test_table_group_agg_exact_unknown_token_aborts
+    !
+    !> See `scenario_table_group_agg_method_refused` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_method_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_method_refused", expect_abort=.true., &
+            failure_message="method= on the mean was expected to abort", &
+            required_stderr='method= belongs to "median", "quantile" and "iqr"')
+    end subroutine test_table_group_agg_method_refused_aborts
+    !
+    !> See `scenario_table_group_agg_ddof_refused` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_ddof_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_ddof_refused", expect_abort=.true., &
+            failure_message="ddof= on the mean was expected to abort", &
+            required_stderr='ddof= belongs to "var", "std" and "sem"')
+    end subroutine test_table_group_agg_ddof_refused_aborts
+    !
+    !> See `scenario_table_group_agg_scale_refused` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_scale_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_scale_refused", expect_abort=.true., &
+            failure_message="scale= on the mean was expected to abort", &
+            required_stderr='scale= belongs to "mad" alone')
+    end subroutine test_table_group_agg_scale_refused_aborts
+    !
+    !> See `scenario_table_group_agg_nan_weight` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_nan_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_nan_weight", expect_abort=.true., &
+            failure_message="a NaN weight was expected to abort", required_stderr="is NaN; weights must be")
+    end subroutine test_table_group_agg_nan_weight_aborts
+    !
+    !> See `scenario_table_group_agg_infinite_weight` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_infinite_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_infinite_weight", expect_abort=.true., &
+            failure_message="an infinite weight was expected to abort", &
+            required_stderr="is infinite; weights must be")
+    end subroutine test_table_group_agg_infinite_weight_aborts
     !
     !> See `scenario_filter_temporal_set_mismatch` (test/error_scenarios.f90).
     subroutine test_filter_temporal_set_mismatch_aborts(error)

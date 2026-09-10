@@ -485,3 +485,8 @@ procedure costs, times the number of groups, divided by the team you asked for. 
 one pass over the rows and `%gather` one copy of the group's rows into your buffer; neither
 allocates per group. The object holds two `int64` arrays the length of the grouped rows and the
 group count — nothing per group, and nothing of the table's columns.
+
+`bench/benchmark_table.sh`'s group mode measures all of this on your own machine: the partition
+against the bare `%argsort_by` under it, `%agg` against the same statistic composed from
+`%get_slice` and `%gather`, the `%apply` loop on a thread ladder, and `%broadcast` per row, swept
+over group counts from ten to a hundred thousand.

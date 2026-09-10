@@ -3096,6 +3096,26 @@ program error_scenarios
         call scenario_table_group_gather_kind()
     case ("table_group_broadcast_length")
         call scenario_table_group_broadcast_length()
+    case ("table_group_blank_key")
+        call scenario_table_group_blank_key()
+    case ("table_group_direction_word")
+        call scenario_table_group_direction_word()
+    case ("table_group_query_unknown_column")
+        call scenario_table_group_query_unknown_column()
+    case ("table_group_query_unsupported_column")
+        call scenario_table_group_query_unsupported_column()
+    case ("table_group_agg_exact_unknown_token")
+        call scenario_table_group_agg_exact_unknown_token()
+    case ("table_group_agg_method_refused")
+        call scenario_table_group_agg_method_refused()
+    case ("table_group_agg_ddof_refused")
+        call scenario_table_group_agg_ddof_refused()
+    case ("table_group_agg_scale_refused")
+        call scenario_table_group_agg_scale_refused()
+    case ("table_group_agg_nan_weight")
+        call scenario_table_group_agg_nan_weight()
+    case ("table_group_agg_infinite_weight")
+        call scenario_table_group_agg_infinite_weight()
     case ("filter_temporal_set_mismatch")
         call scenario_filter_temporal_set_mismatch()
     case ("filter_temporal_literal_list")
@@ -27415,6 +27435,120 @@ contains
         call grp%broadcast([10_int64, 20_int64], per_row)
         print '(a,i0)', "unexpectedly broadcast two values over three groups, rows=", size(per_row)
     end subroutine scenario_table_group_broadcast_length
+    subroutine scenario_table_group_blank_key()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by([character(len=3) :: "key"], grp)
+        print '(a,i0)', "a named key grouped, groups=", grp%ngroups()
+        call t%group_by([character(len=3) :: "key", "   "], grp)
+        print '(a,i0)', "unexpectedly accepted a blank key name, groups=", grp%ngroups()
+    end subroutine scenario_table_group_blank_key
+    subroutine scenario_table_group_direction_word()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        print '(a,i0)', "a bare key grouped, groups=", grp%ngroups()
+        call t%group_by("key desc", grp)
+        print '(a,i0)', "unexpectedly accepted a direction word, groups=", grp%ngroups()
+    end subroutine scenario_table_group_direction_word
+    subroutine scenario_table_group_query_unknown_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%count("x", out)
+        print '(a,i0)', "a resident column counted, groups=", size(out)
+        call grp%count("no_such_column", out)
+        print '(a,i0)', "unexpectedly counted a column that does not exist, groups=", size(out)
+    end subroutine scenario_table_group_query_unknown_column
+    subroutine scenario_table_group_query_unsupported_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%group_by("rowid", grp)
+        call grp%count("rowid", out)
+        print '(a,i0)', "a supported column counted, groups=", size(out)
+        call grp%count("m_intkey", out)
+        print '(a,i0)', "unexpectedly counted an unsupported column, groups=", size(out)
+    end subroutine scenario_table_group_query_unsupported_column
+    subroutine scenario_table_group_agg_exact_unknown_token()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("key", "sum", out)
+        print '(a,i0)', "an exact statistic ran, groups=", size(out)
+        call grp%agg("key", "median", out)
+        print '(a,i0)', "unexpectedly ran a real64-only token into an int64 out, groups=", size(out)
+    end subroutine scenario_table_group_agg_exact_unknown_token
+    subroutine scenario_table_group_agg_method_refused()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "median", out, method="linear")
+        print '(a,i0)', "method= reached the median, groups=", size(out)
+        call grp%agg("x", "mean", out, method="linear")
+        print '(a,i0)', "unexpectedly accepted method= on the mean, groups=", size(out)
+    end subroutine scenario_table_group_agg_method_refused
+    subroutine scenario_table_group_agg_ddof_refused()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "std", out, ddof=0)
+        print '(a,i0)', "ddof= reached the standard deviation, groups=", size(out)
+        call grp%agg("x", "mean", out, ddof=0)
+        print '(a,i0)', "unexpectedly accepted ddof= on the mean, groups=", size(out)
+    end subroutine scenario_table_group_agg_ddof_refused
+    subroutine scenario_table_group_agg_scale_refused()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mad", out, scale="raw")
+        print '(a,i0)', "scale= reached the mad, groups=", size(out)
+        call grp%agg("x", "mean", out, scale="raw")
+        print '(a,i0)', "unexpectedly accepted scale= on the mean, groups=", size(out)
+    end subroutine scenario_table_group_agg_scale_refused
+    subroutine scenario_table_group_agg_nan_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        real(real64) :: w(5)
+        w = 1.0_real64
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weights=w)
+        print '(a,i0)', "finite weights ran, groups=", size(out)
+        w(3) = ieee_value(0.0_real64, ieee_quiet_nan)
+        call grp%agg("x", "mean", out, weights=w)
+        print '(a,i0)', "unexpectedly accepted a NaN weight, groups=", size(out)
+    end subroutine scenario_table_group_agg_nan_weight
+    subroutine scenario_table_group_agg_infinite_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        real(real64) :: w(5)
+        w = 1.0_real64
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weights=w)
+        print '(a,i0)', "finite weights ran, groups=", size(out)
+        w(4) = ieee_value(0.0_real64, ieee_positive_inf)
+        call grp%agg("x", "mean", out, weights=w)
+        print '(a,i0)', "unexpectedly accepted an infinite weight, groups=", size(out)
+    end subroutine scenario_table_group_agg_infinite_weight
     !
     !> A date set against a timestamp column is refused at apply, naming both -- two temporal
     !! types are two families, and an element of the wrong type has no instant to convert.

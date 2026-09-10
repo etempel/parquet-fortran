@@ -674,8 +674,11 @@ contains
         real(real64), pointer :: p(:)
         integer(int64) :: gen0
         integer(int64), allocatable :: off(:), rows(:), c64(:), r64(:), first(:), last(:), codes(:), cnt(:)
+        integer(int64), allocatable :: nu(:), exact(:)
         integer(int32), allocatable :: key(:)
-        real(real64), allocatable :: payload(:)
+        real(real64), allocatable :: payload(:), means(:), per_row(:)
+        real(real64) :: gbuf(9)
+        integer(int64) :: gn
         character(len=:), allocatable :: names(:)
         !
         call build_basic(t)
@@ -691,6 +694,14 @@ contains
         call grp%key_names(names)
         call grp%key_table(kt, size_name="n")
         call grp%count("payload", cnt)
+        ! The verbs that sort, gather or scatter of their own: %nunique runs a second sort over a
+        ! non-owning handle on this very table, and a gather on the source column rather than a
+        ! copy would reorder it with nothing to show for it (feature_risks.md).
+        call grp%nunique("payload", nu)
+        call grp%agg("payload", "mean", means)
+        call grp%agg("key", "sum", exact)
+        call grp%broadcast(means, per_row)
+        call grp%gather("payload", 1_int64, gbuf, gn)
         call check(error, grp%ngroups() == 3_int64 .and. grp%is_current() .and. kt%nrows() == 3_int64, "everything answered")
         if (allocated(error)) return
         call check(error, t%generation() == gen0, "no binding bumped the generation")
@@ -1412,6 +1423,22 @@ contains
         call grp%agg("x", cb_col_weighted_sum, farr, weights=w)
         call check(error, all(fcol == farr .or. (ieee_is_nan(fcol) .and. ieee_is_nan(farr))), &
             "the procedure form takes weight_column= and weights= alike (group 1's NaN value makes both NaN)")
+        if (allocated(error)) return
+        ! A weight column is any of the four scalar numeric kinds, each widened to real64 the way
+        ! the values are. The int32 and real64 arms are exercised above; these are the other two,
+        ! against the same weights written as real64.
+        call t%add_column("w64", int(w, int64))
+        call t%add_column("w32", real(int(w, int64), real32))
+        call t%add_column("wr8", real(int(w, int64), real64))
+        call t%group_by("k", grp)
+        call grp%agg("x", "mean", got, weight_column="wr8")
+        call grp%agg("x", "mean", viacol, weight_column="w64")
+        call check(error, all(got == viacol .or. (ieee_is_nan(got) .and. ieee_is_nan(viacol))), &
+            "an int64 weight column weighs exactly as the same values in real64")
+        if (allocated(error)) return
+        call grp%agg("x", "mean", viacol, weight_column="w32")
+        call check(error, all(got == viacol .or. (ieee_is_nan(got) .and. ieee_is_nan(viacol))), &
+            "and so does a real32 one")
     end subroutine test_agg_weights_and_weight_column
 
     !> The procedure form's presence contract: `is_valid` arrives exactly for the groups that

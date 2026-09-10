@@ -300,6 +300,15 @@ something a reader is expected to have.
 | [Risk-231](#risk-231--a-filter-operator-that-reaches-cmp_op_of-unhandled-silently-becomes-) | A filter operator that reaches `cmp_op_of` unhandled silently becomes `/=` | 4 — covered |
 | [Risk-232](#risk-232--a-rule-literals-trailing-spaces-are-trimmed-in-two-places-and-untrimming-one-makes-the-engines-disagree) | A rule literal's trailing spaces are trimmed in TWO places, and untrimming one makes the engines disagree | 4 — covered |
 | [Risk-233](#risk-233--the-prefix-screen-turns-starts_with-into-a-range-and-a-wrong-upper-bound-prunes-row-groups-that-hold-matching-rows) | The prefix screen turns `starts_with` into a range, and a wrong upper bound prunes row groups that hold matching rows | 4 — covered |
+| [Risk-234](#risk-234--a-groupings-rows-index-a-table-that-may-have-moved-and-only-the-per-query-generation-check-stands-between-a-stale-partition-and-a-plausible-answer) | A grouping's rows index a table that may have moved, and only the per-query check sees it | 4 — covered |
+| [Risk-235](#risk-235--key_table-and-nunique-must-gather-and-sort-copies-or-a-query-silently-reorders-the-callers-table) | %key_table and %nunique must gather and sort COPIES of the source column | 4 — covered |
+| [Risk-236](#risk-236--apply-must-call-the-callback-with-group-gs-rows-and-store-at-g-and-a-mis-association-under-a-dynamic-schedule-is-a-plausible-answer) | %apply must pair group g's rows with out(:, g), and a dynamic schedule hides a swap | 4 — covered |
+| [Risk-237](#risk-237--the-dropna-decision-reads-the-key-columns-validity-at-the-representative-row-never-where-the-sort-put-the-group) | dropna asks the key COLUMN whether a group is the null one, never the sort's placement | 4 — covered |
+| [Risk-238](#risk-238--gather-must-abort-rather-than-truncate-and-aggs-own-buffers-must-be-sized-by-max_size) | A gather into a short buffer must abort; %agg's buffers are sized by %max_size() | 4 — covered |
+| [Risk-239](#risk-239--a-callback-loop-that-resolves-a-team-it-never-opened-or-opens-one-nobody-asked-for-is-invisible-in-every-answer) | A team resolved-but-not-opened, or opened unasked, shows in no answer | 4 — covered |
+| [Risk-240](#risk-240--aggs-widening-and-nuniques-equality-must-stay-parquet_stats-and-the-sort-comparators) | %agg's answers must stay parquet_stats', %nunique's equality the sort comparator's | 4 — covered |
+| [Risk-241](#risk-241--first_rowslast_rows-are-computed-not-read-off-the-permutations-ends) | %first_rows/%last_rows are computed; the engine's stability hides a read-off-the-end | 4 — covered |
+| [Risk-242](#risk-242--the-exact-int64-sum-must-abort-on-overflow-never-wrap) | The exact int64 sum must abort on overflow, never wrap | 4 — covered |
 
 ---
 
@@ -8918,3 +8927,184 @@ twin as its control, all written whole and null-free),
 what the feature is for), `test_set_nullable_declares_and_undeclares` and
 `test_nullable_cols_survives_the_maml_sidecar` (all `test/test_writing.f90`). The mutation to catch
 is the push at `parquet_open_writer` deleted, or one whole-column site left on `has_any_null`.
+
+### Risk-234 — A grouping's rows index a table that may have moved, and only the per-query generation check stands between a stale partition and a plausible answer
+
+`parquet_grouping` holds row numbers, not rows. After any row-structural change to the table it
+was built from -- `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`,
+`%explode`, `%drop_duplicates`, or an `%add_column` that relocated the column slots -- those numbers
+usually stay IN RANGE and name different rows, so every query answers, nothing aborts, and the
+answer is about rows the caller did not ask about: a mass computed from the wrong galaxies.
+Risk-210's property, restated for this object.
+
+**Rule:** `grp_resolve` compares `self%cache%generation` against the stamp taken at build on EVERY
+per-group query and the answer is never cached -- a "still valid" flag would be the stale-flag
+hazard `table-mutate.md` refuses for sortedness, and the check is one `integer(int64)` comparison.
+The five introspection bindings (`%ngroups`, `%nrows`, `%max_size`, `%nkeys`, `%key_names`) describe
+the object itself and skip it, as their interfaces say; nothing else may. A new query added to
+`src/parquet_tables_group.f90` calls `grp_resolve` as its first statement.
+
+**Covered by** one scenario per query family, each keeping every index in range so that only the
+check can tell: `table_group_stale_size`, `_stale_rows`, `_stale_csr`, `_stale_first_rows`,
+`_stale_group_ids`, `_stale_key_table`, `_stale_count`, `_stale_apply`, `_stale_apply_object`,
+`_stale_agg`, `_stale_nunique`, `_stale_broadcast`, `_stale_gather` and `_never_built`
+(`test/error_scenarios.f90`, wrapped in `test/test_errors.f90`). Negative control:
+`test_stale_and_current` (`test/test_table_group.f90`) writes a VALUE and asserts the grouping
+still answers. The mutation to catch is `grp_resolve`'s generation comparison dropped from one
+query.
+
+### Risk-235 — `%key_table` and `%nunique` must gather and sort COPIES, or a query silently reorders the caller's table
+
+Both verbs reach for the sort engine over the table they describe: `%key_table` gathers each key
+column at one row per group, and `%nunique` runs a second `%argsort_by` over the keys and the
+counted column through a non-owning `parquet_table` handle onto the same cache. A gather or a sort
+applied to the SOURCE column instead of a copy reorders the caller's table underneath them -- every
+value is still there, every count is right, and the table's rows are in a different order than the
+caller left them, which is Risk-208's property for this object.
+
+**Rule:** `grp_key_table` builds each output column with `parquet_column%gather_from` into a NEW
+column; `grp_nunique_i64`'s handle is non-owning (`grp_table_handle` copies the row-scope scalars
+and the cache pointer, and `nullify`s that pointer before the handle goes out of scope, so its
+finalizer frees nothing) and it asks `%argsort_by` for a permutation rather than sorting anything.
+Neither may acquire a `%sort_by`, `%reindex` or `%permute` call.
+
+**Covered by** `test_grouping_is_a_read` (`test/test_table_group.f90`), which calls every verb --
+`%csr`, `%size`, `%rows`, `%first_rows`, `%last_rows`, `%group_ids`, `%key_names`, `%key_table`,
+`%count`, `%nunique`, both `%agg` forms, `%broadcast` and `%gather` -- and then asserts the table's
+own generation, its detached flag, both columns' values IN THEIR ORIGINAL ORDER, and that a `%col`
+pointer taken before the grouping still sees the same values. Also `test_key_table_equals_drop_
+duplicates`. The mutation to catch is a `%sort_by` on the source in either verb.
+
+### Risk-236 — `%apply` must call the callback with group `g`'s rows and store at `g`, and a mis-association under a dynamic schedule is a plausible answer
+
+The per-group callback loop runs `schedule(dynamic)` because groups are unequal, so the order in
+which groups are visited is not the order they are stored in. A body that stored at a loop counter,
+a thread-local position or a chunk offset instead of at `g` would produce a well-formed `out` of the
+right length holding each group's answer at another group's index -- and with a trivial fixture,
+where every group's answer is similar, it looks entirely reasonable.
+
+**Rule:** every arm writes `out(g)` / `out(:, g)` for the `g` it was handed, and reads its rows from
+`self%perm(self%offsets(g) : self%offsets(g+1) - 1)`; nothing in the loop body carries state between
+iterations. The serial arm walks in group order for reproducibility, not for correctness.
+
+**Covered by** `test_apply_group_team` (`test/test_table_parallel.f90`, which runs its tests with no
+enclosing region so the team is real): a row-distinct payload over about five hundred unequal groups,
+every form run at `threads=nt` and compared with `==` against its own serial run, so a swap shows as
+a different number. Its power is statistical -- the schedule must actually reorder the groups -- so
+run it at `OMP_NUM_THREADS=8` a few times when touching the loop. Also
+`test_apply_visits_each_group_once` (once per group, in group order, ascending non-empty rows).
+
+### Risk-237 — The `dropna` decision reads the key column's validity at the representative row, never where the sort put the group
+
+`%group_by(dropna=.true.)` must leave out every row whose value is null in ANY key column. The
+sort places the null group last today, so a compaction pass that simply dropped the LAST group would
+pass every test in the suite -- until a `nulls_first` reaches this verb, or a second key column puts
+a null group somewhere other than the end, at which point rows silently join or leave groups.
+
+**Rule:** `group_build`'s compaction asks `parquet_column_is_null` of each key column at the group's
+representative row, and drops the group when any key is null there. It never reads the group's
+position, and never assumes one null group.
+
+**Covered by** `test_two_keys_any_null_drops_the_row` (a null in EITHER of two keys, which is the
+case a position rule gets wrong) and `test_nan_and_null_keys` (a NaN is a value under both settings;
+a null forms a group only under `dropna=.false.`), both `test/test_table_group.f90`. Negative
+control: `test_dropna_null_free_control` -- a key with no nulls drops nothing under either setting.
+The mutation to catch is "drop the last group when `dropna`".
+
+### Risk-238 — `%gather` must abort rather than truncate, and `%agg`'s own buffers must be sized by `%max_size()`
+
+Both halves compute a statistic over the first `size(buf)` rows of a group instead of over the
+group, which is a plausible number nothing downstream can question. `%gather` takes a buffer the
+CALLER owns, so a group longer than it is a caller error that must be refused; `%agg` sizes its own
+per-thread buffers once, and sizing them from anything but the largest group (the first group's
+size, a fixed constant) truncates or overruns for some later group.
+
+**Rule:** `gather_prepare` compares `size(buf)` -- and `size(is_valid)` when given -- against the
+group's row count and aborts naming both, before anything is copied; the two `%agg` bodies allocate
+`cap = max(self%maxsz, 1_int64)`.
+
+**Covered by** `table_group_gather_short_buffer` and `table_group_gather_short_valid`
+(`test/error_scenarios.f90`), each preceded by its own control call with a buffer of the right
+length. `%agg`'s half is covered by `test_agg_group_team` (`test/test_table_parallel.f90`), whose
+fixture's largest group is the 493rd of 497 -- **verified by mutation**: sizing both `%agg` buffers
+from the first group instead of `%max_size()` aborts that test under `--profile debug` (a bounds
+error, exit 2, not a `[FAILED]` line), while the `table_group` `%agg` tests still pass because that
+fixture's largest group IS its first. So: a group-buffer fixture added to `test/test_table_group.f90`
+must have its largest group somewhere other than first, and this property has no cover on a build
+without OpenMP, where the parallel test skips.
+
+### Risk-239 — A callback loop that resolves a team it never opened, or opens one nobody asked for, is invisible in every answer
+
+`%apply` and `%agg(name, func, ...)` run SERIALLY unless the caller gives `threads=`, because the
+library cannot know whether the caller's procedure is re-entrant; `%agg`'s token forms and
+`%broadcast` resolve automatically. Every one of those answers is identical whichever way the loop
+actually ran, so a branch that resolved a count and then ran the other arm -- threading a
+non-re-entrant callback, or silently declining a team the caller asked for -- changes nothing a test
+can read off the result. Risk-189's shape for this object.
+
+**Rule:** `group_team` is the ONE resolver: it refuses `threads < 1`, clamps every explicit request
+through `parquet_clamp_to_affinity`, resolves an absent `threads=` to serial on the callback loops
+and to `parquet_auto_thread_count(parquet_get_table_threads(), "grouping")` on the automatic ones,
+forces 1 below two groups, and records the answer through `group_note_threads` on EVERY route, 1
+included, so "declined" is distinguishable from "ran".
+
+**Covered by** `test_apply_group_team`, `test_agg_group_team` and `test_broadcast_group_team`
+(`test/test_table_parallel.f90`), each asserting the recorded team on every arm: absent, the table
+cap, `threads=1` and `threads=nt`, with the A/B against the serial run beside it. The scenario
+`table_group_apply_threads_zero` covers the refusal. The mutation to catch is the automatic arm
+resolved without the table cap, or `group_note_threads` skipped on one branch.
+
+### Risk-240 — `%agg`'s widening and `%nunique`'s equality must stay `parquet_stats`' and the sort comparator's
+
+Every `%agg` token is the named `pf_*` procedure over the group's values, and `%nunique`'s notion
+of distinctness is the sort comparator's. An in-line "faster" mean, a local NaN rule, a local
+notion of equality, or a different widening of an int32 or float32 column gives a group answer that
+drifts from what the same procedure returns over the same rows as an array -- with both suites
+green, because nothing else compares the two.
+
+**Rule:** `agg_eval` calls `pf_count_valid`, `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`,
+`pf_sem`, `pf_moments`, `pf_median`, `pf_quantile`, `pf_iqr` and `pf_mad` by name and passes
+`is_valid=`/`weights=` on exactly as they arrived; the values are gathered into a `real64` buffer,
+which is the widening that module applies to every kind itself. `%nunique` counts runs of a sort,
+never a hash or a local comparison. The exact `int64` family is the one deliberate exception and
+never touches the buffer.
+
+**Covered by** `test_agg_tokens_equal_pf_oracles` (every real64 token against the named procedure
+over `%get_slice` of the same rows, compared on the bits with a NaN equal to a NaN),
+`test_agg_typed_kinds_equal_oracles` (int32, real32 and logical columns against the TYPED slice, so
+the widening is pinned), `test_nunique_equals_pf_unique_count` and
+`test_agg_options_and_logical_mean` (all `test/test_table_group.f90`). What this forbids is
+computing any of them here.
+
+### Risk-241 — `%first_rows`/`%last_rows` are computed, not read off the permutation's ends
+
+"The group's first row" must be its lowest row NUMBER, not whichever row the sort happens to put
+at the start of the group's run. The engine is stable today, so the two agree on every ordinary
+fixture and a body that took `perm(offsets(g))` would pass -- until an engine change, a thread count
+or a different key kind reorders equal rows, at which point "first" quietly means something else.
+`%drop_duplicates` made the same choice for the same reason (`src/parquet_tables_verbs.f90`).
+
+**Rule:** `grp_first_rows_i64` takes `minval` and `grp_last_rows_i64` `maxval` of each group's rows.
+One pass over the partition is the whole cost of not depending on the engine's tie rule.
+
+**Covered by** `test_first_and_last_rows_are_computed` (`test/test_table_group.f90`), which asserts
+both against `minval`/`maxval` per group AND repeats the whole check on a fixture whose rows are in
+reverse order, which is what separates the two implementations.
+
+### Risk-242 — The exact `int64` `"sum"` must abort on overflow, never wrap
+
+The exact family exists so that an `int64` above 2**53 comes back exactly. A sum that wraps is an
+in-range `int64` that no downstream check can question -- and a wrapping overflow is undefined
+behaviour the optimiser may reason from elsewhere (`.claude/rules/fortran-gotchas.md`), so it is not
+merely a wrong number.
+
+**Rule:** `grp_agg_stat_int` tests for overflow BEFORE each addition, against `huge` in both
+directions, never on a wrapped result, and aborts through `agg_abort`'s single `critical` naming the
+group. `"min"`, `"max"`, `"first"` and `"last"` of a group with no non-null value abort the same way,
+since no exact answer exists there (the real64 form answers NaN).
+
+**Covered by** `table_group_agg_int_sum_overflow` (`test/error_scenarios.f90`), whose control is the
+line above it -- the same call over a column that does not overflow -- and `table_group_agg_int_all_
+null` for the empty-group half; `test_agg_int64_family_exact` (`test/test_table_group.f90`) pins the
+exact answers above 2**53 against `int64` arithmetic over `%csr` and shows the real64 form
+differing. The mutation to catch is the two overflow tests deleted.

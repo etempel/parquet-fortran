@@ -4,8 +4,9 @@
 # reader baseline, a table open+materialize_all, a lazy open reading only TOUCH of the columns, a
 # slice-regime open covering one of SLICES equal row ranges, an access comparison, a write
 # comparison on a null-free table, the same on one where NULLFRAC of the rows are null, a streamed
-# write handing BATCHES tables to a sink, a sort run, a peak-memory pair and an argsort thread
-# sweep. A tenth mode, read_one, is not part of the sequence and is run on its own (see below).
+# write handing BATCHES tables to a sink, a sort run, a peak-memory pair, an argsort thread sweep
+# and a grouping sweep over GROUP_GROUPS group counts. An eleventh mode, read_one, is not part of
+# the sequence and is run on its own (see below).
 #
 # ALWAYS pass --profile release for anything measured here; the wrapper already does. See CLAUDE.md's
 # "Manual (never-`fpm test`) large-scale/benchmark tools" for why, and for the FPM_FFLAGS rules.
@@ -144,6 +145,36 @@
 #   being that the copies are not simultaneous -- each lives only between its column's allocation
 #   and its move_alloc, and schedule(dynamic) staggers when columns finish.
 #
+# group -- the grouping verbs, each against the composition it replaces, and file-free for the
+#   reason sort is: what it measures is the cost of partitioning and walking an already-resident
+#   table. It runs once per GROUP_GROUPS entry over a GROUP_NROWS-row table, and each run reports
+#   four things.
+#
+#   First, what the OBJECT costs above the partition: %group_by against a bare
+#   %argsort_by(keys, perm, group_offsets=), which is the same sort without the object, so the
+#   difference is the dropna pass and two array copies and nothing else.
+#
+#   Second, %agg("mean") against the two compositions that give the same answer -- %gather into
+#   one caller-owned buffer plus pf_mean, and %rows + %get_slice + pf_mean, which allocates twice
+#   per group. All three run SERIAL (%agg is called with threads=1) so that the comparison is
+#   like for like. This is the row that needs the sweep, and the ratio is not monotone in the
+#   group count: both sides carry a per-group cost -- the composition's two allocations, and the
+#   statistics module's own per-call entry work, which %agg pays once per group too -- so the
+#   sweep is how you see which of the two you are paying at your own group size.
+#
+#   Third, the %apply thread ladder: a trivial module-procedure callback with threads= absent
+#   (SERIAL by contract) and then at 1, 2, 4 and 8. READ THE RECORDED TEAM BESIDE EACH RUNG, for
+#   read_one's reason -- "the ladder does not scale" and "no team ever opened" print the same
+#   times, and only the recorded team separates them. A rung whose team is below its request was
+#   clamped to this process's CPU affinity, so on a 4-core machine the 8 rung is a 4-thread run.
+#   The callback is trivial deliberately: a heavier one would flatter every rung.
+#
+#   Fourth, %broadcast per row against the %group_ids lookup a caller writes instead.
+#
+#   The run ends with CHECKSUMS, and they are not decoration: the three mean arms and the two
+#   broadcast arms compute the same numbers, so a run whose sums differ measured different work
+#   and its ratios mean nothing. The mode says so itself when they disagree.
+#
 # lazy / slice -- read these against read_table: the open figure shows what an open costs when it
 #   reads nothing, and the two partial modes show that a program pays only for the columns and rows
 #   it asks for. A slice cannot be cheaper than one row group, so a fixture written with a single
@@ -210,6 +241,12 @@
 #                             Row counts the argsort thread sweep runs at. Also file-free.
 #   ARGSORT_THREADS="1 2 4 8" Thread counts the argsort sweep runs at. 1 is the serial baseline
 #                              every speedup below is measured against, so keep it first.
+#   GROUP_NROWS=20000000      Rows in the in-memory table the group sweep builds. File-free, so
+#                              it is sized independently of TARGET_FILE_SIZE_GB.
+#   GROUP_GROUPS="10 1000 100000"
+#                             Distinct key values the group sweep runs at, one process each. The
+#                              spread is the point: the per-group overhead of the composition
+#                              %agg replaces is invisible at the first and dominant at the last.
 #   PEAKMEM_THREADS="1 0"     Table-mutation thread caps the peak-memory runs use (1 = serial,
 #                              0 = automatic). The answer is the DIFFERENCE between the two peaks,
 #                              so both are needed and 1 must come first.
@@ -268,6 +305,8 @@ FILTER_CHUNK="${FILTER_CHUNK:-50000}"
 SORT_SIZE_GB="${SORT_SIZE_GB:-1}"
 ARGSORT_NROWS="${ARGSORT_NROWS:-1000000 20000000}"
 ARGSORT_THREADS="${ARGSORT_THREADS:-1 2 4 8}"
+GROUP_NROWS="${GROUP_NROWS:-20000000}"
+GROUP_GROUPS="${GROUP_GROUPS:-10 1000 100000}"
 PEAKMEM_THREADS="${PEAKMEM_THREADS:-1 0}"
 TEST_FILE="${TEST_FILE:-}"
 
@@ -388,4 +427,14 @@ for nr in $ARGSORT_NROWS; do
         fpm run benchmark_table --profile release -- --mode=argsort --nrows="$nr" --threads="$t"
         echo
     done
+done
+
+# The grouping verbs, each against the composition it replaces. Also file-free, and swept over
+# group counts rather than row counts: what changes with the number of groups is how much
+# per-group overhead the composition carries, which is the whole question %agg answers. Read each
+# run's recorded teams and its checksums before its ratios (see this script's header).
+echo "=== grouping: the object, %agg, the %apply ladder and %broadcast ==="
+for ng in $GROUP_GROUPS; do
+    fpm run benchmark_table --profile release -- --mode=group --nrows="$GROUP_NROWS" --groups="$ng"
+    echo
 done

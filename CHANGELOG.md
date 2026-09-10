@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Grouping: `parquet_table%group_by` and the `parquet_grouping` object.**
+  `t%group_by(keys, grp)` partitions a table's rows by the values of one or more key columns and
+  keeps the partition as an object that answers per group, without reordering the table. `%rows`,
+  `%csr`, `%size`, `%first_rows`, `%last_rows` and `%group_ids` describe the partition; `%key_table`
+  gives one row per group carrying each key's kind, width and unit, which is the skeleton a summary
+  table is built on. `%agg(name, stat, out)` computes one statistic of one column per group over the
+  `parquet_stats` vocabulary — `"mean"`, `"median"`, `"std"`, `"quantile"` and thirteen more —
+  weighted by `weights=` or `weight_column=` if you want; an `integer(int64)` result selects the
+  exact family, whose `"sum"` aborts rather than wraps. `%agg(name, func, out)` takes a procedure of
+  yours over one column's values instead, and `%count`/`%nunique` count non-null and distinct values
+  per group. `%apply` calls a procedure or an object extending `parquet_group_reducer` once per
+  group with the group's rows, serially unless you give `threads=`. `%broadcast` carries a per-group
+  array back onto the rows and `%gather` copies one group's values into a buffer you own. Groups
+  come in ascending key order, rows within a group in ascending row order, a Null key drops its row
+  unless `dropna=.false.`, and a query on a grouping whose table has changed structurally aborts
+  instead of answering about the wrong rows. `use parquet_tables` now also compiles the statistics
+  tier. See [Grouping rows and aggregating per
+  group](doc/pages/tables/table-group.md).
 - **Row filters match part of a string: `starts_with`, `ends_with` and `contains`.**
   `filt%add('field starts_with "S18"')` keeps the rows whose value begins with those bytes,
   `ends_with` those that end with them, and `contains` those that hold them anywhere. The match is

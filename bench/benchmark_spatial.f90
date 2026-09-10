@@ -69,7 +69,7 @@ program benchmark_spatial
     rhi = 5.0_real64
     skyr = 1.0_real64
     ratio = 10.0_real64
-    walk = "cylinder"
+    walk = "auto"
     spread = "local"
     cells = 0.0_real64
     call read_arguments()
@@ -780,8 +780,10 @@ contains
     !> aspect ratio each cylinder has in distance at the survey's near edge. Two arms over the same
     !> points and lengths, under `PF_LINK_MEAN`:
     !>
-    !> * `library` -- `%pairs_within_los`, walking the cylinder (`--walk=cylinder`, the shipped
-    !>   route) or the covering ball (`--walk=ball`, forced through the test-only hook), bounding
+    !> * `library` -- `%pairs_within_los`, left to choose its walk per point (`--walk=auto`, the
+    !>   shipped route: the cylinder unless the covering ball is no wider than a cell or shorter
+    !>   than the cylinder), or forced onto the cylinder (`--walk=cylinder`) or the covering ball
+    !>   (`--walk=ball`) through the test-only hook; bounding
     !>   each emitter's distance range by its own parallel window (`--spread=local`, shipped) or by
     !>   the catalogue-wide `max(L*W, g)` (`--spread=global`); `--cells=` relaxes the cells-per-point
     !>   ceiling through its test-only override, so the cell can follow the cross-section on a
@@ -802,19 +804,25 @@ contains
         real(real64) :: t_lib, t_ball, t_filter, t0, lip, spread_g, gap, l_ana, zmin, u, h_lib, h_ball
         real(real64) :: ex, ey, ez, dp, dl, di, dj, rho, vol
         integer(int64) :: i, k, kept, nball, a, b, est, c0, b0, n0, c1, b1, n1, reb0, reb1
-        integer :: it
-        logical :: walk_ball, spread_global
+        integer :: it, walk_mode
+        logical :: spread_global
         real(real64), parameter :: ch0 = 2997.9_real64
 
         if (trim(dist) == "flat") then
             write (output_unit, '(a)') "--mode=los needs a 3D fixture; --dist=flat has none"
             error stop 2
         end if
-        walk_ball = trim(walk) == "ball"
-        if (.not. walk_ball .and. trim(walk) /= "cylinder") then
-            write (output_unit, '(a)') "--walk must be cylinder or ball, not " // trim(walk)
+        select case (trim(walk))
+        case ("auto")
+            walk_mode = 0
+        case ("ball")
+            walk_mode = 1
+        case ("cylinder")
+            walk_mode = 2
+        case default
+            write (output_unit, '(a)') "--walk must be auto, ball or cylinder, not " // trim(walk)
             error stop 2
-        end if
+        end select
         spread_global = trim(spread) == "global"
         if (.not. spread_global .and. trim(spread) /= "local") then
             write (output_unit, '(a)') "--spread must be local or global, not " // trim(spread)
@@ -823,7 +831,7 @@ contains
         ! The three test-only forcings. `parquet_debug_reset_spatial_counters` would clear them,
         ! so the counters below are read as differences instead of being reset.
         if (cells > 0.0_real64) call parquet_debug_set_spatial_max_cells_per_point(cells)
-        call parquet_debug_set_spatial_los_walk(walk_ball)
+        call parquet_debug_set_spatial_los_walk(walk_mode)
         call parquet_debug_set_spatial_los_spread(spread_global)
         allocate (bp(np), bl(np), los(np), dd(np), walkr(np))
         zmin = huge(1.0_real64)
@@ -845,7 +853,7 @@ contains
             walkr(i) = sqrt(bp(i) * bp(i) + max(lip * bl(i), spread_g)**2)
         end do
         ! The forced ball walk is about the covering balls, so it is tuned for them, as Stage 2 was.
-        if (walk_ball) call sx%rebuild_for(walkr)
+        if (walk_mode == 1) call sx%rebuild_for(walkr)
         h_lib = sx%cell_size()
         write (output_unit, '(a)') ""
         write (output_unit, '(a,a)') "  walk                  : ", trim(walk)

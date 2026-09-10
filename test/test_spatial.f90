@@ -57,6 +57,10 @@ module test_spatial
     !> `c / H0` in Mpc/h, the one cosmological constant the line-of-sight fixtures need.
     real(real64), parameter :: los_ch0 = 2997.9_real64
 
+    !> The three states of `parquet_debug_set_spatial_los_walk`, named: the library's own choice
+    !> per point, the covering ball for every point, the cylinder wherever it is a finite walk.
+    integer, parameter :: walk_auto = 0, walk_ball = 1, walk_cyl = 2
+
 contains
 
     !> Registers every test in this suite.
@@ -125,6 +129,8 @@ contains
                          test_within_los_walks_the_cylinder), &
             new_unittest("the cells-per-point override relaxes the ceiling and changes no answer", &
                          test_cells_per_point_override_relaxes_the_ceiling), &
+            new_unittest("the line-of-sight walk is the ball when it fits a cell and the cylinder otherwise", &
+                         test_los_walk_choice_follows_the_cell), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
@@ -4822,8 +4828,10 @@ contains
     !> the ball is the shorter walk (`feature_risks.md`: the walked region must contain the
     !> accepted set).
     !>
-    !> The ball walk is the Stage 2 sweep unchanged -- its own rank, its own union -- forced
-    !> through `parquet_debug_set_spatial_los_walk`, so the two paths share the accept test and
+    !> The ball walk is the Stage 2 sweep unchanged -- its own rank, its own union -- and the
+    !> cylinder walk is forced too, both through `parquet_debug_set_spatial_los_walk`, since on a
+    !> test-sized cell the library's own choice is the ball for every point
+    !> (`test_los_walk_choice_follows_the_cell`); so the two paths share the accept test and
     !> nothing else. Three preconditions make the fixture load-bearing: accepted pairs whose partner
     !> lies OUTSIDE the emitter's unpadded geometric cylinder exist, built to order at the far end of
     !> the parallel window with the transverse separation just inside `b_perp` and at its near end
@@ -4901,9 +4909,10 @@ contains
         ! ---- The scalar form, no los: forced ball, then the cylinder walk, then the oracle ----
         call sx%build(x, y, z, radius=bp0)
         call parquet_debug_reset_spatial_counters()
-        call parquet_debug_set_spatial_los_walk(.true.)
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
+        call parquet_debug_set_spatial_los_walk(walk_ball)
         call sx%pairs_within_los(bp0, bl0, bi, bj)
-        call parquet_debug_set_spatial_los_walk(.false.)
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
         call check(error, nbal == n .and. ncyl == 0_int64, "the forced walk must walk every point as a ball")
         if (allocated(error)) return
@@ -4916,6 +4925,7 @@ contains
         call check(error, want(n0 + 1_int64, n0 + 6_int64), "the near points must pair with one another")
         if (allocated(error)) return
         call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         call sx%pairs_within_los(bp0, bl0, ci, cj)
         call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
         call check(error, nbal == 6_int64 .and. ncyl == n - 6_int64, &
@@ -4938,14 +4948,15 @@ contains
         end do
         call sx%rebuild_for(bp)
         do ri = 1, 4
-            call parquet_debug_set_spatial_los_walk(.true.)
+            call parquet_debug_set_spatial_los_walk(walk_ball)
             call sx%pairs_within_los(bp, bl, bi, bj, combine=rules(ri))
-            call parquet_debug_set_spatial_los_walk(.false.)
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             call check(error, pairs_to_set(bi, bj, n, want, nwant), "the ball walk's list must be a set with i < j")
             if (allocated(error)) return
             call check(error, nwant > 0_int64, "every rule must accept some pair")
             if (allocated(error)) return
             call parquet_debug_reset_spatial_counters()
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             call sx%pairs_within_los(bp, bl, ci, cj, combine=rules(ri))
             call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
             call check(error, nbal > 0_int64 .and. ncyl > 0_int64, "both routes must run under every rule")
@@ -4966,14 +4977,15 @@ contains
         end do
         call sz%build(x, y, z, radius=20.0_real64, los=zred)
         do ri = 1, 4
-            call parquet_debug_set_spatial_los_walk(.true.)
+            call parquet_debug_set_spatial_los_walk(walk_ball)
             call sz%pairs_within_los(bp, bl, bi, bj, combine=rules(ri))
-            call parquet_debug_set_spatial_los_walk(.false.)
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             call check(error, pairs_to_set(bi, bj, n, want, nwant), "the ball walk's list must be a set with i < j")
             if (allocated(error)) return
             call check(error, nwant > 0_int64, "every rule must accept some pair on the survey")
             if (allocated(error)) return
             call parquet_debug_reset_spatial_counters()
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             call sz%pairs_within_los(bp, bl, ci, cj, combine=rules(ri))
             call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
             call check(error, ncyl == n .and. nbal == 0_int64, "on the survey every point must walk the cylinder")
@@ -4982,6 +4994,7 @@ contains
                 "with los= the per-point window's cylinder walk must return exactly the ball walk's pairs")
             if (allocated(error)) return
             call parquet_debug_reset_spatial_counters()
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             call parquet_debug_set_spatial_los_spread(.true.)
             call sz%pairs_within_los(bp, bl, ci, cj, combine=rules(ri))
             call parquet_debug_set_spatial_los_spread(.false.)
@@ -4994,6 +5007,7 @@ contains
             if (allocated(error)) return
         end do
         call check(error, pairs_equal_set(bi, bj, want, nwant), "the sum rule's ball list must be the reference just built")
+        call parquet_debug_reset_spatial_counters()
     end subroutine test_los_cylinder_walk_matches_ball_walk
 
     !> Under the union each endpoint walks its own cylinder, and a pair lying in BOTH cylinders is
@@ -5038,18 +5052,20 @@ contains
         if (allocated(error)) return
         call sx%build(x, y, z, radius=bp)
         call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MAX)
         call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
         call check(error, ncyl == n, "every point must walk its own cylinder under the union")
         if (allocated(error)) return
         call check(error, pairs_equal_set(pi, pj, want, nwant), &
             "the union's cylinder walk must emit each pair exactly once: the oracle's set, no duplicate")
+        call parquet_debug_reset_spatial_counters()
     end subroutine test_los_union_tiebreak_counts
 
-    !> `%within_los` walks the cylinder -- the counter says so -- and returns what the ball walk
-    !> returns, rows, measures and separations alike; a query point closer to the observer than its
-    !> cylinder is long walks the ball, and one whose parallel window holds no stored point walks
-    !> nothing and answers zero.
+    !> `%within_los` walks the cylinder when forced to -- the counter says so -- and returns what
+    !> the ball walk returns, rows, measures and separations alike; a query point closer to the
+    !> observer than its cylinder is long walks the ball even then, and one whose parallel window
+    !> holds no stored point walks nothing and answers zero.
     subroutine test_within_los_walks_the_cylinder(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
         real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:)
@@ -5070,15 +5086,16 @@ contains
             a = rows(k)
             p = [x(a), y(a), z(a)]
             call parquet_debug_reset_spatial_counters()
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             m1 = sz%within_los(p, 20.0_real64, 0.006_real64, f1, los_p=zred(a), dist=d1, dperp=q1, dpar=l1, sorted=.true.)
             call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
             call check(error, ncyl == 1_int64 .and. nbal == 0_int64, "a survey point's query must walk the cylinder")
             if (allocated(error)) return
             call check(error, ntest >= m1, "every reported point reached the accept test")
             if (allocated(error)) return
-            call parquet_debug_set_spatial_los_walk(.true.)
+            call parquet_debug_set_spatial_los_walk(walk_ball)
             m2 = sz%within_los(p, 20.0_real64, 0.006_real64, f2, los_p=zred(a), dist=d2, dperp=q2, dpar=l2, sorted=.true.)
-            call parquet_debug_set_spatial_los_walk(.false.)
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
             call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
             call check(error, nbal == 1_int64, "the forced query must walk the ball")
             if (allocated(error)) return
@@ -5099,19 +5116,21 @@ contains
         p = [dp * cos(0.01_real64) * cos(0.02_real64), dp * cos(0.01_real64) * sin(0.02_real64), dp * sin(0.01_real64)]
         zp = 1.0_real64 / (1.0_real64 - 0.5_real64 * dp / los_ch0)**2 - 1.0_real64
         call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         m1 = sz%within_los(p, 10.0_real64, 0.03_real64, f1, los_p=zp, sorted=.true.)
         call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
         call check(error, nbal == 1_int64 .and. ncyl == 0_int64, "a query next to the observer must walk the ball")
         if (allocated(error)) return
         call check(error, m1 > 0_int64, "that query must find the survey's near edge")
         if (allocated(error)) return
-        call parquet_debug_set_spatial_los_walk(.true.)
+        call parquet_debug_set_spatial_los_walk(walk_ball)
         m2 = sz%within_los(p, 10.0_real64, 0.03_real64, f2, los_p=zp, sorted=.true.)
-        call parquet_debug_set_spatial_los_walk(.false.)
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         call check(error, m1 == m2 .and. all(f1(1:m1) == f2(1:m1)), "the fallback ball must answer as the forced ball does")
         if (allocated(error)) return
         ! A parallel window holding no stored point: nothing to walk.
         call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         m1 = sz%within_los(p, 10.0_real64, 0.001_real64, f1, los_p=5.0_real64)
         call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
         call check(error, m1 == 0_int64 .and. ncyl == 1_int64 .and. nbal == 0_int64 .and. ntest == 0_int64, &
@@ -5122,17 +5141,19 @@ contains
         a = rows(2)
         p = [x(a), y(a), z(a)]
         call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         m1 = sd%within_los(p, 20.0_real64, 30.0_real64, f1, dist=d1, sorted=.true.)
         call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
         call check(error, ncyl == 1_int64 .and. nbal == 0_int64, "without los= the query walks the cylinder too")
         if (allocated(error)) return
-        call parquet_debug_set_spatial_los_walk(.true.)
+        call parquet_debug_set_spatial_los_walk(walk_ball)
         m2 = sd%within_los(p, 20.0_real64, 30.0_real64, f2, dist=d2, sorted=.true.)
-        call parquet_debug_set_spatial_los_walk(.false.)
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
         call check(error, m1 == m2 .and. m1 > 1_int64, "without los= the two walks must agree on a non-trivial count")
         if (allocated(error)) return
         call check(error, all(f1(1:m1) == f2(1:m1)) .and. all(d1(1:m1) == d2(1:m1)), &
             "without los= the two walks must report the same rows and measures")
+        call parquet_debug_reset_spatial_counters()
     end subroutine test_within_los_walks_the_cylinder
 
     !> The cells-per-point ceiling binds on a sparse survey and the test-only override relaxes it:
@@ -5183,5 +5204,96 @@ contains
         call sx%pairs_within_los(5.0_real64, 40.0_real64, qi, qj)
         call check(error, pairs_equal_set(qi, qj, want, nwant), "the restored cell must return the same pairs")
     end subroutine test_cells_per_point_override_relaxes_the_ceiling
+
+    !> The library's own choice of walk follows the cell: a covering ball no wider than a cell is
+    !> walked as the ball, one wider than a cell as the cylinder -- the near-observer fallback
+    !> aside -- and both answers equal the oracle. The fine cell is reached through the ceiling
+    !> override with an explicit `cell=`, since a test-sized wedge's shipped cell dwarfs every
+    !> covering ball; the two forcing modes override the rule in either direction, which is the
+    !> negative control for each half. Counters are read as differences, because the reset that
+    !> clears them would also clear the override.
+    subroutine test_los_walk_choice_follows_the_cell(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:), tra(:), tdec(:), td(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: coarse, fine
+        integer(int64) :: n, k, nwant, c0, b0, t0, c1, b1, t1
+        real(real64) :: bp0, bl0, diam, h_coarse, h_fine
+
+        bp0 = 12.0_real64
+        bl0 = 20.0_real64
+        diam = 2.0_real64 * sqrt(bp0 * bp0 + bl0 * bl0)
+        call make_wedge(200_int64, 20_int64, 500.0_real64, 1500.0_real64, 26_int64, ra, dec, d, x, y, z)
+        ! Six points along one line of sight at 1..3.5 from the observer, which walk the ball under
+        ! every mode but the forced ball's own, by the length rule.
+        allocate (tra(6), tdec(6), td(6))
+        do k = 1_int64, 6_int64
+            tra(k) = 0.01_real64
+            tdec(k) = 0.02_real64
+            td(k) = 1.0_real64 + 0.5_real64 * real(k - 1_int64, kind=real64)
+        end do
+        ra = [ra, tra]
+        dec = [dec, tdec]
+        d = [d, td]
+        n = size(ra, kind=int64)
+        x = d * cos(dec) * cos(ra)
+        y = d * cos(dec) * sin(ra)
+        z = d * sin(dec)
+        allocate (bp(n), bl(n), want(n, n))
+        bp = bp0
+        bl = bl0
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, nwant > 0_int64, "the fixture must hold accepted pairs")
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        ! ---- the shipped ceiling: a cell far wider than the covering ball, so the ball everywhere ----
+        call coarse%build(x, y, z, radius=bp0)
+        h_coarse = coarse%cell_size()
+        call check(error, h_coarse > diam, "precondition: the shipped cell must exceed the covering ball's diameter")
+        if (allocated(error)) return
+        call parquet_debug_spatial_los_walk(c0, b0, t0)
+        call coarse%pairs_within_los(bp0, bl0, pi, pj)
+        call parquet_debug_spatial_los_walk(c1, b1, t1)
+        call check(error, b1 - b0 == n .and. c1 - c0 == 0_int64, &
+            "with the covering ball no wider than a cell every point must walk the ball")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the ball walk's pairs must be the oracle's")
+        if (allocated(error)) return
+        ! ---- a cell below the covering ball's diameter: the cylinder, the six near points aside ----
+        call parquet_debug_set_spatial_max_cells_per_point(3000.0_real64)
+        call fine%build(x, y, z, radius=bp0, cell=5.0_real64)
+        h_fine = fine%cell_size()
+        call check(error, h_fine < diam, "precondition: the override must let the cell fall below the covering diameter")
+        if (allocated(error)) return
+        call parquet_debug_spatial_los_walk(c0, b0, t0)
+        call fine%pairs_within_los(bp0, bl0, pi, pj)
+        call parquet_debug_spatial_los_walk(c1, b1, t1)
+        call check(error, c1 - c0 == n - 6_int64 .and. b1 - b0 == 6_int64, &
+            "with the covering ball wider than a cell every point but the six near ones must walk the cylinder")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the cylinder walk's pairs must be the oracle's")
+        if (allocated(error)) return
+        ! ---- the two forcings override the rule, each in its own direction ----
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
+        call parquet_debug_spatial_los_walk(c0, b0, t0)
+        call coarse%pairs_within_los(bp0, bl0, pi, pj)
+        call parquet_debug_spatial_los_walk(c1, b1, t1)
+        call check(error, c1 - c0 == n - 6_int64 .and. b1 - b0 == 6_int64, &
+            "the forced cylinder must ignore the cell and keep the near-observer fallback")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the forced cylinder's pairs must be the oracle's")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_los_walk(walk_ball)
+        call parquet_debug_spatial_los_walk(c0, b0, t0)
+        call fine%pairs_within_los(bp0, bl0, pi, pj)
+        call parquet_debug_spatial_los_walk(c1, b1, t1)
+        call check(error, b1 - b0 == n .and. c1 - c0 == 0_int64, "the forced ball must walk the ball at the fine cell too")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the forced ball's pairs must be the oracle's")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_los_walk(walk_auto)
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_los_walk_choice_follows_the_cell
 
 end module test_spatial

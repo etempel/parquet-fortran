@@ -382,9 +382,10 @@ where a redshift interval spans less distance than at its near end, walks a shor
 Without `los=` that range is `b_par` either side. The walked cylinder is padded by the little a
 partner's own line of sight can carry it outside the point's — a factor `2 D_far / (D + D_far)` on
 the radius and `b_perp**2 / (2 D)` at the near end, both computed per point — so no pair is missed,
-and the exact test above then keeps the cylinder and discards the rest. A point so close to the
-observer that its padded cylinder would be longer than its covering ball is wide walks that ball
-instead. The cylinder walk tests a small multiple of the pairs it keeps where a ball walk tests
+and the exact test above then keeps the cylinder and discards the rest. A point walks its covering
+ball instead when that is the cheaper walk: one so close to the observer that its padded cylinder
+would be longer than the ball is wide, or one whose ball is no wider than a cell and so touches at
+most two cells per axis. The cylinder walk tests a small multiple of the pairs it keeps where a ball walk tests
 hundreds to over a thousand times as many; on a sparse survey the cell the cells-per-point cap
 allows is far wider than the cylinder, so the time saved is a fraction of that, and
 `bench/benchmark_spatial.sh` with `MODE=los` measures both on your own data. **Give `%build` `radius = b_perp`**: the cell follows the

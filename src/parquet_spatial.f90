@@ -507,9 +507,10 @@ module parquet_spatial
     !> Cells per point forced by `parquet_debug_set_spatial_max_cells_per_point`; <= 0 means the
     !! shipped `spatial_max_cells_per_point`.
     real(real64), save :: dbg_max_cells = -1.0_real64
-    !> Whether every line-of-sight sweep walks the covering ball instead of the cylinder
-    !! (`parquet_debug_set_spatial_los_walk`).
-    logical, save :: dbg_los_ball = .false.
+    !> Which walk the line-of-sight queries are forced onto (`parquet_debug_set_spatial_los_walk`):
+    !! 1 the covering ball for every point, 2 the cylinder wherever it is a finite walk, anything
+    !! else the library's own choice per point.
+    integer, save :: dbg_los_walk = 0
     !> Whether the line-of-sight walk bounds a partner's distance by the catalogue-wide
     !! `max(L*W, g)` instead of the emitter's own window (`parquet_debug_set_spatial_los_spread`).
     logical, save :: dbg_los_global = .false.
@@ -1109,8 +1110,9 @@ module parquet_spatial
     ! padded cylinder along its line of sight (`los_walk_shape`, through `spatial_scan_axis`),
     ! bounded in distance by the spread of the stored points within its parallel window -- read
     ! off the `los`-sorted tie groups kept from `%build` -- or the covering ball
-    ! `sqrt(b_perp**2 + Q**2)` when that is the shorter walk; `L` and `g` (`spatial_los_bounds`)
-    ! bound `Q` catalogue-wide for the two warnings and the test-only global-spread arm.
+    ! `sqrt(b_perp**2 + Q**2)` when that is the cheaper walk: a cylinder longer than the ball is
+    ! wide, or a ball no wider than a cell. `L` and `g` (`spatial_los_bounds`) bound `Q`
+    ! catalogue-wide for the two warnings and the test-only global-spread arm.
 
     interface
         !> The guards both line-of-sight queries share: built, radial, and no point at the observer.
@@ -1998,11 +2000,13 @@ contains
     !> across, and in distance from the observer exactly the range the stored points within
     !> `b_par` of its `los` occupy (`b_par` itself either side without `los=`), padded by the
     !> little a partner's own line of sight can carry it outside (`los_walk_shape`,
-    !> `src/parquet_spatial_bulk.f90`); a point so close to the observer that its cylinder would be
-    !> longer than its covering ball is wide walks the ball. The exact test then keeps the cylinder,
-    !> so the answer never depends on the walk. Build with `radius = b_perp`, the cross-section the
-    !> cell should follow. A `b_par` whose window would span the whole catalogue's depth is accepted
-    !> with a warning, since that is what a parallel length given in the wrong unit looks like.
+    !> `src/parquet_spatial_bulk.f90`); a point walks its covering ball instead when that is the
+    !> cheaper walk -- one so close to the observer that its cylinder would be longer than the ball
+    !> is wide, or one whose ball is no wider than a cell and so touches at most two cells per axis.
+    !> The exact test then keeps the cylinder, so the answer never depends on the walk. Build with
+    !> `radius = b_perp`, the cross-section the cell should follow. A `b_par` whose window would
+    !> span the whole catalogue's depth is accepted with a warning, since that is what a parallel
+    !> length given in the wrong unit looks like.
     subroutine bind_pairs_los_r0(self, b_perp, b_par, i, j, threads, dperp, dpar)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: b_perp !! the transverse radius, the same for every point; >= 0.
@@ -2766,7 +2770,7 @@ contains
         dbg_shell_start = -1.0_real64
         dbg_shell_rounds = 0_int64
         dbg_max_cells = -1.0_real64
-        dbg_los_ball = .false.
+        dbg_los_walk = 0
         dbg_los_global = .false.
         dbg_los_cyl = 0_int64
         dbg_los_balls = 0_int64
@@ -2809,17 +2813,24 @@ contains
         dbg_max_cells = c
     end subroutine parquet_debug_set_spatial_max_cells_per_point
 
-    !> Forces every line-of-sight query to walk the covering ball instead of its cylinder.
+    !> Forces the walk every line-of-sight query uses, overriding the per-point choice.
     !>
-    !> **Test-and-bench only.** The ball walk -- `sqrt(b_perp**2 + max(L*b_par, g)**2)` about each
-    !> point, ranked by that radius -- is the cross-check the cylinder walk is held to: the two
-    !> must return identical sets (`test_los_cylinder_walk_matches_ball_walk`), and the arm
-    !> `bench/benchmark_spatial.sh MODE=los WALK=ball` measures the candidates it tests. Public for
-    !> the reason `parquet_debug_set_spatial_cell` is. No library code calls it.
-    subroutine parquet_debug_set_spatial_los_walk(ball)
-        logical, intent(in) :: ball !! .true. walks the covering ball; .false. restores the cylinder walk.
+    !> **Test-and-bench only.** Left alone, each point walks its cylinder unless the covering ball
+    !> is the cheaper walk -- the cylinder longer than the ball is wide (a point near the observer),
+    !> or the ball no wider than a cell, when it touches at most two cells per axis
+    !> (`los_walk_shape`, `src/parquet_spatial_bulk.f90`). `mode = 1` walks the covering ball
+    !> `sqrt(b_perp**2 + max(L*b_par, g)**2)` for every point, ranked by that radius: the
+    !> cross-check the cylinder walk is held to, since the two must return identical sets
+    !> (`test_los_cylinder_walk_matches_ball_walk`), and the arm `bench/benchmark_spatial.sh
+    !> MODE=los WALK=ball`. `mode = 2` walks the cylinder for every point whose cylinder is a finite
+    !> walk (the near-observer fallback stays), which is what makes that route reachable on a
+    !> test-sized fixture, whose ceiling-bound cell dwarfs every covering ball; it is the arm
+    !> `WALK=cylinder`. Any other value restores the library's own choice. Public for the reason
+    !> `parquet_debug_set_spatial_cell` is. No library code calls it.
+    subroutine parquet_debug_set_spatial_los_walk(mode)
+        integer, intent(in) :: mode !! 1 the ball everywhere, 2 the cylinder wherever finite, else the library's choice.
 
-        dbg_los_ball = ball
+        dbg_los_walk = mode
     end subroutine parquet_debug_set_spatial_los_walk
 
     !> Forces the line-of-sight walk to bound a partner's distance by the catalogue-wide
@@ -2839,8 +2850,9 @@ contains
     !> How the line-of-sight queries have walked since the counters were reset.
     !>
     !> **The "which path ran" observable, written by every route in its own body** -- the cylinder
-    !> walk, the ball a near-observer point falls back to, the forced ball, and the empty window a
-    !> `%within_los` query can meet -- so a test can assert not only that the answer is right but
+    !> walk, the ball a point falls back to (near the observer, or when the ball is no wider than a
+    !> cell), the forced ball, and the empty window a `%within_los` query can meet -- so a test can
+    !> assert not only that the answer is right but
     !> that the cylinder was walked to get it, and the bench can put the candidates an arm tested
     !> beside the pairs it kept. A bulk sweep adds one per point, a single query one. Test-only,
     !> and public for the reason `parquet_debug_set_spatial_cell` is.

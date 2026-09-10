@@ -11,6 +11,7 @@
 #   MODE=backend DIST=clustered bench/benchmark_spatial.sh
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 RATIO=10 bench/benchmark_spatial.sh   # the LOS cylinder
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 WALK=ball bench/benchmark_spatial.sh   # its covering-ball walk
+#   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 WALK=cylinder bench/benchmark_spatial.sh   # the cylinder for every point
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 CELLS_PER_POINT=30 bench/benchmark_spatial.sh
 #   DIST=clustered NP=2000000 bench/benchmark_spatial.sh
 #
@@ -21,7 +22,9 @@
 #                    3D fixture, the wedge being the survey shape it is about)
 #   SKYR=1           MODE=backend only: the build radius in DEGREES.
 #   RATIO=10         MODE=los only: the cylinders' aspect ratio in distance, L*b_par / b_perp.
-#   WALK=cylinder    MODE=los only: cylinder (the shipped walk) | ball (the covering-ball walk, forced).
+#   WALK=auto        MODE=los only: auto (the shipped choice per point: the cylinder unless the covering
+#                    ball is no wider than a cell or shorter than the cylinder) | cylinder (forced for
+#                    every point that can walk one) | ball (the covering-ball walk, forced).
 #   SPREAD=local     MODE=los only: local (each emitter's own parallel window bounds its distance
 #                    range, the shipped bound) | global (the catalogue-wide max(L*W, g)).
 #   CELLS_PER_POINT=0  MODE=los only: > 0 relaxes the cells-per-point ceiling (shipped 0.3) through
@@ -73,7 +76,8 @@
 #   los     THE LINE-OF-SIGHT CYLINDER against the work-around it replaces, and its cylinder walk
 #           against the covering-ball walk. Derives a redshift-like los= from the fixture's
 #           distances, sets per-point lengths so that L*b_par/b_perp is RATIO, and times
-#           %pairs_within_los -- walking the cylinder, or the covering ball under WALK=ball; bounding
+#           %pairs_within_los -- choosing its walk per point, or forced onto the cylinder or the
+#           covering ball under WALK=cylinder / WALK=ball; bounding
 #           each emitter's distance range by its own parallel window, or by the catalogue-wide slope
 #           under SPREAD=global -- against %pairs_within at the covering radius plus a serial re-test
 #           of every candidate. Prints CANDIDATES TESTED PER PAIR KEPT for both, read for the library
@@ -112,7 +116,7 @@ RHI="${RHI:-5}"
 THREADS="${THREADS:-0}"
 SKYR="${SKYR:-1}"
 RATIO="${RATIO:-10}"
-WALK="${WALK:-cylinder}"
+WALK="${WALK:-auto}"
 SPREAD="${SPREAD:-local}"
 CELLS_PER_POINT="${CELLS_PER_POINT:-0}"
 

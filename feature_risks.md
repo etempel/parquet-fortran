@@ -9326,7 +9326,10 @@ accepted partner. Three things make it contain them, all in `src/parquet_spatial
   can. Both are computed per emitter from its own `[qlo, qhi]`, widened by `spatial_los_slack`
   against rounding at the bound itself. An emitter whose padded cylinder would be longer than its
   covering ball is wide walks the ball (`sqrt(P**2 + dev**2)`), which is the design's `2D <= Q`
-  fallback and covers short cylinders too.
+  fallback and covers short cylinders too, and so does one whose covering ball is no wider than a
+  cell. That choice is free -- both regions contain the accepted set, so any per-emitter rule is
+  complete -- and it is deliberately a COST rule (`test_los_walk_choice_follows_the_cell` pins it
+  in both directions); what is not free is the union's emit rule, Risk-247.
 - **The envelopes of the rank.** Emitters are ranked by transverse length, descending (ascending
   under `PF_LINK_MIN`), and emit upward through the rank, so a partner's `b_perp` never exceeds the
   emitter's; but under `PF_LINK_MEAN` its `b_par` can, so the emitter's parallel window is the

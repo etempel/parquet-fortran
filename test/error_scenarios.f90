@@ -2280,6 +2280,18 @@ program error_scenarios
         call scenario_table_copy_metadata_unknown_key()
     case ("table_copy_metadata_in_memory")
         call scenario_table_copy_metadata_in_memory()
+    case ("table_write_row_index_with_schema")
+        call scenario_table_write_row_index_with_schema()
+    case ("table_write_row_index_blank")
+        call scenario_table_write_row_index_blank()
+    case ("table_write_row_index_collides")
+        call scenario_table_write_row_index_collides()
+    case ("table_write_row_index_in_memory")
+        call scenario_table_write_row_index_in_memory()
+    case ("table_write_row_index_detached")
+        call scenario_table_write_row_index_detached()
+    case ("table_write_row_index_reserved_warning")
+        call scenario_table_write_row_index_reserved_warning()
     case ("table_copy_metadata_both_forms")
         call scenario_table_copy_metadata_both_forms()
     case ("table_copy_metadata_regenerated_key")
@@ -18064,6 +18076,80 @@ contains
             copy_metadata=.true.)   ! -> aborts
         print '(a)', "unexpectedly copied source metadata for a table with no source file"
     end subroutine scenario_table_copy_metadata_in_memory
+
+    !> A schema states which columns the output has and what they are called, so row_index_name=
+    !! adding one to it says two things at once and is refused rather than obeyed.
+    subroutine scenario_table_write_row_index_with_schema()
+        type(parquet_table) :: t
+        type(parquet_schema) :: out_s
+        call write_table_scenario_fixture("test_run/es_rowidx_schema_in.parquet")
+        call parquet_open_table(t, "test_run/es_rowidx_schema_in.parquet")
+        call t%materialize_all()
+        call out_s%init("dest")
+        call out_s%add_field("id", "int32")
+        call parquet_write_table(t, "test_run/es_rowidx_schema_out.parquet", out_s, &
+            row_index_name="src_row")   ! -> aborts
+        print '(a)', "unexpectedly accepted row_index_name= alongside a schema"
+    end subroutine scenario_table_write_row_index_with_schema
+
+    !> row_index_name= is the name the row numbers are written under, so a blank one names nothing.
+    subroutine scenario_table_write_row_index_blank()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_rowidx_blank_in.parquet")
+        call parquet_open_table(t, "test_run/es_rowidx_blank_in.parquet")
+        call t%materialize_all()
+        call parquet_write_table(t, "test_run/es_rowidx_blank_out.parquet", &
+            row_index_name="   ")   ! -> aborts
+        print '(a)', "unexpectedly accepted a blank row_index_name="
+    end subroutine scenario_table_write_row_index_blank
+
+    !> Two fields of one name is not a schema; refused here, where both names are in hand, rather
+    !! than left to %add_field's duplicate refusal naming a procedure the caller never invoked.
+    subroutine scenario_table_write_row_index_collides()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_rowidx_collide_in.parquet")
+        call parquet_open_table(t, "test_run/es_rowidx_collide_in.parquet")
+        call t%materialize_all()
+        call parquet_write_table(t, "test_run/es_rowidx_collide_out.parquet", &
+            row_index_name="id")   ! "id" is already being written -> aborts
+        print '(a)', "unexpectedly accepted a row_index_name= that names a written column"
+    end subroutine scenario_table_write_row_index_collides
+
+    !> A table built in memory was never read from a file, so there is no file row to record and
+    !! no ordering of the program's calls that would have produced one.
+    subroutine scenario_table_write_row_index_in_memory()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("v", [1.0_real64, 2.0_real64, 3.0_real64])
+        call parquet_write_table(t, "test_run/es_rowidx_mem_out.parquet", &
+            row_index_name="src_row")   ! -> aborts
+        print '(a)', "unexpectedly wrote file row numbers for a table with no source file"
+    end subroutine scenario_table_write_row_index_in_memory
+
+    !> A detached table HAD a file and lost it, so the row numbers are no longer derivable; the
+    !! message says to ask before the mutation rather than after (feature_risks.md Risk-23).
+    subroutine scenario_table_write_row_index_detached()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_rowidx_detached_in.parquet")
+        call parquet_open_table(t, "test_run/es_rowidx_detached_in.parquet")
+        call t%materialize_all()
+        call t%truncate(2)
+        call parquet_write_table(t, "test_run/es_rowidx_detached_out.parquet", &
+            row_index_name="src_row")   ! -> aborts
+        print '(a)', "unexpectedly wrote file row numbers for a detached table"
+    end subroutine scenario_table_write_row_index_detached
+
+    !> The reserved name is a WARNING, not a refusal: the file is valid and other readers see the
+    !! column. This exits 0 -- the negative control for the four refusals above.
+    subroutine scenario_table_write_row_index_reserved_warning()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_rowidx_reserved_in.parquet")
+        call parquet_open_table(t, "test_run/es_rowidx_reserved_in.parquet")
+        call t%materialize_all()
+        call parquet_write_table(t, "test_run/es_rowidx_reserved_out.parquet", &
+            row_index_name=PARQUET_ROW_INDEX)   ! warns, then writes
+        print '(a)', "wrote the row numbers under the reserved name"
+    end subroutine scenario_table_write_row_index_reserved_warning
 
     !> copy_metadata=.true. means "every key" and metadata_keys= means "these"; asking for both at
     !! once has no consistent reading, so it is refused rather than silently preferring one.

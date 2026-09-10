@@ -3213,6 +3213,21 @@ reach for.
 - **Covered:** `the automatic parquet_row_index column names each row's file row` and
   `prefetch reaches the automatic row-index column` (`test/test_table.f90`), plus the
   `table_row_index_after_detach` error scenario for the loss.
+- **Covered:** the **second entry point**, `parquet_write_table`'s `row_index_name=`, which derives
+  the same values through the same `table_row_index_values` and writes them to a file. Dropping its
+  guard does not abort: a detached table is `REGIME_FULL` with no transform, so the derivation falls
+  into the `rows(i) = i` arm and writes **1..nrows as if they were file rows** — wrong provenance,
+  on disk, with no diagnostic anywhere. `table_write_row_index_detached` and
+  `table_write_row_index_in_memory` (error scenarios) hold the two refusals; the detached one must
+  be tested FIRST in `table_row_index_values`, since `table_detach` clears `file_backed` too and the
+  other order reports a detached table as never having had a file.
+- **Covered:** the **resident column wins over a fresh derivation** in `row_index_to_write`
+  (`src/parquet_tables_write.f90`), and the two are not interchangeable: `%sort_by` reorders a
+  materialized row index with every other column, while a derivation asks the reader, which knows
+  the read-time transform and nothing the table did afterwards. Reversing the preference writes the
+  unsorted file order under the caller's chosen name, silently.
+  `row_index_name= follows a %sort_by that reordered a resident row index`
+  (`test/test_table_stream.f90`) is the pin.
 - **Covered:** the **visibility disagreement** — the first of those tests asserts
   `%has_column(PARQUET_ROW_INDEX)` is `.true.` while the column is virtual, that `%column_names`
   omits it while virtual, and that once materialized it is listed **last**. A future tidy-up making

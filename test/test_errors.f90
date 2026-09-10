@@ -1375,6 +1375,18 @@ contains
                 test_table_copy_metadata_in_memory_aborts), &
             new_unittest("copy_metadata=.true. with metadata_keys= aborts", &
                 test_table_copy_metadata_both_forms_aborts), &
+            new_unittest("row_index_name= together with schema= aborts", &
+                test_table_write_row_index_with_schema_aborts), &
+            new_unittest("a blank row_index_name= aborts", &
+                test_table_write_row_index_blank_aborts), &
+            new_unittest("row_index_name= naming a written column aborts", &
+                test_table_write_row_index_collides_aborts), &
+            new_unittest("row_index_name= on an in-memory table aborts", &
+                test_table_write_row_index_in_memory_aborts), &
+            new_unittest("row_index_name= on a detached table aborts", &
+                test_table_write_row_index_detached_aborts), &
+            new_unittest("row_index_name= under the reserved name warns and writes", &
+                test_table_write_row_index_reserved_warns), &
             new_unittest("metadata_keys= naming a writer-generated key aborts", &
                 test_table_copy_metadata_regenerated_key_aborts), &
             new_unittest("metadata_keys= naming an ordinary key still carries it", &
@@ -4614,6 +4626,51 @@ contains
             failure_message="copying source metadata for an in-memory table was expected to abort", &
             required_stderr="has no source metadata to copy")
     end subroutine test_table_copy_metadata_in_memory_aborts
+
+    subroutine test_table_write_row_index_with_schema_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_row_index_with_schema", expect_abort=.true., &
+            failure_message="row_index_name= alongside schema= was expected to error stop", &
+            required_stderr="row_index_name= and schema= cannot both be given")
+    end subroutine test_table_write_row_index_with_schema_aborts
+
+    subroutine test_table_write_row_index_blank_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_row_index_blank", expect_abort=.true., &
+            failure_message="a blank row_index_name= was expected to error stop", &
+            required_stderr="row_index_name= must not be blank")
+    end subroutine test_table_write_row_index_blank_aborts
+
+    subroutine test_table_write_row_index_collides_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_row_index_collides", expect_abort=.true., &
+            failure_message="row_index_name= naming a written column was expected to error stop", &
+            required_stderr="already the name of a column this write is writing")
+    end subroutine test_table_write_row_index_collides_aborts
+
+    subroutine test_table_write_row_index_in_memory_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_row_index_in_memory", expect_abort=.true., &
+            failure_message="row_index_name= on an in-memory table was expected to error stop", &
+            required_stderr="was not read from a parquet file")
+    end subroutine test_table_write_row_index_in_memory_aborts
+
+    subroutine test_table_write_row_index_detached_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_row_index_detached", expect_abort=.true., &
+            failure_message="row_index_name= on a detached table was expected to error stop", &
+            required_stderr="materialize it BEFORE the mutation that detaches")
+    end subroutine test_table_write_row_index_detached_aborts
+
+    !> The negative control for the four refusals above: the reserved name is warned about, not
+    !! refused, so this exits cleanly with the warning on the captured output.
+    subroutine test_table_write_row_index_reserved_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_write_row_index_reserved_warning", &
+            expect_abort=.false., &
+            failure_message="row_index_name= under the reserved name was expected to warn and write", &
+            required_stderr="is the reserved name of the automatic row-index column")
+    end subroutine test_table_write_row_index_reserved_warns
 
     subroutine test_table_copy_metadata_both_forms_aborts(error)
         type(error_type), allocatable, intent(out) :: error

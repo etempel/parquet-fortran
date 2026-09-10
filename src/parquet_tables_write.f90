@@ -123,6 +123,7 @@ contains
         call table_check_not_shared(table, "parquet_write_table")
         if (present(schema)) call ensure_schema_parsed(schema, "parquet_write_table")
         call resolve_metadata_request(copy_metadata, metadata_keys, "parquet_write_table", want_metadata)
+        call check_row_index_request(table, present(schema), "parquet_write_table", row_index_name)
         ! `own` is used in two unrelated situations, and only one of them existed before: a
         ! schema-less write has to BUILD a schema, and a metadata carry-over has to write onto a
         ! COPY of the caller's rather than the caller's own -- otherwise writing a second table
@@ -131,11 +132,13 @@ contains
         use_own = want_metadata .or. .not. present(schema)
         if (.not. present(schema)) then
             call output_stem(trim(filename), stem)
-            call build_table_schema(table, stem, own, nfields)
+            call build_table_schema(table, stem, own, nfields, row_index_name)
             ! Nothing resident is not an error -- it writes a genuinely empty file, which Arrow
             ! accepts and this library reopens as a 0-column, 0-row table. It cannot go through
             ! the generated schema, though: MAML requires at least one field, so there is no
-            ! schema to build and the bare writer does the whole job.
+            ! schema to build and the bare writer does the whole job. `row_index_name=` puts a
+            ! field in, so a table with nothing resident then takes the ordinary path and writes
+            ! a one-column file of row numbers rather than an empty one.
             if (nfields == 0) then
                 call write_empty_file(trim(filename), write_maml, compression, compression_level, &
                     chunk_size, use_threads, overwrite)
@@ -146,12 +149,17 @@ contains
         end if
         if (want_metadata) call carry_source_metadata(table, own, metadata_keys, "parquet_write_table")
         !
+        ! row_index_name is forwarded on both arms although only the first can carry it (it and
+        ! schema= are mutually exclusive, refused above), so the two calls stay one call written
+        ! twice rather than two that could drift.
         if (use_own) then
             call write_through_schema(table, own, filename, row_mask, write_maml, qc,         &
-                compression, compression_level, chunk_size, use_threads, overwrite, release)
+                compression, compression_level, chunk_size, use_threads, overwrite, release,  &
+                row_index_name)
         else
             call write_through_schema(table, schema, filename, row_mask, write_maml, qc,      &
-                compression, compression_level, chunk_size, use_threads, overwrite, release)
+                compression, compression_level, chunk_size, use_threads, overwrite, release,  &
+                row_index_name)
         end if
     end procedure parquet_write_table
     !
@@ -169,6 +177,7 @@ contains
         character(len=:), allocatable :: tname, sfx
         !
         call table_check_open(table, "parquet_derive_schema")
+        call check_row_index_request(table, .false., "parquet_derive_schema", row_index_name)
         if (present(name)) then
             ! Refused here rather than left to %init, whose message would name a procedure the
             ! caller never called. MAML requires a table: value.
@@ -181,7 +190,7 @@ contains
         else
             call source_stem(table, tname)
         end if
-        call build_table_schema(table, tname, schema, nfields)
+        call build_table_schema(table, tname, schema, nfields, row_index_name)
         if (nfields == 0) then
             call table_context_suffix(table%cache, "", sfx)
             error stop EP // "parquet_derive_schema: this table has no resident column to build a " // &
@@ -343,7 +352,8 @@ contains
     !! `parquet_open_writer` applies exactly the defaults it would for a hand-written open, and
     !! there is no second set of defaults here to drift from it.
     subroutine write_through_schema(table, sch, filename, row_mask, write_maml, qc,              &
-            compression, compression_level, chunk_size, use_threads, overwrite, release)
+            compression, compression_level, chunk_size, use_threads, overwrite, release,         &
+            row_index_name)
         type(parquet_table), intent(in) :: table                   !! the table being written.
         type(parquet_schema), intent(in) :: sch                    !! schema that decides the output.
         character(len=*), intent(in) :: filename                   !! output parquet file.
@@ -356,12 +366,19 @@ contains
         logical, intent(in), optional :: use_threads               !! Arrow's multi-threaded writer.
         logical, intent(in), optional :: overwrite                 !! allow truncating an existing file.
         logical, intent(in), optional :: release                   !! give back what this write read.
+        character(len=*), intent(in), optional :: row_index_name   !! the field `sch` declares for the row numbers.
         type(parquet_writer) :: writer
         character(len=:), allocatable :: fname
+        integer(int64), allocatable :: ridx(:)
         integer :: i, nfields, idx
-        logical :: do_release, was_empty
+        logical :: do_release, was_empty, have_ridx
         !
         nfields = sch%get_num_fields()
+        ! Derived BEFORE the writer is opened, so a table that cannot produce row numbers -- built
+        ! in memory, or detached -- aborts with no output file created rather than a half-written
+        ! one. Once, not once per row group: this path writes the whole table in one go.
+        have_ridx = present(row_index_name)
+        if (have_ridx) call row_index_to_write(table, ridx)
         call parquet_open_writer(writer, trim(filename), sch, write_maml=write_maml, qc=qc,       &
             compression=compression, compression_level=compression_level, chunk_size=chunk_size,  &
             use_threads=use_threads, overwrite=overwrite)
@@ -373,6 +390,17 @@ contains
             ! A schema may deliberately disable a field (set_column_unavailable); skip those
             ! rather than demanding the table carry a column nobody is going to write.
             if (.not. sch%is_column_set(fname)) cycle
+            ! The one field that is not a column: its values were derived above, so it is written
+            ! straight out and never looked up. Nested rather than one .and., since the second
+            ! operand references a dummy that may be absent (fortran-gotchas.md: .and. does not
+            ! short-circuit). No is_valid= mask, because a row number is never Null -- the same
+            ! rule scalar_validity applies to every other column on this path.
+            if (have_ridx) then
+                if (fname == trim(row_index_name)) then
+                    call parquet_write_column(writer, fname, ridx)
+                    cycle
+                end if
+            end if
             call locate_column_to_write(table, fname, "parquet_write_table", idx)
             ! Writing a column the caller never read is a first touch like any other: the schema
             ! naming it IS the request to read it. Nothing has to be pre-materialized to write.
@@ -421,10 +449,16 @@ contains
     !! * **Resident columns only.** That is what makes this the quick path -- it writes what is
     !!   already in memory and reads nothing. A column the caller never touched is not written, so
     !!   `release=` never has anything to give back on this path.
-    !! * **`parquet_row_index` is never written**, even when it is resident. It is this library's
-    !!   own provenance column rather than the table's data, and having it appear unasked-for in an
-    !!   output file is the more surprising of the two possible answers. Name it in a schema to
-    !!   write it.
+    !! * **`parquet_row_index` is never written unasked**, even when it is resident. It is this
+    !!   library's own provenance column rather than the table's data, and having it appear
+    !!   unasked-for in an output file is the more surprising of the two possible answers.
+    !!   `row_index_name=` is how to ask: it appends one `int64` field of that name AFTER every
+    !!   resident column, and the values are then written by `write_through_schema` from the
+    !!   table's row numbers rather than from any slot -- which is why the resident-column rule
+    !!   above still skips the reserved slot, and why the two cannot produce a duplicate. A
+    !!   `row_index_name=` that collides with a column being written is refused HERE, where both
+    !!   names are in hand, rather than left to `%add_field`'s duplicate refusal, whose message
+    !!   names a procedure the caller never invoked.
     !! * **`col_size:`/`array_size:` are declared `auto`**, never measured here. The writer resolves
     !!   both from the data at the first write exactly as it would with no schema at all, so this
     !!   procedure cannot get them wrong -- and the sidecar MAML, emitted at close, records the
@@ -433,11 +467,12 @@ contains
     !! The `table:` name is the caller's, since a schema-less table has no schema name to take one
     !! from and MAML requires the key: the output file's stem for a write, the source file's stem
     !! or the caller's own choice for `parquet_derive_schema`.
-    subroutine build_table_schema(table, tname, sch, nfields)
+    subroutine build_table_schema(table, tname, sch, nfields, row_index_name)
         type(parquet_table), intent(in) :: table    !! the table being written.
         character(len=*), intent(in) :: tname       !! the MAML table: name; never blank.
         type(parquet_schema), intent(out) :: sch    !! the schema built from the descriptors.
         integer, intent(out) :: nfields             !! fields added; 0 means "no field to declare".
+        character(len=*), intent(in), optional :: row_index_name !! declare the row numbers, last, under this name.
         character(len=:), allocatable :: dtype, u
         logical :: is_vec, is_str
         integer :: i
@@ -479,10 +514,107 @@ contains
                 nfields = nfields + 1
             end associate
         end do
+        ! LAST, after every resident column, so the row numbers sit at the end of the file rather
+        ! than in the middle of the caller's own columns. No unit: a row number has none, and no
+        ! col_size:/array_size: either, since it is a scalar int64 column.
+        if (present(row_index_name)) then
+            call sch%add_field(trim(row_index_name), "int64")
+            nfields = nfields + 1
+        end if
         ! No parquet_parse_maml here: %init/%add_field keep %cinfo in step as the schema is
         ! built. MAML still requires at least one field, so the caller checks `nfields` and takes
         ! the empty-file path instead of this one.
     end subroutine build_table_schema
+    !
+    !> Validates a `row_index_name=` request, before the schema is built or any file is opened;
+    !! `context` is the public procedure's name and `has_schema` whether the caller gave `schema=`.
+    !! Absent, it does nothing at all -- which is why every existing write is untouched.
+    !!
+    !! **`schema=` is refused rather than honoured** because a schema IS the statement of which
+    !! columns the output has and what they are called, so a second argument adding one to it says
+    !! two things at once. The equivalent with a schema already exists and the message points at
+    !! it: materialize `parquet_row_index` and give the MAML a `col_map:` entry renaming it. (It
+    !! is not merely a policy choice -- `%add_field` requires `%init`, which a MAML-parsed schema
+    !! never called, so appending a field to the caller's schema is not available here anyway.)
+    !!
+    !! The collision test asks the same predicate the write itself will ask
+    !! (`schemaless_writes_slot`), so it answers about the columns actually going into the file
+    !! rather than about every column the table happens to hold; a slot the write skips cannot
+    !! collide with anything.
+    !!
+    !! **The reserved name is a WARNING, not a refusal**, and it is emitted last, after every
+    !! refusal above: the file is perfectly valid and other readers see the column, so refusing
+    !! would deny a legitimate request -- but `parquet_open_table` drops a file column of that
+    !! name on reopen, so a caller who has not read `table-open.md` would find the column missing
+    !! with nothing to explain it. Warning about a request that is then refused would be noise,
+    !! hence the order.
+    subroutine check_row_index_request(table, has_schema, context, row_index_name)
+        class(parquet_table), intent(in) :: table                !! the table being written.
+        logical, intent(in) :: has_schema                        !! .true. when the caller gave schema=.
+        character(len=*), intent(in) :: context                  !! calling procedure, for the messages.
+        character(len=*), intent(in), optional :: row_index_name !! the caller's request, if any.
+        character(len=:), allocatable :: sfx
+        integer :: i
+        !
+        if (.not. present(row_index_name)) return
+        if (has_schema) then
+            call table_context_suffix(table%cache, "", sfx)
+            error stop EP // context // ": row_index_name= and schema= cannot both be given; " // &
+                "the schema is what chooses and names the output columns, so to write the row " // &
+                "numbers under a schema, materialize '" // PARQUET_ROW_INDEX // "' and rename " // &
+                "it with a col_map: entry" // sfx
+        end if
+        if (len_trim(row_index_name) == 0) then
+            call table_context_suffix(table%cache, "", sfx)
+            error stop EP // context // ": row_index_name= must not be blank; it is the name " // &
+                "the row numbers are written under" // sfx
+        end if
+        do i = 1, table%cache%ncols
+            if (.not. schemaless_writes_slot(table%cache%cols(i))) cycle
+            if (table%cache%cols(i)%name /= trim(row_index_name)) cycle
+            call table_context_suffix(table%cache, trim(row_index_name), sfx)
+            error stop EP // context // ": row_index_name='" // trim(row_index_name) // "' is " // &
+                "already the name of a column this write is writing; give the row numbers a " // &
+                "name of their own" // sfx
+        end do
+        if (trim(row_index_name) == PARQUET_ROW_INDEX) then
+            call table_context_suffix(table%cache, "", sfx)
+            call parquet_emit_warning(context // ": row_index_name='" // PARQUET_ROW_INDEX // &
+                "' is the reserved name of the automatic row-index column, so parquet_open_table " // &
+                "drops this column when it reopens the output file, with a warning; only a " // &
+                "read-in MAML's extra: remap: can reach it there" // sfx)
+        end if
+    end subroutine check_row_index_request
+    !
+    !> The row numbers `row_index_name=` writes: the resident `parquet_row_index` column when the
+    !! table has one, otherwise derived.
+    !!
+    !! **The resident column wins, and that is not an optimisation.** `%sort_by` reorders it with
+    !! every other column, so on a table sorted after it was materialized the resident values are
+    !! the correct answer and a fresh derivation from the reader is not -- the reader knows the
+    !! read-time transform, not what the table did to its rows afterwards.
+    !!
+    !! An evicted one (residency back to RES_EMPTY, which is reachable: the row index is never
+    !! `user_populated`, so `%evict_column` accepts it) falls through to the derivation, which is
+    !! what would have rebuilt it anyway.
+    subroutine row_index_to_write(table, rows)
+        type(parquet_table), intent(in) :: table            !! the table being written.
+        integer(int64), allocatable, intent(out) :: rows(:) !! one 1-based file row number per table row.
+        integer(int64), pointer :: p(:)
+        integer :: idx
+        !
+        if (table%cache%row_index_live) then
+            idx = table_find(table, PARQUET_ROW_INDEX)
+            if (idx > 0) then
+                if (table%cache%cols(idx)%residency == RES_FULL) then
+                    call parquet_column_data_ptr(table%cache%cols(idx)%values, p)
+                    rows = p
+                    return
+                end if
+            end if
+        end if
+        call table_row_index_values(table, "parquet_write_table", rows)
+    end subroutine row_index_to_write
     !
     !> Whether a schema-less write takes `slot`: resident, supported, and not the row index --
     !! the three rules `build_table_schema`'s doc-comment gives. One predicate for the two callers

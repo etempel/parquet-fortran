@@ -36,6 +36,18 @@ contains
                 test_derive_schema_matches_schemaless_write), &
             new_unittest("parquet_derive_schema skips parquet_row_index and unread columns", &
                 test_derive_schema_skips_row_index), &
+            new_unittest("parquet_derive_schema declares row_index_name= as a last int64 field", &
+                test_derive_schema_row_index_name), &
+            new_unittest("row_index_name= writes the file row numbers, last, without materializing", &
+                test_write_row_index_name), &
+            new_unittest("row_index_name= on a filtered table writes the surviving file rows", &
+                test_write_row_index_filtered), &
+            new_unittest("row_index_name= follows a %sort_by that reordered a resident row index", &
+                test_write_row_index_after_sort), &
+            new_unittest("row_index_name= is cut by row_mask= with every other column", &
+                test_write_row_index_row_mask), &
+            new_unittest("row_index_name= on a table with nothing resident writes just the row numbers", &
+                test_write_row_index_only), &
             new_unittest("parquet_derive_schema's table: name is the source stem, 'table', or name=", &
                 test_derive_schema_name_rules), &
             new_unittest("set_protected on a derived schema reaches the file", &
@@ -302,6 +314,235 @@ contains
         call s%get_field(1, fname)
         call check(error, fname == "a", "the one field is the resident data column")
     end subroutine test_derive_schema_skips_row_index
+    !
+    !> `row_index_name=` puts one extra field in the derived schema, LAST and `int64`, so that
+    !! the schema keeps describing exactly what the equivalent write produces.
+    subroutine test_derive_schema_row_index_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, lazy
+        type(parquet_schema) :: s
+        integer(int32) :: a(NROW)
+        character(len=:), allocatable :: fname, dtype
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_rowidx_derive.parquet"
+        !
+        do i = 1, NROW
+            a(i) = i
+        end do
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        call parquet_write_table(t, f)
+        !
+        call parquet_open_table(lazy, f)
+        call lazy%prefetch("a")
+        call parquet_derive_schema(lazy, s, row_index_name="src_row")
+        call check(error, s%get_num_fields() == 2, "the resident column plus the row-index field")
+        if (allocated(error)) return
+        call s%get_field(1, fname)
+        call check(error, fname == "a", "the data column comes first")
+        if (allocated(error)) return
+        call s%get_field(2, fname, dtype)
+        call check(error, fname == "src_row", "the row-index field is last, under the name asked for")
+        if (allocated(error)) return
+        call check(error, dtype == "int64", "the row-index field is int64")
+    end subroutine test_derive_schema_row_index_name
+    !
+    !> The whole of the plain case: an UNMATERIALIZED row index is derived for the write, lands
+    !! last in the output under the name asked for, holds `1..nrows` for a whole untransformed
+    !! file -- and the table is left exactly as it was found, with no new column and no reserved
+    !! slot.
+    subroutine test_write_row_index_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, lazy, back
+        type(parquet_reader) :: r
+        integer(int32) :: a(NROW)
+        integer(int64), allocatable :: got(:)
+        character(len=:), allocatable :: cn(:), resident(:)
+        integer :: i, ncols_before
+        character(len=*), parameter :: f = "test_run/table_stream_rowidx_src.parquet"
+        character(len=*), parameter :: g = "test_run/table_stream_rowidx_out.parquet"
+        !
+        do i = 1, NROW
+            a(i) = i * 3
+        end do
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        call parquet_write_table(t, f)
+        !
+        call parquet_open_table(lazy, f)
+        call lazy%materialize_all()
+        ncols_before = lazy%ncols()
+        call parquet_write_table(lazy, g, row_index_name="src_row")
+        ! The table is untouched: no slot was added, so the reserved column is still virtual.
+        call check(error, lazy%ncols() == ncols_before, "the write added no column to the table")
+        if (allocated(error)) return
+        call lazy%column_names(resident, resident_only=.true.)
+        call check(error, size(resident) == 1, "only the data column is resident afterwards")
+        if (allocated(error)) return
+        !
+        call parquet_open_reader(r, g)
+        call parquet_get_column_names(r, cn)
+        call check(error, size(cn) == 2, "the data column and the row-index column")
+        if (allocated(error)) return
+        call check(error, trim(cn(2)) == "src_row", "the row-index column is written last")
+        if (allocated(error)) return
+        call parquet_close_reader(r)
+        !
+        call parquet_open_table(back, g)
+        call back%get("src_row", got)
+        call check(error, size(got) == NROW, "one row number per row")
+        if (allocated(error)) return
+        do i = 1, NROW
+            call check(error, got(i) == int(i, int64), "an untransformed whole file numbers 1..nrows")
+            if (allocated(error)) return
+        end do
+    end subroutine test_write_row_index_name
+    !
+    !> On a FILTERED table the row numbers are the file rows that survived, which is the case
+    !! nothing else can reconstruct: asserted against the automatic column read from a second,
+    !! identically filtered table rather than against arithmetic.
+    subroutine test_write_row_index_filtered(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, narrowed, oracle, back
+        type(parquet_filter) :: filt
+        integer(int64) :: ids(NROW)
+        integer(int64), allocatable :: got(:), want(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_rowidx_filt_src.parquet"
+        character(len=*), parameter :: g = "test_run/table_stream_rowidx_filt_out.parquet"
+        !
+        do i = 1, NROW
+            ids(i) = int(i, int64)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        call parquet_write_table(t, f)
+        !
+        call filt%add("id > 6")
+        call parquet_open_table(narrowed, f, filter=filt)
+        call narrowed%materialize_all()
+        call parquet_write_table(narrowed, g, row_index_name="src_row")
+        !
+        call parquet_open_table(oracle, f, filter=filt)
+        call oracle%get(PARQUET_ROW_INDEX, want)
+        call parquet_open_table(back, g)
+        call back%get("src_row", got)
+        call check(error, size(got) == size(want), "the same number of surviving rows")
+        if (allocated(error)) return
+        do i = 1, size(want)
+            call check(error, got(i) == want(i), "the written row numbers are the surviving file rows")
+            if (allocated(error)) return
+        end do
+    end subroutine test_write_row_index_filtered
+    !
+    !> A row index materialized BEFORE a `%sort_by` is reordered with every other column, so the
+    !! resident values are the answer and a fresh derivation from the reader would not be. Pinned
+    !! against the table's own resident column after the sort.
+    subroutine test_write_row_index_after_sort(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, sorted, back
+        integer(int64) :: ids(NROW)
+        integer(int64), allocatable :: got(:), want(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_rowidx_sort_src.parquet"
+        character(len=*), parameter :: g = "test_run/table_stream_rowidx_sort_out.parquet"
+        !
+        do i = 1, NROW
+            ids(i) = int(NROW - i + 1, int64)   ! descending, so the sort really moves rows
+        end do
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        call parquet_write_table(t, f)
+        !
+        call parquet_open_table(sorted, f)
+        call sorted%prefetch(PARQUET_ROW_INDEX)     ! materialize it FIRST, then reorder it
+        call sorted%materialize_all()
+        call sorted%sort_by("id")
+        call sorted%get(PARQUET_ROW_INDEX, want)
+        call parquet_write_table(sorted, g, row_index_name="src_row")
+        !
+        call parquet_open_table(back, g)
+        call back%get("src_row", got)
+        call check(error, size(got) == NROW, "one row number per row")
+        if (allocated(error)) return
+        call check(error, want(1) == int(NROW, int64), "precondition: the sort moved the last file row first")
+        if (allocated(error)) return
+        do i = 1, NROW
+            call check(error, got(i) == want(i), "the written row numbers follow the sorted order")
+            if (allocated(error)) return
+        end do
+    end subroutine test_write_row_index_after_sort
+    !
+    !> `row_mask=` drops its `.false.` rows from the row-index column exactly as from every other
+    !! column -- it goes through the same write loop and the same mask.
+    subroutine test_write_row_index_row_mask(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, lazy, back
+        integer(int64) :: ids(NROW)
+        logical :: mask(NROW)
+        integer(int64), allocatable :: got(:), gotid(:)
+        integer :: i, n
+        character(len=*), parameter :: f = "test_run/table_stream_rowidx_mask_src.parquet"
+        character(len=*), parameter :: g = "test_run/table_stream_rowidx_mask_out.parquet"
+        !
+        do i = 1, NROW
+            ids(i) = int(i, int64)
+            mask(i) = mod(i, 2) == 0
+        end do
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        call parquet_write_table(t, f)
+        !
+        call parquet_open_table(lazy, f)
+        call lazy%materialize_all()
+        call parquet_write_table(lazy, g, row_mask=mask, row_index_name="src_row")
+        !
+        call parquet_open_table(back, g)
+        call back%get("src_row", got)
+        call back%get("id", gotid)
+        n = count(mask)
+        call check(error, size(got) == n, "only the unmasked rows are written")
+        if (allocated(error)) return
+        do i = 1, n
+            call check(error, got(i) == gotid(i), "the row index was cut by the same mask as the data")
+            if (allocated(error)) return
+        end do
+        call check(error, got(1) == 2_int64, "the first surviving row is file row 2")
+    end subroutine test_write_row_index_row_mask
+    !
+    !> A lazy table with NOTHING resident normally writes an empty file; `row_index_name=` puts a
+    !! field in the schema, so it takes the ordinary path and writes just the row numbers.
+    subroutine test_write_row_index_only(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, lazy, back
+        integer(int64) :: ids(NROW)
+        integer(int64), allocatable :: got(:)
+        character(len=:), allocatable :: cn(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_stream_rowidx_only_src.parquet"
+        character(len=*), parameter :: g = "test_run/table_stream_rowidx_only_out.parquet"
+        !
+        do i = 1, NROW
+            ids(i) = int(i, int64)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        call parquet_write_table(t, f)
+        !
+        call parquet_open_table(lazy, f)   ! nothing read at all
+        call parquet_write_table(lazy, g, row_index_name="src_row")
+        !
+        call parquet_open_table(back, g)
+        call back%column_names(cn)
+        call check(error, size(cn) == 1, "one column: the row numbers")
+        if (allocated(error)) return
+        call check(error, trim(cn(1)) == "src_row", "under the name asked for")
+        if (allocated(error)) return
+        call back%get("src_row", got)
+        call check(error, size(got) == NROW, "every row of the source file")
+        if (allocated(error)) return
+        call check(error, got(NROW) == int(NROW, int64), "numbered through to the last file row")
+    end subroutine test_write_row_index_only
     !
     !> The `table:` name: "table" for a table built in memory, the source file's stem for a
     !! file-backed one, `name=` when given. Read back from the sidecar a writer emits from the

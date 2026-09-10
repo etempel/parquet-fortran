@@ -213,13 +213,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Null may appear in any row group; `protected_cols:` opts a column out.
   `call parquet_derive_schema(t, s, [name])` hands back the `parquet_schema` a schema-less
   `parquet_write_table(t, file)` builds — one field per resident column, `auto` sizes, a `unit:`
-  where the column has one, `parquet_row_index` never — parsed and ready for `%set_protected`,
+  where the column has one, `parquet_row_index` only on request — parsed and ready for `%set_protected`,
   `%add_metadata` or `parquet_open_writer`; `call parquet_open_writer_like(writer, file, t)`
   derives it and opens the writer in one call, taking `schema=`, `copy_metadata=`/`metadata_keys=`
   and every writer option under `parquet_write_table`'s names. `parquet_get_column_names` also
   takes a writer, listing the internal name of every field its schema declares in schema order,
   and `parquet_is_column_enabled(writer, name)` is public. See
   [Writing a table one row group at a time](doc/pages/tables/table-write.md#writing-a-table-one-row-group-at-a-time).
+- **Writing the source file's row numbers: `row_index_name=`.**
+  `call parquet_write_table(t, file, row_index_name="src_row")` adds a last `int64` column of that
+  name holding each written row's physical row number in the source parquet file — the automatic
+  `parquet_row_index` answer, under a name of your choosing, whether or not it was materialized and
+  without adding a column to the table. `row_mask=` cuts it with every other column and
+  `parquet_derive_schema(t, s, row_index_name=...)` declares it the same way. It excludes `schema=`,
+  needs a table that still has its source file, and warns when the name given is `parquet_row_index`
+  itself. See
+  [Writing the source file's row numbers](doc/pages/tables/table-write.md#writing-the-source-files-row-numbers-row_index_name).
 - **A schema can declare that a column may hold Nulls: `extra: nullable_cols:`.** The counterpart of
   `protected_cols:` — one forbids a Null and aborts if it finds one, the other declares that a Null
   is expected, so the column is written with a nullable field even when the values in hand have

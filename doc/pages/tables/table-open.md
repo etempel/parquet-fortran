@@ -504,6 +504,12 @@ Five things to know:
   of threads thereafter. A table *this* thread opened inside the region is thread-private and is
   not affected.
 - **A table built in memory has no such column** — it was not read from anywhere.
+- **To put it in an output file, use `row_index_name=`** rather than writing this column:
+  `parquet_write_table(t, "out.parquet", row_index_name="src_row")` writes the same row numbers
+  under a name of your choosing, whether or not you materialized them
+  ([details](table-write.html#writing-the-source-files-row-numbers-row_index_name)). Writing them
+  under the reserved name itself is accepted but warned about, since a file column called
+  `parquet_row_index` is dropped when this library reopens it, as above.
 
 `parquet_get_physical_row_indices(reader, rows)` is the same answer at the reader level, if you
 are not using a table.

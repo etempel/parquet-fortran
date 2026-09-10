@@ -4853,12 +4853,30 @@ module parquet_tables
             type(parquet_table_cache), intent(in) :: cache !! the table's store, with its transform.
             logical :: narrows                             !! .true. if rows are removed.
         end function table_transform_narrows
-        !> Gives the automatic `parquet_row_index` column a real slot and fills it.
+        !> Derives this table's physical row numbers into `rows`, WITHOUT giving the table a
+        !! column.
         !!
         !! Where the values come from depends only on what the table is: `i` for a whole file with
         !! no transform, `row_lo + i - 1` for an unfiltered slice, and -- for a filtered, sampled
         !! or sorted table -- the reader's own account of which file rows survived and in what
         !! order, which nothing else can reconstruct.
+        !!
+        !! Declared here rather than kept private to one submodule because two need it, and two
+        !! copies of the regime arithmetic would be exactly the kind of pair that drifts:
+        !! `table_make_row_index`, which turns the answer into the automatic column, and
+        !! `parquet_write_table`'s `row_index_name=`, which writes it without one.
+        !!
+        !! error stops when the table has no file to name rows of -- built in memory, or detached
+        !! by a row-structural mutation -- since the values are then not derivable at all. It adds
+        !! no slot and touches no descriptor, so a caller that only wants the values leaves the
+        !! table exactly as it found it.
+        module subroutine table_row_index_values(self, proc, rows)
+            class(parquet_table), intent(in) :: self !! the table (reads through %cache).
+            character(len=*), intent(in) :: proc     !! calling procedure name (for the message).
+            integer(int64), allocatable, intent(out) :: rows(:) !! one 1-based file row number per table row.
+        end subroutine table_row_index_values
+        !> Gives the automatic `parquet_row_index` column a real slot and fills it, from
+        !! `table_row_index_values`.
         !!
         !! Private: reached through the ordinary column API, which resolves the reserved name to
         !! this on first use.
@@ -4975,9 +4993,29 @@ module parquet_tables
         !! currently RESIDENT is written, in slot order, under its own internal name -- a quick
         !! path for a small or temporary table that reads nothing and needs no schema built for
         !! it. A table with nothing resident writes a valid empty file. The automatic
-        !! `parquet_row_index` column is never written by a schema-less write, even when it is
-        !! resident; name it in a schema to write it. Without a schema there is no `col_map:` and
-        !! no `qc:`, so output names are the internal names and writer-side qc is off.
+        !! `parquet_row_index` column is never written unless `row_index_name=` asks for it, even
+        !! when it is resident. Without a schema there is no `col_map:` and no `qc:`, so output
+        !! names are the internal names and writer-side qc is off.
+        !!
+        !! **`row_index_name=` writes the physical row numbers as a column of that name**, last,
+        !! as `int64` with no unit -- which row of the source parquet file each written row came
+        !! from. Whether the automatic `parquet_row_index` column is resident makes no difference:
+        !! naming it here is the request, so an unmaterialized one is derived for the write and
+        !! a resident one is used as it stands (which is what keeps it right after `%sort_by`).
+        !! Either way the table gains no column and no descriptor moves, so `%ncols`,
+        !! `%column_names`, `%generation()` and `release=` are unaffected. `row_mask=` drops its
+        !! rows from this column with all the others, and `write_maml=.true.` declares it in the
+        !! sidecar.
+        !!
+        !! It needs a table that still has its file: a table built in memory has no file row to
+        !! record, and a detached one can no longer derive one, so both are an error naming this
+        !! argument. `row_index_name=` and `schema=` cannot
+        !! be given together -- with a schema, the schema is what chooses and names the output
+        !! columns, so materialize `parquet_row_index` and rename it with a `col_map:` entry
+        !! instead. The name must not be blank, and must not collide with a column being written.
+        !! `row_index_name="parquet_row_index"` is accepted with a WARNING: that name is reserved,
+        !! so `parquet_open_table` drops such a column on reopen unless a read-in MAML's
+        !! `extra: remap:` renames it.
         !!
         !! A schema built with `%init`/`%add_field` and never parsed is parsed here, so calling
         !! `parquet_parse_maml` first is optional. That is why `schema` is `intent(inout)`: the
@@ -5004,7 +5042,7 @@ module parquet_tables
         !! released), never a missed one.
         module subroutine parquet_write_table(table, filename, schema, row_mask, copy_metadata,   &
                 metadata_keys, write_maml, qc, compression, compression_level, chunk_size,        &
-                use_threads, overwrite, release)
+                use_threads, overwrite, release, row_index_name)
             class(parquet_table), intent(in) :: table  !! the table to write (any extending type too).
             character(len=*), intent(in) :: filename   !! output parquet file.
             type(parquet_schema), intent(inout), optional :: schema !! output schema; absent = schema-less write.
@@ -5019,12 +5057,18 @@ module parquet_tables
             logical, intent(in), optional :: use_threads !! use Arrow's multi-threaded writer.
             logical, intent(in), optional :: overwrite !! allow truncating an existing file; default .true.
             logical, intent(in), optional :: release !! evict columns this write materialized; default .true.
+            character(len=*), intent(in), optional :: row_index_name !! also write the source file's row
+            !! numbers, as a last int64 column of this name; excludes schema=.
         end subroutine parquet_write_table
         !> Builds the `parquet_schema` a schema-less `parquet_write_table(table, file)` would build
         !! for `table`, and hands it back in `schema`: one field per RESIDENT column, in slot order,
         !! under the column's own internal name; `col_size:`/`array_size:` declared `auto` (the
         !! writer resolves both from the data); the `unit:` key present only where the column has
-        !! one; the automatic `parquet_row_index` never included. The result is parsed and ready
+        !! one; the automatic `parquet_row_index` included only when `row_index_name=` asks for
+        !! it, as a last `int64` field, under `parquet_write_table`'s rules for the NAME (blank,
+        !! collision and the reserved-name warning all apply). Whether the table can actually
+        !! produce row numbers is the write's business and is not asked here, since this procedure
+        !! reads nothing. The result is parsed and ready
         !! for `parquet_open_writer`, and it is where every adjustment lives: `schema%set_protected`
         !! recovers the unmasked write path for a column that never holds a Null, `%add_metadata`
         !! puts provenance in the file, `%set_column_unavailable` drops a column from the output.
@@ -5037,11 +5081,13 @@ module parquet_tables
         !! opened from, or `"table"` for a table built in memory. error stops when the table has
         !! no resident column: MAML requires at least one field, so there is no schema to hand
         !! back (a schema-less `parquet_write_table` of such a table writes an empty file instead).
-        module subroutine parquet_derive_schema(table, schema, name)
+        module subroutine parquet_derive_schema(table, schema, name, row_index_name)
             class(parquet_table), intent(in) :: table   !! the table to take the shape of (any extending type too).
             type(parquet_schema), intent(out) :: schema !! receives the derived schema, parsed.
             character(len=*), intent(in), optional :: name !! the MAML table: name; default: the source
             !! file's stem, or "table" for an in-memory table.
+            character(len=*), intent(in), optional :: row_index_name !! also declare the source file's row
+            !! numbers, as a last int64 field of this name.
         end subroutine parquet_derive_schema
         !> `parquet_derive_schema` plus `parquet_open_writer`, in one call: opens `writer` on
         !! `filename` with the schema derived from `table`'s resident columns -- or with `schema`

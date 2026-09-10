@@ -220,8 +220,8 @@ A few consequences worth knowing:
 - **Writer-side qc is off**, because there is no `qc:` block to enforce. Read-time qc, if the table
   was opened with `qc=` or a read-in MAML, has already run and is unaffected.
 - **The automatic [`parquet_row_index`](table-open.html#which-row-of-the-file-is-this) column is
-  never written**, even when you have materialized it. It records where a row came from rather than
-  being part of your table; name it in a schema if you want it in the output.
+  never written unless you ask**, even when you have materialized it. It records where a row came
+  from rather than being part of your table. `row_index_name=`, below, is how to ask.
 - **`release=` has nothing to do**, since a schema-less write only ever writes columns that were
   already resident.
 - **`row_mask=` works here too.** Both paths share one write loop, so the mask described
@@ -252,13 +252,52 @@ carries no unit of its own. A temporal column *built in memory* with `%add_colum
 unit to record, so it takes the default microseconds; give it a schema with an explicit
 `timestamp[ns]`-style token if it needs finer.
 
+### Writing the source file's row numbers: `row_index_name=`
+
+`row_index_name=` adds one column to the output holding each written row's physical row number in
+the source parquet file — the same answer the automatic
+[`parquet_row_index`](table-open.html#which-row-of-the-file-is-this) column gives, under a name you
+choose:
+
+```fortran
+call parquet_open_table(t, "big.parquet", filter=filt)
+call t%materialize_all()
+call parquet_write_table(t, "kept.parquet", row_index_name="src_row")
+```
+
+`kept.parquet` then carries `src_row` alongside the data columns, saying which rows of
+`big.parquet` survived the filter. It is `int64`, has no unit, and comes **last**, after every
+resident column.
+
+Four things follow:
+
+- **It does not matter whether you materialized it.** Naming it here is the request, so an
+  unmaterialized row index is derived for the write and a resident one is used as it stands (which
+  is what keeps it right when you materialized it before a `%sort_by` that reordered it). Either
+  way your table is left exactly as it was: no column is added, `%ncols` and `%column_names` do not
+  change, and no `%col` pointer is invalidated.
+- **It needs a table that still has its file.** A table built in memory has no file row to record,
+  and a [detached](table-mutate.html#what-detaching-means) one can no longer work one out; both are
+  an error naming the argument. Write it *before* the mutation that detaches, as for the automatic
+  column itself.
+- **It works with `row_mask=`, and not with `schema=`.** The mask drops its rows from this column
+  along with every other. A schema, on the other hand, is itself the statement of which columns the
+  output has and what they are called, so passing both is an error: with a schema, materialize
+  `parquet_row_index` and rename it with a [`col_map:`](../schema/maml-format.html) entry.
+- **Avoid the name `parquet_row_index`.** It is accepted, and warned about: that name is reserved,
+  so `parquet_open_table` drops a file column called that when it reopens the output, and only a
+  read-in MAML's `extra: remap:` can reach it there. Any other name reads back normally.
+
+The name must not be blank, and must not collide with a column being written — `row_index_name` is
+a new column, not a rename of an existing one (use `%rename_column` for that).
+
 ## Writer options
 
 The full call form, with square brackets marking the optional arguments (the brackets are notation
 here and elsewhere on this page, not something you type) — the arguments are introduced a group at a
 time above and below, and this is the one place they appear together:
 
-`call parquet_write_table(table, filename, [schema], [row_mask], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite], [release])`
+`call parquet_write_table(table, filename, [schema], [row_mask], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite], [release], [row_index_name])`
 
 Everything [`parquet_open_writer`](../io/writing.html#writer-options) can be told,
 `parquet_write_table` can be told too, under the same names and with the same defaults:
@@ -389,12 +428,16 @@ call parquet_close_writer(w)
 The schema is exactly the one the schema-less write would have used: one field per **resident**
 column, in slot order, under the column's own internal name; `col_size:`/`array_size:` declared
 `auto`, so the writer resolves them from the data; the `unit:` key present only where the column has
-one; the automatic `parquet_row_index` never included. It comes back parsed. Nothing is read to
+one; the automatic `parquet_row_index` included only when `row_index_name=` asks for it, under the
+[same rules for the name](#writing-the-source-files-row-numbers-row_index_name), so the schema keeps
+describing what the equivalent write produces. Whether the table can actually supply row numbers is
+the write's business and is not asked here, since this call reads nothing. It comes back parsed.
+Nothing is read to
 build it, and nothing is measured from the values — in particular, whether a column currently holds
 a Null says nothing about the file, and the schema does not pretend otherwise: a column that must be
 written non-nullable is declared so with `%set_protected` (or `protected_cols:`), in advance.
 
-The optional third argument is the MAML `table:` name: `parquet_derive_schema(t, s, name="dr4")`.
+The optional `name` argument is the MAML `table:` name: `parquet_derive_schema(t, s, name="dr4")`.
 Omitted, it is the stem of the file the table was opened from, or `table` for one built in memory.
 A table with no resident column is an error rather than an empty schema, because MAML has no way to
 declare zero fields; materialize something first.

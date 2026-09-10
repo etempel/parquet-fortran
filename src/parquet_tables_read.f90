@@ -1572,37 +1572,29 @@ contains
         if (present(found)) found = .true.
     end subroutine table_prefetch_resolve
     !
-    module procedure table_make_row_index
-        integer(int64), allocatable :: rows(:)
+    module procedure table_row_index_values
         integer(int64) :: i
-        integer :: idx
-        type(parquet_column) :: col
         character(len=:), allocatable :: sfx
         !
-        if (self%cache%row_index_live) return
-        if (.not. self%cache%file_backed .or. self%detached) then
+        ! Two refusals rather than one, because the two states are different mistakes and only one
+        ! of them has a fix: a table built in memory never had a file row to record, so no ordering
+        ! of the program's calls would have produced an answer; a detached table HAD one and lost
+        ! it, so the advice is to ask before the mutation.
+        !
+        ! DETACHED IS TESTED FIRST, and the order is load-bearing: table_detach clears
+        ! `cache%file_backed` as well as setting `detached`, so a detached table satisfies both
+        ! tests and the other order reports it as never having had a file -- advice that is both
+        ! wrong and unactionable. `.not. file_backed` therefore reads as "never had one".
+        if (self%detached) then
             call table_context_suffix(self%cache, PARQUET_ROW_INDEX, sfx)
             error stop EP // "the " // PARQUET_ROW_INDEX // " column says which row of the " // &
                 "source file each row came from, so it is only available while the table still " // &
                 "has that file; materialize it BEFORE the mutation that detaches" // sfx
         end if
-        ! REFUSED HERE, not by table_new_slot at the bottom of this procedure, for two reasons.
-        ! The message: a caller who wrote %get or %prefetch got one naming `add_column`, a
-        ! procedure they never invoked and cannot find in their own code -- and the real advice
-        ! ("ask for it once before the region") is specific to this column, not to structural
-        ! mutation in general. And the ORDER: on a filtered, sampled or sorted table the branch
-        ! below reads the shared reader, so the late guard let two threads into
-        ! parquet_get_physical_row_indices first and the C++ concurrency guard aborted instead,
-        ! reporting a reader collision for what is really a table-structure problem. Everything
-        ! above this line only reads scalars, so this is the first point at which anything is at
-        ! stake.
-        if (unsafe_shared_mutation(self%cache)) then
+        if (.not. self%cache%file_backed) then
             call table_context_suffix(self%cache, PARQUET_ROW_INDEX, sfx)
-            error stop EP // trim(proc) // ": '" // PARQUET_ROW_INDEX // "' does not exist yet, " // &
-                "and materializing it ADDS a column -- which a table this thread did not open " // &
-                "inside the parallel region cannot do, since it would move every other column's " // &
-                "descriptor. Ask for it ONCE before the region (%get, %col or %prefetch) and it " // &
-                "is an ordinary resident column inside it" // sfx
+            error stop EP // trim(proc) // ": this table was not read from a parquet file, so " // &
+                "there is no source-file row number to record for its rows" // sfx
         end if
         allocate(rows(self%row_count))
         if (self%regime == REGIME_SLICE .and. .not. table_transform_narrows(self%cache) .and. &
@@ -1622,6 +1614,35 @@ contains
             ! since its reader is scoped to the slice's rows already.
             call parquet_get_physical_row_indices(self%cache%reader, rows)
         end if
+    end procedure table_row_index_values
+    !
+    module procedure table_make_row_index
+        integer(int64), allocatable :: rows(:)
+        integer :: idx
+        type(parquet_column) :: col
+        character(len=:), allocatable :: sfx
+        !
+        if (self%cache%row_index_live) return
+        ! REFUSED HERE, not by table_new_slot at the bottom of this procedure, for two reasons.
+        ! The message: a caller who wrote %get or %prefetch got one naming `add_column`, a
+        ! procedure they never invoked and cannot find in their own code -- and the real advice
+        ! ("ask for it once before the region") is specific to this column, not to structural
+        ! mutation in general. And the ORDER: on a filtered, sampled or sorted table
+        ! table_row_index_values reads the shared reader, so the late guard let two threads into
+        ! parquet_get_physical_row_indices first and the C++ concurrency guard aborted instead,
+        ! reporting a reader collision for what is really a table-structure problem. Everything
+        ! above this line only reads scalars, so this is the first point at which anything is at
+        ! stake -- which is also why it now precedes the detached refusal that used to come first:
+        ! both are aborts, and only this one has an ordering requirement.
+        if (unsafe_shared_mutation(self%cache)) then
+            call table_context_suffix(self%cache, PARQUET_ROW_INDEX, sfx)
+            error stop EP // trim(proc) // ": '" // PARQUET_ROW_INDEX // "' does not exist yet, " // &
+                "and materializing it ADDS a column -- which a table this thread did not open " // &
+                "inside the parallel region cannot do, since it would move every other column's " // &
+                "descriptor. Ask for it ONCE before the region (%get, %col or %prefetch) and it " // &
+                "is an ordinary resident column inside it" // sfx
+        end if
+        call table_row_index_values(self, proc, rows)
         ! The slot is made directly rather than through %add_column, which would call
         ! table_fix_nrows and mark the column user_populated: nobody wrote these values, the table
         ! derived them, and %evict_column, %reload, %print_stat and %clone all care about the

@@ -10,6 +10,8 @@
 #   MODE=backend bench/benchmark_spatial.sh          # 3D grid vs HEALPix, on the sky
 #   MODE=backend DIST=clustered bench/benchmark_spatial.sh
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 RATIO=10 bench/benchmark_spatial.sh   # the LOS cylinder
+#   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 WALK=ball bench/benchmark_spatial.sh   # its covering-ball walk
+#   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 CELLS_PER_POINT=30 bench/benchmark_spatial.sh
 #   DIST=clustered NP=2000000 bench/benchmark_spatial.sh
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
@@ -19,6 +21,11 @@
 #                    3D fixture, the wedge being the survey shape it is about)
 #   SKYR=1           MODE=backend only: the build radius in DEGREES.
 #   RATIO=10         MODE=los only: the cylinders' aspect ratio in distance, L*b_par / b_perp.
+#   WALK=cylinder    MODE=los only: cylinder (the shipped walk) | ball (the covering-ball walk, forced).
+#   SPREAD=local     MODE=los only: local (each emitter's own parallel window bounds its distance
+#                    range, the shipped bound) | global (the catalogue-wide max(L*W, g)).
+#   CELLS_PER_POINT=0  MODE=los only: > 0 relaxes the cells-per-point ceiling (shipped 0.3) through
+#                    its test-only override, so the cell can follow the cross-section.
 #   NP=1000000       points in the cloud. 1e6 real64 x 3 is 24 MB.
 #   NQ=20000         single queries per timed round.
 #   ROUNDS=3         rounds per arm; the best is kept, per this repo's rules.
@@ -63,17 +70,21 @@
 #           is a mode rather than a number written down anywhere: HEALPix pays a fixed per-query
 #           cost for the disc walk that the grid's integer cell arithmetic does not, and wins it
 #           back on candidates only once the radius is large enough.
-#   los     THE LINE-OF-SIGHT CYLINDER against the work-around it replaces. Derives a redshift-like
-#           los= from the fixture's distances, sets per-point lengths so that L*b_par/b_perp is
-#           RATIO, and times %pairs_within_los against %pairs_within at the covering radius plus a
-#           serial re-test of every candidate. Prints the candidates tested per pair kept -- the
-#           ball walk's excess over the cylinder, which a cylinder walk (Stage 3 of
-#           feature_fof_S2.md) exists to remove -- beside the geometric volume ratio, and the peak
-#           list the work-around held. Run at RATIO=10 and RATIO=30 on DIST=wedge, with SURVEY
-#           dimensions: SIDE=1500 RLO=0.3 RHI=0.5 (a wedge 1500 deep with sub-Mpc transverse
-#           lengths). At the other modes' defaults, a 100-unit box with radii 1..5, each covering
-#           ball is a tenth of the box at RATIO=10 and the work-around's pair list would not fit in
-#           memory; the mode counts first and refuses rather than allocate it.
+#   los     THE LINE-OF-SIGHT CYLINDER against the work-around it replaces, and its cylinder walk
+#           against the covering-ball walk. Derives a redshift-like los= from the fixture's
+#           distances, sets per-point lengths so that L*b_par/b_perp is RATIO, and times
+#           %pairs_within_los -- walking the cylinder, or the covering ball under WALK=ball; bounding
+#           each emitter's distance range by its own parallel window, or by the catalogue-wide slope
+#           under SPREAD=global -- against %pairs_within at the covering radius plus a serial re-test
+#           of every candidate. Prints CANDIDATES TESTED PER PAIR KEPT for both, read for the library
+#           arm from its own counter, beside the geometric volume ratio, each arm's cell and the peak
+#           list the work-around held. Run at RATIO=10 and RATIO=30 on DIST=wedge with SURVEY
+#           dimensions, SIDE=1500 RLO=0.3 RHI=0.5 (a wedge 1500 deep with sub-Mpc transverse
+#           lengths), once per WALK, once per SPREAD, and with CELLS_PER_POINT relaxed (30) to see
+#           how much of the remaining excess is the ceiling's; SIDE=1800 reaches z = 1, where the
+#           global spread overshoots most. At the other modes' defaults, a 100-unit box with radii
+#           1..5, each covering ball is a tenth of the box at RATIO=10 and the work-around's pair
+#           list would not fit in memory; the mode counts first and refuses rather than allocate it.
 #
 # Report the NOISE FLOOR with any figure. Re-running one binary reproduces to a fraction of a
 # per cent here; anything compared across two BUILDS needs a floor measured across rebuilds with an
@@ -101,11 +112,14 @@ RHI="${RHI:-5}"
 THREADS="${THREADS:-0}"
 SKYR="${SKYR:-1}"
 RATIO="${RATIO:-10}"
+WALK="${WALK:-cylinder}"
+SPREAD="${SPREAD:-local}"
+CELLS_PER_POINT="${CELLS_PER_POINT:-0}"
 
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            awk 'NR >= 2 && !/^#/ { exit } NR >= 2 { print }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -170,7 +184,7 @@ echo "  fortran     : ${FPM_FC:-gfortran (fpm default)}"
 echo "  flags       : $FLAGS_LINE"
 echo "  uname -m    : $(uname -m)"
 echo "  mode=$MODE dist=$DIST np=$NP nq=$NQ rounds=$ROUNDS side=$SIDE r=$RLO..$RHI threads=$THREADS"
-echo "  skyr=$SKYR (MODE=backend only)  ratio=$RATIO (MODE=los only)"
+echo "  skyr=$SKYR (MODE=backend only)  ratio=$RATIO walk=$WALK spread=$SPREAD cells_per_point=$CELLS_PER_POINT (MODE=los only)"
 echo "=============================================================================="
 echo
 
@@ -178,7 +192,8 @@ fpm build --profile release >/dev/null
 
 fpm run benchmark_spatial --profile release -- \
     --mode="$MODE" --dist="$DIST" --np="$NP" --nq="$NQ" --rounds="$ROUNDS" \
-    --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS" --skyr="$SKYR" --ratio="$RATIO"
+    --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS" --skyr="$SKYR" --ratio="$RATIO" \
+    --walk="$WALK" --spread="$SPREAD" --cells="$CELLS_PER_POINT"
 
 echo
 echo "Build tree left at $FPM_BUILD_DIR (rm -rf test_run/spatial-bench-* to clean up)."

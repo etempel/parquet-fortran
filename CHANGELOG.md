@@ -20,7 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parallel separation is the difference in distance from the observer. `combine=` chooses how two
   points' lengths decide a pair, `PF_LINK_MAX` meaning the union of the two cylinders; `dperp=` and
   `dpar=` return the two separations per pair. `%rebuild` takes `los=` exactly when the index
-  carries one. `bench/benchmark_spatial.sh` gains `MODE=los`. See
+  carries one. The candidates are walked as each point's own cylinder along its line of sight,
+  bounded in distance by the spread of the stored points within `b_par` of it in `los`, so a long
+  thin cylinder tests few candidates it does not keep; build with `radius = b_perp`.
+  `bench/benchmark_spatial.sh` gains `MODE=los`, with `WALK=`, `SPREAD=` and `CELLS_PER_POINT=`
+  arms. See
   [Cylinders along the line of sight](doc/pages/utilities/spatial.md#cylinders-along-the-line-of-sight).
 - **Grouping: `parquet_table%group_by` and the `parquet_grouping` object.**
   `t%group_by(keys, grp)` partitions a table's rows by the values of one or more key columns and

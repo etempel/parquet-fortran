@@ -117,6 +117,14 @@ contains
                          test_within_los_short_buffer_keeps_true_count), &
             new_unittest("los= stays aligned through copy=.false., re-tuning and %rebuild", &
                          test_pairs_los_survives_rebuild_and_copy_false), &
+            new_unittest("the cylinder walk returns exactly the ball walk's pairs under every rule", &
+                         test_los_cylinder_walk_matches_ball_walk), &
+            new_unittest("the union's tiebreak emits a pair in both cylinders exactly once", &
+                         test_los_union_tiebreak_counts), &
+            new_unittest("within_los walks the cylinder and answers as the ball does", &
+                         test_within_los_walks_the_cylinder), &
+            new_unittest("the cells-per-point override relaxes the ceiling and changes no answer", &
+                         test_cells_per_point_override_relaxes_the_ceiling), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
@@ -4784,5 +4792,396 @@ contains
         call check(error, changed, "%rebuild with a changed los alone must rebuild")
         call parquet_set_spatial_rebuild_warning(warn_was)
     end subroutine test_pairs_los_survives_rebuild_and_copy_false
+
+    !> The pair list `(pi, pj)` as a set over `n` rows, for use as the reference another walk is
+    !> held to: .false. when it holds a pair twice or one not ordered `i < j`.
+    logical function pairs_to_set(pi, pj, n, want, nwant) result(ok)
+        integer(int64), intent(in) :: pi(:) !! the lower rows.
+        integer(int64), intent(in) :: pj(:) !! the higher rows.
+        integer(int64), intent(in) :: n !! how many rows the index holds.
+        logical, allocatable, intent(out) :: want(:, :) !! the set, upper triangle.
+        integer(int64), intent(out) :: nwant !! how many pairs it holds.
+        integer(int64) :: k
+
+        ok = .false.
+        nwant = size(pi, kind=int64)
+        allocate (want(n, n))
+        want = .false.
+        if (size(pj, kind=int64) /= nwant) return
+        do k = 1_int64, nwant
+            if (pi(k) >= pj(k)) return
+            if (want(pi(k), pj(k))) return
+            want(pi(k), pj(k)) = .true.
+        end do
+        ok = .true.
+    end function pairs_to_set
+
+    !> The cylinder walk and the covering-ball walk return identical pair sets under every rule,
+    !> with and without `los=`, and under both radial bounds, on a fixture with pairs in the
+    !> padding band the cylinder's bounds exist for and with points so close to the observer that
+    !> the ball is the shorter walk (`feature_risks.md`: the walked region must contain the
+    !> accepted set).
+    !>
+    !> The ball walk is the Stage 2 sweep unchanged -- its own rank, its own union -- forced
+    !> through `parquet_debug_set_spatial_los_walk`, so the two paths share the accept test and
+    !> nothing else. Three preconditions make the fixture load-bearing: accepted pairs whose partner
+    !> lies OUTSIDE the emitter's unpadded geometric cylinder exist, built to order at the far end of
+    !> the parallel window with the transverse separation just inside `b_perp` and at its near end
+    !> likewise; the walk counters say both routes ran, six points as balls and the rest as
+    !> cylinders; and the scalar form also matches the brute-force oracle, so the two walks are not
+    !> merely equal but right. With `los=`, the per-point window can only narrow the global bound,
+    !> so the candidates it tests are asserted not to exceed the global arm's.
+    subroutine test_los_cylinder_walk_matches_ball_walk(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:), zred(:)
+        real(real64), allocatable :: tra(:), tdec(:), td(:)
+        integer(int64), allocatable :: bi(:), bj(:), ci(:), cj(:), base(:), part(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx, sz
+        integer(int64) :: n0, n, a, k, s, nwant, ncyl, nbal, ntest, ntest_g, nband
+        real(real64) :: bp0, bl0, dj, dth, perp, proj
+        integer :: rules(4), ri
+        real(real64), parameter :: near_ra = 0.01_real64, near_dec = 0.02_real64
+
+        rules = [PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_MAX, PF_LINK_SUM]
+        bp0 = 12.0_real64
+        bl0 = 20.0_real64
+        call make_wedge(200_int64, 20_int64, 500.0_real64, 1500.0_real64, 21_int64, ra, dec, d, x, y, z)
+        n0 = size(x, kind=int64)
+        ! Six points along one line of sight at 1..3.5 from the observer: closer than half their
+        ! parallel length, so each walks the covering ball, and all fifteen pairs among them
+        ! qualify (d_perp = 0).
+        allocate (tra(18), tdec(18), td(18), base(6), part(6))
+        do k = 1_int64, 6_int64
+            tra(k) = near_ra
+            tdec(k) = near_dec
+            td(k) = 1.0_real64 + 0.5_real64 * real(k - 1_int64, kind=real64)
+        end do
+        ! Six band pairs, the base row before its partner so the base emits under the scalar rank:
+        ! three partners at the far end of the parallel window with d_perp at 0.995 b_perp, whose
+        ! distance from the base's line of sight exceeds b_perp; three at its near end with d_perp
+        ! at 0.999 b_perp, whose projection falls below D - b_par.
+        do s = 1_int64, 6_int64
+            k = 6_int64 + 2_int64 * (s - 1_int64) + 1_int64
+            base(s) = n0 + k
+            part(s) = n0 + k + 1_int64
+            tra(k) = -0.05_real64 + 0.02_real64 * real(s, kind=real64)
+            tdec(k) = 0.03_real64
+            td(k) = 600.0_real64 + 100.0_real64 * real(s, kind=real64)
+            if (s <= 3_int64) then
+                dj = td(k) + 0.9_real64 * bl0
+                dth = 2.0_real64 * asin(0.995_real64 * bp0 / (td(k) + dj))
+            else
+                dj = td(k) - 0.999_real64 * bl0
+                dth = 2.0_real64 * asin(0.999_real64 * bp0 / (td(k) + dj))
+            end if
+            tra(k + 1_int64) = tra(k)
+            tdec(k + 1_int64) = tdec(k) + dth
+            td(k + 1_int64) = dj
+        end do
+        ra = [ra, tra]
+        dec = [dec, tdec]
+        d = [d, td]
+        n = size(ra, kind=int64)
+        x = d * cos(dec) * cos(ra)
+        y = d * cos(dec) * sin(ra)
+        z = d * sin(dec)
+        ! The precondition, from the fixture's own geometry: the partner's distance from the base's
+        ! line of sight, and its projection on it.
+        nband = 0_int64
+        do s = 1_int64, 6_int64
+            dth = dec(part(s)) - dec(base(s))
+            perp = d(part(s)) * sin(dth)
+            proj = d(part(s)) * cos(dth)
+            if (perp > bp0 .or. proj < d(base(s)) - bl0 .or. proj > d(base(s)) + bl0) nband = nband + 1_int64
+        end do
+        call check(error, nband == 6_int64, "every built pair must lie outside the base's unpadded geometric cylinder")
+        if (allocated(error)) return
+
+        ! ---- The scalar form, no los: forced ball, then the cylinder walk, then the oracle ----
+        call sx%build(x, y, z, radius=bp0)
+        call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(.true.)
+        call sx%pairs_within_los(bp0, bl0, bi, bj)
+        call parquet_debug_set_spatial_los_walk(.false.)
+        call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+        call check(error, nbal == n .and. ncyl == 0_int64, "the forced walk must walk every point as a ball")
+        if (allocated(error)) return
+        call check(error, pairs_to_set(bi, bj, n, want, nwant), "the ball walk's list must be a set with i < j")
+        if (allocated(error)) return
+        do s = 1_int64, 6_int64
+            call check(error, want(base(s), part(s)), "every built band pair must be accepted")
+            if (allocated(error)) return
+        end do
+        call check(error, want(n0 + 1_int64, n0 + 6_int64), "the near points must pair with one another")
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        call sx%pairs_within_los(bp0, bl0, ci, cj)
+        call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+        call check(error, nbal == 6_int64 .and. ncyl == n - 6_int64, &
+            "the six near points must walk the ball and every other point the cylinder")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(ci, cj, want, nwant), &
+            "the cylinder walk must return exactly the ball walk's pairs (scalar lengths, no los)")
+        if (allocated(error)) return
+        allocate (bp(n), bl(n))
+        bp = bp0
+        bl = bl0
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, pairs_equal_set(ci, cj, want, nwant), "the cylinder walk must also match the oracle")
+        if (allocated(error)) return
+
+        ! ---- Per-point lengths, no los, every rule ----
+        do a = 1_int64, n
+            bp(a) = 8.0_real64 + 8.0_real64 * pf_random_at(fixture_seed, a, 51_int64)
+            bl(a) = 12.0_real64 + 20.0_real64 * pf_random_at(fixture_seed, a, 52_int64)
+        end do
+        call sx%rebuild_for(bp)
+        do ri = 1, 4
+            call parquet_debug_set_spatial_los_walk(.true.)
+            call sx%pairs_within_los(bp, bl, bi, bj, combine=rules(ri))
+            call parquet_debug_set_spatial_los_walk(.false.)
+            call check(error, pairs_to_set(bi, bj, n, want, nwant), "the ball walk's list must be a set with i < j")
+            if (allocated(error)) return
+            call check(error, nwant > 0_int64, "every rule must accept some pair")
+            if (allocated(error)) return
+            call parquet_debug_reset_spatial_counters()
+            call sx%pairs_within_los(bp, bl, ci, cj, combine=rules(ri))
+            call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+            call check(error, nbal > 0_int64 .and. ncyl > 0_int64, "both routes must run under every rule")
+            if (allocated(error)) return
+            call check(error, pairs_equal_set(ci, cj, want, nwant), &
+                "the cylinder walk must return exactly the ball walk's pairs under every rule")
+            if (allocated(error)) return
+        end do
+
+        ! ---- With los=, every rule, under the per-point window and under the global bound ----
+        call make_redshift_survey(200_int64, 20_int64, 0.02_real64, 0.5_real64, 22_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        deallocate (bp, bl)
+        allocate (bp(n), bl(n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 20.0_real64 * pf_random_at(fixture_seed, a, 53_int64)
+            bl(a) = 0.002_real64 + 0.01_real64 * pf_random_at(fixture_seed, a, 54_int64)
+        end do
+        call sz%build(x, y, z, radius=20.0_real64, los=zred)
+        do ri = 1, 4
+            call parquet_debug_set_spatial_los_walk(.true.)
+            call sz%pairs_within_los(bp, bl, bi, bj, combine=rules(ri))
+            call parquet_debug_set_spatial_los_walk(.false.)
+            call check(error, pairs_to_set(bi, bj, n, want, nwant), "the ball walk's list must be a set with i < j")
+            if (allocated(error)) return
+            call check(error, nwant > 0_int64, "every rule must accept some pair on the survey")
+            if (allocated(error)) return
+            call parquet_debug_reset_spatial_counters()
+            call sz%pairs_within_los(bp, bl, ci, cj, combine=rules(ri))
+            call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+            call check(error, ncyl == n .and. nbal == 0_int64, "on the survey every point must walk the cylinder")
+            if (allocated(error)) return
+            call check(error, pairs_equal_set(ci, cj, want, nwant), &
+                "with los= the per-point window's cylinder walk must return exactly the ball walk's pairs")
+            if (allocated(error)) return
+            call parquet_debug_reset_spatial_counters()
+            call parquet_debug_set_spatial_los_spread(.true.)
+            call sz%pairs_within_los(bp, bl, ci, cj, combine=rules(ri))
+            call parquet_debug_set_spatial_los_spread(.false.)
+            call parquet_debug_spatial_los_walk(ncyl, nbal, ntest_g)
+            call check(error, pairs_equal_set(ci, cj, want, nwant), &
+                "with los= the global bound's cylinder walk must return exactly the ball walk's pairs")
+            if (allocated(error)) return
+            call check(error, ntest <= ntest_g, &
+                "the per-point window lies inside the global bound, so it cannot test more candidates")
+            if (allocated(error)) return
+        end do
+        call check(error, pairs_equal_set(bi, bj, want, nwant), "the sum rule's ball list must be the reference just built")
+    end subroutine test_los_cylinder_walk_matches_ball_walk
+
+    !> Under the union each endpoint walks its own cylinder, and a pair lying in BOTH cylinders is
+    !> emitted exactly once, by the tiebreak's rank term (`feature_risks.md`): the pair list is
+    !> exactly the oracle's, so a pair emitted twice or never would fail it. The fixture must hold
+    !> pairs in exactly one cylinder and pairs in both, or the tiebreak's two booleans would not
+    !> both be exercised.
+    subroutine test_los_union_tiebreak_counts(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, nwant, nboth, none, ncyl, nbal, ntest
+        real(real64) :: dp, dl
+        logical :: own_a, own_b
+
+        call make_wedge(260_int64, 40_int64, 500.0_real64, 1500.0_real64, 23_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 6.0_real64 + 14.0_real64 * pf_random_at(fixture_seed, a, 55_int64)
+            bl(a) = bp(a) * (3.0_real64 + 27.0_real64 * pf_random_at(fixture_seed, a, 56_int64))
+        end do
+        nboth = 0_int64
+        none = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                dp = los_dperp(ra(a), dec(a), d(a), ra(b), dec(b), d(b))
+                dl = abs(d(a) - d(b))
+                own_a = los_qualifies(0, dp, dl, bp(a), bl(a), bp(a), bl(a))
+                own_b = los_qualifies(0, dp, dl, bp(b), bl(b), bp(b), bl(b))
+                if (own_a .and. own_b) nboth = nboth + 1_int64
+                if (own_a .neqv. own_b) none = none + 1_int64
+            end do
+        end do
+        call check(error, nboth > 0_int64 .and. none > 0_int64, &
+            "the fixture must hold pairs in both cylinders and pairs in exactly one")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MAX, want, nwant)
+        call check(error, nwant == nboth + none, "the union's oracle count is the pairs in one cylinder or both")
+        if (allocated(error)) return
+        call sx%build(x, y, z, radius=bp)
+        call parquet_debug_reset_spatial_counters()
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MAX)
+        call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+        call check(error, ncyl == n, "every point must walk its own cylinder under the union")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "the union's cylinder walk must emit each pair exactly once: the oracle's set, no duplicate")
+    end subroutine test_los_union_tiebreak_counts
+
+    !> `%within_los` walks the cylinder -- the counter says so -- and returns what the ball walk
+    !> returns, rows, measures and separations alike; a query point closer to the observer than its
+    !> cylinder is long walks the ball, and one whose parallel window holds no stored point walks
+    !> nothing and answers zero.
+    subroutine test_within_los_walks_the_cylinder(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:)
+        real(real64), allocatable :: d1(:), d2(:), q1(:), q2(:), l1(:), l2(:)
+        integer(int64), allocatable :: f1(:), f2(:)
+        type(pf_spatial_index) :: sz, sd
+        integer(int64) :: n, a, m1, m2, ncyl, nbal, ntest, hits, k
+        real(real64) :: p(3), zp, dp
+        integer(int64) :: rows(3)
+
+        call make_redshift_survey(200_int64, 30_int64, 0.02_real64, 0.2_real64, 24_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (f1(n), f2(n), d1(n), d2(n), q1(n), q2(n), l1(n), l2(n))
+        call sz%build(x, y, z, radius=20.0_real64, los=zred)
+        rows = [1_int64, n / 2_int64, n]
+        hits = 0_int64
+        do k = 1_int64, 3_int64
+            a = rows(k)
+            p = [x(a), y(a), z(a)]
+            call parquet_debug_reset_spatial_counters()
+            m1 = sz%within_los(p, 20.0_real64, 0.006_real64, f1, los_p=zred(a), dist=d1, dperp=q1, dpar=l1, sorted=.true.)
+            call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+            call check(error, ncyl == 1_int64 .and. nbal == 0_int64, "a survey point's query must walk the cylinder")
+            if (allocated(error)) return
+            call check(error, ntest >= m1, "every reported point reached the accept test")
+            if (allocated(error)) return
+            call parquet_debug_set_spatial_los_walk(.true.)
+            m2 = sz%within_los(p, 20.0_real64, 0.006_real64, f2, los_p=zred(a), dist=d2, dperp=q2, dpar=l2, sorted=.true.)
+            call parquet_debug_set_spatial_los_walk(.false.)
+            call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+            call check(error, nbal == 1_int64, "the forced query must walk the ball")
+            if (allocated(error)) return
+            call check(error, m1 == m2, "the cylinder and the ball must find the same count")
+            if (allocated(error)) return
+            call check(error, all(f1(1:m1) == f2(1:m1)) .and. all(d1(1:m1) == d2(1:m1)) .and. &
+                all(q1(1:m1) == q2(1:m1)) .and. all(l1(1:m1) == l2(1:m1)), &
+                "the cylinder and the ball must report the same rows, measures and separations, in the same order")
+            if (allocated(error)) return
+            if (m1 > 1_int64) hits = hits + 1_int64
+        end do
+        call check(error, hits > 0_int64, "some query must find a neighbour besides the point itself")
+        if (allocated(error)) return
+        ! A query a hundredth of a unit from the observer: its near-end pad is thousands of units,
+        ! so the ball is the shorter walk; its window reaches the survey's near edge, so it finds
+        ! points, and the ball finds the same ones.
+        dp = 0.01_real64
+        p = [dp * cos(0.01_real64) * cos(0.02_real64), dp * cos(0.01_real64) * sin(0.02_real64), dp * sin(0.01_real64)]
+        zp = 1.0_real64 / (1.0_real64 - 0.5_real64 * dp / los_ch0)**2 - 1.0_real64
+        call parquet_debug_reset_spatial_counters()
+        m1 = sz%within_los(p, 10.0_real64, 0.03_real64, f1, los_p=zp, sorted=.true.)
+        call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+        call check(error, nbal == 1_int64 .and. ncyl == 0_int64, "a query next to the observer must walk the ball")
+        if (allocated(error)) return
+        call check(error, m1 > 0_int64, "that query must find the survey's near edge")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_los_walk(.true.)
+        m2 = sz%within_los(p, 10.0_real64, 0.03_real64, f2, los_p=zp, sorted=.true.)
+        call parquet_debug_set_spatial_los_walk(.false.)
+        call check(error, m1 == m2 .and. all(f1(1:m1) == f2(1:m1)), "the fallback ball must answer as the forced ball does")
+        if (allocated(error)) return
+        ! A parallel window holding no stored point: nothing to walk.
+        call parquet_debug_reset_spatial_counters()
+        m1 = sz%within_los(p, 10.0_real64, 0.001_real64, f1, los_p=5.0_real64)
+        call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+        call check(error, m1 == 0_int64 .and. ncyl == 1_int64 .and. nbal == 0_int64 .and. ntest == 0_int64, &
+            "an empty parallel window is an empty cylinder, counted and not walked")
+        if (allocated(error)) return
+        ! Without los=: the same comparison, the parallel coordinate being the distance.
+        call sd%build(x, y, z, radius=20.0_real64)
+        a = rows(2)
+        p = [x(a), y(a), z(a)]
+        call parquet_debug_reset_spatial_counters()
+        m1 = sd%within_los(p, 20.0_real64, 30.0_real64, f1, dist=d1, sorted=.true.)
+        call parquet_debug_spatial_los_walk(ncyl, nbal, ntest)
+        call check(error, ncyl == 1_int64 .and. nbal == 0_int64, "without los= the query walks the cylinder too")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_los_walk(.true.)
+        m2 = sd%within_los(p, 20.0_real64, 30.0_real64, f2, dist=d2, sorted=.true.)
+        call parquet_debug_set_spatial_los_walk(.false.)
+        call check(error, m1 == m2 .and. m1 > 1_int64, "without los= the two walks must agree on a non-trivial count")
+        if (allocated(error)) return
+        call check(error, all(f1(1:m1) == f2(1:m1)) .and. all(d1(1:m1) == d2(1:m1)), &
+            "without los= the two walks must report the same rows and measures")
+    end subroutine test_within_los_walks_the_cylinder
+
+    !> The cells-per-point ceiling binds on a sparse survey and the test-only override relaxes it:
+    !> a finer cell, more cells than the shipped ceiling allows, the same pairs; and clearing the
+    !> override brings the shipped cell back (the negative control).
+    subroutine test_cells_per_point_override_relaxes_the_ceiling(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:)
+        integer(int64), allocatable :: pi(:), pj(:), qi(:), qj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, nwant, ncells1, ncells2, ncells3, gx, gy, gz
+        real(real64) :: h1, h2, h3
+
+        call make_wedge(360_int64, 10_int64, 500.0_real64, 1500.0_real64, 25_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        call parquet_debug_reset_spatial_counters()
+        call sx%build(x, y, z, radius=5.0_real64)
+        h1 = sx%cell_size()
+        call sx%grid(gx, gy, gz)
+        ncells1 = gx * gy * gz
+        ! The precondition: the ceiling, not the radius, chose this cell.
+        call check(error, ncells1 <= max(1_int64, int(0.3_real64 * real(n, kind=real64), kind=int64)) .and. &
+            h1 > 4.0_real64 * 5.0_real64, "on a sparse wedge the shipped ceiling must coarsen the cell far above the radius")
+        if (allocated(error)) return
+        call sx%pairs_within_los(5.0_real64, 40.0_real64, pi, pj)
+        call check(error, pairs_to_set(pi, pj, n, want, nwant) .and. nwant > 0_int64, "the reference list must be a non-empty set")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_max_cells_per_point(30.0_real64)
+        call sx%rebuild_for(5.0_real64)
+        h2 = sx%cell_size()
+        call sx%grid(gx, gy, gz)
+        ncells2 = gx * gy * gz
+        call check(error, h2 < h1 .and. ncells2 > ncells1 .and. &
+            ncells2 <= int(30.0_real64 * real(n, kind=real64), kind=int64), &
+            "a relaxed ceiling must give a finer cell within the relaxed count")
+        if (allocated(error)) return
+        call sx%pairs_within_los(5.0_real64, 40.0_real64, qi, qj)
+        call check(error, pairs_equal_set(qi, qj, want, nwant), "the cell size must change no pair")
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        call sx%rebuild_for(5.0_real64)
+        h3 = sx%cell_size()
+        call sx%grid(gx, gy, gz)
+        ncells3 = gx * gy * gz
+        call check(error, h3 == h1 .and. ncells3 == ncells1, "clearing the override must restore the shipped ceiling's cell")
+        if (allocated(error)) return
+        call sx%pairs_within_los(5.0_real64, 40.0_real64, qi, qj)
+        call check(error, pairs_equal_set(qi, qj, want, nwant), "the restored cell must return the same pairs")
+    end subroutine test_cells_per_point_override_relaxes_the_ceiling
 
 end module test_spatial

@@ -241,7 +241,7 @@ contains
     module procedure spatial_scan
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64) :: nc(3), a(3), cnt(3)
-        integer(int64) :: ii, jj, kk, jc, kc, base, s0, e0, t, cap, row, minkey
+        integer(int64) :: ii, jj, kk, jc, kc, base, s0, e0, t, cap, row, minkey, ntest
         integer(int64) :: run_lo(2), run_hi(2), ilo, ihi
         real(real64) :: r2, r2in, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3
@@ -249,7 +249,7 @@ contains
         real(real64) :: q1, q2, q3, dself, lself, bpself, blself, dj, sd, ddif, ex, ey, ez, dpv, dlv, dv
         real(real64), allocatable :: dwork(:)
         logical :: has32, has64, hasd, want_min, direct, want_sort, usework, want_bnd
-        logical :: want_los, hasdp, hasdl, ok
+        logical :: want_los, hasdp, hasdl, ok, want_tie, own, oth
         integer :: d, nrun, ir, lrule
 
         m = 0_int64
@@ -323,6 +323,14 @@ contains
         else if (hasdp .or. hasdl) then
             error stop "pf_spatial_index: dperp and dpar are line-of-sight outputs and need los_rule" ! GCOVR_EXCL_LINE
         end if
+        ! The union's emit-once tiebreak (see the interface): under it the rank does not screen the
+        ! candidates, so the rank test is switched off here and the rank read inside the accept.
+        want_tie = .false.
+        if (want_los .and. want_min) then
+            if (present(los_tiebreak)) want_tie = los_tiebreak .and. lrule == PF_LINK_MAX
+        end if
+        if (want_tie) want_min = .false.
+        ntest = 0_int64
         if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%within: this index holds more rows than an int32 buffer can name; use an int64 one"
         cap = 0_int64
@@ -418,6 +426,7 @@ contains
                                     ! of two thousand-unit distances, and the unit vectors' difference
                                     ! is `(s D_i - q (D_j - D_i)) / (D_i D_j)`, never `2 - 2 cos`.
                                     ! Keep the two copies of this block in step.
+                                    ntest = ntest + 1_int64
                                     dj = self%d_s(t)
                                     sd = dself + dj
                                     ddif = (2.0_real64 * (q1 * dx + q2 * dy + q3 * dz) + d2) / sd
@@ -430,8 +439,13 @@ contains
                                     case (0)
                                         ok = dpv <= bpself .and. dlv <= blself
                                     case (PF_LINK_MAX)
-                                        ok = (dpv <= bpself .and. dlv <= blself) .or. &
-                                             (dpv <= los_bps(t) .and. dlv <= los_bls(t))
+                                        own = dpv <= bpself .and. dlv <= blself
+                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                        if (want_tie) then
+                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
+                                        else
+                                            ok = own .or. oth
+                                        end if
                                     case (PF_LINK_MIN)
                                         ok = dpv <= bpself .and. dlv <= blself .and. &
                                              dpv <= los_bps(t) .and. dlv <= los_bls(t)
@@ -482,6 +496,7 @@ contains
                                 end if
                                 if (want_los) then
                                     ! The same block as the direct loop's; see the comment there.
+                                    ntest = ntest + 1_int64
                                     dj = self%d_s(t)
                                     sd = dself + dj
                                     ddif = (2.0_real64 * (q1 * dx + q2 * dy + q3 * dz) + d2) / sd
@@ -494,8 +509,13 @@ contains
                                     case (0)
                                         ok = dpv <= bpself .and. dlv <= blself
                                     case (PF_LINK_MAX)
-                                        ok = (dpv <= bpself .and. dlv <= blself) .or. &
-                                             (dpv <= los_bps(t) .and. dlv <= los_bls(t))
+                                        own = dpv <= bpself .and. dlv <= blself
+                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                        if (want_tie) then
+                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
+                                        else
+                                            ok = own .or. oth
+                                        end if
                                     case (PF_LINK_MIN)
                                         ok = dpv <= bpself .and. dlv <= blself .and. &
                                              dpv <= los_bps(t) .and. dlv <= los_bls(t)
@@ -529,6 +549,7 @@ contains
                 end do
             end do
             call scan_finish(want_sort, m, cap, dist, dwork, out32, out64, dperp, dpar)
+            if (present(ntested)) ntested = ntested + ntest
             return
         end if
 
@@ -675,14 +696,17 @@ contains
 
     module procedure spatial_scan_axis
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
-        integer(int64) :: nc(3), sa(3), sc(3), ia, alo, acnt, jj, kk, base, s0, e0, t, cap, row
-        integer(int64) :: ilo, ihi, nfill
+        integer(int64) :: nc(3), sa(3), sc(3), ia, alo, acnt, jj, kk, base, s0, e0, t, cap, row, minkey
+        integer(int64) :: ilo, ihi, nfill, ntest
         real(real64) :: dv(3), c0(3), c1(3)
         real(real64) :: dd, ddinv, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
         real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
+        real(real64) :: q1, q2, q3, e1, e2, e3, dself, lself, bpself, blself, dj, sd, ddif, sx, sy, sz, s2
+        real(real64) :: ex, ey, ez, dpv, dlv, dm
         real(real64), allocatable :: dwork(:)
         logical :: has32, has64, hasd, direct, hasap, hasat, want_sort, usework
-        integer :: k, da, nd
+        logical :: want_min, want_los, want_tie, hasdp, hasdl, ok, own, oth
+        integer :: k, da, nd, lrule
 
         m = 0_int64
         if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
@@ -704,21 +728,79 @@ contains
         hasd = present(dist)
         hasap = present(axis_point)
         hasat = present(axis_t)
+        hasdp = present(dperp)
+        hasdl = present(dpar)
         nd = self%ncoord
         if (hasap) then
             if (size(axis_point, 1) /= nd) error stop "pf_spatial_index%" // what // &
                 ": axis_point's first extent must equal %ndim(), the rank the index was built with"
         end if
+        want_min = present(min_key)
+        minkey = 0_int64
+        if (want_min) minkey = min_key
+        ! Defensive, as `spatial_scan`'s: the line-of-sight worker passes each group complete, so
+        ! none of these is reachable through a public entry point.
+        if (want_min .and. .not. present(keys)) error stop & ! GCOVR_EXCL_LINE
+            "pf_spatial_index%" // what // ": min_key needs keys" ! GCOVR_EXCL_LINE
+        ! The line-of-sight accept, as `spatial_scan` sets it up; `e1..e3` is the EMITTER, which the
+        ! separations are measured from -- `p1` is the padded axis's near end and would be wrong.
+        want_los = present(los_rule)
+        want_tie = .false.
+        lrule = 0
+        q1 = 0.0_real64
+        q2 = 0.0_real64
+        q3 = 0.0_real64
+        e1 = 0.0_real64
+        e2 = 0.0_real64
+        e3 = 0.0_real64
+        dself = 1.0_real64
+        lself = 0.0_real64
+        bpself = 0.0_real64
+        blself = 0.0_real64
+        dpv = 0.0_real64
+        dlv = 0.0_real64
+        ntest = 0_int64
+        if (want_los) then
+            if (.not. (present(los_q) .and. present(los_p) .and. present(los_d) .and. present(los_l) .and. & ! GCOVR_EXCL_LINE
+                present(los_bp) .and. present(los_bl) .and. present(los_ls))) error stop & ! GCOVR_EXCL_LINE
+                "pf_spatial_index%" // what // ": los_rule needs the emitter's terms and los_ls" ! GCOVR_EXCL_LINE
+            lrule = los_rule
+            if (lrule /= 0) then
+                if (.not. (present(los_bps) .and. present(los_bls))) error stop & ! GCOVR_EXCL_LINE
+                    "pf_spatial_index%" // what // ": a combine rule needs los_bps and los_bls" ! GCOVR_EXCL_LINE
+            end if
+            q1 = los_q(1)
+            q2 = los_q(2)
+            q3 = los_q(3)
+            e1 = los_p(1)
+            e2 = los_p(2)
+            e3 = los_p(3)
+            dself = los_d
+            lself = los_l
+            bpself = los_bp
+            blself = los_bl
+            ! The union's emit-once tiebreak, exactly as `spatial_scan` switches it: the rank no
+            ! longer screens, and is read inside the accept instead.
+            if (want_min) then
+                if (present(los_tiebreak)) want_tie = los_tiebreak .and. lrule == PF_LINK_MAX
+            end if
+            if (want_tie) want_min = .false.
+        else if (hasdp .or. hasdl) then
+            error stop "pf_spatial_index%" // what // & ! GCOVR_EXCL_LINE
+                ": dperp and dpar are line-of-sight outputs and need los_rule" ! GCOVR_EXCL_LINE
+        end if
         if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%" // what // &
             ": this index holds more rows than an int32 buffer can name; use an int64 one"
         cap = 0_int64
-        if (has32 .or. has64 .or. hasd .or. hasap .or. hasat) cap = huge(0_int64)
+        if (has32 .or. has64 .or. hasd .or. hasap .or. hasat .or. hasdp .or. hasdl) cap = huge(0_int64)
         if (has32) cap = min(cap, size(out32, kind=int64))
         if (has64) cap = min(cap, size(out64, kind=int64))
         if (hasd) cap = min(cap, size(dist, kind=int64))
         if (hasap) cap = min(cap, size(axis_point, 2, kind=int64))
         if (hasat) cap = min(cap, size(axis_t, kind=int64))
+        if (hasdp) cap = min(cap, size(dperp, kind=int64))
+        if (hasdl) cap = min(cap, size(dpar, kind=int64))
         want_sort = .false.
         if (present(sorted)) want_sort = sorted
         usework = want_sort .and. .not. hasd .and. cap > 0_int64 .and. cap < huge(0_int64)
@@ -730,6 +812,11 @@ contains
         ! A zero-length axis has no direction to project onto, so all three shapes collapse to the
         ! same ball. Documented on each binding rather than left to be discovered.
         if (.not. (dd > 0.0_real64)) then
+            ! Unreachable from the line-of-sight worker, whose axis always has positive length by ! GCOVR_EXCL_LINE
+            ! the slack it adds; refused, because the ball below would measure from `p1`, not the ! GCOVR_EXCL_LINE
+            ! emitter. ! GCOVR_EXCL_LINE
+            if (want_los) error stop "pf_spatial_index%" // what // & ! GCOVR_EXCL_LINE
+                ": a line-of-sight axis must have positive length" ! GCOVR_EXCL_LINE
             call spatial_scan(self, p1, rmax, m, out32=out32, out64=out64, dist=dist, sorted=sorted)
             ! Every returned point has the SAME foot -- `p1` is the whole segment -- so the axis
             ! outputs are constant and any ordering the ball applied leaves them correct. That is
@@ -819,15 +906,69 @@ contains
                             d2 = wx * wx + wy * wy + wz * wz
                             rad = r1 + tp * dr
                             if (d2 <= rad * rad) then
+                                if (want_min) then
+                                    if (keys(t) <= minkey) cycle
+                                end if
+                                if (want_los) then
+                                    ! The exact cylinder criterion, the geometric test above being
+                                    ! only the pre-filter: the same block as `spatial_scan`'s, on
+                                    ! separations from the EMITTER, never from the axis's near end.
+                                    ! Keep the three copies in step.
+                                    ntest = ntest + 1_int64
+                                    sx = xs(t) - e1
+                                    sy = ys(t) - e2
+                                    sz = zs(t) - e3
+                                    s2 = sx * sx + sy * sy + sz * sz
+                                    dj = self%d_s(t)
+                                    sd = dself + dj
+                                    ddif = (2.0_real64 * (q1 * sx + q2 * sy + q3 * sz) + s2) / sd
+                                    ex = sx * dself - q1 * ddif
+                                    ey = sy * dself - q2 * ddif
+                                    ez = sz * dself - q3 * ddif
+                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
+                                    dlv = abs(los_ls(t) - lself)
+                                    select case (lrule)
+                                    case (0)
+                                        ok = dpv <= bpself .and. dlv <= blself
+                                    case (PF_LINK_MAX)
+                                        own = dpv <= bpself .and. dlv <= blself
+                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                        if (want_tie) then
+                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
+                                        else
+                                            ok = own .or. oth
+                                        end if
+                                    case (PF_LINK_MIN)
+                                        ok = dpv <= bpself .and. dlv <= blself .and. &
+                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                    case (PF_LINK_MEAN)
+                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
+                                             2.0_real64 * dlv <= blself + los_bls(t)
+                                    case default
+                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
+                                    end select
+                                    if (.not. ok) cycle
+                                end if
                                 row = self%idx(t)
                                 m = m + 1_int64
                                 if (m <= cap) then
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
-                                    if (hasd) dist(m) = sqrt(d2)
-                                    if (usework) dwork(m) = sqrt(d2)
+                                    if (hasd .or. usework) then
+                                        ! The distance to the axis, or for a line-of-sight query
+                                        ! the normalised measure, 1 on the cylinder's surface.
+                                        dm = sqrt(d2)
+                                        if (want_los) then
+                                            dm = dpv / bpself
+                                            if (dlv / blself > dm) dm = dlv / blself
+                                        end if
+                                        if (hasd) dist(m) = dm
+                                        if (usework) dwork(m) = dm
+                                    end if
                                     if (hasap) axis_point(1:nd, m) = p1(1:nd) + tp * dv(1:nd)
                                     if (hasat) axis_t(m) = tp
+                                    if (hasdp) dperp(m) = dpv
+                                    if (hasdl) dpar(m) = dlv
                                 end if
                             end if
                         end do
@@ -849,14 +990,63 @@ contains
                             d2 = wx * wx + wy * wy + wz * wz
                             rad = r1 + tp * dr
                             if (d2 <= rad * rad) then
+                                if (want_min) then
+                                    if (keys(t) <= minkey) cycle
+                                end if
+                                if (want_los) then
+                                    ! The same block as the direct loop's; see the comment there.
+                                    ntest = ntest + 1_int64
+                                    sx = xs(row) - e1
+                                    sy = ys(row) - e2
+                                    sz = zs(row) - e3
+                                    s2 = sx * sx + sy * sy + sz * sz
+                                    dj = self%d_s(t)
+                                    sd = dself + dj
+                                    ddif = (2.0_real64 * (q1 * sx + q2 * sy + q3 * sz) + s2) / sd
+                                    ex = sx * dself - q1 * ddif
+                                    ey = sy * dself - q2 * ddif
+                                    ez = sz * dself - q3 * ddif
+                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
+                                    dlv = abs(los_ls(t) - lself)
+                                    select case (lrule)
+                                    case (0)
+                                        ok = dpv <= bpself .and. dlv <= blself
+                                    case (PF_LINK_MAX)
+                                        own = dpv <= bpself .and. dlv <= blself
+                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                        if (want_tie) then
+                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
+                                        else
+                                            ok = own .or. oth
+                                        end if
+                                    case (PF_LINK_MIN)
+                                        ok = dpv <= bpself .and. dlv <= blself .and. &
+                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                    case (PF_LINK_MEAN)
+                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
+                                             2.0_real64 * dlv <= blself + los_bls(t)
+                                    case default
+                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
+                                    end select
+                                    if (.not. ok) cycle
+                                end if
                                 m = m + 1_int64
                                 if (m <= cap) then
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
-                                    if (hasd) dist(m) = sqrt(d2)
-                                    if (usework) dwork(m) = sqrt(d2)
+                                    if (hasd .or. usework) then
+                                        dm = sqrt(d2)
+                                        if (want_los) then
+                                            dm = dpv / bpself
+                                            if (dlv / blself > dm) dm = dlv / blself
+                                        end if
+                                        if (hasd) dist(m) = dm
+                                        if (usework) dwork(m) = dm
+                                    end if
                                     if (hasap) axis_point(1:nd, m) = p1(1:nd) + tp * dv(1:nd)
                                     if (hasat) axis_t(m) = tp
+                                    if (hasdp) dperp(m) = dpv
+                                    if (hasdl) dpar(m) = dlv
                                 end if
                             end if
                         end do
@@ -869,13 +1059,14 @@ contains
             if (nfill >= 2_int64) then
                 if (hasd) then
                     call spatial_order_by_dist(nfill, dist, out32=out32, out64=out64, &
-                        axis_point=axis_point, axis_t=axis_t)
+                        axis_point=axis_point, axis_t=axis_t, dperp=dperp, dpar=dpar)
                 else if (usework) then
                     call spatial_order_by_dist(nfill, dwork, out32=out32, out64=out64, &
-                        axis_point=axis_point, axis_t=axis_t)
+                        axis_point=axis_point, axis_t=axis_t, dperp=dperp, dpar=dpar)
                 end if
             end if
         end if
+        if (present(ntested)) ntested = ntested + ntest
     end procedure spatial_scan_axis
 
     !> Orders a query's results by increasing distance, ties broken by ascending row index.

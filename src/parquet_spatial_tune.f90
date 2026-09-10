@@ -270,7 +270,7 @@ contains
 
         ! The buckets-per-point ceiling, exactly as `spatial_set_nside` applies it -- computed
         ! here too so that no candidate the probe ranks is one the build would then refuse.
-        maxc = max(1_int64, int(spatial_max_cells_per_point * real(self%npts, kind=real64), kind=int64))
+        maxc = spatial_cells_ceiling(self)
         ns_cap = 1_int64
         do while (ns_cap < spatial_max_nside)
             if (12_int64 * (2_int64 * ns_cap) * (2_int64 * ns_cap) > maxc) exit
@@ -422,7 +422,7 @@ contains
         integer :: d, it
 
         hh = h
-        maxc = max(1_int64, int(spatial_max_cells_per_point * real(self%npts, kind=real64), kind=int64))
+        maxc = spatial_cells_ceiling(self)
         do it = 1, 64
             call spatial_grid_dims(self%lo, self%hi, self%wrap, hh, nc, cellv, inv)
             rc = real(nc(1), kind=real64) * real(nc(2), kind=real64) * real(nc(3), kind=real64)

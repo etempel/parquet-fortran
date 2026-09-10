@@ -530,26 +530,36 @@ contains
     !> Every pair inside the line-of-sight cylinder the rule builds. The interface block's banner
     !> states the criterion; this is the sweep.
     !>
-    !> **The walk radius is `sqrt(b_perp**2 + max(L*b_par, g)**2)` per point, doubled for the sum
-    !> rule, and ranked like the ball sweep's radii.** `|p_i - p_j|**2 <= (D_i - D_j)**2 + d_perp**2`
-    !> for any two points about one observer, and `|D_i - D_j| <= max(L*|dlos|, g)` by what
-    !> `spatial_los_bounds` measured, so every pair a point's own cylinder accepts lies in that
-    !> ball; the union, intersection, mean and sum of two cylinders lie in the larger ball, or in
-    !> twice it for the sum, by the convexity of `max(L*b, g)` and of the norm. So one rank by
-    !> descending walk radius -- ascending for `PF_LINK_MIN`, whose bound is the smaller cylinder --
-    !> emits every pair exactly once, from the endpoint whose walk is guaranteed to see it.
+    !> **Each emitter walks its OWN cylinder, ranked by transverse length.** Rank descending by
+    !> `b_perp` (ascending for `PF_LINK_MIN`) and emit upward through the rank: an emitter's
+    !> partners then have the smaller transverse length, so `d_perp` under every rule is within its
+    !> own `b_perp` (twice it under the sum), while `d_par` is within its own `b_par` under the
+    !> union, the intersection and rule 0, and within the largest `b_par` ranked at or below it
+    !> under the mean -- a suffix maximum along the rank -- and twice that under the sum. Under the
+    !> union each endpoint walks exactly its own cylinder and a pair lying in both is emitted once
+    !> by the tiebreak `spatial_scan` documents. So one rank serves all four rules and every pair
+    !> is emitted exactly once, from the endpoint whose own walk is guaranteed to see it.
+    !>
+    !> **The walked cylinder is bounded in DISTANCE by what the parallel window can hold.** For an
+    !> emitter with parallel envelope `W` (in `los`'s units) the partners' distances lie within
+    !> `[min D, max D]` over the stored points within `W` of its own `los` -- read off the sorted
+    !> tie groups `%build` kept, a range minimum and maximum per point through two segment trees
+    !> built per call -- or, without `los=` (where `los` IS the distance) and under the test-only
+    !> global arm, within `D +- max(L*W, g)`. `los_walk_shape` pads that cylinder into one that
+    !> contains every accepted partner, or picks the covering ball when the cylinder would be the
+    !> longer walk, and both routes count themselves (`parquet_debug_spatial_los_walk`).
     !>
     !> **The per-candidate lengths are built in STORED order and always passed**, so the scan has
-    !> one shape; with a single pair of lengths every rule is the searcher's own cylinder (doubled
+    !> one shape; with a single pair of lengths every rule is the emitter's own cylinder (doubled
     !> for the sum), the arrays hold that, and rule 0 never reads them.
     module procedure spatial_pairs_los_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:), ls(:)
         integer(int64), allocatable :: counts(:), heads(:), keys(:)
-        real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:)
-        integer(int64) :: n, t, i, u, m, s0, e0, total, k
-        real(real64) :: p(3), q(3), r, dself, lself, bpself, blself, qq, scale
+        real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:), qlo(:), qhi(:), suf(:), tmin(:), tmax(:)
+        integer(int64) :: n, t, i, u, m, s0, e0, total, k, ng, a, b, ncyl, nbal, ntest
+        real(real64) :: p(3), q(3), r, qq, scale, w
         integer :: nt, nr, rule, lrule
-        logical :: direct, want_sep
+        logical :: direct, want_sep, ball_all, local
 
         rule = PF_LINK_MAX
         if (present(combine)) rule = combine
@@ -572,16 +582,23 @@ contains
             ": every b_perp and b_par must be >= 0 and not NaN"
         scale = 1.0_real64
         if (rule == PF_LINK_SUM) scale = 2.0_real64
+        ! The radii the sweep is ABOUT, which is what the rebuild decision, the recorded effective
+        ! radius and the rank must see: the cross-section `scale * b_perp` for the cylinder walk,
+        ! whose rank is `b_perp`'s; the covering ball `scale * sqrt(b_perp**2 + max(L*b_par, g)**2)`
+        ! for the test-only ball walk, ranked as Stage 1's balls are. The setup may re-tune the
+        ! index, which re-buckets it, so everything below that is addressed by stored position is
+        ! built after this call and never before.
+        ball_all = dbg_los_ball
         allocate (walk(nr))
         do k = 1_int64, int(nr, kind=int64)
-            qq = self%lip * b_par(k)
-            if (self%tie_spread > qq) qq = self%tie_spread
-            walk(k) = scale * sqrt(b_perp(k) * b_perp(k) + qq * qq)
+            if (ball_all) then
+                qq = self%lip * b_par(k)
+                if (self%tie_spread > qq) qq = self%tie_spread
+                walk(k) = scale * sqrt(b_perp(k) * b_perp(k) + qq * qq)
+            else
+                walk(k) = scale * b_perp(k)
+            end if
         end do
-        ! The WALK radii, not the lengths, reach the shared setup: the rebuild decision and the
-        ! recorded effective radius are about the balls that are really walked. The setup may
-        ! re-tune the index, which re-buckets it, so everything below that is addressed by stored
-        ! position is built after this call and never before.
         call spatial_bulk_setup(self, walk, PF_METRIC_EUCLIDEAN, n, nr, nt, threads)
         if (n == 0_int64) then
             allocate (ii(0), jj(0))
@@ -626,9 +643,57 @@ contains
             ls => self%d_s
         end if
         want_sep = present(dperp) .or. present(dpar)
+        ! The range of distances each emitter's partners can occupy, in stored order; empty under
+        ! the ball walk, which has no use for it.
+        if (ball_all) then
+            allocate (qlo(0), qhi(0))
+        else
+            allocate (qlo(n), qhi(n))
+            if (nr > 1 .and. (rule == PF_LINK_MEAN .or. rule == PF_LINK_SUM)) then
+                ! The suffix maximum of the parallel length along the rank: rank k's value is the
+                ! largest `b_par` among the points ranked k or below, which is where an emitter's
+                ! partners come from under these two rules.
+                allocate (suf(n))
+                do t = 1_int64, n
+                    suf(keys(t)) = bls(t)
+                end do
+                do k = n - 1_int64, 1_int64, -1_int64
+                    if (suf(k + 1_int64) > suf(k)) suf(k) = suf(k + 1_int64)
+                end do
+            end if
+            local = self%has_los .and. .not. dbg_los_global
+            if (local) local = allocated(self%los_grp)
+            ng = 0_int64
+            if (local) then
+                ng = size(self%los_grp, kind=int64)
+                call seg_build(self%los_gmin, self%los_gmax, ng, tmin, tmax)
+            end if
+            !$omp parallel do num_threads(nt) schedule(static) default(shared) private(t, w, qq, a, b)
+            do t = 1_int64, n
+                w = bls(t)
+                if (nr > 1) then
+                    if (rule == PF_LINK_MEAN) w = suf(keys(t))
+                    if (rule == PF_LINK_SUM) w = 2.0_real64 * suf(keys(t))
+                end if
+                if (local) then
+                    ! The emitter's own group lies inside its window, so the window is never empty.
+                    call los_window(self%los_grp, ng, ls(t), w, a, b)
+                    qlo(t) = seg_min(tmin, ng, a, b)
+                    qhi(t) = seg_max(tmax, ng, a, b)
+                else
+                    qq = self%lip * w
+                    if (self%tie_spread > qq) qq = self%tie_spread
+                    qlo(t) = self%d_s(t) - qq
+                    qhi(t) = self%d_s(t) + qq
+                end if
+            end do
+            !$omp end parallel do
+        end if
+        ncyl = 0_int64
+        nbal = 0_int64
+        ntest = 0_int64
         allocate (counts(n), heads(n + 1_int64))
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
-        !$omp     private(t, i, u, m, p, q, r, dself, lself, bpself, blself)
+        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, q, r)
         do t = 1_int64, n
             i = self%idx(t)
             u = t
@@ -637,14 +702,9 @@ contains
             p(2) = ys(u)
             p(3) = zs(u)
             q = p - self%obs
-            dself = self%d_s(t)
-            lself = ls(t)
-            bpself = bps(t)
-            blself = bls(t)
             r = walk(1)
             if (nr > 1) r = walk(i)
-            call spatial_scan(self, p, r, m, min_key=keys(t), keys=keys, los_rule=lrule, los_q=q, &
-                los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls)
+            call los_sweep_point(self, what, t, p, q, r, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m)
             counts(t) = m
         end do
         !$omp end parallel do
@@ -657,10 +717,11 @@ contains
         ! Both separations are gathered whenever either is wanted, into locals that always exist
         ! inside the region: an optional allocatable dummy passed into a parallel region is the
         ! recorded ifx segfault, and the two calls are written out for the reason the ball sweep's
-        ! are. What the caller did not ask for is dropped after the region.
+        ! are. What the caller did not ask for is dropped after the region. The walk counters are
+        ! taken on this pass only, so a sweep adds one per point.
         if (want_sep) allocate (dp(total), dl(total))
         !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
-        !$omp     private(t, i, u, m, p, q, r, s0, e0, k, dself, lself, bpself, blself)
+        !$omp     private(t, i, u, m, p, q, r, s0, e0, k) reduction(+:ncyl, nbal, ntest)
         do t = 1_int64, n
             i = self%idx(t)
             s0 = heads(t)
@@ -671,20 +732,14 @@ contains
             p(2) = ys(u)
             p(3) = zs(u)
             q = p - self%obs
-            dself = self%d_s(t)
-            lself = ls(t)
-            bpself = bps(t)
-            blself = bls(t)
             r = walk(1)
             if (nr > 1) r = walk(i)
             if (want_sep) then
-                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, los_rule=lrule, &
-                    los_q=q, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, &
-                    los_bls=bls, dperp=dp(s0:e0), dpar=dl(s0:e0))
+                call los_sweep_point(self, what, t, p, q, r, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
+                    ncyl, nbal, ntest, out64=jj(s0:e0), dperp=dp(s0:e0), dpar=dl(s0:e0))
             else
-                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, los_rule=lrule, &
-                    los_q=q, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, &
-                    los_bls=bls)
+                call los_sweep_point(self, what, t, p, q, r, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
+                    ncyl, nbal, ntest, out64=jj(s0:e0))
             end if
             ! `i` is the endpoint that did the searching, not necessarily the lower row.
             do k = s0, e0
@@ -697,14 +752,255 @@ contains
             end do
         end do
         !$omp end parallel do
+        dbg_los_cyl = dbg_los_cyl + ncyl
+        dbg_los_balls = dbg_los_balls + nbal
+        dbg_los_tested = dbg_los_tested + ntest
         if (present(dperp)) call move_alloc(dp, dperp)
         if (present(dpar)) call move_alloc(dl, dpar)
     end procedure spatial_pairs_los_worker
 
-    !> The points inside the cylinder about `p` along `p`'s own line of sight: one scan with the
-    !> searcher's own lengths and no combine rule.
+    !> One emitter's line-of-sight walk: the covering ball when the whole sweep is forced onto it
+    !> (test-only), else the padded cylinder of its own line of sight, or the ball when that would
+    !> be the longer walk. Every route counts itself here, in its own body, so a test can tell
+    !> which one ran.
+    subroutine los_sweep_point(self, what, t, p, q, rwalk, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
+                               ncyl, nbal, ntest, out64, dperp, dpar)
+        type(pf_spatial_index), intent(in), target :: self !! the index being swept.
+        character(len=*), intent(in) :: what !! the calling binding, for any message.
+        integer(int64), intent(in) :: t !! the emitter's stored position.
+        real(real64), intent(in) :: p(3) !! the emitter's position.
+        real(real64), intent(in) :: q(3) !! `p` relative to the observer.
+        real(real64), intent(in) :: rwalk !! the emitter's cross-section, or its covering ball under `ball_all`.
+        integer(int64), intent(in) :: keys(:) !! the rank per stored position.
+        integer, intent(in) :: lrule !! the rule the accept applies; 0 for the emitter's own cylinder.
+        real(real64), intent(in) :: ls(:) !! the parallel coordinate per stored position.
+        real(real64), intent(in) :: bps(:) !! transverse length per stored position.
+        real(real64), intent(in) :: bls(:) !! parallel length per stored position.
+        logical, intent(in) :: ball_all !! .true. walks the covering ball for every emitter (test-only).
+        real(real64), intent(in) :: qlo(:) !! the least distance a partner can have, per stored position; empty under `ball_all`.
+        real(real64), intent(in) :: qhi(:) !! the greatest such distance; empty under `ball_all`.
+        integer(int64), intent(out) :: m !! how many partners qualified.
+        integer(int64), intent(inout), optional :: ncyl !! incremented when the cylinder was walked.
+        integer(int64), intent(inout), optional :: nbal !! incremented when a ball was walked.
+        integer(int64), intent(inout), optional :: ntest !! incremented per candidate the accept test saw.
+        integer(int64), intent(inout), optional :: out64(:) !! the partners' rows, if wanted.
+        real(real64), intent(inout), optional :: dperp(:) !! their transverse separations, if wanted.
+        real(real64), intent(inout), optional :: dpar(:) !! their parallel separations, if wanted.
+        real(real64) :: pa(3), pb(3), rw, r, dself, lself, bpself, blself
+        logical :: use_ball
+
+        ! Locals, so that no call below names `self` beside one of its own components.
+        dself = self%d_s(t)
+        lself = ls(t)
+        bpself = bps(t)
+        blself = bls(t)
+        if (ball_all) then
+            call spatial_scan(self, p, rwalk, m, out64=out64, min_key=keys(t), keys=keys, los_rule=lrule, los_q=q, &
+                los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls, &
+                dperp=dperp, dpar=dpar, ntested=ntest)
+            if (present(nbal)) nbal = nbal + 1_int64
+            return
+        end if
+        call los_walk_shape(self%obs, q, dself, rwalk, qlo(t), qhi(t), use_ball, r, pa, pb, rw)
+        if (use_ball) then
+            call spatial_scan(self, p, r, m, out64=out64, min_key=keys(t), keys=keys, los_rule=lrule, los_q=q, &
+                los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls, &
+                dperp=dperp, dpar=dpar, los_tiebreak=.true., ntested=ntest)
+            if (present(nbal)) nbal = nbal + 1_int64
+        else
+            call spatial_scan_axis(self, pa, pb, rw, rw, .false., what, m, out64=out64, min_key=keys(t), keys=keys, &
+                los_rule=lrule, los_q=q, los_p=p, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, &
+                los_ls=ls, los_bps=bps, los_bls=bls, dperp=dperp, dpar=dpar, los_tiebreak=.true., ntested=ntest)
+            if (present(ncyl)) ncyl = ncyl + 1_int64
+        end if
+    end subroutine los_sweep_point
+
+    !> The region one emitter walks, from the range of distances `[qlo, qhi]` its partners can
+    !> occupy.
+    !>
+    !> **The padded cylinder contains every accepted partner, by two bounds computed per emitter.**
+    !> With `P` the transverse bound, `D` the emitter's distance and `D_j` in `[qlo, qhi]`, an
+    !> accepted partner has `sin(dtheta/2) <= P / (D + D_j)`, so its distance from the emitter's
+    !> line of sight, `D_j sin dtheta <= 2 D_j sin(dtheta/2)`, is at most `2 P D_j / (D + D_j)`,
+    !> which increases with `D_j`: the walked RADIUS is `2 P qhi / (D + qhi)`. Its projection on
+    !> that line, `D_j cos dtheta = D_j - 2 D_j sin(dtheta/2)**2 >= D_j - 2 D_j P**2 / (D + D_j)**2`,
+    !> and `2x / (D + x)**2` peaks at `x = D` with value `1 / (2D)`: the walked AXIS runs from
+    !> `qlo - P**2 / (2D)` to `qhi`, flat ends. Both are widened by `spatial_los_slack` against
+    !> rounding at the bound itself. Neither bound needs `D` to be large, so no emitter is excluded
+    !> -- but the near-end pad grows as `1/D`, and an emitter close to the observer would walk a
+    !> cylinder longer than its covering ball `sqrt(P**2 + dev**2)` is wide. When the axis exceeds
+    !> that ball's diameter the ball is walked instead, which is the design's `2D <= Q` rule for
+    !> a long cylinder and covers a short one too.
+    pure subroutine los_walk_shape(obs, q, dself, pw, qlo, qhi, use_ball, r, pa, pb, rw)
+        real(real64), intent(in) :: obs(3) !! the observer.
+        real(real64), intent(in) :: q(3) !! the emitter relative to the observer.
+        real(real64), intent(in) :: dself !! the emitter's distance from the observer, `|q|` > 0.
+        real(real64), intent(in) :: pw !! the transverse bound the emitter walks.
+        real(real64), intent(in) :: qlo !! the least distance from the observer a partner can have.
+        real(real64), intent(in) :: qhi !! the greatest such distance; `qlo <= qhi`.
+        logical, intent(out) :: use_ball !! .true. when the ball is the shorter walk.
+        real(real64), intent(out) :: r !! the covering ball's radius.
+        real(real64), intent(out) :: pa(3) !! the padded axis's near end.
+        real(real64), intent(out) :: pb(3) !! its far end.
+        real(real64), intent(out) :: rw !! the padded cylinder's radius.
+        real(real64) :: dev, slack, lo, hi
+
+        ! The farthest a partner's distance can sit from the emitter's, whichever side.
+        dev = dself - qlo
+        if (qhi - dself > dev) dev = qhi - dself
+        r = sqrt(pw * pw + dev * dev)
+        slack = spatial_los_slack * max(abs(qlo), abs(qhi), dself)
+        lo = qlo - 0.5_real64 * pw * pw / dself - slack
+        hi = qhi + slack
+        rw = 2.0_real64 * pw * qhi / (dself + qhi) + slack
+        use_ball = hi - lo > 2.0_real64 * r
+        pa = obs + q * (lo / dself)
+        pb = obs + q * (hi / dself)
+    end subroutine los_walk_shape
+
+    !> The tie groups whose `los` lies within `w` of `lcen`: `a..b`, empty when `a > b`.
+    pure subroutine los_window(grp, ng, lcen, w, a, b)
+        real(real64), intent(in) :: grp(:) !! the distinct `los` values, ascending.
+        integer(int64), intent(in) :: ng !! how many there are.
+        real(real64), intent(in) :: lcen !! the window's centre.
+        real(real64), intent(in) :: w !! its half-width; >= 0.
+        integer(int64), intent(out) :: a !! the first group at or above `lcen - w`.
+        integer(int64), intent(out) :: b !! the last group at or below `lcen + w`.
+        integer(int64) :: lo, hi, mid
+        real(real64) :: lb, ub
+
+        lb = lcen - w
+        ub = lcen + w
+        lo = 1_int64
+        hi = ng + 1_int64
+        do while (lo < hi)
+            mid = lo + (hi - lo) / 2_int64
+            if (grp(mid) < lb) then
+                lo = mid + 1_int64
+            else
+                hi = mid
+            end if
+        end do
+        a = lo
+        hi = ng + 1_int64
+        do while (lo < hi)
+            mid = lo + (hi - lo) / 2_int64
+            if (grp(mid) <= ub) then
+                lo = mid + 1_int64
+            else
+                hi = mid
+            end if
+        end do
+        b = lo - 1_int64
+    end subroutine los_window
+
+    !> The least and greatest distance over the groups `a..b`, by a plain scan: what one query
+    !> needs, where a tree would cost more to build than the window costs to read.
+    pure subroutine los_window_range(gmin, gmax, a, b, qlo, qhi)
+        real(real64), intent(in) :: gmin(:) !! each group's least distance.
+        real(real64), intent(in) :: gmax(:) !! each group's greatest distance.
+        integer(int64), intent(in) :: a !! the first group; `a <= b`.
+        integer(int64), intent(in) :: b !! the last group.
+        real(real64), intent(out) :: qlo !! the least distance over the window.
+        real(real64), intent(out) :: qhi !! the greatest distance over the window.
+        integer(int64) :: k
+
+        qlo = gmin(a)
+        qhi = gmax(a)
+        do k = a + 1_int64, b
+            if (gmin(k) < qlo) qlo = gmin(k)
+            if (gmax(k) > qhi) qhi = gmax(k)
+        end do
+    end subroutine los_window_range
+
+    !> Two bottom-up segment trees over the groups' least and greatest distances, for the range
+    !> minimum and maximum every emitter's window needs, in `O(log n)` each after an `O(n)` build.
+    !>
+    !> Node `x` of the usual zero-based layout lives at `t(x + 1)`: element `k` at node `ng + k - 1`,
+    !> node `x`'s children at `2x` and `2x + 1`, node 0 unused.
+    pure subroutine seg_build(gmin, gmax, ng, tmin, tmax)
+        real(real64), intent(in) :: gmin(:) !! each group's least distance.
+        real(real64), intent(in) :: gmax(:) !! each group's greatest distance.
+        integer(int64), intent(in) :: ng !! how many groups.
+        real(real64), allocatable, intent(out) :: tmin(:) !! the minimum tree.
+        real(real64), allocatable, intent(out) :: tmax(:) !! the maximum tree.
+        integer(int64) :: x
+
+        allocate (tmin(2_int64 * ng), tmax(2_int64 * ng))
+        tmin(1) = huge(0.0_real64)
+        tmax(1) = -huge(0.0_real64)
+        do x = 1_int64, ng
+            tmin(ng + x) = gmin(x)
+            tmax(ng + x) = gmax(x)
+        end do
+        do x = ng - 1_int64, 1_int64, -1_int64
+            tmin(x + 1_int64) = min(tmin(2_int64 * x + 1_int64), tmin(2_int64 * x + 2_int64))
+            tmax(x + 1_int64) = max(tmax(2_int64 * x + 1_int64), tmax(2_int64 * x + 2_int64))
+        end do
+    end subroutine seg_build
+
+    !> The least value over elements `a..b` of a tree `seg_build` made.
+    pure function seg_min(tree, ng, a, b) result(v)
+        real(real64), intent(in) :: tree(:) !! the minimum tree.
+        integer(int64), intent(in) :: ng !! how many elements it holds.
+        integer(int64), intent(in) :: a !! the first element; `a <= b`.
+        integer(int64), intent(in) :: b !! the last element.
+        real(real64) :: v !! the minimum.
+        integer(int64) :: l, r
+
+        v = huge(0.0_real64)
+        l = a - 1_int64 + ng
+        r = b + ng
+        do while (l < r)
+            if (iand(l, 1_int64) == 1_int64) then
+                if (tree(l + 1_int64) < v) v = tree(l + 1_int64)
+                l = l + 1_int64
+            end if
+            if (iand(r, 1_int64) == 1_int64) then
+                r = r - 1_int64
+                if (tree(r + 1_int64) < v) v = tree(r + 1_int64)
+            end if
+            l = l / 2_int64
+            r = r / 2_int64
+        end do
+    end function seg_min
+
+    !> The greatest value over elements `a..b` of a tree `seg_build` made.
+    pure function seg_max(tree, ng, a, b) result(v)
+        real(real64), intent(in) :: tree(:) !! the maximum tree.
+        integer(int64), intent(in) :: ng !! how many elements it holds.
+        integer(int64), intent(in) :: a !! the first element; `a <= b`.
+        integer(int64), intent(in) :: b !! the last element.
+        real(real64) :: v !! the maximum.
+        integer(int64) :: l, r
+
+        v = -huge(0.0_real64)
+        l = a - 1_int64 + ng
+        r = b + ng
+        do while (l < r)
+            if (iand(l, 1_int64) == 1_int64) then
+                if (tree(l + 1_int64) > v) v = tree(l + 1_int64)
+                l = l + 1_int64
+            end if
+            if (iand(r, 1_int64) == 1_int64) then
+                r = r - 1_int64
+                if (tree(r + 1_int64) > v) v = tree(r + 1_int64)
+            end if
+            l = l / 2_int64
+            r = r / 2_int64
+        end do
+    end function seg_max
+
+    !> The points inside the cylinder about `p` along `p`'s own line of sight: the query's own
+    !> lengths and no combine rule, walked as the padded cylinder `los_walk_shape` gives -- the
+    !> ball when that is the shorter walk, or under the test-only forced walk -- with its range of
+    !> distances read off the tie groups within `b_par` of `los_p`. That window can be EMPTY for
+    !> a query point, which is then an empty cylinder and nothing is walked.
     module procedure spatial_within_los_worker
-        real(real64) :: pp(3), q(3), dpq, lp, qq, r
+        real(real64), pointer, contiguous :: ls(:)
+        real(real64) :: pp(3), q(3), pa(3), pb(3), dpq, lp, qq, r, rw, qlo, qhi
+        integer(int64) :: a, b, ng, ntest
+        logical :: use_ball, local
 
         m = 0_int64
         call spatial_los_prepare(self, what)
@@ -732,16 +1028,57 @@ contains
                 ": los_p must be a finite number (no NaN, no infinity)"
             lp = los_p
         end if
-        qq = self%lip * b_par
-        if (self%tie_spread > qq) qq = self%tie_spread
-        r = sqrt(b_perp * b_perp + qq * qq)
         if (self%has_los) then
-            call spatial_scan(self, pp, r, m, out32=out32, out64=out64, dist=dist, sorted=sorted, los_rule=0, &
-                los_q=q, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, los_ls=self%los_s, dperp=dperp, dpar=dpar)
+            ls => self%los_s
         else
-            call spatial_scan(self, pp, r, m, out32=out32, out64=out64, dist=dist, sorted=sorted, los_rule=0, &
-                los_q=q, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, los_ls=self%d_s, dperp=dperp, dpar=dpar)
+            ls => self%d_s
         end if
+        ntest = 0_int64
+        if (dbg_los_ball) then
+            qq = self%lip * b_par
+            if (self%tie_spread > qq) qq = self%tie_spread
+            r = sqrt(b_perp * b_perp + qq * qq)
+            call spatial_scan(self, pp, r, m, out32=out32, out64=out64, dist=dist, sorted=sorted, los_rule=0, &
+                los_q=q, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, los_ls=ls, dperp=dperp, dpar=dpar, &
+                ntested=ntest)
+            !$omp atomic
+            dbg_los_balls = dbg_los_balls + 1_int64
+        else
+            local = self%has_los .and. .not. dbg_los_global
+            if (local) local = allocated(self%los_grp)
+            if (local) then
+                ng = size(self%los_grp, kind=int64)
+                call los_window(self%los_grp, ng, lp, b_par, a, b)
+                if (a > b) then
+                    ! No stored point is within `b_par` of `los_p`: the cylinder is empty.
+                    !$omp atomic
+                    dbg_los_cyl = dbg_los_cyl + 1_int64
+                    return
+                end if
+                call los_window_range(self%los_gmin, self%los_gmax, a, b, qlo, qhi)
+            else
+                qq = self%lip * b_par
+                if (self%tie_spread > qq) qq = self%tie_spread
+                qlo = dpq - qq
+                qhi = dpq + qq
+            end if
+            call los_walk_shape(self%obs, q, dpq, b_perp, qlo, qhi, use_ball, r, pa, pb, rw)
+            if (use_ball) then
+                call spatial_scan(self, pp, r, m, out32=out32, out64=out64, dist=dist, sorted=sorted, los_rule=0, &
+                    los_q=q, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, los_ls=ls, dperp=dperp, dpar=dpar, &
+                    ntested=ntest)
+                !$omp atomic
+                dbg_los_balls = dbg_los_balls + 1_int64
+            else
+                call spatial_scan_axis(self, pa, pb, rw, rw, .false., what, m, out32=out32, out64=out64, dist=dist, &
+                    sorted=sorted, los_rule=0, los_q=q, los_p=pp, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, &
+                    los_ls=ls, dperp=dperp, dpar=dpar, ntested=ntest)
+                !$omp atomic
+                dbg_los_cyl = dbg_los_cyl + 1_int64
+            end if
+        end if
+        !$omp atomic
+        dbg_los_tested = dbg_los_tested + ntest
     end procedure spatial_within_los_worker
 
     !> The distance from every point to its `k`-th nearest OTHER point.

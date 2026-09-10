@@ -314,6 +314,8 @@ something a reader is expected to have.
 | [Risk-243](#risk-243--pairs_within_los-is-complete-only-through-the-measured-slope-l-and-spread-g-and-a-walk-without-them-drops-pairs-quietly) | `%pairs_within_los` is complete only through the measured slope `L` and spread `g` | 4 — covered |
 | [Risk-244](#risk-244--on-a-cylinder-pf_link_max-is-the-union-of-the-two-cylinders-and-the-componentwise-maximum-is-a-plausible-wrong-answer) | On a cylinder `PF_LINK_MAX` is the UNION, never the componentwise maximum | 4 — covered |
 | [Risk-245](#risk-245--the-transverse-separation-is-formed-without-cancellation-and-2---2-cos-is-right-on-a-test-fixture-and-wrong-on-a-catalogue) | The transverse separation is formed without cancellation, never as `2 - 2 cos` | 4 — covered |
+| [Risk-246](#risk-246--the-line-of-sight-cylinder-walk-is-complete-only-through-its-padding-its-envelopes-and-its-distance-range-and-a-narrower-walk-drops-pairs-quietly) | The cylinder walk is complete only through its padding, its envelopes and its distance range | 4 — covered |
+| [Risk-247](#risk-247--the-unions-tiebreak-emits-each-pair-once-only-because-both-endpoints-evaluate-the-same-two-exact-booleans) | The union's tiebreak emits each pair once only because both endpoints evaluate the SAME two exact booleans | 4 — covered |
 
 ---
 
@@ -9309,3 +9311,68 @@ gathered distances.
 a wedge at realistic distances, and asserts `dpar=` is exactly the difference of the two parallel
 coordinates; `test_pairs_los_redshift_example` runs the same criterion at a redshift survey's scale
 against the oracle for all four rules.
+
+### Risk-246 — The line-of-sight cylinder walk is complete only through its padding, its envelopes and its distance range, and a narrower walk drops pairs quietly
+
+`%pairs_within_los` and `%within_los` walk each emitter's OWN cylinder through `spatial_scan_axis`
+(`src/parquet_spatial_query.f90`), and the geometric test inside that walk is only a pre-filter: the
+exact criterion decides, so the answer is right exactly when the walked region CONTAINS every
+accepted partner. Three things make it contain them, all in `src/parquet_spatial_bulk.f90`:
+
+- **The padding of `los_walk_shape`.** A partner within `b_perp` of the emitter's line of sight in
+  `d_perp` is not within `b_perp` of that line in space: its own distance from the observer scales
+  the separation, so the walked radius is `2 P D_far / (D + D_far)`, and its projection falls short
+  of its distance by up to `P**2 / (2 D)`, so the axis starts that much before the nearest partner
+  can. Both are computed per emitter from its own `[qlo, qhi]`, widened by `spatial_los_slack`
+  against rounding at the bound itself. An emitter whose padded cylinder would be longer than its
+  covering ball is wide walks the ball (`sqrt(P**2 + dev**2)`), which is the design's `2D <= Q`
+  fallback and covers short cylinders too.
+- **The envelopes of the rank.** Emitters are ranked by transverse length, descending (ascending
+  under `PF_LINK_MIN`), and emit upward through the rank, so a partner's `b_perp` never exceeds the
+  emitter's; but under `PF_LINK_MEAN` its `b_par` can, so the emitter's parallel window is the
+  SUFFIX MAXIMUM of `b_par` along the rank, and twice that under `PF_LINK_SUM`. An emitter's own
+  `b_par` alone is right for the union, the intersection and rule 0 only.
+- **The distance range.** With `los=` the partners' distances lie within `[min D, max D]` over the
+  stored points whose `los` is within the window of the emitter's own -- a range minimum and maximum
+  over the `los`-sorted tie groups `spatial_los_bounds` keeps (`los_grp`, `los_gmin`, `los_gmax`),
+  which depend on the `(los, D)` pairs alone and so survive every re-bucketing. Under the test-only
+  global arm, and without `los=`, the range is `D +- max(L*W, g)` (Risk-243). A window centred on
+  the emitter's own `b_par` under the mean rule, a range read off a stale or row-ordered array, or
+  a tree queried off by one, narrows the walk and loses the pairs at its edge.
+
+Nothing aborts when any of these is wrong; the list is merely short. **Rule:** the covering-ball
+walk (`parquet_debug_set_spatial_los_walk`) is the oracle inside the library -- the two walks must
+return identical pair sets under every rule, with and without `los=`, under both radial bounds --
+and the four Stage 2 oracle tests still run through the cylinder walk, so a narrower walk fails
+them too.
+
+**Covered by** `test_los_cylinder_walk_matches_ball_walk` (`test/test_spatial.f90`; pairs built to
+order in the padding band, six points near enough the observer to take the ball, all four rules, a
+survey with `los=` under both bounds, and the walk counters asserting which route ran),
+`test_within_los_walks_the_cylinder` (the single query: identical rows, measures and separations,
+the near-observer fallback, the empty window), and the Stage 2 oracle tests of Risk-243 to Risk-245,
+which now exercise the cylinder walk. Mutations recorded in `feature_fof_S2.md`, "Stage 3 -- outcome".
+
+### Risk-247 — The union's tiebreak emits each pair once only because both endpoints evaluate the SAME two exact booleans
+
+Under `PF_LINK_MAX` on the cylinder walk each endpoint walks exactly its own cylinder, so the rank
+cannot screen candidates the way it does for every other rule -- a pair lying in one cylinder only
+must be emitted by that endpoint whatever its rank. The `los_tiebreak` form of the accept
+(`spatial_scan` and `spatial_scan_axis`, `src/parquet_spatial_query.f90`) is
+`own .and. (.not. other .or. keys(t) > min_key)`: the endpoint whose own cylinder holds the pair
+emits it when the partner's does not, and the lower-ranked endpoint emits it when both do. That is
+exactly once only if `own` at one endpoint IS `other` at the other, which holds because both are the
+exact criterion on the same `d_perp` and `d_par` -- never the walk's geometric pre-filter, whose
+padded region differs between the two endpoints, and never a rounded or differently formed
+separation. A pair in both cylinders is then emitted twice or never, and only the count notices.
+
+**Rule:** the tiebreak reads the exact accept's two booleans and nothing else; the covering-ball
+walk keeps the rank screen and the plain union (`own .or. other`), which is right there because a
+ranked emitter's ball covers its partner's cylinder too, and the two forms must never be mixed
+within one sweep -- which is why a near-observer emitter's fallback ball passes `los_tiebreak` as
+the cylinder does.
+
+**Covered by** `test_los_union_tiebreak_counts` (`test/test_spatial.f90`; a fixture with pairs in
+exactly one cylinder and pairs in both, asserted as a precondition, against the union's oracle as
+a set, so a doubled or missing emission fails it) and the union rule's arm of
+`test_los_cylinder_walk_matches_ball_walk`.

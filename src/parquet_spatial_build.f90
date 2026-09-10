@@ -80,6 +80,15 @@ contains
         end do
     end procedure spatial_grid_dims
 
+    !> The ceiling on the bucket count. See the interface in `src/parquet_spatial.f90`.
+    module procedure spatial_cells_ceiling
+        real(real64) :: frac
+
+        frac = spatial_max_cells_per_point
+        if (dbg_max_cells > 0.0_real64) frac = dbg_max_cells
+        maxc = max(1_int64, int(frac * real(self%npts, kind=real64), kind=int64))
+    end procedure spatial_cells_ceiling
+
     !> Fixes the grid for cell side `h`, coarsening when the cell count would leave the counting path.
     module procedure spatial_set_grid
         real(real64) :: hh, rc, ratio, cellv(3), inv(3)
@@ -92,7 +101,7 @@ contains
         ! The ceiling is points-per-cell, not a copy of cubesort's cells-per-point budget: below
         ! 0.3*n cells the bucketing keeps pf_argsort's serial counting fast path, and cubesort's
         ! own rule (8*n cells) is 27x past that and would never see it.
-        maxc = max(1_int64, int(spatial_max_cells_per_point * real(self%npts, kind=real64), kind=int64))
+        maxc = spatial_cells_ceiling(self)
         do it = 1, 64
             call spatial_grid_dims(self%lo, self%hi, self%wrap, hh, nc, cellv, inv)
             ! Multiplied in real64 first: three axes of up to 10^15 cells overflow int64, and the
@@ -124,7 +133,7 @@ contains
         ! this backend exists: a sphere occupies a zero-thickness shell of the grid's bounding
         ! cube, so around 95% of its cells can never hold a point and 0.3 cells per point buys
         ! about 0.014 OCCUPIED ones. Every HEALPix pixel is on the sphere, so 0.3 buys 0.3.
-        maxc = max(1_int64, int(spatial_max_cells_per_point * real(self%npts, kind=real64), kind=int64))
+        maxc = spatial_cells_ceiling(self)
         ! Written as a loop with the test INSIDE, because `.and.` does not short-circuit in
         ! Fortran: with the ceiling test as a second operand, `12*(2*nside)**2` would still be
         ! evaluated at the ceiling and overflow int64. This way `2*ns_cap` never exceeds the
@@ -342,6 +351,9 @@ contains
         self%lip = 1.0_real64
         self%tie_spread = 0.0_real64
         self%los_gap = 0.0_real64
+        if (allocated(self%los_grp)) deallocate (self%los_grp)
+        if (allocated(self%los_gmin)) deallocate (self%los_gmin)
+        if (allocated(self%los_gmax)) deallocate (self%los_gmax)
         n = self%npts
         if (n < 2_int64) return
         call pf_argsort(self%los_s, ord)
@@ -375,6 +387,14 @@ contains
             "could never separate two points; omit los= to use the distance from the observer, or pass a " // &
             "coordinate that varies"
         self%los_gap = w
+        ! The groups are KEPT: the cylinder walk bounds each emitter's radial extent by the spread
+        ! of D over the stored points within its own parallel window, a range minimum and maximum
+        ! over these three arrays (`spatial_pairs_los_worker`). They depend on the (los, D) pairs
+        ! alone, so re-bucketing never stales them, and `%rebuild` remakes them here.
+        allocate (self%los_grp(m), self%los_gmin(m), self%los_gmax(m))
+        self%los_grp = lg(1:m)
+        self%los_gmin = dmin(1:m)
+        self%los_gmax = dmax(1:m)
         ! g: the widest spread of D inside any window narrower than w. Two monotone deques over
         ! the groups, indices ascending, values descending for the maximum and ascending for the
         ! minimum; `[k, j]` is the window, and it always holds `k` itself.
@@ -490,6 +510,9 @@ contains
         if (allocated(self%idx)) deallocate (self%idx)
         if (allocated(self%d_s)) deallocate (self%d_s)
         if (allocated(self%los_s)) deallocate (self%los_s)
+        if (allocated(self%los_grp)) deallocate (self%los_grp)
+        if (allocated(self%los_gmin)) deallocate (self%los_gmin)
+        if (allocated(self%los_gmax)) deallocate (self%los_gmax)
         nullify (self%px)
         nullify (self%py)
         nullify (self%pz)

@@ -78,6 +78,10 @@ module parquet_spatial
     public :: parquet_debug_spatial_shell_rounds
     public :: parquet_debug_reset_spatial_counters
     public :: parquet_debug_spatial_los_bounds
+    public :: parquet_debug_set_spatial_max_cells_per_point
+    public :: parquet_debug_set_spatial_los_walk
+    public :: parquet_debug_set_spatial_los_spread
+    public :: parquet_debug_spatial_los_walk
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -245,6 +249,14 @@ module parquet_spatial
     !! that gate -- not the 2^22 bucket limit -- that binds first. cubesort's own budget rule admits
     !! `8 * n` cells, which is 27x past this and would never see the counting path; do not copy it.
     real(real64), parameter :: spatial_max_cells_per_point = 0.3_real64
+    !> Relative slack on the padded line-of-sight cylinder a `%pairs_within_los` emitter walks.
+    !!
+    !! The cylinder's radius and ends are analytic bounds on where an accepted partner can sit
+    !! (`los_walk_shape`, `src/parquet_spatial_bulk.f90`); a partner exactly on such a bound is
+    !! placed by the walk's own rounded arithmetic, so the bound is widened by this fraction of the
+    !! distances involved. At a thousand units that is a millionth: nothing against a cell, and far
+    !! above the rounding it guards against. The accept test is exact whatever the walk covers.
+    real(real64), parameter :: spatial_los_slack = 1.0e-9_real64
     !> Ratio of the refinement step, applied once around the bracket's winner.
     !!
     !! **The bracket alone leaves a granularity error, and it was measured rather than predicted.**
@@ -331,6 +343,9 @@ module parquet_spatial
         real(real64) :: d_hi = 0.0_real64       !! the largest distance from the observer over the stored points.
         real(real64), allocatable :: d_s(:)     !! distance from the observer of stored point k; radial indexes only.
         real(real64), allocatable :: los_s(:)   !! the parallel coordinate of stored point k; with los= only.
+        real(real64), allocatable :: los_grp(:)  !! the distinct los values ascending, one per tie group; with los= only.
+        real(real64), allocatable :: los_gmin(:) !! the smallest distance from the observer in each group.
+        real(real64), allocatable :: los_gmax(:) !! the largest distance from the observer in each group.
     contains
         procedure, private :: bind_build_r0 !! %build with one radius.
         procedure, private :: bind_build_r1 !! %build with a list of radii.
@@ -489,6 +504,21 @@ module parquet_spatial
     real(real64), save :: dbg_shell_start = -1.0_real64
     !> Expansion rounds accumulated by every shell search since the counters were reset.
     integer(int64), save :: dbg_shell_rounds = 0_int64
+    !> Cells per point forced by `parquet_debug_set_spatial_max_cells_per_point`; <= 0 means the
+    !! shipped `spatial_max_cells_per_point`.
+    real(real64), save :: dbg_max_cells = -1.0_real64
+    !> Whether every line-of-sight sweep walks the covering ball instead of the cylinder
+    !! (`parquet_debug_set_spatial_los_walk`).
+    logical, save :: dbg_los_ball = .false.
+    !> Whether the line-of-sight walk bounds a partner's distance by the catalogue-wide
+    !! `max(L*W, g)` instead of the emitter's own window (`parquet_debug_set_spatial_los_spread`).
+    logical, save :: dbg_los_global = .false.
+    !> Points the line-of-sight queries walked as a cylinder since the counters were reset.
+    integer(int64), save :: dbg_los_cyl = 0_int64
+    !> Points the line-of-sight queries walked as a ball since the counters were reset.
+    integer(int64), save :: dbg_los_balls = 0_int64
+    !> Candidates that reached a line-of-sight accept test since the counters were reset.
+    integer(int64), save :: dbg_los_tested = 0_int64
 
     ! ---- Shared argument checks (parquet_spatial_build.f90) ----
 
@@ -570,6 +600,15 @@ module parquet_spatial
         !! increasing in `theta` over [0, 180 degrees], so a Euclidean ball of that radius in
         !! unit-vector space selects exactly the points within `theta` on the sky -- with no pole
         !! special case and no wrap at 0h, because the sphere has neither.
+        !> The most cells (or pixels) this index may bucket into: `spatial_max_cells_per_point`
+        !> times the point count, at least one -- or the fraction `parquet_debug_set_spatial_max_cells_per_point`
+        !> forced. Every site that applies the ceiling reads it from here, so the test-only override
+        !> cannot reach one of them and miss another.
+        module function spatial_cells_ceiling(self) result(maxc)
+            type(pf_spatial_index), intent(in) :: self !! the index being bucketed.
+            integer(int64) :: maxc !! the ceiling on the bucket count.
+        end function spatial_cells_ceiling
+
         !> Fixes the HEALPix resolution for a query chord, coarsening to keep the counting path.
         !>
         !> The pixel counterpart of `spatial_set_grid`, and it answers the same question: what
@@ -796,15 +835,26 @@ module parquet_spatial
         !! fall inside what `los_rule` makes of the two points' lengths (`0` is the searcher's own
         !! cylinder, otherwise a `PF_LINK_*` rule over the searcher's lengths and the candidate's,
         !! read from `los_bps`/`los_bls` by stored position). The walk radius is the caller's
-        !! business: it must contain the accepted set, which is what `spatial_pairs_los_worker`'s
-        !! `sqrt(b_perp**2 + max(L*b_par, g)**2)` guarantees. `dist` then reports the NORMALISED
-        !! measure `max(d_perp/b_perp, d_par/b_par)` and `sorted=` orders by it; `dperp`/`dpar`
-        !! receive the two raw separations. Present together or not at all, keyed on `los_rule`;
-        !! the free-box walk alone honours them, since the queries are refused on every other kind
-        !! of index.
+        !! business: it must contain the accepted set, which is what the covering ball
+        !! `sqrt(b_perp**2 + Q**2)` of `spatial_pairs_los_worker` guarantees. `dist` then reports
+        !! the NORMALISED measure `max(d_perp/b_perp, d_par/b_par)` and `sorted=` orders by it;
+        !! `dperp`/`dpar` receive the two raw separations. Present together or not at all, keyed on
+        !! `los_rule`; the free-box walk alone honours them, since the queries are refused on every
+        !! other kind of index. `spatial_scan_axis` takes the same group, so a line-of-sight emitter
+        !! may walk either shape and accept identically.
+        !!
+        !! **`los_tiebreak` is the union's emit-once rule for a walk in which each endpoint covers
+        !! its OWN cylinder** (the cylinder walk, and the ball a near-observer emitter falls back
+        !! to): under `PF_LINK_MAX` the rank then does not screen the candidates -- a pair lying in
+        !! one cylinder only is emitted by that endpoint whatever its rank -- and decides only which
+        !! endpoint emits a pair lying in both: `own .and. (.not. other .or. keys(t) > min_key)`,
+        !! the same two booleans at both endpoints. Without it the rank screens first and the union
+        !! is `own .or. other`, which is right only when every emitter's walk covers its partners'
+        !! cylinders too (the covering-ball sweep ranked by radius). `ntested` counts the candidates
+        !! that reached the accept test, for the bench.
         module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys, r_inner, sorted, &
             bnd_u_self, bnd_v_self, bnd_u, bnd_v, los_rule, los_q, los_d, los_l, los_bp, los_bl, &
-            los_ls, los_bps, los_bls, dperp, dpar)
+            los_ls, los_bps, los_bls, dperp, dpar, los_tiebreak, ntested)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p(3) !! the query point; p(3) is ignored by a 2D index.
             real(real64), intent(in) :: r !! the search radius; must be >= 0.
@@ -831,6 +881,8 @@ module parquet_spatial
             real(real64), intent(in), optional :: los_bls(:) !! parallel length per STORED position; rules other than 0.
             real(real64), intent(inout), optional :: dperp(:) !! transverse separation of each reported point.
             real(real64), intent(inout), optional :: dpar(:) !! parallel separation of each reported point.
+            logical, intent(in), optional :: los_tiebreak !! .true.: the union's emit-once tiebreak; needs `min_key`.
+            integer(int64), intent(inout), optional :: ntested !! incremented per candidate reaching the accept test.
         end subroutine spatial_scan
 
         !> Walks the cells an axis-shaped region can reach and reports what it finds.
@@ -846,8 +898,18 @@ module parquet_spatial
         !! intersects the axis, pads the sub-segment by the largest radius over that slab's own
         !! parameter range, and derives the other two axes' cell ranges from that alone -- so every
         !! cell is visited at most once and there is nothing to de-duplicate.
+        !!
+        !! **The line-of-sight queries walk their cylinder through this procedure**, with the same
+        !! `min_key`/`keys`, `los_*`, `dperp`/`dpar`, `los_tiebreak` and `ntested` group `spatial_scan`
+        !! takes and with the same meaning. The geometric test above is then only the PRE-FILTER:
+        !! a candidate inside the walked shape is kept by the exact cylinder criterion alone, formed
+        !! exactly as `spatial_scan` forms it and measured from `los_p`, the emitter, never from `p1`,
+        !! the padded axis's near end. So the caller's axis and radius must CONTAIN every accepted
+        !! partner -- `los_walk_shape` (`src/parquet_spatial_bulk.f90`) is what guarantees it -- and
+        !! `dist` is then the normalised measure, as in `spatial_scan`.
         module subroutine spatial_scan_axis(self, p1, p2, r1, r2, clamp, what, m, out32, out64, dist, &
-            axis_point, axis_t, sorted)
+            axis_point, axis_t, sorted, min_key, keys, los_rule, los_q, los_p, los_d, los_l, los_bp, los_bl, &
+            los_ls, los_bps, los_bls, dperp, dpar, los_tiebreak, ntested)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p1(3) !! one end of the axis; p1(3) is 0 on a 2D index.
             real(real64), intent(in) :: p2(3) !! the other end of the axis.
@@ -862,6 +924,22 @@ module parquet_spatial
             real(real64), intent(inout), optional :: axis_point(:,:) !! `(ndim, m)`: the point `dist` was measured from.
             real(real64), intent(inout), optional :: axis_t(:) !! where on the axis that point sits, in [0, 1].
             logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+            integer(int64), intent(in), optional :: min_key !! accept only points whose key is above this.
+            integer(int64), intent(in), optional :: keys(:) !! order key per STORED position; needs `min_key`.
+            integer, intent(in), optional :: los_rule !! 0 for the emitter's own cylinder, else a `PF_LINK_*` rule.
+            real(real64), intent(in), optional :: los_q(3) !! the emitter's position relative to the observer.
+            real(real64), intent(in), optional :: los_p(3) !! the emitter's position; the separations are measured from it.
+            real(real64), intent(in), optional :: los_d !! the emitter's distance from the observer, `|los_q|` > 0.
+            real(real64), intent(in), optional :: los_l !! the emitter's parallel coordinate.
+            real(real64), intent(in), optional :: los_bp !! the emitter's transverse length.
+            real(real64), intent(in), optional :: los_bl !! the emitter's parallel length.
+            real(real64), intent(in), optional :: los_ls(:) !! parallel coordinate per STORED position.
+            real(real64), intent(in), optional :: los_bps(:) !! transverse length per STORED position; rules other than 0.
+            real(real64), intent(in), optional :: los_bls(:) !! parallel length per STORED position; rules other than 0.
+            real(real64), intent(inout), optional :: dperp(:) !! transverse separation of each reported point.
+            real(real64), intent(inout), optional :: dpar(:) !! parallel separation of each reported point.
+            logical, intent(in), optional :: los_tiebreak !! .true.: the union's emit-once tiebreak; needs `min_key`.
+            integer(int64), intent(inout), optional :: ntested !! incremented per candidate reaching the accept test.
         end subroutine spatial_scan_axis
 
         !> Orders a query's results by increasing distance, ties broken by ascending row index.
@@ -1027,10 +1105,12 @@ module parquet_spatial
     ! coordinate `%build` stored -- or `D` itself when none was. The transverse length is in the
     ! coordinates' units and the parallel one in `los`'s, which need not agree. `B_perp`, `B_par`
     ! come from the `PF_LINK_*` rule over the two points' lengths, `PF_LINK_MAX` meaning the UNION
-    ! of the two cylinders rather than the componentwise maximum. Every accepted pair lies inside
-    ! the ball of radius `sqrt(b_perp**2 + max(L*b_par, g)**2)` about the point whose lengths
-    ! bound it, with `L` and `g` measured at `%build` (`spatial_los_bounds`), which is what lets
-    ! the ordinary cell walk find it.
+    ! of the two cylinders rather than the componentwise maximum. Each emitter walks its OWN
+    ! padded cylinder along its line of sight (`los_walk_shape`, through `spatial_scan_axis`),
+    ! bounded in distance by the spread of the stored points within its parallel window -- read
+    ! off the `los`-sorted tie groups kept from `%build` -- or the covering ball
+    ! `sqrt(b_perp**2 + Q**2)` when that is the shorter walk; `L` and `g` (`spatial_los_bounds`)
+    ! bound `Q` catalogue-wide for the two warnings and the test-only global-spread arm.
 
     interface
         !> The guards both line-of-sight queries share: built, radial, and no point at the observer.
@@ -1089,7 +1169,9 @@ contains
     !> the coordinates' units. Both are fixed at `%build`: `%rebuild` takes `los=` exactly when the
     !> index carries one, and neither is accepted on a 2D or periodic index. A `los` that is
     !> constant, or holds a NaN, is refused; one that is not a function of the distance from the
-    !> observer is accepted with a warning, since every line-of-sight walk is then wide.
+    !> observer is accepted with a warning. **For the line-of-sight queries give `radius=` the
+    !> transverse length `b_perp`**: they walk each point's cylinder, and the cell follows its
+    !> cross-section.
     subroutine bind_build_r0(self, x, y, z, radius, cell, box_lo, box_hi, copy, observer, los)
         class(pf_spatial_index), intent(inout), target :: self !! the index to fill.
         real(real64), intent(in), target :: x(:) !! x of every point.
@@ -1912,11 +1994,15 @@ contains
     !> with one pair of lengths for every point three of the four rules coincide and the fourth is
     !> this call at twice both lengths.
     !>
-    !> The candidate set is a ball of radius `sqrt(b_perp**2 + max(L*b_par, g)**2)` about each
-    !> point, with `L` and `g` measured from the data at `%build` (`spatial_los_bounds`), so a long
-    !> thin cylinder tests many more candidates than it keeps; the answer is exact regardless. A
-    !> `b_par` whose walk would span the whole catalogue's depth is accepted with a warning, since
-    !> that is what a parallel length given in the wrong unit looks like.
+    !> The candidates are walked as each point's own cylinder along its line of sight: `2*b_perp`
+    !> across, and in distance from the observer exactly the range the stored points within
+    !> `b_par` of its `los` occupy (`b_par` itself either side without `los=`), padded by the
+    !> little a partner's own line of sight can carry it outside (`los_walk_shape`,
+    !> `src/parquet_spatial_bulk.f90`); a point so close to the observer that its cylinder would be
+    !> longer than its covering ball is wide walks the ball. The exact test then keeps the cylinder,
+    !> so the answer never depends on the walk. Build with `radius = b_perp`, the cross-section the
+    !> cell should follow. A `b_par` whose window would span the whole catalogue's depth is accepted
+    !> with a warning, since that is what a parallel length given in the wrong unit looks like.
     subroutine bind_pairs_los_r0(self, b_perp, b_par, i, j, threads, dperp, dpar)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: b_perp !! the transverse radius, the same for every point; >= 0.
@@ -1944,8 +2030,10 @@ contains
     !> - `PF_LINK_MEAN` -- `d_perp <= (b_perp_i + b_perp_j)/2 .and. d_par <= (b_par_i + b_par_j)/2`.
     !> - `PF_LINK_SUM` -- `d_perp <= b_perp_i + b_perp_j .and. d_par <= b_par_i + b_par_j`.
     !>
-    !> Each pair is reported by the endpoint whose ball is the larger, which walks that ball (twice
-    !> it under the sum rule), so the list is complete and each pair appears once whichever rule.
+    !> Each pair is reported once, by the endpoint with the larger transverse length, which walks
+    !> its own cylinder -- lengthened to the largest parallel length ranked at or below it under
+    !> the mean rule, and doubled in both lengths under the sum; under the union each endpoint
+    !> walks exactly its own cylinder and a pair lying in both is reported by the lower-ranked one.
     !> Negative or NaN lengths, lists of unequal length, and a list that is neither one value nor
     !> one per point are refused.
     subroutine bind_pairs_los_r1(self, b_perp, b_par, i, j, combine, threads, dperp, dpar)
@@ -2663,7 +2751,9 @@ contains
         n = dbg_pixels_visited
     end function parquet_debug_spatial_pixels_visited
 
-    !> Clears the probe, rebuild, pixel and thread counters, and the forced cell size.
+    !> Clears the probe, rebuild, pixel, thread and line-of-sight counters, and every forcing:
+    !> the cell size, the resolution, the run buffer, the shell start, the cells-per-point ceiling
+    !> and the line-of-sight walk and spread.
     subroutine parquet_debug_reset_spatial_counters()
 
         dbg_probe_count = 0_int64
@@ -2675,6 +2765,12 @@ contains
         dbg_run_buf = 0_int64
         dbg_shell_start = -1.0_real64
         dbg_shell_rounds = 0_int64
+        dbg_max_cells = -1.0_real64
+        dbg_los_ball = .false.
+        dbg_los_global = .false.
+        dbg_los_cyl = 0_int64
+        dbg_los_balls = 0_int64
+        dbg_los_tested = 0_int64
     end subroutine parquet_debug_reset_spatial_counters
 
     !> The bounds a line-of-sight walk rests on, as `%build` (or the last `%rebuild`) measured them.
@@ -2696,5 +2792,66 @@ contains
         tie_spread = index%tie_spread
         gap = index%los_gap
     end subroutine parquet_debug_spatial_los_bounds
+
+    !> Forces the ceiling on cells per point that every later `%build`, `%rebuild_for` and re-tune
+    !> obeys, on the 3D grid and as a pixel count on a HEALPix index alike.
+    !>
+    !> **Test-and-bench only, and public for the reason `parquet_debug_set_spatial_cell` is.** The
+    !> shipped ceiling (`spatial_max_cells_per_point`) is where the bucketing keeps `pf_argsort`'s
+    !> counting fast path, so it is not a tuning preference and this is deliberately not a setting:
+    !> it exists so that `bench/benchmark_spatial.sh` (`MODE=los CELLS_PER_POINT=`) can measure what
+    !> a survey's line-of-sight sweep would gain from a finer grid before anyone decides whether a
+    !> knob is warranted, and so a test can show that the ceiling binds and that relaxing it changes
+    !> the cell and nothing else. No library code calls it.
+    subroutine parquet_debug_set_spatial_max_cells_per_point(c)
+        real(real64), intent(in) :: c !! cells per point to allow; <= 0 restores the shipped ceiling.
+
+        dbg_max_cells = c
+    end subroutine parquet_debug_set_spatial_max_cells_per_point
+
+    !> Forces every line-of-sight query to walk the covering ball instead of its cylinder.
+    !>
+    !> **Test-and-bench only.** The ball walk -- `sqrt(b_perp**2 + max(L*b_par, g)**2)` about each
+    !> point, ranked by that radius -- is the cross-check the cylinder walk is held to: the two
+    !> must return identical sets (`test_los_cylinder_walk_matches_ball_walk`), and the arm
+    !> `bench/benchmark_spatial.sh MODE=los WALK=ball` measures the candidates it tests. Public for
+    !> the reason `parquet_debug_set_spatial_cell` is. No library code calls it.
+    subroutine parquet_debug_set_spatial_los_walk(ball)
+        logical, intent(in) :: ball !! .true. walks the covering ball; .false. restores the cylinder walk.
+
+        dbg_los_ball = ball
+    end subroutine parquet_debug_set_spatial_los_walk
+
+    !> Forces the line-of-sight walk to bound a partner's distance by the catalogue-wide
+    !> `max(L*W, g)` instead of the spread of the points within the emitter's own parallel window.
+    !>
+    !> **Test-and-bench only.** The global bound is the slope at the survey's near edge applied
+    !> everywhere, so it overshoots the far end by the ratio of the two slopes; the arm
+    !> `bench/benchmark_spatial.sh MODE=los SPREAD=global` measures by how much, and a test shows
+    !> the two bounds return the same pairs. Without `los=` the two coincide (`L = 1`, `g = 0`).
+    !> Public for the reason `parquet_debug_set_spatial_cell` is. No library code calls it.
+    subroutine parquet_debug_set_spatial_los_spread(global)
+        logical, intent(in) :: global !! .true. uses `max(L*W, g)`; .false. restores the per-point window.
+
+        dbg_los_global = global
+    end subroutine parquet_debug_set_spatial_los_spread
+
+    !> How the line-of-sight queries have walked since the counters were reset.
+    !>
+    !> **The "which path ran" observable, written by every route in its own body** -- the cylinder
+    !> walk, the ball a near-observer point falls back to, the forced ball, and the empty window a
+    !> `%within_los` query can meet -- so a test can assert not only that the answer is right but
+    !> that the cylinder was walked to get it, and the bench can put the candidates an arm tested
+    !> beside the pairs it kept. A bulk sweep adds one per point, a single query one. Test-only,
+    !> and public for the reason `parquet_debug_set_spatial_cell` is.
+    subroutine parquet_debug_spatial_los_walk(cylinders, balls, tested)
+        integer(int64), intent(out) :: cylinders !! points walked as a cylinder.
+        integer(int64), intent(out) :: balls !! points walked as a ball.
+        integer(int64), intent(out) :: tested !! candidates that reached the accept test.
+
+        cylinders = dbg_los_cyl
+        balls = dbg_los_balls
+        tested = dbg_los_tested
+    end subroutine parquet_debug_spatial_los_walk
 
 end module parquet_spatial ! GCOVR_EXCL_LINE

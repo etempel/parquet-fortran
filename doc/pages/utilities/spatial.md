@@ -375,16 +375,23 @@ cylinder's own sense of near comes first. Both lengths must be positive here, si
 divides by them. Every buffer truncates at the shortest one passed, and `m` is still the true
 count.
 
-**How the library finds the candidates.** The walk is still a ball. About each point it is one of
-radius `sqrt(b_perp**2 + (L * b_par)**2)`, where `L` is how fast the distance from the observer
-changes with `los`, measured from the data at `%build` as the steepest slope over pairs of points at
-least a hundred-thousandth of `los`'s range apart; pairs closer than that contribute a small-scale
-spread `g` instead, which the radius uses in place of `L * b_par` when it is the larger. That ball
-contains the whole cylinder, so no pair is missed, and the exact test above then keeps the cylinder
-and discards the rest. A long thin cylinder is a small part of its ball, so this query tests many
-more candidates than it keeps; the answer is exact regardless, and `bench/benchmark_spatial.sh`
-with `MODE=los` measures the excess on your own data. Without `los=`, `L` is exactly one and `g`
-zero.
+**How the library finds the candidates.** About each point the walk is the cylinder itself: the
+cells along that point's own line of sight, `2 * b_perp` across, and in distance from the observer
+exactly the range the stored points within `b_par` of its `los` occupy — so a survey's far end,
+where a redshift interval spans less distance than at its near end, walks a shorter cylinder.
+Without `los=` that range is `b_par` either side. The walked cylinder is padded by the little a
+partner's own line of sight can carry it outside the point's — a factor `2 D_far / (D + D_far)` on
+the radius and `b_perp**2 / (2 D)` at the near end, both computed per point — so no pair is missed,
+and the exact test above then keeps the cylinder and discards the rest. A point so close to the
+observer that its padded cylinder would be longer than its covering ball is wide walks that ball
+instead. The cylinder walk tests a small multiple of the pairs it keeps where a ball walk tests
+hundreds to over a thousand times as many; on a sparse survey the cell the cells-per-point cap
+allows is far wider than the cylinder, so the time saved is a fraction of that, and
+`bench/benchmark_spatial.sh` with `MODE=los` measures both on your own data. **Give `%build` `radius = b_perp`**: the cell follows the
+cylinder's cross-section. `L`, how fast the distance from the observer changes with `los`, is still
+measured from the data at `%build` — the steepest slope over pairs of points at least a
+hundred-thousandth of `los`'s range apart, with the spread `g` of pairs closer than that — and is
+what the two warnings below read. Without `los=`, `L` is exactly one and `g` zero.
 
 Two things are said rather than refused. A `los=` that is not a function of the distance from the
 observer, or is noisy at small separations — a spectroscopic redshift as `los=` over coordinates

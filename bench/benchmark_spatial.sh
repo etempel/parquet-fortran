@@ -6,12 +6,13 @@
 #   MODE=ab bench/benchmark_spatial.sh               # re-fit the probe's A/B constant here
 #   MODE=build bench/benchmark_spatial.sh            # what the probe costs
 #   MODE=threads bench/benchmark_spatial.sh          # how a bulk sweep scales
+#   MODE=combine bench/benchmark_spatial.sh          # what each combine= rule costs
 #   MODE=backend bench/benchmark_spatial.sh          # 3D grid vs HEALPix, on the sky
 #   MODE=backend DIST=clustered bench/benchmark_spatial.sh
 #   DIST=clustered NP=2000000 bench/benchmark_spatial.sh
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=tune        tune | ab | build | query | threads | backend
+#   MODE=tune        tune | ab | build | query | threads | combine | backend
 #   DIST=uniform     uniform | clustered | wedge | sphere | flat
 #                    (MODE=backend takes uniform or clustered only, on the SPHERE)
 #   SKYR=1           MODE=backend only: the build radius in DEGREES.
@@ -41,6 +42,13 @@
 #   build   What the probe costs: a tuned build against one at the same cell with cell= given,
 #           which skips the probe entirely. The difference is the probe.
 #   query   Single-query and bulk-sweep throughput at the tuned cell.
+#   combine WHAT EACH PAIR RULE COSTS. Sweeps %pairs_within four times over one per-point radius
+#           list drawn from RLO..RHI, once per combine= rule, and prints each arm's time, its pair
+#           count and its ratio to the max arm (the default, and the released behaviour). min
+#           walks smaller balls and should not be slower; mean adds two gathers per candidate; sum
+#           walks twice each radius, so in three dimensions it visits about eight times the volume.
+#           The pair counts must increase strictly from min to sum or the fixture is not
+#           separating the rules -- the mode says so itself when they do not.
 #   threads How a bulk sweep scales with the team size.
 #   backend THE BACKEND COMPARISON. Builds one (ra, dec) catalogue with the 3D grid and with the
 #           HEALPix pixelisation, checks the two answer identically, then times %within_sky across

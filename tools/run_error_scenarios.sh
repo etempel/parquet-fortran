@@ -1347,6 +1347,8 @@ scenarios=(
     "spatial_query_rank_mismatch:1"
     "spatial_rebuild_needs_copy:1"
     "spatial_bulk_radius_length:1"
+    "spatial_pairs_bad_combine:1"
+    "spatial_sky_pairs_sum_too_large:1"
     "spatial_copy_false_strided:1"
     "spatial_threads_below_one:1"
     "spatial_sky_query_on_euclidean:1"

@@ -84,6 +84,8 @@ program benchmark_spatial
         call mode_build()
     case ("query")
         call mode_query()
+    case ("combine")
+        call mode_combine()
     case ("threads")
         call mode_threads()
     case ("backend")
@@ -662,6 +664,60 @@ contains
         write (output_unit, '(a,i0)') "  threads used       : ", parquet_debug_spatial_threads_used()
         write (output_unit, '(a,i0)') "  checksum           : ", keep
     end subroutine mode_query
+
+    !> What each `combine=` rule costs on one per-point radius list.
+    !>
+    !> **All four arms run over the same fixture and the same radii**, because the question is not
+    !> how fast any one rule is but what the rules that carry a per-candidate bound cost against
+    !> the one that does not. `max` is the baseline: it is the released behaviour and the default.
+    !> `min` should sit at or below it, walking smaller balls; `mean` pays two gathers and two
+    !> multiplies per candidate and nothing else; `sum` walks twice each radius, which is eight
+    !> times the volume in three dimensions, so it is expected to be several times the baseline
+    !> and is reported as a ratio rather than compared with the other three.
+    !>
+    !> The pair COUNTS are printed beside the times and are the check that the arms did different
+    !> work: they must increase strictly from `min` through `mean` and `max` to `sum`. Equal counts
+    !> mean the radius spread is too narrow for this fixture to separate the rules, and the timings
+    !> then measure one rule four times.
+    subroutine mode_combine()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        real(real64) :: t(4), t0
+        integer(int64) :: npairs(4), i
+        integer :: rules(4), ri, it
+        character(len=4) :: names(4)
+
+        rules = [PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_MAX, PF_LINK_SUM]
+        names = ["min ", "mean", "max ", "sum "]
+        ! Radii spread over the declared range, so that every rule sees genuinely different values
+        ! at the two ends of a pair. A single radius would make three of the four coincide.
+        allocate (rv(np))
+        do i = 1_int64, np
+            rv(i) = rlo + (rhi - rlo) * pf_random_at(20260910_int64, i, 7_int64)
+        end do
+        call sx%build(x, y, z, radius=rv)
+        do ri = 1, 4
+            t(ri) = huge(1.0_real64)
+            do it = 1, rounds
+                t0 = wtime()
+                call sx%pairs_within(rv, pi, pj, threads=team(), combine=rules(ri))
+                t(ri) = min(t(ri), wtime() - t0)
+            end do
+            npairs(ri) = size(pi, kind=int64)
+        end do
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a,es10.3)') "  cell               : ", sx%cell_size()
+        write (output_unit, '(a)') "  rule        seconds        pairs   vs max"
+        do ri = 1, 4
+            write (output_unit, '(a,a4,f12.4,i13,f9.3)') "  ", names(ri), t(ri), npairs(ri), t(ri) / t(3)
+        end do
+        write (output_unit, '(a,i0)') "  threads used       : ", parquet_debug_spatial_threads_used()
+        if (.not. (npairs(1) < npairs(2) .and. npairs(2) < npairs(3) .and. npairs(3) < npairs(4))) then
+            write (output_unit, '(a)') "  WARNING: the four pair counts do not strictly increase, so this " // &
+                "fixture does not separate the rules and the timings above compare one rule with itself."
+        end if
+    end subroutine mode_combine
 
     !> How a bulk sweep scales with the team size.
     subroutine mode_threads()

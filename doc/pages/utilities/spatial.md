@@ -189,6 +189,10 @@ call sx%count_all_within(0.05_real64, counts, r_inner=0.02_real64)
 call sx%pairs_within(0.05_real64, i, j, r_inner=0.02_real64)
 ```
 
+The per-point pair forms take one further argument, `combine=`, which chooses how two different
+radii decide a pair — see [choosing the rule](#choosing-the-rule-with-combine) below. It composes
+with `r_inner=`: a pair qualifies when it is at least the inner radius away and satisfies the rule.
+
 On a sky index these three are spelled `%all_within_sky`, `%pairs_within_sky` and
 `%count_all_within_sky`, and take their radii in degrees — see
 [search on the sky](#search-on-the-sky).
@@ -209,10 +213,40 @@ the searching. Each unordered pair appears exactly once, always with `i < j`.
 
 **So `sum(counts)` does not size a `%pairs_within` result** when the radii vary. For a single
 radius the identity `size(i) == (sum(counts) - n) / 2` holds, and it is easy to carry that
-assumption across without noticing. Two other conventions are common for per-point radii and
-neither is what `%pairs_within` gives — `d <= min(r_i, r_j)` (both must agree) and
-`d <= r_i + r_j` (the balls touch) — but both are subsets of it, so either can be had by filtering
-the result.
+assumption across without noticing.
+
+### Choosing the rule, with `combine=`
+
+`d <= max(r_i, r_j)` is one of four rules `%pairs_within` and `%pairs_within_sky` offer, and it is
+the default. Name another with `combine=`:
+
+```fortran
+call sx%pairs_within(link_length, i, j, combine=PF_LINK_MEAN)
+call sky%pairs_within_sky(link_deg, i, j, combine=PF_LINK_MIN)
+```
+
+| `combine=` | a pair qualifies when | in words |
+|---|---|---|
+| `PF_LINK_MAX` (default) | `d <= max(r_i, r_j)` | either ball reaches the other point |
+| `PF_LINK_MIN` | `d <= min(r_i, r_j)` | both balls reach the other point |
+| `PF_LINK_MEAN` | `d <= (r_i + r_j)/2` | the arithmetic mean of the two lengths reaches the other point |
+| `PF_LINK_SUM` | `d <= r_i + r_j` | the two balls touch or overlap |
+
+The argument is offered on the **per-point** forms only. With one radius for every point the first
+three are the same rule, and the fourth is the same call at twice the radius.
+
+`PF_LINK_MIN` and `PF_LINK_MEAN` accept subsets of the default, so either could also be had by
+filtering that result. **`PF_LINK_SUM` could not** — it is wider than the default, so the pairs it
+adds are not in that list to be filtered out of. It is also the one rule that sweeps further than
+the radii you gave it: the searcher has to reach a partner up to `r_i + r_j` away, so it walks
+`2*r_i`, which in three dimensions is eight times the volume. `bench/benchmark_spatial.sh` with
+`MODE=combine` times all four on your own data; `PF_LINK_MIN` costs least and `PF_LINK_SUM` costs
+several times the default.
+
+Two consequences of that wider walk are worth knowing. The index is re-tuned against the doubled
+radius, so `%effective_radius()` reports it afterwards. And on a sky index every angular radius
+must be at most 45 degrees under this rule, so that the doubled walk stays inside the 90-degree
+ceiling every sky query has.
 
 ## Segment, cylinder and cone
 
@@ -316,6 +350,12 @@ Euclidean twin — including the [directed and symmetric](#directed-and-symmetri
 split, which survives the change of units unchanged: the chord is strictly increasing in the angle,
 so `max(chord_i, chord_j)` is the chord of `max(deg_i, deg_j)` and a pair qualifies when the wider
 of the two apertures reaches the other object.
+
+`combine=` works here too, and **its rules are stated on the angles, in degrees** — `sep <=
+(deg_i + deg_j)/2` for `PF_LINK_MEAN`, not the mean of the two chords the index works in
+internally. For `PF_LINK_MAX` and `PF_LINK_MIN` the distinction is empty, since the larger angle is
+the larger chord. For the other two it is not: the chord is concave in the angle, so a rule applied
+to chords would answer a slightly different question, and the difference grows with the radius.
 
 What each is for, since the three answer quite different questions: `%all_within_sky` is the
 catalogue self-match; `%pairs_within_sky` is what a group finder or a duplicate-source search
@@ -464,6 +504,14 @@ call sx%pairs_within(link_length, i, j)
 call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, min_size=2)
 ```
 
+With a linking length that varies per object, `combine=` decides what "linked" means for two
+objects carrying different lengths — the default links them when either length reaches, and
+[choosing the rule](#choosing-the-rule-with-combine) sets out the four:
+
+```fortran
+call sx%pairs_within(link_length, i, j, combine=PF_LINK_MEAN)
+```
+
 - `i`, `j` are the edge list. Neither direction nor `i < j` is required, and duplicate edges and
   self-loops are harmless. Every endpoint must name a vertex in `1..nvert`, though — one outside
   that range is an error rather than an ignored edge, since it almost always means `nvert` and the
@@ -596,6 +644,13 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
   less than it costs the grid, because every pixel is on the sphere while most of the grid's cells
   are not — but on a small catalogue it still floors the resolution well above what a small query
   radius would want.
+- **`combine=PF_LINK_SUM` on the sky needs every angular radius to be at most 45 degrees.** The
+  rule's searcher walks twice its own radius, and 90 degrees is the ceiling every sky query has, so
+  the halved limit is that ceiling seen from the other end rather than a second policy. The
+  Euclidean form has no such limit.
+- **`combine=` is offered on the per-point pair forms only.** With one radius for every point three
+  of the four rules coincide, and `PF_LINK_SUM` is the same call at twice the radius, so a
+  selector there would be four names for two answers.
 - **`r_inner=` is scalar-only on `%pairs_within` and `%pairs_within_sky`.** Everywhere else it
   takes one value or one per point. With per-point inner radii a pair would qualify when it lies in
   *i*'s annulus **or** in *j*'s, and the union of two different annuli is not an annulus — which

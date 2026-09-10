@@ -196,15 +196,92 @@ contains
         !$omp end parallel do
     end procedure spatial_count_all_worker
 
+    !> The per-point walk radius and acceptance terms one `PF_LINK_*` rule needs.
+    module procedure spatial_link_terms
+        real(real64) :: c, w, s
+        integer :: k, nk
+
+        nk = size(radii)
+        allocate (walk(nk))
+        ! **The radii reaching here are not yet validated**, and that is safe only because no arm
+        ! below can trap on a bad one. The Euclidean arms are multiplications, so a NaN or a
+        ! negative simply travels into `walk` and is refused by `spatial_bulk_setup` with the
+        ! message it deserves. The sky arms take a square root, and they are reached only through
+        ! `sky_chords`, which has already refused a NaN and anything past 90 degrees -- so the
+        ! radicand sits in [1/2, 1] and never goes negative. Do NOT clamp it with `min`/`max` to
+        ! "make sure": those compile to instructions that raise IEEE_INVALID on a NaN, which is
+        ! exactly the abort this ordering avoids.
+        select case (combine)
+        case (PF_LINK_MAX, PF_LINK_MIN)
+            ! `B(r, r) = r` for both, and neither needs a per-candidate term at all: the bound a
+            ! pair carries is one of its two radii, and the ranking already arranges for the
+            ! endpoint holding that one to be the endpoint doing the searching.
+            walk = radii
+        case (PF_LINK_MEAN)
+            allocate (u(nk), v(nk))
+            if (metric == PF_METRIC_SKY) then
+                do k = 1, nk
+                    c = radii(k)
+                    ! `cos(theta/2)` from the chord with no inverse sine: `c = 2*sin(theta/2)`.
+                    w = sqrt(1.0_real64 - 0.25_real64 * c * c)
+                    ! `s = 2*cos(theta/4)`. Reached through `sqrt(2*(1 + w))` rather than through
+                    ! `sqrt((1 - w)/2)` for the sine: at a small radius `w` sits just below 1, so
+                    ! the second form subtracts two nearly equal doubles and throws away half the
+                    ! significant digits of the very quantity a small radius depends on.
+                    s = sqrt(2.0_real64 * (1.0_real64 + w))
+                    u(k) = c / s            ! 2*sin(theta/4), formed without that cancellation
+                    v(k) = 0.5_real64 * s   ! cos(theta/4)
+                end do
+            else
+                u = 0.5_real64 * radii
+                v = 1.0_real64
+            end if
+            ! `2*u*v` is `c` on the sky and `r` in the plane: the mean of a radius with itself.
+            walk = radii
+        case (PF_LINK_SUM)
+            allocate (u(nk), v(nk))
+            if (metric == PF_METRIC_SKY) then
+                do k = 1, nk
+                    c = radii(k)
+                    w = sqrt(1.0_real64 - 0.25_real64 * c * c)
+                    u(k) = c                ! 2*sin(theta/2)
+                    v(k) = w                ! cos(theta/2)
+                    ! `chord(2*theta) = 2*sin(theta) = 2*c*cos(theta/2)`, which is `2*u*v` -- and
+                    ! NOT `2*c`, the chord doubled. The two agree only in the small-angle limit,
+                    ! and the doubled chord is the larger, so using it would merely walk wider
+                    ! than necessary; the identity is used because it is the tight bound.
+                    walk(k) = 2.0_real64 * c * w
+                end do
+            else
+                u = radii
+                v = 1.0_real64
+                walk = 2.0_real64 * radii
+            end if
+        end select
+    end procedure spatial_link_terms
+
     !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
     module procedure spatial_pairs_within_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64), allocatable :: counts(:), heads(:), keys(:)
+        real(real64), allocatable :: walk(:), urow(:), vrow(:), us(:), vs(:)
         integer(int64) :: n, t, i, u, m, s0, e0, total, k
-        real(real64) :: p(3), r, rin
-        integer :: nt, nr
-        logical :: direct
+        real(real64) :: p(3), r, rin, uself, vself
+        integer :: nt, nr, rule
+        logical :: direct, want_bound
 
+        rule = PF_LINK_MAX
+        if (present(combine)) rule = combine
+        if (rule /= PF_LINK_MAX .and. rule /= PF_LINK_MIN .and. rule /= PF_LINK_MEAN .and. &
+            rule /= PF_LINK_SUM) error stop "pf_spatial_index%" // what // &
+            ": combine= must be PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN or PF_LINK_SUM"
+        ! **Every guard below sees the WALK radii, not the ones the caller passed**, and that is
+        ! deliberate: under `PF_LINK_SUM` the sweep really does walk twice each radius, so the
+        ! length check, the NaN screen, the periodic half-box guard, the rebuild decision and the
+        ! index's recorded effective radius all have to be about the balls that are actually
+        ! walked. A consequence worth knowing: after a sum-rule sweep `%effective_radius()` and
+        ! the rebuild warning quote the doubled radius. For every other rule the two are equal.
+        call spatial_link_terms(radii, rule, expect_metric, walk, urow, vrow)
         ! Scalar only, and validated against the OUTER radii through the same path every other
         ! bulk form uses -- which is what makes a per-point outer radius with a scalar inner one
         ! check against the smallest of them rather than against nothing. `nri` is not asked for:
@@ -212,19 +289,40 @@ contains
         rin = 0.0_real64
         if (present(r_inner)) then
             rin = r_inner
-            call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads, [rin])
+            call spatial_bulk_setup(self, walk, expect_metric, n, nr, nt, threads, [rin])
         else
-            call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads)
+            call spatial_bulk_setup(self, walk, expect_metric, n, nr, nt, threads)
         end if
         if (n == 0_int64) then
             allocate (ii(0), jj(0))
             return
         end if
+        ! **One radius makes every rule the walk radius**, so the per-candidate bound is switched
+        ! off rather than evaluated to a foregone conclusion: `PF_LINK_MEAN` of a radius with
+        ! itself is that radius, and `PF_LINK_SUM`'s bound is its own already-doubled walk. This
+        ! is not only an optimisation -- `bnd_*` are addressed by stored position and would have
+        ! to be length `n` while `radii` is length 1.
+        want_bound = allocated(urow) .and. nr > 1
         call spatial_storage(self, xs, ys, zs)
         direct = self%owns
-        call pair_order_keys(self, radii, nr, n, nt, keys)
+        ! `PF_LINK_MIN` ranks the other way up. Its bound is the SMALLER of the two radii, so the
+        ! endpoint that can be relied on to reach its partner is the one with the smaller ball,
+        ! and it is that endpoint which must do the searching. Every other rule's bound is at
+        ! least the larger radius, so the larger ball searches.
+        call pair_order_keys(self, walk, nr, n, nt, rule == PF_LINK_MIN, keys)
+        if (want_bound) then
+            ! Into STORED order, for the reason `pair_order_keys` gives about its own keys: the
+            ! scan reads one of these per CANDIDATE, so it must be addressed the way a coordinate
+            ! is, not gathered through the row permutation on the hottest loop in the module.
+            allocate (us(n), vs(n))
+            do t = 1_int64, n
+                us(t) = urow(self%idx(t))
+                vs(t) = vrow(self%idx(t))
+            end do
+        end if
         allocate (counts(n), heads(n + 1_int64))
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r)
+        !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
+        !$omp     private(t, i, u, m, p, r, uself, vself)
         do t = 1_int64, n
             i = self%idx(t)
             u = t
@@ -232,11 +330,23 @@ contains
             p(1) = xs(u)
             p(2) = ys(u)
             p(3) = zs(u)
-            r = radii(1)
-            if (nr > 1) r = radii(i)
+            r = walk(1)
+            if (nr > 1) r = walk(i)
             ! `min_key` makes the walk report only points ranked above this one, so each pair is
             ! produced by exactly one of its two endpoints and there is nothing to de-duplicate.
-            call spatial_scan(self, p, r, m, min_key=keys(t), keys=keys, r_inner=rin)
+            ! **The two calls are written out rather than folded behind unallocated actuals.**
+            ! Passing an unallocated allocatable to an optional dummy does make it absent, and
+            ! this project relies on that elsewhere -- but not across a parallel region, where ifx
+            ! has a recorded segfault in the privatization scaffolding for exactly that shape.
+            ! The branch is loop-invariant and costs nothing measurable.
+            if (want_bound) then
+                uself = us(t)
+                vself = vs(t)
+                call spatial_scan(self, p, r, m, min_key=keys(t), keys=keys, r_inner=rin, &
+                    bnd_u_self=uself, bnd_v_self=vself, bnd_u=us, bnd_v=vs)
+            else
+                call spatial_scan(self, p, r, m, min_key=keys(t), keys=keys, r_inner=rin)
+            end if
             counts(t) = m
         end do
         !$omp end parallel do
@@ -248,7 +358,8 @@ contains
         end do
         total = heads(n + 1_int64) - 1_int64
         allocate (ii(total), jj(total))
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r, s0, e0, k)
+        !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
+        !$omp     private(t, i, u, m, p, r, s0, e0, k, uself, vself)
         do t = 1_int64, n
             i = self%idx(t)
             s0 = heads(t)
@@ -258,9 +369,16 @@ contains
             p(1) = xs(u)
             p(2) = ys(u)
             p(3) = zs(u)
-            r = radii(1)
-            if (nr > 1) r = radii(i)
-            call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, r_inner=rin)
+            r = walk(1)
+            if (nr > 1) r = walk(i)
+            if (want_bound) then
+                uself = us(t)
+                vself = vs(t)
+                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, &
+                    r_inner=rin, bnd_u_self=uself, bnd_v_self=vself, bnd_u=us, bnd_v=vs)
+            else
+                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, r_inner=rin)
+            end if
             ! `i` is the endpoint that did the SEARCHING, which under a per-point radius is the one
             ! with the larger ball and so not necessarily the lower row. Order each pair here, so
             ! both forms carry the same contract: every unordered pair once, always with i < j.
@@ -290,12 +408,18 @@ contains
     !> A single radius needs no sort — the balls are all the same size, so both endpoints see each
     !> other and any total order will do. The caller's row index is the one that keeps the output
     !> in the order it has always been in.
-    subroutine pair_order_keys(self, radii, nr, n, nt, keys)
+    !>
+    !> **`ascending` inverts the rank for `PF_LINK_MIN` and for that rule only.** Its bound is the
+    !> SMALLER of a pair's two radii, so the endpoint whose own ball is guaranteed to reach the
+    !> other is the one with the smaller ball -- the mirror image of every other rule, and the one
+    !> place where "rank by descending radius" would drop pairs instead of duplicating them.
+    subroutine pair_order_keys(self, radii, nr, n, nt, ascending, keys)
         type(pf_spatial_index), intent(in) :: self !! the index about to be swept.
-        real(real64), intent(in) :: radii(:) !! one radius, or one per point in row order.
+        real(real64), intent(in) :: radii(:) !! one walk radius, or one per point in row order.
         integer, intent(in) :: nr !! `size(radii)`.
         integer(int64), intent(in) :: n !! how many points the index holds.
         integer, intent(in) :: nt !! the team size, for the sort.
+        logical, intent(in) :: ascending !! .true. ranks the SMALLEST radius first; `PF_LINK_MIN` only.
         integer(int64), allocatable, intent(out) :: keys(:) !! order key per STORED position.
         integer(int64), allocatable :: ord(:), rank_row(:)
         integer(int64) :: t, k
@@ -305,7 +429,7 @@ contains
             keys = self%idx
             return
         end if
-        call pf_argsort(radii, ord, descending=.true., threads=nt)
+        call pf_argsort(radii, ord, descending=.not. ascending, threads=nt)
         allocate (rank_row(n))
         do k = 1_int64, n
             rank_row(ord(k)) = k

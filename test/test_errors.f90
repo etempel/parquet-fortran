@@ -1876,6 +1876,9 @@ contains
             new_unittest("querying a 2D index with a 3D point aborts", test_spatial_query_rank_aborts), &
             new_unittest("rebuilding a copy=.false. index aborts", test_spatial_rebuild_needs_copy_aborts), &
             new_unittest("a radius array of the wrong length aborts", test_spatial_bulk_radius_aborts), &
+            new_unittest("an unknown combine= value aborts", test_spatial_pairs_bad_combine_aborts), &
+            new_unittest("PF_LINK_SUM past 45 degrees on the sky aborts", &
+                         test_spatial_sky_pairs_sum_too_large_aborts), &
             new_unittest("copy=.false. over a strided section aborts", test_spatial_copy_false_strided_aborts), &
             new_unittest("threads= below one aborts", test_spatial_threads_below_one_aborts), &
             new_unittest("an axis query on a periodic index aborts", test_spatial_axis_periodic_aborts), &
@@ -5803,6 +5806,23 @@ contains
             failure_message="a radius array of the wrong length was expected to abort", &
             required_stderr="radius must be one value or one per point")
     end subroutine test_spatial_bulk_radius_aborts
+
+    subroutine test_spatial_pairs_bad_combine_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_pairs_bad_combine", expect_abort=.true., &
+            failure_message="an unknown combine= value was expected to abort", &
+            required_stderr="combine= must be PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN or PF_LINK_SUM")
+    end subroutine test_spatial_pairs_bad_combine_aborts
+
+    !> The message must name the rule's own 45-degree limit, not the general 90-degree ceiling:
+    !> the check runs ahead of the chord conversion precisely so that a caller reads the number
+    !> that applies to the call they made.
+    subroutine test_spatial_sky_pairs_sum_too_large_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_pairs_sum_too_large", expect_abort=.true., &
+            failure_message="PF_LINK_SUM past 45 degrees on the sky was expected to abort", &
+            required_stderr="every angular radius must be <= 45 degrees")
+    end subroutine test_spatial_sky_pairs_sum_too_large_aborts
 
     !> A `contiguous` dummy would copy a strided actual into a temporary that dies at the end of the
     !> call, leaving the index pointing at freed memory with nothing able to detect it -- so this

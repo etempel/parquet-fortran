@@ -235,6 +235,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   none, and one schema then produces one file layout whether it is written whole or a row group at a
   time. `schema%set_nullable(name, [nullable])` sets it in code. A column named under both keys is
   refused, naming it. See [Null values](doc/pages/types/supported-data-types.md#null-values).
+- **`combine=` chooses how two per-point radii decide a pair.** `%pairs_within` and
+  `%pairs_within_sky` take `combine=` on their per-point-radius forms, selecting `PF_LINK_MAX`
+  (either ball reaches the other point, the default and the existing behaviour), `PF_LINK_MIN`
+  (both balls reach the other point), `PF_LINK_MEAN` (the arithmetic mean of the two lengths
+  reaches the other point) or `PF_LINK_SUM` (the two balls touch or overlap). On a sky index the
+  rules are stated on the angles in degrees. `PF_LINK_SUM` sweeps twice each radius, so it re-tunes
+  the index against the doubled radius and refuses an angular radius above 45 degrees. See
+  [Choosing the rule](doc/pages/utilities/spatial.md#choosing-the-rule-with-combine).
 
 ### Changed
 

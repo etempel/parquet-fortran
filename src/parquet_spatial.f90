@@ -62,6 +62,7 @@ module parquet_spatial
     public :: pf_connected_components
     public :: PF_METRIC_EUCLIDEAN, PF_METRIC_SKY
     public :: PF_SKY_GRID3D, PF_SKY_HEALPIX
+    public :: PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_SUM
     !
     ! ---- Test-only observation and override hooks ----
     !
@@ -130,6 +131,47 @@ module parquet_spatial
     !! not, so it wins at larger radii and loses at very small ones; `bench/benchmark_spatial.sh`
     !! is how to find the crossover on a given machine.
     integer, parameter :: PF_SKY_HEALPIX = 2
+
+    ! ---- How two per-point radii decide a pair ----
+    !
+    ! `combine=` on `%pairs_within` and `%pairs_within_sky` selects one of the four. They differ
+    ! only where the two endpoints carry different radii, which is why `combine=` is offered on
+    ! the per-point forms alone: with one radius for every point the first three coincide and the
+    ! fourth is the same sweep at twice the radius.
+    !
+    ! **Every rule is a symmetric function `B(r_i, r_j)`, and the sweep walks `B(r_i, r_i)`.**
+    ! That identity is what keeps the pair list complete: the endpoint doing the searching must
+    ! reach every partner its rule accepts, and because each `B` here rises with both arguments,
+    ! ranking the points so that the searcher's own radius is the extreme one makes its own walk
+    ! the widest bound any of its pairs can have. A rule that broke either property would need a
+    ! new argument, not a new constant -- see `feature_risks.md`.
+
+    !> Either ball reaches the other point: `d <= max(r_i, r_j)`.
+    !!
+    !! `combine=`'s default, so a call that does not name a rule keeps this one. It is the widest
+    !! of the three bounded by the larger radius, so the `PF_LINK_MIN` and `PF_LINK_MEAN` results
+    !! are subsets of it and can be had by filtering; `PF_LINK_SUM` cannot, being wider still.
+    integer, parameter :: PF_LINK_MAX = 1
+    !> Both balls reach the other point: `d <= min(r_i, r_j)`.
+    !!
+    !! The cheapest of the four: every walk is the smaller ball, so it tests fewer candidates than
+    !! the default does on the same radii.
+    integer, parameter :: PF_LINK_MIN = 2
+    !> The arithmetic mean of the two lengths reaches the other point: `d <= (r_i + r_j) / 2`.
+    !!
+    !! On a sky index the mean is taken over the two ANGLES, not over the chords the index works
+    !! in -- the chord is concave in the angle, so averaging chords would quietly drop pairs near
+    !! the mean angle. The conversion is exact and costs nothing per candidate.
+    integer, parameter :: PF_LINK_MEAN = 3
+    !> The two balls touch or overlap: `d <= r_i + r_j`.
+    !!
+    !! **The only rule that sweeps wider than the radii it was given**, since the searcher must
+    !! reach a partner up to `r_i + r_j` away and so walks `2*r_i`. In three dimensions that is
+    !! eight times the volume of the default's walk, and the index is re-tuned and its recorded
+    !! effective radius widened accordingly. On a sky index the sum is taken over the two angles,
+    !! for the reason `PF_LINK_MEAN` gives, and every angular radius must be at most 45 degrees so
+    !! that the doubled walk stays inside the 90-degree ceiling every sky query has.
+    integer, parameter :: PF_LINK_SUM = 4
 
     !> The largest HEALPix resolution parameter this backend will consider.
     !!
@@ -690,7 +732,18 @@ module parquet_spatial
         !! caller's row index as the key; a per-point-radius sweep passes a rank that orders the
         !! points by DESCENDING radius, which is what makes the endpoint doing the searching always
         !! the one whose ball is large enough to reach the other. See `spatial_pairs_within_worker`.
-        module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys, r_inner, sorted)
+        !! `PF_LINK_MIN` ranks the other way round, for the mirror-image reason.
+        !!
+        !! **`bnd_*` carry a per-pair acceptance bound the ball itself cannot express.** The walk
+        !! stays a ball of radius `r`, which is what makes the cell arithmetic possible at all;
+        !! inside it a candidate at stored position `t` is kept only when
+        !! `d <= bnd_u_self*bnd_v(t) + bnd_v_self*bnd_u(t)`. That product form is not a
+        !! convenience: it is the one shape that expresses the mean and sum of two radii in the
+        !! Euclidean metric AND of two ANGLES on the sky, so the walk never learns which metric it
+        !! is running under. All four are present together or none is, and `PF_LINK_MAX` and
+        !! `PF_LINK_MIN` pass none -- their bound IS the walk radius.
+        module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys, r_inner, sorted, &
+            bnd_u_self, bnd_v_self, bnd_u, bnd_v)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p(3) !! the query point; p(3) is ignored by a 2D index.
             real(real64), intent(in) :: r !! the search radius; must be >= 0.
@@ -702,6 +755,10 @@ module parquet_spatial
             integer(int64), intent(in), optional :: keys(:) !! order key per STORED position; needs `min_key`.
             real(real64), intent(in), optional :: r_inner !! an inner radius; makes the ball an annulus.
             logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+            real(real64), intent(in), optional :: bnd_u_self !! the searcher's own `u` term; needs `bnd_u`.
+            real(real64), intent(in), optional :: bnd_v_self !! the searcher's own `v` term; needs `bnd_v`.
+            real(real64), intent(in), optional :: bnd_u(:) !! `u` term per STORED position.
+            real(real64), intent(in), optional :: bnd_v(:) !! `v` term per STORED position.
         end subroutine spatial_scan
 
         !> Walks the cells an axis-shaped region can reach and reports what it finds.
@@ -802,15 +859,40 @@ module parquet_spatial
         end subroutine spatial_all_within_worker
 
         !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
-        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, expect_metric, threads, r_inner)
+        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, expect_metric, what, &
+            threads, r_inner, combine)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: ii(:) !! the lower row index of each pair.
             integer(int64), allocatable, intent(out) :: jj(:) !! the higher row index of each pair.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
+            character(len=*), intent(in) :: what !! the calling binding, for any message.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
             real(real64), intent(in), optional :: r_inner !! an inner radius; SCALAR only, see the worker.
+            integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
         end subroutine spatial_pairs_within_worker
+
+        !> The per-point walk radius and acceptance terms one `PF_LINK_*` rule needs.
+        !!
+        !! **The single place a rule is turned into arithmetic**, so that the sweep, the tuner and
+        !! the guards all see the same numbers. `walk` is `B(r, r)`, the widest bound any pair of
+        !! this point's can carry, and therefore both the radius it must walk and the value the
+        !! index is re-tuned against. `u` and `v` are the product-form terms `spatial_scan`
+        !! multiplies crosswise; they come back UNALLOCATED for `PF_LINK_MAX` and `PF_LINK_MIN`,
+        !! whose bound is the walk radius itself and which therefore test nothing per candidate.
+        !!
+        !! On the sky the radii arrive as CHORDS, and the mean and sum are defined on the ANGLES:
+        !! the terms are built from half-angle identities written to avoid cancelling two nearly
+        !! equal doubles, never by inverting the chord through `asin` and never by combining the
+        !! chords directly (`feature_risks.md`).
+        module subroutine spatial_link_terms(radii, combine, metric, walk, u, v)
+            real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
+            integer, intent(in) :: combine !! the rule, already validated.
+            integer, intent(in) :: metric !! PF_METRIC_EUCLIDEAN or PF_METRIC_SKY.
+            real(real64), allocatable, intent(out) :: walk(:) !! `B(r, r)` per point, same shape as `radii`.
+            real(real64), allocatable, intent(out) :: u(:) !! the `u` term, or unallocated when none is needed.
+            real(real64), allocatable, intent(out) :: v(:) !! the `v` term, or unallocated with `u`.
+        end subroutine spatial_link_terms
 
         !> How many neighbours each point has, in the caller's row order.
         module subroutine spatial_count_all_worker(self, radii, counts, expect_metric, threads, radii_inner)
@@ -1540,6 +1622,10 @@ contains
     !> Every neighbouring pair appears exactly once, with `i < j`. With one radius the relation is
     !> symmetric by construction, so there is nothing to choose: either endpoint's ball reaches the
     !> other or neither does.
+    !>
+    !> **There is no `combine=` here, deliberately.** The four rules differ only where the two
+    !> endpoints carry different radii; with one radius `PF_LINK_MAX`, `PF_LINK_MIN` and
+    !> `PF_LINK_MEAN` are the same rule, and `PF_LINK_SUM` is this call at `2*radius`.
     subroutine bind_pairs_within_r0(self, radius, i, j, threads, r_inner)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius !! the search radius, the same for every point.
@@ -1548,7 +1634,8 @@ contains
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner !! an inner radius; pairs closer than this are dropped.
 
-        call spatial_pairs_within_worker(self, [radius], i, j, PF_METRIC_EUCLIDEAN, threads, r_inner)
+        call spatial_pairs_within_worker(self, [radius], i, j, PF_METRIC_EUCLIDEAN, "pairs_within", &
+            threads, r_inner)
     end subroutine bind_pairs_within_r0
 
     !> `%pairs_within` with an independent radius per point.
@@ -1563,25 +1650,37 @@ contains
     !> own radius. `%count_all_within` counts the directed neighbours too, so it does not size this
     !> result.
     !>
-    !> Two other conventions are common for a per-point radius and neither is what this gives:
-    !> `d <= min(r_i, r_j)` (both must agree) and `d <= r_i + r_j` (the balls touch). Either can be
-    !> had by filtering this result, since both are subsets of it.
+    !> **`combine=` chooses which of four rules decides a pair**, and the default is the one
+    !> described above:
+    !>
+    !> - `PF_LINK_MAX` -- either ball reaches the other point, `d <= max(r_i, r_j)`.
+    !> - `PF_LINK_MIN` -- both balls reach the other point, `d <= min(r_i, r_j)`.
+    !> - `PF_LINK_MEAN` -- the arithmetic mean of the two lengths reaches the other point,
+    !>   `d <= (r_i + r_j)/2`.
+    !> - `PF_LINK_SUM` -- the two balls touch or overlap, `d <= r_i + r_j`.
+    !>
+    !> The min and mean results are subsets of the default and could also be had by filtering it.
+    !> **The sum result could not**: it is wider than the default, so the pairs it adds are not in
+    !> that list to be filtered, and asking for it here sweeps at twice each radius.
     !>
     !> **`r_inner=` is SCALAR here even though `radius` is a vector, and that is a correctness
-    !> constraint rather than a simplification.** With per-point radii a pair qualifies when it
-    !> lies in *i*'s annulus OR in *j*'s, and the union of two different annuli is not an annulus
-    !> -- so the descending-radius ranking that makes each pair be emitted from exactly one
-    !> endpoint no longer covers it, and the edge list would be quietly incomplete. Passing a
-    !> per-point `r_inner` here is refused.
-    subroutine bind_pairs_within_r1(self, radius, i, j, threads, r_inner)
+    !> constraint rather than a simplification.** With per-point inner radii a pair qualifies when
+    !> it lies in *i*'s annulus OR in *j*'s, and the union of two different annuli is not an
+    !> annulus -- so the ranking that makes each pair be emitted from exactly one endpoint no
+    !> longer covers it, and the edge list would be quietly incomplete. Passing a per-point
+    !> `r_inner` here is refused. The scalar one composes with every `combine=` rule, since the
+    !> same inner bound applies to every pair whichever endpoint carries the larger radius.
+    subroutine bind_pairs_within_r1(self, radius, i, j, threads, r_inner, combine)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
         integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner !! one inner radius for every pair; scalar only.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
 
-        call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, threads, r_inner)
+        call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, "pairs_within", &
+            threads, r_inner, combine)
     end subroutine bind_pairs_within_r1
 
     !> `%count_all_within` with one radius for every point.
@@ -1664,6 +1763,10 @@ contains
     !>
     !> Every close pair once, with `i < j` -- the shape a group finder or a duplicate-source search
     !> wants.
+    !>
+    !> **There is no `combine=` here**, for the reason `%pairs_within`'s single-radius form gives:
+    !> with one angular radius three of the four rules coincide and the fourth is this call at
+    !> twice the radius.
     subroutine bind_pairs_sky_r0(self, radius_deg, i, j, threads, r_inner_deg)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
@@ -1676,10 +1779,10 @@ contains
         if (present(r_inner_deg)) then
             cin = sky_chords([r_inner_deg], "pairs_within_sky")
             call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, threads, cin(1))
+                i, j, PF_METRIC_SKY, "pairs_within_sky", threads, cin(1))
         else
             call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, threads)
+                i, j, PF_METRIC_SKY, "pairs_within_sky", threads)
         end if
     end subroutine bind_pairs_sky_r0
 
@@ -1694,22 +1797,46 @@ contains
     !> **`r_inner_deg=` is SCALAR here for the same reason `%pairs_within`'s is**, and the chord
     !> being a monotone reparameterisation of the angle changes nothing about that argument: the
     !> union of two different annuli is still not an annulus.
-    subroutine bind_pairs_sky_r1(self, radius_deg, i, j, threads, r_inner_deg)
+    !>
+    !> **`combine=` takes the same four `PF_LINK_*` rules, stated on the ANGLES.** For
+    !> `PF_LINK_MAX` and `PF_LINK_MIN` that distinction is empty, since the chord is strictly
+    !> increasing in the angle and the larger angle is the larger chord. For `PF_LINK_MEAN` and
+    !> `PF_LINK_SUM` it is not: the chord is concave, so the mean of two chords is strictly below
+    !> the chord of the mean angle whenever the two differ, and a sweep that combined chords would
+    !> return a plausible list quietly missing the pairs between the two bounds. `sep <=
+    !> (deg_i + deg_j)/2` is what this answers.
+    !>
+    !> `PF_LINK_SUM` walks twice each angular radius, so it needs every `radius_deg` to be at most
+    !> 45 degrees -- half the ceiling every sky query has.
+    subroutine bind_pairs_sky_r1(self, radius_deg, i, j, threads, r_inner_deg, combine)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
         integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner_deg !! one inner angular radius; scalar only.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
         real(real64), allocatable :: cin(:)
 
+        ! Ahead of the chord conversion, so that a radius past the general 90-degree ceiling asked
+        ! for under this rule reads the message naming the rule's own limit -- the actionable half
+        ! of the two. Nested rather than `.and.`-ed: `present` does not short-circuit. A NaN fails
+        ! this comparison and is caught by `sky_chords` immediately below, which is the right
+        ! order: "not a number" is the more specific complaint.
+        if (present(combine)) then
+            if (combine == PF_LINK_SUM) then
+                if (any(radius_deg > 0.5_real64 * spatial_max_sky_deg)) error stop &
+                    "pf_spatial_index%pairs_within_sky: combine=PF_LINK_SUM sweeps twice each " // &
+                    "radius, so every angular radius must be <= 45 degrees"
+            end if
+        end if
         if (present(r_inner_deg)) then
             cin = sky_chords([r_inner_deg], "pairs_within_sky")
             call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, threads, cin(1))
+                i, j, PF_METRIC_SKY, "pairs_within_sky", threads, cin(1), combine)
         else
             call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, threads)
+                i, j, PF_METRIC_SKY, "pairs_within_sky", threads, combine=combine)
         end if
     end subroutine bind_pairs_sky_r1
 

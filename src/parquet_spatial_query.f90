@@ -96,7 +96,7 @@ contains
     !> is precisely why removing it would be a silent wrong answer rather than a visible one.
     subroutine scan_healpix(self, p, r, m, cap, r2, r2in, minkey, want_min, direct, &
                             has32, has64, hasd, usework, xs, ys, zs, out32, out64, dist, &
-                            keys, dwork)
+                            keys, dwork, want_bnd, uslf, vslf, bnd_u, bnd_v)
         type(pf_spatial_index), intent(in) :: self !! the index to search.
         real(real64), intent(in) :: p(3) !! the query direction; need not be normalised.
         real(real64), intent(in) :: r !! the search radius, as a chord in unit-vector space.
@@ -123,6 +123,11 @@ contains
         real(real64), intent(inout), optional :: dist(:) !! distance to each reported point.
         integer(int64), intent(in), optional :: keys(:) !! order key per stored position.
         real(real64), intent(inout), optional :: dwork(:) !! distances kept for ordering.
+        logical, intent(in) :: want_bnd !! whether a per-pair acceptance bound is in play.
+        real(real64), intent(in) :: uslf !! the searcher's own `u` term.
+        real(real64), intent(in) :: vslf !! the searcher's own `v` term.
+        real(real64), intent(in), optional :: bnd_u(:) !! `u` term per stored position.
+        real(real64), intent(in), optional :: bnd_v(:) !! `v` term per stored position.
         ! A stack buffer, sized so that the allocating path below is unreachable for any disc a
         ! tuned index actually issues: a disc spans about `2r/resol` rings and at most two runs
         ! per ring, and the resolution is chosen to sit just under the radius. It is
@@ -133,7 +138,7 @@ contains
         integer(int64), allocatable, target :: big_runs(:,:)
         integer(int64), pointer :: rp(:,:)
         integer(int64) :: nruns, k, s0, e0, t, row, first, count, buf
-        real(real64) :: ang, dx, dy, dz, d2, p1, p2, p3
+        real(real64) :: ang, dx, dy, dz, d2, p1, p2, p3, bnd
 
         p1 = p(1)
         p2 = p(2)
@@ -189,6 +194,10 @@ contains
                         if (want_min) then
                             if (keys(t) <= minkey) cycle
                         end if
+                        if (want_bnd) then
+                            bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
+                            if (d2 > bnd * bnd) cycle
+                        end if
                         row = self%idx(t)
                         m = m + 1_int64
                         if (m <= cap) then
@@ -211,6 +220,10 @@ contains
                         if (want_min) then
                             if (keys(t) <= minkey) cycle
                         end if
+                        if (want_bnd) then
+                            bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
+                            if (d2 > bnd * bnd) cycle
+                        end if
                         m = m + 1_int64
                         if (m <= cap) then
                             if (has32) out32(m) = int(row, kind=int32)
@@ -232,8 +245,9 @@ contains
         integer(int64) :: run_lo(2), run_hi(2), ilo, ihi
         real(real64) :: r2, r2in, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3
+        real(real64) :: bnd, uslf, vslf
         real(real64), allocatable :: dwork(:)
-        logical :: has32, has64, hasd, want_min, direct, want_sort, usework
+        logical :: has32, has64, hasd, want_min, direct, want_sort, usework, want_bnd
         integer :: d, nrun, ir
 
         m = 0_int64
@@ -256,6 +270,21 @@ contains
         ! unreachable through any public entry point and no fixture can build a case for it.
         if (want_min .and. .not. present(keys)) error stop & ! GCOVR_EXCL_LINE
             "pf_spatial_index: min_key needs keys" ! GCOVR_EXCL_LINE
+        ! The per-pair acceptance bound, keyed off the ARRAY rather than a flag so that the four
+        ! travel as one mechanism the way `min_key` and `keys` do. The self terms are lifted into
+        ! locals here because the accept test reads them once per candidate and an optional dummy
+        ! is not something a compiler will keep in a register across the cell walk.
+        want_bnd = present(bnd_u)
+        uslf = 0.0_real64
+        vslf = 0.0_real64
+        if (want_bnd) then
+            ! Defensive, exactly as above: every caller passes all four together. ! GCOVR_EXCL_LINE
+            if (.not. (present(bnd_v) .and. present(bnd_u_self) .and. &
+                present(bnd_v_self))) error stop & ! GCOVR_EXCL_LINE
+                "pf_spatial_index: bnd_u needs bnd_v and both self terms" ! GCOVR_EXCL_LINE
+            uslf = bnd_u_self
+            vslf = bnd_v_self
+        end if
         if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%within: this index holds more rows than an int32 buffer can name; use an int64 one"
         cap = 0_int64
@@ -305,7 +334,7 @@ contains
         if (self%backend_id == PF_SKY_HEALPIX) then
             call scan_healpix(self, p, r, m, cap, r2, r2in, minkey, want_min, direct, &
                               has32, has64, hasd, usework, xs, ys, zs, out32, out64, dist, &
-                              keys, dwork)
+                              keys, dwork, want_bnd, uslf, vslf, bnd_u, bnd_v)
             call scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
             return
         end if
@@ -339,6 +368,10 @@ contains
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
                                 end if
+                                if (want_bnd) then
+                                    bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
+                                    if (d2 > bnd * bnd) cycle
+                                end if
                                 row = self%idx(t)
                                 m = m + 1_int64
                                 if (m <= cap) then
@@ -360,6 +393,10 @@ contains
                                 if (d2 < r2in) cycle
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
+                                end if
+                                if (want_bnd) then
+                                    bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
+                                    if (d2 > bnd * bnd) cycle
                                 end if
                                 m = m + 1_int64
                                 if (m <= cap) then
@@ -441,6 +478,10 @@ contains
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
                                 end if
+                                if (want_bnd) then
+                                    bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
+                                    if (d2 > bnd * bnd) cycle
+                                end if
                                 row = self%idx(t)
                                 m = m + 1_int64
                                 if (m <= cap) then
@@ -465,6 +506,10 @@ contains
                                 if (d2 < r2in) cycle
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
+                                end if
+                                if (want_bnd) then
+                                    bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
+                                    if (d2 > bnd * bnd) cycle
                                 end if
                                 m = m + 1_int64
                                 if (m <= cap) then

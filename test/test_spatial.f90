@@ -80,6 +80,16 @@ contains
                          test_pairs_per_point_radius_is_symmetric), &
             new_unittest("a uniform radius vector gives the scalar pair list", &
                          test_pairs_uniform_vector_matches_scalar), &
+            new_unittest("every combine= rule matches a brute-force scan of its own definition", &
+                         test_pairs_combine_rules_match_oracle), &
+            new_unittest("omitting combine= is PF_LINK_MAX", test_pairs_combine_default_is_max), &
+            new_unittest("a uniform radius vector gives the scalar list under every rule", &
+                         test_pairs_combine_uniform_vector), &
+            new_unittest("r_inner= composes with every combine= rule", test_pairs_combine_with_inner), &
+            new_unittest("sky mean and sum combine angles, not chords, on both backends", &
+                         test_sky_pairs_combine_matches_angle_oracle), &
+            new_unittest("the sky sum rule holds inside its 45-degree ceiling", &
+                         test_sky_pairs_sum_within_ceiling), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
@@ -975,6 +985,350 @@ contains
         call check(error, all(vi == si) .and. all(vj == sj), &
             "a uniform radius vector must give the scalar form's pair list, pair for pair")
     end subroutine test_pairs_uniform_vector_matches_scalar
+
+    !> The bound one `PF_LINK_*` rule puts on a pair, stated independently of the library.
+    !>
+    !> **Deliberately written from the rule's plain-language description**, not from the product
+    !> form the sweep uses: an oracle that reproduced `u_i*v_j + v_i*u_j` would agree with a wrong
+    !> derivation of those terms. On the sky the arguments are DEGREES, which is the whole content
+    !> of the mean and sum rules there.
+    real(real64) function link_bound(a, b, rule) result(v)
+        real(real64), intent(in) :: a !! one endpoint's radius, or angular radius in degrees.
+        real(real64), intent(in) :: b !! the other endpoint's.
+        integer, intent(in) :: rule !! one of the four `PF_LINK_*` constants.
+
+        select case (rule)
+        case (PF_LINK_MAX)
+            v = max(a, b)
+        case (PF_LINK_MIN)
+            v = min(a, b)
+        case (PF_LINK_MEAN)
+            v = 0.5_real64 * (a + b)
+        case default
+            v = a + b
+        end select
+    end function link_bound
+
+    !> Every `combine=` rule reproduces a brute-force scan applying that rule's own definition.
+    !>
+    !> **The fixture has to separate the four rules from one another**, or a sweep that ignored
+    !> `combine=` entirely would pass four times over: the strict ordering of the four counts is
+    !> asserted before any of them is compared. It must also contain pairs the searcher's OWN ball
+    !> cannot reach, which is what makes the sum rule's doubled walk load-bearing rather than
+    !> merely generous -- `beyond` counts those and is asserted non-zero.
+    subroutine test_pairs_combine_rules_match_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, k, nwant, beyond, counted(4)
+        real(real64) :: d2, bnd
+        integer :: rules(4), ri, rule
+
+        rules = [PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_MAX, PF_LINK_SUM]
+        n = 300_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do a = 1_int64, n
+            rv(a) = 0.03_real64 + 0.22_real64 * pf_random_at(fixture_seed, a, 11_int64)
+        end do
+        call sx%build(x, y, z, radius=rv)
+        allocate (want(n, n), got(n, n))
+        do ri = 1, 4
+            rule = rules(ri)
+            want = .false.
+            got = .false.
+            nwant = 0_int64
+            beyond = 0_int64
+            do a = 1_int64, n - 1_int64
+                do b = a + 1_int64, n
+                    d2 = (x(a) - x(b))**2 + (y(a) - y(b))**2 + (z(a) - z(b))**2
+                    bnd = link_bound(rv(a), rv(b), rule)
+                    if (d2 <= bnd * bnd) then
+                        want(a, b) = .true.
+                        nwant = nwant + 1_int64
+                        ! Out of reach of either endpoint's own ball, so only a widened walk finds
+                        ! it. Empty for every rule but the sum.
+                        if (d2 > max(rv(a), rv(b))**2) beyond = beyond + 1_int64
+                    end if
+                end do
+            end do
+            counted(ri) = nwant
+            if (rule == PF_LINK_SUM) then
+                call check(error, beyond > 0_int64, &
+                    "the fixture must contain pairs no endpoint's own ball reaches, or the " // &
+                    "sum rule's doubled walk is never exercised")
+                if (allocated(error)) return
+            end if
+            call sx%pairs_within(rv, pi, pj, combine=rule)
+            call check(error, size(pi, kind=int64) == nwant, &
+                "each combine= rule must report exactly the pairs its own definition accepts")
+            if (allocated(error)) return
+            call check(error, all(pi < pj), "every reported pair must have i < j, whatever the rule")
+            if (allocated(error)) return
+            do k = 1_int64, size(pi, kind=int64)
+                got(pi(k), pj(k)) = .true.
+            end do
+            ! Set equality, not a count: a count alone cannot tell a duplicated pair plus a
+            ! missing one from the right answer.
+            call check(error, all(got .eqv. want), &
+                "each combine= rule's edge list must be exactly its own accepted set")
+            if (allocated(error)) return
+        end do
+        ! Last, so that a failure above is reported against the rule that caused it. Strict, in
+        ! the order min < mean < max < sum: a sweep answering one rule for all four would satisfy
+        ! every assertion above and fail here.
+        call check(error, counted(1) < counted(2) .and. counted(2) < counted(3) .and. &
+            counted(3) < counted(4), &
+            "the fixture must separate all four rules; the four pair counts must strictly increase")
+    end subroutine test_pairs_combine_rules_match_oracle
+
+    !> Omitting `combine=` is exactly `PF_LINK_MAX`, the rule the released sweep applies.
+    subroutine test_pairs_combine_default_is_max(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: di(:), dj(:), mi(:), mj(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a
+
+        n = 220_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do a = 1_int64, n
+            rv(a) = 0.04_real64 + 0.20_real64 * pf_random_at(fixture_seed, a, 12_int64)
+        end do
+        call sx%build(x, y, z, radius=rv)
+        call sx%pairs_within(rv, di, dj)
+        call sx%pairs_within(rv, mi, mj, combine=PF_LINK_MAX)
+        call check(error, size(di, kind=int64) == size(mi, kind=int64), &
+            "the default rule must return as many pairs as PF_LINK_MAX does")
+        if (allocated(error)) return
+        ! Element for element: both calls run the same walk in the same order, so the default
+        ! must not merely agree as a set.
+        call check(error, all(di == mi) .and. all(dj == mj), &
+            "omitting combine= must be PF_LINK_MAX, pair for pair")
+    end subroutine test_pairs_combine_default_is_max
+
+    !> A uniform radius VECTOR gives the scalar form's answer under every rule.
+    !>
+    !> The vector path and the scalar path are different code -- the first ranks by radius and may
+    !> carry per-candidate terms, the second ranks by row and never does -- so equal radii are the
+    !> one input where the two must agree exactly. The sum rule agrees with the scalar form at
+    !> TWICE the radius, which is also the statement that its walk is what it claims.
+    subroutine test_pairs_combine_uniform_vector(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: si(:), sj(:), vi(:), vj(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, k
+        integer :: rules(4), ri
+        real(real64), parameter :: rq = 0.12_real64
+
+        rules = [PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_SUM]
+        n = 260_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        rv = rq
+        call sx%build(x, y, z, radius=rq)
+        allocate (want(n, n), got(n, n))
+        do ri = 1, 4
+            if (rules(ri) == PF_LINK_SUM) then
+                call sx%pairs_within(2.0_real64 * rq, si, sj)
+            else
+                call sx%pairs_within(rq, si, sj)
+            end if
+            call sx%pairs_within(rv, vi, vj, combine=rules(ri))
+            call check(error, size(vi, kind=int64) == size(si, kind=int64), &
+                "a uniform radius vector must give the scalar form's pair count")
+            if (allocated(error)) return
+            want = .false.
+            got = .false.
+            do k = 1_int64, size(si, kind=int64)
+                want(si(k), sj(k)) = .true.
+            end do
+            do k = 1_int64, size(vi, kind=int64)
+                got(vi(k), vj(k)) = .true.
+            end do
+            call check(error, all(got .eqv. want), &
+                "a uniform radius vector must give the scalar form's pairs, for every rule")
+            if (allocated(error)) return
+        end do
+    end subroutine test_pairs_combine_uniform_vector
+
+    !> `r_inner=` composes with every rule: it removes the close pairs and touches nothing else.
+    subroutine test_pairs_combine_with_inner(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:), qi(:), qj(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, k, dropped
+        real(real64) :: d2
+        integer :: rules(4), ri
+        real(real64), parameter :: rin = 0.05_real64
+
+        rules = [PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_SUM]
+        n = 260_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do a = 1_int64, n
+            rv(a) = 0.06_real64 + 0.18_real64 * pf_random_at(fixture_seed, a, 13_int64)
+        end do
+        call sx%build(x, y, z, radius=rv)
+        allocate (want(n, n), got(n, n))
+        do ri = 1, 4
+            call sx%pairs_within(rv, pi, pj, combine=rules(ri))
+            call sx%pairs_within(rv, qi, qj, combine=rules(ri), r_inner=rin)
+            ! The annulus result is the plain one minus exactly the pairs closer than `rin`.
+            want = .false.
+            dropped = 0_int64
+            do k = 1_int64, size(pi, kind=int64)
+                d2 = (x(pi(k)) - x(pj(k)))**2 + (y(pi(k)) - y(pj(k)))**2 + (z(pi(k)) - z(pj(k)))**2
+                if (d2 < rin * rin) then
+                    dropped = dropped + 1_int64
+                else
+                    want(pi(k), pj(k)) = .true.
+                end if
+            end do
+            call check(error, dropped > 0_int64, &
+                "the fixture must have pairs inside the inner radius, or the annulus is a no-op")
+            if (allocated(error)) return
+            got = .false.
+            do k = 1_int64, size(qi, kind=int64)
+                got(qi(k), qj(k)) = .true.
+            end do
+            call check(error, all(got .eqv. want), &
+                "r_inner= must drop exactly the pairs closer than it, under every combine= rule")
+            if (allocated(error)) return
+        end do
+    end subroutine test_pairs_combine_with_inner
+
+    !> On the sky the mean and sum rules combine ANGLES, and a chord-space reading is not the same.
+    !>
+    !> **The precondition is the whole point of this test.** The chord is concave in the angle, so
+    !> combining chords gives a strictly smaller bound than combining the angles whenever the two
+    !> radii differ; `split` counts the pairs lying between the two readings, and an implementation
+    !> that averaged chords would return a plausible list missing exactly those. A fixture where
+    !> `split` is zero would pass against either reading and prove nothing, so it is asserted
+    !> non-zero before anything else. Both backends run, since the accept test is shared and a
+    !> backend that grew its own copy would differ here first.
+    subroutine test_sky_pairs_combine_matches_angle_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, k, nwant, split
+        real(real64) :: sep, bnd, chordwise
+        integer :: rules(2), ri, bk, backends(2)
+        real(real64), parameter :: d2r = 0.017453292519943295_real64
+
+        rules = [PF_LINK_MEAN, PF_LINK_SUM]
+        backends = [PF_SKY_GRID3D, PF_SKY_HEALPIX]
+        n = 700_int64
+        call make_sky(n, ra, dec)
+        allocate (rv(n))
+        do a = 1_int64, n
+            rv(a) = 5.0_real64 + 35.0_real64 * pf_random_at(fixture_seed, a, 41_int64)
+        end do
+        allocate (want(n, n), got(n, n))
+        do ri = 1, 2
+            want = .false.
+            nwant = 0_int64
+            split = 0_int64
+            do a = 1_int64, n - 1_int64
+                do b = a + 1_int64, n
+                    sep = sky_sep(ra(a), dec(a), ra(b), dec(b))
+                    bnd = link_bound(rv(a), rv(b), rules(ri))
+                    if (sep <= bnd) then
+                        want(a, b) = .true.
+                        nwant = nwant + 1_int64
+                    end if
+                    ! The same rule applied to the CHORDS and read back as an angle: what a sweep
+                    ! that never converted would answer. **The disagreement is counted in either
+                    ! direction**, because the chord is concave with `chord(0) = 0` and the two
+                    ! consequences point opposite ways: the mean of two chords falls BELOW the
+                    ! chord of the mean angle, while their sum rises ABOVE the chord of the summed
+                    ! angle. A one-sided test would be vacuous for one of the two rules.
+                    chordwise = 2.0_real64 * asin(min(1.0_real64, 0.5_real64 * &
+                        link_bound(2.0_real64 * sin(0.5_real64 * rv(a) * d2r), &
+                                   2.0_real64 * sin(0.5_real64 * rv(b) * d2r), rules(ri)))) / d2r
+                    if ((sep <= bnd) .neqv. (sep <= chordwise)) split = split + 1_int64
+                end do
+            end do
+            call check(error, split > 0_int64, &
+                "the fixture must contain pairs the chord-wise and angle-wise readings judge " // &
+                "differently, or this test cannot tell the two apart")
+            if (allocated(error)) return
+            do bk = 1, 2
+                call sx%clear()
+                call sx%build_sky(ra, dec, radius_deg=rv, backend=backends(bk))
+                call sx%pairs_within_sky(rv, pi, pj, combine=rules(ri))
+                ! The count first: a doubled emission from one backend keeps the set and changes
+                ! only this number.
+                call check(error, size(pi, kind=int64) == nwant, &
+                    "a sky combine= rule must accept exactly the pairs its angular bound admits")
+                if (allocated(error)) return
+                got = .false.
+                do k = 1_int64, size(pi, kind=int64)
+                    got(pi(k), pj(k)) = .true.
+                end do
+                call check(error, all(got .eqv. want), &
+                    "both sky backends must give exactly the angular rule's pairs")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_sky_pairs_combine_matches_angle_oracle
+
+    !> The sum rule on the sky, inside its 45-degree ceiling, against the angular oracle.
+    subroutine test_sky_pairs_sum_within_ceiling(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, k, nwant, beyond
+        real(real64) :: sep
+
+        n = 600_int64
+        call make_sky(n, ra, dec)
+        allocate (rv(n))
+        do a = 1_int64, n
+            ! Up to the 45-degree ceiling the rule imposes, so the doubled walk lands exactly on
+            ! the 90-degree ceiling every sky query has.
+            rv(a) = 15.0_real64 + 30.0_real64 * pf_random_at(fixture_seed, a, 42_int64)
+        end do
+        call sx%build_sky(ra, dec, radius_deg=rv)
+        allocate (want(n, n), got(n, n))
+        want = .false.
+        nwant = 0_int64
+        beyond = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                sep = sky_sep(ra(a), dec(a), ra(b), dec(b))
+                if (sep <= rv(a) + rv(b)) then
+                    want(a, b) = .true.
+                    nwant = nwant + 1_int64
+                    if (sep > max(rv(a), rv(b))) beyond = beyond + 1_int64
+                end if
+            end do
+        end do
+        call check(error, beyond > 0_int64, &
+            "the fixture must contain pairs beyond either angular radius on its own")
+        if (allocated(error)) return
+        call sx%pairs_within_sky(rv, pi, pj, combine=PF_LINK_SUM)
+        call check(error, size(pi, kind=int64) == nwant, &
+            "the sky sum rule must accept exactly the pairs within deg_i + deg_j")
+        if (allocated(error)) return
+        got = .false.
+        do k = 1_int64, size(pi, kind=int64)
+            got(pi(k), pj(k)) = .true.
+        end do
+        call check(error, all(got .eqv. want), &
+            "the sky sum rule's edge list must be exactly the pairs within deg_i + deg_j")
+    end subroutine test_sky_pairs_sum_within_ceiling
 
     ! ---- Segment, cylinder and cone ----
 

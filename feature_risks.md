@@ -306,6 +306,8 @@ something a reader is expected to have.
 | [Risk-237](#risk-237--the-dropna-decision-reads-the-key-columns-validity-at-the-representative-row-never-where-the-sort-put-the-group) | dropna asks the key COLUMN whether a group is the null one, never the sort's placement | 4 — covered |
 | [Risk-238](#risk-238--gather-must-abort-rather-than-truncate-and-aggs-own-buffers-must-be-sized-by-max_size) | A gather into a short buffer must abort; %agg's buffers are sized by %max_size() | 4 — covered |
 | [Risk-239](#risk-239--a-callback-loop-that-resolves-a-team-it-never-opened-or-opens-one-nobody-asked-for-is-invisible-in-every-answer) | A team resolved-but-not-opened, or opened unasked, shows in no answer | 4 — covered |
+| [Risk-240](#risk-240--a-pair-rule-whose-walk-radius-does-not-dominate-its-own-bound-drops-pairs-and-the-list-still-looks-right) | A pair rule whose WALK radius does not dominate its own bound drops pairs | 4 — covered |
+| [Risk-241](#risk-241--on-the-sky-pf_link_mean-and-pf_link_sum-combine-angles-and-combining-the-chords-instead-is-a-plausible-wrong-answer) | On the sky `PF_LINK_MEAN`/`PF_LINK_SUM` combine ANGLES, never the chords | 4 — covered |
 | [Risk-240](#risk-240--aggs-widening-and-nuniques-equality-must-stay-parquet_stats-and-the-sort-comparators) | %agg's answers must stay parquet_stats', %nunique's equality the sort comparator's | 4 — covered |
 | [Risk-241](#risk-241--first_rowslast_rows-are-computed-not-read-off-the-permutations-ends) | %first_rows/%last_rows are computed; the engine's stability hides a read-off-the-end | 4 — covered |
 | [Risk-242](#risk-242--the-exact-int64-sum-must-abort-on-overflow-never-wrap) | The exact int64 sum must abort on overflow, never wrap | 4 — covered |
@@ -7340,9 +7342,17 @@ quietly incomplete: every edge in it is real, and some real edges are missing.
   signature rather than by a runtime check, so the combination cannot be written at all.
 - **The sky twin is not an exception.** The chord is a monotone reparameterisation of the angle,
   which is exactly why it changes nothing about the argument above.
-- **The general fix is known and deliberately not taken**: gather *j*'s two radii and test both
-  annuli in the accept test, at the cost of two gathers per candidate on the hottest path in the
-  module. Do not adopt it without measuring, and do not widen the signature without adopting it.
+- **The general fix is known and now measured**: gather *j*'s two radii and test both annuli in
+  the accept test, at the cost of two gathers per candidate on the hottest path in the module.
+  `combine=`'s `PF_LINK_MEAN` arm carries exactly two such gathers and one bound evaluation, and
+  `MODE=combine bench/benchmark_spatial.sh` puts it at **1.098x the `PF_LINK_MAX` arm** (machine C,
+  gfortran 15.2, 400k uniform points, radii 1..5, best of 3). A per-point `r_inner` needs two
+  further gathers and a second bound, so the honest estimate for the pair is about twice that
+  penalty -- near the 20% the maintainer set as the limit worth paying, not comfortably inside it.
+  **Do not widen the signature on this estimate**: measure the annulus arm itself. Note also that
+  widening `r_inner` on `bind_pairs_within_r1` from a scalar to `r_inner(:)` is a SOURCE-BREAKING
+  change to a binding released in v2.2.0, which is a semantic-versioning decision and not an
+  implementation detail.
 
 **Covered by** the signature itself and by `test_annulus_in_bulk_and_on_the_sky`
 (`test/test_spatial.f90`), which checks that a scalar `r_inner` drops exactly the pairs closer than
@@ -9123,3 +9133,86 @@ line above it -- the same call over a column that does not overflow -- and `tabl
 null` for the empty-group half; `test_agg_int64_family_exact` (`test/test_table_group.f90`) pins the
 exact answers above 2**53 against `int64` arithmetic over `%csr` and shows the real64 form
 differing. The mutation to catch is the two overflow tests deleted.
+
+### Risk-240 — A pair rule whose WALK radius does not dominate its own bound drops pairs, and the list still looks right
+
+`%pairs_within` emits each pair from exactly one endpoint, and that endpoint walks a ball. With
+`combine=` there are now four bounds and one walk, so the property that makes the sweep complete has
+to be stated rather than observed: **for every rule `B`, the searcher's walk radius is `B(r_i, r_i)`,
+and `B` rises with both arguments.** The ranking then puts the searcher's own radius at the extreme
+of every pair it can own, so its own walk is the widest bound any of those pairs can carry.
+
+Both halves are load-bearing and neither is visible in an answer:
+
+- `PF_LINK_SUM`'s bound reaches `r_i + r_j`, so its walk is `2*r_i`. A walk of `r_i` -- the obvious
+  reading, and what every other rule uses -- silently loses every pair further than the larger
+  radius. On a sky index the walk is `chord(2*theta_i)`, which is `2*c*sqrt(1 - c*c/4)` and NOT the
+  chord doubled; the doubled chord is larger, so it is safe but wasteful, while anything smaller is
+  wrong.
+- `PF_LINK_MIN` inverts the RANK instead. Its bound is the smaller radius, so the endpoint whose
+  ball is guaranteed to reach the other is the one with the smaller ball. Ranking it descending
+  like the others drops pairs rather than duplicating them, which is the quiet direction.
+
+`spatial_link_terms` (`src/parquet_spatial_bulk.f90`) is the single place a rule becomes arithmetic,
+and it returns the walk radius beside the terms precisely so the two cannot drift apart. The walk
+radii, not the caller's, are what reach `spatial_bulk_setup` -- so the length check, the NaN screen,
+the periodic half-box guard and the rebuild decision are all about the balls that are really walked.
+
+**What this still forbids:**
+
+- **Do not add a rule without a walk radius equal to `B(r, r)` and a proof that `B` is monotone in
+  both arguments.** A geometric mean satisfies both; a rule keyed on `|r_i - r_j|` satisfies
+  neither and cannot use this sweep at all.
+- **Do not "simplify" the sum rule's walk back to the caller's radius**, and do not replace the sky
+  walk with a doubled chord on the grounds that the answers match -- they match because the doubled
+  chord is the looser of the two.
+- **Do not switch the bound test off for a per-point radius list.** It is switched off only when
+  `size(radii) == 1`, where every rule's bound IS the walk radius; that condition is about the
+  length of the list, never about the rule.
+
+**Covered by** `test_pairs_combine_rules_match_oracle` (`test/test_spatial.f90`), which compares
+each rule against an O(n^2) oracle written from the rule's plain-language definition rather than
+from the product form the sweep uses, and asserts the four pair counts strictly increase so that a
+sweep answering one rule for all four cannot pass. It also asserts the fixture contains pairs no
+endpoint's own ball reaches, which is what makes the sum rule's doubled walk load-bearing rather
+than merely generous. `test_pairs_combine_uniform_vector` catches the mirror defect: a uniform
+radius vector must give the scalar form's answer under every rule, and the scalar form at twice the
+radius under the sum rule.
+
+### Risk-241 — On the sky `PF_LINK_MEAN` and `PF_LINK_SUM` combine ANGLES, and combining the chords instead is a plausible wrong answer
+
+A sky index stores unit vectors and works in chords, `c = 2*sin(theta/2)`; every sky binding converts
+its degrees to chords at the entry point and the worker below is metric-blind. That is exactly right
+for `PF_LINK_MAX` and `PF_LINK_MIN`, because the chord is strictly increasing in the angle, so the
+larger angle is the larger chord and no conversion changes which endpoint wins.
+
+**It is wrong for the other two.** The chord is concave on `[0, 180]` with `chord(0) = 0`, so the
+mean of two chords falls strictly below the chord of the mean angle, and the sum of two chords rises
+strictly above the chord of the summed angle, whenever the two radii differ. A sweep that combined
+chords would return a plausible edge list: sorted, each pair once, `i < j` throughout, every pair
+genuinely near -- and quietly missing (mean) or gaining (sum) the pairs between the two readings, by
+more the larger the radii.
+
+The conversion is exact and needs no inverse sine. With `w = cos(theta/2) = sqrt(1 - c*c/4)` and
+`s = 2*cos(theta/4) = sqrt(2*(1 + w))`, the terms are `u = c/s`, `v = s/2` for the mean and `u = c`,
+`v = w` for the sum, and the bound is `u_i*v_j + v_i*u_j` in both cases.
+
+**What this still forbids:**
+
+- **Do not form `sin(theta/4)` as `sqrt((1 - w)/2)`.** At a small radius `w` sits just below 1, so
+  that subtracts two nearly equal doubles and throws away half the digits of the quantity a small
+  radius depends on. The shipped form divides `c` by `s` instead, which cancels nothing.
+- **Do not clamp the radicand with `min`/`max` "to be safe".** Those compile to instructions that
+  raise IEEE_INVALID on a NaN, and the ordering that makes the bare `sqrt` safe -- `sky_chords`
+  refuses a NaN and anything past 90 degrees before the terms are built -- is what a clamp would
+  quietly replace with an abort under nagfor.
+- **Do not lift the 45-degree refusal on `PF_LINK_SUM`.** Its walk is `chord(2*theta)`, so the
+  general 90-degree ceiling on a sky query is a 45-degree ceiling on this rule's radii.
+
+**Covered by** `test_sky_pairs_combine_matches_angle_oracle` (`test/test_spatial.f90`), whose design
+matters more than its assertions: it computes the chord-wise reading alongside the angle-wise one
+and asserts the fixture contains pairs the two judge **differently**, counted in either direction --
+the mean and the sum disagree on opposite sides, so a one-sided precondition would be vacuous for
+one of them. It runs both sky backends and asserts the pair COUNT before the set, since a doubled
+emission keeps the set and changes only the count. `test_sky_pairs_sum_within_ceiling` covers the
+sum rule up against its own limit.

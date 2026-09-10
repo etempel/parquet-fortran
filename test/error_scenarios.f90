@@ -2616,6 +2616,10 @@ program error_scenarios
         call scenario_spatial_rebuild_needs_copy()
     case ("spatial_bulk_radius_length")
         call scenario_spatial_bulk_radius_length()
+    case ("spatial_pairs_bad_combine")
+        call scenario_spatial_pairs_bad_combine()
+    case ("spatial_sky_pairs_sum_too_large")
+        call scenario_spatial_sky_pairs_sum_too_large()
     case ("spatial_copy_false_strided")
         call scenario_spatial_copy_false_strided()
     case ("spatial_threads_below_one")
@@ -22745,6 +22749,43 @@ contains
         call sx%count_all_within([0.1_real64, 0.2_real64, 0.3_real64], counts)   ! -> aborts
         print '(a)', "unexpectedly accepted a radius array of the wrong length"
     end subroutine scenario_spatial_bulk_radius_length
+
+    !> A `combine=` value that names no rule.
+    !>
+    !> Refused rather than silently treated as the default: the argument selects which pairs come
+    !> back, so a mistyped constant that fell through to `PF_LINK_MAX` would answer a different
+    !> question from the one asked and look entirely ordinary doing it.
+    subroutine scenario_spatial_pairs_bad_combine()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_cloud(64, x, y, z)
+        allocate (rv(size(x)))
+        rv = 0.2_real64
+        call sx%build(x, y, z, radius=rv)
+        call sx%pairs_within(rv, pi, pj, combine=99)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an unknown combine= value, pairs=", size(pi)
+    end subroutine scenario_spatial_pairs_bad_combine
+
+    !> `PF_LINK_SUM` on the sky past the 45-degree limit its doubled walk imposes.
+    !>
+    !> The general sky ceiling is 90 degrees and this rule walks twice each radius, so 60 degrees
+    !> would ask the walk for 120 -- past the point where a ball prunes anything at all. The check
+    !> runs BEFORE the degrees-to-chord conversion so that the message names the rule's own limit
+    !> rather than the general one, which is the half a caller can act on.
+    subroutine scenario_spatial_sky_pairs_sum_too_large()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        allocate (rv(size(ra)))
+        rv = 60.0_real64
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        call sx%pairs_within_sky(rv, pi, pj, combine=PF_LINK_SUM)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a 60-degree radius under PF_LINK_SUM, pairs=", size(pi)
+    end subroutine scenario_spatial_sky_pairs_sum_too_large
 
     !> `copy=.false.` over a strided section.
     !>

@@ -116,6 +116,18 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t) :: res !! the team; 1 means serial.
         end function parquet_debug_get_join_side_threads_used
+        !> The team the last per-group callback loop of a `parquet_grouping` (`%apply`) ran on.
+        function parquet_debug_get_group_threads_used() result(res) &
+            bind(C, name="parquet_debug_get_group_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! the team; 1 means serial.
+        end function parquet_debug_get_group_threads_used
+        !> Overwrites that record, so a test can tell a loop that wrote it from one that did not.
+        subroutine parquet_debug_set_group_threads_used(n) &
+            bind(C, name="parquet_debug_set_group_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! the value to plant.
+        end subroutine parquet_debug_set_group_threads_used
         !> Forces the join's pair-list engine: 0 automatic, 1 the sort engine, 2 the hash engine.
         subroutine parquet_debug_set_join_engine(mode) &
             bind(C, name="parquet_debug_set_join_engine")
@@ -153,6 +165,20 @@ module test_table_parallel
             integer(c_int64_t), value :: n !! new floor, or 0 to restore.
         end subroutine parquet_debug_set_colread_min_elements
     end interface
+    !
+    !> Context for `%apply`'s procedure-form callbacks in `test_apply_group_team`: a module
+    !! variable, because a callback must be a module procedure (an internal one crashes under
+    !! one supported compiler; .claude/rules/fortran-gotchas.md, flang). Read on every thread of
+    !! the team, which is what an explicit threads= declares safe.
+    real(real64), pointer :: par_apply_p(:) => null() !! the fixture's payload column.
+    !
+    !> The object form's context, in a component: `out(1)` is the payload's sum over the group,
+    !! `out(2)`, when there is room, the group's size.
+    type, extends(parquet_group_reducer) :: par_sum_reducer
+        real(real64), pointer :: p(:) => null() !! the payload column.
+    contains
+        procedure :: reduce => par_sum_reduce !! See the type.
+    end type par_sum_reducer
     !
 contains
     !
@@ -215,6 +241,8 @@ contains
                 test_join_thread_split), &
             new_unittest("a join's group passes and its side index run on the join's team", &
                 test_join_group_passes_threads), &
+            new_unittest("a grouping's apply is serial unless asked, opens the team asked for, and agrees", &
+                test_apply_group_team), &
             new_unittest("a gather's team goes inside the column when the columns are fewer than the threads", &
                 test_colwork_level_rule), &
             new_unittest("bounded= reads correctly through both parallel paths", &
@@ -2677,5 +2705,134 @@ contains
         call t%add_column("k", keys)
     end subroutine build_key_table
     !
+    ! ==================================================================================
+    ! %apply's team
+    ! ==================================================================================
+    !
+    !> `%apply`'s team, and the A/B on it. Absent `threads=` is a DECISION for serial and records
+    !! 1; `threads=1` records 1; `threads=nt` records nt on the procedure and the object form
+    !! alike; and the table tier's cap (`parquet_set_table_threads(1)`) does not move an
+    !! explicit request, which is the caller's re-entrancy declaration rather than a ceiling to
+    !! negotiate. Then every form under `threads=nt` equals its serial run bit for bit: the
+    !! fixture's groups are unequal in size and its payload row-distinct, so a result stored at
+    !! the wrong group under the dynamic schedule is a wrong VALUE -- a defect of that kind
+    !! shows intermittently, so this test's power against it is statistical (run it several
+    !! times when hunting one). The callbacks read the table through `%col` pointers taken
+    !! before the calls, on every thread. This suite runs its tests with no enclosing region,
+    !! so the team opened here is a real one.
+    subroutine test_apply_group_team(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 20000 !! rows; about five hundred groups of unequal size.
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        type(par_sum_reducer) :: red
+        integer(int32) :: k(N)
+        real(real64) :: v(N)
+        real(real64), allocatable :: s_abs(:), s_one(:), s_team(:), s_cap(:), o_one(:), o_team(:)
+        real(real64), allocatable :: m_one(:, :), m_team(:, :), om_one(:, :), om_team(:, :)
+        integer(int64) :: r_abs, r_one, r_team, r_cap, r_obj
+        integer :: nt, i
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: no explicit threads= can open a team, so every record " // &
+            "would read 1 and the A/B would compare serial against serial")
+        return
+#else
+        nt = min(4, omp_get_num_procs())
+        if (nt < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is clamped " // &
+                "to omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+#endif
+        ! Keys 0..499 whose group sizes grow with the key (the square root of a spread residue),
+        ! so the dynamic schedule has something to balance; a row-distinct payload.
+        do i = 1, N
+            k(i) = int(sqrt(real(mod(i * 7919, 250000), real64)), int32)
+            v(i) = real(i, real64)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("v", v)
+        call t%col("v", par_apply_p)
+        call t%col("v", red%p)
+        call t%group_by("k", grp)
+        ! ---- the records: cleared to a value no loop writes, then one arm each.
+        call parquet_debug_set_group_threads_used(-1_c_int64_t)
+        call grp%apply(par_cb_sum, s_abs)
+        r_abs = parquet_debug_get_group_threads_used()
+        call grp%apply(par_cb_sum, s_one, threads=1)
+        r_one = parquet_debug_get_group_threads_used()
+        call grp%apply(par_cb_sum, s_team, threads=nt)
+        r_team = parquet_debug_get_group_threads_used()
+        call parquet_set_table_threads(1)
+        call grp%apply(par_cb_sum, s_cap, threads=nt)
+        r_cap = parquet_debug_get_group_threads_used()
+        call parquet_reset_settings()
+        call grp%apply(red, o_team, threads=nt)
+        r_obj = parquet_debug_get_group_threads_used()
+        ! ---- the A/B: the other three forms, serial and on the team.
+        call grp%apply(red, o_one)
+        call grp%apply(par_cb_two, 2, m_one)
+        call grp%apply(par_cb_two, 2, m_team, threads=nt)
+        call grp%apply(red, 2, om_one)
+        call grp%apply(red, 2, om_team, threads=nt)
+        call check(error, grp%ngroups() > 100_int64, "the fixture has a few hundred groups")
+        if (allocated(error)) return
+        call check(error, r_abs == 1_int64, "absent threads= runs serially and says so")
+        if (allocated(error)) return
+        call check(error, r_one == 1_int64, "threads=1 runs serially and says so")
+        if (allocated(error)) return
+        call check(error, r_team == int(nt, int64), "threads=nt opens a team of nt on the procedure form")
+        if (allocated(error)) return
+        call check(error, r_cap == int(nt, int64), "the table-tier cap does not move an explicit threads=")
+        if (allocated(error)) return
+        call check(error, r_obj == int(nt, int64), "threads=nt opens a team of nt on the object form")
+        if (allocated(error)) return
+        call check(error, all(s_team == s_abs) .and. all(s_one == s_abs) .and. all(s_cap == s_abs), &
+            "the one-value procedure form: the team's answer equals the serial one, bit for bit")
+        if (allocated(error)) return
+        call check(error, all(o_team == o_one) .and. all(o_one == s_abs), &
+            "the one-value object form: the same, and equal to the procedure form")
+        if (allocated(error)) return
+        call check(error, all(m_team == m_one) .and. all(m_one(1, :) == s_abs), &
+            "the matrix procedure form: the same, its first row the one-value answer")
+        if (allocated(error)) return
+        call check(error, all(om_team == om_one) .and. all(om_one == m_one), &
+            "the matrix object form: the same, and equal to the procedure form")
+    end subroutine test_apply_group_team
+    !
+    !> The payload's sum over the group, through `par_apply_p`.
+    function par_cb_sum(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! the sum.
+        !
+        r = sum(par_apply_p(rows))
+        if (g < 1_int64) r = -huge(r)   ! a group number below 1 is a library defect: poison the answer
+    end function par_cb_sum
+    !
+    !> The payload's sum over the group and the group's size.
+    subroutine par_cb_two(g, rows, out)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64), intent(out) :: out(:)   !! receives the two values.
+        !
+        out(1) = sum(par_apply_p(rows))
+        out(2) = real(size(rows), real64)
+        if (g < 1_int64) out(1) = -huge(out(1))
+    end subroutine par_cb_two
+    !
+    !> `par_sum_reducer%reduce`; see the type.
+    subroutine par_sum_reduce(self, g, rows, out)
+        class(par_sum_reducer), intent(in) :: self !! the reducer.
+        integer(int64), intent(in) :: g            !! the group number.
+        integer(int64), intent(in) :: rows(:)      !! the group's rows.
+        real(real64), intent(out) :: out(:)        !! receives the results.
+        !
+        out(1) = sum(self%p(rows))
+        if (size(out) > 1) out(2) = real(size(rows), real64)
+        if (g < 1_int64) out(1) = -huge(out(1))
+    end subroutine par_sum_reduce
     !
 end module test_table_parallel

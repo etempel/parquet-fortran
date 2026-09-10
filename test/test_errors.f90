@@ -2559,7 +2559,15 @@ contains
             new_unittest("rows with a group number out of range aborts", &
                 test_table_group_out_of_range_aborts), &
             new_unittest("key_table with a size_name that names a key aborts", &
-                test_table_group_size_name_clash_aborts) &
+                test_table_group_size_name_clash_aborts), &
+            new_unittest("apply on a stale grouping aborts", &
+                test_table_group_stale_apply_aborts), &
+            new_unittest("apply's object form on a stale grouping aborts", &
+                test_table_group_stale_apply_object_aborts), &
+            new_unittest("apply with nout below 1 aborts", &
+                test_table_group_apply_nout_aborts), &
+            new_unittest("apply with threads below 1 aborts", &
+                test_table_group_apply_threads_zero_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19, &
             p21]
@@ -15832,6 +15840,38 @@ contains
             failure_message="key_table with a size_name naming a key was expected to abort", &
             required_stderr="is already a key column's name")
     end subroutine test_table_group_size_name_clash_aborts
+    !
+    !> See `scenario_table_group_stale_apply` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_apply_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_apply", expect_abort=.true., &
+            failure_message="apply on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: apply: this table has changed structurally")
+    end subroutine test_table_group_stale_apply_aborts
+    !
+    !> See `scenario_table_group_stale_apply_object` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_apply_object_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_apply_object", expect_abort=.true., &
+            failure_message="apply's object form on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: apply: this table has changed structurally")
+    end subroutine test_table_group_stale_apply_object_aborts
+    !
+    !> See `scenario_table_group_apply_nout` (test/error_scenarios.f90).
+    subroutine test_table_group_apply_nout_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_apply_nout", expect_abort=.true., &
+            failure_message="apply with nout=0 was expected to abort", &
+            required_stderr="parquet_grouping: apply: nout = 0 is not positive")
+    end subroutine test_table_group_apply_nout_aborts
+    !
+    !> See `scenario_table_group_apply_threads_zero` (test/error_scenarios.f90).
+    subroutine test_table_group_apply_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_apply_threads_zero", expect_abort=.true., &
+            failure_message="apply with threads=0 was expected to abort", &
+            required_stderr="parquet_grouping: apply: threads= must be at least 1, got 0")
+    end subroutine test_table_group_apply_threads_zero_aborts
     !
     !> See `scenario_filter_temporal_set_mismatch` (test/error_scenarios.f90).
     subroutine test_filter_temporal_set_mismatch_aborts(error)

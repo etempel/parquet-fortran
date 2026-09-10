@@ -27,6 +27,9 @@ program error_scenarios
         parquet_debug_set_index_pair_limit
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
+    ! The grouping scenarios' callbacks: module procedures, since an internal one of this
+    ! program cannot be passed as a callback under every supported compiler.
+    use test_group_callbacks, only : scenario_group_row_sum, scenario_group_two, scenario_group_reducer
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
     use iso_fortran_env, only : int32, int64, real32, real64
@@ -3038,6 +3041,14 @@ program error_scenarios
         call scenario_table_group_out_of_range()
     case ("table_group_size_name_clash")
         call scenario_table_group_size_name_clash()
+    case ("table_group_stale_apply")
+        call scenario_table_group_stale_apply()
+    case ("table_group_stale_apply_object")
+        call scenario_table_group_stale_apply_object()
+    case ("table_group_apply_nout")
+        call scenario_table_group_apply_nout()
+    case ("table_group_apply_threads_zero")
+        call scenario_table_group_apply_threads_zero()
     case ("filter_temporal_set_mismatch")
         call scenario_filter_temporal_set_mismatch()
     case ("filter_temporal_literal_list")
@@ -26981,6 +26992,67 @@ contains
         call grp%key_table(kt, size_name="key")
         print '(a,i0)', "unexpectedly accepted a size_name that names a key, cols=", kt%ncols()
     end subroutine scenario_table_group_size_name_clash
+    !
+    !> `%apply` on a stale grouping, in its procedure form: the generation check runs before the
+    !! callback is called even once, so no procedure of the caller's computes anything from rows
+    !! that name the wrong galaxies. An apply before the row change is the control.
+    subroutine scenario_table_group_stale_apply()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%apply(scenario_group_row_sum, out)
+        print '(a,i0)', "apply answered before the change, groups=", size(out)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%apply(scenario_group_row_sum, out)
+        print '(a,i0)', "a stale grouping answered apply, groups=", size(out)
+    end subroutine scenario_table_group_stale_apply
+    !
+    !> `%apply` on a stale grouping, in its object form: the reducer's `%reduce` is never reached
+    !! either. The object form before the row change is the control.
+    subroutine scenario_table_group_stale_apply_object()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        type(scenario_group_reducer) :: red
+        real(real64), allocatable :: out(:, :)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%apply(red, 2, out)
+        print '(a,i0)', "the object form answered before the change, groups=", size(out, 2)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%apply(red, 2, out)
+        print '(a,i0)', "a stale grouping answered the object form, groups=", size(out, 2)
+    end subroutine scenario_table_group_stale_apply_object
+    !
+    !> `nout` below 1 is refused before the loop: a result row with no entries is a mistake, not
+    !! a zero-length answer. The two-value form first is the control.
+    subroutine scenario_table_group_apply_nout()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:, :)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%apply(scenario_group_two, 2, out)
+        print '(a,i0)', "apply with nout=2 ran, groups=", size(out, 2)
+        call grp%apply(scenario_group_two, 0, out)
+        print '(a,i0)', "unexpectedly accepted nout=0, groups=", size(out, 2)
+    end subroutine scenario_table_group_apply_nout
+    !
+    !> `threads=` below 1 on a callback form is refused, naming the serial default: the argument
+    !! is the caller's re-entrancy declaration, and a team of none declares nothing. `threads=1`
+    !! first is the control.
+    subroutine scenario_table_group_apply_threads_zero()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%apply(scenario_group_row_sum, out, threads=1)
+        print '(a,i0)', "apply with threads=1 ran, groups=", size(out)
+        call grp%apply(scenario_group_row_sum, out, threads=0)
+        print '(a,i0)', "unexpectedly accepted threads=0, groups=", size(out)
+    end subroutine scenario_table_group_apply_threads_zero
     !
     !> A date set against a timestamp column is refused at apply, naming both -- two temporal
     !! types are two families, and an element of the wrong type has no instant to convert.

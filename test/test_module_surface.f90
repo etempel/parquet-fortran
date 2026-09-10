@@ -948,7 +948,43 @@ module test_module_surface_tables
     private
     public :: check_tables_surface
 
+    !> A reducer of the tables surface: `parquet_group_reducer` and the interface of its
+    !! deferred binding are reachable through the one import.
+    type, extends(parquet_group_reducer) :: surface_reducer
+        real(real64) :: scale = 1.0_real64 !! multiplies the row sum.
+    contains
+        procedure :: reduce => surface_reduce !! `scale` times the sum of the group's rows.
+    end type surface_reducer
+
 contains
+
+    !> One value per group: the sum of the group's rows (`parquet_group_reduce_i`'s shape).
+    function surface_row_sum(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! their sum.
+        r = real(sum(rows), real64)
+        if (g < 1_int64) r = -huge(r)
+    end function surface_row_sum
+
+    !> Two values per group: the row sum and the group number (`parquet_group_apply_i`'s shape).
+    subroutine surface_row_sum_two(g, rows, out)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64), intent(out) :: out(:)   !! receives the two values.
+        out(1) = real(sum(rows), real64)
+        out(2) = real(g, real64)
+    end subroutine surface_row_sum_two
+
+    !> `surface_reducer%reduce`; see the type.
+    subroutine surface_reduce(self, g, rows, out)
+        class(surface_reducer), intent(in) :: self !! the reducer.
+        integer(int64), intent(in) :: g            !! the group number.
+        integer(int64), intent(in) :: rows(:)      !! the group's rows.
+        real(real64), intent(out) :: out(:)        !! receives the results.
+        out(1) = self%scale * real(sum(rows), real64)
+        if (size(out) > 1) out(2) = real(g, real64)
+    end subroutine surface_reduce
 
     !> Round-trips a two-column table through `use parquet_tables` alone.
     subroutine check_tables_surface(what)
@@ -960,10 +996,13 @@ contains
         type(parquet_table) :: t, back, streamed
         type(parquet_table_index) :: ix
         type(parquet_grouping) :: grp
+        type(surface_reducer) :: red
+        procedure(parquet_group_reduce_i), pointer :: one => null()
+        procedure(parquet_group_apply_i), pointer :: many => null()
         type(parquet_table_writer) :: out
         integer(int64) :: ids(3), row
         real(real64) :: mass(3)
-        real(real64), allocatable :: got(:)
+        real(real64), allocatable :: got(:), per_group(:), per_group_two(:, :)
 
         what = ""
         ids = [1_int64, 2_int64, 3_int64]
@@ -984,6 +1023,17 @@ contains
         ! usable through this one import.
         call t%group_by("id", grp)
         if (what == "" .and. grp%ngroups() /= 3_int64) what = "%group_by/%ngroups on a table built in memory"
+        ! %apply and its callback interfaces: the two abstract interfaces name the procedure
+        ! forms' shapes -- taken here through procedure pointers declared with them, so a dropped
+        ! re-export of either fails this build -- and the abstract type the object form's.
+        one => surface_row_sum
+        many => surface_row_sum_two
+        call grp%apply(one, per_group)
+        if (what == "" .and. size(per_group) /= 3) what = "%apply, one-value procedure form"
+        call grp%apply(many, 2, per_group_two)
+        if (what == "" .and. size(per_group_two, 2) /= 3) what = "%apply, matrix procedure form"
+        call grp%apply(red, per_group)
+        if (what == "" .and. any(per_group /= [1.0_real64, 2.0_real64, 3.0_real64])) what = "%apply, object form"
 
         call parquet_write_table(t, out_file, overwrite=.true.)
 

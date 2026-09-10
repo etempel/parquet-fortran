@@ -16,10 +16,19 @@
 !! null and a NaN in a key; two keys with a null in one of them (the "any key" rule); a
 !! reversed copy of a fixture, so "first" cannot be the engine's tie rule in disguise.
 !!
+!! **`%apply`'s callbacks are MODULE procedures with their context in module variables, or
+!! reducer objects with it in components** -- never internal procedures, which crash under one
+!! supported compiler before they are called (.claude/rules/fortran-gotchas.md, flang). Each
+!! module variable belongs to ONE test, because the suite runs its tests concurrently. The
+!! oracle for `%apply` is the arithmetic over `%csr` it replaces; the matrix form is checked
+!! against the one-value forms and the object form against the procedure form, all with `==`.
+!! The team (`threads=`) is asserted in test/test_table_parallel.f90, which runs its tests with
+!! no enclosing region, so a team opened there is a real one.
+!!
 !! The ABORTS -- no key, an unknown or unorderable key, a direction token, every per-group
-!! query on a stale or never-built grouping, a group number out of range -- live in
-!! test/error_scenarios.f90 as `table_group_*`. Every test that writes a file uses its own path,
-!! since the suite runs its tests concurrently.
+!! query on a stale or never-built grouping, a group number out of range, `%apply` with `nout`
+!! or `threads` below 1 -- live in test/error_scenarios.f90 as `table_group_*`. Every test that
+!! writes a file uses its own path, since the suite runs its tests concurrently.
 module test_table_group
     use parquet
     use iso_fortran_env, only : int32, int64, real64
@@ -29,6 +38,27 @@ module test_table_group
     implicit none
     private
     public :: collect_tests_table_group
+
+    !> Context for the procedure-form callbacks below: one module variable per test that uses
+    !! it (see the header).
+    real(real64), pointer :: ctx_sum_p(:) => null() !! test_apply_scalar_equals_csr_arithmetic's payload.
+    real(real64), pointer :: ctx_obj_p(:) => null() !! test_apply_object_equals_procedure's payload.
+    integer, allocatable :: visits(:)               !! test_apply_visits_each_group_once: calls per group.
+    integer(int64) :: last_g = 0_int64              !! ... the previous call's g, for the order check.
+    logical :: order_ok = .true.                    !! ... every call so far came in group order.
+    logical :: rows_ok = .true.                     !! ... every call so far had ascending, non-empty rows.
+    integer :: calls_seen = 0                       !! test_apply_empty_grouping: calls made.
+
+    !> A reducer holding a `%col` pointer and a tunable, for the object form's tests: `out(1)`
+    !! is `scale * sum(p(rows))`; `out(2)`, when there is room, the group's size; `out(3)` the
+    !! group number -- so one reducer serves the one-value form (called with `out(g:g)`) and the
+    !! matrix form.
+    type, extends(parquet_group_reducer) :: scaled_sum_reducer
+        real(real64), pointer :: p(:) => null() !! the payload column.
+        real(real64) :: scale = 1.0_real64      !! multiplies the sum.
+    contains
+        procedure :: reduce => scaled_sum_reduce !! See the type.
+    end type scaled_sum_reducer
 
 contains
 
@@ -66,7 +96,17 @@ contains
             new_unittest("rebuilding replaces, threads= agrees with serial, clear resets", &
                 test_rebuild_clear_and_threads), &
             new_unittest("group_by reads a key column the table has not read yet; count too", &
-                test_lazy_columns_are_read) &
+                test_lazy_columns_are_read), &
+            new_unittest("apply's one-value form equals the arithmetic over csr, and is a read", &
+                test_apply_scalar_equals_csr_arithmetic), &
+            new_unittest("apply's matrix form gives, row by row, what the one-value forms give", &
+                test_apply_matrix_equals_scalar), &
+            new_unittest("apply calls the procedure once per group, in order, with ascending rows", &
+                test_apply_visits_each_group_once), &
+            new_unittest("apply's object form equals its procedure form; two objects are two contexts", &
+                test_apply_object_equals_procedure), &
+            new_unittest("apply over an empty grouping allocates zero-length outputs and calls nothing", &
+                test_apply_empty_grouping) &
             ]
     end subroutine collect_tests_table_group
 
@@ -745,5 +785,265 @@ contains
         if (allocated(error)) return
         call check(error, grp%is_current() .and. .not. t%is_detached(), "a lazy read stales nothing")
     end subroutine test_lazy_columns_are_read
+
+    ! ---- %apply ---------------------------------------------------------------------------------
+
+    !> `%apply` in its one-value procedure form against the arithmetic it replaces: for every
+    !! group, the callback's `sum(payload(rows))` -- through a `%col` pointer taken before the
+    !! call, which the loop leaves valid because nothing in an `%apply` moves a row -- equals the
+    !! same sum over `%csr`'s rows. And the call is a read: generation, rows and pointer survive.
+    subroutine test_apply_scalar_equals_csr_arithmetic(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:)
+        real(real64), allocatable :: got(:), want(:), payload(:)
+        integer(int64) :: g, gen0
+        !
+        call build_basic(t)
+        gen0 = t%generation()
+        call t%col("payload", ctx_sum_p)
+        call t%group_by(["key"], grp)
+        call grp%apply(cb_sum_ctx, got)
+        call grp%csr(off, rows)
+        call t%get("payload", payload)
+        allocate(want(grp%ngroups()))
+        do g = 1_int64, grp%ngroups()
+            want(g) = sum(payload(rows(off(g) : off(g + 1_int64) - 1_int64)))
+        end do
+        call check(error, size(got) == 3 .and. all(got == want), "one sum per group, equal to the arithmetic over csr")
+        if (allocated(error)) return
+        call check(error, all(want == [13.0_real64, 19.0_real64, 13.0_real64]), "and they are the fixture's sums")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen0 .and. t%nrows() == 9_int64 .and. grp%is_current(), &
+            "apply is a read: the generation and the row count are as they were")
+        if (allocated(error)) return
+        call check(error, associated(ctx_sum_p) .and. ctx_sum_p(9) == 9.0_real64, &
+            "and the %col pointer the callback read through still points at the payload")
+    end subroutine test_apply_scalar_equals_csr_arithmetic
+
+    !> The matrix form against the one-value forms: `out(k, :)` of a three-value callback equals
+    !! the k-th one-value callback's answer for each k, bit for bit. The values are row-distinct
+    !! (a row sum, a size, the group number with its lowest row), so a result stored at the
+    !! wrong group would differ.
+    subroutine test_apply_matrix_equals_scalar(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: m(:, :), s1(:), s2(:), s3(:)
+        !
+        call build_basic(t)
+        call t%group_by(["key"], grp)
+        call grp%apply(cb_three, 3, m)
+        call grp%apply(cb_row_sum, s1)
+        call grp%apply(cb_size, s2)
+        call grp%apply(cb_g_and_first, s3)
+        call check(error, size(m, 1) == 3 .and. size(m, 2) == 3, "out is (nout, ngroups)")
+        if (allocated(error)) return
+        call check(error, all(m(1, :) == s1) .and. all(m(2, :) == s2) .and. all(m(3, :) == s3), &
+            "each row of the matrix is the matching one-value answer")
+        if (allocated(error)) return
+        call check(error, all(s1 == [13.0_real64, 19.0_real64, 13.0_real64]) .and. &
+            all(s2 == [3.0_real64, 4.0_real64, 2.0_real64]) .and. &
+            all(s3 == [1002.0_real64, 2001.0_real64, 3005.0_real64]), "and the answers are the fixture's")
+    end subroutine test_apply_matrix_equals_scalar
+
+    !> The call contract, serially: the procedure is called exactly once per group, in group
+    !! order, with a non-empty ascending row list each time -- recorded by the callback in
+    !! module variables and read back here. Over a key with a NaN and nulls, so the dropped rows
+    !! reach no call and the NaN group is one call.
+    subroutine test_apply_visits_each_group_once(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: got(:)
+        !
+        call build_nullnan(t)
+        call t%group_by("k", grp)
+        allocate(visits(grp%ngroups()))
+        visits = 0
+        last_g = 0_int64
+        order_ok = .true.
+        rows_ok = .true.
+        call grp%apply(cb_visit, got)
+        call check(error, grp%ngroups() == 3_int64 .and. all(visits == 1), "each of the three groups was visited once")
+        if (allocated(error)) return
+        call check(error, order_ok, "in group order")
+        if (allocated(error)) return
+        call check(error, rows_ok, "each with a non-empty, ascending row list")
+        if (allocated(error)) return
+        call check(error, all(got == [1.0_real64, 2.0_real64, 3.0_real64]), "and each result landed at its own group")
+    end subroutine test_apply_visits_each_group_once
+
+    !> The object form against the procedure form: a reducer holding a `%col` pointer and a
+    !! scale as components gives, bit for bit, what a procedure with the same context in module
+    !! variables gives, in both output shapes -- and the one-value object form calls `%reduce`
+    !! with `out(g:g)`, which the reducer sees as a one-entry `out`. Two reducers with different
+    !! scales in one program are two contexts, which module variables cannot be.
+    subroutine test_apply_object_equals_procedure(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        type(scaled_sum_reducer) :: red, red2
+        real(real64), allocatable :: o1(:), p1(:), o2(:, :), o3(:)
+        !
+        call build_basic(t)
+        call t%col("payload", ctx_obj_p)
+        call t%col("payload", red%p)
+        red%scale = 2.5_real64
+        call t%group_by(["key"], grp)
+        call grp%apply(red, o1)
+        call grp%apply(cb_scaled_sum_ctx, p1)
+        call check(error, size(o1) == 3 .and. all(o1 == p1), "the one-value object form equals the procedure form")
+        if (allocated(error)) return
+        call check(error, all(p1 == 2.5_real64 * [13.0_real64, 19.0_real64, 13.0_real64]), "and both are the scaled sums")
+        if (allocated(error)) return
+        call grp%apply(red, 3, o2)
+        call check(error, all(o2(1, :) == p1) .and. all(o2(2, :) == [3.0_real64, 4.0_real64, 2.0_real64]) .and. &
+            all(o2(3, :) == [1.0_real64, 2.0_real64, 3.0_real64]), &
+            "the matrix object form: the scaled sum, the size and the group number per group")
+        if (allocated(error)) return
+        call t%col("payload", red2%p)
+        red2%scale = -1.0_real64
+        call grp%apply(red2, o3)
+        call check(error, all(o3 == -[13.0_real64, 19.0_real64, 13.0_real64]), &
+            "a second reducer with its own scale is a second context in the same program")
+    end subroutine test_apply_object_equals_procedure
+
+    !> Zero groups -- an empty table, and a table whose every key is null under `dropna` -- give
+    !! zero-length outputs in every form, allocated, and the callback is never called.
+    subroutine test_apply_empty_grouping(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, u
+        type(parquet_grouping) :: grp
+        type(scaled_sum_reducer) :: red
+        integer(int64), allocatable :: none(:)
+        real(real64), allocatable :: s(:), m(:, :)
+        real(real64) :: k(3)
+        !
+        allocate(none(0))
+        call parquet_new_table(t)
+        call t%add_column("k", none)
+        call t%group_by("k", grp)
+        calls_seen = 0
+        call grp%apply(cb_count_call, s)
+        call check(error, allocated(s) .and. size(s) == 0, "the one-value procedure form: allocated, zero-length")
+        if (allocated(error)) return
+        call grp%apply(cb_three, 3, m)
+        call check(error, allocated(m) .and. size(m, 1) == 3 .and. size(m, 2) == 0, "the matrix form: (3, 0)")
+        if (allocated(error)) return
+        call grp%apply(red, s)
+        call grp%apply(red, 2, m)
+        call check(error, size(s) == 0 .and. size(m, 1) == 2 .and. size(m, 2) == 0, "both object forms too")
+        if (allocated(error)) return
+        call check(error, calls_seen == 0, "and the procedure was never called")
+        if (allocated(error)) return
+        ! Every key null: the table has rows, the grouping has none.
+        k = 1.0_real64
+        call parquet_new_table(u)
+        call u%add_column("k", k)
+        call u%set_null("k", 1_int64)
+        call u%set_null("k", 2_int64)
+        call u%set_null("k", 3_int64)
+        call u%group_by("k", grp)
+        call grp%apply(cb_count_call, s)
+        call check(error, grp%ngroups() == 0_int64 .and. size(s) == 0 .and. calls_seen == 0, &
+            "an all-null key under dropna: zero groups, zero calls")
+    end subroutine test_apply_empty_grouping
+
+    ! ---- the callbacks: module procedures, never internal ones (see the header) ----------------
+
+    !> `scaled_sum_reducer%reduce`; see the type.
+    subroutine scaled_sum_reduce(self, g, rows, out)
+        class(scaled_sum_reducer), intent(in) :: self !! the reducer.
+        integer(int64), intent(in) :: g               !! the group number.
+        integer(int64), intent(in) :: rows(:)         !! the group's rows.
+        real(real64), intent(out) :: out(:)           !! receives the results.
+        out(1) = self%scale * sum(self%p(rows))
+        if (size(out) > 1) out(2) = real(size(rows), real64)
+        if (size(out) > 2) out(3) = real(g, real64)
+    end subroutine scaled_sum_reduce
+
+    !> The payload's sum over the group, through `ctx_sum_p`.
+    function cb_sum_ctx(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! the sum.
+        r = sum(ctx_sum_p(rows))
+        if (g < 1_int64) r = -huge(r)   ! a group number below 1 is a library defect: poison the answer
+    end function cb_sum_ctx
+
+    !> 2.5 times the payload's sum over the group, through `ctx_obj_p`: the procedure twin of a
+    !! `scaled_sum_reducer` at scale 2.5.
+    function cb_scaled_sum_ctx(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! the scaled sum.
+        r = 2.5_real64 * sum(ctx_obj_p(rows))
+        if (g < 1_int64) r = -huge(r)
+    end function cb_scaled_sum_ctx
+
+    !> The sum of the group's row numbers: row-distinct, with no context at all.
+    function cb_row_sum(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! the sum.
+        r = real(sum(rows), real64)
+        if (g < 1_int64) r = -huge(r)
+    end function cb_row_sum
+
+    !> The group's size.
+    function cb_size(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! how many rows.
+        r = real(size(rows), real64)
+        if (g < 1_int64) r = -huge(r)
+    end function cb_size
+
+    !> A thousand times the group number, plus the group's lowest row.
+    function cb_g_and_first(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! 1000 g + minval(rows).
+        r = real(g, real64) * 1000.0_real64 + real(minval(rows), real64)
+    end function cb_g_and_first
+
+    !> The matrix twin of `cb_row_sum`, `cb_size` and `cb_g_and_first`, in that order.
+    subroutine cb_three(g, rows, out)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64), intent(out) :: out(:)   !! receives the three values.
+        out(1) = real(sum(rows), real64)
+        out(2) = real(size(rows), real64)
+        out(3) = real(g, real64) * 1000.0_real64 + real(minval(rows), real64)
+    end subroutine cb_three
+
+    !> Records the call: how often group `g` was seen, whether the calls came in group order,
+    !! and whether `rows` was non-empty and ascending; answers `g`.
+    function cb_visit(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! g.
+        integer(int64) :: i
+        visits(g) = visits(g) + 1
+        if (g /= last_g + 1_int64) order_ok = .false.
+        last_g = g
+        if (size(rows) < 1) rows_ok = .false.
+        do i = 2_int64, size(rows, kind=int64)
+            if (rows(i) <= rows(i - 1_int64)) rows_ok = .false.
+        end do
+        r = real(g, real64)
+    end function cb_visit
+
+    !> Counts its calls; answers 0.
+    function cb_count_call(g, rows) result(r)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64) :: r                     !! 0.
+        calls_seen = calls_seen + 1
+        r = 0.0_real64
+        if (g < 1_int64 .or. size(rows) < 1) r = -huge(r)
+    end function cb_count_call
 
 end module test_table_group

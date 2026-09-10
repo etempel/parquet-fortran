@@ -36,10 +36,22 @@
 !!
 !! **`%key_table` gathers COPIES** (Risk-208): a gather on the source column would reorder the
 !! caller's table with nothing to show it.
+!!
+!! **`%apply` calls the caller's procedure once per group with the group's rows and nothing
+!! else**, in group order when serial, and stores each result at its own `g` when on a team, so
+!! the answer does not depend on the schedule. The loop is SERIAL unless `threads=` is given:
+!! the library cannot know whether a caller's procedure is re-entrant, so the serial default is
+!! a decision made at the call (`group_team`), not a floor that declined, and an explicit
+!! request is the caller's declaration. The team is recorded on every call for the test-only
+!! hook, because a loop that resolved a team it never opened, or opened one nobody asked for,
+!! is invisible in every answer (feature_risks.md Risk-189's shape).
 submodule (parquet_tables) parquet_tables_group
     ! The ASCII fold the direction-token refusal uses. parquet_utils is already in this module's
     ! footprint (the module itself imports it), so a submodule import costs a consumer nothing.
     use parquet_utils, only : pf_to_lower
+    ! The affinity clamp every resolved thread count goes through (.claude/rules/api-conventions.md,
+    ! "Thread counts"); parquet_settings_base is in this module's footprint already.
+    use parquet_settings_base, only : parquet_clamp_to_affinity
     implicit none
     !
     !> Error-message prefix for every `error stop` a query raises. The build's messages carry the
@@ -515,5 +527,189 @@ contains
         call grp_count_i64(self, name, c64)
         call grp_narrow(c64, "count", "count", out)
     end procedure grp_count_i32
+    !
+    ! ---- %apply: the per-group callback ---------------------------------------------------------
+    !
+    !> The team one per-group callback loop runs on, and the record of it. `threads` ABSENT is a
+    !! DECISION for serial, made here: the library cannot know whether the caller's procedure is
+    !! re-entrant, so only an explicit request opens a team. A request is refused below 1,
+    !! clamped to this process's CPU affinity by the one clamp every resolved count goes through
+    !! (.claude/rules/api-conventions.md, "Thread counts"), and honoured inside an existing
+    !! parallel region as the index tier honours its own; a loop of fewer than two groups is
+    !! serial whatever was asked. The answer is recorded for
+    !! `parquet_debug_get_group_threads_used` on EVERY route, 1 included, so a test can tell
+    !! "declined" from "ran" (feature_risks.md Risk-189).
+    subroutine group_team(n, threads, proc, nt)
+        integer(int64), intent(in) :: n          !! groups in the loop.
+        integer, intent(in), optional :: threads !! the caller's request, or absent.
+        character(len=*), intent(in) :: proc     !! calling binding, for the message.
+        integer, intent(out) :: nt               !! the team; 1 means serial.
+        character(len=32) :: txt
+        !
+        nt = 1
+        if (present(threads)) then
+            if (threads < 1) then
+                write(txt, "(I0)") threads
+                error stop GP // trim(proc) // ": threads= must be at least 1, got " // trim(txt) // &
+                    "; leave it absent for a serial loop"
+            end if
+            nt = parquet_clamp_to_affinity(threads, "grouping")
+        end if
+        if (n < 2_int64) nt = 1
+        call group_note_threads(nt)
+    end subroutine group_team
+    !
+    !> The chunk of groups a thread takes at a time under `schedule(dynamic)`: groups are
+    !! unequal, so the schedule is dynamic, and the chunk amortises a scheduling step over many
+    !! small groups without starving a team of a few large ones.
+    integer function group_chunk(n, nt) result(c)
+        integer(int64), intent(in) :: n !! groups in the loop.
+        integer, intent(in) :: nt       !! the team.
+        c = int(max(1_int64, min(16_int64, n / (4_int64 * int(nt, int64)))))
+    end function group_chunk
+    !
+    !> Records the team a per-group loop ran on, for the test-only
+    !! `parquet_debug_get_group_threads_used` (src/parquet_wrapper.cpp), through a local
+    !! `bind(C)` interface as every `parquet_debug_*` hook is reached.
+    subroutine group_note_threads(nt)
+        use iso_c_binding, only : c_int64_t
+        integer, intent(in) :: nt !! the team; 1 means serial.
+        interface
+            subroutine set_used(n) bind(C, name="parquet_debug_set_group_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: n
+            end subroutine set_used
+        end interface
+        !
+        call set_used(int(nt, c_int64_t))
+    end subroutine group_note_threads
+    !
+    !> Aborts unless `nout` is at least 1: a result row with no entries is a mistake, not a
+    !! zero-length answer. Impure on purpose (a `pure` guard-only call is deleted by one
+    !! supported compiler at -O0; .claude/rules/api-conventions.md).
+    subroutine grp_check_nout(nout, proc)
+        integer, intent(in) :: nout          !! results per group asked for.
+        character(len=*), intent(in) :: proc !! calling binding, for the message.
+        character(len=32) :: txt
+        !
+        if (nout >= 1) return
+        write(txt, "(I0)") nout
+        error stop GP // trim(proc) // ": nout = " // trim(txt) // " is not positive; a result row " // &
+            "needs at least one entry (the one-value form takes no nout)"
+    end subroutine grp_check_nout
+    !
+    ! Each body below has the same two arms, written out rather than folded into one loop under
+    ! an `if (nt > 1)` clause: the serial arm is the DEFAULT and runs the groups in order, by
+    ! contract, with no OpenMP runtime between it and the caller's procedure; the team arm deals
+    ! the groups out in no particular order and each result lands at its own g. Passing
+    ! `self%perm(lo:hi)` is a contiguous section, so no copy is made per group.
+    !
+    ! The two procedure-form bodies restate their interfaces in full, unlike every other body in
+    ! this file: in the abbreviated `module procedure` form gfortran 15 treats the dummy
+    ! PROCEDURE `func` as having an implicit interface (-Werror=implicit-interface), although the
+    ! spec declares it `procedure(parquet_group_reduce_i)` (.claude/rules/fortran-gotchas.md).
+    !
+    !> %apply specific, procedure, one value per group; the contract is on the interface in the
+    !! module spec.
+    module subroutine grp_apply_proc_scalar(self, func, out, threads)
+        class(parquet_grouping), intent(in) :: self      !! the grouping.
+        procedure(parquet_group_reduce_i) :: func        !! called once per group; see the interface.
+        real(real64), allocatable, intent(out) :: out(:) !! one value per group, in group order.
+        integer, intent(in), optional :: threads         !! the team; absent = serial.
+        character(len=*), parameter :: PROC = "apply"
+        integer(int64) :: g
+        integer :: nt, chunk
+        !
+        call grp_resolve(self, PROC)
+        call group_team(self%ngrp, threads, PROC, nt)
+        allocate(out(self%ngrp))
+        if (nt > 1) then
+            chunk = group_chunk(self%ngrp, nt)
+            !$omp parallel do num_threads(nt) default(shared) private(g) schedule(dynamic, chunk)
+            do g = 1_int64, self%ngrp
+                out(g) = func(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64))
+            end do
+            !$omp end parallel do
+        else
+            do g = 1_int64, self%ngrp
+                out(g) = func(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64))
+            end do
+        end if
+    end subroutine grp_apply_proc_scalar
+    !
+    !> %apply specific, procedure, `nout` values per group; the contract is on the interface in
+    !! the module spec.
+    module subroutine grp_apply_proc_matrix(self, func, nout, out, threads)
+        class(parquet_grouping), intent(in) :: self         !! the grouping.
+        procedure(parquet_group_apply_i) :: func            !! called once per group; see the interface.
+        integer, intent(in) :: nout                         !! results per group; at least 1.
+        real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
+        integer, intent(in), optional :: threads            !! the team; absent = serial.
+        character(len=*), parameter :: PROC = "apply"
+        integer(int64) :: g
+        integer :: nt, chunk
+        !
+        call grp_resolve(self, PROC)
+        call grp_check_nout(nout, PROC)
+        call group_team(self%ngrp, threads, PROC, nt)
+        allocate(out(nout, self%ngrp))
+        if (nt > 1) then
+            chunk = group_chunk(self%ngrp, nt)
+            !$omp parallel do num_threads(nt) default(shared) private(g) schedule(dynamic, chunk)
+            do g = 1_int64, self%ngrp
+                call func(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(:, g))
+            end do
+            !$omp end parallel do
+        else
+            do g = 1_int64, self%ngrp
+                call func(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(:, g))
+            end do
+        end if
+    end subroutine grp_apply_proc_matrix
+    !
+    module procedure grp_apply_obj_scalar
+        character(len=*), parameter :: PROC = "apply"
+        integer(int64) :: g
+        integer :: nt, chunk
+        !
+        call grp_resolve(self, PROC)
+        call group_team(self%ngrp, threads, PROC, nt)
+        allocate(out(self%ngrp))
+        if (nt > 1) then
+            chunk = group_chunk(self%ngrp, nt)
+            !$omp parallel do num_threads(nt) default(shared) private(g) schedule(dynamic, chunk)
+            do g = 1_int64, self%ngrp
+                call reducer%reduce(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(g:g))
+            end do
+            !$omp end parallel do
+        else
+            do g = 1_int64, self%ngrp
+                call reducer%reduce(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(g:g))
+            end do
+        end if
+    end procedure grp_apply_obj_scalar
+    !
+    module procedure grp_apply_obj_matrix
+        character(len=*), parameter :: PROC = "apply"
+        integer(int64) :: g
+        integer :: nt, chunk
+        !
+        call grp_resolve(self, PROC)
+        call grp_check_nout(nout, PROC)
+        call group_team(self%ngrp, threads, PROC, nt)
+        allocate(out(nout, self%ngrp))
+        if (nt > 1) then
+            chunk = group_chunk(self%ngrp, nt)
+            !$omp parallel do num_threads(nt) default(shared) private(g) schedule(dynamic, chunk)
+            do g = 1_int64, self%ngrp
+                call reducer%reduce(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(:, g))
+            end do
+            !$omp end parallel do
+        else
+            do g = 1_int64, self%ngrp
+                call reducer%reduce(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(:, g))
+            end do
+        end if
+    end procedure grp_apply_obj_matrix
     !
 end submodule parquet_tables_group

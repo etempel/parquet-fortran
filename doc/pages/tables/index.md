@@ -5,6 +5,7 @@ ordered_subpage: table-open.md
 ordered_subpage: table-write.md
 ordered_subpage: table-mutate.md
 ordered_subpage: table-join.md
+ordered_subpage: table-group.md
 ---
 
 The high-level layer: one `parquet_open_table` call presents a whole parquet file as a
@@ -12,7 +13,8 @@ The high-level layer: one `parquet_open_table` call presents a whole parquet fil
 reads each column only when something first touches it. A table need not come from a file at all —
 it can equally be built from scratch in memory and written back out through an ordinary
 `parquet_schema`. Once it exists, a table can be changed in place — values, nulls, columns and
-rows — and joined against another table on one or more key columns.
+rows — joined against another table on one or more key columns, and grouped by key columns for
+one answer per group.
 
 - [Whole tables in memory: the basics](table.html) — opening a table and reaching a column with
   `%get` or `%col`, nulls, laziness and what it costs, what a table can tell you about itself, the
@@ -32,3 +34,7 @@ rows — and joined against another table on one or more key columns.
 - [Joining two tables](table-join.html) — matching another table's rows against this one's on one
   or more key columns and bringing its columns over: which rows come out, what counts as a match,
   what the join carries and what the result is called.
+- [Grouping rows and aggregating per group](table-group.html) — partitioning a table's rows by one
+  or more key columns into a `parquet_grouping`, what it answers per group, the key table as the
+  summary's skeleton, `%apply` for one answer per group from a procedure or an object of your own,
+  serially or on a team, and when a grouping goes stale.

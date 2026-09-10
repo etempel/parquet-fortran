@@ -4879,6 +4879,23 @@ extern "C"
 		return g_debug_join_side_threads_used;
 	}
 
+	// Test-only: the team the last per-group callback loop of parquet_grouping (%apply) ran on,
+	// written by that loop's one resolver (group_team, src/parquet_tables_group.f90) on every
+	// route, 1 included. The callback forms are serial unless threads= is given, and a loop that
+	// resolved a team it never opened, or opened one nobody asked for, is invisible in every
+	// answer (feature_risks.md Risk-189); std::atomic for the reason g_debug_join_engine_used is.
+	static std::atomic<int64_t> g_debug_group_threads_used{0};
+
+	void parquet_debug_set_group_threads_used(int64_t n)
+	{
+		g_debug_group_threads_used = n;
+	}
+
+	int64_t parquet_debug_get_group_threads_used(void)
+	{
+		return g_debug_group_threads_used;
+	}
+
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		g_debug_last_use_threads = use_threads;

@@ -181,6 +181,11 @@ done | sort | uniq -c | sort -rn
   LHS** (`out%cache%x = self%cache%x` reports a spurious bound mismatch), and the same shape with a
   deferred-length character array segfaults on CI's gfortran while running clean locally. Use an
   explicit `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop.
+- **A dummy PROCEDURE argument in an abbreviated `module procedure` body has an IMPLICIT interface
+  under gfortran 15** (`-Werror=implicit-interface` at every call of it), although the spec
+  declares it `procedure(<abstract interface>)`; nagfor accepts the body. Restate that body's
+  interface in full (`module subroutine name(...)` with every dummy declared and `!!`-tagged), as
+  the two procedure-form `%apply` bodies in `src/parquet_tables_group.f90` do.
 - **gfortran 15.2 ICEs (bare `Segmentation fault`) on a `pure module procedure` passing a `class`
   dummy's `type` component to a `class` dummy beside an allocatable `intent(out)` argument**
   (`mm_get_method`, the `%keys` forms in `src/parquet_index_multi.f90`). Only one ICE is reported

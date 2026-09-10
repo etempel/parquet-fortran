@@ -727,6 +727,12 @@ call t%argsort_by(["field_id", "mag     "], perm, group_offsets=go, group_nkeys=
 
 It counts key *names*, must be between 1 and the number of keys, and requires `group_offsets`.
 
+These raw offsets are the partition for a caller who wants no object. `%group_by` keeps the same
+partition as a `parquet_grouping`, which answers per group — the rows, one row per group, the
+counts, the key values as a table — calls a procedure of yours once per group, and refuses once
+the table has changed underneath it: see
+[Grouping rows and aggregating per group](table-group.html).
+
 > **A permutation goes stale silently.** It describes the table *as it was*. Any row-structural
 > change — `%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append`,
 > `%explode`, `%drop_duplicates`, `%sort_by_values` —

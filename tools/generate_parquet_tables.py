@@ -310,6 +310,10 @@ module parquet_tables
     public :: parquet_table_col
     public :: parquet_table_index
     public :: parquet_grouping
+    public :: parquet_group_reducer
+    public :: parquet_group_reduce_i
+    public :: parquet_group_apply_i
+    public :: parquet_group_reducer_reduce_i
     public :: parquet_slice
     public :: parquet_slice_range
     public :: parquet_slice_list
@@ -726,6 +730,8 @@ module parquet_tables
     w(gen_row_type())
     w("    !")
     w(gen_index_type())
+    w("    !")
+    w(gen_group_callbacks())
     w("    !")
     w(gen_grouping_type())
     w("    !")
@@ -1633,6 +1639,80 @@ def gen_index_type():
     return "\n".join(o)
 
 
+def gen_group_callbacks():
+    """The reducer base type and the callback interfaces of `parquet_grouping%apply`
+    (feature_pandas_S5.md, sections D and H). The abstract type comes first because the
+    interface that imports it must follow it (F2018 C8xx: an imported host entity is declared
+    before the interface body), and a deferred binding may name its interface ahead of it."""
+    o = []
+    w = o.append
+    w("""    !> Base of a REDUCER, an object of the caller's own that `parquet_grouping%apply` calls
+    !! once per group: the context a per-group procedure needs -- `%col` pointers into the
+    !! table, tunables, a seed -- goes in the components of an extension, where the procedure
+    !! forms of `%apply` would need module variables or a host. Extend it, put the context in
+    !! components, implement `reduce`, pass the object (doc/pages/tables/table-group.md shows
+    !! one).
+    !!
+    !! `reduce` takes `self` as `intent(in)`, DELIBERATELY: a reducer that assigns a component
+    !! does not compile, so it cannot accumulate across groups and cannot race when `threads=`
+    !! opens a team. One that needs scratch declares locals; one that must write outside itself
+    !! does so through a pointer component's target, visibly. This is the callback shape that
+    !! runs under every supported compiler -- an internal procedure passed as a callback does not
+    !! (.claude/rules/fortran-gotchas.md, flang) -- and the one the guide leads with for a
+    !! callback that needs context.
+    !!
+    !! No components and no finalizer, so an extension may be a `save`d module variable, a
+    !! local or an array element.
+    type, abstract :: parquet_group_reducer
+    contains
+        procedure(parquet_group_reducer_reduce_i), deferred :: reduce !! One group -> its results; see the interface.
+    end type parquet_group_reducer
+    !
+    ! ---- The %apply callbacks (bodies are the caller's; the loop is in parquet_tables_group) ----
+    abstract interface
+        !> One group -> one value: the scalar procedure form of `parquet_grouping%apply`. `g` is
+        !! the group number, 1 to `%ngroups()`, for a procedure that indexes a per-group input
+        !! of its own; `rows` are the group's table rows, ascending, at least one of them --
+        !! index a `%col` pointer or a `%get` array with them directly (`sum(lum(rows))`); the
+        !! result is the group's value, real64 (widen an integer; for several values use the
+        !! matrix form). Under `threads=` it is called from several threads at once, so it may
+        !! hold no `save` variable and write nothing but its result; a value it cannot compute
+        !! is a NaN of its own choosing, not an abort, since an `error stop` on a team leaves the
+        !! exit status nondeterministic under one supported compiler.
+        function parquet_group_reduce_i(g, rows) result(r)
+            import :: int64, real64
+            integer(int64), intent(in) :: g       !! the group number, 1 to %ngroups().
+            integer(int64), intent(in) :: rows(:) !! the group's table rows, ascending; size(rows) >= 1.
+            real(real64) :: r                     !! the group's value.
+        end function parquet_group_reduce_i
+        !> One group -> a row of values: the matrix procedure form of `parquet_grouping%apply`.
+        !! `g` and `rows` are as in `parquet_group_reduce_i`; `out` has `nout` entries on every
+        !! call and receives this group's results, which the caller reads back as `out(:, g)`.
+        !! The threading contract is `parquet_group_reduce_i`'s: under `threads=` it may hold no
+        !! `save` variable and write nothing but its own `out`.
+        subroutine parquet_group_apply_i(g, rows, out)
+            import :: int64, real64
+            integer(int64), intent(in) :: g       !! the group number, 1 to %ngroups().
+            integer(int64), intent(in) :: rows(:) !! the group's table rows, ascending; size(rows) >= 1.
+            real(real64), intent(out) :: out(:)   !! this group's results; size(out) == nout.
+        end subroutine parquet_group_apply_i
+        !> The one deferred binding of `parquet_group_reducer`: one group -> its results, from
+        !! an object that carries its own context. `self` is the reducer, read-only by intent;
+        !! `g` and `rows` are as in `parquet_group_reduce_i`; `out` has `nout` entries in the
+        !! matrix form of `%apply` and ONE in the scalar form, which calls it with the section
+        !! `out(g:g)` -- so a reducer serving both forms writes `out(1)` and tests `size(out)`
+        !! before writing more. The threading contract is `parquet_group_reduce_i`'s.
+        subroutine parquet_group_reducer_reduce_i(self, g, rows, out)
+            import :: parquet_group_reducer, int64, real64
+            class(parquet_group_reducer), intent(in) :: self !! the reducer; intent(in) on purpose.
+            integer(int64), intent(in) :: g                  !! the group number, 1 to %ngroups().
+            integer(int64), intent(in) :: rows(:)            !! the group's table rows, ascending; size(rows) >= 1.
+            real(real64), intent(out) :: out(:)              !! this group's results.
+        end subroutine parquet_group_reducer_reduce_i
+    end interface""")
+    return "\n".join(o)
+
+
 def gen_grouping_type():
     """The `parquet_grouping` type: `%group_by`'s partition kept as an object (feature_pandas_S5.md)."""
     o = []
@@ -1640,8 +1720,9 @@ def gen_grouping_type():
     w("""    !> A partition of a table's rows by the values of one or more KEY columns -- "which rows
     !! share this key?" -- built by `call t%group_by(keys, grp)` and answered per group: the rows
     !! of a group (`%rows`, `%csr`), one row per group (`%first_rows`, `%last_rows`), the group
-    !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`) and the key
-    !! values as a table of their own (`%key_table`). The table is NOT reordered: this is
+    !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`), the key
+    !! values as a table of their own (`%key_table`) and one answer per group from a procedure
+    !! or an object of the caller's own (`%apply`). The table is NOT reordered: this is
     !! `%argsort_by(keys, perm, group_offsets=)` (doc/pages/tables/table-mutate.md) kept as an
     !! object that knows when it has gone stale, and it keeps the file attached.
     !!
@@ -1671,6 +1752,13 @@ def gen_grouping_type():
     !! advances `%generation()`; the only side effect is that a key column, or the column
     !! `%count` is asked about, is read from the file if nothing has read it yet. `%key_table`
     !! gathers a deep COPY of each key column (feature_risks.md Risk-208).
+    !!
+    !! **`%apply` is the per-group callback**: a procedure of the caller's, or an object of
+    !! theirs extending `parquet_group_reducer`, called once per group with the group number and
+    !! the group's rows and nothing else; it reads the table through `%col` pointers or arrays
+    !! it holds, which nothing here moves. The loop is SERIAL unless the caller gives
+    !! `threads=`, which is their statement that the procedure is safe to call from several
+    !! threads at once -- the library cannot know (doc/pages/tables/table-group.md).
     !!
     !! No finalizer: nothing it owns needs one, and a finalizable type may not be OpenMP-private
     !! (.claude/rules/fortran-gotchas.md). It has allocatable components, so under ifx it must
@@ -1736,6 +1824,19 @@ def gen_grouping_type():
         procedure, private :: grp_count_i64       !! %count specific, int64 counts.
         !> Non-null rows of a column per group, for a column of any kind.
         generic :: count => grp_count_i32, grp_count_i64
+        procedure, private :: grp_apply_proc_scalar !! %apply specific: a function, one value per group.
+        procedure, private :: grp_apply_proc_matrix !! %apply specific: a subroutine, nout values per group.
+        procedure, private :: grp_apply_obj_scalar  !! %apply specific: a reducer object, one value per group.
+        procedure, private :: grp_apply_obj_matrix  !! %apply specific: a reducer object, nout values per group.
+        !> One answer per group from a procedure of your own, or from an object of yours
+        !! extending `parquet_group_reducer`, called once per group with the group's rows:
+        !! `%apply(func, out)` gives one real64 per group (`out(ngroups)`), `%apply(func, nout,
+        !! out)` gives `nout` per group (`out(nout, ngroups)`, one group's results contiguous),
+        !! and the same two shapes take a reducer object in place of `func`. `out` is allocated
+        !! here, zero-length for an empty grouping. `threads=` absent means SERIAL; giving it is
+        !! your statement that the procedure may be called from several threads at once.
+        generic :: apply => grp_apply_proc_scalar, grp_apply_proc_matrix, grp_apply_obj_scalar, &
+            grp_apply_obj_matrix
         ! NO `final` -- see the type's doc-comment.
     end type parquet_grouping""")
     return "\n".join(o)
@@ -2317,6 +2418,51 @@ def group_interfaces():
             character(len=*), intent(in) :: name               !! the column to count; read if not resident.
             integer(int64), allocatable, intent(out) :: out(:) !! non-null rows of `name` per group, in group order.
         end subroutine grp_count_i64
+        !> %apply specific, procedure, one value per group: `out(g)` is `func(g, rows of g)`,
+        !! into an array allocated here, `ngroups` long (zero-length for an empty grouping, and
+        !! then `func` is never called). SERIAL unless `threads=` is given -- a decision, not a
+        !! floor: the library cannot know whether `func` is re-entrant, so only the caller's
+        !! request opens a team. Given, `threads` must be at least 1, is clamped to this
+        !! process's CPU affinity, is honoured inside an existing parallel region, and the
+        !! groups are dealt to the team in no particular order with each result landing at its
+        !! own `g`, so the answer does not depend on the schedule. The team is recorded on every
+        !! call, 1 included, for the test-only `parquet_debug_get_group_threads_used` hook.
+        module subroutine grp_apply_proc_scalar(self, func, out, threads)
+            class(parquet_grouping), intent(in) :: self      !! the grouping.
+            procedure(parquet_group_reduce_i) :: func        !! called once per group; see the interface.
+            real(real64), allocatable, intent(out) :: out(:) !! one value per group, in group order.
+            integer, intent(in), optional :: threads         !! the team; absent = serial.
+        end subroutine grp_apply_proc_scalar
+        !> %apply specific, procedure, `nout` values per group: `func(g, rows of g, out(:, g))`
+        !! for each group, into `out(nout, ngroups)` allocated here -- one group's results
+        !! contiguous, so `out(k, :)` is the k-th aggregate over all groups and goes straight
+        !! into `%add_column`. `nout` below 1 is refused. Threading as in the one-value form.
+        module subroutine grp_apply_proc_matrix(self, func, nout, out, threads)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            procedure(parquet_group_apply_i) :: func            !! called once per group; see the interface.
+            integer, intent(in) :: nout                         !! results per group; at least 1.
+            real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
+            integer, intent(in), optional :: threads            !! the team; absent = serial.
+        end subroutine grp_apply_proc_matrix
+        !> %apply specific, reducer object, one value per group: `reducer%reduce(g, rows of g,
+        !! out(g:g))` for each group. Threading as in the procedure form; the object is
+        !! read-only by its own interface, which is what makes the declaration easy to keep.
+        module subroutine grp_apply_obj_scalar(self, reducer, out, threads)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            class(parquet_group_reducer), intent(in) :: reducer !! the caller's extension; its %reduce is called once per group.
+            real(real64), allocatable, intent(out) :: out(:)    !! one value per group, in group order.
+            integer, intent(in), optional :: threads            !! the team; absent = serial.
+        end subroutine grp_apply_obj_scalar
+        !> %apply specific, reducer object, `nout` values per group: `reducer%reduce(g, rows of
+        !! g, out(:, g))` for each group, into `out(nout, ngroups)` allocated here. `nout` below
+        !! 1 is refused. Threading as in the procedure form.
+        module subroutine grp_apply_obj_matrix(self, reducer, nout, out, threads)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            class(parquet_group_reducer), intent(in) :: reducer !! the caller's extension; its %reduce is called once per group.
+            integer, intent(in) :: nout                         !! results per group; at least 1.
+            real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
+            integer, intent(in), optional :: threads            !! the team; absent = serial.
+        end subroutine grp_apply_obj_matrix
     end interface""")
     return "\n".join(o)
 

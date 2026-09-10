@@ -41,6 +41,7 @@ module test_table_parallel
     use parquet_columns, only : parquet_validity_block_bits
     use iso_fortran_env, only : int32, int64, real64
     use iso_c_binding, only : c_int64_t
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_get_num_threads, omp_get_thread_num, omp_get_wtime, &
@@ -243,6 +244,8 @@ contains
                 test_join_group_passes_threads), &
             new_unittest("a grouping's apply is serial unless asked, opens the team asked for, and agrees", &
                 test_apply_group_team), &
+            new_unittest("a grouping's agg threads automatically, honours the cap and the request, and agrees", &
+                test_agg_group_team), &
             new_unittest("a gather's team goes inside the column when the columns are fewer than the threads", &
                 test_colwork_level_rule), &
             new_unittest("bounded= reads correctly through both parallel paths", &
@@ -2801,6 +2804,110 @@ contains
         call check(error, all(om_team == om_one) .and. all(om_one == m_one), &
             "the matrix object form: the same, and equal to the procedure form")
     end subroutine test_apply_group_team
+    !
+    !> `%agg`'s team, and the A/B on it. Absent `threads=` is AUTOMATIC on the token form --
+    !! the record reads at least 1, and reads 1 under `parquet_set_table_threads(1)`, the cap the
+    !! automatic rule takes -- while `threads=1` records 1 and `threads=nt` records nt; on the
+    !! procedure form absent is serial and `threads=nt` is nt. Then six tokens under
+    !! `threads=nt` equal their `threads=1` run bit for bit (a NaN against a NaN counts as equal)
+    !! over about five hundred unequal groups with nulls and NaNs scattered through them, and so
+    !! does the procedure form: each group's statistic is computed by one thread on one buffer,
+    !! and the pairing of groups with threads cannot change a bit. Serial in this suite, so the
+    !! team is real.
+    subroutine test_agg_group_team(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 20000 !! rows; about five hundred groups of unequal size.
+        character(len=8), parameter :: tokens(6) = [character(len=8) :: "mean", "median", "std", "quantile", &
+            "sum", "count"]
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int32) :: k(N)
+        real(real64) :: v(N)
+        real(real64), allocatable :: one(:), team(:), f_one(:), f_team(:)
+        integer(int64) :: r_abs, r_cap, r_one, r_team, r_fabs, r_fteam
+        integer :: nt, i, tk
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: no team can open, so every record would read 1 and the A/B " // &
+            "would compare serial against serial")
+        return
+#else
+        nt = min(4, omp_get_num_procs())
+        if (nt < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is clamped " // &
+                "to omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+#endif
+        do i = 1, N
+            k(i) = int(sqrt(real(mod(i * 7919, 250000), real64)), int32)
+            v(i) = real(mod(i * 31, 997), real64) + real(i, real64) * 1.0e-6_real64
+        end do
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("v", v)
+        do i = 1, N, 37
+            call t%set_null("v", int(i, int64))
+        end do
+        do i = 5, N, 53
+            call t%set_element("v", int(i, int64), ieee_value(0.0_real64, ieee_quiet_nan))
+        end do
+        call t%group_by("k", grp)
+        ! ---- the records, one arm each.
+        call parquet_debug_set_group_threads_used(-1_c_int64_t)
+        call grp%agg("v", "mean", one)
+        r_abs = parquet_debug_get_group_threads_used()
+        call parquet_set_table_threads(1)
+        call grp%agg("v", "mean", one)
+        r_cap = parquet_debug_get_group_threads_used()
+        call parquet_reset_settings()
+        call grp%agg("v", "mean", one, threads=1)
+        r_one = parquet_debug_get_group_threads_used()
+        call grp%agg("v", "mean", team, threads=nt)
+        r_team = parquet_debug_get_group_threads_used()
+        call grp%agg("v", par_col_mean, f_one)
+        r_fabs = parquet_debug_get_group_threads_used()
+        call grp%agg("v", par_col_mean, f_team, threads=nt)
+        r_fteam = parquet_debug_get_group_threads_used()
+        call check(error, grp%ngroups() > 100_int64, "the fixture has a few hundred groups")
+        if (allocated(error)) return
+        call check(error, r_abs >= 1_int64, "absent threads= resolves automatically on the token form")
+        if (allocated(error)) return
+        call check(error, r_cap == 1_int64, "parquet_set_table_threads(1) caps the automatic answer to 1")
+        if (allocated(error)) return
+        call check(error, r_one == 1_int64 .and. r_team == int(nt, int64), "threads=1 records 1, threads=nt records nt")
+        if (allocated(error)) return
+        call check(error, r_fabs == 1_int64 .and. r_fteam == int(nt, int64), &
+            "the procedure form: absent is serial, threads=nt is nt")
+        if (allocated(error)) return
+        call check(error, all(f_team == f_one .or. (ieee_is_nan(f_team) .and. ieee_is_nan(f_one))), &
+            "the procedure form on a team equals its serial run")
+        if (allocated(error)) return
+        do tk = 1, size(tokens)
+            if (tokens(tk) == "quantile") then
+                call grp%agg("v", trim(tokens(tk)), one, q=0.25_real64, threads=1)
+                call grp%agg("v", trim(tokens(tk)), team, q=0.25_real64, threads=nt)
+            else
+                call grp%agg("v", trim(tokens(tk)), one, threads=1)
+                call grp%agg("v", trim(tokens(tk)), team, threads=nt)
+            end if
+            if (.not. all(team == one .or. (ieee_is_nan(team) .and. ieee_is_nan(one)))) then
+                call check(error, .false., trim(tokens(tk)) // " on a team differs from its serial run")
+                return
+            end if
+        end do
+        call check(error, .true., "every token agreed at both thread counts")
+    end subroutine test_agg_group_team
+    !
+    !> The mean of a group's valid values, for the procedure form's team arm.
+    function par_col_mean(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the mean of the valid values.
+        !
+        call pf_mean(values, r, is_valid=is_valid, weights=weights)
+    end function par_col_mean
     !
     !> The payload's sum over the group, through `par_apply_p`.
     function par_cb_sum(g, rows) result(r)

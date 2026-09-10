@@ -314,6 +314,7 @@ module parquet_tables
     public :: parquet_group_reduce_i
     public :: parquet_group_apply_i
     public :: parquet_group_reducer_reduce_i
+    public :: parquet_group_column_reduce_i
     public :: parquet_slice
     public :: parquet_slice_range
     public :: parquet_slice_list
@@ -1709,6 +1710,21 @@ def gen_group_callbacks():
             integer(int64), intent(in) :: rows(:)            !! the group's table rows, ascending; size(rows) >= 1.
             real(real64), intent(out) :: out(:)              !! this group's results.
         end subroutine parquet_group_reducer_reduce_i
+        !> One group's values of ONE column -> one value: the per-column callback form of
+        !! `parquet_grouping%agg`. `values` are the group's values of the column, in row order,
+        !! widened to real64 exactly as `parquet_stats` widens every kind; `is_valid` is present
+        !! only when the group holds a null (`.false.` marks one), `weights` only when `%agg`
+        !! was given `weights=` or `weight_column=` -- test `present()` and nothing else. The
+        !! result is the group's value; a value the procedure cannot compute is a NaN of its own
+        !! choosing, not an abort. Under `threads=` it is called from several threads at once,
+        !! so it may hold no `save` variable and write nothing but its result.
+        function parquet_group_column_reduce_i(values, is_valid, weights) result(r)
+            import :: real64
+            real(real64), intent(in) :: values(:)            !! the group's values, in row order, widened.
+            logical, intent(in), optional :: is_valid(:)     !! present only when the group holds a null.
+            real(real64), intent(in), optional :: weights(:) !! present only when %agg was given weights.
+            real(real64) :: r                                !! the group's value.
+        end function parquet_group_column_reduce_i
     end interface""")
     return "\n".join(o)
 
@@ -1720,9 +1736,10 @@ def gen_grouping_type():
     w("""    !> A partition of a table's rows by the values of one or more KEY columns -- "which rows
     !! share this key?" -- built by `call t%group_by(keys, grp)` and answered per group: the rows
     !! of a group (`%rows`, `%csr`), one row per group (`%first_rows`, `%last_rows`), the group
-    !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`), the key
-    !! values as a table of their own (`%key_table`) and one answer per group from a procedure
-    !! or an object of the caller's own (`%apply`). The table is NOT reordered: this is
+    !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`, `%nunique`), the
+    !! key values as a table of their own (`%key_table`), one statistic of one column per group
+    !! (`%agg`, the `parquet_stats` vocabulary) and one answer per group from a procedure or an
+    !! object of the caller's own (`%apply`). The table is NOT reordered: this is
     !! `%argsort_by(keys, perm, group_offsets=)` (doc/pages/tables/table-mutate.md) kept as an
     !! object that knows when it has gone stale, and it keeps the file attached.
     !!
@@ -1759,6 +1776,14 @@ def gen_grouping_type():
     !! it holds, which nothing here moves. The loop is SERIAL unless the caller gives
     !! `threads=`, which is their statement that the procedure is safe to call from several
     !! threads at once -- the library cannot know (doc/pages/tables/table-group.md).
+    !!
+    !! **`%agg` is the statistics vocabulary**: one column, one `parquet_stats` statistic per
+    !! group -- `"mean"`, `"median"`, `"std"`, `"quantile"` and the rest -- each delegating to the
+    !! named `pf_*` procedure on the group's values, so a group's answer is that procedure's
+    !! answer over the same rows, bit for bit, with its null, NaN and weight rules. An
+    !! `integer(int64)` `out` selects the EXACT family (`"sum"`, `"min"`, `"max"`, `"first"`,
+    !! `"last"`, the counts), which never goes through a real64 buffer. Its loop is automatic
+    !! threading (library code, re-entrant by construction), unlike `%apply`'s.
     !!
     !! No finalizer: nothing it owns needs one, and a finalizable type may not be OpenMP-private
     !! (.claude/rules/fortran-gotchas.md). It has allocatable components, so under ifx it must
@@ -1824,6 +1849,23 @@ def gen_grouping_type():
         procedure, private :: grp_count_i64       !! %count specific, int64 counts.
         !> Non-null rows of a column per group, for a column of any kind.
         generic :: count => grp_count_i32, grp_count_i64
+        procedure, private :: grp_nunique_i32     !! %nunique specific, int32 counts.
+        procedure, private :: grp_nunique_i64     !! %nunique specific, int64 counts.
+        !> Distinct values of a column per group, for a column of any kind `%argsort_by`
+        !! accepts: nulls are not counted unless `dropna=.false.`, every NaN is one value.
+        generic :: nunique => grp_nunique_i32, grp_nunique_i64
+        procedure, private :: grp_agg_stat_real   !! %agg specific: a statistic token, real64 answers.
+        procedure, private :: grp_agg_stat_int    !! %agg specific: a statistic token, exact int64 answers.
+        procedure, private :: grp_agg_func        !! %agg specific: a per-column procedure of the caller's.
+        !> One statistic of one column per group: `%agg(name, stat, out)` with `stat` a token of
+        !! the `parquet_stats` vocabulary and `out` real64 (`out(ngroups)`, allocated here), or
+        !! `out` `integer(int64)` for the exact family on an integer or logical column; or
+        !! `%agg(name, func, out)` with a procedure of your own over one group's widened values.
+        !! `weights=` (one per table row) or `weight_column=` (a numeric column, a null weight
+        !! zero) weights the population; `q=`, `ddof=`, `method=` and `scale=` are the options of
+        !! the statistics that take them. `threads=` absent is automatic on the token forms and
+        !! serial on the procedure form.
+        generic :: agg => grp_agg_stat_real, grp_agg_stat_int, grp_agg_func
         procedure, private :: grp_apply_proc_scalar !! %apply specific: a function, one value per group.
         procedure, private :: grp_apply_proc_matrix !! %apply specific: a subroutine, nout values per group.
         procedure, private :: grp_apply_obj_scalar  !! %apply specific: a reducer object, one value per group.
@@ -2463,6 +2505,84 @@ def group_interfaces():
             real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
             integer, intent(in), optional :: threads            !! the team; absent = serial.
         end subroutine grp_apply_obj_matrix
+        !> %nunique specific, int32 counts; see the generic.
+        module subroutine grp_nunique_i32(self, name, out, dropna)
+            class(parquet_grouping), intent(in) :: self        !! the grouping.
+            character(len=*), intent(in) :: name               !! the column; read if not resident.
+            integer(int32), allocatable, intent(out) :: out(:) !! distinct values per group, in group order.
+            logical, intent(in), optional :: dropna            !! .false. counts a null as one more value; default .true.
+        end subroutine grp_nunique_i32
+        !> %nunique specific, int64 counts: one more `%argsort_by` over the keys and `name`, so
+        !! that distinctness is the sort comparator's own equality (every NaN one value, every
+        !! null one value) and the same partition's outer groups are this grouping's.
+        module subroutine grp_nunique_i64(self, name, out, dropna)
+            class(parquet_grouping), intent(in) :: self        !! the grouping.
+            character(len=*), intent(in) :: name               !! the column; read if not resident.
+            integer(int64), allocatable, intent(out) :: out(:) !! distinct values per group, in group order.
+            logical, intent(in), optional :: dropna            !! .false. counts a null as one more value; default .true.
+        end subroutine grp_nunique_i64
+        !> %agg specific, a token of the real64 vocabulary: `"size"`, `"count"`, `"sum"`,
+        !! `"mean"`, `"var"`, `"std"`, `"sem"`, `"min"`, `"max"`, `"range"`, `"median"`,
+        !! `"quantile"` (needs `q=`), `"iqr"`, `"mad"`, `"first"`, `"last"` (the first and last
+        !! non-null value in row order) and `"nunique"`, each the named `pf_*` procedure of
+        !! `parquet_stats` over the group's values -- `pf_count_valid`, `pf_sum`, `pf_mean`,
+        !! `pf_variance`, `pf_stddev`, `pf_sem`, `pf_moments` (min, max, range), `pf_median`,
+        !! `pf_quantile`, `pf_iqr`, `pf_mad` -- with that module's null, NaN and weight rules and
+        !! an undefined statistic a NaN, never an abort. The column is a scalar numeric or logical
+        !! one (a logical's `"mean"` is its fraction); any other kind is refused naming it.
+        !! `weights=` holds one real64 per TABLE row; `weight_column=` names a scalar numeric
+        !! column instead, a null weight taken as zero; giving both is refused, and a NaN,
+        !! negative or infinite weight aborts naming its row before any group is computed. An
+        !! option a token does not take is refused (`q=` belongs to `"quantile"`; `method=` to
+        !! `"median"`, `"quantile"` and `"iqr"`; `ddof=` to `"var"`, `"std"` and `"sem"`;
+        !! `scale=` to `"mad"`). `threads=` absent is automatic: the table tier's cap and this
+        !! process's CPU affinity, serial inside a parallel region; the answer is bit-identical
+        !! at every thread count, and the team is recorded for the test-only hook.
+        module subroutine grp_agg_stat_real(self, name, stat, out, weights, weight_column, q, ddof, method, &
+                scale, threads)
+            class(parquet_grouping), intent(in) :: self           !! the grouping.
+            character(len=*), intent(in) :: name                  !! the column; read if not resident.
+            character(len=*), intent(in) :: stat                  !! the statistic's token, case-insensitive.
+            real(real64), allocatable, intent(out) :: out(:)      !! one value per group, in group order.
+            real(real64), intent(in), optional :: weights(:)      !! one weight per table row.
+            character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+            real(real64), intent(in), optional :: q               !! the probability, 0 to 1, for "quantile".
+            integer, intent(in), optional :: ddof                 !! degrees of freedom charged; default 1.
+            character(len=*), intent(in), optional :: method      !! the quantile method, as pf_quantile's.
+            character(len=*), intent(in), optional :: scale       !! "raw" for an unscaled "mad", as pf_mad's.
+            integer, intent(in), optional :: threads              !! the team; absent = automatic.
+        end subroutine grp_agg_stat_real
+        !> %agg specific, the EXACT family, `out` `integer(int64)`: `"size"`, `"count"`,
+        !! `"nunique"`, `"sum"`, `"min"`, `"max"`, `"first"` and `"last"` on an integer or logical
+        !! column (a logical counts as 0 and 1), never through a real64 buffer, so an int64 above
+        !! 2**53 comes back exactly; nulls are left out. `"sum"` ABORTS on overflow naming the
+        !! group, never wraps; `"min"`, `"max"`, `"first"` and `"last"` abort on a group with no
+        !! non-null value, which has no exact answer (the real64 form gives NaN there). A real or
+        !! any other column kind is refused naming it. Unweighted by definition. `threads=` as in
+        !! the real64 form.
+        module subroutine grp_agg_stat_int(self, name, stat, out, threads)
+            class(parquet_grouping), intent(in) :: self        !! the grouping.
+            character(len=*), intent(in) :: name               !! the column; read if not resident.
+            character(len=*), intent(in) :: stat               !! the statistic's token, case-insensitive.
+            integer(int64), allocatable, intent(out) :: out(:) !! one exact value per group, in group order.
+            integer, intent(in), optional :: threads           !! the team; absent = automatic.
+        end subroutine grp_agg_stat_int
+        !> %agg specific, a procedure of the caller's over one column: `func(values, is_valid,
+        !! weights)` once per group, with the group's values of `name` widened to real64 in row
+        !! order, `is_valid` present only when the group holds a null and `weights` only when
+        !! `weights=` or `weight_column=` was given (the weight rules of the token form). The
+        !! column and weight kinds are the token form's. `threads=` absent is SERIAL, as on
+        !! `%apply`: giving it is the caller's statement that `func` may be called from several
+        !! threads at once.
+        module subroutine grp_agg_func(self, name, func, out, weights, weight_column, threads)
+            class(parquet_grouping), intent(in) :: self             !! the grouping.
+            character(len=*), intent(in) :: name                    !! the column; read if not resident.
+            procedure(parquet_group_column_reduce_i) :: func        !! called once per group; see the interface.
+            real(real64), allocatable, intent(out) :: out(:)        !! one value per group, in group order.
+            real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
+            character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+            integer, intent(in), optional :: threads                !! the team; absent = serial.
+        end subroutine grp_agg_func
     end interface""")
     return "\n".join(o)
 
@@ -6146,7 +6266,7 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: proc     !! calling procedure, for messages.
             integer, intent(out) :: idx              !! its slot index.
             !> what the message calls the key, and what it advises instead: `"sort"` (the default),
-            !! `"join"` or `"group"`. A join is an equality test rather than an ordering, and a
+            !! `"join"`, `"group"` or `"nunique"`. A join is an equality test rather than an ordering, and a
             !! grouping's order is a contract rather than a choice, so telling either caller a
             !! column "cannot be a sort key" and to "sort by a scalar column" names an operation
             !! they did not ask for.

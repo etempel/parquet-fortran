@@ -353,6 +353,12 @@ parquet_sorting_reduce.f90
 parquet_sorting_search.f90
 parquet_sorting_select.f90
 parquet_sorting_unique.f90
+parquet_stats.f90
+parquet_stats_bin.f90
+parquet_stats_core.f90
+parquet_stats_kernel.f90
+parquet_stats_order.f90
+parquet_stats_relate.f90
 parquet_strings.f90
 parquet_struct.f90
 parquet_tables.f90

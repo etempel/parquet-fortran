@@ -25,13 +25,23 @@
 !! The team (`threads=`) is asserted in test/test_table_parallel.f90, which runs its tests with
 !! no enclosing region, so a team opened there is a real one.
 !!
+!! **`%agg`'s oracle is the named `pf_*` procedure over `%get_slice` of each group's rows**,
+!! compared with `==` on the bits (a NaN against a NaN counts as equal), for every token of the
+!! real64 vocabulary on the real64 column and for a few tokens on the typed slices of the
+!! int32, real32 and logical columns -- the statistics module widens those to real64 itself, and
+!! the typed oracle pins that the grouping's widening is the same. The exact int64 family is
+!! checked against int64 arithmetic over `%csr` on values above 2**53, where the real64 form is
+!! shown to differ. `%nunique`'s oracle is `pf_unique_count` per gathered group.
+!!
 !! The ABORTS -- no key, an unknown or unorderable key, a direction token, every per-group
 !! query on a stale or never-built grouping, a group number out of range, `%apply` with `nout`
-!! or `threads` below 1 -- live in test/error_scenarios.f90 as `table_group_*`. Every test that
-!! writes a file uses its own path, since the suite runs its tests concurrently.
+!! or `threads` below 1, `%agg`'s refusals (an unknown token, an option a token does not take,
+!! the exact family on a real column, an overflowing exact sum, a group with no exact answer,
+!! a string column, bad weights) -- live in test/error_scenarios.f90 as `table_group_*`. Every
+!! test that writes a file uses its own path, since the suite runs its tests concurrently.
 module test_table_group
     use parquet
-    use iso_fortran_env, only : int32, int64, real64
+    use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
@@ -48,6 +58,9 @@ module test_table_group
     logical :: order_ok = .true.                    !! ... every call so far came in group order.
     logical :: rows_ok = .true.                     !! ... every call so far had ascending, non-empty rows.
     integer :: calls_seen = 0                       !! test_apply_empty_grouping: calls made.
+    integer :: col_calls = 0                        !! test_agg_callback_presence: calls made.
+    integer :: col_valid_present = 0                !! ... calls that saw is_valid present.
+    integer :: col_weights_present = 0              !! ... calls that saw weights present.
 
     !> A reducer holding a `%col` pointer and a tunable, for the object form's tests: `out(1)`
     !! is `scale * sum(p(rows))`; `out(2)`, when there is room, the group's size; `out(3)` the
@@ -106,7 +119,25 @@ contains
             new_unittest("apply's object form equals its procedure form; two objects are two contexts", &
                 test_apply_object_equals_procedure), &
             new_unittest("apply over an empty grouping allocates zero-length outputs and calls nothing", &
-                test_apply_empty_grouping) &
+                test_apply_empty_grouping), &
+            new_unittest("agg: every real64 token equals its pf_* oracle over the group's slice, bit for bit", &
+                test_agg_tokens_equal_pf_oracles), &
+            new_unittest("agg: the typed slices of int32, real32 and logical columns give the same bits", &
+                test_agg_typed_kinds_equal_oracles), &
+            new_unittest("agg: the exact int64 family is exact above 2**53, where the real64 form is not", &
+                test_agg_int64_family_exact), &
+            new_unittest("agg: weights= equals the weighted oracle, a zero or null weight drops its row", &
+                test_agg_weights_and_weight_column), &
+            new_unittest("agg: a procedure sees is_valid only for a group with a null, weights only when given", &
+                test_agg_callback_presence), &
+            new_unittest("agg: the options reach their statistic, and a logical mean is its fraction", &
+                test_agg_options_and_logical_mean), &
+            new_unittest("agg: first and last are the first and last non-null value, NaN when there is none", &
+                test_agg_first_and_last), &
+            new_unittest("nunique equals pf_unique_count per gathered group, under both dropna values", &
+                test_nunique_equals_pf_unique_count), &
+            new_unittest("agg and nunique over an empty grouping allocate zero-length outputs", &
+                test_agg_empty_grouping) &
             ]
     end subroutine collect_tests_table_group
 
@@ -204,6 +235,62 @@ contains
         call t%add_column("r", r, unit="Jy")
         call t%add_column("d", d)
     end subroutine build_kinds
+
+    !> Twelve rows over an int32 key with four groups of unequal size -- 1 at rows 1, 3, 6, 8,
+    !! 10; 2 at rows 2, 5, 9; 3 at rows 4, 7, 12; 4 at row 11 alone (the `std` NaN case) -- and
+    !! a row-distinct column of every kind `%agg` takes, each with a null somewhere: `x`
+    !! (real64, a NaN at row 6 and a null at row 8, both in group 1, and a null at row 12), `i`
+    !! (int32, null at row 3), `big` (int64, values above 2**53 whose group sums are exact only
+    !! in int64; null at row 7), `f` (real32, null at row 9), `b` (logical, null at row 5), `w`
+    !! (real64 weights, a zero at row 3 and a null at row 10), `z` (real64, null throughout
+    !! groups 3 and 4) and `s` (string, null at row 12).
+    subroutine build_agg(t)
+        type(parquet_table), intent(out) :: t !! the table.
+        integer(int32) :: k(12), i(12)
+        integer(int64) :: big(12)
+        real(real64) :: x(12), w(12), z(12)
+        real(real32) :: f(12)
+        logical :: b(12)
+        character(len=1) :: s(12)
+        integer :: r
+        !
+        k = [1, 2, 1, 3, 2, 1, 3, 1, 2, 1, 4, 3]
+        x = [1.5_real64, 2.5_real64, -3.0_real64, 4.25_real64, 5.5_real64, 6.0_real64, 7.75_real64, 8.0_real64, &
+            9.5_real64, 10.0_real64, 11.0_real64, 12.5_real64]
+        x(6) = ieee_value(0.0_real64, ieee_quiet_nan)
+        do r = 1, 12
+            i(r) = int(10 * r, int32)
+            f(r) = real(r, real32) + 0.25_real32
+        end do
+        big = [2_int64**53 + 1_int64, 2_int64**60, 2_int64**53 + 3_int64, 7_int64, 2_int64**61, &
+            2_int64**53 + 5_int64, 8_int64, -(2_int64**53) - 1_int64, 2_int64**61, 3_int64, 2_int64**53, 9_int64]
+        b = [.true., .false., .true., .true., .false., .true., .false., .false., .true., .true., .false., .true.]
+        w = [1.0_real64, 2.0_real64, 0.0_real64, 1.5_real64, 1.0_real64, 2.0_real64, 1.0_real64, 1.0_real64, &
+            3.0_real64, 0.5_real64, 1.0_real64, 2.0_real64]
+        z = x
+        s = ["a", "b", "a", "c", "b", "a", "c", "a", "d", "a", "e", "c"]
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("x", x)
+        call t%add_column("i", i)
+        call t%add_column("big", big)
+        call t%add_column("f", f)
+        call t%add_column("b", b)
+        call t%add_column("w", w)
+        call t%add_column("z", z)
+        call t%add_column("s", s)
+        call t%set_null("x", 8_int64)
+        call t%set_null("x", 12_int64)
+        call t%set_null("i", 3_int64)
+        call t%set_null("big", 7_int64)
+        call t%set_null("f", 9_int64)
+        call t%set_null("b", 5_int64)
+        call t%set_null("w", 10_int64)
+        do r = 1, 12
+            if (k(r) == 3 .or. k(r) == 4) call t%set_null("z", int(r, int64))
+        end do
+        call t%set_null("s", 12_int64)
+    end subroutine build_agg
 
     ! ---- the tests -----------------------------------------------------------------------------
 
@@ -951,7 +1038,602 @@ contains
             "an all-null key under dropna: zero groups, zero calls")
     end subroutine test_apply_empty_grouping
 
+    ! ---- %agg and %nunique ----------------------------------------------------------------------
+
+    !> Whether two real64 values are the same answer: equal bits, or both NaN.
+    logical function same_answer(a, b)
+        real(real64), intent(in) :: a, b !! the two values.
+        if (ieee_is_nan(a) .and. ieee_is_nan(b)) then
+            same_answer = .true.
+        else
+            same_answer = a == b
+        end if
+    end function same_answer
+
+    !> The oracle of one real64 token over one group's real64 values: the named `pf_*`
+    !! procedure, `is_valid` given only when the group holds a null (as the grouping passes it)
+    !! and `weights` when given.
+    subroutine oracle_real(stat, v, valid, r, q, weights, ddof, method, scale)
+        character(len=*), intent(in) :: stat             !! the token.
+        real(real64), intent(in) :: v(:)                 !! the group's values.
+        logical, intent(in) :: valid(:)                  !! their validity.
+        real(real64), intent(out) :: r                   !! the oracle's answer.
+        real(real64), intent(in), optional :: q          !! the quantile's probability.
+        real(real64), intent(in), optional :: weights(:) !! the group's weights.
+        integer, intent(in), optional :: ddof            !! degrees of freedom.
+        character(len=*), intent(in), optional :: method !! the quantile method.
+        character(len=*), intent(in), optional :: scale  !! the mad's scale.
+        if (all(valid)) then
+            call oracle_real_core(stat, v, r, q=q, weights=weights, ddof=ddof, method=method, scale=scale)
+        else
+            call oracle_real_core(stat, v, r, is_valid=valid, q=q, weights=weights, ddof=ddof, method=method, &
+                scale=scale)
+        end if
+    end subroutine oracle_real
+
+    !> `oracle_real`'s body, with `is_valid` an optional it passes on as it arrived.
+    subroutine oracle_real_core(stat, v, r, is_valid, q, weights, ddof, method, scale)
+        character(len=*), intent(in) :: stat             !! the token.
+        real(real64), intent(in) :: v(:)                 !! the group's values.
+        real(real64), intent(out) :: r                   !! the oracle's answer.
+        logical, intent(in), optional :: is_valid(:)     !! their validity, when the group holds a null.
+        real(real64), intent(in), optional :: q          !! the quantile's probability.
+        real(real64), intent(in), optional :: weights(:) !! the group's weights.
+        integer, intent(in), optional :: ddof            !! degrees of freedom.
+        character(len=*), intent(in), optional :: method !! the quantile method.
+        character(len=*), intent(in), optional :: scale  !! the mad's scale.
+        real(real64) :: lo, hi
+        integer(int64) :: n
+        select case (stat)
+        case ("size")
+            r = real(size(v), real64)
+        case ("count")
+            call pf_count_valid(v, n, is_valid=is_valid, weights=weights)
+            r = real(n, real64)
+        case ("sum")
+            call pf_sum(v, r, is_valid=is_valid, weights=weights)
+        case ("mean")
+            call pf_mean(v, r, is_valid=is_valid, weights=weights)
+        case ("var")
+            call pf_variance(v, r, is_valid=is_valid, weights=weights, ddof=ddof)
+        case ("std")
+            call pf_stddev(v, r, is_valid=is_valid, weights=weights, ddof=ddof)
+        case ("sem")
+            call pf_sem(v, r, is_valid=is_valid, weights=weights, ddof=ddof)
+        case ("min")
+            call pf_moments(v, vmin=r, is_valid=is_valid, weights=weights)
+        case ("max")
+            call pf_moments(v, vmax=r, is_valid=is_valid, weights=weights)
+        case ("range")
+            call pf_moments(v, vmin=lo, vmax=hi, is_valid=is_valid, weights=weights)
+            r = hi - lo
+        case ("median")
+            call pf_median(v, r, is_valid=is_valid, weights=weights, method=method)
+        case ("quantile")
+            call pf_quantile(v, q, r, is_valid=is_valid, weights=weights, method=method)
+        case ("iqr")
+            call pf_iqr(v, r, is_valid=is_valid, weights=weights, method=method)
+        case ("mad")
+            call pf_mad(v, r, is_valid=is_valid, weights=weights, scale=scale)
+        case default
+            error stop "test_table_group: oracle_real_core: no oracle for " // stat
+        end select
+    end subroutine oracle_real_core
+
+    !> Every token of the real64 vocabulary over the real64 column `x` -- a NaN and a null in
+    !! group 1, a null in group 3, a group of one -- against `oracle_real` over `%get_slice` of
+    !! each group's rows, bit for bit; `"nunique"` against `%nunique`. And the call is a read.
+    subroutine test_agg_tokens_equal_pf_oracles(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=8), parameter :: tokens(14) = [character(len=8) :: "size", "count", "sum", "mean", "var", &
+            "std", "sem", "min", "max", "range", "median", "quantile", "iqr", "mad"]
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:), nu(:)
+        real(real64), allocatable :: got(:), v(:)
+        logical, allocatable :: valid(:)
+        real(real64) :: want
+        integer(int64) :: g, gen0
+        integer :: k
+        !
+        call build_agg(t)
+        gen0 = t%generation()
+        call t%group_by("k", grp)
+        call grp%csr(off, rows)
+        do k = 1, size(tokens)
+            if (tokens(k) == "quantile") then
+                call grp%agg("x", trim(tokens(k)), got, q=0.3_real64)
+            else
+                call grp%agg("x", trim(tokens(k)), got)
+            end if
+            if (size(got) /= 4) then
+                call check(error, .false., "one answer per group for " // trim(tokens(k)))
+                return
+            end if
+            do g = 1_int64, 4_int64
+                call t%get_slice("x", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), v, is_valid=valid)
+                call oracle_real(trim(tokens(k)), v, valid, want, q=0.3_real64)
+                if (.not. same_answer(got(g), want)) then
+                    call check(error, .false., trim(tokens(k)) // " differs from its pf_* oracle in a group")
+                    return
+                end if
+            end do
+        end do
+        call grp%agg("x", "nunique", got)
+        call grp%nunique("x", nu)
+        call check(error, all(got == real(nu, real64)) .and. all(nu == [4_int64, 3_int64, 2_int64, 1_int64]), &
+            "the nunique token is %nunique widened (group 1: 1.5, -3.0, the NaN and 10.0)")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen0 .and. t%nrows() == 12_int64 .and. grp%is_current(), &
+            "agg is a read")
+    end subroutine test_agg_tokens_equal_pf_oracles
+
+    !> The int32, real32 and logical columns against the oracles over their TYPED slices, for
+    !! `"mean"`, `"median"` and `"std"`: the statistics module widens those kinds to real64
+    !! itself, and the grouping's own widening must give the same bits.
+    subroutine test_agg_typed_kinds_equal_oracles(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:)
+        real(real64), allocatable :: got(:)
+        integer(int32), allocatable :: vi(:)
+        real(real32), allocatable :: vf(:)
+        logical, allocatable :: vb(:), valid(:)
+        character(len=1), parameter :: cols(3) = ["i", "f", "b"]
+        character(len=6), parameter :: toks(3) = [character(len=6) :: "mean", "median", "std"]
+        real(real64) :: want
+        integer(int64) :: g
+        integer :: k, c
+        character(len=6) :: tok
+        character(len=1) :: col
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%csr(off, rows)
+        do c = 1, 3
+            col = cols(c)
+            do k = 1, 3
+                tok = toks(k)
+                call grp%agg(col, trim(tok), got)
+                do g = 1_int64, 4_int64
+                    select case (col)
+                    case ("i")
+                        call t%get_slice("i", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vi, &
+                            is_valid=valid)
+                        call typed_oracle_i32(trim(tok), vi, valid, want)
+                    case ("f")
+                        call t%get_slice("f", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vf, &
+                            is_valid=valid)
+                        call typed_oracle_f32(trim(tok), vf, valid, want)
+                    case default
+                        call t%get_slice("b", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vb, &
+                            is_valid=valid)
+                        call typed_oracle_bool(trim(tok), vb, valid, want)
+                    end select
+                    if (.not. same_answer(got(g), want)) then
+                        call check(error, .false., trim(tok) // " over column " // col // " differs from the typed oracle")
+                        return
+                    end if
+                end do
+            end do
+        end do
+        call check(error, .true., "every typed oracle agreed")
+    end subroutine test_agg_typed_kinds_equal_oracles
+
+    !> `oracle_real` over an int32 slice, through the statistics module's own int32 specifics.
+    subroutine typed_oracle_i32(stat, v, valid, r)
+        character(len=*), intent(in) :: stat  !! the token.
+        integer(int32), intent(in) :: v(:)    !! the group's values.
+        logical, intent(in) :: valid(:)       !! their validity.
+        real(real64), intent(out) :: r        !! the oracle's answer.
+        if (all(valid)) then
+            select case (stat)
+            case ("mean");   call pf_mean(v, r)
+            case ("median"); call pf_median(v, r)
+            case default;    call pf_stddev(v, r)
+            end select
+        else
+            select case (stat)
+            case ("mean");   call pf_mean(v, r, is_valid=valid)
+            case ("median"); call pf_median(v, r, is_valid=valid)
+            case default;    call pf_stddev(v, r, is_valid=valid)
+            end select
+        end if
+    end subroutine typed_oracle_i32
+
+    !> `oracle_real` over a real32 slice, through the real32 specifics.
+    subroutine typed_oracle_f32(stat, v, valid, r)
+        character(len=*), intent(in) :: stat  !! the token.
+        real(real32), intent(in) :: v(:)      !! the group's values.
+        logical, intent(in) :: valid(:)       !! their validity.
+        real(real64), intent(out) :: r        !! the oracle's answer.
+        if (all(valid)) then
+            select case (stat)
+            case ("mean");   call pf_mean(v, r)
+            case ("median"); call pf_median(v, r)
+            case default;    call pf_stddev(v, r)
+            end select
+        else
+            select case (stat)
+            case ("mean");   call pf_mean(v, r, is_valid=valid)
+            case ("median"); call pf_median(v, r, is_valid=valid)
+            case default;    call pf_stddev(v, r, is_valid=valid)
+            end select
+        end if
+    end subroutine typed_oracle_f32
+
+    !> `oracle_real` over a logical slice, through the logical specifics (0 and 1).
+    subroutine typed_oracle_bool(stat, v, valid, r)
+        character(len=*), intent(in) :: stat  !! the token.
+        logical, intent(in) :: v(:)           !! the group's values.
+        logical, intent(in) :: valid(:)       !! their validity.
+        real(real64), intent(out) :: r        !! the oracle's answer.
+        if (all(valid)) then
+            select case (stat)
+            case ("mean");   call pf_mean(v, r)
+            case ("median"); call pf_median(v, r)
+            case default;    call pf_stddev(v, r)
+            end select
+        else
+            select case (stat)
+            case ("mean");   call pf_mean(v, r, is_valid=valid)
+            case ("median"); call pf_median(v, r, is_valid=valid)
+            case default;    call pf_stddev(v, r, is_valid=valid)
+            end select
+        end if
+    end subroutine typed_oracle_bool
+
+    !> The exact family on `big`, whose group-1 values straddle 2**53: every token against
+    !! int64 arithmetic over `%csr` with the null skipped, and the real64 `"sum"` of the same
+    !! group shown to differ from the exact one -- which is what the family exists for. Also the
+    !! family on a logical column, counting .true. as 1.
+    subroutine test_agg_int64_family_exact(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:), got(:), nu(:), cnt(:), sz(:), vals(:)
+        real(real64), allocatable :: approx(:)
+        logical, allocatable :: valid(:)
+        character(len=5), parameter :: toks(5) = [character(len=5) :: "sum", "min", "max", "first", "last"]
+        integer(int64) :: g, want(4), s, lo, hi, first, last, r
+        logical :: seen
+        integer :: k
+        character(len=5) :: tok
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%csr(off, rows)
+        do k = 1, 5
+            tok = toks(k)
+            call grp%agg("big", trim(tok), got)
+            do g = 1_int64, 4_int64
+                call t%get_slice("big", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vals, &
+                    is_valid=valid)
+                s = 0_int64
+                seen = .false.
+                do r = 1_int64, size(vals, kind=int64)
+                    if (.not. valid(r)) cycle
+                    s = s + vals(r)
+                    if (.not. seen) then
+                        lo = vals(r); hi = vals(r); first = vals(r)
+                    end if
+                    lo = min(lo, vals(r))
+                    hi = max(hi, vals(r))
+                    last = vals(r)
+                    seen = .true.
+                end do
+                select case (tok)
+                case ("sum");   want(g) = s
+                case ("min");   want(g) = lo
+                case ("max");   want(g) = hi
+                case ("first"); want(g) = first
+                case default;   want(g) = last
+                end select
+            end do
+            if (.not. all(got == want)) then
+                call check(error, .false., "exact " // trim(tok) // " differs from int64 arithmetic over csr")
+                return
+            end if
+        end do
+        call grp%agg("big", "sum", got)
+        call check(error, got(1) == 2_int64**54 + 11_int64 .and. got(2) == 2_int64**60 + 2_int64**62, &
+            "the exact sums of groups 1 and 2 are the fixture's")
+        if (allocated(error)) return
+        call grp%agg("big", "sum", approx)
+        call check(error, nint(approx(1), int64) /= got(1), &
+            "the real64 sum of group 1 is not the exact one: its values do not fit a real64")
+        if (allocated(error)) return
+        call grp%agg("big", "count", cnt)
+        call grp%agg("big", "size", sz)
+        call grp%agg("big", "nunique", nu)
+        call check(error, all(cnt == [5_int64, 3_int64, 2_int64, 1_int64]) .and. all(sz == [5_int64, 3_int64, &
+            3_int64, 1_int64]) .and. all(nu == [5_int64, 2_int64, 2_int64, 1_int64]), &
+            "count, size and nunique of the exact family")
+        if (allocated(error)) return
+        call grp%agg("b", "sum", got)
+        call check(error, all(got == [4_int64, 1_int64, 2_int64, 0_int64]), "a logical column sums its trues")
+    end subroutine test_agg_int64_family_exact
+
+    !> `weights=` against the weighted oracle over each group's gathered weights, bit for bit;
+    !! the zero weight at row 3 drops that row from the population (`"count"` says so);
+    !! `weight_column=` equals `weights=` given the column's values with its null read as zero,
+    !! so the null weight at row 10 drops its row too; and the procedure form takes both.
+    subroutine test_agg_weights_and_weight_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:)
+        real(real64), allocatable :: w(:), got(:), viacol(:), cnt(:), v(:), wg(:), fcol(:), farr(:)
+        logical, allocatable :: valid(:), wvalid(:)
+        real(real64) :: want
+        integer(int64) :: g
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%csr(off, rows)
+        call t%get("w", w, is_valid=wvalid)
+        where (.not. wvalid) w = 0.0_real64
+        call grp%agg("x", "mean", got, weights=w)
+        do g = 1_int64, 4_int64
+            call t%get_slice("x", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), v, is_valid=valid)
+            wg = w(rows(off(g) : off(g + 1_int64) - 1_int64))
+            call oracle_real("mean", v, valid, want, weights=wg)
+            if (.not. same_answer(got(g), want)) then
+                call check(error, .false., "the weighted mean differs from pf_mean with the gathered weights")
+                return
+            end if
+        end do
+        call grp%agg("x", "count", cnt, weights=w)
+        ! Group 1 holds rows 1, 3, 6, 8, 10: row 3's weight is zero, row 6 is NaN, row 8 is null
+        ! and row 10's weight is null (zero): one row is left. Group 2's three rows all count.
+        call check(error, cnt(1) == 1.0_real64 .and. cnt(2) == 3.0_real64, &
+            "a zero weight and a null weight both drop their row from the population")
+        if (allocated(error)) return
+        call grp%agg("x", "mean", viacol, weight_column="w")
+        call check(error, all(got == viacol .or. (ieee_is_nan(got) .and. ieee_is_nan(viacol))), &
+            "weight_column= equals weights= over the column's values with the null as zero")
+        if (allocated(error)) return
+        call grp%agg("x", cb_col_weighted_sum, fcol, weight_column="w")
+        call grp%agg("x", cb_col_weighted_sum, farr, weights=w)
+        call check(error, all(fcol == farr .or. (ieee_is_nan(fcol) .and. ieee_is_nan(farr))), &
+            "the procedure form takes weight_column= and weights= alike (group 1's NaN value makes both NaN)")
+    end subroutine test_agg_weights_and_weight_column
+
+    !> The procedure form's presence contract: `is_valid` arrives exactly for the groups that
+    !! hold a null, `weights` exactly when weights were given -- counted by the procedure -- and
+    !! the values it sees are the widened ones: its median equals the `"median"` token's.
+    subroutine test_agg_callback_presence(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: cnt(:), sz(:)
+        real(real64), allocatable :: got(:), want(:), w(:)
+        integer :: groups_with_null
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%count("x", cnt)
+        call grp%size(sz)
+        groups_with_null = count(cnt < sz)
+        col_calls = 0
+        col_valid_present = 0
+        col_weights_present = 0
+        call grp%agg("x", cb_col_median, got)
+        call grp%agg("x", "median", want)
+        call check(error, col_calls == 4 .and. col_valid_present == groups_with_null .and. col_weights_present == 0, &
+            "called once per group, is_valid present for the null-holding groups only, no weights")
+        if (allocated(error)) return
+        call check(error, all(got == want .or. (ieee_is_nan(got) .and. ieee_is_nan(want))), &
+            "the procedure's median equals the token's: it saw the same widened values")
+        if (allocated(error)) return
+        allocate(w(12))
+        w = 1.0_real64
+        col_calls = 0
+        col_weights_present = 0
+        call grp%agg("i", cb_col_median, got, weights=w)
+        call check(error, col_calls == 4 .and. col_weights_present == 4, "weights present in every call when given")
+    end subroutine test_agg_callback_presence
+
+    !> The options reach their statistic: `q=` and `method=` the quantile, `ddof=` the
+    !! variance, `scale=` the mad, `"median"` without `q=` as the control; a logical column's
+    !! `"mean"` is its fraction of .true.
+    subroutine test_agg_options_and_logical_mean(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:)
+        real(real64), allocatable :: got(:), v(:)
+        logical, allocatable :: valid(:), vb(:)
+        real(real64) :: want
+        integer(int64) :: g
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%csr(off, rows)
+        call grp%agg("x", "quantile", got, q=0.8_real64, method="inverted_cdf")
+        do g = 1_int64, 4_int64
+            call t%get_slice("x", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), v, is_valid=valid)
+            call oracle_real("quantile", v, valid, want, q=0.8_real64, method="inverted_cdf")
+            if (.not. same_answer(got(g), want)) then
+                call check(error, .false., "q= and method= did not reach pf_quantile")
+                return
+            end if
+        end do
+        call grp%agg("x", "var", got, ddof=0)
+        do g = 1_int64, 4_int64
+            call t%get_slice("x", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), v, is_valid=valid)
+            call oracle_real("var", v, valid, want, ddof=0)
+            if (.not. same_answer(got(g), want)) then
+                call check(error, .false., "ddof= did not reach pf_variance")
+                return
+            end if
+        end do
+        call grp%agg("x", "mad", got, scale="raw")
+        do g = 1_int64, 4_int64
+            call t%get_slice("x", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), v, is_valid=valid)
+            call oracle_real("mad", v, valid, want, scale="raw")
+            if (.not. same_answer(got(g), want)) then
+                call check(error, .false., "scale= did not reach pf_mad")
+                return
+            end if
+        end do
+        call grp%agg("x", "median", got)
+        call check(error, size(got) == 4, "median without q= is the control: it answers")
+        if (allocated(error)) return
+        call grp%agg("b", "mean", got)
+        do g = 1_int64, 4_int64
+            call t%get_slice("b", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vb, is_valid=valid)
+            want = real(count(vb .and. valid), real64) / real(count(valid), real64)
+            if (.not. same_answer(got(g), want)) then
+                call check(error, .false., "a logical mean is not its fraction of .true.")
+                return
+            end if
+        end do
+        call check(error, got(1) == 0.8_real64 .and. got(2) == 0.5_real64, "and the fixture's fractions are as built")
+    end subroutine test_agg_options_and_logical_mean
+
+    !> `"first"` and `"last"` are the first and last NON-NULL value in row order -- pandas'
+    !! rule, not the value at the group's lowest and highest row -- and NaN for a group with no
+    !! non-null value (`z` is null throughout groups 3 and 4). A NaN VALUE is a value: group 1's
+    !! last non-null `x` is at row 10, its first the 1.5 at row 1.
+    subroutine test_agg_first_and_last(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: first(:), last(:)
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%agg("x", "first", first)
+        call grp%agg("x", "last", last)
+        call check(error, first(1) == 1.5_real64 .and. last(1) == 10.0_real64, "group 1: first 1.5, last 10.0")
+        if (allocated(error)) return
+        call check(error, first(3) == 4.25_real64 .and. last(3) == 7.75_real64, &
+            "group 3: the null at row 12 is skipped, so last is row 7's value")
+        if (allocated(error)) return
+        call grp%agg("z", "first", first)
+        call grp%agg("z", "last", last)
+        call check(error, ieee_is_nan(first(3)) .and. ieee_is_nan(last(3)) .and. ieee_is_nan(first(4)) .and. &
+            first(1) == 1.5_real64, "an all-null group answers NaN, a group with values its value")
+    end subroutine test_agg_first_and_last
+
+    !> `%nunique` against `pf_unique_count` over each group's gathered values, under both
+    !! `dropna` values, for a real64 column with a NaN and nulls, an int32 column, a string
+    !! column and the logical column; and of the key column itself, which is one value per group.
+    subroutine test_nunique_equals_pf_unique_count(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: off(:), rows(:), got(:), keep(:)
+        integer(int32), allocatable :: got32(:)
+        real(real64), allocatable :: vx(:)
+        integer(int32), allocatable :: vi(:)
+        character(len=:), allocatable :: vs(:)
+        logical, allocatable :: vb(:), valid(:)
+        character(len=1), parameter :: cols(4) = ["x", "i", "s", "b"]
+        integer(int64) :: g, want, n_null
+        integer :: c, d
+        logical :: drop
+        character(len=1) :: col
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%csr(off, rows)
+        do c = 1, 4
+            col = cols(c)
+            do d = 1, 2
+                drop = d == 1
+                call grp%nunique(col, got, dropna=drop)
+                do g = 1_int64, 4_int64
+                    select case (col)
+                    case ("x")
+                        call t%get_slice("x", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vx, &
+                            is_valid=valid)
+                        call pf_unique_count(vx, want, is_valid=valid, n_null=n_null)
+                    case ("i")
+                        call t%get_slice("i", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vi, &
+                            is_valid=valid)
+                        call pf_unique_count(vi, want, is_valid=valid, n_null=n_null)
+                    case ("s")
+                        call t%get_slice("s", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vs, &
+                            is_valid=valid)
+                        call pf_unique_count(vs, want, is_valid=valid, n_null=n_null)
+                    case default
+                        call t%get_slice("b", parquet_slice_list(rows(off(g) : off(g + 1_int64) - 1_int64)), vb, &
+                            is_valid=valid)
+                        call pf_unique_count(vb, want, is_valid=valid, n_null=n_null)
+                    end select
+                    if (.not. drop .and. n_null > 0_int64) want = want + 1_int64
+                    if (got(g) /= want) then
+                        call check(error, .false., "nunique of column " // col // " differs from pf_unique_count")
+                        return
+                    end if
+                end do
+            end do
+        end do
+        call grp%nunique("x", got)
+        call grp%nunique("x", keep, dropna=.false.)
+        call check(error, all(got == [4_int64, 3_int64, 2_int64, 1_int64]) .and. all(keep == [5_int64, 3_int64, &
+            3_int64, 1_int64]), "x: the NaN is one value, the null one more only under dropna=.false.")
+        if (allocated(error)) return
+        call grp%nunique("k", got32)
+        call check(error, all(got32 == 1_int32), "the key column has one value per group")
+    end subroutine test_nunique_equals_pf_unique_count
+
+    !> Zero groups: every `%agg` form and `%nunique` allocate zero-length outputs.
+    subroutine test_agg_empty_grouping(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: none(:), gi(:), nu(:)
+        real(real64), allocatable :: gr(:), gf(:)
+        !
+        allocate(none(0))
+        call parquet_new_table(t)
+        call t%add_column("k", none)
+        call t%add_column("v", none)
+        call t%group_by("k", grp)
+        call grp%agg("v", "mean", gr)
+        call grp%agg("v", "sum", gi)
+        call grp%agg("v", cb_col_median, gf)
+        call grp%nunique("v", nu)
+        call check(error, allocated(gr) .and. allocated(gi) .and. allocated(gf) .and. allocated(nu) .and. &
+            size(gr) == 0 .and. size(gi) == 0 .and. size(gf) == 0 .and. size(nu) == 0, &
+            "every output is allocated at zero length")
+    end subroutine test_agg_empty_grouping
+
     ! ---- the callbacks: module procedures, never internal ones (see the header) ----------------
+
+    !> The per-column procedure of `test_agg_callback_presence`: records what it was given and
+    !! answers `pf_median` over it, passing the optionals on as they arrived.
+    function cb_col_median(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the median.
+        col_calls = col_calls + 1
+        if (present(is_valid)) col_valid_present = col_valid_present + 1
+        if (present(weights)) col_weights_present = col_weights_present + 1
+        call pf_median(values, r, is_valid=is_valid, weights=weights)
+    end function cb_col_median
+
+    !> The weighted sum of the valid values, by plain arithmetic.
+    function cb_col_weighted_sum(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the weighted sum.
+        real(real64), allocatable :: w(:)
+        allocate(w(size(values)))
+        w = 1.0_real64
+        if (present(weights)) w = weights
+        if (present(is_valid)) then
+            where (.not. is_valid) w = 0.0_real64
+        end if
+        r = sum(values * w, mask=w > 0.0_real64)
+    end function cb_col_weighted_sum
+
 
     !> `scaled_sum_reducer%reduce`; see the type.
     subroutine scaled_sum_reduce(self, g, rows, out)

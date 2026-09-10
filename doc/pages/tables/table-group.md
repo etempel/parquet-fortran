@@ -4,42 +4,30 @@ title: Grouping rows and aggregating per group
 
 `%group_by` partitions a table's rows by the values of one or more key columns and keeps the
 partition as a `parquet_grouping`: an object that answers per group — the rows of a group, one row
-per group, the counts, the key values as a table of their own — and calls a procedure of yours once
-per group through `%apply`. The table itself is not reordered, keeps its file attached and reads a
-key column only if nothing has read it yet. It is the per-field summary of a survey catalogue, the
-properties of every galaxy group in a group catalogue, one output per observing frame.
+per group, the counts, the key values as a table of their own, one statistic of one column through
+`%agg` — and calls a procedure of yours once per group through `%apply`. The table itself is not
+reordered, keeps its file attached and reads a column only if nothing has read it yet. It is the
+per-field summary of a survey catalogue, the properties of every galaxy group in a group catalogue,
+one output per observing frame.
 
 ```fortran
 type(parquet_table) :: t, summary
 type(parquet_grouping) :: grp
 integer(int64), allocatable :: n(:)
-real(real64), allocatable :: mean_mag(:)
+real(real64), allocatable :: med_mag(:), blue(:), snr_p90(:)
 
 call parquet_open_table(t, "sources.parquet")
-call t%group_by("field_id", grp)                   ! one sort of the key column; t is left as it is
+call t%group_by("field_id,class", grp)             ! one sort of the key columns; t is left as it is
 call grp%size(n)                                   ! rows per group, in group order
-call grp%apply(mean_mag_of, mean_mag)              ! one value per group from a procedure of yours
-call grp%key_table(summary)                        ! one row per group: the field_id column
+call grp%agg("mag_g", "median", med_mag)           ! one statistic of one column per group
+call grp%agg("is_blue", "mean", blue)              ! the fraction: the mean of a logical column
+call grp%agg("snr", "quantile", snr_p90, q=0.9_real64)
+call grp%key_table(summary)                        ! one row per group: the field_id and class columns
 call summary%add_column("n_sources", n)
-call summary%add_column("mean_mag", mean_mag)
+call summary%add_column("median_mag_g", med_mag)
+call summary%add_column("blue_fraction", blue)
+call summary%add_column("snr_p90", snr_p90)
 call parquet_write_table(summary, "field_summary.parquet")
-```
-
-with `mean_mag_of` a module procedure that reads the magnitude column through a pointer taken
-before the call:
-
-```fortran
-module summary_mod
-    use iso_fortran_env, only: int64, real64
-    implicit none
-    real(real64), pointer :: mag(:) => null()      ! call t%col("mag", mag) before the %apply
-contains
-    function mean_mag_of(g, rows) result(r)
-        integer(int64), intent(in) :: g, rows(:)   ! the group number and the group's rows
-        real(real64) :: r
-        r = sum(mag(rows)) / size(rows)
-    end function mean_mag_of
-end module summary_mod
 ```
 
 Every procedure on this page is a **read** of the table: none reorders it, touches a row, detaches
@@ -117,6 +105,117 @@ per-group answers come from `%size`, `%count` and `%apply` below.
 
 `%count` counts a column's non-null rows per group, for a column of any kind, and reads the
 column from the file if nothing has yet.
+
+```fortran
+call grp%nunique(name, out, [dropna])  ! distinct values of `name` per group; int32 or int64
+```
+
+`%nunique` counts a column's distinct values per group, for any column `%argsort_by` can order:
+it is one more sort, over the keys and then the column, so that distinctness is the sort's own
+equality — every NaN is one value, and a null is not counted unless `dropna=.false.`, when it is
+one more.
+
+## One statistic per group: `%agg`
+
+`%agg` computes one statistic of one column for every group, with the whole vocabulary of
+[array statistics](../utilities/statistics.html), its null and NaN rules and its weights:
+
+```fortran
+call grp%agg(name, stat, out, [weights], [weight_column], [q], [ddof], [method], [scale], [threads])
+call grp%agg(name, stat, out, [threads])            ! out integer(int64): the exact family
+call grp%agg(name, func, out, [weights], [weight_column], [threads])   ! a procedure of yours, below
+```
+
+`out` is allocated by the call, one entry per group in group order, zero-length for an empty
+grouping. Each token is the named `pf_*` procedure applied to the group's values, so a group's
+answer is that procedure's answer over the same rows, bit for bit, with the same options:
+
+| token | what it is | behind it |
+|---|---|---|
+| `"size"` | rows in the group | — |
+| `"count"` | non-null rows (and, with weights, rows of positive weight) | `pf_count_valid` |
+| `"sum"`, `"mean"` | the sum and the mean | `pf_sum`, `pf_mean` |
+| `"var"`, `"std"`, `"sem"` | the variance, standard deviation and standard error, `ddof=` charged (default 1) | `pf_variance`, `pf_stddev`, `pf_sem` |
+| `"min"`, `"max"`, `"range"` | the smallest and largest value, and their difference | `pf_moments` |
+| `"median"`, `"quantile"`, `"iqr"` | the order statistics; `"quantile"` needs `q=` on a 0–1 scale; `method=` as `pf_quantile`'s | `pf_median`, `pf_quantile`, `pf_iqr` |
+| `"mad"` | the median absolute deviation, scaled unless `scale="raw"` | `pf_mad` |
+| `"first"`, `"last"` | the first and last non-null value in row order | — |
+| `"nunique"` | the distinct values, as `%nunique` counts them | — |
+
+- **The column** is a scalar numeric or logical one; a logical column counts as 0 and 1, so its
+  `"mean"` is its fraction of `.true.` — the `blue_fraction` of the opening example. Any other
+  kind is refused naming it: for the first or last value of any kind use `%first_rows` or
+  `%last_rows` with `%get_slice`; for the counts, `%count` and `%nunique` take every kind.
+- **Nulls leave the population**, as everywhere in the statistics module, and a NaN is skipped
+  by that module's default. An undefined statistic is a NaN, never an abort: a group of one has a
+  NaN `"std"`, an all-null group a NaN `"mean"`.
+- **`weights=`** holds one `real64` weight per *table* row, gathered per group beside the
+  values; **`weight_column=`** names a scalar numeric column of the table instead, widened to
+  `real64`, with a null weight read as zero — a missing membership probability is no membership.
+  A zero weight removes its row from the population; a negative, NaN or infinite weight aborts
+  naming the row, before any group is computed. Giving both is refused, and so are weights on a
+  statistic they cannot affect (`"size"`, `"nunique"`, `"first"`, `"last"`).
+- **An option a token does not take is refused rather than ignored**: `q=` belongs to
+  `"quantile"`, `method=` to `"median"`, `"quantile"` and `"iqr"`, `ddof=` to `"var"`, `"std"` and
+  `"sem"`, `scale=` to `"mad"`.
+- **`threads=` absent is automatic** here, unlike `%apply`: the loop is library code, so it runs
+  on the automatic team under the table tier's cap (`parquet_set_table_threads`), serially inside a
+  parallel region, and the answer is the same at every thread count. The groups are dealt out
+  dynamically; each group's statistic is computed by one thread on one buffer.
+
+### The exact family
+
+Declaring `out` as `integer(int64)` selects the statistics that are exact on an integer column,
+and keeps them exact: `"size"`, `"count"`, `"nunique"`, `"sum"`, `"min"`, `"max"`, `"first"` and
+`"last"`, on an integer or logical column, nulls left out and nothing passed through a real64
+buffer — an `int64` identifier above 2**53 comes back as it went in, where the real64 form would
+round it. The exact `"sum"` **aborts on overflow**, naming the group; it never wraps, because a
+wrapped sum is an in-range number nothing downstream can question. `"min"`, `"max"`, `"first"`
+and `"last"` of a group with no non-null value abort too, since no exact answer exists (the real64
+form gives NaN there). A real column is refused: its statistics are real.
+
+```fortran
+integer(int64), allocatable :: n(:), total(:)
+call grp%agg("n_visits", "sum", total)         ! exact, aborts rather than wraps
+call grp%agg("object_id", "nunique", n)
+```
+
+### A procedure over one column's values
+
+The third form hands a procedure of yours **one group's values of one column**, widened to
+`real64` exactly as the statistics module widens every kind, and takes back one value. Its
+interface is published as `parquet_group_column_reduce_i`:
+
+```fortran
+function func(values, is_valid, weights) result(r)
+    real(real64), intent(in) :: values(:)             ! the group's values, in row order
+    logical, intent(in), optional :: is_valid(:)      ! present only when the group holds a null
+    real(real64), intent(in), optional :: weights(:)  ! present only when %agg was given weights
+    real(real64) :: r
+end function func
+```
+
+`is_valid` and `weights` arrive exactly when they mean something — test `present()` and nothing
+else — so a null-free group takes your fast path. A robust scatter estimate is then two lines,
+with the statistics module doing the ordering:
+
+```fortran
+function robust_mad(values, is_valid, weights) result(r)
+    real(real64), intent(in) :: values(:)
+    logical, intent(in), optional :: is_valid(:)
+    real(real64), intent(in), optional :: weights(:)
+    real(real64) :: r, med
+    call pf_median(values, med, is_valid=is_valid, weights=weights)
+    call pf_median(abs(values - med), r, is_valid=is_valid, weights=weights)
+end function robust_mad
+
+call grp%agg("mag_g", robust_mad, scatter)
+```
+
+A procedure that needs the exact integer values, a string, or several columns at once uses
+`%apply` below and reads the columns through its own pointers. The threading contract is
+`%apply`'s: `threads=` absent means serial, and giving it is your statement that the procedure may
+be called from several threads at once.
 
 ## One answer per group: `%apply`
 
@@ -327,7 +426,9 @@ object exists to make loud.
 
 Grouping costs one sort of the key columns, plus, under `dropna`, one pass over the groups that asks
 each key column whether the group's representative row is null. Each per-group query is one pass
-over the partition, and `%key_table` one gather per key column. `%apply` costs whatever your
+over the partition, and `%key_table` one gather per key column. Each `%agg` statistic costs one
+pass over the column into a per-thread buffer the size of the largest group, allocated once, and
+one call of the statistic per group; `%nunique` costs one more sort. `%apply` costs whatever your
 procedure costs, times the number of groups, divided by the team you asked for. The object holds two
 `int64` arrays the length of the grouped rows and the group count — nothing per group, and nothing
 of the table's columns.

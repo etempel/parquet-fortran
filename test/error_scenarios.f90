@@ -29,7 +29,8 @@ program error_scenarios
     use parquet_tables
     ! The grouping scenarios' callbacks: module procedures, since an internal one of this
     ! program cannot be passed as a callback under every supported compiler.
-    use test_group_callbacks, only : scenario_group_row_sum, scenario_group_two, scenario_group_reducer
+    use test_group_callbacks, only : scenario_group_row_sum, scenario_group_two, scenario_group_reducer, &
+        scenario_group_col_mean
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_nanos
     use iso_fortran_env, only : int32, int64, real32, real64
@@ -3049,6 +3050,38 @@ program error_scenarios
         call scenario_table_group_apply_nout()
     case ("table_group_apply_threads_zero")
         call scenario_table_group_apply_threads_zero()
+    case ("table_group_stale_agg")
+        call scenario_table_group_stale_agg()
+    case ("table_group_stale_nunique")
+        call scenario_table_group_stale_nunique()
+    case ("table_group_agg_unknown_token")
+        call scenario_table_group_agg_unknown_token()
+    case ("table_group_agg_quantile_needs_q")
+        call scenario_table_group_agg_quantile_needs_q()
+    case ("table_group_agg_option_refused")
+        call scenario_table_group_agg_option_refused()
+    case ("table_group_agg_int_real_column")
+        call scenario_table_group_agg_int_real_column()
+    case ("table_group_agg_int_sum_overflow")
+        call scenario_table_group_agg_int_sum_overflow()
+    case ("table_group_agg_int_all_null")
+        call scenario_table_group_agg_int_all_null()
+    case ("table_group_agg_string_column")
+        call scenario_table_group_agg_string_column()
+    case ("table_group_agg_weights_length")
+        call scenario_table_group_agg_weights_length()
+    case ("table_group_agg_negative_weight")
+        call scenario_table_group_agg_negative_weight()
+    case ("table_group_agg_both_weights")
+        call scenario_table_group_agg_both_weights()
+    case ("table_group_agg_weight_column_string")
+        call scenario_table_group_agg_weight_column_string()
+    case ("table_group_agg_weight_column_vector")
+        call scenario_table_group_agg_weight_column_vector()
+    case ("table_group_agg_weights_ignored")
+        call scenario_table_group_agg_weights_ignored()
+    case ("table_group_nunique_vector_column")
+        call scenario_table_group_nunique_vector_column()
     case ("filter_temporal_set_mismatch")
         call scenario_filter_temporal_set_mismatch()
     case ("filter_temporal_literal_list")
@@ -27053,6 +27086,235 @@ contains
         call grp%apply(scenario_group_row_sum, out, threads=0)
         print '(a,i0)', "unexpectedly accepted threads=0, groups=", size(out)
     end subroutine scenario_table_group_apply_threads_zero
+    !
+    !> `%agg` on a stale grouping: the generation check runs before any column is gathered. The
+    !! same call before the row change is the control.
+    subroutine scenario_table_group_stale_agg()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out)
+        print '(a,i0)', "agg answered before the change, groups=", size(out)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%agg("x", "mean", out)
+        print '(a,i0)', "a stale grouping answered agg, groups=", size(out)
+    end subroutine scenario_table_group_stale_agg
+    !
+    !> `%nunique` on a stale grouping; the same call before the row change is the control.
+    subroutine scenario_table_group_stale_nunique()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%nunique("x", out)
+        print '(a,i0)', "nunique answered before the change, groups=", size(out)
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%nunique("x", out)
+        print '(a,i0)', "a stale grouping answered nunique, groups=", size(out)
+    end subroutine scenario_table_group_stale_nunique
+    !
+    !> An unknown statistic token is refused listing the vocabulary; `"mean"` first is the control.
+    subroutine scenario_table_group_agg_unknown_token()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out)
+        print '(a,i0)', "agg mean ran, groups=", size(out)
+        call grp%agg("x", "medain", out)
+        print '(a,i0)', "unexpectedly accepted an unknown token, groups=", size(out)
+    end subroutine scenario_table_group_agg_unknown_token
+    !
+    !> `"quantile"` without `q=` is refused; with `q=` first is the control.
+    subroutine scenario_table_group_agg_quantile_needs_q()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "quantile", out, q=0.5_real64)
+        print '(a,i0)', "quantile with q= ran, groups=", size(out)
+        call grp%agg("x", "quantile", out)
+        print '(a,i0)', "unexpectedly accepted quantile without q=, groups=", size(out)
+    end subroutine scenario_table_group_agg_quantile_needs_q
+    !
+    !> An option a token does not take is refused rather than ignored: `q=` on `"mean"`. The
+    !! same option on `"quantile"` first is the control.
+    subroutine scenario_table_group_agg_option_refused()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "quantile", out, q=0.5_real64)
+        print '(a,i0)', "q= on quantile ran, groups=", size(out)
+        call grp%agg("x", "mean", out, q=0.5_real64)
+        print '(a,i0)', "unexpectedly accepted q= on mean, groups=", size(out)
+    end subroutine scenario_table_group_agg_option_refused
+    !
+    !> The exact int64 family on a real column is refused naming the kind; on the int32 key
+    !! first is the control.
+    subroutine scenario_table_group_agg_int_real_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("key", "sum", out)
+        print '(a,i0)', "the exact sum of an int32 column ran, groups=", size(out)
+        call grp%agg("x", "sum", out)
+        print '(a,i0)', "unexpectedly accepted the exact family on a real column, groups=", size(out)
+    end subroutine scenario_table_group_agg_int_real_column
+    !
+    !> The exact `"sum"` aborts on overflow naming the group, never wraps: two values of 2**62
+    !! in one group, whose sum is 2**63, one above `huge`. The exact sum of the key first is the
+    !! control.
+    subroutine scenario_table_group_agg_int_sum_overflow()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        integer(int64) :: h(5)
+        call table_group_scenario_fixture(t)
+        h = [2_int64**62, 1_int64, 2_int64**62, 2_int64, 3_int64]
+        call t%add_column("h", h)
+        call t%group_by("key", grp)
+        call grp%agg("key", "sum", out)
+        print '(a,i0)', "the exact sum of the key ran, groups=", size(out)
+        call grp%agg("h", "sum", out)
+        print '(a,i0)', "unexpectedly accepted an overflowing exact sum, out(2)=", out(2)
+    end subroutine scenario_table_group_agg_int_sum_overflow
+    !
+    !> The exact `"min"` of a group with no non-null value has no answer and aborts naming the
+    !! group; the exact `"sum"` of the same column (0 there) first is the control.
+    subroutine scenario_table_group_agg_int_all_null()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%add_column("n", [1_int32, 2_int32, 3_int32, 4_int32, 5_int32])
+        call t%set_null("n", 2_int64)
+        call t%set_null("n", 4_int64)
+        call t%group_by("key", grp)
+        call grp%agg("n", "sum", out)
+        print '(a,i0)', "the exact sum over an all-null group ran, out(1)=", out(1)
+        call grp%agg("n", "min", out)
+        print '(a,i0)', "unexpectedly answered the exact min of an all-null group, out(1)=", out(1)
+    end subroutine scenario_table_group_agg_int_all_null
+    !
+    !> A string column under a value statistic is refused naming the kind, with the pointers at
+    !! `%count`, `%nunique` and `%first_rows`; the same statistic over `x` first is the control.
+    subroutine scenario_table_group_agg_string_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out)
+        print '(a,i0)', "mean of x ran, groups=", size(out)
+        call grp%agg("s", "mean", out)
+        print '(a,i0)', "unexpectedly accepted a string column, groups=", size(out)
+    end subroutine scenario_table_group_agg_string_column
+    !
+    !> `weights=` of the wrong length is refused naming both lengths; the right length first.
+    subroutine scenario_table_group_agg_weights_length()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weights=[1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a,i0)', "weights of the right length ran, groups=", size(out)
+        call grp%agg("x", "mean", out, weights=[1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a,i0)', "unexpectedly accepted short weights, groups=", size(out)
+    end subroutine scenario_table_group_agg_weights_length
+    !
+    !> A negative weight is refused naming its table row, before any group is computed; a zero
+    !! weight (a row leaving the population) first is the control.
+    subroutine scenario_table_group_agg_negative_weight()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weights=[1.0_real64, 0.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a,i0)', "a zero weight ran, groups=", size(out)
+        call grp%agg("x", "mean", out, weights=[1.0_real64, -1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a,i0)', "unexpectedly accepted a negative weight, groups=", size(out)
+    end subroutine scenario_table_group_agg_negative_weight
+    !
+    !> `weights=` and `weight_column=` together are refused; each alone first is the control.
+    subroutine scenario_table_group_agg_both_weights()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weight_column="x")
+        call grp%agg("x", "mean", out, weights=[1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64])
+        print '(a,i0)', "each weight form alone ran, groups=", size(out)
+        call grp%agg("x", "mean", out, weights=[1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], &
+            weight_column="x")
+        print '(a,i0)', "unexpectedly accepted both weight forms, groups=", size(out)
+    end subroutine scenario_table_group_agg_both_weights
+    !
+    !> A string weight column is refused naming its kind; a numeric one first is the control.
+    subroutine scenario_table_group_agg_weight_column_string()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weight_column="key")
+        print '(a,i0)', "an int32 weight column ran, groups=", size(out)
+        call grp%agg("x", "mean", out, weight_column="s")
+        print '(a,i0)', "unexpectedly accepted a string weight column, groups=", size(out)
+    end subroutine scenario_table_group_agg_weight_column_string
+    !
+    !> A vector weight column is refused naming its kind; the procedure form with a numeric one
+    !! first is the control (the weight rules are shared by both forms).
+    subroutine scenario_table_group_agg_weight_column_vector()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", scenario_group_col_mean, out, weight_column="key")
+        print '(a,i0)', "the procedure form with an int32 weight column ran, groups=", size(out)
+        call grp%agg("x", scenario_group_col_mean, out, weight_column="v")
+        print '(a,i0)', "unexpectedly accepted a vector weight column, groups=", size(out)
+    end subroutine scenario_table_group_agg_weight_column_vector
+    !
+    !> Weights given to a statistic they cannot affect (`"size"`) are refused rather than
+    !! ignored; `"mean"` with the same weights first is the control.
+    subroutine scenario_table_group_agg_weights_ignored()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%agg("x", "mean", out, weight_column="x")
+        print '(a,i0)', "a weighted mean ran, groups=", size(out)
+        call grp%agg("x", "size", out, weight_column="x")
+        print '(a,i0)', "unexpectedly accepted weights on size, groups=", size(out)
+    end subroutine scenario_table_group_agg_weights_ignored
+    !
+    !> `%nunique` over a vector column is refused through the sort's own lookup, worded for
+    !! this verb; over a scalar column first is the control.
+    subroutine scenario_table_group_nunique_vector_column()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: out(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%nunique("s", out)
+        print '(a,i0)', "nunique of a string column ran, groups=", size(out)
+        call grp%nunique("v", out)
+        print '(a,i0)', "unexpectedly counted a vector column, groups=", size(out)
+    end subroutine scenario_table_group_nunique_vector_column
     !
     !> A date set against a timestamp column is refused at apply, naming both -- two temporal
     !! types are two families, and an element of the wrong type has no instant to convert.

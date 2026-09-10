@@ -331,9 +331,9 @@ contains
         character(len=*), intent(in) :: name     !! the key column's name.
         character(len=*), intent(in) :: proc     !! calling procedure, for messages.
         integer, intent(out) :: idx              !! its slot index.
-        !> `"sort"` (the default), `"join"` or `"group"`; see `table_lookup_sort_key`'s own
-        !! interface. It decides two words of the refusal below and nothing else -- which column
-        !! can be a key is one rule, deliberately, and must stay one.
+        !> `"sort"` (the default), `"join"`, `"group"` or `"nunique"`; see
+        !! `table_lookup_sort_key`'s own interface. It decides two words of the refusal below and
+        !! nothing else -- which column can be a key is one rule, deliberately, and must stay one.
         character(len=*), intent(in), optional :: key_kind
         character(len=:), allocatable :: sfx, kname, kword, advice
         !
@@ -358,6 +358,11 @@ contains
                     kword = "group key"
                     advice = "group by a scalar column instead; the container rows are still " // &
                         "reachable through each group's rows"
+                else if (key_kind == "nunique") then
+                    ! %nunique orders the column to find its distinct values, so it is the sort's
+                    ! rule too, but the caller counted rather than sorted or grouped.
+                    kword = "column %nunique counts"
+                    advice = "count the distinct values of a scalar column instead"
                 end if
             end if
             ! Two reasons, one refusal. A *_VEC row is several values and has no single one to

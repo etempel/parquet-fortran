@@ -1171,6 +1171,7 @@ none of these needs a second import:
 | an ELEMENT at a given quantile | `pf_nth_quantile` | returns a member of the input, with `index=` saying which — see [`pf_median` is not `pf_nth_quantile`](#pf_median-is-not-pf_nth_quantile) |
 | the k-th smallest element | `pf_nth_element` | an O(n) selection on a small array; a full ordering, which is faster, above a couple of hundred elements |
 | a sorted copy, or the permutation | `pf_sort` / `pf_argsort` | the ordering every quantile here is built on |
+| one statistic per GROUP of a table's rows | `parquet_grouping%agg` | this vocabulary, one column at a time, over the groups `%group_by` built — see [Grouping rows and aggregating per group](../tables/table-group.html) |
 
 They are documented on [Sorting, ranking and selection](sorting.html). **Their `ok` argument means
 the opposite of this module's**: omitting it there makes a degenerate population *abort*, where

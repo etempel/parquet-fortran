@@ -60,7 +60,7 @@ in every one of them.
 | `parquet_stats` | 28 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 93 | **yes** | the `parquet_table` container |
+| `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
 | `parquet` | 116 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
@@ -76,14 +76,15 @@ means calling into the C++ half.
 
 **`parquet_tables` costs most of `parquet`'s files**, so importing it instead of the
 facade buys little beyond a narrower namespace. The table layer sits on the reader, the column
-container and the sorting engine, which between them are almost the whole library; what it leaves
-behind is the two facades themselves and the utility tiers nothing in the table layer reaches —
-`parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_stats`, `parquet_logging`,
+container, the sorting engine and the statistics tier (`parquet_grouping%agg` is that tier's
+vocabulary called once per group), which between them are almost the whole library; what it
+leaves behind is the two facades themselves and the utility tiers nothing in the table layer
+reaches — `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_logging`,
 `parquet_utils` and `parquet_version`.
 
 **`parquet_io` is the one real saving on the Arrow side** — see the table above for the two
-counts: it drops the entire table layer, the outer facade, and every utility tier — the seven
-modules listed just above. Reach for it when your program opens files, moves columns in and out,
+counts: it drops the entire table layer, the outer facade, and every utility tier — the six
+modules listed just above, and the statistics tier with them. Reach for it when your program opens files, moves columns in and out,
 and never builds a `parquet_table`.
 
 It does **not** drop `parquet_random`, and the three files it keeps that belong to none of the

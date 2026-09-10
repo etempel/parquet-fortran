@@ -13,7 +13,7 @@ module test_group_callbacks
     use iso_fortran_env, only : int64, real64
     implicit none
     private
-    public :: scenario_group_row_sum, scenario_group_two, scenario_group_reducer
+    public :: scenario_group_row_sum, scenario_group_two, scenario_group_reducer, scenario_group_col_mean
 
     !> A reducer whose only context is a scale: `out(1)` is the scaled sum of the group's row
     !! numbers and `out(2)`, when there is room, the group number.
@@ -42,6 +42,22 @@ contains
         out(1) = real(sum(rows), real64)
         out(2) = real(g, real64)
     end subroutine scenario_group_two
+
+    !> The mean of a group's valid values, by plain arithmetic: the per-column procedure form.
+    function scenario_group_col_mean(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the mean, weighted when weights are given.
+        real(real64), allocatable :: w(:)
+        allocate(w(size(values)))
+        w = 1.0_real64
+        if (present(weights)) w = weights
+        if (present(is_valid)) then
+            where (.not. is_valid) w = 0.0_real64
+        end if
+        r = sum(values * w) / sum(w)
+    end function scenario_group_col_mean
 
     !> `scenario_group_reducer%reduce`; see the type.
     subroutine scenario_group_reduce(self, g, rows, out)

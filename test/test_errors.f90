@@ -2567,7 +2567,39 @@ contains
             new_unittest("apply with nout below 1 aborts", &
                 test_table_group_apply_nout_aborts), &
             new_unittest("apply with threads below 1 aborts", &
-                test_table_group_apply_threads_zero_aborts) &
+                test_table_group_apply_threads_zero_aborts), &
+            new_unittest("agg on a stale grouping aborts", &
+                test_table_group_stale_agg_aborts), &
+            new_unittest("nunique on a stale grouping aborts", &
+                test_table_group_stale_nunique_aborts), &
+            new_unittest("agg with an unknown statistic aborts listing the vocabulary", &
+                test_table_group_agg_unknown_token_aborts), &
+            new_unittest("agg quantile without q= aborts", &
+                test_table_group_agg_quantile_needs_q_aborts), &
+            new_unittest("agg with an option its statistic does not take aborts", &
+                test_table_group_agg_option_refused_aborts), &
+            new_unittest("agg's exact family on a real column aborts", &
+                test_table_group_agg_int_real_column_aborts), &
+            new_unittest("agg's exact sum aborts on overflow", &
+                test_table_group_agg_int_sum_overflow_aborts), &
+            new_unittest("agg's exact min of an all-null group aborts", &
+                test_table_group_agg_int_all_null_aborts), &
+            new_unittest("agg on a string column aborts", &
+                test_table_group_agg_string_column_aborts), &
+            new_unittest("agg with weights of the wrong length aborts", &
+                test_table_group_agg_weights_length_aborts), &
+            new_unittest("agg with a negative weight aborts naming the row", &
+                test_table_group_agg_negative_weight_aborts), &
+            new_unittest("agg with weights= and weight_column= together aborts", &
+                test_table_group_agg_both_weights_aborts), &
+            new_unittest("agg with a string weight column aborts", &
+                test_table_group_agg_weight_column_string_aborts), &
+            new_unittest("agg with a vector weight column aborts", &
+                test_table_group_agg_weight_column_vector_aborts), &
+            new_unittest("agg with weights on a statistic they cannot affect aborts", &
+                test_table_group_agg_weights_ignored_aborts), &
+            new_unittest("nunique of a vector column aborts", &
+                test_table_group_nunique_vector_column_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19, &
             p21]
@@ -15872,6 +15904,134 @@ contains
             failure_message="apply with threads=0 was expected to abort", &
             required_stderr="parquet_grouping: apply: threads= must be at least 1, got 0")
     end subroutine test_table_group_apply_threads_zero_aborts
+    !
+    !> See `scenario_table_group_stale_agg` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_agg_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_agg", expect_abort=.true., &
+            failure_message="agg on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: agg: this table has changed structurally")
+    end subroutine test_table_group_stale_agg_aborts
+    !
+    !> See `scenario_table_group_stale_nunique` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_nunique_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_nunique", expect_abort=.true., &
+            failure_message="nunique on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: nunique: this table has changed structurally")
+    end subroutine test_table_group_stale_nunique_aborts
+    !
+    !> See `scenario_table_group_agg_unknown_token` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_unknown_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_unknown_token", expect_abort=.true., &
+            failure_message="an unknown statistic token was expected to abort", &
+            required_stderr="unknown statistic 'medain'; the tokens are: size, count, sum, mean")
+    end subroutine test_table_group_agg_unknown_token_aborts
+    !
+    !> See `scenario_table_group_agg_quantile_needs_q` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_quantile_needs_q_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_quantile_needs_q", expect_abort=.true., &
+            failure_message="quantile without q= was expected to abort", &
+            required_stderr='"quantile" needs q=')
+    end subroutine test_table_group_agg_quantile_needs_q_aborts
+    !
+    !> See `scenario_table_group_agg_option_refused` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_option_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_option_refused", expect_abort=.true., &
+            failure_message="q= on mean was expected to abort", &
+            required_stderr='q= belongs to "quantile" alone')
+    end subroutine test_table_group_agg_option_refused_aborts
+    !
+    !> See `scenario_table_group_agg_int_real_column` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_int_real_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_int_real_column", expect_abort=.true., &
+            failure_message="the exact family on a real column was expected to abort", &
+            required_stderr="the exact int64 family takes an integer or logical column")
+    end subroutine test_table_group_agg_int_real_column_aborts
+    !
+    !> See `scenario_table_group_agg_int_sum_overflow` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_int_sum_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_int_sum_overflow", expect_abort=.true., &
+            failure_message="an overflowing exact sum was expected to abort", &
+            required_stderr="the int64 sum of 'h' over group 2 overflows")
+    end subroutine test_table_group_agg_int_sum_overflow_aborts
+    !
+    !> See `scenario_table_group_agg_int_all_null` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_int_all_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_int_all_null", expect_abort=.true., &
+            failure_message="the exact min of an all-null group was expected to abort", &
+            required_stderr="group 1 has no non-null value of 'n', so its exact min does not exist")
+    end subroutine test_table_group_agg_int_all_null_aborts
+    !
+    !> See `scenario_table_group_agg_string_column` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_string_column", expect_abort=.true., &
+            failure_message="a string column under a value statistic was expected to abort", &
+            required_stderr="column has no numeric statistics; %agg takes a scalar numeric or logical column")
+    end subroutine test_table_group_agg_string_column_aborts
+    !
+    !> See `scenario_table_group_agg_weights_length` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_weights_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_weights_length", expect_abort=.true., &
+            failure_message="weights of the wrong length were expected to abort", &
+            required_stderr="weights has 3 entries but the table has 5 rows")
+    end subroutine test_table_group_agg_weights_length_aborts
+    !
+    !> See `scenario_table_group_agg_negative_weight` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_negative_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_negative_weight", expect_abort=.true., &
+            failure_message="a negative weight was expected to abort", &
+            required_stderr="the weight of row 2 is negative")
+    end subroutine test_table_group_agg_negative_weight_aborts
+    !
+    !> See `scenario_table_group_agg_both_weights` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_both_weights_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_both_weights", expect_abort=.true., &
+            failure_message="both weight forms together were expected to abort", &
+            required_stderr="weights= and weight_column= were both given")
+    end subroutine test_table_group_agg_both_weights_aborts
+    !
+    !> See `scenario_table_group_agg_weight_column_string` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_weight_column_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_weight_column_string", &
+            expect_abort=.true., failure_message="a string weight column was expected to abort", &
+            required_stderr="weight_column= names a PK_STRING column")
+    end subroutine test_table_group_agg_weight_column_string_aborts
+    !
+    !> See `scenario_table_group_agg_weight_column_vector` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_weight_column_vector_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_weight_column_vector", &
+            expect_abort=.true., failure_message="a vector weight column was expected to abort", &
+            required_stderr="weight_column= names a")
+    end subroutine test_table_group_agg_weight_column_vector_aborts
+    !
+    !> See `scenario_table_group_agg_weights_ignored` (test/error_scenarios.f90).
+    subroutine test_table_group_agg_weights_ignored_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_agg_weights_ignored", expect_abort=.true., &
+            failure_message="weights on size were expected to abort", &
+            required_stderr='weights have no effect on "size"')
+    end subroutine test_table_group_agg_weights_ignored_aborts
+    !
+    !> See `scenario_table_group_nunique_vector_column` (test/error_scenarios.f90).
+    subroutine test_table_group_nunique_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_nunique_vector_column", expect_abort=.true., &
+            failure_message="nunique of a vector column was expected to abort", &
+            required_stderr="cannot be a column %nunique counts")
+    end subroutine test_table_group_nunique_vector_column_aborts
     !
     !> See `scenario_filter_temporal_set_mismatch` (test/error_scenarios.f90).
     subroutine test_filter_temporal_set_mismatch_aborts(error)

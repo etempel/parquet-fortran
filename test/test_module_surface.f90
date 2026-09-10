@@ -976,6 +976,16 @@ contains
         out(2) = real(g, real64)
     end subroutine surface_row_sum_two
 
+    !> The first of a group's values (`parquet_group_column_reduce_i`'s shape).
+    function surface_col_first(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the first value.
+        r = values(1)
+        if (present(is_valid) .or. present(weights)) r = -huge(r)   ! neither is expected here
+    end function surface_col_first
+
     !> `surface_reducer%reduce`; see the type.
     subroutine surface_reduce(self, g, rows, out)
         class(surface_reducer), intent(in) :: self !! the reducer.
@@ -999,6 +1009,8 @@ contains
         type(surface_reducer) :: red
         procedure(parquet_group_reduce_i), pointer :: one => null()
         procedure(parquet_group_apply_i), pointer :: many => null()
+        procedure(parquet_group_column_reduce_i), pointer :: colf => null()
+        integer(int64), allocatable :: per_group_exact(:), distinct(:)
         type(parquet_table_writer) :: out
         integer(int64) :: ids(3), row
         real(real64) :: mass(3)
@@ -1034,6 +1046,22 @@ contains
         if (what == "" .and. size(per_group_two, 2) /= 3) what = "%apply, matrix procedure form"
         call grp%apply(red, per_group)
         if (what == "" .and. any(per_group /= [1.0_real64, 2.0_real64, 3.0_real64])) what = "%apply, object form"
+        ! %agg in its three forms and %nunique: the statistics tier is reachable through this
+        ! one import, as is the per-column callback's interface.
+        call grp%agg("mass", "mean", per_group)
+        if (what == "" .and. any(per_group /= mass)) what = "%agg, token form"
+        call grp%agg("id", "sum", per_group_exact)
+        if (what == "" .and. any(per_group_exact /= ids)) what = "%agg, exact form"
+        ! The procedure itself, not the pointer `colf` (declared with the interface so a dropped
+        ! re-export still fails this build): gfortran 15 resolves a procedure POINTER actual of
+        ! this generic to the `character` specific and hands it an empty token
+        ! (.claude/rules/fortran-gotchas.md); %apply above has no character competitor.
+        colf => surface_col_first
+        if (.not. associated(colf)) what = "the per-column interface's pointer did not associate"
+        call grp%agg("mass", surface_col_first, per_group)
+        if (what == "" .and. any(per_group /= mass)) what = "%agg, procedure form"
+        call grp%nunique("mass", distinct)
+        if (what == "" .and. any(distinct /= 1_int64)) what = "%nunique"
 
         call parquet_write_table(t, out_file, overwrite=.true.)
 

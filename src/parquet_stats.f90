@@ -47,6 +47,20 @@ module parquet_stats
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,
     ! `pf_nth_element` and `pf_sort_threads` through it.
     use parquet_sorting
+    ! **The second tier edge, and the only one that adds a file to the footprint.**
+    ! `pf_normal_scores` maps a rank to a normal quantile, which is `Phi**(-1)`, and the only
+    ! alternative to importing it is a second `Phi**(-1)` in this module. `feature_risks.md`
+    ! Risk-252 records what two spellings of one number cost when the number is a single
+    ! CONSTANT; a duplicated kernel is that defect with far more surface.
+    !
+    ! **`parquet_utils` is a LEAF** -- it imports the intrinsic `iso_fortran_env` and
+    ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs
+    ! `tools/module_footprints.txt` exactly one file and adds nothing beneath it, and
+    ! `check_parquet_stats_stays_arrow_free` is untouched because no Arrow is reachable from it.
+    ! `only:` rather than bare, unlike `parquet_sorting` above: one name is needed, and a
+    ! consumer who wants the probit itself should say `use parquet_utils` and get the whole
+    ! family rather than the one specific this module happens to need.
+    use parquet_utils, only : pf_probit
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
@@ -108,7 +122,8 @@ module parquet_stats
     public :: pf_median, pf_quantile, pf_quantiles
     public :: pf_iqr, pf_trim_mean, pf_percentile_of_score
     public :: pf_mad, pf_mode, pf_describe
-    public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats
+    public :: pf_cov, pf_corr, pf_zscore, pf_normal_scores
+    public :: pf_sigma_clipped_stats
     public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
     public :: pf_bucketize, pf_histogram, pf_bin_edges
     public :: parquet_set_verbosity, parquet_get_verbosity
@@ -1011,7 +1026,7 @@ module parquet_stats
     !>
     !> `median(|x - center|)`, where `center` is the population's own median unless one is
     !> supplied. `scale="normal"` (the default) multiplies by `1/Phi^-1(3/4)` =
-    !> 1.482602218505602, which makes the result
+    !> 1.4826022185056018, which makes the result
     !> a consistent estimator of the standard deviation for Gaussian data -- so on a large
     !> Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample
     !> with a few wild points they do not, which is the whole reason to reach for it.
@@ -1157,6 +1172,45 @@ module parquet_stats
         module procedure zscore_bool
         module procedure zscore_col
     end interface pf_zscore
+    !
+    !> Replaces each value by the normal quantile its RANK marks -- rankits, normal scores, the
+    !> van der Waerden transform; the x-axis of a Q-Q plot against a Gaussian.
+    !>
+    !> `s(i) = Phi**(-1)((r(i) - a)/(m + 1 - 2a))`, where `r(i)` is `values(i)`'s MIDRANK among
+    !> the `m` elements that survive the exclusion rules -- each run of equal values receiving
+    !> the mean of the sorted positions it spans, exactly as `pf_corr(method="spearman")`
+    !> does -- and `a` comes from `method=`. `s` is the same size as `values` and is in the
+    !> caller's original order.
+    !>
+    !> **The result depends on the input only through its ORDER**, so it is unchanged, bit for
+    !> bit, by any strictly monotone transform of the values: `pf_normal_scores(x)` and
+    !> `pf_normal_scores(exp(x))` are the same array. Ranks are taken over the SURVIVORS, so
+    !> excluding a quarter of the population gives the remaining elements exactly the scores
+    !> they would have had as a population of their own.
+    !>
+    !> **An excluded element has no score**, and there are two ways to learn which: `out_valid`
+    !> marks them exactly, and without it they are written as quiet NaNs -- `pf_zscore`'s rule
+    !> verbatim. `ok` is `.false.` in either case. A one-element population scores that element
+    !> `Phi**(-1)(1/2) = 0`, which is the correct degenerate answer rather than a failure.
+    !>
+    !> There is deliberately **no `weights`** and **no `pf_stats` binding**: a weighted midrank
+    !> is a definitional choice no reference library makes, and tier B sorts in place and never
+    !> hands values back in the caller's order.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments. An undefined answer is a **quiet NaN** with `ok = .false.`, never an abort: this
+    !> module aborts on misuse and never on a data condition.
+    !>
+    !> Every argument may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)`
+    !> or `logical` array, or a scalar numeric `type(parquet_column)`.
+    interface pf_normal_scores
+        module procedure normal_scores_f64
+        module procedure normal_scores_i32
+        module procedure normal_scores_i64
+        module procedure normal_scores_f32
+        module procedure normal_scores_bool
+        module procedure normal_scores_col
+    end interface pf_normal_scores
     !
     !> astropy's `sigma_clipped_stats`: iteratively drop the outliers, then summarise the rest.
     !>
@@ -2304,7 +2358,7 @@ module parquet_stats
         !>
         !> `median(|x - center|)`, where `center` is the population's own median unless one is
         !> supplied. `scale="normal"` (the default) multiplies by `1/Phi^-1(3/4)` =
-        !> 1.482602218505602, which makes the result
+        !> 1.4826022185056018, which makes the result
         !> a consistent estimator of the standard deviation for Gaussian data -- so on a large
         !> Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample
         !> with a few wild points they do not, which is the whole reason to reach for it.
@@ -2336,7 +2390,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.
@@ -2596,6 +2650,50 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine zscore_f64
+        !> `pf_normal_scores` over a 64-bit real array: each element's rank, mapped through
+        !! `Phi**(-1)`.
+        !!
+        !! **The scores depend on the input only through its ORDER.** That is the property worth
+        !! knowing and the one that constrains the implementation: any strictly monotone transform
+        !! of `values` must give bit-identical scores, so the value may be read only to sort it and
+        !! never to compute with. The midranks are `pf_corr(method="spearman")`'s, over the
+        !! SURVIVING elements rather than the original array.
+        module subroutine normal_scores_f64(values, s, is_valid, skipnan, method, out_valid, &
+                n_null, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's original order.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one.
+        end subroutine normal_scores_f64
         !> `pf_sigma_clipped_stats` over a 64-bit real array: astropy's iterative clip.
         !!
         !! **One ordering serves the whole run**, and that is a property rather than an
@@ -3589,7 +3687,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.
@@ -3733,6 +3831,40 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine zscore_i32
+        !> `pf_normal_scores` over a 32-bit integer array.
+        module subroutine normal_scores_i32(values, s, is_valid, method, out_valid, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's
+            !! original order. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one.
+        end subroutine normal_scores_i32
         !> `pf_sigma_clipped_stats` over a 32-bit integer array.
         module subroutine sigma_clipped_stats_i32(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -4587,7 +4719,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.
@@ -4736,6 +4868,40 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine zscore_i64
+        !> `pf_normal_scores` over a 64-bit integer array.
+        module subroutine normal_scores_i64(values, s, is_valid, method, out_valid, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's
+            !! original order. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one.
+        end subroutine normal_scores_i64
         !> `pf_sigma_clipped_stats` over a 64-bit integer array.
         module subroutine sigma_clipped_stats_i64(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -5609,7 +5775,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.
@@ -5763,6 +5929,44 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine zscore_f32
+        !> `pf_normal_scores` over a 32-bit real array.
+        module subroutine normal_scores_f32(values, s, is_valid, skipnan, method, out_valid, n_null, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's
+            !! original order. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one.
+        end subroutine normal_scores_f32
         !> `pf_sigma_clipped_stats` over a 32-bit real array.
         module subroutine sigma_clipped_stats_f32(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -6632,7 +6836,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.
@@ -6779,6 +6983,40 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine zscore_bool
+        !> `pf_normal_scores` over a logical array.
+        module subroutine normal_scores_bool(values, s, is_valid, method, out_valid, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's
+            !! original order. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one.
+        end subroutine normal_scores_bool
         !> `pf_sigma_clipped_stats` over a logical array.
         module subroutine sigma_clipped_stats_bool(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -7771,7 +8009,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.
@@ -7932,6 +8170,44 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine zscore_col
+        !> `pf_normal_scores` over a scalar numeric `parquet_column`.
+        module subroutine normal_scores_col(values, s, is_valid, skipnan, method, out_valid, n_null, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's
+            !! original order. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one.
+        end subroutine normal_scores_col
         !> `pf_sigma_clipped_stats` over a scalar numeric `parquet_column`.
         module subroutine sigma_clipped_stats_col(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -8950,7 +9226,7 @@ module parquet_stats
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively.

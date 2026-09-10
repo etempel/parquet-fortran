@@ -321,6 +321,8 @@ something a reader is expected to have.
 | [Risk-250](#risk-250--a-truncated-draws-bounds-are-enforced-on-the-standardised-scale-and-de-standardising-rounds-back-outside) | A truncated draw's bounds are enforced on the STANDARDISED scale, and de-standardising rounds back outside | 4 — covered |
 | [Risk-251](#risk-251--a-case-threshold-formed-as-a-difference-of-nearly-equal-doubles-is-contracted-into-an-fma-and-the-draw-hangs) | A case threshold formed as a difference of nearly-equal doubles is contracted into an FMA, and the draw HANGS | 4 — covered |
 | [Risk-252](#risk-252--pf_probit075-and-the-frozen-mad_normal_scale-are-two-spellings-of-one-number-and-only-a-test-compares-them) | `pf_probit(0.75)` and the frozen `MAD_NORMAL_SCALE` are two spellings of one number | 4 — covered |
+| [Risk-253](#risk-253--a-probit-based-statistic-that-tests-only-for-an-empty-population-inherits-risk-171s-defect) | A probit-based statistic that tests only for an EMPTY population inherits Risk-171's defect | 4 — covered |
+| [Risk-254](#risk-254--a-plotting-position-denominated-by-sizevalues-instead-of-the-survivor-count-is-invisible) | A plotting position denominated by `size(values)` instead of the survivor count is invisible | 4 — covered |
 
 ---
 
@@ -9500,30 +9502,86 @@ cannot fail.
 
 ### Risk-252 — `pf_probit(0.75)` and the frozen `MAD_NORMAL_SCALE` are two spellings of one number, and only a test compares them
 
-`src/parquet_stats_order.f90` freezes the scale `pf_mad(scale="normal")` multiplies by as the
-literal `1.482602218505602`, deliberately: `pf_mad` shipped in v2.2.0 and a constant re-derived at
-run time would make every number it has already published depend on whatever computes it. Now that
-`parquet_utils` carries `pf_probit`, **there are two spellings of `1/Phi^-1(3/4)` in one library and
-nothing structural keeps them together.**
+`src/parquet_stats_order.f90` freezes the scale `pf_mad(scale="normal")` multiplies by as a
+literal, deliberately: `pf_mad` shipped in v2.2.0 and a constant re-derived at run time would make
+every number it has already published depend on whatever computes it. Now that `parquet_utils`
+carries `pf_probit`, **there are two spellings of `1/Phi^-1(3/4)` in one library and nothing
+structural keeps them together.**
 
 A kernel change that moves `pf_probit(0.75)` by an ulp leaves `pf_mad(scale="normal")` and anything
 built on `pf_probit` disagreeing in the last digit on the same data, with both answers plausible and
 neither path aborting. Nothing in the build notices: they are different modules, different tiers, and
 the statistics tier does not import the utility one.
 
-**They already differ by exactly one ulp, and that is the state to preserve rather than a defect to
-fix.** Sixteen decimal digits do not name that double uniquely — the literal is
-`0x3ff7b8bd1a975674` and the nearest double to the true value is `...673`. Correcting the last bit
-is a 1.5e-16 relative change to a released statistic and would move every `pf_mad(scale="normal")`
-number already published, so the literal stays as it is (feature_probit.md, Q8).
+**They did differ, by exactly one ulp, and the literal has been corrected.** Up to v2.3.0 it read
+`1.482602218505602` = `0x3ff7b8bd1a975674`, one ulp above the nearest double to the true value
+(`...673`): sixteen decimal digits do not name that double uniquely, and the value was in fact
+`1.0/0.6744897501960817`, which rounds twice — once to the quartile, once to its reciprocal. It now
+reads `1.4826022185056018` and is exact. The correction moved every published
+`pf_mad(scale="normal")` number by at most 1.5e-16 relative, which is why it is a `### Changed`
+entry rather than a silent tidy-up.
+
+**Do not respell it with sixteen digits, and do not restore the reciprocal-of-a-double form** —
+both name `...674`. The value that belongs here is the correctly rounded `1/Phi^-1(3/4)`, and it
+takes seventeen digits to write.
 
 **What it forbids.** The literal must not be replaced by a call to `pf_probit`, and it must not
-drift further than the one ulp it already sits at. A second consumer of the same constant — a
-quantile-based scale estimator, a normal-consistency factor for some other statistic — reaches for
-`pf_probit` rather than pasting the digits a third time.
+drift at all. A second consumer of the same constant — a quantile-based scale estimator, a
+normal-consistency factor for some other statistic — reaches for `pf_probit` rather than pasting
+the digits a third time.
 
 **Covered by** `test_probit_matches_mad_scale` (`test/test_utils.f90`), which asserts
-`1/pf_probit(0.75)` against the 50-digit oracle and the source literal against the same oracle at a
-bound of one ulp, and by `tools/generate_probit_reference.py --self-test`, which reads the literal
-out of `src/parquet_stats_order.f90` itself and applies the same bound — so a hand edit to the
-source is caught even if the test's own copy of the literal is edited to match.
+`1/pf_probit(0.75)` against the 50-digit oracle and the source literal against the same oracle at
+bit-for-bit equality, and by `tools/generate_probit_reference.py --self-test`, which reads the
+literal out of `src/parquet_stats_order.f90` itself and applies the same equality — so a hand edit
+to the source is caught even if the test's own copy of the literal is edited to match.
+
+**Not covered, and deliberately.** scipy computes `mad / 0.6744897501960817`, a division; this
+library multiplies, so that the two scaling sites in `parquet_stats_order.f90` agree with each
+other bit for bit. Multiply and divide differ by one ulp on about 58% of inputs (38% before the
+correction), so a `scale="normal"` answer sits within one ulp of scipy's rather than on it. No test
+asserts bit equality with scipy, and none should.
+
+
+### Risk-253 — A probit-based statistic that tests only for an EMPTY population inherits Risk-171's defect
+
+`pf_normal_scores` reaches `stats_compact`, and Risk-171 states the rule outright: **under
+`skipnan = .false.` a NaN sorts to one END of the ordering and poisons nothing.** The other `m-1`
+elements keep the positions they always had, so an order statistic computed from a poisoned
+population comes back as a perfectly ordinary number with `ok = .true.`.
+
+The vector-valued case is the one that slips through, and it is worse than the scalar one. A caller
+who asks for propagating behaviour and receives eight real scores and one NaN will read that as "the
+NaN was excluded" — which is the *opposite* of what was asked for, and is indistinguishable from the
+default `skipnan = .true.` answer except by the flag. So the rule here is stronger than "answer NaN":
+**every element of `s` is NaN**, not just the NaN's own.
+
+**What it forbids.** Testing `m == 0` alone. `saw_nan` is a separate out-argument of `stats_compact`
+for exactly this reason and must be read by every procedure that calls it. The same applies to
+`pf_probit_fit`, `pf_probit_scale` and `pf_probit_mean` when they land.
+
+**Covered by** `test_propagating_nan_reaches_every_tier` (`test/test_stats.f90`), extended to
+`pf_normal_scores` in **both halves** — the propagating half asserting `all(ns /= ns)` rather than
+merely `ns(4) /= ns(4)`, and the default-`skipnan` half asserting that the eight survivors do have
+real scores. Without the second half a procedure returning NaN unconditionally would pass.
+
+### Risk-254 — A plotting position denominated by `size(values)` instead of the survivor count is invisible
+
+Every score shifts toward zero by a factor of roughly `m/n`. **Monotonicity is preserved, the mean
+stays near zero, the scores stay ordered, and every distributional check still passes** — only the
+SCALE is wrong, and only when something is excluded, so a test over a clean population cannot see it
+at all. One level up the same defect gives `pf_probit_fit` a `sigma` wrong by the same factor while
+`corr` stays near 1, so the normality diagnostic reports "fine".
+
+`pf_corr`'s Spearman path already carries this rule as a source comment (*"The ranks are taken over
+the SURVIVING pairs, not over the original arrays"*, `src/parquet_stats_relate.f90`), and
+`normal_scores_f64` carries it too.
+
+**What it forbids.** Forming the denominator from `size(values)`, from `n` as passed in, or from
+anything but `stats_compact`'s `n_valid`. Note that a test over a population with **nothing**
+excluded cannot distinguish the two, because `m == n` there: the test has to exclude something.
+
+**Covered by** `test_normal_scores_uses_the_survivor_count` (`test/test_stats.f90`), which excludes
+every third element of a 40-element population and asserts that each survivor's score is
+**bit-for-bit** the score it would have had in the 27-element sub-population computed on its own —
+an identity that a wrong denominator breaks in the last digit as surely as in the first.

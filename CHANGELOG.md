@@ -18,6 +18,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   right and never as `1 - pf_norm_cdf(z)`, which has no significant digits left past about
   `z = 8`. Nothing in the family validates or aborts. See
   [The normal distribution](doc/pages/utilities/utils.md#the-normal-distribution-probit-cdf-density).
+- **Normal scores in `parquet_stats`: `pf_normal_scores(values, s [, ...])`.** Replaces each value
+  by the normal quantile its midrank marks — rankits, the van der Waerden transform, the x-axis of
+  a Q-Q plot. `s` is the same size as `values` and in the caller's original order; ties share one
+  score, and ranks are taken over the surviving elements. `method=` chooses the plotting position:
+  `"blom"` (the default), `"weibull"`, `"tukey"`, `"hazen"`, `"cunnane"` or `"filliben"`, the
+  median rank. An excluded element is marked in `out_valid` or written as a quiet NaN; under
+  `skipnan = .false.` every score is NaN. There is no `weights` argument and no `pf_stats` binding.
+  See
+  [pf_normal_scores](doc/pages/utilities/statistics.md#pf_normal_scores--rankits-the-x-axis-of-a-q-q-plot).
 - **A cylinder along the line of sight: `pf_spatial_index%within_los` and `%pairs_within_los`.**
   `sx%pairs_within_los(b_perp, b_par, i, j)` returns every pair, once and with `i < j`, whose
   transverse separation about an observer is within `b_perp` and whose parallel separation is
@@ -281,6 +290,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`pf_mad(scale="normal")` and `pf_sigma_clipped_stats(stdfunc="mad_std")` scale by the
+  correctly rounded `1/Phi^-1(3/4)`.** The constant was `1.482602218505602`, one ulp above the
+  nearest double; it is now `1.4826022185056018`. Results move by at most 1.5e-16 relative.
 - **`parquet_table%append`** treats a column the appended table has but has not read as absent on
   both forms (null-filled, as `%append(row)` already did; the table form aborted), and drops an
   appended table's `parquet_row_index` when this table has none instead of refusing it.

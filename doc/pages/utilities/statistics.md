@@ -558,7 +558,7 @@ call pf_mad(mag, spread, center=0.0_real64) ! deviations about a centre you supp
 
 `scale="normal"` (the default) multiplies by `1/Phi^-1(3/4)`, which is scipy's
 `median_abs_deviation(scale='normal')` and what an astronomy script means by "the MAD". Note the
-constant: it is a multiplication by `1.482602218505602`, and **not** by the rounded `1.4826` most
+constant: it is a multiplication by `1.4826022185056018`, and **not** by the rounded `1.4826` most
 textbooks quote — those differ by about 1.5e-06 relative, which is far above the double-precision
 noise floor and is enough to fail a comparison against scipy. The same multiplier scales
 `stdfunc="mad_std"` inside `pf_sigma_clipped_stats`, so the two agree bit for bit.
@@ -756,6 +756,64 @@ practice, since a NaN propagates through whatever the caller does next.
 as a NaN, or the population's variance was zero and *every* output is NaN. `n_null` separates them at
 no cost — it is `0` in the second case — so a second flag would be another thing to document and
 reset for no new information.
+
+## `pf_normal_scores` — rankits, the x-axis of a Q-Q plot
+
+```fortran
+call pf_normal_scores(mag, s)                          ! method = "blom"
+call pf_normal_scores(mag, s, method="filliben")
+call pf_normal_scores(mag, s, is_valid=mask, out_valid=ok_out, n_null=nn, ok=fine)
+```
+
+`s(i) = Phi⁻¹((r(i) − a) / (m + 1 − 2a))`, where `r(i)` is `values(i)`'s **midrank** among the `m`
+elements that survive the exclusion rules and `a` comes from `method=`. `s` is the same size as
+`values` and is in the caller's original order. Plot `s` against the sorted values and you have a
+normal Q-Q plot; correlate the two and you have a normality statistic.
+
+Ties share one score, exactly as `pf_corr(method="spearman")` gives them one rank: each run of equal
+values receives the mean of the sorted positions it spans.
+
+### The result depends on the ORDER and nothing else
+
+Any strictly monotone transform of the values leaves the scores **bit for bit identical** —
+`pf_normal_scores(x)` and `pf_normal_scores(exp(x))` are the same array. That is worth knowing before
+reaching for it: the scores carry the *ranking* of the population, not its shape, so scaling,
+shifting or log-transforming the input first is wasted work.
+
+Ranks are taken over the **survivors**, never over the whole array, so excluding a quarter of the
+population gives the rest exactly the scores they would have had as a population of their own.
+
+### Which plotting position
+
+| `method=` | `a` | what it is |
+|---|---|---|
+| `"blom"` (the default) | `3/8` | the standard rankit; what R's `qqnorm` uses for small `n`, and what "normal scores" means unqualified |
+| `"weibull"` | `0` | `r/(m+1)`; the van der Waerden score |
+| `"tukey"` | `1/3` | |
+| `"hazen"` | `1/2` | |
+| `"cunnane"` | `0.4` | approximately unbiased quantiles for a wide class of distributions |
+| `"filliben"` | — | the **median** rank, and a different formula rather than a different constant: `1 − 0.5^(1/m)` at the first position, `0.5^(1/m)` at the last, `(i − 0.3175)/(m + 0.365)` between |
+
+Matched case-insensitively; any other token **aborts**, naming all six. That is misuse, not a data
+condition.
+
+### The rules to know
+
+An **excluded** element has no score: `out_valid(:)` marks them exactly, and without it they are
+written as quiet NaNs. This is `pf_zscore`'s rule verbatim, and `ok = .false.` in either case.
+
+Under `skipnan = .false.` **every** element of `s` is NaN and `ok = .false.` — not just the NaN's
+own. A NaN sorts to one end of the ordering and poisons no rank, so anything less would hand back
+ordinary-looking scores from a population you asked to have poisoned.
+
+A **one-element** population scores that element exactly `0`, which is `Phi⁻¹(1/2)` and the correct
+degenerate answer rather than a failure. An empty one is all-NaN with `ok = .false.`.
+
+There is deliberately **no `weights` argument** — a weighted midrank is a further definitional
+choice that no reference library makes, and its absence makes passing one a *compile* error rather
+than a run-time abort. There is also **no `pf_stats` binding**: tier B sorts in place and never
+hands the retained values back in the caller's order, so a per-element result in that order cannot
+come from it.
 
 ## `pf_sigma_clipped_stats` — the robust summary
 
@@ -1181,10 +1239,13 @@ with — but it is the one thing to check when moving a call between the two.
 
 ## What it costs to import
 
-`use parquet_stats` compiles this module plus `parquet_sorting`'s files — 28 of this library's
-Fortran files — and its Fortran graph never reaches the Parquet C++ bindings. That is narrower than
+`use parquet_stats` compiles this module, `parquet_sorting`'s files and the leaf `parquet_utils`
+— 29 of this library's Fortran files — and its Fortran graph never reaches the Parquet C++ bindings. That is narrower than
 "no C++": `link` is a package-level key in `fpm.toml`, so the C++ wrapper is still compiled and
 Arrow still linked whichever module you import. No `use` statement makes the *package* Arrow-free.
 The statistics that need an order take it from `pf_argsort` and `pf_nth_element` rather than
-carrying a second sorting implementation. See [Choosing a module](../operating/choosing-a-module.html)
+carrying a second sorting implementation, and `pf_normal_scores` takes `Phi⁻¹` from `pf_probit`
+rather than carrying a second one of those. `parquet_utils` is a leaf — it imports only the
+intrinsic `iso_fortran_env` and `ieee_arithmetic` — so that edge adds one file and nothing beneath
+it. See [Choosing a module](../operating/choosing-a-module.html)
 for the measured figure and for what every other import costs.

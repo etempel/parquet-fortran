@@ -105,18 +105,29 @@ submodule (parquet_stats) parquet_stats_order
     !! **Full precision, not the rounded 1.4826 every textbook quotes.** The two differ by 1.5e-06
     !! relative, which is four million times the double-precision noise floor and showed up
     !! immediately as a cross-check failure against `scipy.stats.median_abs_deviation`. Matching
-    !! scipy exactly is the whole reason this token is called "normal".
+    !! scipy is the whole reason this token is called "normal".
+    !!
+    !! **SEVENTEEN digits, because sixteen do not name this double.** The literal is the correctly
+    !! rounded double nearest the exact `1/Phi^-1(3/4)` = 1.48260221850560186054707652936...,
+    !! which is `0x3ff7b8bd1a975673`. It is deliberately NOT `1.0_real64 /
+    !! 0.6744897501960817_real64`: rounding the quartile to a double and then taking its reciprocal
+    !! in double rounds twice and lands on `...674`, one ulp high. That double, spelled
+    !! `1.482602218505602`, was this constant's value up to and including v2.3.0. Against the exact
+    !! quotient the correction takes the worst relative error of `raw * MAD_NORMAL_SCALE` from
+    !! 2.3e-16 down to 1.4e-16 -- past the 1.7e-16 that scipy's own `mad / 0.6744897501960817`
+    !! reaches. **Do not respell this with sixteen digits**; that is a different double, and
+    !! `tools/generate_probit_reference.py --self-test` fails the moment the two diverge.
     !!
     !! **One constant, applied ONE way, and that is the point of it being a multiplier.** Both
     !! scalings in this file go through it: `resolve_mad_scale`, behind `pf_mad`/`%mad`, and
     !! `slice_mad_std`, behind `pf_sigma_clipped_stats(stdfunc="mad_std")`. One multiplying by a
     !! reciprocal while the other divides by `Phi^-1(3/4)` is NOT the same operation in binary
-    !! floating point -- measured, the two disagree by one ulp on about 39% of inputs -- so the
+    !! floating point -- measured, the two disagree by one ulp on about 58% of inputs -- so the
     !! same population could give the two paths different answers with nothing saying which was
-    !! meant. The literal below is bit-identical to `1.0_real64 / 0.6744897501960817_real64`, so
-    !! having both multiply by it costs nothing. **Do not reintroduce a division by `Phi^-1(3/4)`
-    !! in either path.**
-    real(real64), parameter :: MAD_NORMAL_SCALE = 1.482602218505602_real64
+    !! meant. **Do not reintroduce a division by `Phi^-1(3/4)` in either path.** scipy is the one
+    !! that divides, so a "normal" answer here sits within one ulp of scipy's rather than on it;
+    !! that ulp is the price of the two paths in this file agreeing bit for bit with each other.
+    real(real64), parameter :: MAD_NORMAL_SCALE = 1.4826022185056018_real64
 
 contains
 

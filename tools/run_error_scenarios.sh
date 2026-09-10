@@ -944,6 +944,7 @@ scenarios=(
     "stats_mad_center_not_finite:1"
     "stats_mode_string_column_is_valid:1"
     "stats_corr_bad_method:1"
+    "stats_normal_scores_bad_method:1"
     "stats_spearman_with_weights:1"
     "stats_pair_size_mismatch:1"
     "stats_clip_bad_cenfunc:1"

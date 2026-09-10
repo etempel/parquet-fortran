@@ -143,6 +143,92 @@ contains
                 'refuses rather than inventing one'
     end subroutine corr_method
 
+    !> Resolves `pf_normal_scores`' `method=` token to its plotting position, or aborts.
+    !!
+    !! **Two shapes behind one argument, so the flag is not decoration.** Five of the six tokens
+    !! name a constant `a` in `(r - a)/(m + 1 - 2a)`; "filliben" is the MEDIAN rank and is not of
+    !! that family at all, so it comes back as its own flag rather than as an `a` that could not
+    !! express it. Reaching for a sentinel `a` here -- a negative, say -- would put a number that
+    !! is not a plotting position into a variable whose whole purpose is to hold one.
+    subroutine nscore_method(what, method, a, filliben)
+        character(len=*), intent(in) :: what               !! the public procedure's name.
+        character(len=*), intent(in), optional :: method   !! the caller's token, if any.
+        real(real64), intent(out) :: a                     !! the plotting-position constant.
+        logical, intent(out) :: filliben                   !! .true. for the median rank.
+        character(len=16) :: tok
+        integer :: i, c
+
+        a = 0.375_real64
+        filliben = .false.
+        if (.not. present(method)) return
+        tok = ""
+        do i = 1, min(len(method), len(tok))
+            c = iachar(method(i:i))
+            if (c >= iachar("A") .and. c <= iachar("Z")) c = c + 32
+            tok(i:i) = achar(c)
+        end do
+        select case (trim(tok))
+        case ("blom")
+            a = 0.375_real64
+        case ("weibull")
+            a = 0.0_real64
+        case ("tukey")
+            a = 1.0_real64 / 3.0_real64
+        case ("hazen")
+            a = 0.5_real64
+        case ("cunnane")
+            a = 0.4_real64
+        case ("filliben")
+            filliben = .true.
+        case default
+            error stop what // ': unrecognised method "' // trim(method) // &
+                '"; the tokens are "blom" (the default), "weibull", "tukey", "hazen", ' // &
+                '"cunnane" and "filliben"'
+        end select
+    end subroutine nscore_method
+
+    !> The probability a midrank marks: what `Phi**(-1)` is actually asked for.
+    !!
+    !! **The result is never 0 and never 1**, for every token and every `m`, so `pf_probit` here
+    !! never returns an infinity. For the `a`-family that is arithmetic: `a` lies in `[0, 1/2]`,
+    !! so the smallest position `(1-a)/(m+1-2a)` is positive and the largest `(m-a)/(m+1-2a)` is
+    !! below 1 for any `a < 1`. Filliben's two end forms are `1 - 0.5**(1/m)` and `0.5**(1/m)`,
+    !! both strictly inside. That is why this family needs no clamp, and a clamp added here would
+    !! hide a genuine defect rather than guard against one.
+    pure function nscore_position(r, m, a, den, filliben) result(p)
+        real(real64), intent(in) :: r      !! the midrank, 1-based and possibly a half-integer.
+        integer(int64), intent(in) :: m    !! how many elements survived.
+        real(real64), intent(in) :: a      !! the plotting-position constant.
+        real(real64), intent(in) :: den    !! `m + 1 - 2a`, formed once by the caller.
+        logical, intent(in) :: filliben    !! .true. for the median rank.
+        real(real64) :: p
+        real(real64) :: rm
+
+        rm = real(m, real64)
+        if (m == 1_int64) then
+            ! **Every rule meets at exactly 1/2 when one element survives**, and it is written out
+            ! rather than left to the arithmetic because it is the documented degenerate answer.
+            ! `(1-a)/(2-2a)` is 1/2 mathematically for any `a`, but it is a quotient of two
+            ! rounded numbers, and one ulp of error there is the difference between a score of
+            ! exactly 0 and a score of -1e-16 -- which is what a caller would see and disbelieve.
+            p = 0.5_real64
+        else if (filliben) then
+            ! Filliben's median rank. The two END positions are separate closed forms rather than
+            ! the interior formula evaluated there, which is what makes this Filliben's statistic
+            ! rather than an approximation to it. A tie spanning position 1 has a midrank above 1
+            ! and so takes the interior form, which is both correct and monotone.
+            if (r == 1.0_real64) then
+                p = 1.0_real64 - 0.5_real64 ** (1.0_real64 / rm)
+            else if (r == rm) then
+                p = 0.5_real64 ** (1.0_real64 / rm)
+            else
+                p = (r - 0.3175_real64) / (rm + 0.365_real64)
+            end if
+        else
+            p = (r - a) / den
+        end if
+    end function nscore_position
+
     !> The midranks of `v(1:m)`: each run of equal values gets the mean of the positions it spans.
     !!
     !! **This is not a second ranking implementation.** The expensive half of ranking is the sort,
@@ -344,6 +430,83 @@ contains
         ! information.
         if (present(ok)) ok = .not. any_excluded
     end procedure zscore_f64
+
+    module procedure normal_scores_f64
+        real(real64), allocatable :: keep(:), keep_w(:), rank(:)
+        real(real64) :: a, den
+        integer(int64) :: n, m, nnull, nnan, i, k
+        logical :: saw_nan, filliben, excluded, any_excluded
+
+        ! The token is resolved BEFORE anything else, including the size checks: an unrecognised
+        ! `method=` is misuse and should abort on an empty array exactly as it does on a full one,
+        ! rather than depending on whether the population happened to reach the branch that reads
+        ! it. That is `pf_quantile`'s rule and the reason its bad-token scenario is reproducible.
+        call nscore_method("pf_normal_scores", method, a, filliben)
+        n = size(values, kind=int64)
+        if (size(s, kind=int64) /= n) &
+            error stop "pf_normal_scores: s has " // trim(stats_i2s(size(s, kind=int64))) // &
+                " elements but values has " // trim(stats_i2s(n))
+        if (present(out_valid)) then
+            if (size(out_valid, kind=int64) /= n) &
+                error stop "pf_normal_scores: out_valid has " // &
+                    trim(stats_i2s(size(out_valid, kind=int64))) // &
+                    " elements but values has " // trim(stats_i2s(n))
+        end if
+
+        call stats_compact(values, "pf_normal_scores", is_valid=is_valid, skipnan=skipnan, &
+            keep_x=keep, keep_w=keep_w, n_valid=m, n_null=nnull, n_nan=nnan, saw_nan=saw_nan)
+        if (present(n_null)) n_null = nnull
+
+        ! **`saw_nan` is tested here, and `feature_risks.md` Risk-253 is exactly why.** Under
+        ! `skipnan = .false.` a surviving NaN sorts to one end of the ordering and poisons no
+        ! rank -- the other m-1 elements keep the positions they always had -- so a procedure that
+        ! tested only for an empty population would hand back a perfectly ordinary set of scores
+        ! from a population the caller explicitly asked to have poisoned, with `ok = .true.`.
+        ! One test covers that and the empty population both, and they have the same answer.
+        if (m == 0_int64 .or. saw_nan) then
+            do i = 1_int64, n
+                s(i) = stats_nan()
+            end do
+            if (present(out_valid)) out_valid = .false.
+            if (present(ok)) ok = .false.
+            return
+        end if
+
+        ! **The ranks are taken over the SURVIVORS, not over the original array** -- Risk-254, and
+        ! `pf_corr`'s Spearman path carries the same rule for the same reason. Denominating by
+        ! `n` instead would shrink every score toward zero by roughly `m/n`: still ordered, still
+        ! centred, still monotone, and wrong only in SCALE, so no distributional check would see
+        ! it and only a population with something excluded would show it at all.
+        allocate(rank(m))
+        call midranks(keep, m, rank, threads)
+        den = real(m, real64) + 1.0_real64 - 2.0_real64 * a
+
+        ! One walk in the caller's order, consuming the survivors in the order `stats_compact`
+        ! kept them -- which is input order, so the k-th survivor is the k-th element this loop
+        ! does not exclude. The exclusion test is `pf_zscore`'s, and it is re-derived rather than
+        ! read from a mask because a NaN can only be here at all if `skipnan` excluded it: the
+        ! other case returned above.
+        any_excluded = .false.
+        k = 0_int64
+        do i = 1_int64, n
+            excluded = .false.
+            if (present(is_valid)) excluded = .not. is_valid(i)
+            if (.not. excluded) excluded = (values(i) /= values(i))
+            if (excluded) then
+                any_excluded = .true.
+                ! Written whether or not `out_valid` was asked for, as `pf_zscore` does: an output
+                ! element is then never undefined memory, which nagfor's `-nan` build reports and
+                ! the standard leaves non-conforming to read.
+                s(i) = stats_nan()
+                if (present(out_valid)) out_valid(i) = .false.
+            else
+                k = k + 1_int64
+                s(i) = pf_probit(nscore_position(rank(k), m, a, den, filliben))
+                if (present(out_valid)) out_valid(i) = .true.
+            end if
+        end do
+        if (present(ok)) ok = .not. any_excluded
+    end procedure normal_scores_f64
 
     ! ==================================================================================
     ! The cumulative family

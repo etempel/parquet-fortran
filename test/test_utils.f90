@@ -611,23 +611,24 @@ contains
 
     !> `1/pf_probit(0.75)` is the scale `pf_mad(scale="normal")` multiplies by.
     !!
-    !! **`feature_risks.md` Risk-252.** `src/parquet_stats_order.f90` freezes that scale as the
-    !! literal `1.482602218505602`, deliberately, so that every `pf_mad` answer this library has
-    !! published stays bit-stable and independent of any kernel. Once `pf_probit` exists there are
-    !! two spellings of one number in one library and nothing structural keeps them together.
+    !! **`feature_risks.md` Risk-252.** `src/parquet_stats_order.f90` freezes that scale as a
+    !! literal, so that every `pf_mad` answer stays bit-stable and independent of any kernel. Once
+    !! `pf_probit` exists there are two spellings of one number in one library and nothing
+    !! structural keeps them together -- this test is the thing that does.
     !!
-    !! **They are known to differ by exactly one ulp**, and that is not slack in this test. Sixteen
-    !! decimal digits do not name that double uniquely: the literal is `0x3ff7b8bd1a975674` and the
-    !! nearest double to `1/Phi**(-1)(3/4)` is `...673`. Correcting the last bit would move every
-    !! `pf_mad(scale="normal")` number already published, for a relative change of 1.5e-16, so it
-    !! stays as it is. What must not drift is anything larger, which is what the bound catches.
+    !! **The bound is bit-for-bit equality, and it was not always met.** Up to v2.3.0 the frozen
+    !! literal was `1.482602218505602`, which is `0x3ff7b8bd1a975674`: one ulp ABOVE the nearest
+    !! double to `1/Phi**(-1)(3/4)`, because sixteen decimal digits do not name that double
+    !! uniquely and `1.0/0.6744897501960817` rounds twice. It now reads `1.4826022185056018` and
+    !! agrees exactly, so this asks for zero ulp rather than one. **Do not relax it back to a
+    !! tolerance**; a tolerance here would pass against precisely the respelling that was wrong.
     subroutine test_probit_matches_mad_scale(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         !> The literal `src/parquet_stats_order.f90` carries. Written out rather than imported:
         !! `parquet_utils` is a leaf and this suite must not acquire an edge to the statistics
         !! tier to read one constant. `tools/generate_probit_reference.py --self-test` compares the
         !! two spellings from the other side, against the source file itself.
-        real(real64), parameter :: MAD_NORMAL_SCALE_IN_SOURCE = 1.482602218505602_real64
+        real(real64), parameter :: MAD_NORMAL_SCALE_IN_SOURCE = 1.4826022185056018_real64
         real(real64) :: computed
         character(len=:), allocatable :: txt
 
@@ -636,9 +637,9 @@ contains
             "1/pf_probit(0.75) must be the oracle's 1/Phi^-1(3/4)")
         if (allocated(error)) return
         call pf_to_str(ulp_gap(MAD_NORMAL_SCALE_IN_SOURCE, MAD_NORMAL_SCALE_REF), txt)
-        call check(error, ulp_gap(MAD_NORMAL_SCALE_IN_SOURCE, MAD_NORMAL_SCALE_REF) <= 1.0_real64, &
+        call check(error, MAD_NORMAL_SCALE_IN_SOURCE == MAD_NORMAL_SCALE_REF, &
             "the MAD normal scale frozen in src/parquet_stats_order.f90 is " // txt // &
-            " ulp from 1/Phi^-1(3/4); one is allowed and more is a drift")
+            " ulp from 1/Phi^-1(3/4); it must be the same double, to the bit")
         if (allocated(error)) return
         call check(error, PROBIT_Q3 > 0.674_real64 .and. PROBIT_Q3 < 0.675_real64, &
             "the oracle's Phi^-1(3/4) is not where it should be, so this test proves nothing")

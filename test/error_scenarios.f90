@@ -1090,6 +1090,8 @@ program error_scenarios
         call scenario_stats_mode_string_column_is_valid()
     case ("stats_corr_bad_method")
         call scenario_stats_corr_bad_method()
+    case ("stats_normal_scores_bad_method")
+        call scenario_stats_normal_scores_bad_method()
     case ("stats_spearman_with_weights")
         call scenario_stats_spearman_with_weights()
     case ("stats_pair_size_mismatch")
@@ -20958,6 +20960,20 @@ contains
         call pf_corr(x, y, r, method="kendall")    ! -> aborts (unknown token)
         print '(a,es12.5)', "unexpectedly accepted method=kendall, r=", r
     end subroutine scenario_stats_corr_bad_method
+
+    !> An unrecognised plotting-position token aborts, naming all six.
+    !!
+    !! The token is resolved BEFORE the population is looked at, so this aborts on any input at
+    !! all rather than only on one that reaches the branch reading it.
+    subroutine scenario_stats_normal_scores_bad_method()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: s(4)
+
+        call pf_normal_scores(x, s, method="hazen")     ! a real token: accepted
+        if (s(1) >= s(2)) print '(a)', "the scores left their order"
+        call pf_normal_scores(x, s, method="rankit")    ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted method=rankit, s(1)=", s(1)
+    end subroutine scenario_stats_normal_scores_bad_method
 
     !> A weighted midrank is a definitional choice no reference library makes, so this refuses.
     subroutine scenario_stats_spearman_with_weights()

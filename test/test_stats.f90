@@ -32,6 +32,11 @@ module test_stats
     ! makes that a build error instead. The facade's own re-export of this tier is pinned by
     ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
     use parquet_stats
+    ! `pf_normal_scores`' expectations are `Phi**(-1)` of a plotting position this file forms
+    ! itself. `parquet_stats` imports `pf_probit` with an `only:` list and is `private` by
+    ! default, so it does not re-export it and this module names it directly -- which is also the
+    ! point: the expectation must not come from the same generic the library reached through.
+    use parquet_utils, only : pf_probit
     use parquet_random
     use parquet_columns
     use parquet_strings
@@ -183,6 +188,18 @@ contains
                 test_spearman_sees_monotone), &
             new_unittest("pf_zscore standardises and reports its exclusions", &
                 test_zscore_standardises), &
+            new_unittest("pf_normal_scores reads the ORDER alone, so a monotone transform " // &
+                "changes nothing", test_normal_scores_is_order_only), &
+            new_unittest("pf_normal_scores gives tied values one shared midrank score", &
+                test_normal_scores_ties_share_a_score), &
+            new_unittest("pf_normal_scores denominates by the survivor count, not the array " // &
+                "size", test_normal_scores_uses_the_survivor_count), &
+            new_unittest("pf_normal_scores marks its exclusions and writes NaN without the mask", &
+                test_normal_scores_marks_exclusions), &
+            new_unittest("every plotting-position token gives its own documented constant", &
+                test_normal_scores_every_method_token), &
+            new_unittest("pf_normal_scores' one-element, empty and all-tied populations", &
+                test_normal_scores_degenerate), &
             new_unittest("pf_sigma_clipped_stats reproduces astropy", &
                 test_sigma_clip_matches_astropy), &
             new_unittest("a whole sigma-clipping run costs ONE ordering", &
@@ -1409,14 +1426,14 @@ contains
     !!
     !! **What this can and cannot see.** It pins `resolve_mad_scale`, behind `pf_mad`/`%mad`:
     !! restore a division there and this fails, because `raw / 0.6744897501960817` is not
-    !! `raw * 1.482602218505602` for most values. It CANNOT see `slice_mad_std`, the other site --
+    !! `raw * 1.4826022185056018` for most values. It CANNOT see `slice_mad_std`, the other site --
     !! that value is the clip scale inside `pf_sigma_clipped_stats` and never leaves the procedure
     !! (the `stddev` it reports comes from `slice_mean_sd`), so no public observable exists for it.
     !! Both now multiply by the shared `MAD_NORMAL_SCALE`; that half is held by the constant being
     !! shared, not by this test.
     subroutine test_mad_normal_is_one_multiplication(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
-        real(real64), parameter :: SCALE = 1.482602218505602_real64 !! 1/Phi^-1(3/4), full precision.
+        real(real64), parameter :: SCALE = 1.4826022185056018_real64 !! 1/Phi^-1(3/4), correctly rounded.
         real(real64), allocatable :: v(:)
         real(real64) :: raw, normal
 
@@ -1430,7 +1447,7 @@ contains
         ! `==`, not a tolerance: the point is WHICH operation was applied, and a tolerance would
         ! pass against the division this test exists to forbid.
         call check(error, normal == raw * SCALE, &
-            'pf_mad(scale="normal") must be the raw deviation times 1.482602218505602 exactly')
+            'pf_mad(scale="normal") must be the raw deviation times 1.4826022185056018 exactly')
         if (allocated(error)) return
         call check(error, normal /= raw / 0.6744897501960817_real64 .or. &
             raw * SCALE == raw / 0.6744897501960817_real64, &
@@ -3233,10 +3250,10 @@ contains
     !! is the `skipnan=.true.` half below, which must still answer a number.
     subroutine test_propagating_nan_reaches_every_tier(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
-        real(real64) :: v(9), r
+        real(real64) :: v(9), r, ns(9)
         type(pf_stats) :: s
         integer :: k
-        logical :: ok
+        logical :: ok, ov(9)
 
         do k = 1, 9
             v(k) = real(k, real64)
@@ -3267,6 +3284,13 @@ contains
         call pf_mad(v, r, skipnan=.false., ok=ok)
         call check(error, r /= r .and. .not. ok, "and pf_mad")
         if (allocated(error)) return
+        ! **Risk-253, and the vector-valued case is the one that would slip through.** A NaN
+        ! sorts to one end of the ordering and poisons NO rank, so the other eight elements would
+        ! come back with perfectly ordinary scores unless `saw_nan` is tested outright.
+        call pf_normal_scores(v, ns, skipnan=.false., ok=ok)
+        call check(error, all(ns /= ns) .and. .not. ok, &
+            "and pf_normal_scores, where EVERY score must be NaN and not just the NaN's own")
+        if (allocated(error)) return
 
         ! The object side takes the same route through its own guard.
         call s%compute(v, skipnan=.false.)
@@ -3282,6 +3306,14 @@ contains
         if (allocated(error)) return
         call pf_mad(v, r, ok=ok)
         call check(error, r == r .and. ok, "and pf_mad answers a number too")
+        if (allocated(error)) return
+        ! The second half, without which a procedure returning NaN unconditionally would pass.
+        ! `ok` is .false. here because the NaN was EXCLUDED, which is `pf_zscore`'s rule -- but
+        ! the eight survivors must all have real scores.
+        call pf_normal_scores(v, ns, out_valid=ov)
+        call check(error, count(ov) == 8 .and. .not. ov(4) .and. &
+            all(ns == ns .or. .not. ov), &
+            "and pf_normal_scores scores the eight survivors, excluding only the NaN")
     end subroutine test_propagating_nan_reaches_every_tier
 
     !> The second sample the two-sample tests are taken against.
@@ -3507,6 +3539,290 @@ contains
         call check(error, close_to(r, -0.97222222222222232_real64), &
             "tied values must share a midrank, matching scipy.stats.spearmanr")
     end subroutine test_spearman_sees_monotone
+
+    !> The scores read the ORDER and nothing else, so any strictly monotone transform is invisible.
+    !!
+    !! **This is the strongest structural assertion this family admits, and it needs no
+    !! tolerance.** A score computed from the VALUE where the rank belongs -- the single most
+    !! natural way to write this procedure wrongly -- fails it on the first transform, as does
+    !! standardising the values first and mapping those through `Phi**(-1)`. Two transforms of
+    !! different character are used because an affine one would be passed by a z-score as well,
+    !! and would therefore prove nothing.
+    subroutine test_normal_scores_is_order_only(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), t(:), s0(:), s1(:), s2(:), s3(:)
+        integer(int64) :: i
+
+        call golden_fixture(64_int64, x)
+        allocate(t(64), s0(64), s1(64), s2(64), s3(64))
+
+        call pf_normal_scores(x, s0)
+        ! `exp` over a hundredth of the fixture: strictly increasing, no overflow at this range,
+        ! and it stretches the spacing by five orders of magnitude across the array.
+        do i = 1_int64, 64_int64
+            t(i) = exp(x(i) / 100.0_real64)
+        end do
+        call pf_normal_scores(t, s1)
+        call check(error, all(s0 == s1), &
+            "an exponential of the values must give bit-identical scores")
+        if (allocated(error)) return
+
+        ! `atan`: strictly increasing and BOUNDED, so it compresses where `exp` stretched.
+        do i = 1_int64, 64_int64
+            t(i) = atan(x(i))
+        end do
+        call pf_normal_scores(t, s2)
+        call check(error, all(s0 == s2), "and so must an arctangent of them")
+        if (allocated(error)) return
+
+        ! Reversing the order negates every score, because the plotting positions are symmetric
+        ! about 1/2 and `pf_probit` is antisymmetric about it. Not bit-for-bit: `1 - p` is an
+        ! exact double only for `p >= 1/2`, so half the pairs meet across one rounding.
+        do i = 1_int64, 64_int64
+            t(i) = -x(i)
+        end do
+        call pf_normal_scores(t, s3)
+        call check(error, maxval(abs(s3 + s0)) < 1.0e-14_real64, &
+            "reversing the order must negate every score")
+        if (allocated(error)) return
+
+        ! The vacuity guard. Without it the three assertions above would all pass against a
+        ! procedure that returned the same constant for every element.
+        call check(error, maxval(s0) - minval(s0) > 1.0_real64, &
+            "this test is vacuous unless the scores actually vary across the population")
+    end subroutine test_normal_scores_is_order_only
+
+    !> Ties share ONE score, and it is the midrank's rather than any ordinal position's.
+    subroutine test_normal_scores_ties_share_a_score(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(7), s(7), want, ordinal
+        real(real64), parameter :: A = 0.375_real64  !! "blom", the default.
+
+        ! Positions 2, 3 and 4 are one tie, so every one of them takes the midrank 3.
+        x = [1.0_real64, 5.0_real64, 5.0_real64, 5.0_real64, 9.0_real64, 11.0_real64, 13.0_real64]
+        call pf_normal_scores(x, s)
+        call check(error, s(2) == s(3) .and. s(3) == s(4), &
+            "the three tied elements must receive one identical score")
+        if (allocated(error)) return
+
+        ! The midrank of a run spanning sorted positions 2..4 is 3, and the score is
+        ! `Phi**(-1)((3 - 3/8)/(7 + 1 - 3/4))`. Computed here from the definition rather than read
+        ! from the library, so a midrank replaced by an ordinal rank fails rather than agreeing
+        ! with itself.
+        want = pf_probit((3.0_real64 - A) / (7.0_real64 + 1.0_real64 - 2.0_real64 * A))
+        call check(error, s(2) == want, "and it must be the MIDRANK's score, to the bit")
+        if (allocated(error)) return
+
+        ! The vacuity guard: an ordinal rank would put the first of the run at position 2, and
+        ! this test is worth nothing unless that is a different number.
+        ordinal = pf_probit((2.0_real64 - A) / (7.0_real64 + 1.0_real64 - 2.0_real64 * A))
+        call check(error, ordinal /= want, &
+            "this test is vacuous unless an ordinal rank would give a different score")
+        if (allocated(error)) return
+
+        ! The untied elements keep the positions they always had: 1 and 5, 6, 7.
+        call check(error, s(1) < s(2) .and. s(2) < s(5) .and. s(5) < s(6) .and. s(6) < s(7), &
+            "the untied elements must stay strictly ordered around the tie")
+    end subroutine test_normal_scores_ties_share_a_score
+
+    !> **`feature_risks.md` Risk-254.** The ranks are the SURVIVORS', not the whole array's.
+    !!
+    !! Denominating by `size(values)` shrinks every score toward zero by roughly `m/n`: the scores
+    !! stay ordered, stay centred on zero and stay monotone in the values, so every distributional
+    !! check still passes and only the SCALE is wrong -- and only when something is excluded. The
+    !! assertion that sees it is bit-for-bit identity with the sub-population computed alone.
+    subroutine test_normal_scores_uses_the_survivor_count(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), sub(:), s(:), s_sub(:)
+        logical, allocatable :: mask(:)
+        integer(int64) :: i, k
+        integer :: nkept
+
+        call golden_fixture(40_int64, x)
+        allocate(mask(40), s(40))
+        ! Every third element excluded: 27 survive out of 40, so `m/n` is far from 1 and a
+        ! denominator taken from the array size would be visibly wrong.
+        do i = 1_int64, 40_int64
+            mask(i) = (mod(i, 3_int64) /= 0_int64)
+        end do
+        nkept = count(mask)
+        allocate(sub(nkept), s_sub(nkept))
+        k = 0_int64
+        do i = 1_int64, 40_int64
+            if (mask(i)) then
+                k = k + 1_int64
+                sub(k) = x(i)
+            end if
+        end do
+
+        call pf_normal_scores(x, s, is_valid=mask)
+        call pf_normal_scores(sub, s_sub)
+        k = 0_int64
+        do i = 1_int64, 40_int64
+            if (mask(i)) then
+                k = k + 1_int64
+                if (s(i) /= s_sub(k)) then
+                    call check(error, .false., &
+                        "a survivor's score must equal its score in the sub-population alone")
+                    return
+                end if
+            end if
+        end do
+        call check(error, nkept == 27, "the mask must exclude enough to make the scales differ")
+        if (allocated(error)) return
+
+        ! The vacuity guard, and it is the whole point: had the denominator been `n`, the scores
+        ! would still have been ordered and centred -- they would simply have been these ones
+        ! multiplied down. So assert that the two denominators genuinely disagree here.
+        call check(error, abs(maxval(s_sub)) > 1.0e-3_real64 + &
+            abs(pf_probit((real(nkept, real64) - 0.375_real64) / &
+                          (40.0_real64 + 1.0_real64 - 0.75_real64))), &
+            "this test is vacuous unless denominating by the array size would give a " // &
+            "different extreme score")
+    end subroutine test_normal_scores_uses_the_survivor_count
+
+    !> An excluded element is marked in `out_valid`, and is a quiet NaN when the mask is absent.
+    subroutine test_normal_scores_marks_exclusions(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), s(:)
+        logical, allocatable :: mask(:), ov(:)
+        integer(int64) :: nnull, i
+        logical :: ok
+
+        call golden_fixture(32_int64, x)
+        allocate(s(32), mask(32), ov(32))
+        call pf_normal_scores(x, s, ok=ok)
+        call check(error, ok .and. all(s == s), "a clean population must score every element")
+        if (allocated(error)) return
+
+        mask = .true.
+        mask(5) = .false.
+        mask(11) = .false.
+        call pf_normal_scores(x, s, is_valid=mask, out_valid=ov, n_null=nnull, ok=ok)
+        call check(error, (.not. ok) .and. nnull == 2_int64, &
+            "an excluded element must give ok=.false. with n_null naming the cause")
+        if (allocated(error)) return
+        call check(error, (.not. ov(5)) .and. (.not. ov(11)) .and. count(ov) == 30, &
+            "out_valid must mark exactly the excluded elements")
+        if (allocated(error)) return
+        ! The NaN is written whether or not the mask was asked for -- so an output element is
+        ! never left as undefined memory, which nagfor's `-nan` build reports.
+        call check(error, s(5) /= s(5) .and. s(11) /= s(11), &
+            "and their outputs must be quiet NaNs, not stale or zero")
+        if (allocated(error)) return
+        do i = 1_int64, 32_int64
+            if (mask(i)) then
+                if (s(i) /= s(i)) then
+                    call check(error, .false., "a surviving element must have a real score")
+                    return
+                end if
+            end if
+        end do
+
+        ! Without `out_valid` the NaN is the only signal, and it must still be there.
+        call pf_normal_scores(x, s, is_valid=mask, ok=ok)
+        call check(error, (.not. ok) .and. s(5) /= s(5) .and. s(11) /= s(11), &
+            "the NaN must be written even when out_valid was not asked for")
+    end subroutine test_normal_scores_marks_exclusions
+
+    !> Each `method=` token uses its own documented plotting position, and no two agree.
+    !!
+    !! A tie-free population is used deliberately, so the midranks are exactly `1..m` and the
+    !! expectation is the published formula evaluated by hand. **A token falling through to the
+    !! default is what this catches** -- the defect a `select case` without a `case default`
+    !! produces, and one that changes every score by a few percent while leaving them ordered,
+    !! centred and monotone.
+    subroutine test_normal_scores_every_method_token(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: M = 11                    !! a tie-free population of eleven.
+        real(real64) :: x(M), s(M), want(M), blom(M)
+        real(real64) :: rm, den
+        integer :: i, t
+        character(len=8), parameter :: TOKENS(5) = &
+            [character(len=8) :: "blom", "weibull", "tukey", "hazen", "cunnane"]
+        real(real64), parameter :: AVAL(5) = &
+            [0.375_real64, 0.0_real64, 1.0_real64 / 3.0_real64, 0.5_real64, 0.4_real64]
+
+        do i = 1, M
+            x(i) = real(i, real64) * 3.0_real64   ! strictly increasing, so rank(i) = i.
+        end do
+        rm = real(M, real64)
+
+        do t = 1, 5
+            den = rm + 1.0_real64 - 2.0_real64 * AVAL(t)
+            do i = 1, M
+                want(i) = pf_probit((real(i, real64) - AVAL(t)) / den)
+            end do
+            call pf_normal_scores(x, s, method=trim(TOKENS(t)))
+            call check(error, all(s == want), &
+                'method="' // trim(TOKENS(t)) // '" must use its own documented constant')
+            if (allocated(error)) return
+            if (t == 1) blom = want
+            ! Every token but the first must DIFFER from the default, or a fall-through would
+            ! pass this test unnoticed.
+            if (t > 1) then
+                call check(error, any(s /= blom), &
+                    'method="' // trim(TOKENS(t)) // '" must not agree with "blom" everywhere')
+                if (allocated(error)) return
+            end if
+        end do
+
+        ! The default is "blom", asserted rather than assumed.
+        call pf_normal_scores(x, s)
+        call check(error, all(s == blom), 'the default method must be "blom"')
+        if (allocated(error)) return
+
+        ! "filliben" is the MEDIAN rank and is a different SHAPE, not a different constant: two
+        ! closed forms at the ends and an interior formula between.
+        want(1) = pf_probit(1.0_real64 - 0.5_real64 ** (1.0_real64 / rm))
+        want(M) = pf_probit(0.5_real64 ** (1.0_real64 / rm))
+        do i = 2, M - 1
+            want(i) = pf_probit((real(i, real64) - 0.3175_real64) / (rm + 0.365_real64))
+        end do
+        call pf_normal_scores(x, s, method="FILLIBEN")
+        call check(error, all(s == want), &
+            'method="filliben" must use the median rank, ends included, and match case-insensitively')
+        if (allocated(error)) return
+        call check(error, any(s /= blom), '"filliben" must not agree with "blom" everywhere')
+    end subroutine test_normal_scores_every_method_token
+
+    !> The three degenerate populations: one element, none, and every element tied.
+    subroutine test_normal_scores_degenerate(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: one(1), s1(1), empty(0), s0(0), flat(6), s6(6)
+        real(real64) :: mid
+        logical :: ok
+        integer :: t
+        character(len=8), parameter :: TOKENS(6) = &
+            [character(len=8) :: "blom", "weibull", "tukey", "hazen", "cunnane", "filliben"]
+
+        ! **One survivor scores EXACTLY zero, under every token.** Each rule collapses to the
+        ! plotting position 1/2 at m = 1, and `pf_probit(0.5)` is exactly 0 -- so this is `== 0`
+        ! rather than a tolerance, and it catches a quotient left to round on its own.
+        one(1) = 42.0_real64
+        do t = 1, 6
+            call pf_normal_scores(one, s1, method=trim(TOKENS(t)), ok=ok)
+            call check(error, s1(1) == 0.0_real64 .and. ok, &
+                'a single survivor must score exactly 0 under method="' // trim(TOKENS(t)) // '"')
+            if (allocated(error)) return
+        end do
+
+        ! An empty population is not an error: `ok` is .false. and nothing aborts, because a
+        ! per-group loop meets an empty group on real data.
+        call pf_normal_scores(empty, s0, ok=ok)
+        call check(error, .not. ok, "an empty population must report ok=.false. and not abort")
+        if (allocated(error)) return
+
+        ! Every element tied: one midrank, so one score, and it is the centre.
+        flat = 7.0_real64
+        call pf_normal_scores(flat, s6, ok=ok)
+        mid = pf_probit((3.5_real64 - 0.375_real64) / (6.0_real64 + 1.0_real64 - 0.75_real64))
+        call check(error, all(s6 == mid) .and. ok, &
+            "a constant population must give every element the same central score")
+        if (allocated(error)) return
+        call check(error, abs(mid) < 1.0e-15_real64, &
+            "and that score is the centre, because the midrank of a full tie is (m+1)/2")
+    end subroutine test_normal_scores_degenerate
 
     !> `pf_zscore` standardises, reports its exclusions, and has mean 0 and stddev 1.
     subroutine test_zscore_standardises(error)

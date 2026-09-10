@@ -26,8 +26,8 @@ Usage:  tools/generate_probit_reference.py [--check] [--self-test]
   --check      regenerate into memory and compare with the committed file; exit 1 on difference.
   --self-test  cross-check the oracle against scipy, re-derive the `erfinv` coefficients that
                `src/parquet_utils.f90` carries, confirm the frozen `MAD_NORMAL_SCALE` in
-               `src/parquet_stats_order.f90` is `1/Phi^-1(3/4)`, and confirm every emitted literal
-               round-trips to the same double it was made from.
+               `src/parquet_stats_order.f90` is the double nearest `1/Phi^-1(3/4)` exactly, and
+               confirm every emitted literal round-trips to the same double it was made from.
 
 `--self-test` needs scipy; plain generation and `--check` need only `mpmath`. `--check` runs in
 CI's lint stage, which installs Ubuntu's `python3-mpmath` for exactly that.
@@ -402,7 +402,7 @@ def self_test():
         fails += 1
 
     # 5. feature_risks.md Risk-252, from the generator's side: the scale pf_mad multiplies by is
-    #    frozen as a literal, and 1/Phi^-1(3/4) is what it has to be.
+    #    frozen as a literal, and the double nearest 1/Phi^-1(3/4) is what it has to be.
     order = REPO_ROOT / "src" / "parquet_stats_order.f90"
     checks += 1
     if not order.exists():
@@ -415,18 +415,17 @@ def self_test():
                   "blind" % order.name, file=sys.stderr)
             fails += 1
         else:
-            # ONE ulp of tolerance, and it is load-bearing rather than slack: the frozen literal
-            # `1.482602218505602` is one ulp ABOVE the nearest double to 1/Phi^-1(3/4)
-            # (0x3ff7b8bd1a975674 against ...673), because sixteen decimal digits do not name that
-            # double uniquely. It stays as it is: `pf_mad(scale="normal")` shipped in v2.2.0 and
-            # correcting the last bit would move every number it has published, for a relative
-            # change of 1.5e-16 (feature_probit.md, Q8). What must not drift is anything LARGER
-            # than that, which is what this bound catches.
+            # EXACT equality, with no tolerance at all. Up to v2.3.0 the frozen literal was
+            # `1.482602218505602` = 0x3ff7b8bd1a975674, one ulp ABOVE the nearest double to
+            # 1/Phi^-1(3/4) (...673): sixteen decimal digits do not name that double uniquely, and
+            # `1.0/0.6744897501960817` rounds twice -- once to the quartile, once to its
+            # reciprocal. It now reads `1.4826022185056018` and is the correctly rounded value, so
+            # a tolerance here would only re-admit the spelling that was wrong.
             have, want = float(m.group(1)), float(1 / probit(0.75))
             checks += 1
-            if abs(have - want) > math.ulp(want):
-                print("--self-test: MAD_NORMAL_SCALE is %.17g; 1/Phi^-1(3/4) is %.17g -- they "
-                      "differ by %.1f ulp, and only one is allowed"
+            if have != want:
+                print("--self-test: MAD_NORMAL_SCALE is %.17g; the double nearest 1/Phi^-1(3/4) "
+                      "is %.17g -- they differ by %.1f ulp and must not differ at all"
                       % (have, want, abs(have - want) / math.ulp(want)), file=sys.stderr)
                 fails += 1
 

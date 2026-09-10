@@ -568,6 +568,14 @@ contains
         call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, out_valid=out_valid, n_null=n_null, ok=ok)
     end procedure zscore_i32
 
+    module procedure normal_scores_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call normal_scores_f64(wide, s, is_valid=is_valid, method=method, out_valid=out_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure normal_scores_i32
+
     module procedure sigma_clipped_stats_i32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -795,6 +803,14 @@ contains
         wide = real(values, real64)
         call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, out_valid=out_valid, n_null=n_null, ok=ok)
     end procedure zscore_i64
+
+    module procedure normal_scores_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call normal_scores_f64(wide, s, is_valid=is_valid, method=method, out_valid=out_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure normal_scores_i64
 
     module procedure sigma_clipped_stats_i64
         real(real64), allocatable :: wide(:)
@@ -1028,6 +1044,14 @@ contains
         call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, skipnan=skipnan, out_valid=out_valid, &
             n_null=n_null, ok=ok)
     end procedure zscore_f32
+
+    module procedure normal_scores_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call normal_scores_f64(wide, s, is_valid=is_valid, skipnan=skipnan, method=method, &
+            out_valid=out_valid, n_null=n_null, ok=ok, threads=threads)
+    end procedure normal_scores_f32
 
     module procedure sigma_clipped_stats_f32
         real(real64), allocatable :: wide(:)
@@ -1263,6 +1287,14 @@ contains
         call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, out_valid=out_valid, n_null=n_null, ok=ok)
     end procedure zscore_bool
 
+    module procedure normal_scores_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call normal_scores_f64(wide, s, is_valid=is_valid, method=method, out_valid=out_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure normal_scores_bool
+
     module procedure sigma_clipped_stats_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -1497,6 +1529,14 @@ contains
         call zscore_f64(wide, z, is_valid=mask, ddof=ddof, skipnan=skipnan, out_valid=out_valid, &
             n_null=n_null, ok=ok)
     end procedure zscore_col
+
+    module procedure normal_scores_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_normal_scores", is_valid, wide, mask)
+        call normal_scores_f64(wide, s, is_valid=mask, skipnan=skipnan, method=method, out_valid=out_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure normal_scores_col
 
     module procedure sigma_clipped_stats_col
         real(real64), allocatable :: wide(:)

@@ -2223,6 +2223,8 @@ contains
                 test_stats_mode_string_column_is_valid_aborts), &
             new_unittest("an unrecognised correlation method aborts", &
                 test_stats_corr_bad_method_aborts), &
+            new_unittest("an unrecognised plotting-position method aborts", &
+                test_stats_normal_scores_bad_method_aborts), &
             new_unittest("a weighted Spearman correlation aborts", &
                 test_stats_spearman_with_weights_aborts), &
             new_unittest("two samples of different size abort", &
@@ -8793,6 +8795,19 @@ contains
             failure_message="an unrecognised correlation method was expected to abort", &
             required_stderr="unrecognised method")
     end subroutine test_stats_corr_bad_method_aborts
+
+    !> parquet_stats abort path: see scenario_stats_normal_scores_bad_method in
+    !> test/error_scenarios.f90. "rankit" is the token chosen because it is what a reader of the
+    !> literature would most plausibly try -- the scores ARE rankits, but the token is "blom".
+    !> The scenario's own negative control is the accepted `method="hazen"` call above it.
+    subroutine test_stats_normal_scores_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_normal_scores_bad_method", &
+            expect_abort=.true., &
+            failure_message="an unrecognised plotting-position method was expected to abort", &
+            required_stderr="unrecognised method")
+    end subroutine test_stats_normal_scores_bad_method_aborts
 
     !> parquet_stats abort path: see scenario_stats_spearman_with_weights in
     !> test/error_scenarios.f90. The scenario's own negative control is the weighted PEARSON call

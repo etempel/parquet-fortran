@@ -128,6 +128,20 @@ module parquet_stats
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,
     ! `pf_nth_element` and `pf_sort_threads` through it.
     use parquet_sorting
+    ! **The second tier edge, and the only one that adds a file to the footprint.**
+    ! `pf_normal_scores` maps a rank to a normal quantile, which is `Phi**(-1)`, and the only
+    ! alternative to importing it is a second `Phi**(-1)` in this module. `feature_risks.md`
+    ! Risk-252 records what two spellings of one number cost when the number is a single
+    ! CONSTANT; a duplicated kernel is that defect with far more surface.
+    !
+    ! **`parquet_utils` is a LEAF** -- it imports the intrinsic `iso_fortran_env` and
+    ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs
+    ! `tools/module_footprints.txt` exactly one file and adds nothing beneath it, and
+    ! `check_parquet_stats_stays_arrow_free` is untouched because no Arrow is reachable from it.
+    ! `only:` rather than bare, unlike `parquet_sorting` above: one name is needed, and a
+    ! consumer who wants the probit itself should say `use parquet_utils` and get the whole
+    ! family rather than the one specific this module happens to need.
+    use parquet_utils, only : pf_probit
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
@@ -262,7 +276,7 @@ D["scale"] = """            character(len=*), intent(in), optional :: scale
             !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
             !! result a consistent estimator of the standard deviation for Gaussian data --
             !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
-            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! by "the MAD". That is a multiplication by 1.4826022185056018, and **not** by the
             !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
             !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
             !! case-insensitively."""
@@ -1039,6 +1053,15 @@ MODE_OPTS = ["count", "modes", "is_valid", "weights", "n_null", "ok"]
 #: and then the standardised values would not have unit variance under any convention worth
 #: choosing between.
 ZSCORE_OPTS = ["is_valid", "ddof", "skipnan", "out_valid", "n_null", "ok"]
+#: `pf_normal_scores` -- `pf_zscore`'s shape with `method` in place of `ddof`, plus `threads`.
+#:
+#: **No `weights`, and the omission is a COMPILE error rather than a run-time one.** A weighted
+#: midrank is a further definitional choice that no reference library makes; `pf_corr` already
+#: refuses one at run time (`corr_method`), but a procedure that never had the argument refuses
+#: it at compile time instead, which is strictly better and is what `pf_sigma_clipped_stats`
+#: does. `threads` IS here, unlike `pf_zscore`'s: the midrank walk is `pf_argsort`'s, and that
+#: sort takes a thread count.
+NSCORE_OPTS = ["is_valid", "skipnan", "method", "out_valid", "n_null", "ok", "threads"]
 #: `pf_cov` -- no `skipnan`, because a NaN in EITHER array always drops the pair: a two-sample
 #: statistic has no meaning over two populations of different length, so there is nothing for
 #: `skipnan = .false.` to select.
@@ -1624,6 +1647,21 @@ RELATE_IFACES = """        !> `pf_cov` over two 64-bit real arrays: the PAIRWISE
             !! the standardised values, same size as `values`.
 @@zscore_opts@@
         end subroutine zscore_f64
+        !> `pf_normal_scores` over a 64-bit real array: each element's rank, mapped through
+        !! `Phi**(-1)`.
+        !!
+        !! **The scores depend on the input only through its ORDER.** That is the property worth
+        !! knowing and the one that constrains the implementation: any strictly monotone transform
+        !! of `values` must give bit-identical scores, so the value may be read only to sort it and
+        !! never to compute with. The midranks are `pf_corr(method="spearman")`'s, over the
+        !! SURVIVING elements rather than the original array.
+        module subroutine normal_scores_f64(values, s, is_valid, skipnan, method, out_valid, &
+                n_null, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s(:)
+            !! the normal scores, same size as `values`, in the caller's original order.
+@@nscore_opts@@
+        end subroutine normal_scores_f64
         !> `pf_sigma_clipped_stats` over a 64-bit real array: astropy's iterative clip.
         !!
         !! **One ordering serves the whole run**, and that is a property rather than an
@@ -1879,6 +1917,30 @@ RELATE_DOC = {
         "in which case EVERY output is NaN. `n_null` separates the two: it is `0` for the second.",
         "",
         "The result has mean 0 and standard deviation 1 over the surviving elements, to a few ulp."],
+    "pf_normal_scores": [
+        "Replaces each value by the normal quantile its RANK marks -- rankits, normal scores, the",
+        "van der Waerden transform; the x-axis of a Q-Q plot against a Gaussian.",
+        "",
+        "`s(i) = Phi**(-1)((r(i) - a)/(m + 1 - 2a))`, where `r(i)` is `values(i)`'s MIDRANK among",
+        "the `m` elements that survive the exclusion rules -- each run of equal values receiving",
+        "the mean of the sorted positions it spans, exactly as `pf_corr(method=\"spearman\")`",
+        "does -- and `a` comes from `method=`. `s` is the same size as `values` and is in the",
+        "caller's original order.",
+        "",
+        "**The result depends on the input only through its ORDER**, so it is unchanged, bit for",
+        "bit, by any strictly monotone transform of the values: `pf_normal_scores(x)` and",
+        "`pf_normal_scores(exp(x))` are the same array. Ranks are taken over the SURVIVORS, so",
+        "excluding a quarter of the population gives the remaining elements exactly the scores",
+        "they would have had as a population of their own.",
+        "",
+        "**An excluded element has no score**, and there are two ways to learn which: `out_valid`",
+        "marks them exactly, and without it they are written as quiet NaNs -- `pf_zscore`'s rule",
+        "verbatim. `ok` is `.false.` in either case. A one-element population scores that element",
+        "`Phi**(-1)(1/2) = 0`, which is the correct degenerate answer rather than a failure.",
+        "",
+        "There is deliberately **no `weights`** and **no `pf_stats` binding**: a weighted midrank",
+        "is a definitional choice no reference library makes, and tier B sorts in place and never",
+        "hands values back in the caller's order."],
     "pf_sigma_clipped_stats": [
         "astropy's `sigma_clipped_stats`: iteratively drop the outliers, then summarise the rest.",
         "",
@@ -2072,6 +2134,30 @@ MODE_D["ok"] = """            logical, intent(out), optional :: ok
 #: `method`'s doc for `pf_corr`, whose token names a correlation rather than an interpolation.
 #: An override rather than a second entry in the canonical sequence -- the DUMMY is still `method`
 #: in the same slot, which is what `check_stats_optional_argument_order` reads.
+#: `pf_normal_scores`' own `method` and `out_valid`. `method` here selects a PLOTTING POSITION,
+#: which is a different thing entirely from the quantile-interpolation `method` the order family
+#: takes and from `pf_corr`'s pearson/spearman -- three unrelated vocabularies behind one argument
+#: name, so each spells its own out in full rather than sharing a sentence.
+NSCORE_D = dict(D)
+NSCORE_D["method"] = """            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively."""
+NSCORE_D["out_valid"] = """            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the element therefore
+            !! has no score. Same size as `values`. **Absent, such an element is written as a
+            !! quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next."""
+NSCORE_D["threads"] = """            integer, intent(in), optional :: threads
+            !! how many threads the midrank ordering may use, passed straight to `pf_argsort`.
+            !! Absent takes the automatic rule. **The answer does not depend on this argument**:
+            !! ties take the mean of the positions they span, so no tie-breaking the sort might
+            !! choose can reach the result. It is a speed control and never an accuracy one."""
 CORR_D = dict(D)
 CORR_D["method"] = """            character(len=*), intent(in), optional :: method
             !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
@@ -2226,6 +2312,41 @@ def zscore_body(tag, widen, has_nan):
                             for o in mine]
     lines.append("        call " + wrap_call("zscore_f64", call))
     lines.append("    end procedure zscore_%s" % tag)
+    return "\n".join(lines)
+
+
+def nscore_iface(tag, decl, has_nan, kindword):
+    """One interface body for `pf_normal_scores`' per-kind entry point."""
+    mine = kind_opts(NSCORE_OPTS, has_nan)
+    args = wrap_args(["values", "s"] + mine)
+    lines = ["        !> `pf_normal_scores` over %s." % kindword]
+    lines.append("        module subroutine normal_scores_%s(%s)" % (tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            real(real64), intent(out) :: s(:)")
+    lines.append("            !! the normal scores, same size as `values`, in the caller's")
+    lines.append("            !! original order. An excluded element is a quiet NaN unless")
+    lines.append("            !! `out_valid` is present.")
+    for key in mine:
+        lines.append(NSCORE_D[key])
+    lines.append("        end subroutine normal_scores_%s" % tag)
+    return "\n".join(lines)
+
+
+def nscore_body(tag, widen, has_nan):
+    """One `module procedure` body for `pf_normal_scores`' per-kind entry point."""
+    mine = kind_opts(NSCORE_OPTS, has_nan)
+    lines = ["    module procedure normal_scores_%s" % tag]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_normal_scores", is_valid, wide, mask)')
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", "s"] + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o)
+                            for o in mine]
+    lines.append("        call " + wrap_call("normal_scores_f64", call))
+    lines.append("    end procedure normal_scores_%s" % tag)
     return "\n".join(lines)
 
 
@@ -2715,7 +2836,7 @@ ORDER_DOC = {
         "",
         "`median(|x - center|)`, where `center` is the population's own median unless one is",
         "supplied. `scale=\"normal\"` (the default) multiplies by `1/Phi^-1(3/4)` =",
-        "1.482602218505602, which makes the result",
+        "1.4826022185056018, which makes the result",
         "a consistent estimator of the standard deviation for Gaussian data -- so on a large",
         "Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample",
         "with a few wild points they do not, which is the whole reason to reach for it.",
@@ -2977,7 +3098,8 @@ def gen_spec():
     out.append("    public :: pf_median, pf_quantile, pf_quantiles")
     out.append("    public :: pf_iqr, pf_trim_mean, pf_percentile_of_score")
     out.append("    public :: pf_mad, pf_mode, pf_describe")
-    out.append("    public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats")
+    out.append("    public :: pf_cov, pf_corr, pf_zscore, pf_normal_scores")
+    out.append("    public :: pf_sigma_clipped_stats")
     out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
     out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges")
     # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
@@ -3058,7 +3180,8 @@ def gen_spec():
     for spec in GENERIC_SPECIFICS_ORDER["pf_describe"]:
         out.append("        module procedure %s" % spec)
     out.append("    end interface pf_describe")
-    for name in ("pf_cov", "pf_corr", "pf_zscore", "pf_sigma_clipped_stats"):
+    for name in ("pf_cov", "pf_corr", "pf_zscore", "pf_normal_scores",
+                 "pf_sigma_clipped_stats"):
         out.append("    !")
         for line in RELATE_DOC[name]:
             out.append(("    !> " + line).rstrip())
@@ -3122,6 +3245,7 @@ def gen_spec():
     relate = relate.replace("@@cov_opts@@", "\n".join(CORR_D[k] for k in COV_OPTS))
     relate = relate.replace("@@corr_opts@@", "\n".join(CORR_D[k] for k in CORR_OPTS))
     relate = relate.replace("@@zscore_opts@@", "\n".join(D[k] for k in ZSCORE_OPTS))
+    relate = relate.replace("@@nscore_opts@@", "\n".join(NSCORE_D[k] for k in NSCORE_OPTS))
     relate = relate.replace("@@sigclip_opts@@", "\n".join(ORDER_D[k] for k in SIGCLIP_OPTS))
     out.append(relate)
     cum = CUM_IFACES.replace("@@cum_opts@@", "\n".join(D[k] for k in CUM_OPTS))
@@ -3158,6 +3282,7 @@ def gen_spec():
                               "the correlation in [-1, 1]; NaN when either sample is constant.",
                               CORR_OPTS, tag, decl, kindword, []))
         out.append(zscore_iface(tag, decl, has_nan, kindword))
+        out.append(nscore_iface(tag, decl, has_nan, kindword))
         out.append(sigclip_iface(tag, decl, has_nan, kindword))
         for base, word in CUM_WORDS:
             out.append(cum_iface(base, "the running %s, same size as `values`. An excluded "
@@ -3200,6 +3325,7 @@ def gen_kernel():
         bodies.append(pair_body("cov", "c", COV_OPTS, tag, widen))
         bodies.append(pair_body("corr", "r", CORR_OPTS, tag, widen))
         bodies.append(zscore_body(tag, widen, has_nan))
+        bodies.append(nscore_body(tag, widen, has_nan))
         bodies.append(sigclip_body(tag, widen, has_nan))
         for base, _ in CUM_WORDS:
             bodies.append(cum_body(base, tag, widen, has_nan))

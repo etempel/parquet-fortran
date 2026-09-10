@@ -665,8 +665,8 @@ in use; there is nothing to configure, and deliberately no way to override it.
 
 ## Distributions
 
-Four distributions are built on the uniforms: **exponential**, **normal**, **Gamma** and
-**Poisson**. Every one of them is addressed exactly as the uniforms are — a coordinate, or a walk
+The distributions are built on the uniforms: the **exponential**, the **normal**, the **normal
+truncated to an interval**, **Gamma** and **Poisson**. Every one of them is addressed exactly as the uniforms are — a coordinate, or a walk
 along a stream — and every one has its own frozen contract identifier, so a program recording
 `pf_random_algorithm` is not told its uniform draws moved because a Ziggurat layer count changed.
 
@@ -681,6 +681,7 @@ that look interchangeable, because two of them are not.
 | `%exp_portable`, `pf_random_exp_portable_at`, `pf_random_fill_exp_portable` | **every platform** | **yes**, exactly |
 | `%normal`, `pf_random_normal_at`, `pf_random_fill_normal` | given libm | **no** — see below |
 | `%normal_portable`, `pf_random_normal_portable_at`, `pf_random_fill_normal_portable` | **every platform** | **no** |
+| `%normal_truncated(lo, hi)` | given libm | n/a (no bulk form) |
 | `%gamma(shape)` | given libm | n/a (no bulk form) |
 | `%poisson(lambda)` | given libm | n/a (no bulk form) |
 
@@ -782,6 +783,51 @@ is a user obligation to take it into account.
 
 The exponential is exempt because its consumption is fixed, which is why its row reads "yes".
 
+### The truncated normal
+
+A normal restricted to an interval, with no wasted draws however far into the tail the interval
+sits.
+
+```fortran
+call rng%normal_truncated(lo, hi, x)                       ! standard normal, restricted to [lo, hi]
+call rng%normal_truncated(lo, hi, x, mu=m, sigma=s)        ! N(m, s**2), restricted to [lo, hi]
+```
+
+Optional arguments appear in square brackets, with the comma outside the bracket:
+`%normal_truncated(lo, hi, x, [mu], [sigma])`.
+
+**`lo`, `hi`, `mu`, `sigma` and the result all live on one scale**, which is the thing to get right
+here. `mu` defaults to 0 and `sigma` to 1, so the two-bound call is the standard normal on
+`[lo, hi]`; give `mu` and `sigma` and the bounds stay in your own units, not in standard deviations.
+This is deliberately unlike `%gamma`, where you rescale the result yourself — a truncated normal
+cannot be rescaled after the fact without also rescaling the bounds, and an interface that invited
+you to try would return plausible wrong numbers.
+
+**For no bound on one side, pass `huge(1.0_real64)` or `-huge(1.0_real64)`** — or a true
+`Infinity` if you have one to hand. Both spellings give the same distribution, so a one-sided
+truncation needs nothing from `ieee_arithmetic`.
+
+```fortran
+call rng%normal_truncated(0.0_real64, huge(1.0_real64), x, mu=m, sigma=s)   ! a positive draw
+```
+
+**The result is always inside `[lo, hi]`.** That is worth stating because it is not free: the draw
+happens on the standardised scale and coming back off it does not round into the interval by
+itself, so the value is clamped. A positivity truncation really does return a non-negative number.
+
+Three proposals serve the whole domain, and which one runs is decided by the bounds alone:
+straight rejection when the interval straddles the mode and is wide, a uniform proposal when it is
+narrow, and an exponentially tilted proposal out in a tail. Between one and about one and a half
+proposals per draw across the whole domain, and never more than about two, so `[4, +Infinity)` and
+`[20, +Infinity)` cost what `[-1, 2]` costs. Drawing normals until one lands in range — the obvious
+thing to write by hand — needs some 32 000 draws per value at `lo = 4` and does not finish at all
+much beyond that.
+
+Both bounds are refused rather than repaired: `lo` must be strictly below `hi` after centring and
+scaling, `sigma` must be strictly positive, and a NaN anywhere is refused. Reversed bounds abort
+rather than being swapped, unlike `%int_range`, because for an interval the two orders are
+different questions and one of them has no answer.
+
 ### Gamma and Poisson
 
 Both are stream-only: there is no `pf_random_gamma_at`, no bulk fill, and no `_portable` twin.
@@ -817,6 +863,7 @@ One per distribution family, separate from `pf_random_algorithm` and from each o
 |---|---|
 | `pf_exp_algorithm` | both exponential realisations: the mapping, the `1 - u` convention, the two-word cost, and which logarithm each form uses |
 | `pf_normal_algorithm` | both normal realisations: the layer count and table construction, the polar variant, both rejection loops' draw order and cost, and the sub-stream labels |
+| `pf_normal_truncated_algorithm` | the three proposals, the rule choosing between them, **both of that rule's thresholds**, each proposal's draw order, and which normal the straight-rejection case consumes |
 | `pf_gamma_algorithm` | the Marsaglia–Tsang variant, the `shape < 1` boost, **and which normal the inner loop consumes** |
 | `pf_poisson_algorithm` | both algorithms, the crossover `lambda`, and each one's draw order |
 
@@ -839,7 +886,7 @@ value — a program recording only Gamma's identifier would otherwise miss it.
 stream *is*. What stops being possible is **predicting** it. A fixed-cost producer lets you compute
 where a stream will be after a known sequence of draws (`%uniform` 2 words, `%uniform32` 1, `%bits`
 2, `%int_range` 2, `%exp` 2, all of the last three pair-aligned); `%normal`, `%normal_portable`,
-`%gamma` and `%poisson` do not.
+`%normal_truncated`, `%gamma` and `%poisson` do not.
 
 So checkpoint and restart — save `%position()`, `%rewind` to it later — keeps working for every
 producer. Arithmetic on positions does not.

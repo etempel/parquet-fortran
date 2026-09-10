@@ -124,6 +124,7 @@ module parquet_random
     public :: pf_normal_algorithm
     public :: pf_gamma_algorithm
     public :: pf_poisson_algorithm
+    public :: pf_normal_truncated_algorithm
     public :: pf_random_at
     public :: pf_random32_at
     public :: pf_random_bits_at
@@ -141,6 +142,7 @@ module parquet_random
     public :: parquet_debug_normal_path
     public :: parquet_debug_gamma_path
     public :: parquet_debug_poisson_path
+    public :: parquet_debug_normal_truncated_path
     public :: pf_random_seed
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
@@ -227,6 +229,32 @@ module parquet_random
     !!
     !! Bit-identical for a given libm: PTRS needs `log` and `log_gamma`, and Knuth needs `exp`.
     character(len=*), parameter :: pf_poisson_algorithm = "poisson:knuth|10|ptrs/libm/v1"
+
+    !> Identifies the truncated normal mapping: the three proposals, the rule choosing between
+    !! them, both of that rule's thresholds, each proposal's draw order, and -- named explicitly,
+    !! for the reason `pf_gamma_algorithm` names it -- **which normal the naive case consumes**.
+    !!
+    !! **The case rule is contract, not a tuning knob.** Which proposal runs decides which value
+    !! comes back, so moving either threshold moves draws while every distributional test still
+    !! passes (`feature_risks.md` Risk-248). It is in the string for the same reason the Poisson's
+    !! crossover is in `pf_poisson_algorithm`.
+    !!
+    !! **Bit-identical for a given libm, and there is no portable form.** The uniform and tilted
+    !! proposals both weigh an `exp` from libm, and `parquet_expkey` freezes a logarithm only, so a
+    !! `%normal_truncated_portable` could not keep the promise its name would imply -- the same
+    !! argument that keeps `%gamma_portable` from existing. Do not add one for symmetry with
+    !! `%normal`.
+    character(len=*), parameter :: pf_normal_truncated_algorithm = &
+        "normal_trunc:robert95-3case/naive+uniform+exptilt/normal=ziggurat256/libm/v1"
+
+    !> Where the truncated normal's straddling arm switches from naive rejection to the uniform
+    !! proposal. **Frozen contract; see `pf_normal_truncated_algorithm`.**
+    !!
+    !! Both proposals cover the same target integral over `[a, b]`, so their expected costs are in
+    !! the ratio of their envelope masses: `b - a` for the uniform proposal against `sqrt(2*pi)`
+    !! for the whole normal. They therefore cross exactly here. Not fitted, not measured, and not
+    !! arbitrary -- unlike `poisson_crossover`, which is arbitrary within a region.
+    real(real64), parameter :: trunc_straddle_crossover = 2.5066282746310002_real64
 
     !> Where Poisson switches from Knuth's product to PTRS. **Frozen contract; see
     !! `pf_poisson_algorithm`.** Knuth costs one uniform per unit of `lambda`, PTRS a constant two
@@ -865,6 +893,8 @@ module parquet_random
         procedure :: exp_portable => stream_exp_portable  !! `%exp` through the frozen log; same cost.
         procedure :: normal => stream_normal        !! Next standard normal; VARIABLE cost, pair-aligned.
         procedure :: normal_portable => stream_normal_portable  !! `%normal` frozen; variable cost.
+        procedure :: normal_truncated => stream_normal_truncated  !! Next normal restricted to an
+                                                    !! interval; VARIABLE cost, pair-aligned.
         procedure :: gamma => stream_gamma          !! Next `Gamma(shape, 1)`; VARIABLE cost.
         procedure, private :: poisson_i32 => stream_poisson_i32 !! `%poisson`, `int32` result
         procedure, private :: poisson_i64 => stream_poisson_i64 !! `%poisson`, `int64` result
@@ -1456,6 +1486,27 @@ contains
                                                         !! candidate the full test would reject
         call poisson_draw(rng, lambda, k, path, squeeze_ok)
     end subroutine parquet_debug_poisson_path
+
+    !> Reports which case a `%normal_truncated` draw took, and how many proposals it cost.
+    !! **Test-only**; see `parquet_debug_normal_path`.
+    !!
+    !! `path` is 1 naive, 2 uniform proposal, 3 exponential tilting, plus 3 more when the interval
+    !! was mirrored onto the non-negative side, so a test asserting the mirror is not lost has
+    !! something to read. **The reachable set is `{1, 2, 3, 5, 6}`; `4` cannot occur** -- see
+    !! `normal_truncated_draw`. Forcing a case is not offered and is not needed: the case is
+    !! decided by the standardised bounds alone, so a test reaches any of the five by choosing an
+    !! interval on the side it wants, which also exercises the two thresholds as they ship.
+    pure subroutine parquet_debug_normal_truncated_path(rng, lo, hi, x, path, tries, mu, sigma)
+        type(pf_random_stream), intent(inout) :: rng    !! the stream to advance, as `%normal_truncated` would
+        real(real64), intent(in) :: lo              !! lower bound of the support, in `x`'s units
+        real(real64), intent(in) :: hi              !! upper bound of the support, in `x`'s units
+        real(real64), intent(out) :: x              !! the draw, equal to `%normal_truncated`'s
+        integer(int32), intent(out) :: path         !! 1/2/3 naive/uniform/tilted; +3 when mirrored
+        integer(int64), intent(out) :: tries        !! proposals the rejection loop consumed
+        real(real64), intent(in), optional :: mu    !! untruncated mean; default 0
+        real(real64), intent(in), optional :: sigma !! untruncated standard deviation; default 1
+        call normal_truncated_draw(rng, lo, hi, x, path, tries, mu, sigma)
+    end subroutine parquet_debug_normal_truncated_path
 
     subroutine parquet_debug_normal_path(seed, i, draw, portable, x, path, pairs)
         integer(int64), intent(in) :: seed          !! the stream family's seed
@@ -3376,6 +3427,233 @@ contains
         call advance_by(self, 2_int64 * pairs)
         x = v
     end subroutine stream_normal
+
+    !> Where the tail arm switches from the uniform proposal to exponential tilting, for a
+    !! standardised lower bound `a >= 0`. **Frozen contract; see `pf_normal_truncated_algorithm`.**
+    !!
+    !! **Derived, not fitted, and the derivation is here because the closed form hides it.** Both
+    !! proposals cover the same target integral over `[a, b]`, so their expected costs are in the
+    !! ratio of their envelope masses: `(b - a) * exp(-a*a/2)` for a uniform proposal whose
+    !! envelope is anchored at `a`, against `exp(lam*lam/2 - lam*a) / lam` for the tilted one.
+    !! Substituting `lam*lam = a*lam + 1` -- which is `lam`'s defining equation, see
+    !! `normal_truncated_draw` -- turns the second into `exp(-a*a/2)` times the expression below,
+    !! so the two cross exactly at `b - a = tn_threshold(a)`.
+    !!
+    !! **Written to cancel NOTHING, and that is load-bearing rather than fastidious.** The direct
+    !! transcription of the algebra is `exp((2 + a*a - a*s)/4) * 2/(a + s)`, in which `a*a - a*s`
+    !! is a difference of two nearly-equal large doubles: for `a` around `1e10` the two agree to
+    !! every bit, the true difference is 0, and a compiler that CONTRACTS the pair into an FMA
+    !! returns the rounding error of `a*a` instead -- some hundreds -- which comes back out of the
+    !! `exp` as a threshold near `1e53`. That sends a wide tail interval into the uniform proposal,
+    !! whose acceptance there underflows to zero, and the draw HANGS (`feature_risks.md`
+    !! Risk-251). Rationalising `a - s = -4/(a + s)` removes the cancellation instead of guarding
+    !! it, so no rounding barrier is needed and no compiler flag can reintroduce it. `hypot`
+    !! rather than `sqrt(a*a + 4)` keeps `a*a` from overflowing for an `a` above `1.3e154`, which
+    !! would otherwise make `s` infinite and the threshold 0.
+    !!
+    !! The result is positive and decreasing in `a`, behaving as `1/a` out in the tail; at `a = 0`
+    !! it is `exp(0.5)`. Beyond `a` of about `6.7e7` it drops below one ulp of `a`, so no interval
+    !! narrower than the threshold is representable there and the tilted case is the only one that
+    !! can serve a far tail at all -- which is why the hang above was not a rare corner.
+    pure function tn_threshold(a) result(t)
+        real(real64), intent(in) :: a               !! standardised lower bound; `a >= 0`
+        real(real64) :: t                           !! the interval width at which the two cross
+        real(real64) :: s
+        s = hypot(a, 2.0_real64)                    ! sqrt(a*a + 4), without overflowing
+        t = (2.0_real64 / (a + s)) * exp(0.5_real64 - a / (a + s))
+    end function tn_threshold
+
+    !> The truncated normal draw, with the accepting case reported. See `stream_normal_truncated`.
+    !!
+    !! Robert (1995), *Simulation of truncated normal variables*, Statistics and Computing
+    !! 5:121-125: three proposals and a **Phi-free** rule choosing between them. Phi-free matters
+    !! twice -- a rule evaluating the normal CDF would put the case boundary at libm's mercy, and
+    !! the case boundary decides the value.
+    !!
+    !! `path` is 1 naive, 2 uniform proposal, 3 exponential tilting, plus 3 more when the interval
+    !! was mirrored -- so 5 and 6 are the latter two cases on a wholly non-positive interval. The
+    !! offset encoding is `gamma_draw`'s, for the same reason: the mirror is orthogonal to the
+    !! case, and overwriting `path` would make every mirrored draw's case invisible. `tries` counts
+    !! proposals. Nothing in the library reads either.
+    !!
+    !! **`path == 4` cannot occur, by construction rather than by accident**: naive rejection is
+    !! reachable only from the straddling arm, and the straddling arm is never mirrored. So the
+    !! reachable set is exactly `{1, 2, 3, 5, 6}`, and a test enumerating the cases asserts those
+    !! five -- not six. Renumbering to close the gap would put the mirror back into the case
+    !! number, which is what this encoding exists to avoid.
+    !!
+    !! **The two guards are written as negated `>` and `<` tests, never as `<=` or `>=`.** Every
+    !! comparison against a NaN is false, so the negated form refuses a NaN and the direct form
+    !! waves it through -- the same idiom, for the same reason, as `gamma_draw`'s shape guard.
+    !! The bound guard sits on the STANDARDISED bounds, which makes one test cover four defects:
+    !! `lo > hi`, `lo == hi`, a NaN in `lo`, `hi` or `mu`, and an infinite `mu` (both bounds then
+    !! collapse to one infinity). An interval that is non-empty in data units but collapses under
+    !! a large `sigma` is refused there too, which is why the message names the standardisation.
+    !!
+    !! **Infinite bounds need no special case anywhere.** `b - a` is `+Infinity`, which satisfies
+    !! every case rule's `>=`; `z <= b` is then always true; and `huge(1.0_real64)` behaves
+    !! identically, so a caller need not reach for `ieee_arithmetic` to truncate on one side.
+    pure subroutine normal_truncated_draw(self, lo, hi, x, path, tries, mu, sigma)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: lo              !! lower bound of the support, in `x`'s units
+        real(real64), intent(in) :: hi              !! upper bound of the support, in `x`'s units
+        real(real64), intent(out) :: x              !! the draw, satisfying `lo <= x <= hi`
+        integer(int32), intent(out) :: path         !! 1/2/3 naive/uniform/tilted; +3 when mirrored
+        integer(int64), intent(out) :: tries        !! proposals this draw consumed; at least 1
+        real(real64), intent(in), optional :: mu    !! untruncated mean; default 0
+        real(real64), intent(in), optional :: sigma !! untruncated standard deviation; default 1
+        real(real64) :: a, b, m, t, z, u, e, lam, ctr, scl
+        logical :: mirrored
+
+        ctr = 0.0_real64
+        scl = 1.0_real64
+        if (present(mu)) ctr = mu
+        if (present(sigma)) scl = sigma
+        if (.not. (scl > 0.0_real64)) then
+            error stop "pf_random_stream%normal_truncated: sigma must be strictly positive " // &
+                       "(a scale of zero or less is not a distribution, and NaN is not a scale)"
+        end if
+        a = (lo - ctr) / scl
+        b = (hi - ctr) / scl
+        if (.not. (a < b)) then
+            error stop "pf_random_stream%normal_truncated: the lower bound must be strictly " // &
+                       "below the upper bound after centring and scaling (an empty or " // &
+                       "single-point support is not a distribution, and NaN is not a bound)"
+        end if
+
+        tries = 0_int64
+        mirrored = .false.
+        m = 0.0_real64
+        if (a < 0.0_real64 .and. b > 0.0_real64) then
+            ! The interval straddles the mode, so the target's maximum is interior, at 0.
+            if (b - a >= trunc_straddle_crossover) then
+                path = 1
+                do
+                    tries = tries + 1_int64
+                    call stream_normal(self, z)
+                    if (z >= a .and. z <= b) exit
+                end do
+                call tn_finish(z, 1.0_real64, ctr, scl, lo, hi, x)
+                return
+            end if
+        else
+            ! Wholly non-positive intervals are mirrored onto non-negative ones, so the three
+            ! cases below need only the one orientation. `b <= 0` rather than `b < 0` keeps the
+            ! `a < 0, b == 0` interval out of the straddling arm, where an envelope anchored at 0
+            ! would be right but `tn_threshold` would not be consulted.
+            if (b <= 0.0_real64) then
+                t = a
+                a = -b
+                b = -t
+                mirrored = .true.
+            end if
+            if (b - a >= tn_threshold(a)) then
+                ! Exponential tilting. `lam` maximises the tilted envelope and solves
+                ! `lam*lam = a*lam + 1`, so `lam >= a >= 0` always and the accept probability
+                ! below never exceeds 1.
+                path = 3
+                lam = 0.5_real64 * (a + hypot(a, 2.0_real64))
+                do
+                    tries = tries + 1_int64
+                    call stream_exp(self, e)
+                    z = a + e / lam
+                    call stream_uniform(self, u)
+                    if (z <= b) then
+                        t = z - lam
+                        if (u <= exp(-0.5_real64 * t * t)) exit
+                    end if
+                end do
+                call tn_finish(z, merge(-1.0_real64, 1.0_real64, mirrored), ctr, scl, lo, hi, x)
+                if (mirrored) path = path + 3
+                return
+            end if
+            m = a
+        end if
+
+        ! The uniform proposal, for an interval too narrow for its arm's alternative. `m` is the
+        ! point of `[a, b]` nearest zero and therefore where the target is largest, so the accept
+        ! probability is at most 1, with equality only at `m` -- getting `m` wrong returns a
+        ! UNIFORM draw that no coarse test can tell from this one (`feature_risks.md` Risk-249).
+        path = 2
+        do
+            tries = tries + 1_int64
+            call stream_uniform(self, u)
+            z = a + u * (b - a)
+            call stream_uniform(self, u)
+            ! `(m - z)*(m + z)` rather than `m*m - z*z`: the same quantity, formed without the
+            ! cancellation that makes the second one meaningless for a large `m` -- see
+            ! `tn_threshold`, where the identical hazard hangs the draw outright.
+            if (u <= exp(0.5_real64 * (m - z) * (m + z))) exit
+        end do
+        call tn_finish(z, merge(-1.0_real64, 1.0_real64, mirrored), ctr, scl, lo, hi, x)
+        if (mirrored) path = path + 3
+    end subroutine normal_truncated_draw
+
+    !> Un-mirrors, de-standardises and CLAMPS one truncated normal draw.
+    !!
+    !! **The clamp is the only thing that makes `lo <= x <= hi` true, and it is not redundant
+    !! tidying for a later reader to delete** (`feature_risks.md` Risk-250). `z` is drawn inside
+    !! `[(lo-mu)/sigma, (hi-mu)/sigma]`, but `mu + sigma*z` does not round back inside `[lo, hi]`
+    !! whenever `mu` and `sigma` are not aligned with the bounds: measured over 1.27 M evaluations
+    !! at independently chosen `mu`, `sigma` and bounds, 74 453 landed outside. The case that
+    !! matters is a positivity truncation, where a draw on the lower boundary comes back negative
+    !! and flows into a `sqrt`, a `log` or a physical count somewhere else entirely.
+    !!
+    !! **Two `if`s rather than `min`/`max`**, which compile to `minsd`/`maxsd` and raise
+    !! `IEEE_INVALID` on a quiet NaN. Nothing here can be a NaN -- `normal_truncated_draw` refused
+    !! every NaN input before drawing, and `sigma > 0` and `lam > 0` are guaranteed -- so this is
+    !! belt and braces rather than a live hazard, but it costs nothing and nagfor unmasks the trap
+    !! for the whole process. The clamp moves a value by at most one ulp of the bound.
+    pure subroutine tn_finish(z, sgn, ctr, scl, lo, hi, x)
+        real(real64), intent(in) :: z               !! the standardised draw, on the mirrored side
+        real(real64), intent(in) :: sgn             !! `-1` if the interval was mirrored, else `1`
+        real(real64), intent(in) :: ctr             !! the resolved `mu`
+        real(real64), intent(in) :: scl             !! the resolved `sigma`
+        real(real64), intent(in) :: lo              !! lower bound, in the caller's units
+        real(real64), intent(in) :: hi              !! upper bound, in the caller's units
+        real(real64), intent(out) :: x              !! the draw, clamped into `[lo, hi]`
+        x = ctr + scl * (sgn * z)
+        if (x < lo) x = lo
+        if (x > hi) x = hi
+    end subroutine tn_finish
+
+    !> `%normal_truncated`: the next normal restricted to `[lo, hi]`.
+    !!
+    !! **`lo`, `hi`, `mu`, `sigma` and the result all live on ONE scale**, and that is the
+    !! load-bearing decision of this interface. `%gamma` can leave the scale to the caller because
+    !! scaling a Gamma draw commutes with drawing it; truncation does not commute so painlessly --
+    !! the bounds have to be standardised before the draw, so an interface taking bounds on the
+    !! standard scale would invite a caller to pass physical bounds beside a physical `mu` and get
+    !! a plausible wrong answer with nothing to see.
+    !!
+    !! `mu` defaults to 0 and `sigma` to 1, so the two-bound call is the standard normal on
+    !! `[lo, hi]`. For no bound on one side pass `huge(1.0_real64)` or a true `Infinity`; both work
+    !! and give the same distribution.
+    !!
+    !! **The result is guaranteed inside `[lo, hi]`** -- see `tn_finish`, which is where that is
+    !! actually made true.
+    !!
+    !! **Variable, unpredictable cost**, pair-aligned, joining `%normal`, `%gamma` and `%poisson`
+    !! in what `%position` can and cannot promise (see `pf_random_stream`). Between one and about
+    !! one and a half proposals per draw across the whole domain, and never more than about two,
+    !! however far into the tail the interval sits -- which is the property that lets this be
+    !! written without an iteration cap. Naive rejection alone would need some 32 000 normals per
+    !! value at `lo = 4`, and would not terminate in practice further out.
+    !!
+    !! **Unlike `%normal`, an exhausted stream may abort part-way through the rejection loop**,
+    !! having consumed some words. `%gamma` has the same property; the stronger "writes and moves
+    !! nothing" invariant is not available to a producer built from several sub-draws.
+    pure subroutine stream_normal_truncated(self, lo, hi, x, mu, sigma)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: lo              !! lower bound of the support, in `x`'s units
+        real(real64), intent(in) :: hi              !! upper bound of the support, in `x`'s units
+        real(real64), intent(out) :: x              !! the draw, satisfying `lo <= x <= hi`
+        real(real64), intent(in), optional :: mu    !! untruncated mean; default 0
+        real(real64), intent(in), optional :: sigma !! untruncated standard deviation; default 1
+        integer(int32) :: path
+        integer(int64) :: tries
+        call normal_truncated_draw(self, lo, hi, x, path, tries, mu, sigma)
+    end subroutine stream_normal_truncated
 
     !> `%gamma`: the next `Gamma(shape, 1)` draw, by Marsaglia-Tsang rejection.
     !!

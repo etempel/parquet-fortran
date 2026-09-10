@@ -27,6 +27,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `bench/benchmark_spatial.sh` gains `MODE=los`, with `WALK=`, `SPREAD=` and `CELLS_PER_POINT=`
   arms. See
   [Cylinders along the line of sight](doc/pages/utilities/spatial.md#cylinders-along-the-line-of-sight).
+- **Truncated normal draws: `rng%normal_truncated(lo, hi, x [, mu, sigma])`.** Draws a normal
+  restricted to an interval, with the bounds, the location, the scale and the result all on one
+  scale, and the result guaranteed inside `[lo, hi]`. One-sided truncation is a `huge()` or
+  infinite bound. The draw costs between one and about two proposals for any interval, however far
+  into the tail it sits, and which of its three proposals runs is frozen contract published through
+  `pf_normal_truncated_algorithm`. See [Distributions](doc/pages/utilities/random.md).
 - **Grouping: `parquet_table%group_by` and the `parquet_grouping` object.**
   `t%group_by(keys, grp)` partitions a table's rows by the values of one or more key columns and
   keeps the partition as an object that answers per group, without reordering the table. `%rows`,

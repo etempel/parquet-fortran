@@ -86,7 +86,25 @@ contains
             new_unittest("the Poisson int32 and int64 results agree where both fit", &
                          test_poisson_kinds), &
             new_unittest("every squeeze accepts only what the full test would accept, exactly", &
-                         test_squeezes_are_valid) &
+                         test_squeezes_are_valid), &
+            new_unittest("the truncated normal is right on each case's own interval, with a uniform control", &
+                         test_normal_trunc_distribution), &
+            new_unittest("every reachable truncated-normal case is taken, and each threshold decides which", &
+                         test_normal_trunc_cases), &
+            new_unittest("every truncated draw lands inside its bounds, at an ill-conditioned scale", &
+                         test_normal_trunc_containment), &
+            new_unittest("both truncated envelopes are exact: the accept probability never exceeds 1", &
+                         test_normal_trunc_envelopes), &
+            new_unittest("the uniform proposal is right at its WIDEST interval, where a flat draw would show", &
+                         test_normal_trunc_case_two_widest), &
+            new_unittest("a huge bound and a true infinity are the same truncation", &
+                         test_normal_trunc_unbounded_forms), &
+            new_unittest("the truncated normal is pure: usable in do concurrent, same values", &
+                         test_normal_trunc_purity), &
+            new_unittest("the truncated normal's stream cost is variable, observed, and rewind-exact", &
+                         test_normal_trunc_cost), &
+            new_unittest("a far-out interval reaches the tilted case and terminates, at every scale", &
+                         test_normal_trunc_far_tail_terminates) &
             ]
     end subroutine collect_tests_parquet_random_dist
 
@@ -1393,5 +1411,634 @@ contains
         expect = dn / real(NCELL, real64)
         chi2 = sum((real(counts, real64) - expect) ** 2 / expect)
     end subroutine exp_gate
+
+    ! ================================================================================
+    ! The truncated normal
+    ! ================================================================================
+
+    !> The truncated normal has the right shape on an interval from each of its three cases.
+    !!
+    !! **The negative control is a UNIFORM sample on the same interval**, not a rescaled normal,
+    !! because that is precisely what a wrong envelope anchor returns (`feature_risks.md`
+    !! Risk-249). A gate that accepted it would be measuring nothing on the narrow intervals where
+    !! the uniform proposal runs -- which are the intervals where a truncated normal most resembles
+    !! a uniform, and so the ones a careless gate passes blind.
+    subroutine test_normal_trunc_distribution(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 200000_int64
+        real(real64) :: z_mean, z_var, chi2
+        integer :: c
+        real(real64) :: lo(3), hi(3)
+        character(len=16) :: what(3)
+
+        ! One interval per case: naive (straddling and wide), uniform proposal (a tail sliver),
+        ! exponential tilting (a one-sided tail).
+        lo = [-1.0_real64, 3.0_real64, 4.0_real64]
+        hi = [2.0_real64, 3.2_real64, huge(1.0_real64)]
+        what = ["naive          ", "uniform        ", "tilted         "]
+
+        do c = 1, 3
+            call trunc_gate(dist_seed, NDRAW, lo(c), hi(c), .false., z_mean, z_var, chi2)
+            call check(error, abs(z_mean) <= 4.5_real64, &
+                "the truncated normal's mean is more than 4.5 SE from the exact conditional mean, case " // &
+                trim(what(c)))
+            if (allocated(error)) return
+            call check(error, abs(z_var) <= 5.0_real64, &
+                "the truncated normal's variance is more than 5 SE from the exact conditional variance, case " // &
+                trim(what(c)))
+            if (allocated(error)) return
+            call check(error, chi2 <= 43.8_real64, &
+                "the truncated normal's conditional CDF is not uniform over 20 equiprobable cells at the 0.999 " // &
+                "level, case " // trim(what(c)))
+            if (allocated(error)) return
+
+            ! NEGATIVE CONTROL: uniform draws on the same interval must be rejected.
+            call trunc_gate(dist_seed, NDRAW, lo(c), hi(c), .true., z_mean, z_var, chi2)
+            call check(error, chi2 > 43.8_real64, &
+                "the gate ACCEPTS a flat sample on the same interval, so it is not measuring the shape at all " // &
+                "and its verdict on the real draws means nothing, case " // trim(what(c)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_normal_trunc_distribution
+
+    !> Every reachable case is taken, `path = 4` never is, and each threshold decides its own side.
+    !!
+    !! **The thresholds are recomputed here from the written specification**, not imported from
+    !! `parquet_random`, for the reason `test_generic_stride_aliasing` recomputes its domain tags:
+    !! a test borrowing the library's constant cannot tell a wrong constant from a wrong rule.
+    subroutine test_normal_trunc_cases(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng
+        integer(int64) :: tries, npath(6)
+        integer(int32) :: path
+        real(real64) :: x, a, w, sq2pi
+        integer :: k
+
+        sq2pi = sqrt(8.0_real64 * atan(1.0_real64))      ! sqrt(2*pi), built rather than quoted
+        npath = 0_int64
+        call rng%seed(dist_seed, 71_int64)
+
+        ! Six intervals, chosen for the case each should take.
+        call probe_path(rng, -2.0_real64, 2.0_real64, npath, path)            ! naive
+        call probe_path(rng, -0.2_real64, 0.2_real64, npath, path)            ! uniform, straddling
+        call probe_path(rng, 4.0_real64, huge(1.0_real64), npath, path)       ! tilted
+        call probe_path(rng, -0.2_real64, -0.05_real64, npath, path)          ! uniform, mirrored
+        call probe_path(rng, -huge(1.0_real64), -4.0_real64, npath, path)     ! tilted, mirrored
+        call probe_path(rng, 0.0_real64, 0.05_real64, npath, path)            ! uniform, a == 0
+
+        call check(error, npath(1) > 0 .and. npath(2) > 0 .and. npath(3) > 0, &
+            "one of the three unmirrored truncated-normal cases was never reached, so the case rule has " // &
+            "collapsed onto fewer proposals than it ships with")
+        if (allocated(error)) return
+        call check(error, npath(5) > 0 .and. npath(6) > 0, &
+            "a wholly non-positive interval did not report a MIRRORED path, so either the mirror is gone or " // &
+            "the path code no longer records it -- and a lost mirror returns a near-uniform draw")
+        if (allocated(error)) return
+        call check(error, npath(4) == 0, &
+            "a draw reported path 4 (mirrored naive), which cannot occur: naive rejection is reachable only " // &
+            "from the straddling arm, and the straddling arm is never mirrored")
+        if (allocated(error)) return
+
+        ! The straddling threshold: sqrt(2*pi) wide takes naive, a hair narrower takes uniform.
+        ! Both are centred, so only the WIDTH differs between the two calls.
+        call rng%seed(dist_seed, 72_int64)
+        call parquet_debug_normal_truncated_path(rng, -0.5_real64 * sq2pi * 1.001_real64, &
+            0.5_real64 * sq2pi * 1.001_real64, x, path, tries)
+        call check(error, path == 1_int32, &
+            "an interval wider than sqrt(2*pi) did not take naive rejection, so the straddling threshold moved")
+        if (allocated(error)) return
+        call parquet_debug_normal_truncated_path(rng, -0.5_real64 * sq2pi * 0.999_real64, &
+            0.5_real64 * sq2pi * 0.999_real64, x, path, tries)
+        call check(error, path == 2_int32, &
+            "an interval narrower than sqrt(2*pi) did not take the uniform proposal, so the straddling " // &
+            "threshold moved -- and which proposal runs decides the value, not just the speed")
+        if (allocated(error)) return
+
+        ! The tail threshold, at three lower bounds spanning the useful range.
+        do k = 1, 3
+            a = real(k, real64)
+            w = spec_threshold(a)
+            call parquet_debug_normal_truncated_path(rng, a, a + w * 1.01_real64, x, path, tries)
+            call check(error, path == 3_int32, &
+                "a tail interval wider than the derived threshold did not take exponential tilting")
+            if (allocated(error)) return
+            call parquet_debug_normal_truncated_path(rng, a, a + w * 0.99_real64, x, path, tries)
+            call check(error, path == 2_int32, &
+                "a tail interval narrower than the derived threshold did not take the uniform proposal, so " // &
+                "the library's tn_threshold no longer agrees with the specification recomputed here")
+            if (allocated(error)) return
+        end do
+    end subroutine test_normal_trunc_cases
+
+    !> Every draw lands inside the requested bounds, including where the round trip fights back.
+    !!
+    !! **This is the test for the clamp in `tn_finish`, and it is not vacuous: it FAILS without
+    !! it.** `z` is drawn inside the standardised interval, but `mu + sigma*z` need not round back
+    !! inside `[lo, hi]` once `mu` and `sigma` are nowhere near the bounds -- and a draw landing
+    !! exactly on a bound is not rare, it is most of them for a tight interval far from `mu`.
+    !! Measured with the clamp removed, 300 000 draws per arm: arm 1 put 7 584 below `lo` and
+    !! 7 608 above `hi`, arm 2 put 38 566 below `lo`. Mutation: replace either `if` in `tn_finish`
+    !! with `if (.false.)` and this test must fail.
+    !!
+    !! The `lo = 0` arm is the one that matters in practice, and it is deliberately kept even
+    !! though it is the weakest of the three: a negative value from a positivity truncation flows
+    !! into a `sqrt` or a physical count somewhere else entirely.
+    subroutine test_normal_trunc_containment(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 60000_int64
+        type(pf_random_stream) :: rng
+        integer(int64) :: k, outside, negative, on_edge
+        real(real64) :: x, mu, sg, lo, hi, u
+
+        ! Arm 1: bounds chosen independently of mu and sigma, both roaming over decades, so the
+        ! standardisation is ill-conditioned in both directions.
+        outside = 0_int64
+        on_edge = 0_int64
+        call rng%seed(dist_seed, 73_int64)
+        do k = 1_int64, NDRAW
+            call rng%uniform(u)
+            mu = (u - 0.5_real64) * 2.0e6_real64
+            call rng%uniform(u)
+            sg = 10.0_real64 ** ((u - 0.5_real64) * 8.0_real64)
+            call rng%uniform(u)
+            lo = (u - 0.5_real64) * 2.0e6_real64
+            call rng%uniform(u)
+            hi = lo + sg * (0.01_real64 + 3.0_real64 * u)
+            if (.not. (lo < hi)) cycle
+            if (.not. ((lo - mu) / sg < (hi - mu) / sg)) cycle
+            call rng%normal_truncated(lo, hi, x, mu=mu, sigma=sg)
+            if (x < lo .or. x > hi) outside = outside + 1_int64
+            if (x == lo .or. x == hi) on_edge = on_edge + 1_int64
+        end do
+        call check(error, outside == 0_int64, &
+            "a truncated normal returned a value OUTSIDE the interval it was asked for, at an ill-conditioned " // &
+            "combination of mu, sigma and bounds -- the de-standardised result is not being clamped back in")
+        if (allocated(error)) return
+        ! Vacuity guard: the clamp only bites on draws that land on a bound, so a fixture reaching
+        ! none of them would pass against a build with no clamp at all.
+        call check(error, on_edge > 0_int64, &
+            "no draw in arm 1 landed exactly on a bound, so this fixture never reached the rounding case the " // &
+            "clamp exists for and its verdict is vacuous")
+        if (allocated(error)) return
+
+        ! Arm 2: a tight physical interval a long way from mu, with a small sigma -- so the
+        ! standardised bounds are enormous and almost every draw lands on one of them.
+        outside = 0_int64
+        on_edge = 0_int64
+        call rng%seed(dist_seed, 74_int64)
+        do k = 1_int64, NDRAW
+            call rng%uniform(u)
+            mu = (u - 0.5_real64) * 2.0_real64
+            sg = 1.0e-9_real64
+            call rng%uniform(u)
+            lo = 1.0e3_real64 * (1.0_real64 + u)
+            hi = lo + 1.0e-7_real64
+            call rng%normal_truncated(lo, hi, x, mu=mu, sigma=sg)
+            if (x < lo .or. x > hi) outside = outside + 1_int64
+            if (x == lo .or. x == hi) on_edge = on_edge + 1_int64
+        end do
+        call check(error, outside == 0_int64, &
+            "a truncated normal on a tight interval far from mu returned a value outside it")
+        if (allocated(error)) return
+        call check(error, on_edge > 0_int64, &
+            "no draw in arm 2 landed exactly on a bound, so this fixture is vacuous")
+        if (allocated(error)) return
+
+        ! Arm 3: a positivity truncation, which is what this costs in practice.
+        negative = 0_int64
+        call rng%seed(dist_seed, 75_int64)
+        do k = 1_int64, NDRAW
+            call rng%uniform(u)
+            mu = (u - 0.5_real64) * 100.0_real64
+            call rng%uniform(u)
+            sg = 10.0_real64 ** ((u - 0.5_real64) * 6.0_real64)
+            call rng%normal_truncated(0.0_real64, huge(1.0_real64), x, mu=mu, sigma=sg)
+            if (x < 0.0_real64) negative = negative + 1_int64
+        end do
+        call check(error, negative == 0_int64, &
+            "a truncated normal with lo = 0 returned a NEGATIVE value")
+    end subroutine test_normal_trunc_containment
+
+    !> Both rejection envelopes are exact: the accept probability is never above 1.
+    !!
+    !! Asserted DIRECTLY rather than through a moment, the way `test_squeezes_are_valid` asserts
+    !! the Gamma squeeze. An envelope anchored at the wrong point makes the accept test pass for
+    !! every candidate over part of the interval, which returns the PROPOSAL -- a uniform, or a
+    !! truncated exponential -- and no coarse distributional gate can see the difference
+    !! (`feature_risks.md` Risk-249). The formulas are written out here from the specification.
+    subroutine test_normal_trunc_envelopes(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: NPT = 400
+        real(real64) :: a, b, m, z, lam, p, worst
+        integer :: j, c
+        real(real64) :: los(4), his(4)
+
+        ! The uniform proposal: p(z) = exp((m*m - z*z)/2) with m the point of [a,b] nearest zero.
+        los = [-0.3_real64, 0.0_real64, 2.0_real64, -1.2_real64]
+        his = [0.9_real64, 0.4_real64, 2.3_real64, -0.7_real64]
+        do c = 1, 4
+            a = los(c)
+            b = his(c)
+            m = a
+            if (b < 0.0_real64) m = b
+            if (a < 0.0_real64 .and. b > 0.0_real64) m = 0.0_real64
+            worst = 0.0_real64
+            do j = 0, NPT
+                z = a + (b - a) * real(j, real64) / real(NPT, real64)
+                p = exp(0.5_real64 * (m * m - z * z))
+                worst = max(worst, p)
+                call check(error, p <= 1.0_real64, &
+                    "the uniform proposal's accept probability exceeds 1 somewhere on the interval, so its " // &
+                    "envelope is anchored away from the target's maximum and the draw degrades toward flat")
+                if (allocated(error)) return
+            end do
+            call check(error, abs(worst - 1.0_real64) <= 1.0e-12_real64, &
+                "the uniform proposal's accept probability never REACHES 1 on the interval, so its envelope is " // &
+                "loose: the anchor is not the target's maximum and every draw costs more than it should")
+            if (allocated(error)) return
+        end do
+
+        ! Exponential tilting: p(z) = exp(-(z - lam)**2 / 2), maximal at z = lam, and lam must
+        ! solve lam*lam = a*lam + 1 and lie at or above a.
+        do c = 1, 4
+            a = real(c - 1, real64) * 2.0_real64
+            lam = 0.5_real64 * (a + sqrt(a * a + 4.0_real64))
+            call check(error, abs(lam * lam - (a * lam + 1.0_real64)) <= 1.0e-12_real64 * max(1.0_real64, lam * lam), &
+                "the tilting rate does not solve lam*lam = a*lam + 1, which is what makes its envelope the " // &
+                "tightest exponential one and its accept probability at most 1")
+            if (allocated(error)) return
+            call check(error, lam >= a, "the tilting rate fell below the lower bound, so the envelope's maximum " // &
+                "is outside the support and the accept test is no longer bounded by 1")
+            if (allocated(error)) return
+            do j = 0, NPT
+                z = a + 12.0_real64 * real(j, real64) / real(NPT, real64)
+                p = exp(-0.5_real64 * (z - lam) ** 2)
+                call check(error, p <= 1.0_real64, &
+                    "the tilted proposal's accept probability exceeds 1 somewhere above the lower bound")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_normal_trunc_envelopes
+
+    !> The uniform proposal at the WIDEST interval it ever runs on, where a flat draw would show.
+    !!
+    !! **Where the previous test is exact, this one is where the distortion is largest.** The
+    !! uniform proposal only ever runs on intervals narrower than its threshold, and a truncated
+    !! normal on a narrow interval is nearly flat -- so a test on a conveniently tiny interval
+    !! cannot tell the two apart. This one sits at 99.9 % of the threshold, and its control is a
+    !! flat sample on the same interval, which must be rejected.
+    subroutine test_normal_trunc_case_two_widest(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 400000_int64
+        type(pf_random_stream) :: rng
+        real(real64) :: a, b, x, z_mean, z_var, chi2
+        integer(int64) :: tries
+        integer(int32) :: path
+
+        a = 0.0_real64
+        b = a + spec_threshold(a) * 0.999_real64
+
+        ! It must actually BE the uniform proposal, or this test is measuring another case.
+        call rng%seed(dist_seed, 75_int64)
+        call parquet_debug_normal_truncated_path(rng, a, b, x, path, tries)
+        call check(error, path == 2_int32, &
+            "the widest case-2 interval no longer takes the uniform proposal, so this test is not exercising " // &
+            "the case it was written for")
+        if (allocated(error)) return
+
+        call trunc_gate(dist_seed, NDRAW, a, b, .false., z_mean, z_var, chi2)
+        call check(error, chi2 <= 43.8_real64, &
+            "the uniform proposal's output is not the truncated normal at the widest interval it runs on")
+        if (allocated(error)) return
+        call check(error, abs(z_var) <= 5.0_real64, &
+            "the uniform proposal's variance is wrong at the widest interval it runs on")
+        if (allocated(error)) return
+
+        call trunc_gate(dist_seed, NDRAW, a, b, .true., z_mean, z_var, chi2)
+        call check(error, chi2 > 43.8_real64, &
+            "the gate ACCEPTS a flat sample at the widest case-2 interval, so it cannot see the one defect " // &
+            "the uniform proposal can have -- returning its own proposal unfiltered")
+    end subroutine test_normal_trunc_case_two_widest
+
+    !> A `huge()` bound and a true infinity are the same truncation, value for value.
+    !!
+    !! The case rule and both accept tests are written so that an infinite bound needs no special
+    !! case; this asserts that, so a caller need not reach for `ieee_arithmetic` to truncate on one
+    !! side. The infinity is built with `ieee_value`, never as an overflowing expression, because
+    !! nagfor traps the overflow that would build it arithmetically.
+    subroutine test_normal_trunc_unbounded_forms(error)
+        use ieee_arithmetic, only: ieee_value, ieee_positive_inf, ieee_negative_inf
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng
+        integer :: k
+        real(real64) :: x1, x2, pinf, ninf
+
+        pinf = ieee_value(0.0_real64, ieee_positive_inf)
+        ninf = ieee_value(0.0_real64, ieee_negative_inf)
+
+        do k = 1, 200
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(2.0_real64, huge(1.0_real64), x1)
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(2.0_real64, pinf, x2)
+            call check(error, x1 == x2, &
+                "an upper bound of huge(1.0_real64) and one of +Infinity gave different draws at the same " // &
+                "coordinates, so one of them is taking a path the other is not")
+            if (allocated(error)) return
+
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(-huge(1.0_real64), -2.0_real64, x1)
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(ninf, -2.0_real64, x2)
+            call check(error, x1 == x2, &
+                "a lower bound of -huge(1.0_real64) and one of -Infinity gave different draws at the same " // &
+                "coordinates")
+            if (allocated(error)) return
+        end do
+
+        ! Both-sides-unbounded is an ordinary standard normal, and must accept every candidate.
+        call rng%seed(dist_seed, 76_int64)
+        call rng%normal_truncated(ninf, pinf, x1)
+        call check(error, x1 == x1, "an unbounded truncated normal returned a NaN")
+    end subroutine test_normal_trunc_unbounded_forms
+
+    !> The truncated normal is `pure`: usable in a `do concurrent` body, with the same values.
+    subroutine test_normal_trunc_purity(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer :: j
+        real(real64) :: dc(256), serial(256)
+        type(pf_random_stream) :: rng
+
+        do concurrent (j = 1:256)
+            block
+                type(pf_random_stream) :: local
+                call local%seed(dist_seed, int(j, int64))
+                call local%normal_truncated(-1.0_real64, 2.5_real64, dc(j))
+            end block
+        end do
+        do j = 1, 256
+            call rng%seed(dist_seed, int(j, int64))
+            call rng%normal_truncated(-1.0_real64, 2.5_real64, serial(j))
+        end do
+        call check(error, all(dc == serial), &
+            "%normal_truncated gives different values inside a do concurrent body than outside it")
+    end subroutine test_normal_trunc_purity
+
+    !> The stream cost is variable, reported exactly by `%position`, and `%rewind` reproduces it.
+    subroutine test_normal_trunc_cost(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng
+        integer(int64), parameter :: NW = 400_int64
+        real(real64) :: x, first(NW), again(NW)
+        integer(int64) :: k, p0, saved, costs(NW)
+        integer :: distinct
+
+        ! A tail sliver: the uniform proposal rejects often enough that a variable cost is certain.
+        call rng%seed(dist_seed, 77_int64)
+        do k = 1_int64, NW
+            p0 = rng%position()
+            call rng%normal_truncated(1.0_real64, 1.3_real64, first(k))
+            costs(k) = rng%position() - p0
+            call check(error, costs(k) >= 4_int64 .and. modulo(costs(k), 2_int64) == 0_int64, &
+                "a %normal_truncated draw consumed an odd number of words, or fewer than the four a single " // &
+                "uniform-proposal candidate needs")
+            if (allocated(error)) return
+        end do
+        distinct = count(costs /= costs(1))
+        call check(error, distinct > 0, &
+            "every %normal_truncated draw in this fixture cost the same number of words, so no rejection ever " // &
+            "fired and this test has not exercised the variable-cost path it exists for")
+        if (allocated(error)) return
+
+        ! Checkpoint and restart: the position is exact even though it cannot be predicted.
+        call rng%seed(dist_seed, 77_int64)
+        do k = 1_int64, 13_int64
+            call rng%normal_truncated(1.0_real64, 1.3_real64, x)
+        end do
+        saved = rng%position()
+        do k = 1_int64, NW
+            call rng%normal_truncated(1.0_real64, 1.3_real64, again(k))
+        end do
+        call rng%rewind(saved)
+        do k = 1_int64, NW
+            call rng%normal_truncated(1.0_real64, 1.3_real64, x)
+            call check(error, x == again(k), &
+                "%rewind to a saved position did not reproduce the truncated normals drawn from it")
+            if (allocated(error)) return
+        end do
+    end subroutine test_normal_trunc_cost
+
+    !> A far-out interval must reach the tilted case and terminate, not spin in the uniform one.
+    !!
+    !! **Regression for `feature_risks.md` Risk-251, and it is a HANG rather than a wrong answer**,
+    !! which is why it is asserted through the path rather than through a value. The case rule's
+    !! threshold is a difference of two nearly-equal large doubles if written directly; formed that
+    !! way it comes back around `1e53` for a standardised bound near `1e10`, every wide tail
+    !! interval is then sent to the uniform proposal, whose acceptance there underflows to zero,
+    !! and the draw never returns. Nothing else in the suite would fail -- it would simply stop.
+    !!
+    !! The bounds below are the ones that hung: `(lo - mu)/sigma` is about `-1.379e10` with the
+    !! interval 2.15 standardised units wide, so the tilted case must take it.
+    !!
+    !! **This test can only fail where the compiler CONTRACTS, so run it optimised.** Reverting the
+    !! threshold to its cancelling form and running `fpm test` unoptimised passes all 29 tests in
+    !! this suite: at `-O0` there is no FMA to contract into, the difference evaluates to the 0 it
+    !! mathematically is, and the reverted code is genuinely correct. The same revert under
+    !! `--profile release` fails here and then hangs. Confirmed by mutation, both ways.
+    subroutine test_normal_trunc_far_tail_terminates(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng
+        real(real64) :: x, a, w
+        integer(int64) :: tries
+        integer(int32) :: path
+        integer :: k
+
+        call rng%seed(dist_seed, 79_int64)
+        call parquet_debug_normal_truncated_path(rng, -8.527880783008039e5_real64, &
+            -8.527880780515589e5_real64, x, path, tries, &
+            mu=7.432195363441985e5_real64, sigma=1.157446411309802e-4_real64)
+        call check(error, path == 6_int32, &
+            "a far-out mirrored interval 2.15 standardised units wide did not take the tilted case, so the " // &
+            "case threshold has collapsed and the uniform proposal it fell into cannot accept at all")
+        if (allocated(error)) return
+        call check(error, tries <= 4_int64, &
+            "a far-out tilted draw took more than four proposals, which the tilted envelope's acceptance bound " // &
+            "does not allow -- the rate is wrong")
+        if (allocated(error)) return
+
+        ! The threshold must stay finite, positive and ~1/a across the whole range, not just at
+        ! the one bound above. spec_threshold recomputes it independently; both must agree.
+        !
+        ! **The discrimination arm stops at a = 1e6 because of arithmetic, not caution.** The
+        ! threshold behaves as 1/a and one ulp of `a` is about a*2.2e-16, so the two cross near
+        ! a = 6.7e7: past that no interval NARROWER than the threshold is representable at all,
+        ! `a + 0.95*w` rounds to `a` or beyond it, and the question the arm asks stops having an
+        ! answer. Everything above that bound is covered by the wide arm below, which is the only
+        ! case that exists out there.
+        do k = 0, 12
+            a = 10.0_real64 ** (real(k, real64) * 0.5_real64) - 1.0_real64
+            w = spec_threshold(a)
+            call check(error, w > 0.0_real64 .and. w <= 2.0_real64, &
+                "the recomputed tail threshold left (0, 2], so the specification this suite checks the " // &
+                "library against is itself wrong")
+            if (allocated(error)) return
+            ! Just above the threshold must tilt; just below must take the uniform proposal.
+            call parquet_debug_normal_truncated_path(rng, a, a + w * 1.05_real64, x, path, tries)
+            call check(error, path == 3_int32, &
+                "an interval wider than the recomputed threshold did not take exponential tilting")
+            if (allocated(error)) return
+            call check(error, x >= a, "a tilted draw came back below its lower bound")
+            if (allocated(error)) return
+            call parquet_debug_normal_truncated_path(rng, a, a + w * 0.95_real64, x, path, tries)
+            call check(error, path == 2_int32, &
+                "an interval narrower than the recomputed threshold did not take the uniform proposal")
+            if (allocated(error)) return
+            call check(error, tries <= 20_int64, &
+                "a uniform-proposal draw at the threshold took more than twenty proposals, so its acceptance " // &
+                "is nowhere near the bound the case rule rests on")
+            if (allocated(error)) return
+        end do
+
+        ! The wide arm, out where the threshold is below one ulp of the bound: every representable
+        ! interval tilts, and must terminate promptly and land inside. This is the regime the hang
+        ! lived in. It stops at 1e16 because that is as far as a fixture can go and still assert a
+        ! MEANINGFUL interval; the separate overflow of `a*a` above 1.3e154, which `hypot` exists to
+        ! prevent, is not reachable from a bound a caller would write and is argued rather than
+        ! tested (`feature_risks.md` Risk-251).
+        do k = 1, 6
+            a = 10.0_real64 ** (real(2 * k + 4, real64))
+            call parquet_debug_normal_truncated_path(rng, a, a * 1.000001_real64, x, path, tries)
+            call check(error, path == 3_int32, &
+                "a far-out interval did not take exponential tilting, which is the only case that can serve " // &
+                "it: no narrower interval is representable at that magnitude")
+            if (allocated(error)) return
+            call check(error, tries <= 8_int64, &
+                "a far-out tilted draw took more than eight proposals, so its acceptance rate is not the one " // &
+                "the envelope guarantees -- this is how the hang announced itself")
+            if (allocated(error)) return
+            call check(error, x >= a .and. x <= a * 1.000001_real64, &
+                "a far-out draw came back outside its own interval")
+            if (allocated(error)) return
+        end do
+    end subroutine test_normal_trunc_far_tail_terminates
+
+    !> Draws one truncated normal and files its path, for `test_normal_trunc_cases`.
+    subroutine probe_path(rng, lo, hi, npath, path)
+        type(pf_random_stream), intent(inout) :: rng    !! the stream to advance
+        real(real64), intent(in) :: lo                  !! lower bound of the support
+        real(real64), intent(in) :: hi                  !! upper bound of the support
+        integer(int64), intent(inout) :: npath(6)       !! per-path counters, incremented in place
+        integer(int32), intent(out) :: path             !! the path this draw took
+        real(real64) :: x
+        integer(int64) :: tries
+        call parquet_debug_normal_truncated_path(rng, lo, hi, x, path, tries)
+        npath(path) = npath(path) + 1_int64
+    end subroutine probe_path
+
+    !> The tail arm's case threshold, RECOMPUTED from the specification rather than imported.
+    !!
+    !! `parquet_random`'s `tn_threshold` is private, and a test that reached for it could not tell
+    !! a wrong constant from a wrong rule. This is the same expression written independently from
+    !! the derivation: the width at which a uniform envelope anchored at `a` and the tilted
+    !! envelope have equal mass.
+    !! Both forms cancel nothing: `lam - a` is rationalised to `2/(a + s)`, so this is usable at
+    !! the large `a` where the naive transcription of either form collapses.
+    pure function spec_threshold(a) result(t)
+        real(real64), intent(in) :: a       !! standardised lower bound; `a >= 0`
+        real(real64) :: t                   !! the interval width at which the two proposals cross
+        real(real64) :: s, gap
+        s = hypot(a, 2.0_real64)
+        gap = 2.0_real64 / (a + s)          ! exactly `lam - a`, rationalised
+        t = exp(0.5_real64 * gap * gap) * gap
+    end function spec_threshold
+
+    !> Upper tail `P(Z > x)` of the standard normal, safe for an infinite or `huge` argument.
+    !!
+    !! Written as `erfc(x/sqrt(2))/2` rather than `1 - Phi(x)` so the far-tail intervals do not
+    !! cancel: at `x = 4` the two differ in the fifth significant digit of the answer. The cutoff
+    !! at 40 keeps `x*x` from overflowing for an infinite bound, which nagfor traps; beyond it the
+    !! true value is below `tiny(1.0_real64)` anyway.
+    pure function tn_q(x) result(q)
+        real(real64), intent(in) :: x       !! the point to measure the upper tail from
+        real(real64) :: q                   !! `P(Z > x)`, in `[0, 1]`
+        if (x >= 40.0_real64) then
+            q = 0.0_real64
+        else if (x <= -40.0_real64) then
+            q = 1.0_real64
+        else
+            q = 0.5_real64 * erfc(x / sqrt(2.0_real64))
+        end if
+    end function tn_q
+
+    !> Standard normal density, safe for an infinite or `huge` argument. See `tn_q`.
+    pure function tn_phi(x) result(p)
+        real(real64), intent(in) :: x       !! the point to evaluate the density at
+        real(real64) :: p                   !! the density there
+        if (abs(x) >= 40.0_real64) then
+            p = 0.0_real64
+        else
+            p = exp(-0.5_real64 * x * x) / sqrt(8.0_real64 * atan(1.0_real64))
+        end if
+    end function tn_phi
+
+    !> Draws `n` truncated normals on `[lo, hi]` and reports three test statistics.
+    !!
+    !! `flat` is what makes the negative control possible: `.false.` is the library's own draw and
+    !! `.true.` is a uniform sample on the same interval -- the exact output a wrong envelope
+    !! anchor produces, and the one a shape test must reject.
+    !!
+    !! The cell index is the EXACT conditional CDF, so the chi-square is distribution-free rather
+    !! than a comparison against another sampler.
+    subroutine trunc_gate(seed, n, lo, hi, flat, z_mean, z_var, chi2)
+        integer(int64), intent(in) :: seed      !! the family to draw from
+        integer(int64), intent(in) :: n         !! how many draws to take
+        real(real64), intent(in) :: lo          !! lower bound of the support
+        real(real64), intent(in) :: hi          !! upper bound of the support
+        logical, intent(in) :: flat             !! `.true.` draws the uniform control instead
+        real(real64), intent(out) :: z_mean     !! standard errors of the mean from the exact one
+        real(real64), intent(out) :: z_var      !! standard errors of the variance from the exact one
+        real(real64), intent(out) :: chi2       !! chi-square of the conditional CDF over 20 cells
+        integer, parameter :: NCELL = 20
+        type(pf_random_stream) :: rng
+        integer(int64) :: k, counts(NCELL), cell
+        real(real64) :: x, u, s, s2, mean, var, expect, dn
+        real(real64) :: qa, qb, mass, emean, evar, m4
+
+        qa = tn_q(lo)
+        qb = tn_q(hi)
+        mass = qa - qb
+        emean = (tn_phi(lo) - tn_phi(hi)) / mass
+        evar = 1.0_real64 + (lo * tn_phi(lo) - hi * tn_phi(hi)) / mass - emean * emean
+        ! `lo * tn_phi(lo)` is 0 rather than a NaN for an infinite bound, because tn_phi cuts off.
+
+        counts = 0_int64
+        s = 0.0_real64
+        s2 = 0.0_real64
+        call rng%seed(seed, 78_int64)
+        do k = 1_int64, n
+            if (flat) then
+                call rng%uniform(u)
+                x = lo + u * (hi - lo)
+            else
+                call rng%normal_truncated(lo, hi, x)
+            end if
+            s = s + x
+            s2 = s2 + x * x
+            cell = min(int(real(NCELL, real64) * ((qa - tn_q(x)) / mass), int64) + 1_int64, int(NCELL, int64))
+            cell = max(cell, 1_int64)
+            counts(cell) = counts(cell) + 1_int64
+        end do
+        dn = real(n, real64)
+        mean = s / dn
+        var = s2 / dn - mean * mean
+        z_mean = (mean - emean) * sqrt(dn / evar)
+        ! The variance of the sample variance needs the fourth central moment, which has no tidy
+        ! closed form here; 2*evar**2 is its Gaussian value and is the right order for every
+        ! interval used, so this z is a scale-free residual rather than an exact standard error.
+        m4 = 2.0_real64 * evar * evar
+        z_var = (var - evar) * sqrt(dn / m4)
+        expect = dn / real(NCELL, real64)
+        chi2 = sum((real(counts, real64) - expect) ** 2 / expect)
+    end subroutine trunc_gate
 
 end module test_random_dist

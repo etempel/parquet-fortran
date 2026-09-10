@@ -316,6 +316,10 @@ something a reader is expected to have.
 | [Risk-245](#risk-245--the-transverse-separation-is-formed-without-cancellation-and-2---2-cos-is-right-on-a-test-fixture-and-wrong-on-a-catalogue) | The transverse separation is formed without cancellation, never as `2 - 2 cos` | 4 — covered |
 | [Risk-246](#risk-246--the-line-of-sight-cylinder-walk-is-complete-only-through-its-padding-its-envelopes-and-its-distance-range-and-a-narrower-walk-drops-pairs-quietly) | The cylinder walk is complete only through its padding, its envelopes and its distance range | 4 — covered |
 | [Risk-247](#risk-247--the-unions-tiebreak-emits-each-pair-once-only-because-both-endpoints-evaluate-the-same-two-exact-booleans) | The union's tiebreak emits each pair once only because both endpoints evaluate the SAME two exact booleans | 4 — covered |
+| [Risk-248](#risk-248--the-truncated-normals-case-rule-decides-the-value-not-the-speed-and-a-moved-threshold-is-invisible-to-every-distributional-test) | The truncated normal's case rule decides the VALUE, and a moved threshold is invisible to every distributional test | 4 — covered |
+| [Risk-249](#risk-249--a-rejection-envelope-anchored-at-the-wrong-point-returns-its-own-proposal-and-a-narrow-truncated-normal-is-nearly-uniform) | A rejection envelope anchored at the wrong point returns its own PROPOSAL | 4 — covered |
+| [Risk-250](#risk-250--a-truncated-draws-bounds-are-enforced-on-the-standardised-scale-and-de-standardising-rounds-back-outside) | A truncated draw's bounds are enforced on the STANDARDISED scale, and de-standardising rounds back outside | 4 — covered |
+| [Risk-251](#risk-251--a-case-threshold-formed-as-a-difference-of-nearly-equal-doubles-is-contracted-into-an-fma-and-the-draw-hangs) | A case threshold formed as a difference of nearly-equal doubles is contracted into an FMA, and the draw HANGS | 4 — covered |
 
 ---
 
@@ -9379,3 +9383,115 @@ the cylinder does.
 exactly one cylinder and pairs in both, asserted as a precondition, against the union's oracle as
 a set, so a doubled or missing emission fails it) and the union rule's arm of
 `test_los_cylinder_walk_matches_ball_walk`.
+
+
+### Risk-248 — The truncated normal's case rule decides the VALUE, not the speed, and a moved threshold is invisible to every distributional test
+
+`%normal_truncated` chooses between three proposals by two thresholds: `trunc_straddle_crossover`
+(`sqrt(2*pi)`) on the arm that straddles the mode, and `tn_threshold(a)` on the tail arm. Move
+either and every draw whose interval sits on the moved side comes back **different** — while
+remaining a correct draw from the same truncated normal, so every moment test, every chi-square and
+every containment assertion still passes. What breaks is that a stored result stops reproducing
+while `pf_normal_truncated_algorithm` still reads `v1`.
+
+This is the same class as the Poisson crossover, and it is the reason both thresholds are named in
+that identifier rather than left as internal constants.
+
+**What this forbids.** Neither threshold is tuned, measured, fitted, or made a setting; each is an
+exact break-even point between two envelope masses, and the derivation lives beside it. A change to
+either is a change to `pf_normal_truncated_algorithm`. A "harmless simplification" of
+`tn_threshold`'s expression is a change to it too, whether or not the algebra is equivalent — see
+[Risk-251](#risk-251--a-case-threshold-formed-as-a-difference-of-nearly-equal-doubles-is-contracted-into-an-fma-and-the-draw-hangs).
+
+**Covered by** `test_normal_trunc_cases` (`test/test_random_dist.f90`), which puts an interval just
+inside and just outside each threshold and asserts through `parquet_debug_normal_truncated_path`
+that each takes the case it should; and by `test_normal_trunc_far_tail_terminates`, whose
+`spec_threshold` recomputes the tail threshold from the specification independently rather than
+importing the library's own constant — a test that borrowed it could not tell a wrong constant from
+a wrong rule.
+
+### Risk-249 — A rejection envelope anchored at the wrong point returns its own PROPOSAL, and a narrow truncated normal is nearly uniform
+
+The uniform proposal accepts on `u <= exp((m - z)*(m + z)/2)`, where `m` is the point of `[a, b]`
+nearest zero and therefore where the target density is largest. Anchor it at the other end — or drop
+the mirror, so that `m = a` is used with `a < 0` — and the accept probability exceeds 1 over part of
+the interval, the test passes for every candidate there, and the procedure returns a **uniform** draw
+on `[a, b]`. Exponential tilting has the twin defect: `lam` must solve `lam*lam = a*lam + 1`, and a
+wrong `lam` returns something between a truncated exponential and the right answer.
+
+**Why it hides.** The uniform proposal only ever runs on intervals narrower than `tn_threshold(a)`,
+which is at most `exp(0.5)`, and a truncated normal on a narrow interval **is** nearly uniform. The
+distortion is a few parts in a hundred at the widest end of that range and parts in ten thousand at
+the narrow end, so a gate built on a conveniently tiny interval passes a build that has stopped
+filtering at all.
+
+**What this forbids.** A distributional test of the uniform proposal uses an interval at the
+**widest** end of its admissible range, not a small one; its negative control is a **flat sample on
+the same interval**, not a rescaled normal, because flat is exactly what the defect produces; and the
+envelope's exactness is asserted directly rather than hoped for through a moment.
+
+**Covered by** `test_normal_trunc_envelopes` (the accept probability is at most 1 everywhere on the
+interval and reaches 1 at the anchor, asserted pointwise for both proposals),
+`test_normal_trunc_case_two_widest` (the distributional gate at `0.999` of the threshold, with the
+flat control it must reject) and the uniform control arm of `test_normal_trunc_distribution`.
+Confirmed by mutation: anchoring at `b` fails three tests.
+
+### Risk-250 — A truncated draw's bounds are enforced on the STANDARDISED scale, and de-standardising rounds back outside
+
+The rejection loops draw `z` inside `[(lo-mu)/sigma, (hi-mu)/sigma]`; the value handed back is
+`mu + sigma*z`. That round trip is not exact whenever `mu` and `sigma` are not aligned with the
+bounds, so `x` can land outside `[lo, hi]` with every step upstream correct. It bites only on draws
+that land **on** a bound — an interior `z` maps strictly inside — but those are not rare: for a tight
+interval a long way from `mu` they are most of the draws, because `e/lam` or `u*(b-a)` falls below one
+ulp of the bound and the sum rounds back onto it.
+
+Measured with the clamp removed, 300 000 draws per arm: bounds chosen independently of `mu` and
+`sigma` put **7 584 below `lo` and 7 608 above `hi`**; a tight interval far from `mu` put **38 566
+below `lo`**. The case that matters is a positivity truncation, where a value below `lo = 0` flows
+into a `sqrt`, a `log` or a physical count somewhere else entirely and is wrong there rather than
+here.
+
+**What this forbids.** The two `if`s at the end of `tn_finish` are the only thing making
+`lo <= x <= hi` true, and they must not be deleted as obviously-redundant cleanup. They are written
+as `if`s rather than `min`/`max` because those raise `IEEE_INVALID` on a quiet NaN, and they are
+reached only after every NaN input has been refused.
+
+**Covered by** `test_normal_trunc_containment` (`test/test_random_dist.f90`), whose three arms each
+carry a vacuity guard requiring that draws actually landed on a bound — without it a fixture that
+never reaches the rounding case passes against a build with no clamp at all. Confirmed by mutation:
+disabling either `if` fails it.
+
+### Risk-251 — A case threshold formed as a difference of nearly-equal doubles is contracted into an FMA, and the draw HANGS
+
+`tn_threshold(a)` transcribes directly as `exp((2 + a*a - a*s)/4) * 2/(a + s)` with
+`s = sqrt(a*a + 4)`. For a standardised bound around `1e10`, `s` equals `a` to every bit, so
+`a*a - a*s` is exactly 0 — **unless the compiler contracts the pair into an FMA**, which evaluates
+`a*a` exactly before subtracting the rounded `a*s` and so returns the rounding error of `a*a`, some
+hundreds. Through the `exp` that becomes a threshold near `1e53`, every wide tail interval is
+misrouted to the uniform proposal, whose acceptance there underflows to zero, and the draw **never
+returns**.
+
+This is not a corner: beyond `a` of about `6.7e7` the true threshold is below one ulp of `a`, so the
+tilted case is the only one that can serve a far tail at all, and misrouting it hits everything out
+there. The observed failure was `%normal_truncated` with `mu = 7.43e5`, `sigma = 1.16e-4` and bounds
+near `-8.53e5` spinning forever.
+
+**Only an optimising build can see it.** At `-O0` there is no FMA to contract into, the difference
+evaluates to the 0 it mathematically is, and the naive form is genuinely correct — the whole
+`random_dist` suite passes against it under a plain `fpm test`. The same source under
+`--profile release` fails and then hangs. Confirmed by mutation, both ways.
+
+**What this forbids.** Both quantities are formed so that nothing cancels, rather than guarded with
+rounding barriers: `a - s` is rationalised to `-4/(a + s)`, giving `exp(0.5 - a/(a+s))`, and the
+uniform proposal's exponent is `(m - z)*(m + z)` rather than `m*m - z*z`. A barrier would work only
+where it was written; rationalising cannot be undone by a flag. `hypot(a, 2)` rather than
+`sqrt(a*a + 4)` keeps `a*a` from overflowing above `1.3e154`, which would make `s` infinite and the
+threshold 0 — the same hang from the other direction. This is `.claude/rules/fortran-gotchas.md`'s
+"a DIFFERENCE of two nearly-equal doubles carries ~8 digits, the rest is the compiler", with a hang
+rather than a wrong digit as the symptom.
+
+**Covered by** `test_normal_trunc_far_tail_terminates` (`test/test_random_dist.f90`): the exact
+bounds that hung must report the tilted case in at most four proposals, the case rule is checked
+against an independently recomputed threshold from `a = 0` up to `1e6`, and a wide arm runs to
+`1e16`, where only the tilted case exists. **Run it optimised** — under the default profile it
+cannot fail.

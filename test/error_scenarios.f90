@@ -1230,6 +1230,16 @@ program error_scenarios
         call scenario_random_gamma_shape_not_positive()
     case ("random_gamma_shape_nan")
         call scenario_random_gamma_shape_nan()
+    case ("random_normal_truncated_sigma_not_positive")
+        call scenario_random_normal_truncated_sigma_not_positive()
+    case ("random_normal_truncated_sigma_nan")
+        call scenario_random_normal_truncated_sigma_nan()
+    case ("random_normal_truncated_bounds_reversed")
+        call scenario_random_normal_truncated_bounds_reversed()
+    case ("random_normal_truncated_bounds_nan")
+        call scenario_random_normal_truncated_bounds_nan()
+    case ("random_normal_truncated_bounds_collapse")
+        call scenario_random_normal_truncated_bounds_collapse()
     case ("random_poisson_lambda_negative")
         call scenario_random_poisson_lambda_negative()
     case ("random_poisson_lambda_nan")
@@ -21922,6 +21932,89 @@ contains
         call rng%gamma(ieee_value(0.0_real64, ieee_quiet_nan), x)   ! -> aborts
         print '(a,es12.5)', "unexpectedly drew a gamma with a NaN shape: ", x
     end subroutine scenario_random_gamma_shape_nan
+
+    !> `%normal_truncated` with a non-positive sigma must abort rather than divide by it.
+    !!
+    !! The control draws with a tiny but legal sigma first, so a run that aborted before reaching
+    !! the guarded call is distinguishable from one the guard caught. Every scenario here prints
+    !! its draw: the guard sits inside a `pure` subroutine, and gfortran deletes an unused pure
+    !! call at -O1 and above, which would exit 0 (`check_scenario_uses_a_pure_result`).
+    subroutine scenario_random_normal_truncated_sigma_not_positive()
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%normal_truncated(-1.0_real64, 1.0_real64, x, sigma=1.0e-30_real64)
+        print '(a,es12.5)', "drew a truncated normal with sigma 1e-30: ", x
+        call rng%normal_truncated(-1.0_real64, 1.0_real64, x, sigma=0.0_real64)   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a truncated normal with sigma 0: ", x
+    end subroutine scenario_random_normal_truncated_sigma_not_positive
+
+    !> A NaN sigma must abort rather than return a NaN. The guard is written `.not. (sigma > 0)`
+    !! rather than `sigma <= 0` for exactly this reason: every comparison against a NaN is false,
+    !! so the second form would wave it through.
+    subroutine scenario_random_normal_truncated_sigma_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%normal_truncated(-1.0_real64, 1.0_real64, x, sigma=2.0_real64)
+        print '(a,es12.5)', "drew a truncated normal with sigma 2: ", x
+        call rng%normal_truncated(-1.0_real64, 1.0_real64, x, &
+            sigma=ieee_value(0.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a truncated normal with a NaN sigma: ", x
+    end subroutine scenario_random_normal_truncated_sigma_nan
+
+    !> Bounds the wrong way round must abort, NOT be swapped.
+    !!
+    !! `%int_range` swaps them, and that is the right call there because both orders name the same
+    !! set of integers. Here they name different things and one of them names nothing, so a swap
+    !! would answer a question the caller did not ask.
+    subroutine scenario_random_normal_truncated_bounds_reversed()
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%normal_truncated(-1.0_real64, 2.0_real64, x)
+        print '(a,es12.5)', "drew a truncated normal on [-1, 2]: ", x
+        call rng%normal_truncated(2.0_real64, -1.0_real64, x)   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a truncated normal on [2, -1]: ", x
+    end subroutine scenario_random_normal_truncated_bounds_reversed
+
+    !> A NaN bound must abort. Caught by the same negated comparison as the NaN sigma, and by the
+    !! same reasoning; a NaN `mu` is caught here too, because it makes both standardised bounds NaN.
+    subroutine scenario_random_normal_truncated_bounds_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%normal_truncated(-1.0_real64, 2.0_real64, x)
+        print '(a,es12.5)', "drew a truncated normal on [-1, 2]: ", x
+        call rng%normal_truncated(-1.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), x)   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a truncated normal with a NaN upper bound: ", x
+    end subroutine scenario_random_normal_truncated_bounds_nan
+
+    !> An interval that is non-empty in data units but COLLAPSES under the centring must abort.
+    !!
+    !! This is the only scenario asserting that the standardisation happens BEFORE the guard rather
+    !! than the guard reading the raw arguments: `lo < hi` holds here, and
+    !! `(lo - mu)/sigma < (hi - mu)/sigma` does not. It asserts the same message as the
+    !! reversed-bounds scenario and is kept for that reason -- the message names the centring and
+    !! scaling precisely so this case is explicable to whoever hits it.
+    !!
+    !! **The collapse comes from `mu`, not from `sigma`.** Dividing by a large scale keeps the two
+    !! bounds distinct, because division preserves relative spacing; SUBTRACTING a large `mu` does
+    !! not, because `1 - 1e10` and `nearest(1, 2) - 1e10` are one double. That asymmetry is why
+    !! this fixture is built the way it is and not the more obvious way.
+    subroutine scenario_random_normal_truncated_bounds_collapse()
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%normal_truncated(1.0_real64, 1.0_real64 + 1.0e-3_real64, x, sigma=1.0e-3_real64)
+        print '(a,es12.5)', "drew a truncated normal on a one-sigma-wide interval: ", x
+        ! Two adjacent doubles, offset by a mu large enough that both centre onto one value.
+        call rng%normal_truncated(1.0_real64, nearest(1.0_real64, 2.0_real64), x, &
+            mu=1.0e10_real64, sigma=1.0e-3_real64)   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a truncated normal on a collapsed interval: ", x
+    end subroutine scenario_random_normal_truncated_bounds_collapse
 
     !> A Poisson mean cannot be negative. `lambda = 0` is legal and always gives 0, which is the
     !! control here -- a guard written `lambda > 0` would refuse it wrongly.

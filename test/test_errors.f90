@@ -470,6 +470,16 @@ contains
                 test_random_gamma_shape_not_positive_aborts), &
             new_unittest("a gamma draw refuses a NaN shape", &
                 test_random_gamma_shape_nan_aborts), &
+            new_unittest("a truncated normal refuses a sigma that is not strictly positive", &
+                test_random_normal_truncated_sigma_not_positive_aborts), &
+            new_unittest("a truncated normal refuses a NaN sigma", &
+                test_random_normal_truncated_sigma_nan_aborts), &
+            new_unittest("a truncated normal refuses reversed bounds rather than swapping them", &
+                test_random_normal_truncated_bounds_reversed_aborts), &
+            new_unittest("a truncated normal refuses a NaN bound", &
+                test_random_normal_truncated_bounds_nan_aborts), &
+            new_unittest("a truncated normal refuses an interval that collapses under its scale", &
+                test_random_normal_truncated_bounds_collapse_aborts), &
             new_unittest("a poisson draw refuses a negative lambda", &
                 test_random_poisson_lambda_negative_aborts), &
             new_unittest("a poisson draw refuses a NaN lambda", &
@@ -9699,6 +9709,59 @@ contains
             failure_message="a poisson draw with a negative lambda was expected to abort", &
             required_stderr="lambda must be at least 0")
     end subroutine test_random_poisson_lambda_negative_aborts
+
+    !> `%normal_truncated` abort path: see scenario_random_normal_truncated_sigma_not_positive.
+    subroutine test_random_normal_truncated_sigma_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_normal_truncated_sigma_not_positive", &
+            expect_abort=.true., &
+            failure_message="a truncated normal with sigma 0 was expected to abort", &
+            required_stderr="sigma must be strictly positive")
+    end subroutine test_random_normal_truncated_sigma_not_positive_aborts
+
+    !> `%normal_truncated(sigma=NaN)`: see scenario_random_normal_truncated_sigma_nan. Distinct
+    !> from the scenario above because a NaN passes a `<=` test and only a negated `>` refuses it.
+    subroutine test_random_normal_truncated_sigma_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_normal_truncated_sigma_nan", &
+            expect_abort=.true., &
+            failure_message="a truncated normal with a NaN sigma was expected to abort", &
+            required_stderr="sigma must be strictly positive")
+    end subroutine test_random_normal_truncated_sigma_nan_aborts
+
+    !> `%normal_truncated` abort path: see scenario_random_normal_truncated_bounds_reversed.
+    subroutine test_random_normal_truncated_bounds_reversed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_normal_truncated_bounds_reversed", &
+            expect_abort=.true., &
+            failure_message="a truncated normal with reversed bounds was expected to abort rather than swap them", &
+            required_stderr="lower bound must be strictly")
+    end subroutine test_random_normal_truncated_bounds_reversed_aborts
+
+    !> `%normal_truncated` abort path: see scenario_random_normal_truncated_bounds_nan.
+    subroutine test_random_normal_truncated_bounds_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_normal_truncated_bounds_nan", &
+            expect_abort=.true., &
+            failure_message="a truncated normal with a NaN bound was expected to abort", &
+            required_stderr="lower bound must be strictly")
+    end subroutine test_random_normal_truncated_bounds_nan_aborts
+
+    !> `%normal_truncated` abort path: see scenario_random_normal_truncated_bounds_collapse. The
+    !> same message as the reversed-bounds pair, from an interval that is non-empty in data units:
+    !> this is the assertion that the guard reads the STANDARDISED bounds.
+    subroutine test_random_normal_truncated_bounds_collapse_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_normal_truncated_bounds_collapse", &
+            expect_abort=.true., &
+            failure_message="an interval that collapses under its own scale was expected to abort", &
+            required_stderr="after centring and scaling")
+    end subroutine test_random_normal_truncated_bounds_collapse_aborts
 
     !> `%poisson(NaN)`: see scenario_random_poisson_lambda_nan, and the NaN note on the gamma pair.
     subroutine test_random_poisson_lambda_nan_aborts(error)

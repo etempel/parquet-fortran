@@ -83,7 +83,8 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:)
+                                            p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
+                                            p22(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1958,6 +1959,49 @@ contains
             new_unittest("the automatic-rebuild warning is said, and can be silenced", &
                 test_spatial_rebuild_warning) &
             ]
+        ! The line-of-sight cylinder's scenarios (%within_los, %pairs_within_los, observer=, los=):
+        ! their own part rather than more entries in p7, which sits near the 255-continuation-line
+        ! limit only nagfor enforces (code-style.md).
+        p22 = [ &
+            new_unittest("pairs_within_los on a sky index aborts", test_spatial_los_on_sky_aborts), &
+            new_unittest("pairs_within_los on a 2D index aborts", test_spatial_los_on_2d_aborts), &
+            new_unittest("pairs_within_los on a periodic index aborts", test_spatial_los_on_periodic_aborts), &
+            new_unittest("a stored point on the observer aborts a line-of-sight sweep", &
+                test_spatial_los_point_at_observer_aborts), &
+            new_unittest("within_los from the observer itself aborts", &
+                test_spatial_within_los_point_at_observer_aborts), &
+            new_unittest("length lists of different lengths abort pairs_within_los", &
+                test_spatial_los_length_mismatch_aborts), &
+            new_unittest("three lengths for many points abort pairs_within_los", &
+                test_spatial_los_lengths_not_per_point_aborts), &
+            new_unittest("a negative parallel length aborts pairs_within_los", &
+                test_spatial_los_negative_length_aborts), &
+            new_unittest("an unknown combine= aborts pairs_within_los", test_spatial_los_bad_combine_aborts), &
+            new_unittest("within_los without los_p on a los= index aborts", &
+                test_spatial_within_los_needs_los_p_aborts), &
+            new_unittest("within_los with los_p on an index without los= aborts", &
+                test_spatial_within_los_los_p_refused_aborts), &
+            new_unittest("a zero length aborts within_los", test_spatial_within_los_zero_length_aborts), &
+            new_unittest("a two-coordinate point aborts within_los", test_spatial_within_los_rank_aborts), &
+            new_unittest("a NaN los_p aborts within_los", test_spatial_within_los_los_p_nan_aborts), &
+            new_unittest("a constant los= aborts %build", test_spatial_los_constant_aborts), &
+            new_unittest("a NaN in los= aborts %build", test_spatial_los_nan_aborts), &
+            new_unittest("a short los= aborts %build", test_spatial_los_length_aborts), &
+            new_unittest("los= on a 2D build aborts", test_spatial_los_build_on_2d_aborts), &
+            new_unittest("observer= on a periodic build aborts", test_spatial_los_build_on_periodic_aborts), &
+            new_unittest("a two-coordinate observer= aborts", test_spatial_los_observer_size_aborts), &
+            new_unittest("a NaN observer= aborts", test_spatial_los_observer_nan_aborts), &
+            new_unittest("a point on the observer aborts a los= build", &
+                test_spatial_los_build_point_at_observer_aborts), &
+            new_unittest("rebuild without los= on a los= index aborts", test_spatial_rebuild_los_missing_aborts), &
+            new_unittest("rebuild with los= on an index without one aborts", &
+                test_spatial_rebuild_los_unexpected_aborts), &
+            new_unittest("rebuild with a short los= aborts", test_spatial_rebuild_los_length_aborts), &
+            new_unittest("a los= that is not a function of the distance warns at build", &
+                test_spatial_los_not_a_function_warns), &
+            new_unittest("a parallel window spanning the catalogue warns at the sweep", &
+                test_spatial_los_window_spans_catalogue_warns) &
+            ]
         p8 = [ &
             new_unittest("reading a non-list column into a list column aborts", test_list_read_not_a_list_aborts), &
             new_unittest("a nested list payload reads", test_list_read_nested_payload_aborts), &
@@ -2643,8 +2687,8 @@ contains
             new_unittest("agg with a NaN weight aborts", test_table_group_agg_nan_weight_aborts), &
             new_unittest("agg with an infinite weight aborts", test_table_group_agg_infinite_weight_aborts) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p8, p9, p10, p11, p12, p17, p18, p19, &
-            p21]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
+            p19, p21]
     end subroutine collect_tests_parquet_errors
 
 
@@ -5823,6 +5867,204 @@ contains
             failure_message="PF_LINK_SUM past 45 degrees on the sky was expected to abort", &
             required_stderr="every angular radius must be <= 45 degrees")
     end subroutine test_spatial_sky_pairs_sum_too_large_aborts
+
+    ! ---- The line-of-sight cylinder: %within_los, %pairs_within_los, observer= and los= ----
+
+    subroutine test_spatial_los_on_sky_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_on_sky", expect_abort=.true., &
+            failure_message="pairs_within_los on a sky index was expected to abort", &
+            required_stderr="built with %build_sky; a line-of-sight cylinder needs Cartesian coordinates")
+    end subroutine test_spatial_los_on_sky_aborts
+
+    subroutine test_spatial_los_on_2d_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_on_2d", expect_abort=.true., &
+            failure_message="pairs_within_los on a 2D index was expected to abort", &
+            required_stderr="this index is two-dimensional; a line of sight needs three coordinates")
+    end subroutine test_spatial_los_on_2d_aborts
+
+    subroutine test_spatial_los_on_periodic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_on_periodic", expect_abort=.true., &
+            failure_message="pairs_within_los on a periodic index was expected to abort", &
+            required_stderr="this index is periodic; a line of sight has no meaning under the minimum image")
+    end subroutine test_spatial_los_on_periodic_aborts
+
+    !> The query-time half of the point-on-the-observer refusal: an index built without `los=` keeps
+    !> accepting a point at the origin, as every %build always has, and the sweep is what refuses.
+    subroutine test_spatial_los_point_at_observer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_point_at_observer", expect_abort=.true., &
+            failure_message="a stored point on the observer was expected to abort the sweep", &
+            required_stderr="pairs_within_los: a stored point coincides with the observer (distance 0)")
+    end subroutine test_spatial_los_point_at_observer_aborts
+
+    subroutine test_spatial_within_los_point_at_observer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_los_point_at_observer", expect_abort=.true., &
+            failure_message="a query from the observer itself was expected to abort", &
+            required_stderr="the query point coincides with the observer, so it has no line of sight")
+    end subroutine test_spatial_within_los_point_at_observer_aborts
+
+    subroutine test_spatial_los_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_length_mismatch", expect_abort=.true., &
+            failure_message="length lists of different lengths were expected to abort", &
+            required_stderr="b_perp and b_par must be the same length")
+    end subroutine test_spatial_los_length_mismatch_aborts
+
+    subroutine test_spatial_los_lengths_not_per_point_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_lengths_not_per_point", expect_abort=.true., &
+            failure_message="three lengths for 64 points were expected to abort", &
+            required_stderr="b_perp and b_par must be one value each or one per point each")
+    end subroutine test_spatial_los_lengths_not_per_point_aborts
+
+    subroutine test_spatial_los_negative_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_negative_length", expect_abort=.true., &
+            failure_message="a negative parallel length was expected to abort", &
+            required_stderr="every b_perp and b_par must be >= 0 and not NaN")
+    end subroutine test_spatial_los_negative_length_aborts
+
+    subroutine test_spatial_los_bad_combine_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_bad_combine", expect_abort=.true., &
+            failure_message="an unknown combine= on the cylinder sweep was expected to abort", &
+            required_stderr="pairs_within_los: combine= must be PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN or PF_LINK_SUM")
+    end subroutine test_spatial_los_bad_combine_aborts
+
+    subroutine test_spatial_within_los_needs_los_p_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_los_needs_los_p", expect_abort=.true., &
+            failure_message="within_los without los_p on a los= index was expected to abort", &
+            required_stderr="so los_p= is required")
+    end subroutine test_spatial_within_los_needs_los_p_aborts
+
+    subroutine test_spatial_within_los_los_p_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_los_los_p_refused", expect_abort=.true., &
+            failure_message="within_los with los_p on an index without los= was expected to abort", &
+            required_stderr="so los_p= has no meaning here")
+    end subroutine test_spatial_within_los_los_p_refused_aborts
+
+    subroutine test_spatial_within_los_zero_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_los_zero_length", expect_abort=.true., &
+            failure_message="a zero length on within_los was expected to abort", &
+            required_stderr="b_perp and b_par must both be > 0 and not NaN")
+    end subroutine test_spatial_within_los_zero_length_aborts
+
+    subroutine test_spatial_within_los_rank_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_los_rank", expect_abort=.true., &
+            failure_message="a two-coordinate point on within_los was expected to abort", &
+            required_stderr="within_los: the query point must have three coordinates")
+    end subroutine test_spatial_within_los_rank_aborts
+
+    subroutine test_spatial_within_los_los_p_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_los_los_p_nan", expect_abort=.true., &
+            failure_message="a NaN los_p was expected to abort", &
+            required_stderr="los_p must be a finite number")
+    end subroutine test_spatial_within_los_los_p_nan_aborts
+
+    subroutine test_spatial_los_constant_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_constant", expect_abort=.true., &
+            failure_message="a constant los= was expected to abort %build", &
+            required_stderr="build: los= is constant, or varies by less than 64 ulps")
+    end subroutine test_spatial_los_constant_aborts
+
+    subroutine test_spatial_los_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_nan", expect_abort=.true., &
+            failure_message="a NaN in los= was expected to abort %build", &
+            required_stderr="build: every los value must be a finite number")
+    end subroutine test_spatial_los_nan_aborts
+
+    subroutine test_spatial_los_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_length", expect_abort=.true., &
+            failure_message="a short los= was expected to abort %build", &
+            required_stderr="build: los= must have one entry per point")
+    end subroutine test_spatial_los_length_aborts
+
+    subroutine test_spatial_los_build_on_2d_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_build_on_2d", expect_abort=.true., &
+            failure_message="los= on a 2D build was expected to abort", &
+            required_stderr="observer= and los= describe a line of sight")
+    end subroutine test_spatial_los_build_on_2d_aborts
+
+    subroutine test_spatial_los_build_on_periodic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_build_on_periodic", expect_abort=.true., &
+            failure_message="observer= on a periodic build was expected to abort", &
+            required_stderr="observer= and los= describe a line of sight")
+    end subroutine test_spatial_los_build_on_periodic_aborts
+
+    subroutine test_spatial_los_observer_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_observer_size", expect_abort=.true., &
+            failure_message="a two-coordinate observer= was expected to abort", &
+            required_stderr="observer= must have exactly three coordinates")
+    end subroutine test_spatial_los_observer_size_aborts
+
+    subroutine test_spatial_los_observer_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_observer_nan", expect_abort=.true., &
+            failure_message="a NaN observer= was expected to abort", &
+            required_stderr="every observer coordinate must be a finite number")
+    end subroutine test_spatial_los_observer_nan_aborts
+
+    !> The build-time half of the point-on-the-observer refusal: `los=` declares the intent, so the
+    !> build refuses rather than leaving it to the first sweep.
+    subroutine test_spatial_los_build_point_at_observer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_build_point_at_observer", expect_abort=.true., &
+            failure_message="a point on the observer was expected to abort a los= build", &
+            required_stderr="build: a point coincides with the observer (distance 0)")
+    end subroutine test_spatial_los_build_point_at_observer_aborts
+
+    subroutine test_spatial_rebuild_los_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_los_missing", expect_abort=.true., &
+            failure_message="rebuild without los= on a los= index was expected to abort", &
+            required_stderr="so %rebuild needs los= with the new values")
+    end subroutine test_spatial_rebuild_los_missing_aborts
+
+    subroutine test_spatial_rebuild_los_unexpected_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_los_unexpected", expect_abort=.true., &
+            failure_message="rebuild with los= on an index without one was expected to abort", &
+            required_stderr="so %rebuild takes none")
+    end subroutine test_spatial_rebuild_los_unexpected_aborts
+
+    subroutine test_spatial_rebuild_los_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_los_length", expect_abort=.true., &
+            failure_message="rebuild with a short los= was expected to abort", &
+            required_stderr="rebuild: los= must have one entry per point")
+    end subroutine test_spatial_rebuild_los_length_aborts
+
+    !> The warning must land on the stream the settings name and nowhere else, or it is decorative
+    !> (`feature_risks.md` Risk-41's shape); the scenario itself exits cleanly, since a `los` that
+    !> is not a function of the distance is accepted.
+    subroutine test_spatial_los_not_a_function_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "spatial_los_not_a_function_warns", &
+            "los= is not a function of the distance from the observer", &
+            "stderr", "a los= unrelated to the distance must warn at %build")
+    end subroutine test_spatial_los_not_a_function_warns
+
+    subroutine test_spatial_los_window_spans_catalogue_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "spatial_los_window_spans_catalogue_warns", &
+            "the parallel window spans the whole catalogue along every line of sight", &
+            "stderr", "a parallel window spanning the catalogue must warn at the sweep")
+    end subroutine test_spatial_los_window_spans_catalogue_warns
 
     !> A `contiguous` dummy would copy a strided actual into a temporary that dies at the end of the
     !> call, leaving the index pointing at freed memory with nothing able to detect it -- so this

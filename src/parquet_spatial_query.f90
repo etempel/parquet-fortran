@@ -246,9 +246,11 @@ contains
         real(real64) :: r2, r2in, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3
         real(real64) :: bnd, uslf, vslf
+        real(real64) :: q1, q2, q3, dself, lself, bpself, blself, dj, sd, ddif, ex, ey, ez, dpv, dlv, dv
         real(real64), allocatable :: dwork(:)
         logical :: has32, has64, hasd, want_min, direct, want_sort, usework, want_bnd
-        integer :: d, nrun, ir
+        logical :: want_los, hasdp, hasdl, ok
+        integer :: d, nrun, ir, lrule
 
         m = 0_int64
         if (.not. self%built_ok) error stop &
@@ -285,13 +287,51 @@ contains
             uslf = bnd_u_self
             vslf = bnd_v_self
         end if
+        ! The line-of-sight accept, keyed on `los_rule` so the whole group travels as one mechanism
+        ! the way `min_key`/`keys` and `bnd_*` do; the searcher's terms are lifted into locals for
+        ! the reason the bound's are.
+        want_los = present(los_rule)
+        hasdp = present(dperp)
+        hasdl = present(dpar)
+        lrule = 0
+        q1 = 0.0_real64
+        q2 = 0.0_real64
+        q3 = 0.0_real64
+        dself = 1.0_real64
+        lself = 0.0_real64
+        bpself = 0.0_real64
+        blself = 0.0_real64
+        dpv = 0.0_real64
+        dlv = 0.0_real64
+        if (want_los) then
+            ! Defensive, exactly as above: both workers pass the group complete. ! GCOVR_EXCL_LINE
+            if (.not. (present(los_q) .and. present(los_d) .and. present(los_l) .and. present(los_bp) &
+                .and. present(los_bl) .and. present(los_ls))) error stop & ! GCOVR_EXCL_LINE
+                "pf_spatial_index: los_rule needs the searcher's terms and los_ls" ! GCOVR_EXCL_LINE
+            lrule = los_rule
+            if (lrule /= 0) then
+                if (.not. (present(los_bps) .and. present(los_bls))) error stop & ! GCOVR_EXCL_LINE
+                    "pf_spatial_index: a combine rule needs los_bps and los_bls" ! GCOVR_EXCL_LINE
+            end if
+            q1 = los_q(1)
+            q2 = los_q(2)
+            q3 = los_q(3)
+            dself = los_d
+            lself = los_l
+            bpself = los_bp
+            blself = los_bl
+        else if (hasdp .or. hasdl) then
+            error stop "pf_spatial_index: dperp and dpar are line-of-sight outputs and need los_rule" ! GCOVR_EXCL_LINE
+        end if
         if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%within: this index holds more rows than an int32 buffer can name; use an int64 one"
         cap = 0_int64
-        if (has32 .or. has64 .or. hasd) cap = huge(0_int64)
+        if (has32 .or. has64 .or. hasd .or. hasdp .or. hasdl) cap = huge(0_int64)
         if (has32) cap = min(cap, size(out32, kind=int64))
         if (has64) cap = min(cap, size(out64, kind=int64))
         if (hasd) cap = min(cap, size(dist, kind=int64))
+        if (hasdp) cap = min(cap, size(dperp, kind=int64))
+        if (hasdl) cap = min(cap, size(dpar, kind=int64))
         ! An absent inner radius is stored as zero rather than behind a flag, so the accept test
         ! is one comparison against a squared bound in both cases: `d2 < 0` is never true, so the
         ! plain ball pays a compare it can never fail and needs no second code path.
@@ -372,13 +412,55 @@ contains
                                     bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
                                     if (d2 > bnd * bnd) cycle
                                 end if
+                                if (want_los) then
+                                    ! The cylinder test, formed without cancellation: `D_j - D_i`
+                                    ! is `(2 q.s + |s|^2) / (D_i + D_j)` rather than the difference
+                                    ! of two thousand-unit distances, and the unit vectors' difference
+                                    ! is `(s D_i - q (D_j - D_i)) / (D_i D_j)`, never `2 - 2 cos`.
+                                    ! Keep the two copies of this block in step.
+                                    dj = self%d_s(t)
+                                    sd = dself + dj
+                                    ddif = (2.0_real64 * (q1 * dx + q2 * dy + q3 * dz) + d2) / sd
+                                    ex = dx * dself - q1 * ddif
+                                    ey = dy * dself - q2 * ddif
+                                    ez = dz * dself - q3 * ddif
+                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
+                                    dlv = abs(los_ls(t) - lself)
+                                    select case (lrule)
+                                    case (0)
+                                        ok = dpv <= bpself .and. dlv <= blself
+                                    case (PF_LINK_MAX)
+                                        ok = (dpv <= bpself .and. dlv <= blself) .or. &
+                                             (dpv <= los_bps(t) .and. dlv <= los_bls(t))
+                                    case (PF_LINK_MIN)
+                                        ok = dpv <= bpself .and. dlv <= blself .and. &
+                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                    case (PF_LINK_MEAN)
+                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
+                                             2.0_real64 * dlv <= blself + los_bls(t)
+                                    case default
+                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
+                                    end select
+                                    if (.not. ok) cycle
+                                end if
                                 row = self%idx(t)
                                 m = m + 1_int64
                                 if (m <= cap) then
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
-                                    if (hasd) dist(m) = sqrt(d2)
-                                    if (usework) dwork(m) = sqrt(d2)
+                                    if (hasd .or. usework) then
+                                        ! The reported measure: the distance, or for a line-of-sight
+                                        ! query the normalised one, 1 on the cylinder's surface.
+                                        dv = sqrt(d2)
+                                        if (want_los) then
+                                            dv = dpv / bpself
+                                            if (dlv / blself > dv) dv = dlv / blself
+                                        end if
+                                        if (hasd) dist(m) = dv
+                                        if (usework) dwork(m) = dv
+                                    end if
+                                    if (hasdp) dperp(m) = dpv
+                                    if (hasdl) dpar(m) = dlv
                                 end if
                             end if
                         end do
@@ -398,19 +480,55 @@ contains
                                     bnd = uslf * bnd_v(t) + vslf * bnd_u(t)
                                     if (d2 > bnd * bnd) cycle
                                 end if
+                                if (want_los) then
+                                    ! The same block as the direct loop's; see the comment there.
+                                    dj = self%d_s(t)
+                                    sd = dself + dj
+                                    ddif = (2.0_real64 * (q1 * dx + q2 * dy + q3 * dz) + d2) / sd
+                                    ex = dx * dself - q1 * ddif
+                                    ey = dy * dself - q2 * ddif
+                                    ez = dz * dself - q3 * ddif
+                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
+                                    dlv = abs(los_ls(t) - lself)
+                                    select case (lrule)
+                                    case (0)
+                                        ok = dpv <= bpself .and. dlv <= blself
+                                    case (PF_LINK_MAX)
+                                        ok = (dpv <= bpself .and. dlv <= blself) .or. &
+                                             (dpv <= los_bps(t) .and. dlv <= los_bls(t))
+                                    case (PF_LINK_MIN)
+                                        ok = dpv <= bpself .and. dlv <= blself .and. &
+                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
+                                    case (PF_LINK_MEAN)
+                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
+                                             2.0_real64 * dlv <= blself + los_bls(t)
+                                    case default
+                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
+                                    end select
+                                    if (.not. ok) cycle
+                                end if
                                 m = m + 1_int64
                                 if (m <= cap) then
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
-                                    if (hasd) dist(m) = sqrt(d2)
-                                    if (usework) dwork(m) = sqrt(d2)
+                                    if (hasd .or. usework) then
+                                        dv = sqrt(d2)
+                                        if (want_los) then
+                                            dv = dpv / bpself
+                                            if (dlv / blself > dv) dv = dlv / blself
+                                        end if
+                                        if (hasd) dist(m) = dv
+                                        if (usework) dwork(m) = dv
+                                    end if
+                                    if (hasdp) dperp(m) = dpv
+                                    if (hasdl) dpar(m) = dlv
                                 end if
                             end if
                         end do
                     end if
                 end do
             end do
-            call scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
+            call scan_finish(want_sort, m, cap, dist, dwork, out32, out64, dperp, dpar)
             return
         end if
 
@@ -531,7 +649,7 @@ contains
     !>
     !> Two exits reach this rather than one, because the free and periodic walks are separate loop
     !> nests -- see this file's header for why they are kept apart.
-    subroutine scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
+    subroutine scan_finish(want_sort, m, cap, dist, dwork, out32, out64, dperp, dpar)
         logical, intent(in) :: want_sort !! whether the caller asked for an ordered result.
         integer(int64), intent(in) :: m !! the true count, which may exceed the buffers.
         integer(int64), intent(in) :: cap !! how many entries were actually written.
@@ -539,17 +657,19 @@ contains
         real(real64), intent(inout), optional :: dwork(:) !! our own, when the caller wanted none.
         integer(int32), intent(inout), optional :: out32(:) !! int32 rows, permuted with the keys.
         integer(int64), intent(inout), optional :: out64(:) !! int64 rows, permuted with the keys.
+        real(real64), intent(inout), optional :: dperp(:) !! transverse separations, permuted with the rows.
+        real(real64), intent(inout), optional :: dpar(:) !! parallel separations, permuted with the rows.
         integer(int64) :: nfill
 
         if (.not. want_sort) return
         nfill = min(m, cap)
         if (nfill < 2_int64) return
         if (present(dist)) then
-            call spatial_order_by_dist(nfill, dist, out32=out32, out64=out64)
+            call spatial_order_by_dist(nfill, dist, out32=out32, out64=out64, dperp=dperp, dpar=dpar)
         else if (present(dwork)) then
             ! An unallocated `dwork` arrives here ABSENT (F2018 15.5.2.12), which is exactly the
             ! "the caller wanted no distances and no ordering either" case.
-            call spatial_order_by_dist(nfill, dwork, out32=out32, out64=out64)
+            call spatial_order_by_dist(nfill, dwork, out32=out32, out64=out64, dperp=dperp, dpar=dpar)
         end if
     end subroutine scan_finish
 
@@ -810,6 +930,18 @@ contains
                 tmpr(k) = axis_t(perm(k))
             end do
             axis_t(1:nfill) = tmpr
+        end if
+        if (present(dperp)) then
+            do k = 1_int64, nfill
+                tmpr(k) = dperp(perm(k))
+            end do
+            dperp(1:nfill) = tmpr
+        end if
+        if (present(dpar)) then
+            do k = 1_int64, nfill
+                tmpr(k) = dpar(perm(k))
+            end do
+            dpar(1:nfill) = tmpr
         end if
         if (present(axis_point)) then
             nd = size(axis_point, 1)

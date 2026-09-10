@@ -311,6 +311,9 @@ something a reader is expected to have.
 | [Risk-240](#risk-240--aggs-widening-and-nuniques-equality-must-stay-parquet_stats-and-the-sort-comparators) | %agg's answers must stay parquet_stats', %nunique's equality the sort comparator's | 4 — covered |
 | [Risk-241](#risk-241--first_rowslast_rows-are-computed-not-read-off-the-permutations-ends) | %first_rows/%last_rows are computed; the engine's stability hides a read-off-the-end | 4 — covered |
 | [Risk-242](#risk-242--the-exact-int64-sum-must-abort-on-overflow-never-wrap) | The exact int64 sum must abort on overflow, never wrap | 4 — covered |
+| [Risk-243](#risk-243--pairs_within_los-is-complete-only-through-the-measured-slope-l-and-spread-g-and-a-walk-without-them-drops-pairs-quietly) | `%pairs_within_los` is complete only through the measured slope `L` and spread `g` | 4 — covered |
+| [Risk-244](#risk-244--on-a-cylinder-pf_link_max-is-the-union-of-the-two-cylinders-and-the-componentwise-maximum-is-a-plausible-wrong-answer) | On a cylinder `PF_LINK_MAX` is the UNION, never the componentwise maximum | 4 — covered |
+| [Risk-245](#risk-245--the-transverse-separation-is-formed-without-cancellation-and-2---2-cos-is-right-on-a-test-fixture-and-wrong-on-a-catalogue) | The transverse separation is formed without cancellation, never as `2 - 2 cos` | 4 — covered |
 
 ---
 
@@ -9216,3 +9219,93 @@ the mean and the sum disagree on opposite sides, so a one-sided precondition wou
 one of them. It runs both sky backends and asserts the pair COUNT before the set, since a doubled
 emission keeps the set and changes only the count. `test_sky_pairs_sum_within_ceiling` covers the
 sum rule up against its own limit.
+
+### Risk-243 — `%pairs_within_los` is complete only through the measured slope `L` and spread `g`, and a walk without them drops pairs quietly
+
+The line-of-sight cylinder is accepted inside an ordinary ball walk, so completeness rests on the
+ball containing the cylinder. `|p_i - p_j|**2 <= (D_i - D_j)**2 + d_perp**2` for any two points about
+one observer, and the parallel test bounds `|los_i - los_j|`, not `|D_i - D_j|` -- so the walk needs
+a bound on the radial separation in terms of the parallel one. `spatial_los_bounds`
+(`src/parquet_spatial_build.f90`) measures two numbers at `%build` and `%rebuild`: `L`, the steepest
+`|dD| / |dlos|` over pairs at least the gap floor `w` apart in `los`, and `g`, the largest `|dD|`
+over pairs closer than `w`, with `w = 1e-5 * range(los)` floored at 64 ulps of `max |los|`. Every
+pair then satisfies `|D_i - D_j| <= max(L * |dlos|, g)`, and the walk radius is
+`sqrt(b_perp**2 + max(L * b_par, g)**2)`, doubled for `PF_LINK_SUM`, ranked descending (ascending
+for `PF_LINK_MIN`) exactly as the ball sweep's radii are.
+
+Nothing aborts when any of this is wrong: a walk of `sqrt(b_perp**2 + b_par**2)` (dropping `L`), a
+slope measured over row order instead of `los`-sorted order, a slope taken over gaps below `w`
+(noisy on a continuous list, infinite on a tie), a spread measured over a window narrower than `w`,
+or a radius without `g` at all, each returns a plausible pair list quietly missing the pairs whose
+distance grows faster than their `los`, or whose `los` ties while their distance differs.
+
+**What this still forbids:**
+
+- **Do not drop the gap floor, and do not raise it into a smoothing window.** Below it a tie in
+  `los` -- two galaxies with one catalogued redshift, whose distances still differ at the rounding
+  level because they are recomputed from the coordinates -- makes the slope infinite, and the
+  closest of `n` continuous values inflate it with rounding noise. Above it, at a few per cent of the
+  range, dense data would put whole structures inside one window and the slope would no longer
+  bound anything.
+- **Do not measure `L` over consecutive sorted points**; the maximum is attained on TIGHT pairs
+  (`v` in `[los_v', los_v' + w)`, `v'` the first point at or beyond `los_u + w`), which the
+  consecutive pairs are not once ties or near-ties exist. Points sharing a `los` are compressed
+  into one group carrying the smallest and largest distance first, which is what keeps that scan
+  from going quadratic on redshifts quoted to a few decimals.
+- **Do not let the radial arrays go stale.** `d_s` and `los_s` are addressed by STORED position, and
+  stored order is remade by every route through `spatial_bucket`: `%build`, `%rebuild`,
+  `%rebuild_for` and the automatic re-tune a bulk call triggers. `spatial_bucket` permutes `los_s`
+  beside the coordinates -- through the old row map when the coordinates are borrowed -- and ends
+  with `spatial_radial_prepare`; a re-bucketing route that skipped either would attach a distance
+  or a parallel coordinate to the wrong row.
+
+**Covered by** `test_pairs_los_with_slope` (`test/test_spatial.f90`; `los = D/2`, `L = 2`, with a
+precondition that accepted pairs beyond `sqrt(b_perp**2 + b_par**2)` exist),
+`test_pairs_los_close_los_is_complete` (`los` quantised into ties over distances spreading by up to
+50, `b_par` far below that, with a precondition that accepted pairs only `g` reaches exist),
+`test_pairs_los_slope_is_clean` (a hundred thousand continuous redshifts with Einstein-de Sitter
+distances: `L` within a millionth of the steepest tight secant and within a hundred-thousandth of the
+analytic `dD/dz`, `g <= 1.01 L w`), and `test_pairs_los_survives_rebuild_and_copy_false` (a borrowed
+index re-tuned by its bulk call, `%rebuild_for`, and `%rebuild` with moved points and a new `los`,
+each against the oracle).
+
+### Risk-244 — On a cylinder `PF_LINK_MAX` is the UNION of the two cylinders, and the componentwise maximum is a plausible wrong answer
+
+On a ball the default rule reads `d <= max(r_i, r_j)`, and the componentwise reading of that on two
+lengths -- `d_perp <= max(b_perp) .and. d_par <= max(b_par)` -- is the natural generalisation and the
+wrong one. When the two points' aspect ratios differ, a pair can satisfy the transverse test through
+one endpoint's length and the parallel test through the other's while lying inside NEITHER point's
+cylinder. The decided meaning is the union: the pair lies in `i`'s cylinder or in `j`'s. The
+componentwise form over-accepts, and every pair it adds is genuinely near in both senses, so the
+list looks entirely ordinary.
+
+**Rule:** the accept test in `spatial_scan` (`src/parquet_spatial_query.f90`) evaluates the two own
+cylinders and ORs them for `PF_LINK_MAX`; it needs the candidate's two lengths per candidate, which
+is why the stored-order length arrays are built and passed for every rule. The oracle in the tests
+is written from the plain-language definition (`los_qualifies`), never from the library's arithmetic.
+
+**Covered by** `test_pairs_los_matches_cylinder_oracle` (`test/test_spatial.f90`), whose fixture
+spreads the ratios over 5..30 and asserts, before comparing anything, that the union and the
+componentwise maximum judge at least one pair differently; it then asserts set equality for all
+four rules and that the four pair counts are pairwise distinct -- distinct rather than ordered,
+because on a cylinder the mean set is not inside the union.
+
+### Risk-245 — The transverse separation is formed without cancellation, and `2 - 2 cos` is right on a test fixture and wrong on a catalogue
+
+`d_perp = |n_i - n_j| (D_i + D_j) / 2` needs the length of the difference of two unit vectors, and
+at the milli-radian separations of a real catalogue that length is `1e-3` while each component is
+of order 1. Forming it as `sqrt(2 - 2 n_i . n_j)` subtracts two nearly equal doubles and keeps about
+eight digits; a degree-scale test fixture never notices. The shipped form
+(`src/parquet_spatial_query.f90`, the `want_los` block) is cancellation-free twice over: `D_j - D_i`
+is `(2 q.s + |s|**2) / (D_i + D_j)` with `q = p_i - o` and `s = p_j - p_i`, never the difference of
+two thousand-unit distances, and the unit vectors' difference is `(s D_i - q (D_j - D_i)) / (D_i D_j)`.
+
+**Rule:** the two copies of that block (the direct and the borrowed-coordinate loops) stay
+identical, and no "simplification" reintroduces a dot product of unit vectors or a difference of
+gathered distances.
+
+**Covered by** `test_pairs_los_reports_separations` (`test/test_spatial.f90`), which compares
+`dperp=` with a haversine oracle computed from the fixture's own angles at a part in a billion, on
+a wedge at realistic distances, and asserts `dpar=` is exactly the difference of the two parallel
+coordinates; `test_pairs_los_redshift_example` runs the same criterion at a redshift survey's scale
+against the oracle for all four rules.

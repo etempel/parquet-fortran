@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A cylinder along the line of sight: `pf_spatial_index%within_los` and `%pairs_within_los`.**
+  `sx%pairs_within_los(b_perp, b_par, i, j)` returns every pair, once and with `i < j`, whose
+  transverse separation about an observer is within `b_perp` and whose parallel separation is
+  within `b_par`, with one pair of lengths for every point or one per point;
+  `m = sx%within_los(p, b_perp, b_par, found)` is the same cylinder about one point, with `dist=`
+  the normalised measure `max(d_perp/b_perp, d_par/b_par)` and `sorted=` ordering by it. `%build`
+  takes `observer=` (default the origin) and `los=`, an optional parallel coordinate per point in
+  its own units, the redshift itself over comoving coordinates being the intended use: `b_perp` and
+  `dperp=` are in the coordinates' units, `b_par` and `dpar=` in `los=`'s, and without `los=` the
+  parallel separation is the difference in distance from the observer. `combine=` chooses how two
+  points' lengths decide a pair, `PF_LINK_MAX` meaning the union of the two cylinders; `dperp=` and
+  `dpar=` return the two separations per pair. `%rebuild` takes `los=` exactly when the index
+  carries one. `bench/benchmark_spatial.sh` gains `MODE=los`. See
+  [Cylinders along the line of sight](doc/pages/utilities/spatial.md#cylinders-along-the-line-of-sight).
 - **Grouping: `parquet_table%group_by` and the `parquet_grouping` object.**
   `t%group_by(keys, grp)` partitions a table's rows by the values of one or more key columns and
   keeps the partition as an object that answers per group, without reordering the table. `%rows`,

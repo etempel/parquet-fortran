@@ -54,6 +54,9 @@ module test_spatial
     !> directly. The same reasoning applies to any oracle argument added here later.
     real(real64), parameter :: NO_WRAP(3) = 0.0_real64
 
+    !> `c / H0` in Mpc/h, the one cosmological constant the line-of-sight fixtures need.
+    real(real64), parameter :: los_ch0 = 2997.9_real64
+
 contains
 
     !> Registers every test in this suite.
@@ -90,6 +93,30 @@ contains
                          test_sky_pairs_combine_matches_angle_oracle), &
             new_unittest("the sky sum rule holds inside its 45-degree ceiling", &
                          test_sky_pairs_sum_within_ceiling), &
+            new_unittest("every combine= rule on the line-of-sight cylinder matches its own oracle", &
+                         test_pairs_los_matches_cylinder_oracle), &
+            new_unittest("omitting los= is the distance from the observer", &
+                         test_pairs_los_default_los_is_distance), &
+            new_unittest("a los= steeper than the distance widens the walk by its measured slope", &
+                         test_pairs_los_with_slope), &
+            new_unittest("pairs closer than the gap floor in los are carried by the spread alone", &
+                         test_pairs_los_close_los_is_complete), &
+            new_unittest("the slope is measured cleanly on a continuous redshift list", &
+                         test_pairs_los_slope_is_clean), &
+            new_unittest("comoving coordinates with the redshift as los= match the oracle", &
+                         test_pairs_los_redshift_example), &
+            new_unittest("dperp and dpar report the two separations in their two units", &
+                         test_pairs_los_reports_separations), &
+            new_unittest("observer= reproduces the origin's pairs on shifted coordinates", &
+                         test_pairs_los_observer_offset), &
+            new_unittest("within_los returns exactly the point's own cylinder", &
+                         test_within_los_matches_oracle), &
+            new_unittest("within_los orders by the normalised measure", &
+                         test_within_los_sorted_by_normalised_measure), &
+            new_unittest("within_los reports the true count when the buffer is short", &
+                         test_within_los_short_buffer_keeps_true_count), &
+            new_unittest("los= stays aligned through copy=.false., re-tuning and %rebuild", &
+                         test_pairs_los_survives_rebuild_and_copy_false), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
@@ -3941,5 +3968,821 @@ contains
         call check(error, sky%count_within_sky(ra(1), dec(1), 90.0_real64) > 0_int64, &
             "a hemisphere-wide radius must count something rather than nothing")
     end subroutine test_count_within_sky
+
+    ! ---- Line-of-sight fixtures and the cylinder oracle ----
+
+    !> The Einstein-de Sitter comoving distance, `2 (c/H0) (1 - 1/sqrt(1+z))`: a real distance-redshift
+    !> relation with a closed form, so an analytic slope `(c/H0) (1+z)**(-3/2)` exists to compare
+    !> the measured one against.
+    pure elemental real(real64) function los_comoving(z) result(d)
+        real(real64), intent(in) :: z !! the redshift.
+
+        d = 2.0_real64 * los_ch0 * (1.0_real64 - 1.0_real64 / sqrt(1.0_real64 + z))
+    end function los_comoving
+
+    !> A deterministic survey wedge about an observer at the origin: `nrand` scattered points inside
+    !> a footprint about ten degrees across at distances in `[d_lo, d_hi]`, plus `nspoke` radial
+    !> spokes of four points each, 15 apart in distance along one line of sight, so that pairs along
+    !> a line of sight exist at every depth whatever the random draw did. Returns the generating
+    !> angles and distances beside the coordinates, so an oracle can work from them and never from
+    !> the Cartesian coordinates the library sees.
+    subroutine make_wedge(nrand, nspoke, d_lo, d_hi, stream, ra, dec, d, x, y, z)
+        integer(int64), intent(in) :: nrand !! scattered points.
+        integer(int64), intent(in) :: nspoke !! spokes; each adds four points along one line of sight.
+        real(real64), intent(in) :: d_lo !! the nearest distance.
+        real(real64), intent(in) :: d_hi !! the farthest distance.
+        integer(int64), intent(in) :: stream !! a draw offset, so two fixtures differ.
+        real(real64), allocatable, intent(out) :: ra(:) !! right ascension, radians.
+        real(real64), allocatable, intent(out) :: dec(:) !! declination, radians.
+        real(real64), allocatable, intent(out) :: d(:) !! distance from the origin.
+        real(real64), allocatable, intent(out) :: x(:) !! x of every point.
+        real(real64), allocatable, intent(out) :: y(:) !! y of every point.
+        real(real64), allocatable, intent(out) :: z(:) !! z of every point.
+        integer(int64) :: n, i, s, k
+        real(real64), parameter :: half = 0.087_real64
+
+        n = nrand + 4_int64 * nspoke
+        allocate (ra(n), dec(n), d(n), x(n), y(n), z(n))
+        do i = 1_int64, nrand
+            ra(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, i, 1_int64) - 1.0_real64)
+            dec(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, i, 2_int64) - 1.0_real64)
+            d(i) = d_lo + (d_hi - d_lo) * pf_random_at(fixture_seed + stream, i, 3_int64)
+        end do
+        do s = 1_int64, nspoke
+            do k = 0_int64, 3_int64
+                i = nrand + 4_int64 * (s - 1_int64) + k + 1_int64
+                ra(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, s, 4_int64) - 1.0_real64)
+                dec(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, s, 5_int64) - 1.0_real64)
+                d(i) = d_lo + (d_hi - d_lo - 45.0_real64) * pf_random_at(fixture_seed + stream, s, 6_int64) &
+                    + 15.0_real64 * real(k, kind=real64)
+            end do
+        end do
+        do i = 1_int64, n
+            x(i) = d(i) * cos(dec(i)) * cos(ra(i))
+            y(i) = d(i) * cos(dec(i)) * sin(ra(i))
+            z(i) = d(i) * sin(dec(i))
+        end do
+    end subroutine make_wedge
+
+    !> A deterministic redshift survey, the worked example of the design in miniature: `nrand`
+    !> galaxies with redshifts in `[z_lo, z_hi]` and `nspoke` spokes of four galaxies 0.002 apart in
+    !> redshift along one line of sight, placed at their Einstein-de Sitter comoving distance.
+    subroutine make_redshift_survey(nrand, nspoke, z_lo, z_hi, stream, ra, dec, zred, d, x, y, z)
+        integer(int64), intent(in) :: nrand !! scattered galaxies.
+        integer(int64), intent(in) :: nspoke !! spokes of four galaxies each.
+        real(real64), intent(in) :: z_lo !! the lowest redshift.
+        real(real64), intent(in) :: z_hi !! the highest redshift.
+        integer(int64), intent(in) :: stream !! a draw offset, so two fixtures differ.
+        real(real64), allocatable, intent(out) :: ra(:) !! right ascension, radians.
+        real(real64), allocatable, intent(out) :: dec(:) !! declination, radians.
+        real(real64), allocatable, intent(out) :: zred(:) !! the redshift: the parallel coordinate.
+        real(real64), allocatable, intent(out) :: d(:) !! comoving distance, Mpc/h.
+        real(real64), allocatable, intent(out) :: x(:) !! x of every galaxy, Mpc/h.
+        real(real64), allocatable, intent(out) :: y(:) !! y of every galaxy.
+        real(real64), allocatable, intent(out) :: z(:) !! z of every galaxy.
+        integer(int64) :: n, i, s, k
+        real(real64), parameter :: half = 0.087_real64
+
+        n = nrand + 4_int64 * nspoke
+        allocate (ra(n), dec(n), zred(n), d(n), x(n), y(n), z(n))
+        do i = 1_int64, nrand
+            ra(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, i, 1_int64) - 1.0_real64)
+            dec(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, i, 2_int64) - 1.0_real64)
+            zred(i) = z_lo + (z_hi - z_lo) * pf_random_at(fixture_seed + stream, i, 3_int64)
+        end do
+        do s = 1_int64, nspoke
+            do k = 0_int64, 3_int64
+                i = nrand + 4_int64 * (s - 1_int64) + k + 1_int64
+                ra(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, s, 4_int64) - 1.0_real64)
+                dec(i) = half * (2.0_real64 * pf_random_at(fixture_seed + stream, s, 5_int64) - 1.0_real64)
+                zred(i) = z_lo + (z_hi - z_lo - 0.006_real64) * pf_random_at(fixture_seed + stream, s, 6_int64) &
+                    + 0.002_real64 * real(k, kind=real64)
+            end do
+        end do
+        do i = 1_int64, n
+            d(i) = los_comoving(zred(i))
+            x(i) = d(i) * cos(dec(i)) * cos(ra(i))
+            y(i) = d(i) * cos(dec(i)) * sin(ra(i))
+            z(i) = d(i) * sin(dec(i))
+        end do
+    end subroutine make_redshift_survey
+
+    !> The transverse separation of two points about the origin, from the angles and distances the
+    !> fixture was generated with: `2 sin(dtheta/2) (D_1 + D_2)/2`, the half-angle sine by the
+    !> haversine, so it cancels nothing and shares nothing with the Cartesian coordinates.
+    real(real64) function los_dperp(ra1, dec1, d1, ra2, dec2, d2) result(dp)
+        real(real64), intent(in) :: ra1 !! first point's right ascension, radians.
+        real(real64), intent(in) :: dec1 !! first point's declination, radians.
+        real(real64), intent(in) :: d1 !! first point's distance from the origin.
+        real(real64), intent(in) :: ra2 !! second point's right ascension.
+        real(real64), intent(in) :: dec2 !! second point's declination.
+        real(real64), intent(in) :: d2 !! second point's distance.
+        real(real64) :: hav
+
+        hav = sin(0.5_real64 * (dec2 - dec1))**2 + cos(dec1) * cos(dec2) * sin(0.5_real64 * (ra2 - ra1))**2
+        dp = sqrt(hav) * (d1 + d2)
+    end function los_dperp
+
+    !> Whether separations `dp`, `dl` qualify under `rule` for lengths `(bpa, bla)` and `(bpb, blb)`,
+    !> written from each rule's plain-language definition: rule 0 is the first point's own cylinder,
+    !> and `PF_LINK_MAX` is the UNION of the two cylinders, never the componentwise maximum.
+    logical function los_qualifies(rule, dp, dl, bpa, bla, bpb, blb) result(ok)
+        integer, intent(in) :: rule !! 0, or one of the four `PF_LINK_*` constants.
+        real(real64), intent(in) :: dp !! the transverse separation.
+        real(real64), intent(in) :: dl !! the parallel separation.
+        real(real64), intent(in) :: bpa !! the first point's transverse length.
+        real(real64), intent(in) :: bla !! the first point's parallel length.
+        real(real64), intent(in) :: bpb !! the second point's transverse length.
+        real(real64), intent(in) :: blb !! the second point's parallel length.
+
+        select case (rule)
+        case (0)
+            ok = dp <= bpa .and. dl <= bla
+        case (PF_LINK_MAX)
+            ok = (dp <= bpa .and. dl <= bla) .or. (dp <= bpb .and. dl <= blb)
+        case (PF_LINK_MIN)
+            ok = dp <= min(bpa, bpb) .and. dl <= min(bla, blb)
+        case (PF_LINK_MEAN)
+            ok = dp <= 0.5_real64 * (bpa + bpb) .and. dl <= 0.5_real64 * (bla + blb)
+        case default
+            ok = dp <= bpa + bpb .and. dl <= bla + blb
+        end select
+    end function los_qualifies
+
+    !> Every pair the cylinder criterion accepts under `rule`, by scanning every pair from the
+    !> fixture's own angles, distances and parallel coordinate. `want(a, b)` for `a < b`.
+    subroutine brute_los_pairs(ra, dec, d, los, bp, bl, rule, want, nwant)
+        real(real64), intent(in) :: ra(:) !! right ascension per point, radians.
+        real(real64), intent(in) :: dec(:) !! declination per point, radians.
+        real(real64), intent(in) :: d(:) !! distance from the observer per point.
+        real(real64), intent(in) :: los(:) !! the parallel coordinate per point.
+        real(real64), intent(in) :: bp(:) !! transverse length per point.
+        real(real64), intent(in) :: bl(:) !! parallel length per point.
+        integer, intent(in) :: rule !! one of the four `PF_LINK_*` constants.
+        logical, intent(out) :: want(:, :) !! the accepted set, upper triangle.
+        integer(int64), intent(out) :: nwant !! how many pairs were accepted.
+        integer(int64) :: a, b, n
+        real(real64) :: dp, dl
+
+        n = size(ra, kind=int64)
+        want = .false.
+        nwant = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                dp = los_dperp(ra(a), dec(a), d(a), ra(b), dec(b), d(b))
+                dl = abs(los(a) - los(b))
+                if (los_qualifies(rule, dp, dl, bp(a), bl(a), bp(b), bl(b))) then
+                    want(a, b) = .true.
+                    nwant = nwant + 1_int64
+                end if
+            end do
+        end do
+    end subroutine brute_los_pairs
+
+    !> The rows inside point `a`'s OWN cylinder, `a` itself included: the directed relation
+    !> `%within_los` answers, asserted straight from the fixture rather than derived from a pair list.
+    subroutine brute_los_own(ra, dec, d, los, a, bp, bl, out, m)
+        real(real64), intent(in) :: ra(:) !! right ascension per point, radians.
+        real(real64), intent(in) :: dec(:) !! declination per point, radians.
+        real(real64), intent(in) :: d(:) !! distance from the observer per point.
+        real(real64), intent(in) :: los(:) !! the parallel coordinate per point.
+        integer(int64), intent(in) :: a !! the searching point.
+        real(real64), intent(in) :: bp !! its transverse length.
+        real(real64), intent(in) :: bl !! its parallel length.
+        integer(int64), allocatable, intent(out) :: out(:) !! the rows found, ascending.
+        integer(int64), intent(out) :: m !! how many rows were found.
+        integer(int64) :: b, n
+
+        n = size(ra, kind=int64)
+        allocate (out(n))
+        m = 0_int64
+        do b = 1_int64, n
+            if (los_qualifies(0, los_dperp(ra(a), dec(a), d(a), ra(b), dec(b), d(b)), abs(los(a) - los(b)), &
+                bp, bl, bp, bl)) then
+                m = m + 1_int64
+                out(m) = b
+            end if
+        end do
+    end subroutine brute_los_own
+
+    !> Whether the pair list `(pi, pj)` is exactly the set `want`: each pair once, `i < j`, no more.
+    logical function pairs_equal_set(pi, pj, want, nwant) result(same)
+        integer(int64), intent(in) :: pi(:) !! the lower rows.
+        integer(int64), intent(in) :: pj(:) !! the higher rows.
+        logical, intent(in) :: want(:, :) !! the expected set, upper triangle.
+        integer(int64), intent(in) :: nwant !! how many pairs it holds.
+        logical, allocatable :: got(:, :)
+        integer(int64) :: k
+
+        same = .false.
+        if (size(pi, kind=int64) /= nwant) return
+        if (size(pj, kind=int64) /= nwant) return
+        if (nwant == 0_int64) then
+            same = .true.
+            return
+        end if
+        if (.not. all(pi < pj)) return
+        allocate (got(size(want, 1), size(want, 2)))
+        got = .false.
+        do k = 1_int64, nwant
+            ! A duplicate would keep the set and change only the count, and the count is already
+            ! right here -- so it has to be caught pair by pair.
+            if (got(pi(k), pj(k))) return
+            got(pi(k), pj(k)) = .true.
+        end do
+        same = all(got .eqv. want)
+    end function pairs_equal_set
+
+    !> Every `combine=` rule on the line-of-sight cylinder reproduces a brute-force scan of its own
+    !> definition, on a survey wedge with per-point lengths whose aspect ratios spread over 5..30.
+    !>
+    !> Two preconditions make the fixture load-bearing. The four rules must give four different
+    !> counts, or a sweep answering one rule for all four would pass -- distinct rather than ordered,
+    !> because on a cylinder the mean set is NOT inside the union. And the union must disagree with
+    !> the componentwise maximum on at least one pair (`feature_risks.md`): with the ratios spread, a
+    !> pair can satisfy `d_perp <= max(b_perp)` through one endpoint and `d_par <= max(b_par)`
+    !> through the other while lying in neither cylinder, and a sweep taking the componentwise
+    !> reading would report it.
+    subroutine test_pairs_los_matches_cylinder_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, nwant, disagree, counted(4)
+        real(real64) :: dp, dl
+        integer :: rules(4), ri, rj
+        logical :: cmax
+
+        rules = [PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_MAX, PF_LINK_SUM]
+        call make_wedge(300_int64, 40_int64, 500.0_real64, 1500.0_real64, 1_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 10.0_real64 * pf_random_at(fixture_seed, a, 31_int64)
+            bl(a) = bp(a) * (5.0_real64 + 25.0_real64 * pf_random_at(fixture_seed, a, 32_int64))
+        end do
+        disagree = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                dp = los_dperp(ra(a), dec(a), d(a), ra(b), dec(b), d(b))
+                dl = abs(d(a) - d(b))
+                cmax = dp <= max(bp(a), bp(b)) .and. dl <= max(bl(a), bl(b))
+                if (cmax .neqv. los_qualifies(PF_LINK_MAX, dp, dl, bp(a), bl(a), bp(b), bl(b))) &
+                    disagree = disagree + 1_int64
+            end do
+        end do
+        call check(error, disagree > 0_int64, &
+            "the fixture must hold pairs the union and the componentwise maximum judge differently")
+        if (allocated(error)) return
+        call sx%build(x, y, z, radius=sqrt(bp**2 + bl**2))
+        do ri = 1, 4
+            call brute_los_pairs(ra, dec, d, d, bp, bl, rules(ri), want, nwant)
+            counted(ri) = nwant
+            call check(error, nwant > 0_int64, "every rule must accept some pair on this fixture")
+            if (allocated(error)) return
+            call sx%pairs_within_los(bp, bl, pi, pj, combine=rules(ri))
+            call check(error, pairs_equal_set(pi, pj, want, nwant), &
+                "each combine= rule's cylinder pair list must be exactly its own accepted set")
+            if (allocated(error)) return
+        end do
+        do ri = 1, 3
+            do rj = ri + 1, 4
+                call check(error, counted(ri) /= counted(rj), &
+                    "the fixture must separate all four rules; two pair counts coincide")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_pairs_los_matches_cylinder_oracle
+
+    !> Omitting `los=` makes the parallel coordinate the distance from the observer: an index built
+    !> without it and one built with `los = D` return the same pairs as sets, both equal to the
+    !> oracle, and the measured slope of the second is one.
+    !>
+    !> Sets rather than lists: the second index measures `L` at rounding distance from one, so its
+    !> walk radii differ in the last digits and two points of nearly equal radius can swap rank,
+    !> which changes only which endpoint reports a pair.
+    subroutine test_pairs_los_default_los_is_distance(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:), qi(:), qj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: plain, withd
+        integer(int64) :: n, a, nwant
+        real(real64) :: lip, spread, gap
+
+        call make_wedge(260_int64, 30_int64, 500.0_real64, 1500.0_real64, 2_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 8.0_real64 + 8.0_real64 * pf_random_at(fixture_seed, a, 33_int64)
+            bl(a) = 20.0_real64 + 30.0_real64 * pf_random_at(fixture_seed, a, 34_int64)
+        end do
+        call plain%build(x, y, z, radius=sqrt(bp**2 + bl**2))
+        call withd%build(x, y, z, radius=sqrt(bp**2 + bl**2), los=d)
+        call parquet_debug_spatial_los_bounds(plain, lip, spread, gap)
+        call check(error, lip == 1.0_real64 .and. spread == 0.0_real64 .and. gap == 0.0_real64, &
+            "an index without los= reports L = 1, g = 0 and no gap floor")
+        if (allocated(error)) return
+        call parquet_debug_spatial_los_bounds(withd, lip, spread, gap)
+        call check(error, abs(lip - 1.0_real64) < 1.0e-9_real64, &
+            "los = D must measure a slope of one to rounding")
+        if (allocated(error)) return
+        call check(error, gap > 0.0_real64 .and. spread <= gap * (1.0_real64 + 1.0e-9_real64), &
+            "with los = D the spread below the gap floor cannot exceed the floor itself")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, nwant > 0_int64, "the fixture must hold accepted pairs")
+        if (allocated(error)) return
+        call plain%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call withd%pairs_within_los(bp, bl, qi, qj, combine=PF_LINK_MEAN)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "without los= the pair list must be the oracle's with d_par = |D_i - D_j|")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(qi, qj, want, nwant), &
+            "with los = D the pair list must be the same set")
+    end subroutine test_pairs_los_default_los_is_distance
+
+    !> A `los=` that runs at half the distance's rate has slope two, and the walk must widen by it.
+    !>
+    !> `los = D/2` makes a parallel length `b_par` reach `2*b_par` in distance, so the fixture is
+    !> asserted to hold accepted pairs farther apart than `sqrt(b_perp**2 + b_par**2)` -- exactly
+    !> the pairs a walk that dropped `L` would lose, silently (`feature_risks.md`).
+    subroutine test_pairs_los_with_slope(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:), los(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, nwant, beyond
+        real(real64) :: lip, spread, gap, s2, bnd2
+
+        call make_wedge(260_int64, 40_int64, 500.0_real64, 1500.0_real64, 3_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 8.0_real64 + 4.0_real64 * pf_random_at(fixture_seed, a, 35_int64)
+            bl(a) = 12.0_real64 + 6.0_real64 * pf_random_at(fixture_seed, a, 36_int64)
+        end do
+        los = 0.5_real64 * d
+        call sx%build(x, y, z, radius=sqrt(bp**2 + (2.0_real64 * bl)**2), los=los)
+        call parquet_debug_spatial_los_bounds(sx, lip, spread, gap)
+        call check(error, abs(lip - 2.0_real64) < 1.0e-9_real64, "los = D/2 must measure a slope of two")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MEAN, want, nwant)
+        beyond = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                if (.not. want(a, b)) cycle
+                s2 = (x(a) - x(b))**2 + (y(a) - y(b))**2 + (z(a) - z(b))**2
+                bnd2 = (0.5_real64 * (bp(a) + bp(b)))**2 + (0.5_real64 * (bl(a) + bl(b)))**2
+                if (s2 > bnd2) beyond = beyond + 1_int64
+            end do
+        end do
+        call check(error, beyond > 0_int64, &
+            "the fixture must hold accepted pairs beyond sqrt(b_perp**2 + b_par**2), or the slope is never load-bearing")
+        if (allocated(error)) return
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "with los = D/2 the pair list must be exactly the oracle's, slope-widened walk included")
+    end subroutine test_pairs_los_with_slope
+
+    !> Pairs closer than the gap floor in `los` never enter the slope; the spread `g` carries them.
+    !>
+    !> `los` is quantised to steps of 50 in distance, so every pair inside one step is a TIE in
+    !> `los` while its distances differ by up to 50. With `b_par` far below that, `L*b_par` misses
+    !> those pairs and only `g` reaches them; the fixture is asserted to hold accepted pairs beyond
+    !> `sqrt(b_perp**2 + (L*b_par)**2)`, which a walk without `g` would lose. The scalar form of the
+    !> query is used, so this also covers `bind_pairs_los_r0`.
+    subroutine test_pairs_los_close_los_is_complete(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:), los(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, nwant, beyond
+        real(real64) :: lip, spread, gap, s2
+        real(real64), parameter :: bperp = 40.0_real64, bpar = 10.0_real64
+
+        call make_wedge(200_int64, 60_int64, 500.0_real64, 1500.0_real64, 4_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n), los(n))
+        bp = bperp
+        bl = bpar
+        do a = 1_int64, n
+            los(a) = 50.0_real64 * floor(d(a) / 50.0_real64)
+        end do
+        call sx%build(x, y, z, radius=60.0_real64, los=los)
+        call parquet_debug_spatial_los_bounds(sx, lip, spread, gap)
+        call check(error, gap > 0.0_real64 .and. spread > lip * bpar, &
+            "the fixture's ties must make the spread, not the slope, the wider bound")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MAX, want, nwant)
+        beyond = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                if (.not. want(a, b)) cycle
+                s2 = (x(a) - x(b))**2 + (y(a) - y(b))**2 + (z(a) - z(b))**2
+                if (s2 > bperp**2 + (lip * bpar)**2) beyond = beyond + 1_int64
+            end do
+        end do
+        call check(error, beyond > 0_int64, &
+            "the fixture must hold accepted pairs only the spread reaches, or g is never load-bearing")
+        if (allocated(error)) return
+        call sx%pairs_within_los(bperp, bpar, pi, pj)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "pairs tied in los must all come back; the spread below the gap floor carries them")
+    end subroutine test_pairs_los_close_los_is_complete
+
+    !> On a continuous redshift list the measured slope is the analytic one, to a tolerance the
+    !> plain consecutive estimator misses by orders of magnitude.
+    !>
+    !> A hundred thousand redshifts drawn uniformly in `[0.02, 0.2]` with Einstein-de Sitter
+    !> distances. The distance is concave in the redshift, so the steepest secant over pairs at least
+    !> the gap floor apart is the one from the smallest redshift to the first at or beyond
+    !> `z_min + gap`, which the test recomputes from the fixture and asserts to a millionth; the
+    !> analytic derivative at `z_min`, `(c/H0) (1+z)**(-3/2)`, is asserted to a hundred-thousandth,
+    !> the secant's own deviation over so short a gap. The closest two of these redshifts sit about
+    !> `range / n**2` apart, where the rounding of a 500-unit distance alone shifts a consecutive
+    !> secant by parts in ten thousand -- the inflation the gap floor exists to keep out. The spread
+    !> below the floor cannot exceed `L*gap` by more than rounding.
+    subroutine test_pairs_los_slope_is_clean(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:), zs(:)
+        integer(int64), allocatable :: perm(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, b
+        real(real64) :: lip, spread, gap, l_ref, l_analytic
+
+        n = 100000_int64
+        call make_redshift_survey(n, 0_int64, 0.02_real64, 0.2_real64, 5_int64, ra, dec, zred, d, x, y, z)
+        call sx%build(x, y, z, radius=5.0_real64, los=zred)
+        call parquet_debug_spatial_los_bounds(sx, lip, spread, gap)
+        call check(error, gap > 0.0_real64, "a los= index must record its gap floor")
+        if (allocated(error)) return
+        call check(error, abs(gap - 1.0e-5_real64 * (maxval(zred) - minval(zred))) <= 1.0e-12_real64, &
+            "the gap floor is a hundred-thousandth of the range of los")
+        if (allocated(error)) return
+        call pf_argsort(zred, perm)
+        allocate (zs(n))
+        do b = 1_int64, n
+            zs(b) = zred(perm(b))
+        end do
+        b = 2_int64
+        do while (zs(b) - zs(1) < gap)
+            b = b + 1_int64
+        end do
+        l_ref = (los_comoving(zs(b)) - los_comoving(zs(1))) / (zs(b) - zs(1))
+        l_analytic = los_ch0 * (1.0_real64 + zs(1))**(-1.5_real64)
+        call check(error, abs(lip - l_ref) <= 1.0e-6_real64 * l_ref, &
+            "the measured slope must be the steepest secant over pairs at least the gap apart, to a millionth")
+        if (allocated(error)) return
+        call check(error, abs(lip - l_analytic) <= 1.0e-5_real64 * l_analytic, &
+            "the measured slope must be the analytic dD/dz at the nearest redshift, to a hundred-thousandth")
+        if (allocated(error)) return
+        call check(error, spread <= 1.01_real64 * lip * gap, &
+            "the spread below the gap floor cannot exceed L times the floor by more than rounding")
+    end subroutine test_pairs_los_slope_is_clean
+
+    !> The worked example of the design in miniature: comoving coordinates, the redshift itself as
+    !> `los=`, a comoving transverse length and a redshift-interval parallel length, all four rules
+    !> against the oracle; and the slope the library measured is the survey's `dD/dz` at its near
+    !> edge, which is the whole conversion between the two units.
+    subroutine test_pairs_los_redshift_example(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, nwant, counted(4)
+        real(real64) :: lip, spread, gap, l_analytic
+        integer :: rules(4), ri
+
+        rules = [PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_MAX, PF_LINK_SUM]
+        call make_redshift_survey(260_int64, 40_int64, 0.02_real64, 0.2_real64, 6_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            ! A transverse length in Mpc/h; a parallel one as a velocity of 1000..4000 km/s over c.
+            bp(a) = 10.0_real64 + 20.0_real64 * pf_random_at(fixture_seed, a, 37_int64)
+            bl(a) = (1000.0_real64 + 3000.0_real64 * pf_random_at(fixture_seed, a, 38_int64)) / 299792.458_real64
+        end do
+        call sx%build(x, y, z, radius=30.0_real64, los=zred)
+        call parquet_debug_spatial_los_bounds(sx, lip, spread, gap)
+        l_analytic = los_ch0 * (1.0_real64 + minval(zred))**(-1.5_real64)
+        call check(error, abs(lip - l_analytic) <= 1.0e-2_real64 * l_analytic, &
+            "the slope must be dD/dz at the survey's nearest redshift, to a per cent on a few hundred galaxies")
+        if (allocated(error)) return
+        do ri = 1, 4
+            call brute_los_pairs(ra, dec, d, zred, bp, bl, rules(ri), want, nwant)
+            counted(ri) = nwant
+            call check(error, nwant > 0_int64, "every rule must accept some pair in the redshift survey")
+            if (allocated(error)) return
+            call sx%pairs_within_los(bp, bl, pi, pj, combine=rules(ri))
+            call check(error, pairs_equal_set(pi, pj, want, nwant), &
+                "each rule over comoving coordinates with the redshift as los= must match the oracle")
+            if (allocated(error)) return
+        end do
+        call check(error, counted(1) < counted(4), "the intersection must be smaller than the sum of cylinders")
+    end subroutine test_pairs_los_redshift_example
+
+    !> `dperp=` and `dpar=` report the two separations per pair in their two units: the transverse
+    !> one against the haversine oracle to a part in a billion, and the parallel one exactly the
+    !> redshift difference. Either may be asked for alone.
+    subroutine test_pairs_los_reports_separations(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:), bp(:), bl(:), dp(:), dl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, k
+        real(real64) :: ref
+
+        call make_redshift_survey(200_int64, 40_int64, 0.02_real64, 0.2_real64, 7_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 20.0_real64 * pf_random_at(fixture_seed, a, 39_int64)
+            bl(a) = 0.003_real64 + 0.01_real64 * pf_random_at(fixture_seed, a, 40_int64)
+        end do
+        call sx%build(x, y, z, radius=30.0_real64, los=zred)
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN, dperp=dp, dpar=dl)
+        call check(error, size(pi, kind=int64) > 0_int64, "the fixture must hold pairs")
+        if (allocated(error)) return
+        call check(error, size(dp, kind=int64) == size(pi, kind=int64) .and. size(dl, kind=int64) == size(pi, kind=int64), &
+            "one transverse and one parallel separation per pair")
+        if (allocated(error)) return
+        do k = 1_int64, size(pi, kind=int64)
+            ref = los_dperp(ra(pi(k)), dec(pi(k)), d(pi(k)), ra(pj(k)), dec(pj(k)), d(pj(k)))
+            ! Relative, with an absolute floor of a tenth of a parsec: two galaxies on one spoke
+            ! share a direction exactly, so the oracle's separation is zero there while the
+            ! library's is the rounding of a thousand-unit coordinate, about 1e-13.
+            call check(error, abs(dp(k) - ref) <= 1.0e-9_real64 * ref + 1.0e-10_real64, &
+                "dperp must be the haversine transverse separation to a part in a billion")
+            if (allocated(error)) return
+            call check(error, dl(k) == abs(zred(pi(k)) - zred(pj(k))), &
+                "dpar must be exactly the difference of the two parallel coordinates")
+            if (allocated(error)) return
+        end do
+        ! Alone, through the scalar form.
+        call sx%pairs_within_los(20.0_real64, 0.005_real64, pi, pj, dpar=dl)
+        call check(error, size(dl, kind=int64) == size(pi, kind=int64), "dpar alone must still be one per pair")
+        if (allocated(error)) return
+        do k = 1_int64, size(pi, kind=int64)
+            call check(error, dl(k) == abs(zred(pi(k)) - zred(pj(k))) .and. dl(k) <= 0.005_real64, &
+                "dpar alone must be the parallel separation, inside the parallel length")
+            if (allocated(error)) return
+        end do
+    end subroutine test_pairs_los_reports_separations
+
+    !> `observer=` moves the origin of every line of sight: shifted coordinates with the shift as the
+    !> observer reproduce the origin build's pairs and single query.
+    subroutine test_pairs_los_observer_offset(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:), qi(:), qj(:), fa(:), fb(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: origin, shifted
+        integer(int64) :: n, a, nwant, ma, mb
+        real(real64) :: pq(3)
+        real(real64), parameter :: o(3) = [300.0_real64, -200.0_real64, 50.0_real64]
+
+        call make_wedge(240_int64, 30_int64, 500.0_real64, 1500.0_real64, 8_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n), fa(n), fb(n))
+        do a = 1_int64, n
+            bp(a) = 8.0_real64 + 8.0_real64 * pf_random_at(fixture_seed, a, 41_int64)
+            bl(a) = 20.0_real64 + 30.0_real64 * pf_random_at(fixture_seed, a, 42_int64)
+        end do
+        call origin%build(x, y, z, radius=sqrt(bp**2 + bl**2))
+        call shifted%build(x + o(1), y + o(2), z + o(3), radius=sqrt(bp**2 + bl**2), observer=o)
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MAX, want, nwant)
+        call check(error, nwant > 0_int64, "the fixture must hold accepted pairs")
+        if (allocated(error)) return
+        call origin%pairs_within_los(bp, bl, pi, pj)
+        call shifted%pairs_within_los(bp, bl, qi, qj)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the origin build must match the oracle")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(qi, qj, want, nwant), &
+            "shifted coordinates about a shifted observer must give the same pairs")
+        if (allocated(error)) return
+        pq = [x(1) + o(1), y(1) + o(2), z(1) + o(3)]
+        ma = origin%within_los([x(1), y(1), z(1)], bp(1), bl(1), fa)
+        mb = shifted%within_los(pq, bp(1), bl(1), fb)
+        call check(error, ma > 0_int64 .and. same_rows(fa, ma, fb, mb), &
+            "a single query about the shifted observer must find the same rows")
+    end subroutine test_pairs_los_observer_offset
+
+    !> `%within_los` with a point's own lengths returns exactly the points inside that point's OWN
+    !> cylinder -- the directed relation, asserted from the fixture for every point, on an index with
+    !> `los=` and on one without.
+    subroutine test_within_los_matches_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: found(:), want(:)
+        type(pf_spatial_index) :: sz, sd
+        integer(int64) :: n, a, m, mw, hits
+        real(real64) :: p(3)
+
+        call make_redshift_survey(200_int64, 30_int64, 0.02_real64, 0.2_real64, 9_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), found(n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 20.0_real64 * pf_random_at(fixture_seed, a, 43_int64)
+            bl(a) = 0.003_real64 + 0.01_real64 * pf_random_at(fixture_seed, a, 44_int64)
+        end do
+        call sz%build(x, y, z, radius=30.0_real64, los=zred)
+        hits = 0_int64
+        do a = 1_int64, n
+            p = [x(a), y(a), z(a)]
+            m = sz%within_los(p, bp(a), bl(a), found, los_p=zred(a))
+            call brute_los_own(ra, dec, d, zred, a, bp(a), bl(a), want, mw)
+            call check(error, m == mw .and. same_rows(found, m, want, mw), &
+                "within_los with los= must return exactly the point's own cylinder")
+            if (allocated(error)) return
+            if (m > 1_int64) hits = hits + 1_int64
+        end do
+        call check(error, hits > 0_int64, "some point must have a neighbour besides itself")
+        if (allocated(error)) return
+        ! Without los=: the parallel coordinate is the distance, and the lengths are both Mpc/h.
+        call sd%build(x, y, z, radius=30.0_real64)
+        do a = 1_int64, n
+            p = [x(a), y(a), z(a)]
+            m = sd%within_los(p, bp(a), 30.0_real64, found)
+            call brute_los_own(ra, dec, d, d, a, bp(a), 30.0_real64, want, mw)
+            call check(error, m == mw .and. same_rows(found, m, want, mw), &
+                "within_los without los= must return the point's own cylinder in distance")
+            if (allocated(error)) return
+        end do
+    end subroutine test_within_los_matches_oracle
+
+    !> `dist=` is `max(d_perp/b_perp, d_par/b_par)`, `sorted=.true.` orders by it, and the rows are
+    !> the same set the unsorted call returns.
+    subroutine test_within_los_sorted_by_normalised_measure(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:), dn(:), dp(:), dl(:)
+        integer(int64), allocatable :: found(:), plain(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, m, mp, k, best, mbest
+        real(real64) :: p(3), ref
+        real(real64), parameter :: bperp = 30.0_real64, bpar = 0.01_real64
+
+        call make_redshift_survey(200_int64, 30_int64, 0.02_real64, 0.2_real64, 10_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (found(n), plain(n), dn(n), dp(n), dl(n))
+        call sx%build(x, y, z, radius=bperp, los=zred)
+        ! The most populated cylinder, so the ordering has something to order.
+        best = 1_int64
+        mbest = 0_int64
+        do a = 1_int64, n
+            p = [x(a), y(a), z(a)]
+            m = sx%within_los(p, bperp, bpar, plain, los_p=zred(a))
+            if (m > mbest) then
+                mbest = m
+                best = a
+            end if
+        end do
+        call check(error, mbest >= 3_int64, "some cylinder must hold at least three points")
+        if (allocated(error)) return
+        p = [x(best), y(best), z(best)]
+        mp = sx%within_los(p, bperp, bpar, plain, los_p=zred(best))
+        m = sx%within_los(p, bperp, bpar, found, los_p=zred(best), dist=dn, dperp=dp, dpar=dl, sorted=.true.)
+        call check(error, m == mp .and. same_rows(found, m, plain, mp), "sorting must keep the same rows")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            ref = max(dp(k) / bperp, dl(k) / bpar)
+            call check(error, abs(dn(k) - ref) <= 1.0e-12_real64, &
+                "dist must be the normalised measure max(d_perp/b_perp, d_par/b_par)")
+            if (allocated(error)) return
+            call check(error, dn(k) <= 1.0_real64 + 1.0e-12_real64, "every reported point lies inside the cylinder")
+            if (allocated(error)) return
+            if (k > 1_int64) then
+                call check(error, dn(k) >= dn(k - 1_int64), "sorted= must order by increasing normalised measure")
+                if (allocated(error)) return
+            end if
+        end do
+        call check(error, found(1) == best .and. dn(1) == 0.0_real64, &
+            "the point itself is nearest in its own cylinder, at measure zero")
+    end subroutine test_within_los_sorted_by_normalised_measure
+
+    !> A short buffer, int32 or int64, still returns the TRUE count, and what it holds are members.
+    subroutine test_within_los_short_buffer_keeps_true_count(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:)
+        integer(int64), allocatable :: full(:), want(:), two(:)
+        integer(int32), allocatable :: two32(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, m, m2, mw, best, mbest, k
+        real(real64) :: p(3)
+        real(real64), parameter :: bperp = 30.0_real64, bpar = 0.01_real64
+
+        call make_redshift_survey(200_int64, 30_int64, 0.02_real64, 0.2_real64, 11_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (full(n), two(2), two32(2))
+        call sx%build(x, y, z, radius=bperp, los=zred)
+        best = 1_int64
+        mbest = 0_int64
+        do a = 1_int64, n
+            p = [x(a), y(a), z(a)]
+            m = sx%within_los(p, bperp, bpar, full, los_p=zred(a))
+            if (m > mbest) then
+                mbest = m
+                best = a
+            end if
+        end do
+        call check(error, mbest >= 3_int64, "some cylinder must hold at least three points")
+        if (allocated(error)) return
+        p = [x(best), y(best), z(best)]
+        call brute_los_own(ra, dec, d, zred, best, bperp, bpar, want, mw)
+        m2 = sx%within_los(p, bperp, bpar, two, los_p=zred(best))
+        call check(error, m2 == mw, "an int64 buffer of two must still report the true count")
+        if (allocated(error)) return
+        do k = 1_int64, 2_int64
+            call check(error, any(want(1:mw) == two(k)), "what a short buffer holds must be members of the cylinder")
+            if (allocated(error)) return
+        end do
+        m2 = sx%within_los(p, bperp, bpar, two32, los_p=zred(best))
+        call check(error, m2 == mw, "an int32 buffer of two must still report the true count")
+        if (allocated(error)) return
+        do k = 1_int64, 2_int64
+            call check(error, any(want(1:mw) == int(two32(k), kind=int64)), &
+                "what a short int32 buffer holds must be members of the cylinder")
+            if (allocated(error)) return
+        end do
+    end subroutine test_within_los_short_buffer_keeps_true_count
+
+    !> The parallel coordinate follows every re-bucketing: a `copy=.false.` index whose bulk call
+    !> re-tunes it (the borrowed-coordinate path scatters `los` back to row order first), a
+    !> `%rebuild_for`, and a `%rebuild` with moved points and new `los`. `los = D/2` here, so a `los`
+    !> attached to the wrong row would change a parallel separation and break the oracle match.
+    subroutine test_pairs_los_survives_rebuild_and_copy_false(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), bp(:), bl(:), los(:), d2(:), los2(:)
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+        real(real64), allocatable :: x2(:), y2(:), z2(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: borrowed, owned
+        integer(int64) :: n, a, nwant, rebuilds
+        logical :: changed, warn_was
+
+        ! The re-tune below is provoked on purpose, so its once-per-index warning is noise here;
+        ! restored at the end, and the suite runs its tests serially so nothing else sees the toggle.
+        warn_was = parquet_get_spatial_rebuild_warning()
+        call parquet_set_spatial_rebuild_warning(.false.)
+        call make_wedge(220_int64, 40_int64, 500.0_real64, 1500.0_real64, 12_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 8.0_real64 + 4.0_real64 * pf_random_at(fixture_seed, a, 45_int64)
+            bl(a) = 12.0_real64 + 6.0_real64 * pf_random_at(fixture_seed, a, 46_int64)
+        end do
+        los = 0.5_real64 * d
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, nwant > 0_int64, "the fixture must hold accepted pairs")
+        if (allocated(error)) return
+        ! A deliberately poor radius hint, so that the bulk call re-tunes and re-buckets a
+        ! BORROWED index -- the one route that permutes los through the old row map.
+        call parquet_debug_reset_spatial_counters()
+        call borrowed%build(x, y, z, radius=0.5_real64, los=los, copy=.false.)
+        call borrowed%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        rebuilds = parquet_debug_spatial_rebuilds()
+        call check(error, rebuilds > 0_int64, "the poor hint must have made the bulk call re-tune the borrowed index")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "a re-tuned copy=.false. index must keep los aligned with its rows")
+        if (allocated(error)) return
+        call borrowed%rebuild_for(60.0_real64)
+        call borrowed%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "%rebuild_for on a copy=.false. index must keep los aligned")
+        if (allocated(error)) return
+        ! An owning index: %rebuild with unchanged data is a no-op, and with moved points and a new
+        ! los it rebuilds and answers about the new data.
+        call owned%build(x, y, z, radius=40.0_real64, los=los)
+        call owned%rebuild(x, y, z, rebuilt=changed, los=los)
+        call check(error, .not. changed, "%rebuild with the same coordinates and los must not rebuild")
+        if (allocated(error)) return
+        call owned%rebuild_for(60.0_real64)
+        call owned%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "%rebuild_for on an owning index must keep los aligned")
+        if (allocated(error)) return
+        x2 = 1.1_real64 * x
+        y2 = 1.1_real64 * y
+        z2 = 1.1_real64 * z
+        d2 = 1.1_real64 * d
+        los2 = 0.5_real64 * d2
+        call owned%rebuild(x2, y2, z2, rebuilt=changed, los=los2)
+        call check(error, changed, "%rebuild with moved coordinates must rebuild")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d2, los2, bp, bl, PF_LINK_MEAN, want, nwant)
+        call owned%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "after %rebuild the pairs must be those of the new coordinates and the new los")
+        if (allocated(error)) return
+        ! A moved los over unmoved points is a change too.
+        call owned%rebuild(x2, y2, z2, rebuilt=changed, los=0.25_real64 * d2)
+        call check(error, changed, "%rebuild with a changed los alone must rebuild")
+        call parquet_set_spatial_rebuild_warning(warn_was)
+    end subroutine test_pairs_los_survives_rebuild_and_copy_false
 
 end module test_spatial

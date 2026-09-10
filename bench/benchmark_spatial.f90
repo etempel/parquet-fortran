@@ -28,6 +28,10 @@
 !>   same `(ra, dec)` catalogue with each backend and times `%within_sky` across a radius sweep
 !>   from `R/3` to `3R` about the build radius. It is the only mode that uses `--skyr` and the
 !>   only one whose fixture is angular rather than Cartesian, so `--side` does not reach it.
+!> * `--mode=los` -- **the line-of-sight cylinder against the ball-plus-filter work-around it
+!>   replaces**, on a redshift-like `los=` derived from the fixture's distances; `--ratio` sets the
+!>   cylinders' aspect ratio in distance. Its candidate-excess figure is the baseline a cylinder
+!>   walk is measured against.
 !>
 !> **Every timed figure is a best-of-N**, because a single round swings more than the effects being
 !> measured. Report the noise floor with any result: rebuilding the same source moves untouched
@@ -50,7 +54,7 @@ program benchmark_spatial
     character(len=32) :: mode, dist
     integer(int64) :: np, nq
     integer :: rounds, threads
-    real(real64) :: side, rlo, rhi, skyr
+    real(real64) :: side, rlo, rhi, skyr, ratio
     real(real64), allocatable :: x(:), y(:), z(:)
 
     mode = "tune"
@@ -63,6 +67,7 @@ program benchmark_spatial
     rlo = 1.0_real64
     rhi = 5.0_real64
     skyr = 1.0_real64
+    ratio = 10.0_real64
     call read_arguments()
 
     write (output_unit, '(a)') "# benchmark_spatial"
@@ -73,6 +78,7 @@ program benchmark_spatial
     write (output_unit, '(a,i0)') "# rounds    : ", rounds
     write (output_unit, '(a,f0.3,a,f0.3)') "# radii     : ", rlo, " .. ", rhi
     write (output_unit, '(a,i0)') "# omp max   : ", omp_available()
+    write (output_unit, '(a,f0.2)') "# ratio     : ", ratio
     call make_cloud()
 
     select case (trim(mode))
@@ -90,6 +96,8 @@ program benchmark_spatial
         call mode_threads()
     case ("backend")
         call mode_backend()
+    case ("los")
+        call mode_los()
     case default
         write (output_unit, '(a)') "unknown --mode: " // trim(mode)
         error stop 2
@@ -143,6 +151,8 @@ contains
                 read (arg(eq + 1:), *) threads
             case ("--skyr")
                 read (arg(eq + 1:), *) skyr
+            case ("--ratio")
+                read (arg(eq + 1:), *) ratio
             case ("--side")
                 read (arg(eq + 1:), *) side
             case ("--rlo")
@@ -747,6 +757,131 @@ contains
         end do
         write (output_unit, '(a,i0)') "  checksum : ", sum(counts)
     end subroutine mode_threads
+
+    !> The line-of-sight cylinder against the ball-plus-filter work-around it replaces.
+    !>
+    !> **The baseline a cylinder walk is measured against.** The fixture's distances become a
+    !> redshift-like parallel coordinate through the Einstein-de Sitter relation inverted,
+    !> `z = (1 - D / (2 c/H0))**(-2) - 1`, so `los=` is a genuine second radial coordinate whose
+    !> slope `L = dD/dz` the library measures at build. The transverse lengths are drawn from
+    !> `RLO..RHI`; the parallel ones are set so that `L * b_par = RATIO * b_perp`, which is the
+    !> aspect ratio each cylinder has in distance. Two arms over the same points and lengths, under
+    !> `PF_LINK_MEAN`:
+    !>
+    !> * `cylinder` -- `%pairs_within_los`: the accept test inside the walk;
+    !> * `ball+filter` -- `%pairs_within` at the covering radius `sqrt(b_perp**2 + (L*b_par)**2)`
+    !>   under the default rule (the union of the two balls is the candidate superset of the mean
+    !>   cylinder), then a serial pass re-testing every candidate with the cylinder criterion, which
+    !>   is what a caller did before the library offered the query.
+    !>
+    !> The ball arm's pair count IS the number of candidates the cylinder's accept test sees, so
+    !> `ball pairs / cylinder pairs` is the candidate excess of the ball walk that a cylinder walk
+    !> exists to remove; it is printed beside the geometric volume ratio, the times and the peak
+    !> list the work-around had to hold. The two arms must agree on the kept count, or nothing is
+    !> reported.
+    subroutine mode_los()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: bp(:), bl(:), los(:), dd(:), walk(:)
+        integer(int64), allocatable :: pi(:), pj(:), bi(:), bj(:), counts(:)
+        real(real64) :: t_cyl, t_ball, t_filter, t0, lip, spread, gap, l_ana, zmin, u
+        real(real64) :: ex, ey, ez, dp, dl, di, dj, rho, vol
+        integer(int64) :: i, k, kept, nball, a, b, est
+        integer :: it
+        real(real64), parameter :: ch0 = 2997.9_real64
+
+        if (trim(dist) == "flat") then
+            write (output_unit, '(a)') "--mode=los needs a 3D fixture; --dist=flat has none"
+            error stop 2
+        end if
+        allocate (bp(np), bl(np), los(np), dd(np), walk(np))
+        zmin = huge(1.0_real64)
+        do i = 1_int64, np
+            dd(i) = sqrt(x(i) * x(i) + y(i) * y(i) + z(i) * z(i))
+            ! Einstein-de Sitter inverted; the box is well inside 2c/H0, so this is always defined.
+            u = 1.0_real64 - 0.5_real64 * dd(i) / ch0
+            los(i) = 1.0_real64 / (u * u) - 1.0_real64
+            zmin = min(zmin, los(i))
+            bp(i) = rlo + (rhi - rlo) * pf_random_at(20260910_int64, i, 8_int64)
+        end do
+        call sx%build(x, y, z, radius=[rlo, rhi], los=los)
+        call parquet_debug_spatial_los_bounds(sx, lip, spread, gap)
+        l_ana = ch0 * (1.0_real64 + zmin)**(-1.5_real64)
+        do i = 1_int64, np
+            bl(i) = ratio * bp(i) / lip
+            walk(i) = sqrt(bp(i) * bp(i) + max(lip * bl(i), spread)**2)
+        end do
+        ! Re-tuned for the balls both arms walk, so neither pays a rebuild inside its timing.
+        call sx%rebuild_for(walk)
+        ! The work-around's list is the ball's pair count, which a long cylinder inflates by the
+        ! volume ratio: at the box-and-radii defaults of the other modes the covering balls are a
+        ! tenth of the box at RATIO=10 and that list is hundreds of gigabytes. A count-only pass
+        ! (no allocation) bounds it first and refuses, naming the knobs, rather than let the ball
+        ! arm's allocation take the process down.
+        call sx%count_all_within(walk, counts, threads=team())
+        est = sum(counts) - np
+        if (est > 400000000_int64) then
+            write (output_unit, '(a,i0,a)') "  the ball walk would hold about ", est / 2_int64, &
+                " candidate pairs, too many to allocate: lower RLO/RHI or NP, or raise SIDE " // &
+                "(each covering ball is RATIO x b_perp in radius; SIDE=1500 RLO=0.3 RHI=0.5 is a survey)"
+            error stop 4
+        end if
+        t_cyl = huge(1.0_real64)
+        do it = 1, rounds
+            t0 = wtime()
+            call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN, threads=team())
+            t_cyl = min(t_cyl, wtime() - t0)
+        end do
+        kept = size(pi, kind=int64)
+        t_ball = huge(1.0_real64)
+        do it = 1, rounds
+            t0 = wtime()
+            call sx%pairs_within(walk, bi, bj, threads=team())
+            t_ball = min(t_ball, wtime() - t0)
+        end do
+        nball = size(bi, kind=int64)
+        ! The work-around's second half: every candidate re-tested, serially, the way a caller
+        ! would -- unit vectors from the coordinates, the mean cylinder.
+        t_filter = huge(1.0_real64)
+        do it = 1, rounds
+            t0 = wtime()
+            k = 0_int64
+            do i = 1_int64, nball
+                a = bi(i)
+                b = bj(i)
+                di = dd(a)
+                dj = dd(b)
+                ex = x(a) / di - x(b) / dj
+                ey = y(a) / di - y(b) / dj
+                ez = z(a) / di - z(b) / dj
+                dp = sqrt(ex * ex + ey * ey + ez * ez) * 0.5_real64 * (di + dj)
+                dl = abs(los(a) - los(b))
+                if (2.0_real64 * dp <= bp(a) + bp(b) .and. 2.0_real64 * dl <= bl(a) + bl(b)) k = k + 1_int64
+            end do
+            t_filter = min(t_filter, wtime() - t0)
+        end do
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a,es10.3)') "  cell                  : ", sx%cell_size()
+        write (output_unit, '(a,f0.3,a,f0.3,a)') "  slope L               : ", lip, "   (analytic dD/dz at z_min: ", l_ana, ")"
+        write (output_unit, '(a,es10.3,a,es10.3)') "  spread g, gap floor   : ", spread, "  ", gap
+        write (output_unit, '(a,f0.2)') "  ratio L*b_par/b_perp  : ", ratio
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "  arm                seconds        pairs    peak list"
+        write (output_unit, '(a,f12.4,i13,i13)') "  cylinder      ", t_cyl, kept, kept
+        write (output_unit, '(a,f12.4,i13,i13)') "  ball + filter ", t_ball + t_filter, k, nball
+        write (output_unit, '(a,f12.4,a,f12.4,a)') "    (ball ", t_ball, " s, filter ", t_filter, " s)"
+        if (k /= kept) then
+            write (output_unit, '(a)') "ARMS DISAGREE on the pairs kept -- refusing to report a ratio"
+            error stop 3
+        end if
+        rho = ratio
+        vol = (4.0_real64 / 3.0_real64) * (1.0_real64 + rho * rho)**1.5_real64 / (2.0_real64 * rho)
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a,f10.2)') "  candidates per kept pair : ", &
+            real(nball, kind=real64) / real(max(kept, 1_int64), kind=real64)
+        write (output_unit, '(a,f10.2)') "  ball/cylinder volume     : ", vol
+        write (output_unit, '(a,f10.3,a)') "  cylinder vs work-around  : ", t_cyl / (t_ball + t_filter), "x"
+        write (output_unit, '(a,i0)') "  threads used             : ", parquet_debug_spatial_threads_used()
+    end subroutine mode_los
 
     !> The team size to ask a bulk call for: `--threads=` when given, otherwise automatic.
     integer function team() result(n)

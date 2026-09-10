@@ -34,11 +34,13 @@ real(real64) :: x(n), y(n), z(n)
 call sx%build(x, y, z, radius=0.05_real64)              ! 3D
 call sx%build(x, y, radius=0.05_real64)                 ! 2D: omit z
 call sx%build(x, y, z, radius=[0.01_real64, 0.05_real64, 0.2_real64])
+call sx%build(x, y, z, radius=0.3_real64, observer=o, los=zred)   ! for the line-of-sight queries
 ```
 
 A list is folded into one effective radius, `sum(r**3)/sum(r**2)`, which is the value the cost
 model wants — the cubic term is the points a query tests and the quadratic one is how often. Read
-it back with `%effective_radius()`.
+it back with `%effective_radius()`. `observer=` and `los=` serve
+[cylinders along the line of sight](#cylinders-along-the-line-of-sight) and nothing else.
 
 **The cell size is measured, not guessed.** A cost model gives a starting bracket and a
 deterministic probe then counts, for a handful of candidate cell sizes, how many cells a
@@ -304,6 +306,130 @@ Every output buffer, `axis_point`'s second extent and `axis_t`'s length included
 same place: the shortest one you pass. (The one exception is a zero-length axis, where the shape is
 a ball and every foot is `p1`, so each buffer is simply filled to its own extent.) `m` is still the
 true count, so this is a size-and-retry rather than an error.
+
+## Cylinders along the line of sight
+
+A redshift-survey group finder links two galaxies when they are close **across** the line of sight
+and close **along** it, with two different lengths, because the two separations mean different
+things: the transverse one is a distance, the parallel one is mostly a velocity. `%pairs_within_los`
+and `%within_los` answer that criterion inside the index, on a 3D Euclidean, non-periodic index
+built over Cartesian coordinates about an observer:
+
+```fortran
+call sx%build(x, y, z, radius=r_hint, observer=o, los=zred)
+call sx%pairs_within_los(b_perp, b_par, i, j, combine=PF_LINK_MEAN, dperp=dperp, dpar=dpar)
+m = sx%within_los(p, b_perp, b_par, found, los_p=z_p, dist=dn, sorted=.true.)
+```
+
+The full signatures are `%build(x, y, z, radius=, [cell=,] [box_lo=,] [box_hi=,] [copy=,]
+[observer=,] [los=])`, `%pairs_within_los(b_perp, b_par, i, j, [combine=,] [threads=,] [dperp=,]
+[dpar=])` and `%within_los(p, b_perp, b_par, found, [los_p=,] [dist=,] [dperp=,] [dpar=,]
+[sorted=])`.
+
+With `D` the distance from the observer and `n` the unit vector towards a point, a pair `i, j`
+qualifies when both of
+
+```
+d_perp = |n_i - n_j| * (D_i + D_j) / 2  <=  b_perp
+d_par  = |los_i - los_j|                <=  b_par
+```
+
+hold. `d_perp` is the chord between the two directions at the pair's mean distance. `d_par` is the
+difference of a **parallel coordinate**, which is `los=` when `%build` was given one and `D` itself
+otherwise.
+
+**The two lengths are in two units, and the units need not agree.** `b_perp` and `dperp=` are in the
+coordinates' units. `b_par` and `dpar=` are in `los=`'s units, whatever those are: `los=` is any
+per-point value in row order, most usefully the redshift itself over comoving coordinates, so that
+a parallel linking length is a redshift interval — `v / c` for a velocity `v` — while the
+transverse one stays a comoving length. Without `los=` both are in the coordinates' units. `los=` is
+always copied, whatever `copy=` says. `%rebuild` then takes `los=` with the new values and is
+refused without it, and is refused with it on an index built without one. `observer=` is the
+observer's position, default the origin, and is fixed at `%build` too.
+
+**`b_perp` is a radius and `b_par` a half-length**, both separations measured from the point, so the
+region a point's partners can occupy is `2 * b_perp` across and `2 * b_par` long — exactly as
+`radius=` bounds a ball. Both take one value or one per point, in row order.
+
+`combine=` chooses how two points' lengths decide a pair, with the four rules of
+[choosing the rule](#choosing-the-rule-with-combine) read on a cylinder:
+
+| `combine=` | a pair qualifies when |
+|---|---|
+| `PF_LINK_MAX` (default) | it lies in `i`'s cylinder **or** in `j`'s: the union of the two |
+| `PF_LINK_MIN` | it lies in both cylinders |
+| `PF_LINK_MEAN` | `d_perp <= (b_perp_i + b_perp_j)/2` and `d_par <= (b_par_i + b_par_j)/2` |
+| `PF_LINK_SUM` | `d_perp <= b_perp_i + b_perp_j` and `d_par <= b_par_i + b_par_j` |
+
+The default is the **union**, not the componentwise maximum of the lengths: when two points' aspect
+ratios differ, a pair can be within the larger transverse length and within the larger parallel
+length while lying in neither point's cylinder, and it is not reported. `dperp=` and `dpar=` return
+the two separations per pair, in their two units. The scalar form takes no `combine=`, for the
+reason `%pairs_within`'s does not.
+
+`%within_los` is the same cylinder about one point `p`, with `p`'s lengths only. `los_p=` is `p`'s
+own parallel coordinate, required exactly when the index carries `los=`. Its `dist=` is the
+**normalised** measure `max(d_perp / b_perp, d_par / b_par)` — 1 on the cylinder's surface, below 1
+inside — and `sorted=.true.` orders by it, ties by ascending row index, so the point nearest in the
+cylinder's own sense of near comes first. Both lengths must be positive here, since the measure
+divides by them. Every buffer truncates at the shortest one passed, and `m` is still the true
+count.
+
+**How the library finds the candidates.** The walk is still a ball. About each point it is one of
+radius `sqrt(b_perp**2 + (L * b_par)**2)`, where `L` is how fast the distance from the observer
+changes with `los`, measured from the data at `%build` as the steepest slope over pairs of points at
+least a hundred-thousandth of `los`'s range apart; pairs closer than that contribute a small-scale
+spread `g` instead, which the radius uses in place of `L * b_par` when it is the larger. That ball
+contains the whole cylinder, so no pair is missed, and the exact test above then keeps the cylinder
+and discards the rest. A long thin cylinder is a small part of its ball, so this query tests many
+more candidates than it keeps; the answer is exact regardless, and `bench/benchmark_spatial.sh`
+with `MODE=los` measures the excess on your own data. Without `los=`, `L` is exactly one and `g`
+zero.
+
+Two things are said rather than refused. A `los=` that is not a function of the distance from the
+observer, or is noisy at small separations — a spectroscopic redshift as `los=` over coordinates
+placed by a photometric one, say — makes `L` far above the catalogue-wide slope, and `%build` warns
+that every line-of-sight walk will be that wide. A `b_par` whose walk would span the catalogue's
+whole depth is what a parallel length given in the coordinates' units against a redshift `los=`
+looks like, and `%pairs_within_los` warns. A constant `los=`, a NaN in it, a point sitting on the
+observer, and a 2D, periodic or sky index are refused; see [Limitations](#limitations).
+
+### A redshift survey: comoving coordinates, the redshift as `los=`
+
+Galaxies with `ra` and `dec` in radians and a redshift `zred`, placed at their comoving distance by
+the caller's own cosmology. The library never sees the cosmology, only three coordinate arrays and
+one `los=` array:
+
+```fortran
+use parquet_spatial, only: pf_spatial_index, PF_LINK_MEAN
+real(real64), allocatable :: x(:), y(:), z(:), zred(:), b_perp(:), b_par(:), dperp(:), dpar(:)
+integer(int64), allocatable :: i(:), j(:)
+type(pf_spatial_index) :: sx
+
+do k = 1, n
+    d = comoving_distance(zred(k))                   ! the caller's cosmology, Mpc/h
+    x(k) = d * cos(dec(k)) * cos(ra(k))
+    y(k) = d * cos(dec(k)) * sin(ra(k))
+    z(k) = d * sin(dec(k))
+end do
+b_perp = 0.3_real64                                  ! Mpc/h: the coordinates' units
+b_par = 1000.0_real64 / 299792.458_real64            ! 1000 km/s as a redshift interval
+
+call sx%build(x, y, z, radius=b_perp, los=zred)      ! observer at the origin
+call sx%pairs_within_los(b_perp, b_par, i, j, combine=PF_LINK_MEAN, dperp=dperp, dpar=dpar)
+```
+
+`dperp` comes back in Mpc/h and `dpar` in redshift, so `dpar * c` is each pair's velocity difference
+in km/s. The slope the library measured is the survey's `dD/dz` at its nearest redshift; that one
+number is the whole conversion between the two units, and a `b_par` given in Mpc/h by mistake is
+what the second warning above catches. The same cylinder about one position, nearest first in the
+cylinder's own measure, is
+
+```fortran
+m = sx%within_los(p, 0.3_real64, b_par(1), found, los_p=z_p, dist=dn, sorted=.true.)
+```
+
+with `z_p` the redshift of `p`.
 
 ## Search on the sky
 
@@ -659,6 +785,12 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
 - **`%nearest` on a periodic index cannot look past half the box.** A periodic ball beyond `L/2` is
   undefined rather than merely imprecise, so a `k` that cannot be reached inside that radius is an
   error naming `k` and the box, not a shorter answer.
+- **The line-of-sight queries need a 3D, Euclidean, non-periodic index**, and `observer=`/`los=`
+  are refused anywhere else: a 2D index has no depth, a periodic one no observer the minimum image
+  could agree on, a sky index no distance. A point sitting on the observer has no line of sight and
+  is refused too — at `%build` when `los=` is given, at the query otherwise — as are a constant
+  `los=` and a NaN in it. A `los=` that is not a function of the distance from the observer is
+  accepted with a warning, and the walk is then wide.
 - **The index does not know its coordinates have moved.** Nothing detects a mutated array behind a
   `copy=.false.` index, and with `copy=.true.` only `%rebuild` looks. A stale index returns wrong
   answers silently, so call `%rebuild` after anything that may have changed the data.

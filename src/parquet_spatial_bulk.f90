@@ -509,6 +509,241 @@ contains
         dbg_threads_used = nt
     end subroutine spatial_bulk_setup
 
+    !> The guards both line-of-sight queries share.
+    module procedure spatial_los_prepare
+
+        if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
+            ": this index has not been built; call %build first"
+        if (self%metric_id /= PF_METRIC_EUCLIDEAN) error stop "pf_spatial_index%" // what // &
+            ": this index was built with %build_sky; a line-of-sight cylinder needs Cartesian coordinates about an observer"
+        if (self%ncoord /= 3) error stop "pf_spatial_index%" // what // &
+            ": this index is two-dimensional; a line of sight needs three coordinates"
+        if (self%periodic_on) error stop "pf_spatial_index%" // what // &
+            ": this index is periodic; a line of sight has no meaning under the minimum image"
+        ! Every route that leaves `radial` clear is refused above, so this is unreachable. ! GCOVR_EXCL_LINE
+        if (.not. self%radial) error stop "pf_spatial_index%" // what // ": not a radial index" ! GCOVR_EXCL_LINE
+        if (self%at_obs) error stop "pf_spatial_index%" // what // &
+            ": a stored point coincides with the observer (distance 0), so it has no line of sight; " // &
+            "move the observer= at %build or drop the point"
+    end procedure spatial_los_prepare
+
+    !> Every pair inside the line-of-sight cylinder the rule builds. The interface block's banner
+    !> states the criterion; this is the sweep.
+    !>
+    !> **The walk radius is `sqrt(b_perp**2 + max(L*b_par, g)**2)` per point, doubled for the sum
+    !> rule, and ranked like the ball sweep's radii.** `|p_i - p_j|**2 <= (D_i - D_j)**2 + d_perp**2`
+    !> for any two points about one observer, and `|D_i - D_j| <= max(L*|dlos|, g)` by what
+    !> `spatial_los_bounds` measured, so every pair a point's own cylinder accepts lies in that
+    !> ball; the union, intersection, mean and sum of two cylinders lie in the larger ball, or in
+    !> twice it for the sum, by the convexity of `max(L*b, g)` and of the norm. So one rank by
+    !> descending walk radius -- ascending for `PF_LINK_MIN`, whose bound is the smaller cylinder --
+    !> emits every pair exactly once, from the endpoint whose walk is guaranteed to see it.
+    !>
+    !> **The per-candidate lengths are built in STORED order and always passed**, so the scan has
+    !> one shape; with a single pair of lengths every rule is the searcher's own cylinder (doubled
+    !> for the sum), the arrays hold that, and rule 0 never reads them.
+    module procedure spatial_pairs_los_worker
+        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:), ls(:)
+        integer(int64), allocatable :: counts(:), heads(:), keys(:)
+        real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:)
+        integer(int64) :: n, t, i, u, m, s0, e0, total, k
+        real(real64) :: p(3), q(3), r, dself, lself, bpself, blself, qq, scale
+        integer :: nt, nr, rule, lrule
+        logical :: direct, want_sep
+
+        rule = PF_LINK_MAX
+        if (present(combine)) rule = combine
+        if (rule /= PF_LINK_MAX .and. rule /= PF_LINK_MIN .and. rule /= PF_LINK_MEAN .and. &
+            rule /= PF_LINK_SUM) error stop "pf_spatial_index%" // what // &
+            ": combine= must be PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN or PF_LINK_SUM"
+        call spatial_los_prepare(self, what)
+        n = self%npts
+        nr = size(b_perp)
+        if (size(b_par) /= nr) error stop "pf_spatial_index%" // what // &
+            ": b_perp and b_par must be the same length: one value each, or one per point each"
+        if (nr /= 1 .and. int(nr, kind=int64) /= n) error stop "pf_spatial_index%" // what // &
+            ": b_perp and b_par must be one value each or one per point each"
+        ! `.not. all(>= 0)` rather than `any(< 0)`, so a NaN is refused too: it answers .false. to
+        ! both comparisons. The parallel lengths are multiplied by L below and the transverse ones
+        ! squared, so both must be clean before either reaches arithmetic a trap could see.
+        if (.not. all(b_perp >= 0.0_real64)) error stop "pf_spatial_index%" // what // &
+            ": every b_perp and b_par must be >= 0 and not NaN"
+        if (.not. all(b_par >= 0.0_real64)) error stop "pf_spatial_index%" // what // &
+            ": every b_perp and b_par must be >= 0 and not NaN"
+        scale = 1.0_real64
+        if (rule == PF_LINK_SUM) scale = 2.0_real64
+        allocate (walk(nr))
+        do k = 1_int64, int(nr, kind=int64)
+            qq = self%lip * b_par(k)
+            if (self%tie_spread > qq) qq = self%tie_spread
+            walk(k) = scale * sqrt(b_perp(k) * b_perp(k) + qq * qq)
+        end do
+        ! The WALK radii, not the lengths, reach the shared setup: the rebuild decision and the
+        ! recorded effective radius are about the balls that are really walked. The setup may
+        ! re-tune the index, which re-buckets it, so everything below that is addressed by stored
+        ! position is built after this call and never before.
+        call spatial_bulk_setup(self, walk, PF_METRIC_EUCLIDEAN, n, nr, nt, threads)
+        if (n == 0_int64) then
+            allocate (ii(0), jj(0))
+            if (present(dperp)) allocate (dperp(0))
+            if (present(dpar)) allocate (dpar(0))
+            return
+        end if
+        ! A parallel window spanning the catalogue's whole depth is what a `b_par` given in the
+        ! coordinates' units against a redshift `los` looks like from inside. Said, not refused:
+        ! the sweep is slow and exact, and the window can be meant.
+        if (n > 1_int64) then
+            if (self%lip * maxval(b_par) > self%d_hi - self%d_lo) then
+                if (.not. parquet_output_is_suppressed()) then
+                    call parquet_emit_warning("pf_spatial_index%" // what // ": L x max(b_par) = " // &
+                        num_text(self%lip * maxval(b_par)) // " exceeds the catalogue's range in distance from " // &
+                        "the observer (" // num_text(self%d_hi - self%d_lo) // "), so the parallel window spans " // &
+                        "the whole catalogue along every line of sight; is b_par in los='s units?")
+                end if
+            end if
+        end if
+        call spatial_storage(self, xs, ys, zs)
+        direct = self%owns
+        call pair_order_keys(self, walk, nr, n, nt, rule == PF_LINK_MIN, keys)
+        allocate (bps(n), bls(n))
+        if (nr > 1) then
+            do t = 1_int64, n
+                bps(t) = b_perp(self%idx(t))
+                bls(t) = b_par(self%idx(t))
+            end do
+            lrule = rule
+        else
+            bps = scale * b_perp(1)
+            bls = scale * b_par(1)
+            lrule = 0
+        end if
+        ! The parallel coordinate the accept test reads per candidate: the stored one, or the
+        ! distance from the observer when none was stored -- the same array either way, so the
+        ! scan needs no second path.
+        if (self%has_los) then
+            ls => self%los_s
+        else
+            ls => self%d_s
+        end if
+        want_sep = present(dperp) .or. present(dpar)
+        allocate (counts(n), heads(n + 1_int64))
+        !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
+        !$omp     private(t, i, u, m, p, q, r, dself, lself, bpself, blself)
+        do t = 1_int64, n
+            i = self%idx(t)
+            u = t
+            if (.not. direct) u = i
+            p(1) = xs(u)
+            p(2) = ys(u)
+            p(3) = zs(u)
+            q = p - self%obs
+            dself = self%d_s(t)
+            lself = ls(t)
+            bpself = bps(t)
+            blself = bls(t)
+            r = walk(1)
+            if (nr > 1) r = walk(i)
+            call spatial_scan(self, p, r, m, min_key=keys(t), keys=keys, los_rule=lrule, los_q=q, &
+                los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls)
+            counts(t) = m
+        end do
+        !$omp end parallel do
+        heads(1) = 1_int64
+        do t = 1_int64, n
+            heads(t + 1_int64) = heads(t) + counts(t)
+        end do
+        total = heads(n + 1_int64) - 1_int64
+        allocate (ii(total), jj(total))
+        ! Both separations are gathered whenever either is wanted, into locals that always exist
+        ! inside the region: an optional allocatable dummy passed into a parallel region is the
+        ! recorded ifx segfault, and the two calls are written out for the reason the ball sweep's
+        ! are. What the caller did not ask for is dropped after the region.
+        if (want_sep) allocate (dp(total), dl(total))
+        !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
+        !$omp     private(t, i, u, m, p, q, r, s0, e0, k, dself, lself, bpself, blself)
+        do t = 1_int64, n
+            i = self%idx(t)
+            s0 = heads(t)
+            e0 = heads(t + 1_int64) - 1_int64
+            u = t
+            if (.not. direct) u = i
+            p(1) = xs(u)
+            p(2) = ys(u)
+            p(3) = zs(u)
+            q = p - self%obs
+            dself = self%d_s(t)
+            lself = ls(t)
+            bpself = bps(t)
+            blself = bls(t)
+            r = walk(1)
+            if (nr > 1) r = walk(i)
+            if (want_sep) then
+                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, los_rule=lrule, &
+                    los_q=q, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, &
+                    los_bls=bls, dperp=dp(s0:e0), dpar=dl(s0:e0))
+            else
+                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, los_rule=lrule, &
+                    los_q=q, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, &
+                    los_bls=bls)
+            end if
+            ! `i` is the endpoint that did the searching, not necessarily the lower row.
+            do k = s0, e0
+                if (jj(k) > i) then
+                    ii(k) = i
+                else
+                    ii(k) = jj(k)
+                    jj(k) = i
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        if (present(dperp)) call move_alloc(dp, dperp)
+        if (present(dpar)) call move_alloc(dl, dpar)
+    end procedure spatial_pairs_los_worker
+
+    !> The points inside the cylinder about `p` along `p`'s own line of sight: one scan with the
+    !> searcher's own lengths and no combine rule.
+    module procedure spatial_within_los_worker
+        real(real64) :: pp(3), q(3), dpq, lp, qq, r
+
+        m = 0_int64
+        call spatial_los_prepare(self, what)
+        if (size(p) /= 3) error stop "pf_spatial_index%" // what // &
+            ": the query point must have three coordinates"
+        call spatial_check_finite(p, "pf_spatial_index%" // what, "query point coordinate")
+        if (present(los_p) .neqv. self%has_los) then
+            if (self%has_los) error stop "pf_spatial_index%" // what // ": this index carries a parallel " // &
+                "coordinate (los= at %build), so los_p= is required: the query point's own value in the same units"
+            error stop "pf_spatial_index%" // what // ": this index was built without los=, so los_p= has no " // &
+                "meaning here; the parallel separation is the difference in distance from the observer"
+        end if
+        ! Strictly positive, unlike the pair sweep's lengths: `dist=` divides by both.
+        if (.not. (b_perp > 0.0_real64 .and. b_par > 0.0_real64)) error stop "pf_spatial_index%" // what // &
+            ": b_perp and b_par must both be > 0 and not NaN; the normalised distance divides by them"
+        ! A named local, for the reason `query_point`'s callers give: the scan takes `p(3)`.
+        pp = p
+        q = pp - self%obs
+        dpq = sqrt(q(1) * q(1) + q(2) * q(2) + q(3) * q(3))
+        if (dpq == 0.0_real64) error stop "pf_spatial_index%" // what // &
+            ": the query point coincides with the observer, so it has no line of sight"
+        lp = dpq
+        if (present(los_p)) then
+            if (.not. (abs(los_p) <= huge(0.0_real64))) error stop "pf_spatial_index%" // what // &
+                ": los_p must be a finite number (no NaN, no infinity)"
+            lp = los_p
+        end if
+        qq = self%lip * b_par
+        if (self%tie_spread > qq) qq = self%tie_spread
+        r = sqrt(b_perp * b_perp + qq * qq)
+        if (self%has_los) then
+            call spatial_scan(self, pp, r, m, out32=out32, out64=out64, dist=dist, sorted=sorted, los_rule=0, &
+                los_q=q, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, los_ls=self%los_s, dperp=dperp, dpar=dpar)
+        else
+            call spatial_scan(self, pp, r, m, out32=out32, out64=out64, dist=dist, sorted=sorted, los_rule=0, &
+                los_q=q, los_d=dpq, los_l=lp, los_bp=b_perp, los_bl=b_par, los_ls=self%d_s, dperp=dperp, dpar=dpar)
+        end if
+    end procedure spatial_within_los_worker
+
     !> The distance from every point to its `k`-th nearest OTHER point.
     module procedure spatial_kth_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)

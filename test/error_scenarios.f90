@@ -2620,6 +2620,60 @@ program error_scenarios
         call scenario_spatial_pairs_bad_combine()
     case ("spatial_sky_pairs_sum_too_large")
         call scenario_spatial_sky_pairs_sum_too_large()
+    case ("spatial_los_on_sky")
+        call scenario_spatial_los_on_sky()
+    case ("spatial_los_on_2d")
+        call scenario_spatial_los_on_2d()
+    case ("spatial_los_on_periodic")
+        call scenario_spatial_los_on_periodic()
+    case ("spatial_los_point_at_observer")
+        call scenario_spatial_los_point_at_observer()
+    case ("spatial_within_los_point_at_observer")
+        call scenario_spatial_within_los_point_at_observer()
+    case ("spatial_los_length_mismatch")
+        call scenario_spatial_los_length_mismatch()
+    case ("spatial_los_lengths_not_per_point")
+        call scenario_spatial_los_lengths_not_per_point()
+    case ("spatial_los_negative_length")
+        call scenario_spatial_los_negative_length()
+    case ("spatial_los_bad_combine")
+        call scenario_spatial_los_bad_combine()
+    case ("spatial_within_los_needs_los_p")
+        call scenario_spatial_within_los_needs_los_p()
+    case ("spatial_within_los_los_p_refused")
+        call scenario_spatial_within_los_los_p_refused()
+    case ("spatial_within_los_zero_length")
+        call scenario_spatial_within_los_zero_length()
+    case ("spatial_within_los_rank")
+        call scenario_spatial_within_los_rank()
+    case ("spatial_within_los_los_p_nan")
+        call scenario_spatial_within_los_los_p_nan()
+    case ("spatial_los_constant")
+        call scenario_spatial_los_constant()
+    case ("spatial_los_nan")
+        call scenario_spatial_los_nan()
+    case ("spatial_los_length")
+        call scenario_spatial_los_length()
+    case ("spatial_los_build_on_2d")
+        call scenario_spatial_los_build_on_2d()
+    case ("spatial_los_build_on_periodic")
+        call scenario_spatial_los_build_on_periodic()
+    case ("spatial_los_observer_size")
+        call scenario_spatial_los_observer_size()
+    case ("spatial_los_observer_nan")
+        call scenario_spatial_los_observer_nan()
+    case ("spatial_los_build_point_at_observer")
+        call scenario_spatial_los_build_point_at_observer()
+    case ("spatial_rebuild_los_missing")
+        call scenario_spatial_rebuild_los_missing()
+    case ("spatial_rebuild_los_unexpected")
+        call scenario_spatial_rebuild_los_unexpected()
+    case ("spatial_rebuild_los_length")
+        call scenario_spatial_rebuild_los_length()
+    case ("spatial_los_not_a_function_warns")
+        call scenario_spatial_los_not_a_function_warns()
+    case ("spatial_los_window_spans_catalogue_warns")
+        call scenario_spatial_los_window_spans_catalogue_warns()
     case ("spatial_copy_false_strided")
         call scenario_spatial_copy_false_strided()
     case ("spatial_threads_below_one")
@@ -22786,6 +22840,376 @@ contains
         call sx%pairs_within_sky(rv, pi, pj, combine=PF_LINK_SUM)   ! -> aborts
         print '(a,i0)', "unexpectedly accepted a 60-degree radius under PF_LINK_SUM, pairs=", size(pi)
     end subroutine scenario_spatial_sky_pairs_sum_too_large
+
+    !> A deterministic wedge for the line-of-sight scenarios: `n` points at distances 500..1500
+    !> from the origin inside a few degrees, so every point has a line of sight, with the distance
+    !> handed back beside the coordinates for a scenario that wants a `los` derived from it.
+    subroutine spatial_los_cloud(n, x, y, z, d)
+        integer, intent(in) :: n !! how many points.
+        real(real64), allocatable, intent(out) :: x(:) !! x of every point.
+        real(real64), allocatable, intent(out) :: y(:) !! y of every point.
+        real(real64), allocatable, intent(out) :: z(:) !! z of every point.
+        real(real64), allocatable, intent(out) :: d(:) !! distance from the origin of every point.
+        integer :: i
+        real(real64) :: ra, dec
+
+        allocate (x(n), y(n), z(n), d(n))
+        do i = 1, n
+            ra = 0.1_real64 * (pf_random_at(4321_int64, i, 1_int64) - 0.5_real64)
+            dec = 0.1_real64 * (pf_random_at(4321_int64, i, 2_int64) - 0.5_real64)
+            d(i) = 500.0_real64 + 1000.0_real64 * pf_random_at(4321_int64, i, 3_int64)
+            x(i) = d(i) * cos(dec) * cos(ra)
+            y(i) = d(i) * cos(dec) * sin(ra)
+            z(i) = d(i) * sin(dec)
+        end do
+    end subroutine spatial_los_cloud
+
+    !> `%pairs_within_los` on a sky index: unit vectors carry no distance from an observer.
+    subroutine scenario_spatial_los_on_sky()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        call sx%pairs_within_los(0.1_real64, 0.1_real64, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly answered a line-of-sight query on a sky index, pairs=", size(pi)
+    end subroutine scenario_spatial_los_on_sky
+
+    !> `%pairs_within_los` on a 2D index: a line of sight needs three coordinates.
+    subroutine scenario_spatial_los_on_2d()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, radius=0.2_real64)
+        call sx%pairs_within_los(0.1_real64, 0.1_real64, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly answered a line-of-sight query on a 2D index, pairs=", size(pi)
+    end subroutine scenario_spatial_los_on_2d
+
+    !> `%pairs_within_los` on a periodic index: the minimum image has no observer.
+    subroutine scenario_spatial_los_on_periodic()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+                      box_hi=[1.0_real64, 1.0_real64, 1.0_real64])
+        call sx%pairs_within_los(0.1_real64, 0.1_real64, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly answered a line-of-sight query on a periodic index, pairs=", size(pi)
+    end subroutine scenario_spatial_los_on_periodic
+
+    !> A stored point sitting on the observer has no line of sight. Refused at the QUERY on an index
+    !> built without `los=`, because a plain %build has always accepted a point at the origin.
+    subroutine scenario_spatial_los_point_at_observer()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        x(5) = 0.0_real64
+        y(5) = 0.0_real64
+        z(5) = 0.0_real64
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%pairs_within_los(10.0_real64, 30.0_real64, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly swept a catalogue holding a point at the observer, pairs=", size(pi)
+    end subroutine scenario_spatial_los_point_at_observer
+
+    !> `%within_los` with the query point on the observer: no direction to search along.
+    subroutine scenario_spatial_within_los_point_at_observer()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64) :: got(8), m
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64)
+        m = sx%within_los([0.0_real64, 0.0_real64, 0.0_real64], 10.0_real64, 30.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly answered a query from the observer itself, m=", m
+    end subroutine scenario_spatial_within_los_point_at_observer
+
+    !> Transverse and parallel length lists of different lengths.
+    subroutine scenario_spatial_los_length_mismatch()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        allocate (bp(64), bl(63))
+        bp = 10.0_real64
+        bl = 30.0_real64
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%pairs_within_los(bp, bl, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted length lists of different lengths, pairs=", size(pi)
+    end subroutine scenario_spatial_los_length_mismatch
+
+    !> Length lists that are neither one value nor one per point.
+    subroutine scenario_spatial_los_lengths_not_per_point()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%pairs_within_los([10.0_real64, 10.0_real64, 10.0_real64], &
+                                 [30.0_real64, 30.0_real64, 30.0_real64], pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted three lengths for 64 points, pairs=", size(pi)
+    end subroutine scenario_spatial_los_lengths_not_per_point
+
+    !> A negative parallel length.
+    subroutine scenario_spatial_los_negative_length()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        allocate (bp(64), bl(64))
+        bp = 10.0_real64
+        bl = 30.0_real64
+        bl(5) = -1.0_real64
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%pairs_within_los(bp, bl, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative parallel length, pairs=", size(pi)
+    end subroutine scenario_spatial_los_negative_length
+
+    !> A `combine=` value that names no rule, on the cylinder sweep.
+    subroutine scenario_spatial_los_bad_combine()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        allocate (bp(64), bl(64))
+        bp = 10.0_real64
+        bl = 30.0_real64
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=99)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an unknown combine= value on the cylinder, pairs=", size(pi)
+    end subroutine scenario_spatial_los_bad_combine
+
+    !> `%within_los` without `los_p=` on an index that carries `los=`: the query point's own parallel
+    !> coordinate is the one thing the library cannot derive.
+    subroutine scenario_spatial_within_los_needs_los_p()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64) :: got(8), m
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, los=d)
+        m = sx%within_los([x(1), y(1), z(1)], 10.0_real64, 30.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly answered without los_p on a los= index, m=", m
+    end subroutine scenario_spatial_within_los_needs_los_p
+
+    !> `%within_los` with `los_p=` on an index built without `los=`: the value would be compared with
+    !> distances, silently.
+    subroutine scenario_spatial_within_los_los_p_refused()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64) :: got(8), m
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64)
+        m = sx%within_los([x(1), y(1), z(1)], 10.0_real64, 30.0_real64, got, los_p=d(1))   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted los_p on an index without los=, m=", m
+    end subroutine scenario_spatial_within_los_los_p_refused
+
+    !> `%within_los` with a zero transverse length: the normalised distance would divide by it.
+    subroutine scenario_spatial_within_los_zero_length()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64) :: got(8), m
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64)
+        m = sx%within_los([x(1), y(1), z(1)], 0.0_real64, 30.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a zero transverse length, m=", m
+    end subroutine scenario_spatial_within_los_zero_length
+
+    !> `%within_los` with a two-coordinate query point on a 3D index.
+    subroutine scenario_spatial_within_los_rank()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64) :: got(8), m
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64)
+        m = sx%within_los([x(1), y(1)], 10.0_real64, 30.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a two-coordinate query point, m=", m
+    end subroutine scenario_spatial_within_los_rank
+
+    !> `%within_los` with a NaN `los_p=`.
+    subroutine scenario_spatial_within_los_los_p_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64) :: got(8), m
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, los=d)
+        m = sx%within_los([x(1), y(1), z(1)], 10.0_real64, 30.0_real64, got, &
+                          los_p=ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN los_p, m=", m
+    end subroutine scenario_spatial_within_los_los_p_nan
+
+    !> A constant `los=`: the parallel test could never separate two points.
+    subroutine scenario_spatial_los_constant()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        d = 1.0_real64
+        call sx%build(x, y, z, radius=20.0_real64, los=d)   ! -> aborts
+        print '(a,i0)', "unexpectedly built an index over a constant los, n=", sx%size()
+    end subroutine scenario_spatial_los_constant
+
+    !> A NaN in `los=`.
+    subroutine scenario_spatial_los_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        d(3) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call sx%build(x, y, z, radius=20.0_real64, los=d)   ! -> aborts
+        print '(a,i0)', "unexpectedly built an index over a NaN los, n=", sx%size()
+    end subroutine scenario_spatial_los_nan
+
+    !> A `los=` shorter than the catalogue.
+    subroutine scenario_spatial_los_length()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, los=d(1:63))   ! -> aborts
+        print '(a,i0)', "unexpectedly built an index over a short los, n=", sx%size()
+    end subroutine scenario_spatial_los_length
+
+    !> `los=` on a 2D build.
+    subroutine scenario_spatial_los_build_on_2d()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, radius=20.0_real64, los=d)   ! -> aborts
+        print '(a,i0)', "unexpectedly built a 2D index with los=, n=", sx%size()
+    end subroutine scenario_spatial_los_build_on_2d
+
+    !> `observer=` on a periodic build.
+    subroutine scenario_spatial_los_build_on_periodic()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+                      box_hi=[1.0_real64, 1.0_real64, 1.0_real64], &
+                      observer=[0.5_real64, 0.5_real64, 0.5_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a periodic index with observer=, n=", sx%size()
+    end subroutine scenario_spatial_los_build_on_periodic
+
+    !> An `observer=` with two coordinates.
+    subroutine scenario_spatial_los_observer_size()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, observer=[1.0_real64, 2.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a two-coordinate observer, n=", sx%size()
+    end subroutine scenario_spatial_los_observer_size
+
+    !> A NaN in `observer=`.
+    subroutine scenario_spatial_los_observer_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        real(real64) :: o(3)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        o = [ieee_value(1.0_real64, ieee_quiet_nan), 0.0_real64, 0.0_real64]
+        call sx%build(x, y, z, radius=20.0_real64, observer=o)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN observer coordinate, n=", sx%size()
+    end subroutine scenario_spatial_los_observer_nan
+
+    !> A point on the observer, refused at BUILD when `los=` declares the line-of-sight intent.
+    subroutine scenario_spatial_los_build_point_at_observer()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        x(5) = 0.0_real64
+        y(5) = 0.0_real64
+        z(5) = 0.0_real64
+        call sx%build(x, y, z, radius=20.0_real64, los=d)   ! -> aborts
+        print '(a,i0)', "unexpectedly built a los= index holding a point at the observer, n=", sx%size()
+    end subroutine scenario_spatial_los_build_point_at_observer
+
+    !> `%rebuild` without `los=` on an index that carries one.
+    subroutine scenario_spatial_rebuild_los_missing()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, los=d)
+        call sx%rebuild(x, y, z)   ! -> aborts
+        print '(a,i0)', "unexpectedly rebuilt a los= index without new los values, n=", sx%size()
+    end subroutine scenario_spatial_rebuild_los_missing
+
+    !> `%rebuild` with `los=` on an index built without one.
+    subroutine scenario_spatial_rebuild_los_unexpected()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%rebuild(x, y, z, los=d)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted los= on %rebuild of an index without one, n=", sx%size()
+    end subroutine scenario_spatial_rebuild_los_unexpected
+
+    !> `%rebuild` with a `los=` shorter than the coordinates.
+    subroutine scenario_spatial_rebuild_los_length()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, los=d)
+        call sx%rebuild(x, y, z, los=d(1:63))   ! -> aborts
+        print '(a,i0)', "unexpectedly rebuilt with a short los, n=", sx%size()
+    end subroutine scenario_spatial_rebuild_los_length
+
+    !> A `los=` unrelated to the distance from the observer is accepted with a warning, on the
+    !> stream the settings name: its small-scale slope is thousands of times the catalogue-wide one.
+    subroutine scenario_spatial_los_not_a_function_warns()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:), los(:)
+        integer :: i
+
+        call spatial_los_cloud(64, x, y, z, d)
+        allocate (los(64))
+        do i = 1, 64
+            los(i) = pf_random_at(8765_int64, i, 1_int64)
+        end do
+        call parquet_set_message_stream("stderr")
+        call sx%build(x, y, z, radius=20.0_real64, los=los)   ! -> warns, does not abort
+        call parquet_reset_settings()
+        print '(a,i0)', "built with a warning; n=", sx%size()
+    end subroutine scenario_spatial_los_not_a_function_warns
+
+    !> A parallel length given in the coordinates' units against a redshift-like `los=` makes every
+    !> line-of-sight walk span the whole catalogue: said, on the stream the settings name, never
+    !> refused, since the sweep is still exact and the window can be meant.
+    subroutine scenario_spatial_los_window_spans_catalogue_warns()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        ! A redshift-like coordinate: a thousandth of the distance, so its slope is a thousand.
+        call sx%build(x, y, z, radius=20.0_real64, los=0.001_real64 * d)
+        call parquet_set_message_stream("stderr")
+        call sx%pairs_within_los(10.0_real64, 30.0_real64, pi, pj)   ! -> warns, does not abort
+        call parquet_reset_settings()
+        print '(a,i0)', "swept with a warning; pairs=", size(pi)
+    end subroutine scenario_spatial_los_window_spans_catalogue_warns
 
     !> `copy=.false.` over a strided section.
     !>

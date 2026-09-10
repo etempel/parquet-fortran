@@ -77,6 +77,7 @@ module parquet_spatial
     public :: parquet_debug_set_spatial_shell_start
     public :: parquet_debug_spatial_shell_rounds
     public :: parquet_debug_reset_spatial_counters
+    public :: parquet_debug_spatial_los_bounds
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -318,6 +319,18 @@ module parquet_spatial
         real(real64), pointer, contiguous :: pz(:) => null() !! the caller's z when owns is .false.
         integer(int64), allocatable :: start(:) !! dense: cell c holds stored points start(c) : start(c+1)-1.
         integer(int64), allocatable :: idx(:)   !! the caller's row index of stored point k.
+        ! ---- The line-of-sight state behind %within_los and %pairs_within_los ----
+        logical :: radial = .false.             !! 3D, Euclidean, non-periodic: the one kind that answers a line-of-sight query.
+        logical :: has_los = .false.            !! whether %build stored a parallel coordinate (los=).
+        logical :: at_obs = .false.             !! whether a stored point coincides with the observer (distance 0).
+        real(real64) :: obs(3) = 0.0_real64     !! the observer: %build's observer=, or the origin.
+        real(real64) :: lip = 1.0_real64        !! L: the steepest |dD|/|dlos| over pairs at least los_gap apart; 1 without los=.
+        real(real64) :: tie_spread = 0.0_real64 !! g: the largest |dD| over pairs closer than los_gap in los; 0 without los=.
+        real(real64) :: los_gap = 0.0_real64    !! the gap floor between L and g: 1e-5 of los's range, at least 64 ulps of it.
+        real(real64) :: d_lo = 0.0_real64       !! the smallest distance from the observer over the stored points.
+        real(real64) :: d_hi = 0.0_real64       !! the largest distance from the observer over the stored points.
+        real(real64), allocatable :: d_s(:)     !! distance from the observer of stored point k; radial indexes only.
+        real(real64), allocatable :: los_s(:)   !! the parallel coordinate of stored point k; with los= only.
     contains
         procedure, private :: bind_build_r0 !! %build with one radius.
         procedure, private :: bind_build_r1 !! %build with a list of radii.
@@ -388,6 +401,18 @@ module parquet_spatial
         !! SYMMETRIC: a pair qualifies when EITHER ball reaches the other, `d <= max(r_i, r_j)`,
         !! so it does not matter which endpoint would have been doing the searching.
         generic :: pairs_within => bind_pairs_within_r0, bind_pairs_within_r1
+        procedure, private :: bind_within_los_i32 !! %within_los into an int32 buffer.
+        procedure, private :: bind_within_los_i64 !! %within_los into an int64 buffer.
+        !> Points inside the cylinder about `p` along its own line of sight from the observer: a
+        !! transverse radius `b_perp` in the coordinates' units and a parallel half-length `b_par`
+        !! in `los=`'s units. Returns the TRUE count.
+        generic :: within_los => bind_within_los_i32, bind_within_los_i64
+        procedure, private :: bind_pairs_los_r0 !! %pairs_within_los with one transverse and one parallel length.
+        procedure, private :: bind_pairs_los_r1 !! %pairs_within_los with a pair of lengths per point.
+        !> Every pair once, with `i < j`, whose transverse and parallel separations along the line
+        !! of sight from the observer both fall inside what the `combine=` rule makes of the two
+        !! points' lengths.
+        generic :: pairs_within_los => bind_pairs_los_r0, bind_pairs_los_r1
         procedure, private :: bind_count_all_r0 !! %count_all_within with one radius.
         procedure, private :: bind_count_all_r1 !! %count_all_within with one radius per point.
         !> How many neighbours each point has, without materialising them.
@@ -497,7 +522,7 @@ module parquet_spatial
         !> Builds `self` over the caller's coordinates. The single worker every `%build` specific
         !! reaches, taking the radius hint as an already-flattened array.
         module subroutine spatial_build_worker(self, x, y, z, radii, cell, box_lo, box_hi, copy, &
-                                              backend, nside)
+                                              backend, nside, observer, los)
             type(pf_spatial_index), intent(inout), target :: self !! the index to fill.
             real(real64), intent(in), target :: x(:) !! x of every point.
             real(real64), intent(in), target :: y(:) !! y of every point.
@@ -514,7 +539,28 @@ module parquet_spatial
             !! choice and the bucketing key both have to know before they run.
             integer, intent(in), optional :: backend
             integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
+            real(real64), intent(in), optional :: observer(:) !! the observer for line-of-sight queries; default the origin.
+            real(real64), intent(in), optional :: los(:) !! a parallel coordinate per point, in the caller's own units.
         end subroutine spatial_build_worker
+
+        !> Recomputes the stored-order distances from the observer, and whether any is zero.
+        !!
+        !! Called at the end of `spatial_bucket`, which is the ONE place stored order is made, so
+        !! the array cannot be stale whichever route re-bucketed: `%build`, `%rebuild`,
+        !! `%rebuild_for` or the automatic re-tune a bulk query triggers.
+        module subroutine spatial_radial_prepare(self)
+            type(pf_spatial_index), intent(inout), target :: self !! a radial index, just bucketed.
+        end subroutine spatial_radial_prepare
+
+        !> Measures the two bounds a line-of-sight walk rests on when `los=` is a second radial
+        !! coordinate: `L`, the steepest slope of the distance from the observer against `los` over
+        !! pairs at least `los_gap` apart, and `g`, the spread of that distance over pairs closer
+        !! than `los_gap`. Refuses a constant `los`; warns when `L` is far above the catalogue-wide
+        !! secant, which is what a `los` that is not a function of the distance looks like.
+        module subroutine spatial_los_bounds(self, what)
+            type(pf_spatial_index), intent(inout), target :: self !! the index, with `d_s` and `los_s` in stored order.
+            character(len=*), intent(in) :: what !! the entry point, for a message: "build" or "rebuild".
+        end subroutine spatial_los_bounds
 
         !> Rebuilds `self` from `x`, `y`, `z` unless they are element-for-element what it already
         !! holds, in which case it only widens the radius record.
@@ -547,13 +593,14 @@ module parquet_spatial
             integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
         end subroutine spatial_build_sky_worker
 
-        module subroutine spatial_rebuild_worker(self, x, y, z, radii, rebuilt)
+        module subroutine spatial_rebuild_worker(self, x, y, z, radii, rebuilt, los)
             type(pf_spatial_index), intent(inout), target :: self !! the index to validate.
             real(real64), intent(in), target :: x(:) !! x of every point.
             real(real64), intent(in), target :: y(:) !! y of every point.
             real(real64), intent(in), optional, target :: z(:) !! z; must match the built rank.
             real(real64), intent(in), optional :: radii(:) !! extra radii to fold into the record.
             logical, intent(out), optional :: rebuilt !! .true. when the data had changed.
+            real(real64), intent(in), optional :: los(:) !! the parallel coordinate; required exactly when %build stored one.
         end subroutine spatial_rebuild_worker
 
         !> Re-tunes the cell size for `radii` over the points already stored, without the caller
@@ -742,8 +789,22 @@ module parquet_spatial
         !! Euclidean metric AND of two ANGLES on the sky, so the walk never learns which metric it
         !! is running under. All four are present together or none is, and `PF_LINK_MAX` and
         !! `PF_LINK_MIN` pass none -- their bound IS the walk radius.
+        !!
+        !! **`los_*` turn the accept test into the line-of-sight cylinder of `%pairs_within_los`
+        !! and `%within_los`**, inside the same ball walk: a candidate is kept when its transverse
+        !! separation `|n_i - n_j| (D_i + D_j)/2` and its parallel separation `|los_i - los_j|` both
+        !! fall inside what `los_rule` makes of the two points' lengths (`0` is the searcher's own
+        !! cylinder, otherwise a `PF_LINK_*` rule over the searcher's lengths and the candidate's,
+        !! read from `los_bps`/`los_bls` by stored position). The walk radius is the caller's
+        !! business: it must contain the accepted set, which is what `spatial_pairs_los_worker`'s
+        !! `sqrt(b_perp**2 + max(L*b_par, g)**2)` guarantees. `dist` then reports the NORMALISED
+        !! measure `max(d_perp/b_perp, d_par/b_par)` and `sorted=` orders by it; `dperp`/`dpar`
+        !! receive the two raw separations. Present together or not at all, keyed on `los_rule`;
+        !! the free-box walk alone honours them, since the queries are refused on every other kind
+        !! of index.
         module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys, r_inner, sorted, &
-            bnd_u_self, bnd_v_self, bnd_u, bnd_v)
+            bnd_u_self, bnd_v_self, bnd_u, bnd_v, los_rule, los_q, los_d, los_l, los_bp, los_bl, &
+            los_ls, los_bps, los_bls, dperp, dpar)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p(3) !! the query point; p(3) is ignored by a 2D index.
             real(real64), intent(in) :: r !! the search radius; must be >= 0.
@@ -759,6 +820,17 @@ module parquet_spatial
             real(real64), intent(in), optional :: bnd_v_self !! the searcher's own `v` term; needs `bnd_v`.
             real(real64), intent(in), optional :: bnd_u(:) !! `u` term per STORED position.
             real(real64), intent(in), optional :: bnd_v(:) !! `v` term per STORED position.
+            integer, intent(in), optional :: los_rule !! 0 for the searcher's own cylinder, else a `PF_LINK_*` rule.
+            real(real64), intent(in), optional :: los_q(3) !! the searcher's position relative to the observer.
+            real(real64), intent(in), optional :: los_d !! the searcher's distance from the observer, `|los_q|` > 0.
+            real(real64), intent(in), optional :: los_l !! the searcher's parallel coordinate.
+            real(real64), intent(in), optional :: los_bp !! the searcher's transverse length.
+            real(real64), intent(in), optional :: los_bl !! the searcher's parallel length.
+            real(real64), intent(in), optional :: los_ls(:) !! parallel coordinate per STORED position.
+            real(real64), intent(in), optional :: los_bps(:) !! transverse length per STORED position; rules other than 0.
+            real(real64), intent(in), optional :: los_bls(:) !! parallel length per STORED position; rules other than 0.
+            real(real64), intent(inout), optional :: dperp(:) !! transverse separation of each reported point.
+            real(real64), intent(inout), optional :: dpar(:) !! parallel separation of each reported point.
         end subroutine spatial_scan
 
         !> Walks the cells an axis-shaped region can reach and reports what it finds.
@@ -798,13 +870,15 @@ module parquet_spatial
         !! among equal distances is the order the walk produced, which is cell order -- and cell
         !! order depends on the tuned cell size, which depends on the machine. A caller who asks
         !! for a canonical order would then get a different one on a different machine.
-        module subroutine spatial_order_by_dist(nfill, d, out32, out64, axis_point, axis_t)
+        module subroutine spatial_order_by_dist(nfill, d, out32, out64, axis_point, axis_t, dperp, dpar)
             integer(int64), intent(in) :: nfill !! how many leading entries were actually written.
             real(real64), intent(inout) :: d(:) !! the distances: the sort key, permuted in place.
             integer(int32), intent(inout), optional :: out32(:) !! int32 row buffer, permuted with it.
             integer(int64), intent(inout), optional :: out64(:) !! int64 row buffer, permuted with it.
             real(real64), intent(inout), optional :: axis_point(:,:) !! axis feet, permuted with it.
             real(real64), intent(inout), optional :: axis_t(:) !! axis parameters, permuted with it.
+            real(real64), intent(inout), optional :: dperp(:) !! transverse separations, permuted with it.
+            real(real64), intent(inout), optional :: dpar(:) !! parallel separations, permuted with it.
         end subroutine spatial_order_by_dist
 
         !> The `kk` nearest points to `p`, by a ball that expands until it holds enough of them.
@@ -943,12 +1017,80 @@ module parquet_spatial
         end function spatial_threads
     end interface
 
+    ! ---- Cylinders along the line of sight (parquet_spatial_bulk.f90) ----
+    !
+    ! Both queries accept a candidate `j` of point `i` when
+    !
+    !     d_perp = |n_i - n_j| * (D_i + D_j) / 2  <=  B_perp     and     d_par = |los_i - los_j|  <=  B_par
+    !
+    ! with `D` the distance from the observer, `n` the unit vector from it, and `los` the parallel
+    ! coordinate `%build` stored -- or `D` itself when none was. The transverse length is in the
+    ! coordinates' units and the parallel one in `los`'s, which need not agree. `B_perp`, `B_par`
+    ! come from the `PF_LINK_*` rule over the two points' lengths, `PF_LINK_MAX` meaning the UNION
+    ! of the two cylinders rather than the componentwise maximum. Every accepted pair lies inside
+    ! the ball of radius `sqrt(b_perp**2 + max(L*b_par, g)**2)` about the point whose lengths
+    ! bound it, with `L` and `g` measured at `%build` (`spatial_los_bounds`), which is what lets
+    ! the ordinary cell walk find it.
+
+    interface
+        !> The guards both line-of-sight queries share: built, radial, and no point at the observer.
+        module subroutine spatial_los_prepare(self, what)
+            type(pf_spatial_index), intent(in) :: self !! the index about to be queried.
+            character(len=*), intent(in) :: what !! the calling binding, for any message.
+        end subroutine spatial_los_prepare
+
+        !> Every pair inside the line-of-sight cylinder the rule builds, exactly once, `i < j`.
+        module subroutine spatial_pairs_los_worker(self, b_perp, b_par, ii, jj, what, threads, combine, &
+                                                  dperp, dpar)
+            type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+            real(real64), intent(in) :: b_perp(:) !! one transverse length, or one per point, in the coordinates' units.
+            real(real64), intent(in) :: b_par(:) !! one parallel length, or one per point, in `los`'s units.
+            integer(int64), allocatable, intent(out) :: ii(:) !! the lower row index of each pair.
+            integer(int64), allocatable, intent(out) :: jj(:) !! the higher row index of each pair.
+            character(len=*), intent(in) :: what !! the calling binding, for any message.
+            integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+            integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
+            real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
+            real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair.
+        end subroutine spatial_pairs_los_worker
+
+        !> The points inside the cylinder about `p` along `p`'s own line of sight.
+        module subroutine spatial_within_los_worker(self, p, b_perp, b_par, m, what, los_p, out32, out64, &
+                                                   dist, dperp, dpar, sorted)
+            type(pf_spatial_index), intent(in), target :: self !! the index to search.
+            real(real64), intent(in) :: p(:) !! the query point; must have three coordinates.
+            real(real64), intent(in) :: b_perp !! the transverse radius, in the coordinates' units; > 0.
+            real(real64), intent(in) :: b_par !! the parallel half-length, in `los`'s units; > 0.
+            integer(int64), intent(out) :: m !! how many points qualify, whatever the buffer holds.
+            character(len=*), intent(in) :: what !! the calling binding, for any message.
+            real(real64), intent(in), optional :: los_p !! `p`'s parallel coordinate; required exactly when the index has `los`.
+            integer(int32), intent(inout), optional :: out32(:) !! caller's row indices, int32 buffer.
+            integer(int64), intent(inout), optional :: out64(:) !! caller's row indices, int64 buffer.
+            real(real64), intent(inout), optional :: dist(:) !! `max(d_perp/b_perp, d_par/b_par)` per reported point.
+            real(real64), intent(inout), optional :: dperp(:) !! transverse separation per reported point.
+            real(real64), intent(inout), optional :: dpar(:) !! parallel separation per reported point.
+            logical, intent(in), optional :: sorted !! .true. orders the result by increasing `dist`.
+        end subroutine spatial_within_los_worker
+    end interface
+
 contains
 
     ! ---- %build ----
 
     !> `%build` with a single radius hint.
-    subroutine bind_build_r0(self, x, y, z, radius, cell, box_lo, box_hi, copy)
+    !>
+    !> **`observer=` and `los=` serve `%within_los` and `%pairs_within_los` and nothing else.** The
+    !> observer (default the origin) is where every line of sight starts, so it fixes each point's
+    !> distance `D` and direction; `los=` is an optional SECOND radial coordinate, one value per
+    !> point in row order, always copied whatever `copy=` says. Absent, the parallel separation of
+    !> a pair is `|D_i - D_j|`; present, it is `|los_i - los_j|` in **`los`'s own units, which need
+    !> not be the coordinates'** -- a redshift over comoving coordinates is the intended use, and
+    !> `b_par`/`dpar=` on both queries are then redshift intervals while `b_perp`/`dperp=` stay in
+    !> the coordinates' units. Both are fixed at `%build`: `%rebuild` takes `los=` exactly when the
+    !> index carries one, and neither is accepted on a 2D or periodic index. A `los` that is
+    !> constant, or holds a NaN, is refused; one that is not a function of the distance from the
+    !> observer is accepted with a warning, since every line-of-sight walk is then wide.
+    subroutine bind_build_r0(self, x, y, z, radius, cell, box_lo, box_hi, copy, observer, los)
         class(pf_spatial_index), intent(inout), target :: self !! the index to fill.
         real(real64), intent(in), target :: x(:) !! x of every point.
         real(real64), intent(in), target :: y(:) !! y of every point.
@@ -958,12 +1100,15 @@ contains
         real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
         real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
         logical, intent(in), optional :: copy !! .false. points at the caller's arrays; default .true.
+        real(real64), intent(in), optional :: observer(:) !! the observer's three coordinates; default the origin.
+        real(real64), intent(in), optional :: los(:) !! parallel coordinate per point, in its own units (a redshift, say).
 
-        call spatial_build_worker(self, x, y, z, [radius], cell, box_lo, box_hi, copy)
+        call spatial_build_worker(self, x, y, z, [radius], cell, box_lo, box_hi, copy, observer=observer, los=los)
     end subroutine bind_build_r0
 
-    !> `%build` with a list of radii; the list collapses to `r_eff = sum(r^3)/sum(r^2)`.
-    subroutine bind_build_r1(self, x, y, z, radius, cell, box_lo, box_hi, copy)
+    !> `%build` with a list of radii; the list collapses to `r_eff = sum(r^3)/sum(r^2)`. See
+    !> `bind_build_r0` for `observer=` and `los=`.
+    subroutine bind_build_r1(self, x, y, z, radius, cell, box_lo, box_hi, copy, observer, los)
         class(pf_spatial_index), intent(inout), target :: self !! the index to fill.
         real(real64), intent(in), target :: x(:) !! x of every point.
         real(real64), intent(in), target :: y(:) !! y of every point.
@@ -973,8 +1118,10 @@ contains
         real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
         real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
         logical, intent(in), optional :: copy !! .false. points at the caller's arrays; default .true.
+        real(real64), intent(in), optional :: observer(:) !! the observer's three coordinates; default the origin.
+        real(real64), intent(in), optional :: los(:) !! parallel coordinate per point, in its own units (a redshift, say).
 
-        call spatial_build_worker(self, x, y, z, radius, cell, box_lo, box_hi, copy)
+        call spatial_build_worker(self, x, y, z, radius, cell, box_lo, box_hi, copy, observer=observer, los=los)
     end subroutine bind_build_r1
 
     !> `%build_sky` with a single angular radius.
@@ -1020,31 +1167,37 @@ contains
     ! ---- %rebuild and %rebuild_for ----
 
     !> `%rebuild` with a single radius hint.
-    subroutine bind_rebuild_r0(self, x, y, z, radius, rebuilt)
+    !>
+    !> **`los=` is required exactly when `%build` stored one**, with the new values for the new
+    !> coordinates, and refused otherwise; the observer stays what `%build` was given. A change in
+    !> `los` alone counts as changed data and rebuilds.
+    subroutine bind_rebuild_r0(self, x, y, z, radius, rebuilt, los)
         class(pf_spatial_index), intent(inout), target :: self !! the index to validate.
         real(real64), intent(in), target :: x(:) !! x of every point.
         real(real64), intent(in), target :: y(:) !! y of every point.
         real(real64), intent(in), optional, target :: z(:) !! z; must match the built rank.
         real(real64), intent(in), optional :: radius !! a radius to fold into the record.
         logical, intent(out), optional :: rebuilt !! .true. when the data had changed.
+        real(real64), intent(in), optional :: los(:) !! the parallel coordinate per point; see above.
 
         if (present(radius)) then
-            call spatial_rebuild_worker(self, x, y, z, [radius], rebuilt)
+            call spatial_rebuild_worker(self, x, y, z, [radius], rebuilt, los)
         else
-            call spatial_rebuild_worker(self, x, y, z, rebuilt=rebuilt)
+            call spatial_rebuild_worker(self, x, y, z, rebuilt=rebuilt, los=los)
         end if
     end subroutine bind_rebuild_r0
 
-    !> `%rebuild` with a list of radii.
-    subroutine bind_rebuild_r1(self, x, y, z, radius, rebuilt)
+    !> `%rebuild` with a list of radii. See `bind_rebuild_r0` for `los=`.
+    subroutine bind_rebuild_r1(self, x, y, z, radius, rebuilt, los)
         class(pf_spatial_index), intent(inout), target :: self !! the index to validate.
         real(real64), intent(in), target :: x(:) !! x of every point.
         real(real64), intent(in), target :: y(:) !! y of every point.
         real(real64), intent(in), optional, target :: z(:) !! z; must match the built rank.
         real(real64), intent(in) :: radius(:) !! radii to fold into the record.
         logical, intent(out), optional :: rebuilt !! .true. when the data had changed.
+        real(real64), intent(in), optional :: los(:) !! the parallel coordinate per point; see `bind_rebuild_r0`.
 
-        call spatial_rebuild_worker(self, x, y, z, radius, rebuilt)
+        call spatial_rebuild_worker(self, x, y, z, radius, rebuilt, los)
     end subroutine bind_rebuild_r1
 
     !> `%rebuild_for` with a single radius: re-tunes over the points already stored.
@@ -1286,6 +1439,61 @@ contains
         q = query_point(self, p, "count_within")
         call spatial_scan(self, q, r, m, r_inner=r_inner)
     end function bind_count_within
+
+    !> `%within_los` into an `int32` buffer.
+    !>
+    !> **The cylinder about `p` along `p`'s own line of sight from the observer.** A stored point
+    !> `j` qualifies when both of
+    !>
+    !>     d_perp = |n_p - n_j| * (D_p + D_j) / 2  <=  b_perp        (the coordinates' units)
+    !>     d_par  = |los_p - los_j|                <=  b_par         (los='s units)
+    !>
+    !> hold, with `D` the distance from the observer, `n` the unit vector from it, and `los` the
+    !> parallel coordinate `%build` stored -- or `D` itself when it stored none, in which case
+    !> `los_p=` is refused; when it did, `los_p=` is required and is `p`'s value in the same units.
+    !> **`b_perp` is a RADIUS and `b_par` a HALF-LENGTH**, both separations from `p`, so the region
+    !> is `2*b_perp` across and `2*b_par` long, exactly as `radius=` bounds a ball; both must be
+    !> positive. **The two units need not agree**: over comoving coordinates with the redshift as
+    !> `los`, `b_perp` is a comoving length and `b_par` a redshift interval (`v / c` for a velocity
+    !> `v`). `p` itself must not sit on the observer, which has no line of sight.
+    !>
+    !> `dist=` is the NORMALISED measure `max(d_perp / b_perp, d_par / b_par)` -- 1 on the
+    !> cylinder's surface, below 1 inside -- and `sorted=.true.` orders by it, ties by ascending
+    !> row index; `dperp=`/`dpar=` fill the two raw separations, in their two units. `m` is the TRUE
+    !> count whatever the buffers hold, and every buffer truncates at the shortest one passed. Only
+    !> a 3D, Euclidean, non-periodic index answers this query.
+    integer(int64) function bind_within_los_i32(self, p, b_perp, b_par, out, los_p, dist, dperp, dpar, sorted) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(:) !! the query point; three coordinates.
+        real(real64), intent(in) :: b_perp !! the transverse radius, in the coordinates' units; > 0.
+        real(real64), intent(in) :: b_par !! the parallel half-length, in `los`'s units; > 0.
+        integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(in), optional :: los_p !! `p`'s parallel coordinate; required exactly when the index has `los`.
+        real(real64), intent(out), optional :: dist(:) !! `max(d_perp/b_perp, d_par/b_par)` per reported point.
+        real(real64), intent(out), optional :: dperp(:) !! transverse separation per reported point.
+        real(real64), intent(out), optional :: dpar(:) !! parallel separation per reported point, in `los`'s units.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing `dist`.
+
+        call spatial_within_los_worker(self, p, b_perp, b_par, m, "within_los", los_p, out32=out, dist=dist, &
+                                       dperp=dperp, dpar=dpar, sorted=sorted)
+    end function bind_within_los_i32
+
+    !> `%within_los` into an `int64` buffer. See `bind_within_los_i32` for the whole contract.
+    integer(int64) function bind_within_los_i64(self, p, b_perp, b_par, out, los_p, dist, dperp, dpar, sorted) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(:) !! the query point; three coordinates.
+        real(real64), intent(in) :: b_perp !! the transverse radius, in the coordinates' units; > 0.
+        real(real64), intent(in) :: b_par !! the parallel half-length, in `los`'s units; > 0.
+        integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(in), optional :: los_p !! `p`'s parallel coordinate; required exactly when the index has `los`.
+        real(real64), intent(out), optional :: dist(:) !! `max(d_perp/b_perp, d_par/b_par)` per reported point.
+        real(real64), intent(out), optional :: dperp(:) !! transverse separation per reported point.
+        real(real64), intent(out), optional :: dpar(:) !! parallel separation per reported point, in `los`'s units.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing `dist`.
+
+        call spatial_within_los_worker(self, p, b_perp, b_par, m, "within_los", los_p, out64=out, dist=dist, &
+                                       dperp=dperp, dpar=dpar, sorted=sorted)
+    end function bind_within_los_i64
 
     !> `%within_sky` into an `int32` buffer.
     !>
@@ -1682,6 +1890,78 @@ contains
         call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, "pairs_within", &
             threads, r_inner, combine)
     end subroutine bind_pairs_within_r1
+
+    !> `%pairs_within_los` with one transverse and one parallel length for every point.
+    !>
+    !> **Every pair once, `i < j`, whose separations along the line of sight from the observer
+    !> fall inside the cylinder**: with `D` the distance from the observer and `n` the unit vector
+    !> from it,
+    !>
+    !>     d_perp = |n_i - n_j| * (D_i + D_j) / 2  <=  b_perp        (the coordinates' units)
+    !>     d_par  = |los_i - los_j|                <=  b_par         (los='s units)
+    !>
+    !> where `los` is the parallel coordinate `%build` stored, or `D` itself when it stored none.
+    !> **The two lengths are in two units that need not agree**: over comoving coordinates with the
+    !> redshift as `los=`, `b_perp` is a comoving length and `b_par` a redshift interval -- `v / c`
+    !> for a velocity difference `v`. **`b_perp` is a RADIUS and `b_par` a HALF-LENGTH**, both
+    !> separations from the point, so each point's cylinder is `2*b_perp` across and `2*b_par`
+    !> long, exactly as `radius=` bounds a ball. `dperp=`/`dpar=` return the two separations per
+    !> pair, in those same two units. Only a 3D, Euclidean, non-periodic index answers this query.
+    !>
+    !> **There is no `combine=` here**, for the reason `%pairs_within`'s single-radius form gives:
+    !> with one pair of lengths for every point three of the four rules coincide and the fourth is
+    !> this call at twice both lengths.
+    !>
+    !> The candidate set is a ball of radius `sqrt(b_perp**2 + max(L*b_par, g)**2)` about each
+    !> point, with `L` and `g` measured from the data at `%build` (`spatial_los_bounds`), so a long
+    !> thin cylinder tests many more candidates than it keeps; the answer is exact regardless. A
+    !> `b_par` whose walk would span the whole catalogue's depth is accepted with a warning, since
+    !> that is what a parallel length given in the wrong unit looks like.
+    subroutine bind_pairs_los_r0(self, b_perp, b_par, i, j, threads, dperp, dpar)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: b_perp !! the transverse radius, the same for every point; >= 0.
+        real(real64), intent(in) :: b_par !! the parallel half-length, the same for every point, in `los`'s units; >= 0.
+        integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
+        real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair, in `los`'s units.
+
+        call spatial_pairs_los_worker(self, [b_perp], [b_par], i, j, "pairs_within_los", threads, &
+            dperp=dperp, dpar=dpar)
+    end subroutine bind_pairs_los_r0
+
+    !> `%pairs_within_los` with an independent pair of lengths per point, in the caller's row order.
+    !>
+    !> The cylinder criterion and the two-unit contract are `bind_pairs_los_r0`'s. **`combine=`
+    !> chooses how the two points' lengths decide a pair**, and on a cylinder the default reads
+    !> differently from the ball's:
+    !>
+    !> - `PF_LINK_MAX` -- the pair lies in `i`'s cylinder OR in `j`'s: the **union** of the two
+    !>   cylinders, NOT the componentwise maximum of the lengths, which would accept a pair inside
+    !>   neither whenever the two points' aspect ratios differ.
+    !> - `PF_LINK_MIN` -- the pair lies in both cylinders (the componentwise minimum).
+    !> - `PF_LINK_MEAN` -- `d_perp <= (b_perp_i + b_perp_j)/2 .and. d_par <= (b_par_i + b_par_j)/2`.
+    !> - `PF_LINK_SUM` -- `d_perp <= b_perp_i + b_perp_j .and. d_par <= b_par_i + b_par_j`.
+    !>
+    !> Each pair is reported by the endpoint whose ball is the larger, which walks that ball (twice
+    !> it under the sum rule), so the list is complete and each pair appears once whichever rule.
+    !> Negative or NaN lengths, lists of unequal length, and a list that is neither one value nor
+    !> one per point are refused.
+    subroutine bind_pairs_los_r1(self, b_perp, b_par, i, j, combine, threads, dperp, dpar)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: b_perp(:) !! one transverse radius per point, in the coordinates' units; >= 0.
+        real(real64), intent(in) :: b_par(:) !! one parallel half-length per point, in `los`'s units; >= 0.
+        integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`, the union.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
+        real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair, in `los`'s units.
+
+        call spatial_pairs_los_worker(self, b_perp, b_par, i, j, "pairs_within_los", threads, combine, &
+            dperp, dpar)
+    end subroutine bind_pairs_los_r1
 
     !> `%count_all_within` with one radius for every point.
     subroutine bind_count_all_r0(self, radius, counts, threads, r_inner)
@@ -2396,5 +2676,25 @@ contains
         dbg_shell_start = -1.0_real64
         dbg_shell_rounds = 0_int64
     end subroutine parquet_debug_reset_spatial_counters
+
+    !> The bounds a line-of-sight walk rests on, as `%build` (or the last `%rebuild`) measured them.
+    !>
+    !> `lip` is `L`, the steepest slope of the distance from the observer against `los` over pairs
+    !> at least `gap` apart; `tie_spread` is `g`, the largest difference in that distance over pairs
+    !> closer than `gap`; `gap` is the floor itself. An index without `los=` reports 1, 0 and 0.
+    !> **Test-only, and public because the state is private to a Fortran type** with no `bind(C)`
+    !> boundary to hide the hook behind; it is what lets a test assert that the slope is measured
+    !> cleanly on a continuous redshift list rather than merely that the pairs came back right,
+    !> which they would under a slope inflated by any factor. No library code calls it.
+    subroutine parquet_debug_spatial_los_bounds(index, lip, tie_spread, gap)
+        type(pf_spatial_index), intent(in) :: index !! the index to read.
+        real(real64), intent(out) :: lip !! `L`, the slope; 1 without `los=`.
+        real(real64), intent(out) :: tie_spread !! `g`, the small-scale spread; 0 without `los=`.
+        real(real64), intent(out) :: gap !! the gap floor the two are split at; 0 without `los=`.
+
+        lip = index%lip
+        tie_spread = index%tie_spread
+        gap = index%los_gap
+    end subroutine parquet_debug_spatial_los_bounds
 
 end module parquet_spatial ! GCOVR_EXCL_LINE

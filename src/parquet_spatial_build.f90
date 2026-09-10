@@ -155,7 +155,7 @@ contains
     !> Buckets the stored points into the current grid, filling `start` and `idx`.
     module procedure spatial_bucket
         integer(int64), allocatable :: cid(:), perm(:), offs(:), newstart(:), newidx(:)
-        real(real64), allocatable :: tmp(:)
+        real(real64), allocatable :: tmp(:), rowl(:)
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64) :: n, i, g, c, run, ipix
         real(real64) :: v(3)
@@ -222,6 +222,31 @@ contains
                 newidx(i) = perm(i)
             end do
         end if
+        if (self%has_los) then
+            ! The parallel coordinate follows the bucketing exactly as a coordinate does, so the
+            ! sweep reads it by stored position with the coordinates' locality. It is a copy whatever
+            ! `copy=` said, so the two cases differ only in what `perm` permutes: stored positions
+            ! when the coordinates were reordered too (or on the first bucketing, when both are
+            ! still in the caller's order), rows when a borrowed index is re-bucketed -- there the
+            ! array is scattered back to row order through the OLD `idx` first, which is why this
+            ! sits above the `move_alloc` that replaces it.
+            allocate(tmp(n))
+            if (self%owns .or. .not. allocated(self%idx)) then
+                do i = 1_int64, n
+                    tmp(i) = self%los_s(perm(i))
+                end do
+            else
+                allocate(rowl(n))
+                do i = 1_int64, n
+                    rowl(self%idx(i)) = self%los_s(i)
+                end do
+                do i = 1_int64, n
+                    tmp(i) = rowl(perm(i))
+                end do
+                deallocate(rowl)
+            end if
+            call move_alloc(tmp, self%los_s)
+        end if
         call move_alloc(newidx, self%idx)
         if (self%owns) then
             ! Reordering the coordinates into cell order is what makes a query scan a contiguous
@@ -248,7 +273,180 @@ contains
                 end select
             end do
         end if
+        ! Stored order was just made, so the stored-order distances are made here too -- once, for
+        ! every route that re-buckets, which is what keeps them from ever being stale.
+        if (self%radial) call spatial_radial_prepare(self)
     end procedure spatial_bucket
+
+    !> Recomputes the stored-order distances from the observer, and whether any is zero.
+    module procedure spatial_radial_prepare
+        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        integer(int64) :: n, t, u
+        real(real64) :: dx, dy, dz, d
+
+        n = self%npts
+        if (allocated(self%d_s)) deallocate (self%d_s)
+        allocate (self%d_s(n))
+        self%at_obs = .false.
+        self%d_lo = 0.0_real64
+        self%d_hi = 0.0_real64
+        if (n == 0_int64) return
+        call spatial_storage(self, xs, ys, zs)
+        do t = 1_int64, n
+            ! Stored position `t` addresses a reordered coordinate directly and a borrowed one
+            ! through the permutation, exactly as the walk does.
+            u = t
+            if (.not. self%owns) u = self%idx(t)
+            dx = xs(u) - self%obs(1)
+            dy = ys(u) - self%obs(2)
+            dz = zs(u) - self%obs(3)
+            d = sqrt(dx * dx + dy * dy + dz * dz)
+            self%d_s(t) = d
+            if (d == 0.0_real64) self%at_obs = .true.
+        end do
+        ! Finite by construction -- the coordinates were screened and the observer too -- so the
+        ! reductions cannot meet a NaN.
+        self%d_lo = minval(self%d_s)
+        self%d_hi = maxval(self%d_s)
+    end procedure spatial_radial_prepare
+
+    !> Measures `L` and `g` for a `los=` index. The interface states the contract; this is why the
+    !> measurement has the shape it has.
+    !>
+    !> **Every pair of points enters exactly one of the two.** With `w` the gap floor, a pair at
+    !> least `w` apart in `los` bounds the slope `L`, and a pair closer than that bounds the spread
+    !> `g`; so for any pair with `|dlos| <= b`, `|dD| <= max(L*b, g)`, which is the radial
+    !> half-length every line-of-sight walk uses. Without the floor a tie in `los` -- two galaxies
+    !> with the same catalogued redshift, whose distances still differ at the rounding level because
+    !> they are recomputed from the coordinates -- would make the slope infinite, and the closest of
+    !> `n` continuous values, about `range / n**2` apart, would inflate it with rounding noise: by a
+    !> tenth at a million points, without bound when the distances come from a table.
+    !>
+    !> **Points sharing a `los` value are compressed into one group first**, carrying the smallest
+    !> and largest distance, because only those two matter to any pair involving the group. That is
+    !> what keeps the scan below from going quadratic on a catalogue whose redshifts are quoted to
+    !> a few decimals.
+    !>
+    !> **`L` needs no all-pairs pass.** A secant over a gap that holds a point at least `w` from
+    !> both ends is a weighted mean of the two shorter secants either side of that point, so the
+    !> steepest secant is attained on a TIGHT pair: `(u, v)` with `v` in `[los_v', los_v' + w)`,
+    !> `v'` the first group at or beyond `los_u + w`. That costs one floor's width of groups per
+    !> group, about a hundred-thousandth of them each. `g` is a sliding window of width `w` over
+    !> the sorted groups, two monotone deques, one pass.
+    module procedure spatial_los_bounds
+        integer(int64), allocatable :: ord(:), qmax(:), qmin(:)
+        real(real64), allocatable :: lg(:), dmin(:), dmax(:)
+        integer(int64) :: n, m, k, v, u, vf, j, hmax, tmax, hmin, tmin
+        real(real64) :: lo, hi, range, w, gg, ll, num, secant
+
+        self%lip = 1.0_real64
+        self%tie_spread = 0.0_real64
+        self%los_gap = 0.0_real64
+        n = self%npts
+        if (n < 2_int64) return
+        call pf_argsort(self%los_s, ord)
+        allocate (lg(n), dmin(n), dmax(n))
+        m = 0_int64
+        do k = 1_int64, n
+            v = ord(k)
+            if (m > 0_int64) then
+                if (self%los_s(v) == lg(m)) then
+                    if (self%d_s(v) < dmin(m)) dmin(m) = self%d_s(v)
+                    if (self%d_s(v) > dmax(m)) dmax(m) = self%d_s(v)
+                    cycle
+                end if
+            end if
+            m = m + 1_int64
+            lg(m) = self%los_s(v)
+            dmin(m) = self%d_s(v)
+            dmax(m) = self%d_s(v)
+        end do
+        deallocate (ord)
+        lo = lg(1)
+        hi = lg(m)
+        range = hi - lo
+        ! The floor: a hundred-thousandth of the range, and never below what the values themselves
+        ! resolve -- 64 ulps of the largest magnitude, so a parallel coordinate carrying a large
+        ! offset cannot bring it under the rounding of its own differences.
+        w = 64.0_real64 * spacing(max(abs(lo), abs(hi)))
+        if (1.0e-5_real64 * range > w) w = 1.0e-5_real64 * range
+        if (m == 1_int64 .or. range < w) error stop "pf_spatial_index%" // what // &
+            ": los= is constant, or varies by less than 64 ulps of its own magnitude, so the parallel test " // &
+            "could never separate two points; omit los= to use the distance from the observer, or pass a " // &
+            "coordinate that varies"
+        self%los_gap = w
+        ! g: the widest spread of D inside any window narrower than w. Two monotone deques over
+        ! the groups, indices ascending, values descending for the maximum and ascending for the
+        ! minimum; `[k, j]` is the window, and it always holds `k` itself.
+        allocate (qmax(m), qmin(m))
+        hmax = 1_int64
+        tmax = 0_int64
+        hmin = 1_int64
+        tmin = 0_int64
+        gg = 0.0_real64
+        j = 0_int64
+        do k = 1_int64, m
+            do while (j < m)
+                if (.not. (lg(j + 1_int64) - lg(k) < w)) exit
+                j = j + 1_int64
+                do while (tmax >= hmax)
+                    if (dmax(qmax(tmax)) > dmax(j)) exit
+                    tmax = tmax - 1_int64
+                end do
+                tmax = tmax + 1_int64
+                qmax(tmax) = j
+                do while (tmin >= hmin)
+                    if (dmin(qmin(tmin)) < dmin(j)) exit
+                    tmin = tmin - 1_int64
+                end do
+                tmin = tmin + 1_int64
+                qmin(tmin) = j
+            end do
+            do while (qmax(hmax) < k)
+                hmax = hmax + 1_int64
+            end do
+            do while (qmin(hmin) < k)
+                hmin = hmin + 1_int64
+            end do
+            num = dmax(qmax(hmax)) - dmin(qmin(hmin))
+            if (num > gg) gg = num
+        end do
+        self%tie_spread = gg
+        ! L: over the tight pairs of groups. `vf` only ever moves forward, since `lg` is sorted.
+        ll = 0.0_real64
+        vf = 1_int64
+        do u = 1_int64, m
+            do while (vf <= m)
+                if (lg(vf) - lg(u) >= w) exit
+                vf = vf + 1_int64
+            end do
+            if (vf > m) exit
+            v = vf
+            do while (v <= m)
+                if (.not. (lg(v) - lg(vf) < w)) exit
+                num = dmax(v) - dmin(u)
+                if (dmax(u) - dmin(v) > num) num = dmax(u) - dmin(v)
+                num = num / (lg(v) - lg(u))
+                if (num > ll) ll = num
+                v = v + 1_int64
+            end do
+        end do
+        self%lip = ll
+        ! A smooth monotone relation keeps the small-scale slope within a factor of a few of the
+        ! catalogue-wide secant; a `los` that is not a function of the distance, or one noisy at
+        ! small separations, is far above it. Said, not refused: the walk is wide but the answer
+        ! is exact.
+        secant = (self%d_hi - self%d_lo) / range
+        if (ll > 100.0_real64 * secant) then
+            if (.not. parquet_output_is_suppressed()) then
+                call parquet_emit_warning("pf_spatial_index%" // what // ": los= is not a function of the " // &
+                    "distance from the observer, or is noisy at small separations: its steepest slope over " // &
+                    "pairs at least " // real_text(w) // " apart is " // real_text(ll) // " against a " // &
+                    "catalogue-wide " // real_text(secant) // ". Every line-of-sight walk will be " // &
+                    real_text(ll) // " x b_par wide; the answer stays exact.")
+            end if
+        end if
+    end procedure spatial_los_bounds
 
     !> Releases every array and returns `self` to its default, unbuilt state.
     module procedure spatial_clear_worker
@@ -276,11 +474,22 @@ contains
         self%rho = 0.0_real64
         self%r2sum = 0.0_real64
         self%r3sum = 0.0_real64
+        self%radial = .false.
+        self%has_los = .false.
+        self%at_obs = .false.
+        self%obs = 0.0_real64
+        self%lip = 1.0_real64
+        self%tie_spread = 0.0_real64
+        self%los_gap = 0.0_real64
+        self%d_lo = 0.0_real64
+        self%d_hi = 0.0_real64
         if (allocated(self%xs)) deallocate (self%xs)
         if (allocated(self%ys)) deallocate (self%ys)
         if (allocated(self%zs)) deallocate (self%zs)
         if (allocated(self%start)) deallocate (self%start)
         if (allocated(self%idx)) deallocate (self%idx)
+        if (allocated(self%d_s)) deallocate (self%d_s)
+        if (allocated(self%los_s)) deallocate (self%los_s)
         nullify (self%px)
         nullify (self%py)
         nullify (self%pz)
@@ -353,7 +562,7 @@ contains
     module procedure spatial_build_worker
         integer(int64) :: n, ns
         integer :: nd, back
-        logical :: docopy, coarsened
+        logical :: docopy, coarsened, radial
         real(real64) :: h, rmax
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
 
@@ -381,6 +590,27 @@ contains
             if (size(box_lo) /= nd .or. size(box_hi) /= nd) error stop &
                 "pf_spatial_index%build: box_lo=/box_hi= must have one entry per coordinate"
         end if
+        ! The line-of-sight inputs. Both are refused where no line of sight exists: a 2D index has
+        ! no depth, a periodic one no observer the minimum image could agree on, and a sky index --
+        ! the one route that passes `backend` -- no Cartesian distance. The observer is screened
+        ! like a query point, `los` like a coordinate: a NaN in either would reach the distance and
+        ! slope arithmetic below, whose comparisons a compiler with the IEEE traps unmasked turns
+        ! into an abort naming nothing.
+        radial = nd == 3 .and. .not. present(box_lo) .and. .not. present(backend)
+        if (present(observer) .or. present(los)) then
+            if (.not. radial) error stop "pf_spatial_index%build: observer= and los= describe a line of sight, " // &
+                "which needs a 3D, non-periodic index over Cartesian coordinates; a 2D or periodic index takes neither"
+            if (present(observer)) then
+                if (size(observer) /= 3) error stop &
+                    "pf_spatial_index%build: observer= must have exactly three coordinates"
+                call spatial_check_finite(observer, "pf_spatial_index%build", "observer coordinate")
+            end if
+            if (present(los)) then
+                if (size(los, kind=int64) /= n) error stop &
+                    "pf_spatial_index%build: los= must have one entry per point, in row order"
+                call spatial_check_finite(los, "pf_spatial_index%build", "los value")
+            end if
+        end if
         docopy = .true.
         if (present(copy)) docopy = copy
         back = PF_SKY_GRID3D
@@ -402,6 +632,16 @@ contains
         self%npts = n
         self%ncoord = nd
         self%owns = docopy
+        ! Set before the bucketing, which recomputes the stored-order distances for a radial index.
+        self%radial = radial
+        if (present(observer)) self%obs = observer
+        if (present(los)) then
+            self%has_los = .true.
+            ! In the caller's row order here; `spatial_bucket` permutes it into stored order beside
+            ! the coordinates, whatever `copy=` said about those.
+            allocate (self%los_s(n))
+            self%los_s = los
+        end if
         ! Set BEFORE the grid choice and the bucketing, both of which branch on it, and after
         ! `spatial_clear_worker`, which resets it.
         self%backend_id = back
@@ -514,6 +754,13 @@ contains
             end if
         end if
         call spatial_bucket(self)
+        ! A point on the observer has no direction, so it can be neither the searcher nor a
+        ! candidate of a line-of-sight query. Refused here when the caller declared that intent with
+        ! `los=`, and at the query otherwise (`spatial_los_prepare`), because a plain %build has
+        ! always accepted a point at the origin and still does.
+        if (present(los) .and. self%at_obs) error stop "pf_spatial_index%build: a point coincides with the " // &
+            "observer (distance 0), so it has no line of sight; move the observer= or drop the point"
+        if (self%has_los) call spatial_los_bounds(self, "build")
         self%built_ok = .true.
     end procedure spatial_build_worker
 
@@ -590,6 +837,18 @@ contains
         if (present(z)) nd = 3
         if (nd /= self%ncoord) error stop &
             "pf_spatial_index%rebuild: z must be supplied exactly as it was to %build"
+        ! The parallel coordinate is part of the index's shape, fixed at %build like the rank: new
+        ! coordinates need new values for it, and an index without one cannot acquire one here.
+        if (present(los) .neqv. self%has_los) then
+            if (self%has_los) error stop "pf_spatial_index%rebuild: this index carries a parallel coordinate " // &
+                "(los= at %build), so %rebuild needs los= with the new values"
+            error stop "pf_spatial_index%rebuild: this index was built without los=, so %rebuild takes none; " // &
+                "build it again with los= to add one"
+        end if
+        if (present(los)) then
+            if (size(los, kind=int64) /= size(x, kind=int64)) error stop &
+                "pf_spatial_index%rebuild: los= must have one entry per point, in row order"
+        end if
         n = self%npts
         changed = size(x, kind=int64) /= n .or. size(y, kind=int64) /= n
         if (.not. changed .and. present(z)) changed = size(z, kind=int64) /= n
@@ -607,6 +866,14 @@ contains
                 end if
                 if (present(z)) then
                     if (self%zs(k) /= z(i)) then
+                        changed = .true.
+                        exit
+                    end if
+                end if
+                ! A moved parallel coordinate over unmoved points is a change too: the slope and the
+                ! spread were measured against the old values.
+                if (self%has_los) then
+                    if (self%los_s(k) /= los(i)) then
                         changed = .true.
                         exit
                     end if
@@ -640,6 +907,12 @@ contains
         else
             self%zs = 0.0_real64
         end if
+        if (self%has_los) then
+            call spatial_check_finite(los, "pf_spatial_index%rebuild", "los value")
+            if (allocated(self%los_s)) deallocate (self%los_s)
+            allocate (self%los_s(n))
+            self%los_s = los
+        end if
         if (present(radii)) call spatial_fold_radii(self, radii, .true.)
         if (.not. self%periodic_on .and. n > 0_int64) then
             self%lo(1) = minval(self%xs)
@@ -650,6 +923,11 @@ contains
             self%hi(3) = maxval(self%zs)
         end if
         call spatial_retune(self)
+        if (self%has_los) then
+            if (self%at_obs) error stop "pf_spatial_index%rebuild: a point coincides with the observer " // &
+                "(distance 0), so it has no line of sight; move the observer= at %build or drop the point"
+            call spatial_los_bounds(self, "rebuild")
+        end if
     end procedure spatial_rebuild_worker
 
     !> Re-tunes the cell size for `radii` over the points already stored.

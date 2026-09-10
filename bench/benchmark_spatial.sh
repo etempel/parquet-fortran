@@ -9,13 +9,16 @@
 #   MODE=combine bench/benchmark_spatial.sh          # what each combine= rule costs
 #   MODE=backend bench/benchmark_spatial.sh          # 3D grid vs HEALPix, on the sky
 #   MODE=backend DIST=clustered bench/benchmark_spatial.sh
+#   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 RATIO=10 bench/benchmark_spatial.sh   # the LOS cylinder
 #   DIST=clustered NP=2000000 bench/benchmark_spatial.sh
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=tune        tune | ab | build | query | threads | combine | backend
+#   MODE=tune        tune | ab | build | query | threads | combine | backend | los
 #   DIST=uniform     uniform | clustered | wedge | sphere | flat
-#                    (MODE=backend takes uniform or clustered only, on the SPHERE)
+#                    (MODE=backend takes uniform or clustered only, on the SPHERE; MODE=los any
+#                    3D fixture, the wedge being the survey shape it is about)
 #   SKYR=1           MODE=backend only: the build radius in DEGREES.
+#   RATIO=10         MODE=los only: the cylinders' aspect ratio in distance, L*b_par / b_perp.
 #   NP=1000000       points in the cloud. 1e6 real64 x 3 is 24 MB.
 #   NQ=20000         single queries per timed round.
 #   ROUNDS=3         rounds per arm; the best is kept, per this repo's rules.
@@ -60,6 +63,17 @@
 #           is a mode rather than a number written down anywhere: HEALPix pays a fixed per-query
 #           cost for the disc walk that the grid's integer cell arithmetic does not, and wins it
 #           back on candidates only once the radius is large enough.
+#   los     THE LINE-OF-SIGHT CYLINDER against the work-around it replaces. Derives a redshift-like
+#           los= from the fixture's distances, sets per-point lengths so that L*b_par/b_perp is
+#           RATIO, and times %pairs_within_los against %pairs_within at the covering radius plus a
+#           serial re-test of every candidate. Prints the candidates tested per pair kept -- the
+#           ball walk's excess over the cylinder, which a cylinder walk (Stage 3 of
+#           feature_fof_S2.md) exists to remove -- beside the geometric volume ratio, and the peak
+#           list the work-around held. Run at RATIO=10 and RATIO=30 on DIST=wedge, with SURVEY
+#           dimensions: SIDE=1500 RLO=0.3 RHI=0.5 (a wedge 1500 deep with sub-Mpc transverse
+#           lengths). At the other modes' defaults, a 100-unit box with radii 1..5, each covering
+#           ball is a tenth of the box at RATIO=10 and the work-around's pair list would not fit in
+#           memory; the mode counts first and refuses rather than allocate it.
 #
 # Report the NOISE FLOOR with any figure. Re-running one binary reproduces to a fraction of a
 # per cent here; anything compared across two BUILDS needs a floor measured across rebuilds with an
@@ -86,6 +100,7 @@ RLO="${RLO:-1}"
 RHI="${RHI:-5}"
 THREADS="${THREADS:-0}"
 SKYR="${SKYR:-1}"
+RATIO="${RATIO:-10}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -155,7 +170,7 @@ echo "  fortran     : ${FPM_FC:-gfortran (fpm default)}"
 echo "  flags       : $FLAGS_LINE"
 echo "  uname -m    : $(uname -m)"
 echo "  mode=$MODE dist=$DIST np=$NP nq=$NQ rounds=$ROUNDS side=$SIDE r=$RLO..$RHI threads=$THREADS"
-echo "  skyr=$SKYR (MODE=backend only)"
+echo "  skyr=$SKYR (MODE=backend only)  ratio=$RATIO (MODE=los only)"
 echo "=============================================================================="
 echo
 
@@ -163,7 +178,7 @@ fpm build --profile release >/dev/null
 
 fpm run benchmark_spatial --profile release -- \
     --mode="$MODE" --dist="$DIST" --np="$NP" --nq="$NQ" --rounds="$ROUNDS" \
-    --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS" --skyr="$SKYR"
+    --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS" --skyr="$SKYR" --ratio="$RATIO"
 
 echo
 echo "Build tree left at $FPM_BUILD_DIR (rm -rf test_run/spatial-bench-* to clean up)."

@@ -60,7 +60,11 @@ contains
                 test_mm_clear_and_introspection), &
             new_unittest("the automatic choice is the map's rule over the distinct keys", &
                 test_mm_auto_choice), &
-            new_unittest("a rebuild forgets the previous keys", test_mm_rebuild) &
+            new_unittest("a rebuild forgets the previous keys", test_mm_rebuild), &
+            new_unittest("a one-column rank-2 build groups as a rank-1 build", &
+                test_mm_rank2_single_column), &
+            new_unittest("a composite build stores the values it was given", &
+                test_mm_composite_explicit_values) &
             ]
     end subroutine collect_tests_index_multimap
 
@@ -1017,5 +1021,92 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_mm_rebuild
+
+    !> A one-column rank-2 key array groups exactly as the rank-1 array does, on every backend.
+    !!
+    !! A multimap built from a slice of a table arrives rank-2 with one column, which takes the
+    !! composite build path with `ncomp == 1`. Two of its arms exist only for that width: the
+    !! sorted grouping reads the single column directly, and the direct grouping fills the scalar
+    !! range beside the per-component geometry. A map that grouped differently there would answer
+    !! a plausible group id rather than failing, so the assertion is against the rank-1 build.
+    subroutine test_mm_rank2_single_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_multimap) :: m2, m1
+        integer(int64) :: keys(200, 1), flat(200), i
+        integer(int64), allocatable :: r2(:), r1(:), dist(:)
+        integer :: k
+
+        call fill_repeating_keys(flat, 25_int64, 4_int64, 2_int64, 99_int64)
+        keys(:, 1) = flat
+        call distinct_in_order(flat, dist)
+        do k = 1, 3
+            call m2%build(keys, method=trim(METHODS(k)))
+            call m1%build(flat, method=trim(METHODS(k)))
+            call check(error, m2%ngroups() == m1%ngroups(), &
+                "a one-column build must find the same groups as a rank-1 build, on " // &
+                trim(METHODS(k)))
+            if (allocated(error)) return
+            do i = 1_int64, size(dist, kind=int64)
+                call m2%get_all(dist(i), r2)
+                call m1%get_all(dist(i), r1)
+                call check(error, size(r2, kind=int64) == size(r1, kind=int64), &
+                    "and must hold the same rows per key, on " // trim(METHODS(k)))
+                if (allocated(error)) return
+                call check(error, all(r2 == r1), &
+                    "with the same row numbers in the same order, on " // trim(METHODS(k)))
+                if (allocated(error)) return
+            end do
+            ! A miss must stay a miss through the composite path too.
+            call m2%get_all(maxval(flat) + 1_int64, r2)
+            call check(error, size(r2, kind=int64) == 0_int64, &
+                "an absent key must return no rows from a one-column build, on " // trim(METHODS(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_mm_rank2_single_column
+
+    !> A composite multimap build stores the `values=` it was given, not the row numbers.
+    !!
+    !! `test_mm_explicit_values` makes this assertion for rank-1 keys. The composite build validates
+    !! and carries the values through a separate path, and a fixture whose values are neither the row
+    !! numbers nor in key order is what separates the two.
+    subroutine test_mm_composite_explicit_values(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_multimap) :: mm
+        integer(int64) :: keys(12, 2), vals(12), probe(2), i, j
+        integer(int64), allocatable :: rows(:)
+        logical :: mask(12)
+        character(len=6) :: methods(2)
+        integer :: k
+
+        ! Three distinct tuples, each appearing four times, interleaved.
+        do i = 1_int64, 12_int64
+            keys(i, 1) = 5_int64 + mod(i - 1_int64, 3_int64)
+            keys(i, 2) = 40_int64 - mod(i - 1_int64, 3_int64)
+            vals(i) = 1000_int64 - 7_int64 * i
+        end do
+        mask = .true.
+        mask(4) = .false.
+        mask(9) = .false.
+        methods = ["direct", "hash  "]
+        do k = 1, 2
+            call mm%build(keys, vals, method=trim(methods(k)))
+            do j = 0_int64, 2_int64
+                probe = [5_int64 + j, 40_int64 - j]
+                call mm%get_all(probe, rows)
+                call check(error, size(rows, kind=int64) == 4_int64, &
+                    "a composite group must hold every row of its tuple, on " // trim(methods(k)))
+                if (allocated(error)) return
+                call check(error, all(rows == [(vals(j + 1_int64 + 3_int64 * i), i = 0_int64, 3_int64)]), &
+                    "and must report the caller's values in position order, on " // trim(methods(k)))
+                if (allocated(error)) return
+            end do
+            ! The same build with a mask: the masked rows contribute neither a row nor a value.
+            call mm%build(keys, vals, method=trim(methods(k)), valid=mask)
+            call mm%get_all([5_int64, 40_int64], rows)
+            call check(error, size(rows, kind=int64) == 3_int64 .and. all(rows /= vals(4)), &
+                "a masked composite build must drop the masked row, on " // trim(methods(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_mm_composite_explicit_values
 
 end module test_index_multimap

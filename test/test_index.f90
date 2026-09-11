@@ -111,7 +111,35 @@ contains
             new_unittest("the watermark tightens only at compact", test_pool_watermark_monotone), &
             new_unittest("a cleared pool issues 1 again", test_pool_clear), &
             new_unittest("an empty pool answers every query", test_pool_empty), &
-            new_unittest("reserve changes no answer the pool gives", test_pool_reserve) &
+            new_unittest("reserve changes no answer the pool gives", test_pool_reserve), &
+            new_unittest("the int32 scalar entry points answer as the int64 ones do", &
+                test_int32_scalar_entry_points), &
+            new_unittest("the int32 composite entry points answer as the int64 ones do", &
+                test_int32_tuple_entry_points), &
+            new_unittest("set, get_or_add and remove agree in every kind combination", &
+                test_int32_mutation_entry_points), &
+            new_unittest("the composite mutations agree in every kind combination", &
+                test_int32_tuple_mutation_entry_points), &
+            new_unittest("get_or_add_many codes alike whatever the rank and kinds", &
+                test_int32_get_or_add_many_kinds), &
+            new_unittest("a composite direct map is mutable inside its ranges", &
+                test_direct_composite_mutation), &
+            new_unittest("remove on an unbuilt map reports the key as absent", &
+                test_remove_on_unbuilt_map), &
+            new_unittest("a one-column rank-2 build equals a rank-1 build", &
+                test_rank2_single_column_build), &
+            new_unittest("a sorted build takes valid= and values= together", &
+                test_sorted_build_masked_values), &
+            new_unittest("reset empties every backend and keeps its storage", &
+                test_reset_every_backend), &
+            new_unittest("a one-column rank-2 get_many equals the rank-1 one", &
+                test_rank2_single_column_get_many), &
+            new_unittest("a one-column rank-2 build takes valid= on every backend", &
+                test_rank2_single_column_masked_build), &
+            new_unittest("an explicit auto token chooses as an absent method= does", &
+                test_explicit_auto_token), &
+            new_unittest("a map answers 0 between init and its first insert", &
+                test_init_before_first_insert) &
             ]
     end subroutine collect_tests_index
 
@@ -2181,6 +2209,632 @@ contains
         call check(error, q%get_max_index() == 100_int64, &
             "reserving below the watermark changes nothing")
     end subroutine test_pool_reserve
+
+
+    ! ---- The int32 and mixed-kind entry points ----
+
+    !> Every `int32`-keyed scalar entry point answers exactly what its `int64` twin answers.
+    !!
+    !! The typed tier is a widen-and-forward layer: each `int32` specific copies the caller's keys
+    !! or values into `int64` and calls the same worker the `int64` specific calls. That shape makes
+    !! a defect in it silent in the worst way -- a widening that dropped the sign, transposed a
+    !! mixed-kind pair, or forwarded the wrong argument answers a plausible number rather than
+    !! failing -- so the assertion here is against the `int64` twin AND against the scan oracle,
+    !! not against the same layer spelled differently. Negative keys are in the fixture because an
+    !! `int(k, int64)` that went through an unsigned step would only show there.
+    subroutine test_int32_scalar_entry_points(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m32, m64
+        integer(int32) :: k32(6), v32(6), p32(9), a32(9), b32(9)
+        integer(int64) :: k64(6), v64(6), p64(9), a64(9), b64(9), i, want
+        logical :: mask(9)
+        character(len=6) :: methods(3)
+        integer :: t
+
+        k32 = [-7_int32, 11_int32, 12_int32, 13_int32, 17_int32, 23_int32]
+        v32 = [6_int32, 5_int32, 4_int32, 3_int32, 2_int32, 1_int32]
+        p32 = [-9_int32, -7_int32, 10_int32, 11_int32, 13_int32, 17_int32, 23_int32, 24_int32, 12_int32]
+        mask = [.true., .false., .true., .true., .false., .true., .true., .false., .true.]
+        k64 = int(k32, int64)
+        v64 = int(v32, int64)
+        p64 = int(p32, int64)
+        methods = ["direct", "hash  ", "sorted"]
+        do t = 1, 3
+            ! The two mixed-kind build forms -- int32 keys with int64 values, and int64 keys with
+            ! int32 values -- must produce the same map as each other and as the oracle.
+            call m32%build(k32, v64, method=trim(methods(t)))
+            call m64%build(k64, v32, method=trim(methods(t)))
+            do i = 1_int64, 9_int64
+                want = expected_value(k64, v64, p64(i))
+                call check(error, m32%get(p64(i)) == want, &
+                    "int32 keys with int64 values must store what the scan says, on " // trim(methods(t)))
+                if (allocated(error)) return
+                call check(error, m64%get(p64(i)) == want, &
+                    "int64 keys with int32 values must store what the scan says, on " // trim(methods(t)))
+                if (allocated(error)) return
+                call check(error, m32%contains(p32(i)) .eqv. (want > 0_int64), &
+                    "contains with an int32 key must agree with the scan, on " // trim(methods(t)))
+                if (allocated(error)) return
+            end do
+            ! %get_many over int32 keys, into both answer kinds, against the int64-keyed twin.
+            call m32%get_many(p32, a32)
+            call m32%get_many(p32, a64)
+            call m64%get_many(p64, b32)
+            call m64%get_many(p64, b64)
+            do i = 1_int64, 9_int64
+                want = expected_value(k64, v64, p64(i))
+                call check(error, int(a32(i), int64) == want .and. a64(i) == want .and. &
+                    int(b32(i), int64) == want .and. b64(i) == want, &
+                    "get_many must answer the scan whatever the key and answer kinds, on " // &
+                    trim(methods(t)))
+                if (allocated(error)) return
+            end do
+            ! The same four shapes with a mask: a masked row answers 0 without being looked up.
+            call m32%get_many(p32, a32, valid=mask)
+            call m32%get_many(p32, a64, valid=mask)
+            call m64%get_many(p64, b32, valid=mask)
+            call m64%get_many(p64, b64, valid=mask)
+            do i = 1_int64, 9_int64
+                want = 0_int64
+                if (mask(i)) want = expected_value(k64, v64, p64(i))
+                call check(error, int(a32(i), int64) == want .and. a64(i) == want .and. &
+                    int(b32(i), int64) == want .and. b64(i) == want, &
+                    "a masked get_many must answer 0 for a masked row and the scan for the rest, on " // &
+                    trim(methods(t)))
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_int32_scalar_entry_points
+
+    !> Every `int32` composite entry point answers exactly what its `int64` twin answers.
+    !!
+    !! `test_int32_scalar_entry_points`' argument, one component wider: the tuple forms widen into
+    !! a fixed stack buffer and re-check the width, so a transposed or short-copied tuple is the
+    !! failure to look for, and only a fixture whose components differ per row can see it.
+    !! `method="sorted"` is absent because it rejects composite keys by design.
+    subroutine test_int32_tuple_entry_points(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m32, m64
+        integer(int32) :: k32(6, 2), v32(6), p32(8, 2), a32(8), b32(8)
+        integer(int64) :: k64(6, 2), v64(6), p64(8, 2), a64(8), b64(8), i, want
+        logical :: mask(8)
+        character(len=6) :: methods(2)
+        integer :: t
+
+        k32(:, 1) = [-3_int32, -3_int32, 1_int32, 1_int32, 4_int32, 4_int32]
+        k32(:, 2) = [5_int32, 9_int32, 5_int32, 9_int32, 5_int32, 9_int32]
+        v32 = [6_int32, 5_int32, 4_int32, 3_int32, 2_int32, 1_int32]
+        ! Probes: four stored tuples, and four misses whose components are each stored but not
+        ! together -- the only shape that catches a lookup comparing one component and stopping.
+        p32(:, 1) = [-3_int32, 1_int32, 4_int32, 4_int32, -3_int32, 1_int32, 9_int32, 4_int32]
+        p32(:, 2) = [5_int32, 9_int32, 5_int32, 9_int32, 7_int32, 4_int32, 5_int32, 99_int32]
+        mask = [.true., .false., .true., .true., .false., .true., .true., .false.]
+        k64 = int(k32, int64)
+        v64 = int(v32, int64)
+        p64 = int(p32, int64)
+        methods = ["direct", "hash  "]
+        do t = 1, 2
+            ! build from int32 tuples with no values: the row numbers are the values.
+            call m32%build(k32, method=trim(methods(t)))
+            do i = 1_int64, 6_int64
+                call check(error, m32%get(k64(i, :)) == i, &
+                    "an int32 composite build must number its rows, on " // trim(methods(t)))
+                if (allocated(error)) return
+            end do
+            call check(error, m32%ncomponents() == 2, &
+                "an int32 composite build must report two components, on " // trim(methods(t)))
+            if (allocated(error)) return
+            ! The two mixed-kind composite build forms, against each other and the scan.
+            call m32%build(k32, v64, method=trim(methods(t)))
+            call m64%build(k64, v32, method=trim(methods(t)))
+            do i = 1_int64, 8_int64
+                want = expected_value_n(k64, v64, p64(i, :))
+                call check(error, m32%get(p64(i, :)) == want .and. m64%get(p64(i, :)) == want, &
+                    "the mixed-kind composite builds must agree with the scan, on " // trim(methods(t)))
+                if (allocated(error)) return
+                call check(error, m32%contains(p32(i, :)) .eqv. (want > 0_int64), &
+                    "contains with an int32 tuple must agree with the scan, on " // trim(methods(t)))
+                if (allocated(error)) return
+                call check(error, m32%contains(p64(i, :)) .eqv. (want > 0_int64), &
+                    "contains with an int64 tuple must agree with the scan, on " // trim(methods(t)))
+                if (allocated(error)) return
+            end do
+            call m32%get_many(p32, a32)
+            call m32%get_many(p32, a64)
+            call m64%get_many(p64, b32)
+            call m64%get_many(p64, b64)
+            do i = 1_int64, 8_int64
+                want = expected_value_n(k64, v64, p64(i, :))
+                call check(error, int(a32(i), int64) == want .and. a64(i) == want .and. &
+                    int(b32(i), int64) == want .and. b64(i) == want, &
+                    "composite get_many must answer the scan whatever the kinds, on " // &
+                    trim(methods(t)))
+                if (allocated(error)) return
+            end do
+            call m32%get_many(p32, a32, valid=mask)
+            call m32%get_many(p32, a64, valid=mask)
+            call m64%get_many(p64, b32, valid=mask)
+            call m64%get_many(p64, b64, valid=mask)
+            do i = 1_int64, 8_int64
+                want = 0_int64
+                if (mask(i)) want = expected_value_n(k64, v64, p64(i, :))
+                call check(error, int(a32(i), int64) == want .and. a64(i) == want .and. &
+                    int(b32(i), int64) == want .and. b64(i) == want, &
+                    "a masked composite get_many must answer 0 for a masked row, on " // &
+                    trim(methods(t)))
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_int32_tuple_entry_points
+
+    !> `%set`, `%get_or_add` and `%remove` answer alike in every key/value kind combination.
+    !!
+    !! The mutation tier has the same widen-and-forward shape as the lookup tier, and one extra
+    !! thing to get wrong: `%set` raises the `%get_or_add` watermark, so an `int32` form that
+    !! forwarded its value unwidened would reissue an index that is already in use. The final
+    !! `%get_or_add` of a new key is what sees that.
+    subroutine test_int32_mutation_entry_points(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int32) :: i32
+        integer(int64) :: i64
+        logical :: found
+
+        call m%init(method="hash")
+        call m%set(-4_int32, 7_int32)   ! int32 key, int32 value
+        call m%set(11_int32, 8_int64)   ! int32 key, int64 value
+        call m%set(12_int64, 9_int32)   ! int64 key, int32 value
+        call check(error, m%get(-4_int64) == 7_int64 .and. m%get(11_int64) == 8_int64 .and. &
+            m%get(12_int64) == 9_int64, "every set kind combination must store the value given")
+        if (allocated(error)) return
+        ! get_or_add of a stored key returns what set stored, in either answer kind.
+        call m%get_or_add(-4_int32, i32)
+        call check(error, i32 == 7_int32, "get_or_add: int32 key, int32 answer")
+        if (allocated(error)) return
+        call m%get_or_add(11_int32, i64)
+        call check(error, i64 == 8_int64, "get_or_add: int32 key, int64 answer")
+        if (allocated(error)) return
+        call m%get_or_add(12_int64, i32)
+        call check(error, i32 == 9_int32, "get_or_add: int64 key, int32 answer")
+        if (allocated(error)) return
+        ! A new key takes the next index above the watermark the three sets raised, which is 9.
+        call m%get_or_add(30_int32, i32)
+        call check(error, i32 == 10_int32, &
+            "an int32 set must raise the watermark, so a new key numbers above it")
+        if (allocated(error)) return
+        call m%remove(30_int32, found=found)
+        call check(error, found .and. m%get(30_int64) == 0_int64, &
+            "remove with an int32 key must forget exactly that key")
+        if (allocated(error)) return
+        call m%remove(31_int32, found=found)
+        call check(error, .not. found, "remove of an absent int32 key must report found=.false.")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == 3_int64, "the other three keys must survive")
+    end subroutine test_int32_mutation_entry_points
+
+    !> The composite `%set`, `%get_or_add` and `%remove` forms, in every kind combination.
+    !!
+    !! `test_int32_mutation_entry_points` for tuples. The tuples share a first component on
+    !! purpose: a widening that wrote only the first component would still answer for the first
+    !! key and is only visible once a second tuple shares it.
+    subroutine test_int32_tuple_mutation_entry_points(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int32) :: i32
+        integer(int64) :: i64
+        logical :: found
+
+        call m%init(ncomp=2, method="hash")
+        call m%set([-1_int32, 2_int32], 5_int32)   ! int32 tuple, int32 value
+        call m%set([-1_int32, 3_int32], 6_int64)   ! int32 tuple, int64 value
+        call m%set([-1_int64, 4_int64], 7_int32)   ! int64 tuple, int32 value
+        call check(error, m%get([-1_int64, 2_int64]) == 5_int64 .and. &
+            m%get([-1_int64, 3_int64]) == 6_int64 .and. m%get([-1_int64, 4_int64]) == 7_int64, &
+            "every composite set kind combination must store the value given")
+        if (allocated(error)) return
+        call m%get_or_add([-1_int32, 2_int32], i32)
+        call check(error, i32 == 5_int32, "composite get_or_add: int32 tuple, int32 answer")
+        if (allocated(error)) return
+        call m%get_or_add([-1_int32, 3_int32], i64)
+        call check(error, i64 == 6_int64, "composite get_or_add: int32 tuple, int64 answer")
+        if (allocated(error)) return
+        call m%get_or_add([-1_int64, 4_int64], i32)
+        call check(error, i32 == 7_int32, "composite get_or_add: int64 tuple, int32 answer")
+        if (allocated(error)) return
+        call m%get_or_add([-1_int32, 9_int32], i32)
+        call check(error, i32 == 8_int32, &
+            "an int32 composite set must raise the watermark, so a new tuple numbers above it")
+        if (allocated(error)) return
+        call m%remove([-1_int32, 9_int32], found=found)
+        call check(error, found .and. m%get([-1_int64, 9_int64]) == 0_int64, &
+            "remove with an int32 tuple must forget exactly that tuple")
+        if (allocated(error)) return
+        call m%remove([-1_int32, 99_int32], found=found)
+        call check(error, .not. found, "remove of an absent int32 tuple must report found=.false.")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == 3_int64, "the other three tuples must survive")
+    end subroutine test_int32_tuple_mutation_entry_points
+
+    !> `%get_or_add_many` codes identically whatever the key rank and the two kinds are.
+    !!
+    !! The four shapes are asserted against a loop of the scalar `%get_or_add` over a map built the
+    !! same way, so a bulk form that numbered in a different order, or lost the mask, fails rather
+    !! than merely differing from its twin.
+    subroutine test_int32_get_or_add_many_kinds(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, one
+        integer(int32) :: k32(7), t32(7, 2), c32(7)
+        integer(int64) :: k64(7), t64(7, 2), c64(7), want(7), i
+        logical :: mask(7)
+
+        k32 = [5_int32, -2_int32, 5_int32, 8_int32, -2_int32, 13_int32, 8_int32]
+        mask = [.true., .true., .false., .true., .true., .true., .false.]
+        k64 = int(k32, int64)
+        ! The scalar loop's answer, which is the order the bulk form must reproduce.
+        call one%init(method="hash")
+        do i = 1_int64, 7_int64
+            want(i) = 0_int64
+            if (mask(i)) call one%get_or_add(k64(i), want(i))
+        end do
+        call m%init(method="hash")
+        call m%get_or_add_many(k32, c64, valid=mask)
+        call check(error, all(c64 == want), &
+            "get_or_add_many: int32 keys, int64 codes must equal a loop of get_or_add")
+        if (allocated(error)) return
+        ! The same keys as 1-tuples, through the three rank-2 kind combinations.
+        t32(:, 1) = k32
+        t32(:, 2) = [1_int32, 1_int32, 1_int32, 2_int32, 1_int32, 2_int32, 2_int32]
+        t64 = int(t32, int64)
+        call one%init(ncomp=2, method="hash")
+        do i = 1_int64, 7_int64
+            want(i) = 0_int64
+            if (mask(i)) call one%get_or_add(t64(i, :), want(i))
+        end do
+        call m%init(ncomp=2, method="hash")
+        call m%get_or_add_many(t32, c32, valid=mask)
+        call check(error, all(int(c32, int64) == want), &
+            "get_or_add_many: int32 tuples, int32 codes must equal a loop of get_or_add")
+        if (allocated(error)) return
+        call m%init(ncomp=2, method="hash")
+        call m%get_or_add_many(t32, c64, valid=mask)
+        call check(error, all(c64 == want), &
+            "get_or_add_many: int32 tuples, int64 codes must equal a loop of get_or_add")
+        if (allocated(error)) return
+        call m%init(ncomp=2, method="hash")
+        call m%get_or_add_many(t64, c32, valid=mask)
+        call check(error, all(int(c32, int64) == want), &
+            "get_or_add_many: int64 tuples, int32 codes must equal a loop of get_or_add")
+    end subroutine test_int32_get_or_add_many_kinds
+
+    !> A composite DIRECT map is mutable inside the key ranges it was built for.
+    !!
+    !! The direct backend reaches a tuple's slot through the mixed-radix offset rather than a hash,
+    !! and `%set`/`%remove` are the only callers of it that write. An offset that used the wrong
+    !! stride would still land inside the array and overwrite a DIFFERENT key's slot -- silent, and
+    !! visible only by checking the neighbours after the write, which is what this does.
+    subroutine test_direct_composite_mutation(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(4, 2)
+        logical :: found
+
+        keys(:, 1) = [1_int64, 1_int64, 2_int64, 2_int64]
+        keys(:, 2) = [10_int64, 11_int64, 10_int64, 11_int64]
+        call m%build(keys, method="direct")
+        ! Replace one stored tuple; every other slot must be untouched.
+        call m%set([2_int64, 10_int64], 99_int64)
+        call check(error, m%get([2_int64, 10_int64]) == 99_int64 .and. &
+            m%get([1_int64, 10_int64]) == 1_int64 .and. m%get([1_int64, 11_int64]) == 2_int64 .and. &
+            m%get([2_int64, 11_int64]) == 4_int64, &
+            "a direct composite set must write only the slot it addressed")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == 4_int64, "replacing a stored tuple must not add a key")
+        if (allocated(error)) return
+        ! A slot inside the ranges but never built: the count rises.
+        call m%remove([1_int64, 11_int64], found=found)
+        call check(error, found .and. m%get([1_int64, 11_int64]) == 0_int64 .and. &
+            m%nkeys() == 3_int64, "a direct composite remove must forget exactly that tuple")
+        if (allocated(error)) return
+        call m%set([1_int64, 11_int64], 42_int64)
+        call check(error, m%get([1_int64, 11_int64]) == 42_int64 .and. m%nkeys() == 4_int64, &
+            "setting an empty in-range slot must add a key back")
+        if (allocated(error)) return
+        call m%remove([1_int64, 11_int64], found=found)
+        call m%remove([1_int64, 11_int64], found=found)
+        call check(error, .not. found, "removing an already-removed tuple must report found=.false.")
+        if (allocated(error)) return
+        ! Out of range in the SECOND component only: the offset must refuse it rather than
+        ! wrapping into the next first-component block.
+        call m%remove([1_int64, 12_int64], found=found)
+        call check(error, .not. found, &
+            "a tuple outside the built ranges must not be found by remove")
+        if (allocated(error)) return
+        call m%remove([1_int32, 12_int32], found=found)
+        call check(error, .not. found, "nor by the int32 spelling of it")
+    end subroutine test_direct_composite_mutation
+
+    !> `%remove` on a map that was never built reports "not there" instead of aborting.
+    !!
+    !! A map with no components has no storage to search, and `found=` is the caller's statement
+    !! that an absent key is acceptable. The early return this takes is separate from the one an
+    !! absent key in a built map takes, and only an unbuilt map reaches it.
+    subroutine test_remove_on_unbuilt_map(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        logical :: found
+
+        call m%remove([1_int64, 2_int64], found=found)
+        call check(error, .not. found, "an unbuilt map must report an int64 tuple as absent")
+        if (allocated(error)) return
+        call m%remove([1_int32, 2_int32], found=found)
+        call check(error, .not. found, "an unbuilt map must report an int32 tuple as absent")
+        if (allocated(error)) return
+        call check(error, m%ncomponents() == 0, "and must still be unbuilt afterwards")
+    end subroutine test_remove_on_unbuilt_map
+
+    !> A rank-2 key array with ONE column builds the same map a rank-1 array does.
+    !!
+    !! A one-column composite build is the shape a caller gets from slicing a table, and it takes
+    !! the composite build path with `ncomp == 1` -- a path that has to fill the scalar range
+    !! (`kmin1`/`kmax1`) as well as the per-component geometry, because the resulting map still has
+    !! to answer a scalar `%get(k)`. That cross-fill is what this asserts; `sorted` is included
+    !! because it reads the single column directly and fills the range last.
+    subroutine test_rank2_single_column_build(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m2, m1
+        integer(int64) :: keys(5, 1), flat(5), probes(7), i
+        character(len=6) :: methods(3)
+        integer :: t
+
+        flat = [3_int64, 4_int64, 5_int64, 9_int64, 12_int64]
+        keys(:, 1) = flat
+        probes = [2_int64, 3_int64, 5_int64, 6_int64, 9_int64, 12_int64, 13_int64]
+        methods = ["direct", "hash  ", "sorted"]
+        do t = 1, 3
+            call m2%build(keys, method=trim(methods(t)))
+            call m1%build(flat, method=trim(methods(t)))
+            call check(error, m2%ncomponents() == 1, &
+                "a one-column composite build has one component, on " // trim(methods(t)))
+            if (allocated(error)) return
+            do i = 1_int64, 7_int64
+                call check(error, m2%get(probes(i)) == m1%get(probes(i)), &
+                    "a one-column build must answer a scalar get as a rank-1 build does, on " // &
+                    trim(methods(t)))
+                if (allocated(error)) return
+                call check(error, m2%get([probes(i)]) == m1%get([probes(i)]), &
+                    "and must answer a 1-tuple get the same way, on " // trim(methods(t)))
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_rank2_single_column_build
+
+    !> A sorted build takes `valid=` and `values=` together.
+    !!
+    !! The sorted backend compacts the unmasked rows into fresh arrays before sorting them, and
+    !! that compaction has two arms -- carry the caller's value across, or number the row. Only a
+    !! build given both arguments reaches the first, and only a fixture whose values are neither
+    !! the row numbers nor in key order can tell the two apart.
+    subroutine test_sorted_build_masked_values(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(6), values(6), i
+        logical :: mask(6)
+
+        keys = [50_int64, 10_int64, 40_int64, 20_int64, 30_int64, 60_int64]
+        values = [11_int64, 12_int64, 13_int64, 14_int64, 15_int64, 16_int64]
+        mask = [.true., .true., .false., .true., .true., .false.]
+        call m%build(keys, values, method="sorted", valid=mask)
+        call check(error, m%nkeys() == 4_int64, "a masked sorted build stores the unmasked rows")
+        if (allocated(error)) return
+        do i = 1_int64, 6_int64
+            if (mask(i)) then
+                call check(error, m%get(keys(i)) == values(i), &
+                    "a masked sorted build must carry the caller's value across")
+            else
+                call check(error, m%get(keys(i)) == 0_int64, &
+                    "a masked sorted build must not store a masked row")
+            end if
+            if (allocated(error)) return
+        end do
+    end subroutine test_sorted_build_masked_values
+
+    !> `%reset` empties a map on every backend while keeping its allocation.
+    !!
+    !! `test_reset_keeps_storage` covers the hash backend. The direct backend empties by zeroing
+    !! its slot array instead, a separate arm, and a reset that skipped it would leave every key
+    !! still findable -- an emptied map that answers is the silent failure worth a test.
+    subroutine test_reset_every_backend(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        character(len=:), allocatable :: got
+        integer(int64) :: keys(4), bytes, i
+        character(len=6) :: methods(3)
+        integer :: t
+
+        keys = [2_int64, 3_int64, 5_int64, 7_int64]
+        methods = ["direct", "hash  ", "sorted"]
+        do t = 1, 3
+            call m%build(keys, method=trim(methods(t)))
+            bytes = m%memory_bytes()
+            call m%reset()
+            call check(error, m%nkeys() == 0_int64, &
+                "reset must empty the map on " // trim(methods(t)))
+            if (allocated(error)) return
+            do i = 1_int64, 4_int64
+                call check(error, m%get(keys(i)) == 0_int64, &
+                    "no key may still answer after reset on " // trim(methods(t)))
+                if (allocated(error)) return
+            end do
+            call check(error, m%memory_bytes() == bytes, &
+                "reset must keep the allocation on " // trim(methods(t)))
+            if (allocated(error)) return
+            call m%get_method(got)
+            call check(error, got == trim(methods(t)), &
+                "and must keep the backend on " // trim(methods(t)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_reset_every_backend
+
+    !> A rank-2 `%get_many` over a ONE-column map answers what the rank-1 form answers.
+    !!
+    !! A one-column composite map is the scalar table underneath, and each bulk worker has an arm
+    !! that says so: the hash arm hands `keys(:, 1)` to the SCALAR block kernel rather than the
+    !! tuple one, and the sorted map falls through to the general per-row arm. Neither is reached
+    !! by a rank-1 call or by a two-component one, and an arm that gathered the wrong column would
+    !! answer a plausible index rather than failing. All four key/answer kind combinations are
+    !! driven because the widening happens inside each worker, not before it.
+    subroutine test_rank2_single_column_get_many(error)
+        type(pf_index_map) :: m2, m1
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64) :: keys(9, 1), flat(9), p64(11, 1), f64(11), a64(11), b64(11), i, want
+        integer(int32) :: k32(9, 1), q32(11, 1), a32(11), b32(11)
+        logical :: mask(11)
+        character(len=6) :: methods(3)
+        integer :: t
+
+        flat = [3_int64, 4_int64, 5_int64, 9_int64, 12_int64, 20_int64, 21_int64, 25_int64, 30_int64]
+        ! Probes: hits and misses, below the range, above it, and interleaved between stored keys.
+        f64 = [2_int64, 3_int64, 5_int64, 6_int64, 9_int64, 12_int64, 13_int64, 21_int64, 25_int64, &
+            30_int64, 31_int64]
+        mask = [.true., .false., .true., .true., .false., .true., .true., .false., .true., .true., .false.]
+        keys(:, 1) = flat
+        p64(:, 1) = f64
+        k32 = int(keys, int32)
+        q32 = int(p64, int32)
+        methods = ["direct", "hash  ", "sorted"]
+        do t = 1, 3
+            call m2%build(keys, method=trim(methods(t)))
+            call m1%build(flat, method=trim(methods(t)))
+            ! The rank-1 form is the oracle: it is the same map, reached by the path this suite
+            ! already covers everywhere else.
+            call m1%get_many(f64, b64)
+            call m2%get_many(p64, a64)
+            call check(error, all(a64 == b64), &
+                "a one-column bulk lookup must equal the rank-1 one, on " // trim(methods(t)))
+            if (allocated(error)) return
+            call m2%get_many(q32, a64)
+            call check(error, all(a64 == b64), &
+                "and with int32 keys, on " // trim(methods(t)))
+            if (allocated(error)) return
+            call m2%get_many(p64, a32)
+            call check(error, all(int(a32, int64) == b64), &
+                "and with int32 answers, on " // trim(methods(t)))
+            if (allocated(error)) return
+            call m2%get_many(q32, a32)
+            call check(error, all(int(a32, int64) == b64), &
+                "and with both int32, on " // trim(methods(t)))
+            if (allocated(error)) return
+            ! The same four shapes with a mask: a masked row answers 0 and is not looked up.
+            call m2%get_many(p64, a64, valid=mask)
+            call m2%get_many(q32, b64, valid=mask)
+            call m2%get_many(p64, a32, valid=mask)
+            call m2%get_many(q32, b32, valid=mask)
+            do i = 1_int64, 11_int64
+                want = 0_int64
+                if (mask(i)) want = m1%get(f64(i))
+                call check(error, a64(i) == want .and. b64(i) == want .and. &
+                    int(a32(i), int64) == want .and. int(b32(i), int64) == want, &
+                    "a masked one-column bulk lookup must answer 0 for a masked row, on " // &
+                    trim(methods(t)))
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_rank2_single_column_get_many
+
+    !> A one-column rank-2 build takes `valid=` on every backend, sorted included.
+    !!
+    !! The sorted arm of the composite build compacts the unmasked rows out of the single column
+    !! before sorting them, which is a different call from the one an unmasked build makes.
+    subroutine test_rank2_single_column_masked_build(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(6, 1), i
+        logical :: mask(6)
+        character(len=6) :: methods(3)
+        integer :: t
+
+        keys(:, 1) = [50_int64, 10_int64, 40_int64, 20_int64, 30_int64, 60_int64]
+        mask = [.true., .true., .false., .true., .true., .false.]
+        methods = ["direct", "hash  ", "sorted"]
+        do t = 1, 3
+            call m%build(keys, method=trim(methods(t)), valid=mask)
+            call check(error, m%nkeys() == 4_int64, &
+                "a masked one-column build stores the unmasked rows, on " // trim(methods(t)))
+            if (allocated(error)) return
+            do i = 1_int64, 6_int64
+                if (mask(i)) then
+                    call check(error, m%get(keys(i, 1)) == i, &
+                        "and numbers each by its own row, on " // trim(methods(t)))
+                else
+                    call check(error, m%get(keys(i, 1)) == 0_int64, &
+                        "and stores no masked row, on " // trim(methods(t)))
+                end if
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_rank2_single_column_masked_build
+
+    !> `method="auto"` spelled out is the same as leaving `method=` absent.
+    !!
+    !! The token is accepted and resolves to the automatic choice rather than to a backend of its
+    !! own; a resolver that fell through to a fixed backend for it would silently stop honouring
+    !! the heuristic for every caller who spells the default.
+    subroutine test_explicit_auto_token(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: spelt, absent
+        character(len=:), allocatable :: a, b
+        integer(int64) :: dense(6), sparse(4), i
+
+        dense = [1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64]
+        sparse = [1_int64, 10_int64**9, 2_int64 * 10_int64**9, 3_int64 * 10_int64**9]
+        call spelt%build(dense, method="auto")
+        call absent%build(dense)
+        call spelt%get_method(a)
+        call absent%get_method(b)
+        call check(error, a == b, "method=""auto"" must choose what an absent method= chooses")
+        if (allocated(error)) return
+        do i = 1_int64, 6_int64
+            call check(error, spelt%get(dense(i)) == i, "and must answer every key")
+            if (allocated(error)) return
+        end do
+        ! And on a fixture the heuristic sends the other way, so the assertion is not about one
+        ! backend happening to be chosen twice.
+        call spelt%build(sparse, method="AUTO")
+        call absent%build(sparse)
+        call spelt%get_method(a)
+        call absent%get_method(b)
+        call check(error, a == b, "the token is case-insensitive and still chooses automatically")
+        if (allocated(error)) return
+        call check(error, a /= "direct", "fixture: this key set must not be dense enough for direct")
+    end subroutine test_explicit_auto_token
+
+    !> A map started by `%init` but never filled answers 0 rather than probing an absent table.
+    !!
+    !! `%init` with no `capacity=` leaves the hash backend selected with no slots allocated, so
+    !! every lookup before the first insert reaches an arm no other state reaches. It must answer
+    !! "not found", not read the unallocated table.
+    subroutine test_init_before_first_insert(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        character(len=:), allocatable :: got
+
+        call m%init(method="hash")
+        call m%get_method(got)
+        call check(error, got == "hash", "%init selects the hash backend")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == 0_int64, "and holds no keys yet")
+        if (allocated(error)) return
+        call check(error, m%get(1_int64) == 0_int64, &
+            "a lookup before the first insert must answer 0")
+        if (allocated(error)) return
+        call check(error, m%get([1_int64]) == 0_int64, "and so must the 1-tuple spelling")
+        if (allocated(error)) return
+        call check(error, .not. m%contains(1_int64), "and contains must agree")
+        if (allocated(error)) return
+        ! And the map is usable immediately afterwards.
+        call m%set(1_int64, 5_int64)
+        call check(error, m%get(1_int64) == 5_int64, "the map accepts a key straight after")
+    end subroutine test_init_before_first_insert
 
     ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.
 end module test_index ! GCOVR_EXCL_LINE

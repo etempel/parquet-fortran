@@ -65,7 +65,11 @@ contains
             new_unittest("the partitioned insert has a work floor, and only the automatic path takes it", &
                 test_partitioned_build_floor), &
             new_unittest("a sorted build answers the same each side of its threading floor", &
-                test_sorted_build_floor) &
+                test_sorted_build_floor), &
+            new_unittest("a threaded one-column rank-2 build equals a serial one", &
+                test_threaded_rank2_single_column), &
+            new_unittest("a threaded one-column get_or_add_many codes as the rank-1 one", &
+                test_threaded_rank2_single_column_goam) &
             ]
     end subroutine collect_tests_index_omp
 
@@ -1533,5 +1537,115 @@ contains
         call check(error, m%nkeys() == ABOVE, &
             "a sorted build above the floor stored the wrong number of keys")
     end subroutine test_sorted_build_floor
+
+    !> A threaded one-column rank-2 build takes the partitioned insert and answers as the serial one.
+    !!
+    !! A composite build with `ncomp == 1` is the scalar table underneath, so its threaded hash arm
+    !! hands the single column to the SCALAR partitioned insert rather than the tuple one -- a
+    !! separate branch from both `test_threaded_build_matches` (rank-1 keys) and
+    !! `test_threaded_composite_build` (two components). The spill counter is what keeps the
+    !! assertion from holding for the wrong reason: without it, a build that quietly fell back to
+    !! the serial insert loop would compare equal to the serial arm and prove nothing.
+    subroutine test_threaded_rank2_single_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: serial_map, threaded_map
+        integer(int64) :: keys(30000, 1), probes(200), a, b, i
+        integer :: k, nt
+        character(len=6) :: methods(3)
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded arm IS the serial arm, so " // &
+            "the equality below would hold for the wrong reason")
+        return
+#endif
+        nt = pf_index_threads(30000_int64)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no " // &
+                "team is opened and both arms of the comparison would run serially")
+            return
+        end if
+        do i = 1_int64, 30000_int64
+            keys(i, 1) = i * 11_int64
+        end do
+        do i = 1_int64, 200_int64
+            probes(i) = i * 331_int64
+        end do
+        methods = ["direct", "hash  ", "sorted"]
+        do k = 1, 3
+            call serial_map%build(keys, method=trim(methods(k)), threads=1)
+            call threaded_map%build(keys, method=trim(methods(k)), threads=nt)
+            call check(error, threaded_map%nkeys() == serial_map%nkeys(), &
+                "a threaded one-column build stored a different number of keys on " // &
+                trim(methods(k)))
+            if (allocated(error)) return
+            if (k == 2) then
+                call check(error, parquet_debug_index_spills() >= 0_int64, &
+                    "the threaded one-column hash build must have run the partitioned insert")
+                if (allocated(error)) return
+            end if
+            do i = 1_int64, 200_int64
+                a = serial_map%get(probes(i))
+                b = threaded_map%get(probes(i))
+                call check(error, a == b, &
+                    "a threaded one-column build answered differently on " // trim(methods(k)))
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_threaded_rank2_single_column
+
+    !> A threaded `%get_or_add_many` over a ONE-column rank-2 key array codes as the rank-1 one.
+    !!
+    !! A one-column composite map is the scalar table underneath, so its threaded arm hands the
+    !! single column to the SCALAR partitioned insert rather than the tuple one -- a branch neither
+    !! the rank-1 nor the two-component call reaches. The spill counter keeps the assertion honest:
+    !! a call that quietly fell back to the serial loop would code identically and prove nothing.
+    subroutine test_threaded_rank2_single_column_goam(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: flat_map, col_map
+        integer(int64), allocatable :: stream(:), cols(:,:), c1(:), c2(:)
+        integer(int64), parameter :: n = 120000_int64, k = 40000_int64
+        integer(int64) :: i, j, bad
+        integer :: nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it every get_or_add_many is the serial pass, " // &
+            "and the comparison below would compare that pass with itself")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no call " // &
+                "ever partitions")
+            return
+        end if
+        allocate(stream(n), cols(n, 1), c1(n), c2(n))
+        do i = 1_int64, n
+            j = 1_int64 + mod(i * 7919_int64, k)
+            stream(i) = j * 1000003_int64 + 17_int64
+        end do
+        cols(:, 1) = stream
+        call flat_map%init()
+        call flat_map%get_or_add_many(stream, c1)
+        call col_map%init(ncomp=1)
+        call col_map%get_or_add_many(cols, c2)
+        call check(error, parquet_debug_index_threads_used() == nt, &
+            "a one-column get_or_add_many over 120000 rows resolves the team pf_index_threads reports")
+        if (allocated(error)) return
+        call check(error, parquet_debug_index_spills() >= 0_int64, &
+            "the one-column keys were inserted by the partitioned pass, not the serial loop")
+        if (allocated(error)) return
+        call check(error, col_map%nkeys() == k .and. flat_map%nkeys() == k, &
+            "both shapes store exactly the distinct keys")
+        if (allocated(error)) return
+        call check(error, all(c1 == c2), &
+            "a one-column rank-2 get_or_add_many must code exactly as the rank-1 one does")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (col_map%get(stream(i)) /= c2(i)) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, &
+            "every row's code is what %get answers for its key afterwards")
+    end subroutine test_threaded_rank2_single_column_goam
 
 end module test_index_omp ! GCOVR_EXCL_LINE

@@ -2974,6 +2974,24 @@ program error_scenarios
         call scenario_index_build_valid_length()
     case ("index_keys_rank1_on_composite")
         call scenario_index_keys_rank1_on_composite()
+    case ("index_masked_duplicate_direct")
+        call scenario_index_masked_duplicate_direct()
+    case ("index_masked_duplicate_tuple_direct")
+        call scenario_index_masked_duplicate_tuple_direct()
+    case ("index_set_value_zero")
+        call scenario_index_set_value_zero()
+    case ("index_method_token_too_long")
+        call scenario_index_method_token_too_long()
+    case ("index_get_many_on_string_map")
+        call scenario_index_get_many_on_string_map()
+    case ("index_get_many_ncomp_mismatch")
+        call scenario_index_get_many_ncomp_mismatch()
+    case ("index_keys_rank2_on_string_map")
+        call scenario_index_keys_rank2_on_string_map()
+    case ("index_composite_direct_product_too_wide")
+        call scenario_index_composite_direct_product_too_wide()
+    case ("index_direct_alloc_refused")
+        call scenario_index_direct_alloc_refused()
     case ("index_control")
         call scenario_index_control()
     case ("index_concurrent_abort")
@@ -2982,6 +3000,8 @@ program error_scenarios
         call scenario_index_spill_duplicate()
     case ("index_partitioned_duplicate")
         call scenario_index_partitioned_duplicate()
+    case ("index_partitioned_duplicate_one_column")
+        call scenario_index_partitioned_duplicate_one_column()
     case ("index_partitioned_duplicate_tuple")
         call scenario_index_partitioned_duplicate_tuple()
     case ("index_str_partitioned_duplicate")
@@ -3028,6 +3048,22 @@ program error_scenarios
         call scenario_multimap_keys_rank1_on_composite()
     case ("multimap_probe_shape_mismatch")
         call scenario_multimap_probe_shape_mismatch()
+    case ("multimap_tuple_on_string_map")
+        call scenario_multimap_tuple_on_string_map()
+    case ("multimap_integer_on_string_map")
+        call scenario_multimap_integer_on_string_map()
+    case ("multimap_get_first_many_on_string_map")
+        call scenario_multimap_get_first_many_on_string_map()
+    case ("multimap_get_first_many_ncomp_mismatch")
+        call scenario_multimap_get_first_many_ncomp_mismatch()
+    case ("multimap_probe_many_on_string_map")
+        call scenario_multimap_probe_many_on_string_map()
+    case ("multimap_direct_range_too_wide")
+        call scenario_multimap_direct_range_too_wide()
+    case ("multimap_composite_direct_product_too_wide")
+        call scenario_multimap_composite_direct_product_too_wide()
+    case ("multimap_direct_alloc_refused")
+        call scenario_multimap_direct_alloc_refused()
     case ("multimap_control")
         call scenario_multimap_control()
     case ("index_string_on_integer_map")
@@ -26193,6 +26229,142 @@ contains
         print '(a,i0)', "a rank-1 key list was returned for a composite map, n=", size(flat)
     end subroutine scenario_index_keys_rank1_on_composite
     !
+    !> A duplicate in a MASKED direct build is still named, at its own position in the caller's
+    !> array. The threaded scatter detects a duplicate by counting occupied slots, and the serial
+    !> re-pass that turns that count into a message has to skip the masked rows exactly as the
+    !> scatter did -- a re-pass that counted them would name the wrong row, or a row that was never
+    !> stored at all.
+    subroutine scenario_index_masked_duplicate_direct()
+        type(pf_index_map) :: m
+        logical :: mask(5)
+
+        ! Row 2 is masked, so 9 appears once among the unmasked rows; rows 4 and 5 both hold 3.
+        mask = [.true., .false., .true., .true., .true.]
+        call m%build([1_int64, 9_int64, 9_int64, 3_int64, 7_int64], method="direct", valid=mask)
+        print '(a,i0)', "control: the masked build stored keys=", m%nkeys()
+        mask = [.true., .false., .true., .true., .true.]
+        call m%build([1_int64, 9_int64, 9_int64, 3_int64, 3_int64], method="direct", valid=mask)
+        print '(a)', "built a masked direct map with a duplicate key"
+    end subroutine scenario_index_masked_duplicate_direct
+    !
+    !> `scenario_index_masked_duplicate_direct` for key tuples, whose re-pass walks the mixed-radix
+    !> offset instead of the scalar one.
+    subroutine scenario_index_masked_duplicate_tuple_direct()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(5, 2)
+        logical :: mask(5)
+
+        pairs(:, 1) = [1_int64, 2_int64, 2_int64, 3_int64, 3_int64]
+        pairs(:, 2) = [7_int64, 8_int64, 8_int64, 9_int64, 1_int64]
+        mask = [.true., .false., .true., .true., .true.]
+        call m%build(pairs, method="direct", valid=mask)   ! control: the repeat is masked out
+        print '(a,i0)', "control: the masked composite build stored keys=", m%nkeys()
+        pairs(5, 2) = 9_int64                              ! now rows 4 and 5 are the same tuple
+        call m%build(pairs, method="direct", valid=mask)
+        print '(a)', "built a masked direct composite map with a duplicate tuple"
+    end subroutine scenario_index_masked_duplicate_tuple_direct
+    !
+    !> `%set` refuses the value 0 for the same reason `%build` refuses it: 0 is how every lookup in
+    !> this module reports "not found", so storing it would make the key unfindable while `%nkeys`
+    !> still counted it.
+    subroutine scenario_index_set_value_zero()
+        type(pf_index_map) :: m
+
+        call m%init(method="hash")
+        call m%set(7_int64, 1_int64)         ! control: the smallest legal value
+        print '(a,i0)', "control: set stored value 1, nkeys=", m%nkeys()
+        call m%set(8_int64, 0_int64)         ! -> aborts
+        print '(a)', "a set storing the value 0 was accepted"
+    end subroutine scenario_index_set_value_zero
+    !
+    !> A method token longer than the buffer the resolver compares in is refused before it is
+    !> truncated into that buffer, where it could silently become a DIFFERENT token: a 17-character
+    !> string beginning "hash" must not resolve to "hash".
+    subroutine scenario_index_method_token_too_long()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64], method="hash")   ! control: the token it starts with
+        print '(a,i0)', "control: the short token built a map, nkeys=", m%nkeys()
+        call m%build([1_int64, 2_int64], method="hashhashhashhashhash")   ! -> aborts
+        print '(a)', "an over-long method token was accepted"
+    end subroutine scenario_index_method_token_too_long
+    !
+    !> A bulk integer lookup on a string-keyed map is refused. The scalar form is covered by
+    !> `scenario_index_integer_on_string_map`; this is the bulk one, which reaches a different
+    !> guard and would otherwise probe the string table's internal `(hash, occurrence)` keys.
+    subroutine scenario_index_get_many_on_string_map()
+        type(pf_index_map) :: m
+        integer(int64) :: out(2)
+
+        call m%build(["a", "b"])
+        call m%get_many([1_int64, 2_int64], out)   ! -> aborts
+        print '(a,i0)', "a bulk integer lookup on a string map was accepted, got=", out(1)
+    end subroutine scenario_index_get_many_on_string_map
+    !
+    !> A bulk lookup presenting the wrong number of components is refused rather than comparing the
+    !> components it was given and ignoring the rest.
+    subroutine scenario_index_get_many_ncomp_mismatch()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2), triples(2, 3), out(2)
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        triples(:, 1) = [1_int64, 2_int64]
+        triples(:, 2) = [3_int64, 4_int64]
+        triples(:, 3) = [5_int64, 6_int64]
+        call m%build(pairs, method="hash")
+        call m%get_many(pairs, out)                ! control: the width the map has
+        print '(a,i0)', "control: the two-component bulk lookup answered ", out(1)
+        call m%get_many(triples, out)              ! -> aborts
+        print '(a,i0)', "a three-component bulk lookup on a two-component map was accepted, got=", out(1)
+    end subroutine scenario_index_get_many_ncomp_mismatch
+    !
+    !> A rank-2 integer key list asked of a string-keyed map is refused, as the rank-1 form is
+    !> (`scenario_index_string_keys_rank1`): the caller is handed a `parquet_string_column` or
+    !> nothing, never the internal integer keys the string table is built on.
+    subroutine scenario_index_keys_rank2_on_string_map()
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: rows(:,:)
+
+        call m%build(["a", "b"])
+        call m%keys(rows)                          ! -> aborts
+        ! `%keys` is `pure` and reports only through its argument, so the result is used here or
+        ! the optimiser deletes the call and the abort with it.
+        print '(a,i0)', "a rank-2 integer key list from a string map was accepted, rows=", size(rows, 1)
+    end subroutine scenario_index_keys_rank2_on_string_map
+    !
+    !> `method="direct"` over composite keys whose component spans MULTIPLY past the int64 domain is
+    !> refused. Each span on its own is representable here; only their product is not, which is the
+    !> case a per-component check alone would let through into an overflowing slot count.
+    subroutine scenario_index_composite_direct_product_too_wide()
+        type(pf_index_map) :: m
+        integer(int64) :: wide(2, 2), near(2, 2)
+        integer(int64), parameter :: BIG = 2_int64**40
+
+        near(:, 1) = [1_int64, 2_int64]
+        near(:, 2) = [1_int64, 2_int64]
+        wide(:, 1) = [-BIG, BIG]
+        wide(:, 2) = [-BIG, BIG]
+        call m%build(near, method="direct")        ! control: a product that fits easily
+        print '(a,i0)', "control: the narrow composite direct map holds ", m%nkeys()
+        call m%build(wide, method="direct")        ! -> aborts
+        print '(a)', "a composite direct map whose spans overflow was built"
+    end subroutine scenario_index_composite_direct_product_too_wide
+    !
+    !> A direct build whose slot count is representable but far larger than any machine can allocate
+    !> reports what it asked for and what to do instead, rather than dying in the runtime's own
+    !> allocation failure. The automatic choice cannot reach this -- it keeps the span inside its
+    !> budget -- so only an explicit `method="direct"` gets here.
+    subroutine scenario_index_direct_alloc_refused()
+        type(pf_index_map) :: m
+        integer(int64), parameter :: HUGE_SPAN = 2_int64**50
+
+        call m%build([1_int64, 4_int64], method="direct")   ! control: a span that allocates
+        print '(a,i0)', "control: the small direct map holds ", m%nkeys()
+        call m%build([1_int64, HUGE_SPAN], method="direct") ! -> aborts
+        print '(a)', "a direct map of 2**50 slots was allocated"
+    end subroutine scenario_index_direct_alloc_refused
+    !
     !> The shared negative control for every map scenario above: the same calls, made correctly,
     !> must run to completion. Without it a guard that fired unconditionally would satisfy every
     !> one of the abort scenarios while breaking the library outright.
@@ -26305,6 +26477,25 @@ contains
         call m%build(keys, method="hash", threads=64)   ! -> aborts, naming 30 at position 20001
         print '(a)', "a duplicate in a partitioned build was accepted"
     end subroutine scenario_index_partitioned_duplicate
+    !
+    !> `scenario_index_partitioned_duplicate` for a ONE-column rank-2 key array, whose partitioned
+    !> arm is the scalar insert reached through the composite build. The serial re-pass that names
+    !> the offender is a separate call there from the one the rank-1 build makes.
+    subroutine scenario_index_partitioned_duplicate_one_column()
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:,:)
+        integer(int64) :: i
+
+        allocate(keys(20001, 1))
+        do i = 1_int64, 20000_int64
+            keys(i, 1) = i * 3_int64
+        end do
+        keys(20001, 1) = 30_int64
+        call m%build(keys(1:20000, :), method="hash", threads=64)   ! control: no duplicate
+        print '(a,i0)', "control: 20000 one-column keys built, nkeys=", m%nkeys()
+        call m%build(keys, method="hash", threads=64)   ! -> aborts, naming 30 at position 20001
+        print '(a)', "a duplicate in a partitioned one-column build was accepted"
+    end subroutine scenario_index_partitioned_duplicate_one_column
     !
     !> `scenario_index_partitioned_duplicate` for key tuples.
     subroutine scenario_index_partitioned_duplicate_tuple()
@@ -26623,6 +26814,109 @@ contains
         call mm%probe_many(triples, off, m)
         print '(a,i0)', "a probe of the wrong width was accepted, pairs=", size(m)
     end subroutine scenario_multimap_probe_shape_mismatch
+    !
+    !> A key TUPLE on a string-keyed multimap is refused, as a scalar key is. The tuple form is the
+    !> dangerous one: a string multimap's keys are `(hash, occurrence)` pairs underneath, so a
+    !> two-component probe matches the internal width exactly and would otherwise be looked up.
+    subroutine scenario_multimap_tuple_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: g
+
+        call mm%build(["a", "b", "a"])
+        g = mm%get([1_int64, 0_int64])              ! -> aborts
+        ! `%get` is `pure`, so the result is used here or the call is deleted with its abort.
+        print '(a,i0)', "a key tuple on a string multimap was accepted, got=", g
+    end subroutine scenario_multimap_tuple_on_string_map
+    !
+    !> A scalar integer key on a string-keyed multimap is refused, as it is on a string-keyed map.
+    subroutine scenario_multimap_integer_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: g
+
+        call mm%build(["a", "b", "a"])
+        g = mm%get(1_int64)                         ! -> aborts
+        ! `%get` is `pure`, so the result is used here or the call is deleted with its abort.
+        print '(a,i0)', "an integer key on a string multimap was accepted, got=", g
+    end subroutine scenario_multimap_integer_on_string_map
+    !
+    !> And the bulk form of it, which reaches a different guard from the scalar one above.
+    subroutine scenario_multimap_get_first_many_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: out(2)
+
+        call mm%build(["a", "b", "a"])
+        call mm%get_first_many([1_int64, 2_int64], out)   ! -> aborts
+        print '(a,i0)', "a bulk integer lookup on a string multimap was accepted, got=", out(1)
+    end subroutine scenario_multimap_get_first_many_on_string_map
+    !
+    !> A bulk multimap lookup presenting the wrong number of components is refused rather than
+    !> comparing the components it was given and ignoring the rest.
+    subroutine scenario_multimap_get_first_many_ncomp_mismatch()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2), triples(3, 3), out(3)
+
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64]
+        pairs(:, 2) = [3_int64, 4_int64, 3_int64]
+        triples(:, 1) = pairs(:, 1)
+        triples(:, 2) = pairs(:, 2)
+        triples(:, 3) = [5_int64, 6_int64, 5_int64]
+        call mm%build(pairs, method="hash")
+        call mm%get_first_many(pairs, out)          ! control: the width the multimap has
+        print '(a,i0)', "control: the two-component bulk lookup answered ", out(1)
+        call mm%get_first_many(triples, out)        ! -> aborts
+        print '(a,i0)', "a three-component bulk multimap lookup was accepted, got=", out(1)
+    end subroutine scenario_multimap_get_first_many_ncomp_mismatch
+    !
+    !> `%probe_many` with integer keys on a string-keyed multimap is refused; its shape check is a
+    !> separate guard from the one the m:1 bulk forms take.
+    subroutine scenario_multimap_probe_many_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: offsets(:), matches(:)
+
+        call mm%build(["a", "b", "a"])
+        call mm%probe_many([1_int64, 2_int64], offsets, matches)   ! -> aborts
+        print '(a,i0)', "an integer probe of a string multimap was accepted, n=", size(offsets)
+    end subroutine scenario_multimap_probe_many_on_string_map
+    !
+    !> `method="direct"` over a multimap key range spanning the whole int64 domain is refused, as it
+    !> is for `pf_index_map` (`scenario_index_direct_range_too_wide`).
+    subroutine scenario_multimap_direct_range_too_wide()
+        type(pf_index_multimap) :: mm
+
+        call mm%build([1_int64, 2_int64, 1_int64], method="direct")   ! control
+        print '(a,i0)', "control: the narrow direct multimap has groups ", mm%ngroups()
+        call mm%build([-huge(0_int64), huge(0_int64)], method="direct")   ! -> aborts
+        print '(a)', "a direct multimap spanning the whole int64 domain was built"
+    end subroutine scenario_multimap_direct_range_too_wide
+    !
+    !> And the composite form, whose component spans multiply past the int64 domain.
+    subroutine scenario_multimap_composite_direct_product_too_wide()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: wide(2, 2), near(2, 2)
+        integer(int64), parameter :: BIG = 2_int64**40
+
+        near(:, 1) = [1_int64, 2_int64]
+        near(:, 2) = [1_int64, 2_int64]
+        wide(:, 1) = [-BIG, BIG]
+        wide(:, 2) = [-BIG, BIG]
+        call mm%build(near, method="direct")        ! control: a product that fits easily
+        print '(a,i0)', "control: the narrow composite direct multimap has groups ", mm%ngroups()
+        call mm%build(wide, method="direct")        ! -> aborts
+        print '(a)', "a composite direct multimap whose spans overflow was built"
+    end subroutine scenario_multimap_composite_direct_product_too_wide
+    !
+    !> A direct multimap build whose slot count is representable but unallocatable reports what it
+    !> asked for and what to do instead. `scenario_index_direct_alloc_refused` is the map's twin;
+    !> the multimap allocates its grouping slots through a separate path.
+    subroutine scenario_multimap_direct_alloc_refused()
+        type(pf_index_multimap) :: mm
+        integer(int64), parameter :: HUGE_SPAN = 2_int64**50
+
+        call mm%build([1_int64, 4_int64, 1_int64], method="direct")   ! control
+        print '(a,i0)', "control: the small direct multimap has groups ", mm%ngroups()
+        call mm%build([1_int64, HUGE_SPAN], method="direct")          ! -> aborts
+        print '(a)', "a direct multimap of 2**50 slots was allocated"
+    end subroutine scenario_multimap_direct_alloc_refused
     !
     !> The negative control for every multimap guard above: each legal shape of every call
     !> completes, so a guard that fired on a legal call would fail here.

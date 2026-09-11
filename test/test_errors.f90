@@ -2375,6 +2375,24 @@ contains
                 test_index_build_valid_length_aborts), &
             new_unittest("a rank-1 key list from a composite map aborts", &
                 test_index_keys_rank1_on_composite_aborts), &
+            new_unittest("a duplicate in a masked direct build aborts", &
+                test_index_masked_duplicate_direct_aborts), &
+            new_unittest("a duplicate tuple in a masked direct build aborts", &
+                test_index_masked_duplicate_tuple_direct_aborts), &
+            new_unittest("storing the value 0 through set aborts", &
+                test_index_set_value_zero_aborts), &
+            new_unittest("a method token longer than the resolver's buffer aborts", &
+                test_index_method_token_too_long_aborts), &
+            new_unittest("a bulk integer lookup on a string map aborts", &
+                test_index_get_many_on_string_map_aborts), &
+            new_unittest("a bulk lookup of the wrong component count aborts", &
+                test_index_get_many_ncomp_mismatch_aborts), &
+            new_unittest("a rank-2 key list from a string map aborts", &
+                test_index_keys_rank2_on_string_map_aborts), &
+            new_unittest("a composite direct build whose spans multiply too far aborts", &
+                test_index_composite_direct_product_too_wide_aborts), &
+            new_unittest("a direct build of unallocatable size aborts with its slot count", &
+                test_index_direct_alloc_refused_aborts), &
             new_unittest("every legal pf_index_map path completes", &
                 test_index_control_completes), &
             new_unittest("a multimap values array of the wrong length aborts", &
@@ -2415,6 +2433,22 @@ contains
                 test_multimap_keys_rank1_on_composite_aborts), &
             new_unittest("a probe of the wrong tuple width aborts", &
                 test_multimap_probe_shape_mismatch_aborts), &
+            new_unittest("a key tuple on a string multimap aborts", &
+                test_multimap_tuple_on_string_map_aborts), &
+            new_unittest("an integer key on a string multimap aborts", &
+                test_multimap_integer_on_string_map_aborts), &
+            new_unittest("a bulk integer lookup on a string multimap aborts", &
+                test_multimap_get_first_many_on_string_map_aborts), &
+            new_unittest("a bulk multimap lookup of the wrong component count aborts", &
+                test_multimap_get_first_many_ncomp_mismatch_aborts), &
+            new_unittest("an integer probe of a string multimap aborts", &
+                test_multimap_probe_many_on_string_map_aborts), &
+            new_unittest("a direct multimap spanning the int64 domain aborts", &
+                test_multimap_direct_range_too_wide_aborts), &
+            new_unittest("a composite direct multimap whose spans multiply too far aborts", &
+                test_multimap_composite_direct_product_too_wide_aborts), &
+            new_unittest("a direct multimap of unallocatable size aborts with its slot count", &
+                test_multimap_direct_alloc_refused_aborts), &
             new_unittest("every legal pf_index_multimap path completes", &
                 test_multimap_control_completes), &
             new_unittest("a string lookup on an integer map aborts", &
@@ -2522,6 +2556,8 @@ contains
                 test_index_partitioned_duplicate_aborts), &
             new_unittest("a duplicate tuple in a partitioned build aborts naming its position", &
                 test_index_partitioned_duplicate_tuple_aborts), &
+            new_unittest("a duplicate in a partitioned one-column build aborts", &
+                test_index_partitioned_duplicate_one_column_aborts), &
             new_unittest("a duplicate string in a partitioned build aborts naming its position", &
                 test_index_str_partitioned_duplicate_aborts), &
             new_unittest("threads=0 on get_or_add_many aborts", &
@@ -3287,6 +3323,87 @@ contains
             required_stderr="this map has composite keys")
     end subroutine test_index_keys_rank1_on_composite_aborts
     !
+    !> See `scenario_index_masked_duplicate_direct` (test/error_scenarios.f90).
+    subroutine test_index_masked_duplicate_direct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_masked_duplicate_direct", &
+            expect_abort=.true., &
+            failure_message="a duplicate in a masked direct build was expected to abort", &
+            required_stderr="duplicate key 3 at position 5")
+    end subroutine test_index_masked_duplicate_direct_aborts
+    !
+    !> See `scenario_index_masked_duplicate_tuple_direct` (test/error_scenarios.f90).
+    subroutine test_index_masked_duplicate_tuple_direct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_masked_duplicate_tuple_direct", &
+            expect_abort=.true., &
+            failure_message="a duplicate tuple in a masked direct build was expected to abort", &
+            required_stderr="at position 5")
+    end subroutine test_index_masked_duplicate_tuple_direct_aborts
+    !
+    !> See `scenario_index_set_value_zero` (test/error_scenarios.f90).
+    subroutine test_index_set_value_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_set_value_zero", &
+            expect_abort=.true., &
+            failure_message="a set storing the value 0 was expected to abort", &
+            required_stderr="stored values must be >= 1")
+    end subroutine test_index_set_value_zero_aborts
+    !
+    !> See `scenario_index_method_token_too_long` (test/error_scenarios.f90).
+    subroutine test_index_method_token_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_method_token_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long method token was expected to abort", &
+            required_stderr="unknown method (accepted:")
+    end subroutine test_index_method_token_too_long_aborts
+    !
+    !> See `scenario_index_get_many_on_string_map` (test/error_scenarios.f90).
+    subroutine test_index_get_many_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_many_on_string_map", &
+            expect_abort=.true., &
+            failure_message="a bulk integer lookup on a string map was expected to abort", &
+            required_stderr="this map holds string keys; look up with string keys")
+    end subroutine test_index_get_many_on_string_map_aborts
+    !
+    !> See `scenario_index_get_many_ncomp_mismatch` (test/error_scenarios.f90).
+    subroutine test_index_get_many_ncomp_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_many_ncomp_mismatch", &
+            expect_abort=.true., &
+            failure_message="a bulk lookup of the wrong component count was expected to abort", &
+            required_stderr="the keys' component count does not match this map's")
+    end subroutine test_index_get_many_ncomp_mismatch_aborts
+    !
+    !> See `scenario_index_keys_rank2_on_string_map` (test/error_scenarios.f90).
+    subroutine test_index_keys_rank2_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_rank2_on_string_map", &
+            expect_abort=.true., &
+            failure_message="a rank-2 key list from a string map was expected to abort", &
+            required_stderr="ask for a parquet_string_column")
+    end subroutine test_index_keys_rank2_on_string_map_aborts
+    !
+    !> See `scenario_index_composite_direct_product_too_wide` (test/error_scenarios.f90).
+    subroutine test_index_composite_direct_product_too_wide_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_composite_direct_product_too_wide", &
+            expect_abort=.true., &
+            failure_message="a composite direct build whose spans overflow was expected to abort", &
+            required_stderr="their product exceeds the int64 domain")
+    end subroutine test_index_composite_direct_product_too_wide_aborts
+    !
+    !> See `scenario_index_direct_alloc_refused` (test/error_scenarios.f90).
+    subroutine test_index_direct_alloc_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_direct_alloc_refused", &
+            expect_abort=.true., &
+            failure_message="a direct build of unallocatable size was expected to abort", &
+            required_stderr="slots for the direct backend")
+    end subroutine test_index_direct_alloc_refused_aborts
+    !
     !> The negative control: every legal call must run to completion, or a guard that fired
     !> unconditionally would satisfy every abort scenario above while breaking the library.
     subroutine test_index_control_completes(error)
@@ -3331,6 +3448,15 @@ contains
             failure_message="a duplicate tuple in a partitioned build was expected to abort", &
             required_stderr="duplicate key [7, 30] at position 20001")
     end subroutine test_index_partitioned_duplicate_tuple_aborts
+    !
+    !> See `scenario_index_partitioned_duplicate_one_column` (test/error_scenarios.f90).
+    subroutine test_index_partitioned_duplicate_one_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, &
+            "index_partitioned_duplicate_one_column", expect_abort=.true., &
+            failure_message="a duplicate in a partitioned one-column build was expected to abort", &
+            required_stderr="duplicate key [30] at position 20001")
+    end subroutine test_index_partitioned_duplicate_one_column_aborts
     !
     !> See `scenario_index_str_partitioned_duplicate` (test/error_scenarios.f90).
     subroutine test_index_str_partitioned_duplicate_aborts(error)
@@ -3529,6 +3655,78 @@ contains
             failure_message="a probe of the wrong tuple width was expected to abort", &
             required_stderr="pf_index_multimap%probe_many: the keys' component count does not match this multimap's")
     end subroutine test_multimap_probe_shape_mismatch_aborts
+    !
+    !> See `scenario_multimap_tuple_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_tuple_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_tuple_on_string_map", &
+            expect_abort=.true., &
+            failure_message="a key tuple on a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys; look up with a string key")
+    end subroutine test_multimap_tuple_on_string_map_aborts
+    !
+    !> See `scenario_multimap_integer_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_integer_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_integer_on_string_map", &
+            expect_abort=.true., &
+            failure_message="an integer key on a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys; look up with a string key")
+    end subroutine test_multimap_integer_on_string_map_aborts
+    !
+    !> See `scenario_multimap_get_first_many_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_get_first_many_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_first_many_on_string_map", &
+            expect_abort=.true., &
+            failure_message="a bulk integer lookup on a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys; look up with string keys")
+    end subroutine test_multimap_get_first_many_on_string_map_aborts
+    !
+    !> See `scenario_multimap_get_first_many_ncomp_mismatch` (test/error_scenarios.f90).
+    subroutine test_multimap_get_first_many_ncomp_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_get_first_many_ncomp_mismatch", &
+            expect_abort=.true., &
+            failure_message="a bulk multimap lookup of the wrong width was expected to abort", &
+            required_stderr="the keys' component count does not match this multimap's")
+    end subroutine test_multimap_get_first_many_ncomp_mismatch_aborts
+    !
+    !> See `scenario_multimap_probe_many_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_probe_many_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_probe_many_on_string_map", &
+            expect_abort=.true., &
+            failure_message="an integer probe of a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys; probe with string keys")
+    end subroutine test_multimap_probe_many_on_string_map_aborts
+    !
+    !> See `scenario_multimap_direct_range_too_wide` (test/error_scenarios.f90).
+    subroutine test_multimap_direct_range_too_wide_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_direct_range_too_wide", &
+            expect_abort=.true., &
+            failure_message="a direct multimap spanning the int64 domain was expected to abort", &
+            required_stderr="it exceeds the whole int64 domain")
+    end subroutine test_multimap_direct_range_too_wide_aborts
+    !
+    !> See `scenario_multimap_composite_direct_product_too_wide` (test/error_scenarios.f90).
+    subroutine test_multimap_composite_direct_product_too_wide_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, &
+            "multimap_composite_direct_product_too_wide", expect_abort=.true., &
+            failure_message="a composite direct multimap whose spans overflow was expected to abort", &
+            required_stderr="their product exceeds the int64 domain")
+    end subroutine test_multimap_composite_direct_product_too_wide_aborts
+    !
+    !> See `scenario_multimap_direct_alloc_refused` (test/error_scenarios.f90).
+    subroutine test_multimap_direct_alloc_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_direct_alloc_refused", &
+            expect_abort=.true., &
+            failure_message="a direct multimap of unallocatable size was expected to abort", &
+            required_stderr="slots for the direct backend")
+    end subroutine test_multimap_direct_alloc_refused_aborts
     !
     !> See `scenario_multimap_control` (test/error_scenarios.f90).
     subroutine test_multimap_control_completes(error)

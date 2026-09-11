@@ -2916,6 +2916,14 @@ program error_scenarios
         call scenario_toml_strings_range()
     case ("toml_key_too_long")
         call scenario_toml_key_too_long()
+    case ("toml_value_not_list")
+        call scenario_toml_value_not_list()
+    case ("toml_name_not_a_section")
+        call scenario_toml_name_not_a_section()
+    case ("toml_path_too_long")
+        call scenario_toml_path_too_long()
+    case ("toml_report_fatal")
+        call scenario_toml_report_fatal()
     case ("toml_bad_severity")
         call scenario_toml_bad_severity()
     case ("toml_control")
@@ -25839,6 +25847,73 @@ contains
         call pf_toml_get(conf, huge_key, n, default = 0)
         print '(a)', "scenario_toml_key_too_long: an over-long key should have aborted"
     end subroutine scenario_toml_key_too_long
+
+    !> A scalar read as a list must abort rather than leave the caller's array as it found it: an
+    !! array that keeps its entry values is indistinguishable from one the file legitimately set.
+    subroutine scenario_toml_value_not_list()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer :: v(3)
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        v = 0
+        call pf_toml_get(gen, "limits", v)     ! control: a key that really is a list
+        print '(a,i0)', "control: the list read gave v(1)=", v(1)
+        call pf_toml_get(gen, "nproc", v)      ! -> aborts: a scalar is not a list
+        print '(a,i0)', "a scalar was accepted as a list, v(1)=", v(1)
+    end subroutine scenario_toml_value_not_list
+
+    !> Asking for a `[name]` section whose name is already a plain value must abort: handing back
+    !! an empty section would make a misspelt configuration look like an omitted one.
+    subroutine scenario_toml_name_not_a_section()
+        type(pf_toml) :: conf, gen, sect
+
+        call pf_toml_loads(conf, 'a = 1' // new_line("a") // '[real_one]' // new_line("a") // &
+            'b = 2' // new_line("a"))
+        call pf_toml_new_section(conf, "real_one", gen)   ! control: an existing section is reused
+        print '(a,l1)', "control: the existing section was opened, is_open=", pf_toml_is_open(gen)
+        call pf_toml_new_section(conf, "a", sect)         ! -> aborts: `a` is a value
+        print '(a,l1)', "a value was accepted as a section, is_open=", pf_toml_is_open(sect)
+    end subroutine scenario_toml_name_not_a_section
+
+    !> A section.key path longer than the accumulator can hold must abort rather than truncate:
+    !! two distinct paths truncated to the same text compare equal, so one would hide the other
+    !! from the unknown-key sweep -- a silent under-report by the very check that exists to
+    !! prevent one.
+    subroutine scenario_toml_path_too_long()
+        type(pf_toml) :: conf, short, s1, s2
+        character(len=PF_TOML_MAX_KEY) :: long_name
+
+        call pf_toml_new(conf, "paths")
+        long_name = repeat("s", PF_TOML_MAX_KEY)
+        call pf_toml_new_section(conf, "short", short)    ! control: a path well inside the limit
+        print '(a,l1)', "control: the short section was created, is_open=", pf_toml_is_open(short)
+        ! Each nesting level appends a name and a dot, so two maximum-length names run past
+        ! PF_TOML_MAX_PATH without either name being over-long on its own. Separate handles at
+        ! each level: one variable as both the parent and the result would alias an intent(in)
+        ! dummy onto an intent(out) one, which is not conforming (F2018 15.5.2.13).
+        call pf_toml_new_section(conf, long_name, s1)
+        call pf_toml_new_section(s1, long_name, s2)       ! -> aborts
+        print '(a,l1)', "an over-long section path was accepted, is_open=", pf_toml_is_open(s2)
+    end subroutine scenario_toml_path_too_long
+
+    !> `pf_toml_report` at its default severity is FATAL: a validation complaint the calling
+    !! program raises stops the run, exactly as a type error found by this module does.
+    subroutine scenario_toml_report_fatal()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_report(gen, "nproc", "nproc is only a warning here", &
+            severity = PF_TOML_WARN)     ! control: a warning returns
+        print '(a)', "control: the warning severity returned"
+        call pf_toml_report(gen, "nproc", "nproc must be at least ten")   ! -> aborts
+        print '(a)', "a fatal report was accepted"
+    end subroutine scenario_toml_report_fatal
 
     !> A severity that is none of the three constants must abort rather than pick one.
     subroutine scenario_toml_bad_severity()

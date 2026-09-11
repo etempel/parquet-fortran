@@ -62,6 +62,12 @@ contains
             new_unittest("get_alloc sizes the result from the file", test_get_alloc), &
             new_unittest("get_alloc_opt leaves the result unallocated when the key is absent", test_get_alloc_absent), &
             new_unittest("get_alloc_opt keeps a list the caller already held", test_get_alloc_opt_keeps_a_list), &
+            new_unittest("get_opt over a list keeps the variable for every element kind", &
+                test_get_opt_array_every_kind), &
+            new_unittest("get_alloc sizes from the file for every element kind", &
+                test_get_alloc_every_kind), &
+            new_unittest("get_alloc_opt leaves an absent key unallocated for every kind", &
+                test_get_alloc_opt_every_kind), &
             new_unittest("a string list keeps each element's own length", test_strings_lengths), &
             new_unittest("a string list survives closing the document", test_strings_outlive_document), &
             new_unittest("an absent optional string list has count 0", test_strings_absent), &
@@ -82,6 +88,10 @@ contains
             new_unittest("a new document can be built, saved and read back", test_build_and_save), &
             new_unittest("new_section upserts, on a built and on a loaded document", test_new_section_upserts), &
             new_unittest("update changes a key and set adds one", test_set_and_update), &
+            new_unittest("set and save round-trip every scalar and list kind", &
+                test_set_every_kind_round_trips), &
+            new_unittest("update changes a key for every scalar and list kind", &
+                test_update_every_kind), &
             new_unittest("append_section builds an array of tables", test_append_section), &
             new_unittest("save writes the effective configuration", test_save_effective), &
             new_unittest("get_opt records the variable's own value for save", test_opt_reaches_the_shadow), &
@@ -99,7 +109,9 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! Receives the suite's tests.
 
         testsuite = [ &
-            new_unittest("a warning sweep reaches the log", test_warn_reaches_the_log) &
+            new_unittest("a warning sweep reaches the log", test_warn_reaches_the_log), &
+            new_unittest("report logs a caller's complaint against a key's line", &
+                test_report_reaches_the_log) &
             ]
     end subroutine collect_tests_toml_serial
 
@@ -449,6 +461,235 @@ contains
             "a present list must overwrite the variable's entry values")
         call pf_toml_close(conf)
     end subroutine test_array_optional
+
+    !> `pf_toml_get_opt` over a caller-sized list, for every element kind.
+    !!
+    !! `test_array_optional` establishes what the optional list form means, on `real64`. Each kind
+    !! is a separate specific with its own extraction and its own copy back into the caller's
+    !! array, so the property worth re-asserting per kind is the one that makes this form useful:
+    !! an absent key leaves the caller's OWN entry values standing. A specific that zeroed the
+    !! array before looking, or that wrote a partial result on the absent path, hands back a
+    !! plausible list rather than failing -- which is why each kind is asked both questions, with
+    !! the present-key read as the negative control for the absent-key one.
+    subroutine test_get_opt_array_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        block
+            integer(int32) :: v(3)
+            v = [-1_int32, -2_int32, -3_int32]
+            call pf_toml_get_opt(gen, "no_such_list", v)
+            call check(error, all(v == [-1_int32, -2_int32, -3_int32]), &
+                "int32: an absent optional list must leave the caller's values")
+            if (allocated(error)) return
+            call pf_toml_get_opt(gen, "limits", v)
+            call check(error, all(v == [1_int32, 2_int32, 3_int32]), &
+                "int32: a present list must overwrite them")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(3)
+            v = [-1_int64, -2_int64, -3_int64]
+            call pf_toml_get_opt(gen, "no_such_list", v)
+            call check(error, all(v == [-1_int64, -2_int64, -3_int64]), &
+                "int64: an absent optional list must leave the caller's values")
+            if (allocated(error)) return
+            call pf_toml_get_opt(gen, "limits", v)
+            call check(error, all(v == [1_int64, 2_int64, 3_int64]), &
+                "int64: a present list must overwrite them")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(2)
+            v = [-1.0_real32, -2.0_real32]
+            call pf_toml_get_opt(gen, "no_such_list", v)
+            call check(error, all(abs(v - [-1.0_real32, -2.0_real32]) < 1.0e-6_real32), &
+                "real32: an absent optional list must leave the caller's values")
+            if (allocated(error)) return
+            call pf_toml_get_opt(gen, "weights", v)
+            call check(error, all(abs(v - [0.5_real32, 1.5_real32]) < 1.0e-6_real32), &
+                "real32: a present list must overwrite them")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: v(2)
+            v = [.false., .true.]
+            call pf_toml_get_opt(gen, "no_such_list", v)
+            call check(error, all(v .eqv. [.false., .true.]), &
+                "logical: an absent optional list must leave the caller's values")
+            if (allocated(error)) return
+            call pf_toml_get_opt(gen, "flags", v)
+            call check(error, all(v .eqv. [.true., .false.]), &
+                "logical: a present list must overwrite them")
+        end block
+        if (allocated(error)) return
+        block
+            ! Deliberately shortest first, as `test_build_and_save` is: the read side must not
+            ! size every element from the first one it sees.
+            character(len=24) :: v(3)
+            v(1) = "kept one"
+            v(2) = "kept two"
+            v(3) = "kept three"
+            call pf_toml_get_opt(gen, "no_such_list", v)
+            call check(error, v(1) == "kept one" .and. v(3) == "kept three", &
+                "character: an absent optional list must leave the caller's values")
+            if (allocated(error)) return
+            call pf_toml_get_opt(gen, "files", v)
+            call check(error, v(1) == "a" .and. v(2) == "bc" .and. v(3) == "a much longer third", &
+                "character: a present list must overwrite them, each at its own length")
+        end block
+        if (allocated(error)) return
+        call pf_toml_close(conf)
+    end subroutine test_get_opt_array_every_kind
+
+    !> `pf_toml_get_alloc` takes its size from the file, for every element kind.
+    !!
+    !! `test_get_alloc` establishes the form on `int32`. The size coming from the FILE is the whole
+    !! point, so each kind is read into a variable deliberately left unallocated and the length is
+    !! asserted as well as the values -- a specific that sized from anything else would still fill
+    !! the elements it did allocate.
+    subroutine test_get_alloc_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        block
+            integer(int32), allocatable :: v(:)
+            call pf_toml_get_alloc(gen, "limits", v)
+            call check(error, allocated(v), "int32: get_alloc must allocate the result")
+            if (allocated(error)) return
+            call check(error, size(v) == 3 .and. all(v == [1_int32, 2_int32, 3_int32]), &
+                "int32: get_alloc must size and fill from the file")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: v(:)
+            call pf_toml_get_alloc(gen, "limits", v)
+            call check(error, allocated(v), "int64: get_alloc must allocate the result")
+            if (allocated(error)) return
+            call check(error, size(v) == 3 .and. all(v == [1_int64, 2_int64, 3_int64]), &
+                "int64: get_alloc must size and fill from the file")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: v(:)
+            call pf_toml_get_alloc(gen, "weights", v)
+            call check(error, allocated(v), "real32: get_alloc must allocate the result")
+            if (allocated(error)) return
+            call check(error, size(v) == 2 .and. &
+                all(abs(v - [0.5_real32, 1.5_real32]) < 1.0e-6_real32), &
+                "real32: get_alloc must size and fill from the file")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: v(:)
+            call pf_toml_get_alloc(gen, "weights", v)
+            call check(error, allocated(v), "real64: get_alloc must allocate the result")
+            if (allocated(error)) return
+            call check(error, size(v) == 2 .and. &
+                all(abs(v - [0.5_real64, 1.5_real64]) < 1.0e-12_real64), &
+                "real64: get_alloc must size and fill from the file")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: v(:)
+            call pf_toml_get_alloc(gen, "flags", v)
+            call check(error, allocated(v), "logical: get_alloc must allocate the result")
+            if (allocated(error)) return
+            call check(error, size(v) == 2 .and. all(v .eqv. [.true., .false.]), &
+                "logical: get_alloc must size and fill from the file")
+        end block
+        if (allocated(error)) return
+        call pf_toml_close(conf)
+    end subroutine test_get_alloc_every_kind
+
+    !> `pf_toml_get_alloc_opt` for every element kind: absent leaves the variable exactly as found.
+    !!
+    !! `allocated(values)` is the caller's answer to "did the file set this key?", so the assertion
+    !! that matters per kind is that an absent key leaves an unallocated variable UNALLOCATED --
+    !! a specific that allocated a zero-length array instead would make an absent key and an empty
+    !! list indistinguishable, which is the one thing this form exists to keep apart.
+    subroutine test_get_alloc_opt_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        block
+            integer(int32), allocatable :: v(:)
+            call pf_toml_get_alloc_opt(gen, "no_such_list", v)
+            call check(error, .not. allocated(v), &
+                "int32: an absent key must leave the variable unallocated")
+            if (allocated(error)) return
+            call pf_toml_get_alloc_opt(gen, "limits", v)
+            call check(error, allocated(v), "int32: a present key must allocate it")
+            if (allocated(error)) return
+            call check(error, size(v) == 3 .and. all(v == [1_int32, 2_int32, 3_int32]), &
+                "int32: and fill it from the file")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: v(:)
+            call pf_toml_get_alloc_opt(gen, "no_such_list", v)
+            call check(error, .not. allocated(v), &
+                "int64: an absent key must leave the variable unallocated")
+            if (allocated(error)) return
+            call pf_toml_get_alloc_opt(gen, "limits", v)
+            call check(error, allocated(v), "int64: a present key must allocate it")
+            if (allocated(error)) return
+            call check(error, size(v) == 3 .and. all(v == [1_int64, 2_int64, 3_int64]), &
+                "int64: and fill it from the file")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: v(:)
+            call pf_toml_get_alloc_opt(gen, "no_such_list", v)
+            call check(error, .not. allocated(v), &
+                "real32: an absent key must leave the variable unallocated")
+            if (allocated(error)) return
+            call pf_toml_get_alloc_opt(gen, "weights", v)
+            call check(error, allocated(v), "real32: a present key must allocate it")
+            if (allocated(error)) return
+            call check(error, size(v) == 2 .and. &
+                all(abs(v - [0.5_real32, 1.5_real32]) < 1.0e-6_real32), &
+                "real32: and fill it from the file")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: v(:)
+            call pf_toml_get_alloc_opt(gen, "no_such_list", v)
+            call check(error, .not. allocated(v), &
+                "real64: an absent key must leave the variable unallocated")
+            if (allocated(error)) return
+            call pf_toml_get_alloc_opt(gen, "weights", v)
+            call check(error, allocated(v) .and. size(v) == 2, &
+                "real64: a present key must allocate and size it")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: v(:)
+            call pf_toml_get_alloc_opt(gen, "no_such_list", v)
+            call check(error, .not. allocated(v), &
+                "logical: an absent key must leave the variable unallocated")
+            if (allocated(error)) return
+            call pf_toml_get_alloc_opt(gen, "flags", v)
+            call check(error, allocated(v), "logical: a present key must allocate it")
+            if (allocated(error)) return
+            call check(error, size(v) == 2 .and. all(v .eqv. [.true., .false.]), &
+                "logical: and fill it from the file")
+        end block
+        if (allocated(error)) return
+        call pf_toml_close(conf)
+    end subroutine test_get_alloc_opt_every_kind
 
     !> `pf_toml_get_alloc` takes its size from the file rather than from the caller.
     subroutine test_get_alloc(error)
@@ -1339,6 +1580,144 @@ contains
         call pf_toml_close(conf)
     end subroutine test_set_and_update
 
+    !> `pf_toml_set` accepts every scalar and list kind, and `pf_toml_save` writes each one back.
+    !!
+    !! `test_build_and_save` establishes the build-save-reload loop over the kinds a caller reaches
+    !! for first; this is the rest of the matrix. The reload is what makes it an assertion rather
+    !! than a smoke test: each value has to survive being RENDERED to TOML text and parsed again,
+    !! so a writer emitting the wrong literal for its kind -- an integer where a float belongs, a
+    !! list punctuated wrongly -- fails here rather than producing a file nobody reads back.
+    !!
+    !! Values are deliberately distinct per element and per kind, so an element written from the
+    !! wrong slot cannot coincide with the right answer.
+    subroutine test_set_every_kind_round_trips(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: doc, sect, back, bsect
+        character(len=*), parameter :: out_file = "test_run/toml_set_every_kind.toml"
+        integer(int64) :: i64, i64a(3)
+        real(real32) :: r32, r32a(2)
+        real(real64) :: r64a(2)
+        logical :: loga(3)
+
+        call pf_toml_new(doc, "kinds")
+        call pf_toml_new_section(doc, "general", sect)
+        call pf_toml_set(sect, "big", 9000000000_int64)
+        call pf_toml_set(sect, "small", 0.25_real32)
+        call pf_toml_set(sect, "bigs", [11_int64, 22_int64, 33_int64])
+        call pf_toml_set(sect, "smalls", [0.5_real32, 2.25_real32])
+        call pf_toml_set(sect, "wides", [1.25_real64, 3.75_real64])
+        call pf_toml_set(sect, "switches", [.true., .false., .true.])
+        call pf_toml_save(doc, out_file)
+        call pf_toml_close(doc)
+
+        call pf_toml_load(back, out_file)
+        call pf_toml_section(back, "general", bsect)
+        call pf_toml_get(bsect, "big", i64)
+        call check(error, i64 == 9000000000_int64, &
+            "an int64 beyond int32's range must survive the write and the reload")
+        if (allocated(error)) return
+        call pf_toml_get(bsect, "small", r32)
+        call check(error, abs(r32 - 0.25_real32) < 1.0e-6_real32, "a real32 scalar must survive")
+        if (allocated(error)) return
+        call pf_toml_get(bsect, "bigs", i64a)
+        call check(error, all(i64a == [11_int64, 22_int64, 33_int64]), "an int64 list must survive")
+        if (allocated(error)) return
+        call pf_toml_get(bsect, "smalls", r32a)
+        call check(error, all(abs(r32a - [0.5_real32, 2.25_real32]) < 1.0e-6_real32), &
+            "a real32 list must survive")
+        if (allocated(error)) return
+        call pf_toml_get(bsect, "wides", r64a)
+        call check(error, all(abs(r64a - [1.25_real64, 3.75_real64]) < 1.0e-12_real64), &
+            "a real64 list must survive")
+        if (allocated(error)) return
+        call pf_toml_get(bsect, "switches", loga)
+        call check(error, all(loga .eqv. [.true., .false., .true.]), "a logical list must survive")
+        call pf_toml_close(back)
+    end subroutine test_set_every_kind_round_trips
+
+    !> `pf_toml_update` changes a key that is already there, for every scalar and list kind.
+    !!
+    !! `test_set_and_update` establishes what update means against set; each kind is its own
+    !! specific, and the assertion per kind is that a later `pf_toml_get` returns the NEW value --
+    !! an update that wrote into the shadow rather than the parsed document would leave the getter
+    !! answering the file's original, which is exactly the silent failure the two-function split
+    !! exists to avoid.
+    subroutine test_update_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text, str
+        integer(int64) :: i64
+        integer(int32) :: i32a(3)
+        real(real32) :: r32
+        real(real64) :: r64, r64a(2)
+        logical :: log1, loga(2)
+        integer(int64) :: i64a(3)
+        real(real32) :: r32a(2)
+        character(len=24) :: stra(3)
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+
+        call pf_toml_update(gen, "nproc", 8000000000_int64)
+        call pf_toml_get(gen, "nproc", i64)
+        call check(error, i64 == 8000000000_int64, "update: int64 scalar")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "factor", 0.75_real32)
+        call pf_toml_get(gen, "factor", r32)
+        call check(error, abs(r32 - 0.75_real32) < 1.0e-6_real32, "update: real32 scalar")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "factor", 1.5_real64)
+        call pf_toml_get(gen, "factor", r64)
+        call check(error, abs(r64 - 1.5_real64) < 1.0e-12_real64, "update: real64 scalar")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "verbose", .false.)
+        call pf_toml_get(gen, "verbose", log1)
+        call check(error, .not. log1, "update: logical scalar")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "name", "run two")
+        call pf_toml_get(gen, "name", str)
+        call check(error, str == "run two", "update: character scalar")
+        if (allocated(error)) return
+
+        call pf_toml_update(gen, "limits", [7_int32, 8_int32, 9_int32])
+        call pf_toml_get(gen, "limits", i32a)
+        call check(error, all(i32a == [7_int32, 8_int32, 9_int32]), "update: int32 list")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "limits", [70_int64, 80_int64, 90_int64])
+        call pf_toml_get(gen, "limits", i64a)
+        call check(error, all(i64a == [70_int64, 80_int64, 90_int64]), "update: int64 list")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "weights", [2.5_real32, 3.5_real32])
+        call pf_toml_get(gen, "weights", r32a)
+        call check(error, all(abs(r32a - [2.5_real32, 3.5_real32]) < 1.0e-6_real32), &
+            "update: real32 list")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "weights", [4.25_real64, 5.75_real64])
+        call pf_toml_get(gen, "weights", r64a)
+        call check(error, all(abs(r64a - [4.25_real64, 5.75_real64]) < 1.0e-12_real64), &
+            "update: real64 list")
+        if (allocated(error)) return
+        call pf_toml_update(gen, "flags", [.false., .true.])
+        call pf_toml_get(gen, "flags", loga)
+        call check(error, all(loga .eqv. [.false., .true.]), "update: logical list")
+        if (allocated(error)) return
+        stra(1) = "x"
+        stra(2) = "yy"
+        stra(3) = "a replacement third"
+        call pf_toml_update(gen, "files", stra)
+        stra = ""
+        call pf_toml_get(gen, "files", stra)
+        call check(error, stra(1) == "x" .and. stra(3) == "a replacement third", &
+            "update: character list")
+        if (allocated(error)) return
+        ! Every key touched above was already in the file and is marked read by the update, so the
+        ! sweep must stay silent: an update that failed to mark would report the key as unread.
+        call pf_toml_get(gen, "level", str)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_close(conf)
+    end subroutine test_update_every_kind
+
     !> `pf_toml_append_section` builds `[[name]]` entries that reload as entries.
     subroutine test_append_section(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
@@ -1497,6 +1876,76 @@ contains
         call pf_toml_check_all(conf)
         call pf_toml_close(conf)
     end subroutine read_shared_fixture
+    !> `pf_toml_report` puts a caller's own complaint in the log, against the key's source line.
+    !!
+    !! The point of this entry is the SOURCE EXCERPT: a validation message the calling program
+    !! writes ("these two lists must be the same length") is only useful if it shows the reader
+    !! which line to edit, and rendering that excerpt is the half no other entry in this module
+    !! exercises. Both arms are driven, because they answer differently and only one of them can
+    !! quote the file: a key that IS in the document carries an origin and gets the excerpt, and a
+    !! key that is not is reported plainly rather than refused.
+    !!
+    !! `PF_TOML_IGNORE` returns before writing anything, which is asserted by its message being
+    !! absent from a log that holds the other two.
+    !!
+    !! In the serial suite because it reconfigures the process-global default logger.
+    subroutine test_report_reaches_the_log(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=*), parameter :: log_file = "test_run/toml_report.log"
+        character(len=:), allocatable :: text
+        character(len=512) :: line
+        integer :: unit, ios
+        logical :: found_known, found_absent, found_ignored, found_excerpt
+
+        text = '[general]' // new_line("a") // 'b = 2' // new_line("a")
+
+        call pf_log_init(level = PF_LEVEL_INFO, name = "toml-test", console = .false.)
+        call pf_log_add_file(log_file, level = PF_LEVEL_INFO, append = .false.)
+
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "b", ios)
+        ! A key the file sets: reported with the excerpt that quotes its line.
+        call pf_toml_report(gen, "b", "b must be at least ten", severity = PF_TOML_WARN)
+        ! A key the file does not set: reported without one, rather than refused.
+        call pf_toml_report(gen, "absent_key", "absent_key would have been checked", &
+            severity = PF_TOML_WARN)
+        ! And the severity that says nothing at all.
+        call pf_toml_report(gen, "b", "this must never be logged", severity = PF_TOML_IGNORE)
+        call pf_toml_close(conf)
+
+        call pf_log_flush()
+        call pf_log_close()
+
+        found_known = .false.
+        found_absent = .false.
+        found_ignored = .false.
+        found_excerpt = .false.
+        open(newunit=unit, file=log_file, status="old", action="read", iostat=ios)
+        call check(error, ios == 0, "the log file must have been created")
+        if (allocated(error)) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, "b must be at least ten") > 0) found_known = .true.
+            if (index(line, "absent_key would have been checked") > 0) found_absent = .true.
+            if (index(line, "this must never be logged") > 0) found_ignored = .true.
+            ! The excerpt quotes the source line itself, which no message text contains.
+            if (index(line, "b = 2") > 0) found_excerpt = .true.
+        end do
+        close(unit)
+        call check(error, found_known, "a report against a key in the file must reach the log")
+        if (allocated(error)) return
+        call check(error, found_excerpt, &
+            "and must carry the source excerpt quoting that key's line")
+        if (allocated(error)) return
+        call check(error, found_absent, &
+            "a report against a key the file does not set must still reach the log")
+        if (allocated(error)) return
+        call check(error, .not. found_ignored, "PF_TOML_IGNORE must write nothing at all")
+    end subroutine test_report_reaches_the_log
+
 
     ! ================================================================================
     ! Logging integration (serial suite)

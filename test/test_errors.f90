@@ -2317,6 +2317,14 @@ contains
                 test_toml_key_too_long_aborts), &
             new_unittest("an unknown parquet_toml severity aborts", &
                 test_toml_bad_severity_aborts), &
+            new_unittest("reading a config scalar as a list aborts", &
+                test_toml_value_not_list_aborts), &
+            new_unittest("opening a config value as a section aborts", &
+                test_toml_name_not_a_section_aborts), &
+            new_unittest("an over-long config section path aborts rather than truncating", &
+                test_toml_path_too_long_aborts), &
+            new_unittest("a fatal parquet_toml report aborts", &
+                test_toml_report_fatal_aborts), &
             new_unittest("every legal parquet_toml path completes", &
                 test_toml_control_completes) &
             ]
@@ -16318,6 +16326,42 @@ contains
             failure_message="an unknown parquet_toml severity was expected to abort", &
             required_stderr="unknown severity")
     end subroutine test_toml_bad_severity_aborts
+
+    !> See `scenario_toml_value_not_list` (test/error_scenarios.f90).
+    subroutine test_toml_value_not_list_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_value_not_list", &
+            expect_abort=.true., &
+            failure_message="reading a config scalar as a list was expected to abort", &
+            required_stderr="config value is not a list")
+    end subroutine test_toml_value_not_list_aborts
+
+    !> See `scenario_toml_name_not_a_section` (test/error_scenarios.f90).
+    subroutine test_toml_name_not_a_section_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_name_not_a_section", &
+            expect_abort=.true., &
+            failure_message="opening a config value as a section was expected to abort", &
+            required_stderr="config name is not a section")
+    end subroutine test_toml_name_not_a_section_aborts
+
+    !> See `scenario_toml_path_too_long` (test/error_scenarios.f90).
+    subroutine test_toml_path_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_path_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long config section path was expected to abort", &
+            required_stderr="path is too long")
+    end subroutine test_toml_path_too_long_aborts
+
+    !> See `scenario_toml_report_fatal` (test/error_scenarios.f90).
+    subroutine test_toml_report_fatal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_report_fatal", &
+            expect_abort=.true., &
+            failure_message="a fatal parquet_toml report was expected to abort", &
+            required_stderr="nproc must be at least ten")
+    end subroutine test_toml_report_fatal_aborts
 
     !> THE NEGATIVE CONTROL for all of the above: the same setup, every legal path, exit 0.
     !!

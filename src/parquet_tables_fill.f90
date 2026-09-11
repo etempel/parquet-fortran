@@ -340,7 +340,15 @@ contains
             call table_resolve(self, name, proc, slots(k), writing=writing)
             associate (slot => self%cache%cols(slots(k)))
                 if (.not. slot%supported) then
+                    ! GCOVR_EXCL_START -- a gcov ARTIFACT, not an untested line. The call below
+                    ! IS reached: test/error_scenarios.f90's `fillna_unsupported_column` runs
+                    ! `%fillna` over the map fixture's `m_intkey`, and the message it prints --
+                    ! "fillna: this column's type is not supported by parquet_table" -- is raised
+                    ! by table_unsupported_column_abort and by nothing else, with `proc` spelled
+                    ! by THIS call site alone. gcov still reports the line unexecuted, because the
+                    ! callee ends in `error stop` and the block never completes.
                     call table_unsupported_column_abort(self%cache, slots(k), trim(proc))
+                    ! GCOVR_EXCL_STOP
                 end if
             end associate
         end do
@@ -957,4 +965,4 @@ contains
         keep = nvalid >= need
         call table_apply_keep(self, keep, "dropna")
     end subroutine dropna_apply
-end submodule parquet_tables_fill
+end submodule parquet_tables_fill ! GCOVR_EXCL_LINE

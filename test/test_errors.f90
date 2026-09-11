@@ -256,6 +256,31 @@ contains
                 test_read_dictionary_binary_unsupported_aborts), &
             new_unittest("%print_rows refuses a negative first=/last=", &
                 test_print_rows_negative_count_aborts), &
+            new_unittest("%print_rows refuses a negative last=", test_print_rows_negative_last_aborts), &
+            new_unittest("a parquet_date key on an integer index is refused by name", &
+                test_table_index_date_key_on_int_aborts), &
+            new_unittest("a parquet_time key on an integer index is refused by name", &
+                test_table_index_time_key_on_int_aborts), &
+            new_unittest("the hash engine refuses an over-sized string-keyed join", &
+                test_join_max_rows_hash_string_key_aborts), &
+            new_unittest("the hash engine refuses an over-sized two-column join", &
+                test_join_max_rows_hash_tuple_key_aborts), &
+            new_unittest("%print_rows follows message_stream when no unit= is given", &
+                test_print_rows_follows_message_stream), &
+            new_unittest("%get_matrix refuses a column that holds no values", &
+                test_get_matrix_unsupported_column_aborts), &
+            new_unittest("%keep_columns truncates a long list of absent names", &
+                test_keep_columns_many_missing_aborts), &
+            new_unittest("%join refuses a columns= name whose type cannot be read", &
+                test_join_columns_unsupported_aborts), &
+            new_unittest("parquet_derive_schema refuses a blank name=", &
+                test_derive_schema_blank_name_aborts), &
+            new_unittest("parquet_open_writer_like refuses a table with nothing resident", &
+                test_open_writer_like_nothing_resident_aborts), &
+            new_unittest("a sink schema naming a column that holds no values is refused", &
+                test_sink_schema_names_an_unreadable_column_aborts), &
+            new_unittest("an overflowing int64 group sum is refused, not wrapped", &
+                test_agg_int64_sum_overflow_aborts), &
             new_unittest("%print_rows refuses rows= together with first=/last=", &
                 test_print_rows_rows_with_first_aborts), &
             new_unittest("%print_rows refuses a slice row outside the table", &
@@ -17078,5 +17103,136 @@ contains
             failure_message="a literal list on a date column was expected to abort", &
             required_stderr="is not supported on a date column -- bind the members as an array of parquet_date")
     end subroutine test_filter_temporal_literal_list_aborts
+
+
+    !> last= has its own negative guard, separate from first='s.
+    subroutine test_print_rows_negative_last_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "print_rows_negative_last", expect_abort=.true., &
+            failure_message="%print_rows(last=-1) was expected to abort", &
+            required_stderr="got last=-1")
+    end subroutine test_print_rows_negative_last_aborts
+
+    !> A column this library cannot read has no values to carry across a join.
+    subroutine test_join_columns_unsupported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_columns_unsupported", expect_abort=.true., &
+            failure_message="%join(columns=) naming an unreadable column was expected to abort", &
+            required_stderr="nothing to carry across")
+    end subroutine test_join_columns_unsupported_aborts
+
+
+    !> MAML requires a table: value, so a blank name= is refused where it is given.
+    subroutine test_derive_schema_blank_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "derive_schema_blank_name", expect_abort=.true., &
+            failure_message="parquet_derive_schema(name='') was expected to abort", &
+            required_stderr="name= must not be blank")
+    end subroutine test_derive_schema_blank_name_aborts
+
+    !> A schema cannot be derived from columns nothing has read.
+    subroutine test_open_writer_like_nothing_resident_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "open_writer_like_nothing_resident", &
+            expect_abort=.true., &
+            failure_message="parquet_open_writer_like on an unread table was expected to abort", &
+            required_stderr="no resident column")
+    end subroutine test_open_writer_like_nothing_resident_aborts
+
+    !> A sink schema naming a column that holds no values is refused at open.
+    subroutine test_sink_schema_names_an_unreadable_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sink_schema_names_an_unreadable_column", &
+            expect_abort=.true., &
+            failure_message="a sink schema naming an unreadable column was expected to abort", &
+            required_stderr="holds no values")
+    end subroutine test_sink_schema_names_an_unreadable_column_aborts
+
+    !> An overflowing int64 group sum is refused rather than wrapped.
+    subroutine test_agg_int64_sum_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "agg_int64_sum_overflow", expect_abort=.true., &
+            failure_message="an overflowing int64 group sum was expected to abort", &
+            required_stderr="overflows")
+    end subroutine test_agg_int64_sum_overflow_aborts
+
+
+    !> With no unit=, %print_rows writes where message_stream says, which is process-global.
+    subroutine test_print_rows_follows_message_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "print_rows_follows_message_stream", &
+            "streammarker", expect_on="stderr", &
+            failure_message="message_stream=stderr should move %print_rows's output to stderr")
+    end subroutine test_print_rows_follows_message_stream
+
+
+    !> The same guard, reached through the matrix verbs' own prepare step.
+    subroutine test_get_matrix_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_matrix_unsupported_column", &
+            expect_abort=.true., &
+            failure_message="%get_matrix on a column that holds no values was expected to abort", &
+            required_stderr="m_intkey")
+    end subroutine test_get_matrix_unsupported_column_aborts
+
+    !> A long list of missing names is capped and ellipsised rather than printed whole.
+    subroutine test_keep_columns_many_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "keep_columns_many_missing", &
+            expect_abort=.true., &
+            failure_message="%keep_columns naming twenty absent columns was expected to abort", &
+            required_stderr="absent_col1, absent_col2")
+    end subroutine test_keep_columns_many_missing_aborts
+
+
+    !> The hash engine's max_rows report probes a string key through its own shape.
+    subroutine test_join_max_rows_hash_string_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_hash_string_key", &
+            expect_abort=.true., &
+            failure_message="a string-keyed hash join over max_rows= was expected to abort", &
+            required_stderr="max_rows")
+    end subroutine test_join_max_rows_hash_string_key_aborts
+
+    !> And a composite key through the tuple shape.
+    subroutine test_join_max_rows_hash_tuple_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_hash_tuple_key", &
+            expect_abort=.true., &
+            failure_message="a two-column hash join over max_rows= was expected to abort", &
+            required_stderr="max_rows")
+    end subroutine test_join_max_rows_hash_tuple_key_aborts
+
+
+    !> The refusal names the key class the caller asked for, not the column's.
+    subroutine test_table_index_date_key_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_index_date_key_on_int", &
+            expect_abort=.true., &
+            failure_message="a parquet_date key on an integer index was expected to abort", &
+            required_stderr="a parquet_date")
+    end subroutine test_table_index_date_key_on_int_aborts
+
+    !> And the time class has its own word.
+    subroutine test_table_index_time_key_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_index_time_key_on_int", &
+            expect_abort=.true., &
+            failure_message="a parquet_time key on an integer index was expected to abort", &
+            required_stderr="a parquet_time")
+    end subroutine test_table_index_time_key_on_int_aborts
 
 end module test_errors

@@ -78,6 +78,9 @@ contains
             new_unittest("argsort_by_values hands back the order without applying it", &
                 test_argsort_by_values), &
             new_unittest("argsort_by_values fills an int32 permutation too", test_argsort_by_values_i32), &
+            new_unittest("sort_by_values accepts every value type", test_sort_by_values_every_kind), &
+            new_unittest("argsort_by_values crosses every value type with both perm kinds", &
+                test_argsort_by_values_every_kind), &
             new_unittest("value_counts orders by count descending, then by value ascending", &
                 test_value_counts_order), &
             new_unittest("value_counts descending=.false. puts the rarest first", &
@@ -620,6 +623,142 @@ contains
         call t%argsort_by_values(v, perm)
         call check(error, all(perm == [2, 3, 1]), "an int32 permutation says the same thing")
     end subroutine test_argsort_by_values_i32
+
+    !> Every `%sort_by_values` specific, over one fixture and one order.
+    !!
+    !! The five differ only in the type of `values`; each one's whole body is to forward that
+    !! array to `pf_argsort` and apply what comes back. So the failure they can have is a forward
+    !! that loses or mistypes the values, and the assertion that catches it is the resulting row
+    !! order. One rank pattern -- `[3, 1, 2]` -- is spelled in all five types, so every specific
+    !! must land the same `id` order, and a cell that answered differently named itself.
+    subroutine test_sort_by_values_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        !! Ranks [3, 1, 2] over ids [10, 20, 30]: row 2 sorts first, then row 3, then row 1.
+        integer(int32), parameter :: WANT(3) = [20, 30, 10]
+        !
+        call build_distinct(t)
+        call t%sort_by_values([3_int32, 1_int32, 2_int32])
+        call expect_ids(error, t, WANT, "int32 values")
+        if (allocated(error)) return
+        !
+        call build_distinct(t)
+        call t%sort_by_values([3_int64, 1_int64, 2_int64])
+        call expect_ids(error, t, WANT, "int64 values")
+        if (allocated(error)) return
+        !
+        call build_distinct(t)
+        call t%sort_by_values([3.0_real32, 1.0_real32, 2.0_real32])
+        call expect_ids(error, t, WANT, "real32 values")
+        if (allocated(error)) return
+        !
+        call build_distinct(t)
+        call t%sort_by_values([3.0_real64, 1.0_real64, 2.0_real64])
+        call expect_ids(error, t, WANT, "real64 values")
+        if (allocated(error)) return
+        !
+        call build_distinct(t)
+        call t%sort_by_values(["c", "a", "b"])
+        call expect_ids(error, t, WANT, "character values")
+    end subroutine test_sort_by_values_every_kind
+
+    !> Every `%argsort_by_values` specific: five value types crossed with both permutation kinds.
+    !!
+    !! **The cross is the point, not the diagonal.** A caller picks the value type and the
+    !! permutation kind independently, so the mixed cells -- int32 values into an int64 `perm`,
+    !! real64 values into an int32 one -- are as reachable as the matching ones and were the cells
+    !! resting on nothing. The same `[3, 1, 2]` ranks used by the sort sweep above run through all
+    !! ten, so each must hand back the same permutation in its own integer kind.
+    subroutine test_argsort_by_values_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        integer(int32), allocatable :: p32(:)
+        integer(int64), allocatable :: p64(:)
+        !
+        call build_distinct(t)
+        !
+        call t%argsort_by_values([3_int32, 1_int32, 2_int32], p32)
+        call expect_perm32(error, p32, "int32 values, int32 perm")
+        if (allocated(error)) return
+        call t%argsort_by_values([3_int32, 1_int32, 2_int32], p64)
+        call expect_perm64(error, p64, "int32 values, int64 perm")
+        if (allocated(error)) return
+        !
+        call t%argsort_by_values([3_int64, 1_int64, 2_int64], p32)
+        call expect_perm32(error, p32, "int64 values, int32 perm")
+        if (allocated(error)) return
+        call t%argsort_by_values([3_int64, 1_int64, 2_int64], p64)
+        call expect_perm64(error, p64, "int64 values, int64 perm")
+        if (allocated(error)) return
+        !
+        call t%argsort_by_values([3.0_real32, 1.0_real32, 2.0_real32], p32)
+        call expect_perm32(error, p32, "real32 values, int32 perm")
+        if (allocated(error)) return
+        call t%argsort_by_values([3.0_real32, 1.0_real32, 2.0_real32], p64)
+        call expect_perm64(error, p64, "real32 values, int64 perm")
+        if (allocated(error)) return
+        !
+        call t%argsort_by_values([3.0_real64, 1.0_real64, 2.0_real64], p32)
+        call expect_perm32(error, p32, "real64 values, int32 perm")
+        if (allocated(error)) return
+        call t%argsort_by_values([3.0_real64, 1.0_real64, 2.0_real64], p64)
+        call expect_perm64(error, p64, "real64 values, int64 perm")
+        if (allocated(error)) return
+        !
+        call t%argsort_by_values(["c", "a", "b"], p32)
+        call expect_perm32(error, p32, "character values, int32 perm")
+        if (allocated(error)) return
+        call t%argsort_by_values(["c", "a", "b"], p64)
+        call expect_perm64(error, p64, "character values, int64 perm")
+        if (allocated(error)) return
+        !
+        ! The negative control for the whole sweep: ten cells agreeing on one answer would also
+        ! be satisfied by ten specifics that all ignored `values` and returned identity. They do
+        ! not -- identity is [1, 2, 3], and every cell above said [2, 3, 1].
+        call check(error, .not. all(p64 == [1_int64, 2_int64, 3_int64]), &
+            "the swept answer must not be the identity permutation")
+    end subroutine test_argsort_by_values_every_kind
+
+    !> Asserts the table's `id` column is in `want`'s order, naming `label` if it is not.
+    subroutine expect_ids(error, t, want, label)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table), intent(inout) :: t !! the sorted table.
+        integer(int32), intent(in) :: want(:) !! the expected `id` order.
+        character(len=*), intent(in) :: label !! names the specific in a failure message.
+        integer(int32), allocatable :: id(:)
+        !
+        call t%get("id", id)
+        call check(error, size(id) == size(want), label//": the row count must survive the sort")
+        if (allocated(error)) return
+        call check(error, all(id == want), label//": the rows must land in the values' order")
+    end subroutine expect_ids
+
+    !> Asserts an int32 permutation equals the sweep's expected `[2, 3, 1]`.
+    subroutine expect_perm32(error, perm, label)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int32), allocatable, intent(in) :: perm(:) !! the permutation to check.
+        character(len=*), intent(in) :: label !! names the specific in a failure message.
+        !
+        call check(error, allocated(perm), label//": the permutation must come back allocated")
+        if (allocated(error)) return
+        call check(error, size(perm) == 3, label//": one entry per row")
+        if (allocated(error)) return
+        call check(error, all(perm == [2, 3, 1]), label//": the order the values imply")
+    end subroutine expect_perm32
+
+    !> Asserts an int64 permutation equals the sweep's expected `[2, 3, 1]`.
+    subroutine expect_perm64(error, perm, label)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64), allocatable, intent(in) :: perm(:) !! the permutation to check.
+        character(len=*), intent(in) :: label !! names the specific in a failure message.
+        !
+        call check(error, allocated(perm), label//": the permutation must come back allocated")
+        if (allocated(error)) return
+        call check(error, size(perm) == 3, label//": one entry per row")
+        if (allocated(error)) return
+        call check(error, all(perm == [2_int64, 3_int64, 1_int64]), &
+            label//": the order the values imply")
+    end subroutine expect_perm64
 
     ! ---- fixture files ----------------------------------------------------------------------
 

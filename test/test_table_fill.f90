@@ -98,7 +98,18 @@ contains
             new_unittest("dropna counts a vector row null if any element is", test_dropna_vector), &
             new_unittest("fillna and dropna on a slice see the slice only", test_fill_on_a_slice), &
             new_unittest("fillna resolves every value kind, in both name forms", &
-                test_fillna_every_value_kind) &
+                test_fillna_every_value_kind), &
+            new_unittest("fillna fills every vector kind", test_fillna_every_vector_kind), &
+            new_unittest("fillna fills every temporal vector kind", &
+                test_fillna_every_temporal_vector_kind), &
+            new_unittest("ffill and bfill scan every scalar kind", &
+                test_scan_fill_every_scalar_kind), &
+            new_unittest("ffill scans every vector kind element by element", &
+                test_scan_fill_every_vector_kind), &
+            new_unittest("every ffill/bfill entry point forwards what it was given", &
+                test_ffill_bfill_every_entry_point), &
+            new_unittest("dropna how=any spelled out matches the default", &
+                test_dropna_how_any_spelled_out) &
             ]
     end subroutine collect_tests_table_fill
 
@@ -1093,4 +1104,432 @@ contains
         call check(error, gt(2)%hour() == 4 .and. gt(2)%minute() == 5, &
             "the parquet_time value reached the time column")
     end subroutine test_fillna_every_value_kind
+
+    !> `%fillna` over the four VECTOR kinds the single int32 vector test does not reach.
+    !!
+    !! `fillna_column` dispatches on the column's kind, and the vector arms are not the scalar
+    !! arms with a loop bolted on: each one takes its own typed `parquet_column_data_ptr` and
+    !! masks with `valid(1:w, 1:n)` rather than `valid(1, 1:n)`. An arm that used the scalar
+    !! mask would fill element 1 of every row and leave the rest null, which the existing int32
+    !! test would catch for int32 alone. Two elements per row, with the null in a DIFFERENT
+    !! element for each column, is what makes that failure visible here.
+    subroutine test_fillna_every_vector_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int64) :: a64(2,3)
+        real(real32) :: a32(2,3)
+        real(real64) :: a64r(2,3)
+        logical :: ab(2,3)
+        logical :: m(2,3)
+        integer(int64), allocatable :: g64(:,:)
+        real(real32), allocatable :: g32(:,:)
+        real(real64), allocatable :: g64r(:,:)
+        logical, allocatable :: gb(:,:)
+
+        a64 = reshape([1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64], [2, 3])
+        a32 = reshape([1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32, 5.5_real32, 6.5_real32], [2, 3])
+        a64r = reshape([1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64, 5.5_real64, 6.5_real64], [2, 3])
+        ab = reshape([.true., .true., .true., .true., .true., .true.], [2, 3])
+        call parquet_new_table(t)
+        call t%add_column("i64v", a64)
+        call t%add_column("f32v", a32)
+        call t%add_column("f64v", a64r)
+        call t%add_column("blv", ab)
+        ! A different element is nulled in each column, so an arm that filled a fixed element
+        ! rather than the masked one cannot pass by agreeing with its neighbour.
+        m = .true.; m(1, 2) = .false.
+        call t%set_null("i64v", m)
+        m = .true.; m(2, 1) = .false.
+        call t%set_null("f32v", m)
+        m = .true.; m(1, 3) = .false.
+        call t%set_null("f64v", m)
+        m = .true.; m(2, 2) = .false.
+        call t%set_null("blv", m)
+
+        call t%fillna("i64v", -7_int64)
+        call t%fillna("f32v", -7.5_real32)
+        call t%fillna("f64v", -8.5_real64)
+        call t%fillna("blv", .false.)
+
+        call check(error, .not. (t%has_nulls("i64v") .or. t%has_nulls("f32v") &
+            .or. t%has_nulls("f64v") .or. t%has_nulls("blv")), &
+            "every vector kind must clear its column's nulls")
+        if (allocated(error)) return
+        call t%get("i64v", g64)
+        call check(error, g64(1, 2) == -7_int64 .and. g64(2, 2) == 4_int64, &
+            "int64 vector: the nulled element takes the value and its neighbour does not")
+        if (allocated(error)) return
+        call t%get("f32v", g32)
+        call check(error, g32(2, 1) == -7.5_real32 .and. g32(1, 1) == 1.5_real32, &
+            "real32 vector: the nulled element takes the value and its neighbour does not")
+        if (allocated(error)) return
+        call t%get("f64v", g64r)
+        call check(error, g64r(1, 3) == -8.5_real64 .and. g64r(2, 3) == 6.5_real64, &
+            "real64 vector: the nulled element takes the value and its neighbour does not")
+        if (allocated(error)) return
+        call t%get("blv", gb)
+        call check(error, (.not. gb(2, 2)) .and. gb(1, 2), &
+            "logical vector: the nulled element takes the value and its neighbour does not")
+    end subroutine test_fillna_every_vector_kind
+
+    !> `%fillna` over the three TEMPORAL vector kinds.
+    !!
+    !! These are the arms that loop element by element rather than masking, and each ends with its
+    !! own `%compact_validity()` -- a temporal column caches "does this hold a null", so an arm
+    !! that wrote the values and skipped the compaction leaves a column that reads back full of
+    !! values and still claims to be null. `%has_nulls` after the fill is what sees that, exactly
+    !! as `test_fillna_temporal` does for the scalar case.
+    !!
+    !! Default-initialized temporal elements are already null, so no `%set_null` is needed; only
+    !! the elements set below are valid.
+    subroutine test_fillna_every_temporal_vector_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_date) :: dv(2,3), dfill
+        type(parquet_time) :: tv(2,3), tfill
+        type(parquet_timestamp) :: sv(2,3), sfill
+        type(parquet_date), allocatable :: gd(:,:)
+        type(parquet_time), allocatable :: gt(:,:)
+        type(parquet_timestamp), allocatable :: gs(:,:)
+
+        ! Element (1,1) of each is given a value; every other element stays null.
+        call dv(1,1)%set(2020, 1, 1)
+        call tv(1,1)%set(1, 2, 3)
+        call sv(1,1)%set(2020, 1, 1, 1, 2, 3)
+        call parquet_new_table(t)
+        call t%add_column("dv", dv)
+        call t%add_column("tv", tv)
+        call t%add_column("sv", sv)
+        call check(error, t%has_nulls("dv") .and. t%has_nulls("tv") .and. t%has_nulls("sv"), &
+            "the unset elements must start null")
+        if (allocated(error)) return
+        ! Arms the has_nulls trap: with the cache clean and saying .true., an arm that fills the
+        ! values but never compacts reports a column of nulls that has none.
+        call t%compact_validity("dv")
+        call t%compact_validity("tv")
+        call t%compact_validity("sv")
+
+        call dfill%set(1970, 1, 1)
+        call tfill%set(4, 5, 6)
+        call sfill%set(1970, 1, 1, 4, 5, 6)
+        call t%fillna("dv", dfill)
+        call t%fillna("tv", tfill)
+        call t%fillna("sv", sfill)
+
+        call check(error, .not. (t%has_nulls("dv") .or. t%has_nulls("tv") .or. t%has_nulls("sv")), &
+            "every temporal vector kind must clear its column's nulls")
+        if (allocated(error)) return
+        call t%get("dv", gd)
+        call check(error, gd(2, 3)%year() == 1970 .and. gd(1, 1)%year() == 2020, &
+            "date vector: the null elements take the fill and the set one is untouched")
+        if (allocated(error)) return
+        call t%get("tv", gt)
+        call check(error, gt(2, 3)%hour() == 4 .and. gt(1, 1)%hour() == 1, &
+            "time vector: the null elements take the fill and the set one is untouched")
+        if (allocated(error)) return
+        call t%get("sv", gs)
+        call check(error, gs(2, 3) == sfill .and. gs(1, 1) == sv(1, 1), &
+            "timestamp vector: the null elements take the fill and the set one is untouched")
+    end subroutine test_fillna_every_temporal_vector_kind
+
+    !> `%ffill` and `%bfill` over every SCALAR kind but the int32 and string ones already tested.
+    !!
+    !! `scan_fill_column` has its own per-kind arm, separate from `fillna_column`'s, because a
+    !! scan carries the previous value forward rather than writing a constant -- so each arm holds
+    !! a typed `last` of its own. The shared mask `[null, value, null, null, value]` is filled in
+    !! both directions from one fixture: forward leaves row 1 null and carries row 2 into rows 3
+    !! and 4; backward leaves nothing null and pulls row 5 back into rows 3 and 4. Asserting BOTH
+    !! directions is what distinguishes a real scan from an arm that merely copied one neighbour.
+    subroutine test_scan_fill_every_scalar_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        logical, parameter :: MASK(5) = [.false., .true., .false., .false., .true.]
+        type(parquet_time) :: tmv(5)
+        type(parquet_timestamp) :: tsv(5)
+        integer(int64), allocatable :: g64(:)
+        real(real32), allocatable :: g32(:)
+        real(real64), allocatable :: g64r(:)
+        logical, allocatable :: gb(:), valid(:)
+        type(parquet_time), allocatable :: gt(:)
+        type(parquet_timestamp), allocatable :: gs(:)
+        integer :: i
+
+        do i = 1, 5
+            call tmv(i)%set(i, 0, 0)
+            call tsv(i)%set(2020, 1, i, i, 0, 0)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("i64", [1_int64, 2_int64, 3_int64, 4_int64, 5_int64])
+        call t%add_column("f32", [1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32])
+        call t%add_column("f64", [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64])
+        call t%add_column("bl", [.false., .true., .false., .false., .false.])
+        call t%add_column("tm", tmv)
+        call t%add_column("ts", tsv)
+        call t%set_null("i64", MASK)
+        call t%set_null("f32", MASK)
+        call t%set_null("f64", MASK)
+        call t%set_null("bl", MASK)
+        call t%set_null("tm", MASK)
+        call t%set_null("ts", MASK)
+
+        call t%ffill("i64, f32, f64, bl, tm, ts")
+        call t%get("i64", g64, is_valid=valid)
+        call check(error, .not. valid(1), "int64: ffill must leave a LEADING null alone")
+        if (allocated(error)) return
+        call check(error, g64(3) == 2_int64 .and. g64(4) == 2_int64 .and. g64(5) == 5_int64, &
+            "int64: row 2 carries forward into rows 3 and 4, and row 5 keeps its own value")
+        if (allocated(error)) return
+        call t%get("f32", g32)
+        call check(error, g32(3) == 2.0_real32 .and. g32(4) == 2.0_real32, "real32 carries forward")
+        if (allocated(error)) return
+        call t%get("f64", g64r)
+        call check(error, g64r(3) == 2.0_real64 .and. g64r(4) == 2.0_real64, "real64 carries forward")
+        if (allocated(error)) return
+        call t%get("bl", gb)
+        call check(error, gb(3) .and. gb(4), "logical carries forward")
+        if (allocated(error)) return
+        call t%get("tm", gt)
+        call check(error, gt(3)%hour() == 2 .and. gt(4)%hour() == 2, "time carries forward")
+        if (allocated(error)) return
+        call t%get("ts", gs)
+        call check(error, gs(3) == tsv(2) .and. gs(4) == tsv(2), "timestamp carries forward")
+        if (allocated(error)) return
+
+        ! The other direction, from a fresh fixture: bfill must pull row 5 BACK into rows 3 and 4,
+        ! and must leave nothing null, since row 1's value comes from row 2.
+        call parquet_new_table(t)
+        call t%add_column("i64", [1_int64, 2_int64, 3_int64, 4_int64, 5_int64])
+        call t%add_column("tm", tmv)
+        call t%set_null("i64", MASK)
+        call t%set_null("tm", MASK)
+        call t%bfill("i64, tm")
+        call t%get("i64", g64, is_valid=valid)
+        call check(error, all(valid), "int64: bfill leaves no null, since row 1 takes row 2's value")
+        if (allocated(error)) return
+        call check(error, g64(1) == 2_int64 .and. g64(3) == 5_int64 .and. g64(4) == 5_int64, &
+            "int64: bfill pulls the LATER value back, which is the opposite of ffill's answer")
+        if (allocated(error)) return
+        call t%get("tm", gt)
+        call check(error, gt(3)%hour() == 5 .and. gt(4)%hour() == 5, "time fills backward too")
+    end subroutine test_scan_fill_every_scalar_kind
+
+    !> `%ffill` over every VECTOR kind: each element is its own independent series.
+    !!
+    !! The vector arms carry one `last` PER ELEMENT, not one per column, which is the rule
+    !! `test_ffill_vector` states for int32 and which nothing states for the rest. The fixture
+    !! nulls element 1 and element 2 in DIFFERENT rows, so an arm carrying a single `last` across
+    !! the whole row would pull element 2's value into element 1 and be caught here.
+    subroutine test_scan_fill_every_vector_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int64) :: a64(2,3)
+        real(real32) :: a32(2,3)
+        real(real64) :: a64r(2,3)
+        logical :: ab(2,3)
+        type(parquet_date) :: dv(2,3)
+        type(parquet_time) :: tv(2,3)
+        type(parquet_timestamp) :: sv(2,3)
+        logical :: m(2,3)
+        integer(int64), allocatable :: g64(:,:)
+        real(real32), allocatable :: g32(:,:)
+        real(real64), allocatable :: g64r(:,:)
+        logical, allocatable :: gb(:,:)
+        type(parquet_date), allocatable :: gd(:,:)
+        type(parquet_time), allocatable :: gt(:,:)
+        type(parquet_timestamp), allocatable :: gs(:,:)
+        integer :: i, j
+
+        do j = 1, 3
+            do i = 1, 2
+                a64(i, j) = int(i*10 + j, int64)
+                a32(i, j) = real(i*10 + j, real32)
+                a64r(i, j) = real(i*10 + j, real64)
+                ab(i, j) = (i == 1)
+                call dv(i, j)%set(2020, i, j)
+                call tv(i, j)%set(i, j, 0)
+                call sv(i, j)%set(2020, 1, 1, i, j, 0)
+            end do
+        end do
+        ! Element 1 is null in row 2; element 2 is null in row 3. Different rows, so one `last`
+        ! shared across the row would show.
+        m = .true.
+        m(1, 2) = .false.
+        m(2, 3) = .false.
+
+        call parquet_new_table(t)
+        call t%add_column("i64v", a64)
+        call t%add_column("f32v", a32)
+        call t%add_column("f64v", a64r)
+        call t%add_column("blv", ab)
+        call t%add_column("dv", dv)
+        call t%add_column("tv", tv)
+        call t%add_column("sv", sv)
+        call t%set_null("i64v", m)
+        call t%set_null("f32v", m)
+        call t%set_null("f64v", m)
+        call t%set_null("blv", m)
+        call t%set_null("dv", m)
+        call t%set_null("tv", m)
+        call t%set_null("sv", m)
+
+        call t%ffill("i64v, f32v, f64v, blv, dv, tv, sv")
+
+        call t%get("i64v", g64)
+        call check(error, g64(1, 2) == 11_int64, &
+            "int64 vector: element 1 carries its OWN previous row forward")
+        if (allocated(error)) return
+        call check(error, g64(2, 3) == 22_int64, &
+            "int64 vector: and element 2 carries its own, not element 1's")
+        if (allocated(error)) return
+        call t%get("f32v", g32)
+        call check(error, g32(1, 2) == 11.0_real32 .and. g32(2, 3) == 22.0_real32, &
+            "real32 vector: each element is its own series")
+        if (allocated(error)) return
+        call t%get("f64v", g64r)
+        call check(error, g64r(1, 2) == 11.0_real64 .and. g64r(2, 3) == 22.0_real64, &
+            "real64 vector: each element is its own series")
+        if (allocated(error)) return
+        call t%get("blv", gb)
+        call check(error, gb(1, 2) .and. .not. gb(2, 3), &
+            "logical vector: each element carries its own previous value")
+        if (allocated(error)) return
+        call t%get("dv", gd)
+        call check(error, gd(1, 2)%month() == 1 .and. gd(1, 2)%day() == 1, &
+            "date vector: element 1 of row 2 takes element 1 of row 1")
+        if (allocated(error)) return
+        call t%get("tv", gt)
+        call check(error, gt(1, 2)%minute() == 1 .and. gt(2, 3)%minute() == 2, &
+            "time vector: each element carries its own previous value")
+        if (allocated(error)) return
+        call t%get("sv", gs)
+        call check(error, gs(1, 2) == sv(1, 1) .and. gs(2, 3) == sv(2, 2), &
+            "timestamp vector: each element carries its own previous value")
+    end subroutine test_scan_fill_every_vector_kind
+
+    !> The twelve `%ffill`/`%bfill` entry points, and `%fillna`'s real32 name-string form.
+    !!
+    !! `limit` is optional and comes in both integer kinds, which per CLAUDE.md cannot disambiguate
+    !! a generic -- so each direction is a base specific plus two kinded ones, in each of the two
+    !! name forms. Twelve procedures whose whole body is one forwarding call, and a forward that
+    !! named the wrong direction or dropped `limit` is invisible until something calls it.
+    !!
+    !! The fixture is the run shape `write_run_fixture` uses, built in memory: valid at rows 3, 4
+    !! and 7 only. `limit=1` is what separates a forwarded limit from a dropped one -- with it,
+    !! row 5 fills and row 6 does not.
+    subroutine test_ffill_bfill_every_entry_point(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        logical, parameter :: MASK(8) = &
+            [.false., .false., .true., .true., .false., .false., .true., .false.]
+        integer(int32), allocatable :: g(:)
+        logical, allocatable :: valid(:)
+        real(real32), allocatable :: gf(:)
+
+        ! ---- the array name form, no limit ----
+        call build_run_table(t, MASK)
+        call t%ffill(["v"])
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(5) == 40 .and. g(6) == 40 .and. g(8) == 70, &
+            "ffill(names array) fills every trailing row of each run")
+        if (allocated(error)) return
+        call check(error, .not. (valid(1) .or. valid(2)), "and leaves the leading run null")
+        if (allocated(error)) return
+
+        ! ---- the array name form, int32 limit ----
+        call build_run_table(t, MASK)
+        call t%ffill(["v"], limit=1)
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(5) == 40 .and. .not. valid(6), &
+            "ffill(names array, int32 limit) must stop after one row")
+        if (allocated(error)) return
+
+        ! ---- the array name form, int64 limit ----
+        call build_run_table(t, MASK)
+        call t%ffill(["v"], limit=1_int64)
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(5) == 40 .and. .not. valid(6), &
+            "ffill(names array, int64 limit) must agree with the int32 form")
+        if (allocated(error)) return
+
+        ! ---- the name-string form, int64 limit ----
+        call build_run_table(t, MASK)
+        call t%ffill("v", limit=1_int64)
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(5) == 40 .and. .not. valid(6), &
+            "ffill(name string, int64 limit) must agree too")
+        if (allocated(error)) return
+
+        ! ---- bfill, all three array-name forms ----
+        call build_run_table(t, MASK)
+        call t%bfill(["v"])
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(1) == 30 .and. g(2) == 30 .and. g(5) == 70 .and. g(6) == 70, &
+            "bfill(names array) pulls the LATER value back, the opposite of ffill's answer")
+        if (allocated(error)) return
+        call check(error, .not. valid(8), "and leaves the trailing run null")
+        if (allocated(error)) return
+
+        call build_run_table(t, MASK)
+        call t%bfill(["v"], limit=1)
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(2) == 30 .and. .not. valid(1), &
+            "bfill(names array, int32 limit) must stop after one row")
+        if (allocated(error)) return
+
+        call build_run_table(t, MASK)
+        call t%bfill(["v"], limit=1_int64)
+        call t%get("v", g, is_valid=valid)
+        call check(error, g(2) == 30 .and. .not. valid(1), &
+            "bfill(names array, int64 limit) must agree with the int32 form")
+        if (allocated(error)) return
+
+        ! ---- %fillna's real32 name-string form ----
+        call parquet_new_table(t)
+        call t%add_column("f", [0.0_real32, 0.0_real32, 0.0_real32])
+        call t%set_null("f", [.true., .false., .true.])
+        call t%fillna("f", 2.5_real32)
+        call t%get("f", gf)
+        call check(error, .not. t%has_nulls("f") .and. gf(2) == 2.5_real32, &
+            "fillna(name string, real32 value) must resolve to the real32 specific")
+    end subroutine test_ffill_bfill_every_entry_point
+
+    !> An eight-row int32 table valid exactly where `mask` is, for the entry-point sweep.
+    subroutine build_run_table(t, mask)
+        type(parquet_table), intent(out) :: t !! the table to build.
+        logical, intent(in) :: mask(8) !! per row: .false. marks it null.
+        !
+        call parquet_new_table(t)
+        call t%add_column("v", [0_int32, 0_int32, 30_int32, 40_int32, 0_int32, 0_int32, 70_int32, 0_int32])
+        call t%set_null("v", mask)
+    end subroutine build_run_table
+
+    !> `%dropna` with `how` spelled out as its own default.
+    !!
+    !! `how="any"` IS the default, so the arm that accepts the word is separate from the path a
+    !! caller who omits `how` takes -- the validation runs before anything else precisely so a
+    !! typo is refused whether or not there is work to do. Passing the word explicitly must give
+    !! the same answer as omitting it; that equality is the assertion.
+    subroutine test_dropna_how_any_spelled_out(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int32), allocatable :: implied(:), spelled(:)
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%set_null("a", [.true., .false., .true.])
+        call t%dropna("a")
+        call t%get("a", implied)
+        call check(error, size(implied) == 2, "the default drops the one null row")
+        if (allocated(error)) return
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%set_null("a", [.true., .false., .true.])
+        call t%dropna("a", how="any")
+        call t%get("a", spelled)
+        call check(error, size(spelled) == size(implied), &
+            "how=""any"" spelled out must drop exactly what the default drops")
+        if (allocated(error)) return
+        call check(error, all(spelled == implied), "and keep the same rows")
+    end subroutine test_dropna_how_any_spelled_out
 end module test_table_fill

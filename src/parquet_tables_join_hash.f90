@@ -304,7 +304,7 @@ contains
             end do
         end do
         call join_refuse_require("1:m", "left", "on=", first, second, n_dup)
-    end subroutine hash_refuse_1m
+    end subroutine hash_refuse_1m ! GCOVR_EXCL_LINE -- unreachable: the call above never returns.
     !
     !> Clause 6's right half: every right row no probe reached -- the rows of every group
     !! `group_hit` does not mark, plus every null-keyed row, which is in no group at all -- as the

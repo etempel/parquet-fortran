@@ -63,8 +63,14 @@ contains
             new_unittest("a map column is classified by its VALUE type", test_map_classification), &
             new_unittest("%col, %get, %ref and %set reach a list column", test_list_accessors), &
             new_unittest("%add_column takes all three container types", test_add_container_columns), &
+            new_unittest("%get, %set and %ref reach a map and a struct column", &
+                test_map_and_struct_accessors), &
             new_unittest("a container column survives the slice regime, row group by row group", &
                 test_container_slice), &
+            new_unittest("a map column read as a slice assembles row group by row group", &
+                test_map_column_slice), &
+            new_unittest("%print_stat reports a deferred-width list column as pending", &
+                test_print_stat_deferred_width_list), &
             new_unittest("a container column assembles under bounded=, including emptied row groups", &
                 test_container_bounded), &
             new_unittest("row-structural mutations keep a container column ALIGNED", &
@@ -320,6 +326,100 @@ contains
         call check(error, sp%nrows() == 3, "the struct column is reachable through %col too")
     end subroutine test_add_container_columns
 
+    !> `%get`, `%set` and `%ref` over a MAP and a STRUCT column.
+    !!
+    !! `test_list_accessors` above proves the three bindings for the list container only, and the
+    !! map and struct specifics are not that code reached with a different tag: each one names its
+    !! own `PK_*` in the `table_require_kind` guard, its own `container_as_*` narrowing, and its
+    !! own `select type` arm after `clone_into`. A specific narrowing to the wrong container type
+    !! would leave the `select type` unmatched and hand back an EMPTY column rather than aborting
+    !! -- a silent failure, which is why each assertion below checks the payload and not only that
+    !! the call returned.
+    !!
+    !! The independence assertions are the other half: `%get` promises a genuine copy and `%set` a
+    !! genuine write, so each is checked by mutating one side and reading the other.
+    subroutine test_map_and_struct_accessors(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: t
+        type(parquet_map_column) :: mc, mcopy
+        type(parquet_struct_column) :: sc, scopy
+        type(parquet_map_column), pointer :: mp
+        type(parquet_struct_column), pointer :: sp
+        type(parquet_table_col) :: h
+        character(len=8) :: fields(2)
+        integer :: kinds(2)
+        !
+        call mc%init(PK_FLOAT64)
+        call mc%append_row(["a", "b"], [1.5_real64, 2.5_real64])
+        call mc%append_null_row()
+        call mc%append_row(["c"], [3.5_real64])
+        fields(1) = "f1"
+        fields(2) = "f2"
+        kinds(1) = PK_INT32
+        kinds(2) = PK_FLOAT64
+        call sc%init(fields, kinds, 3_int64)
+        ! %init creates the rows NULL. Rows 1 and 3 are cleared and given a value so the
+        ! source has MIXED nullness: against an all-null column the assertions below could
+        ! not tell a faithful copy from one that carried no payload at all.
+        call sc%clear_null_row(1_int64)
+        call sc%clear_null_row(3_int64)
+        call sc%set_field(1_int64, "f1", 7_int32)
+        call sc%set_field(3_int64, "f1", 9_int32)
+        !
+        call parquet_new_table(t)
+        call t%add_column("mp", mc)
+        call t%add_column("st", sc)
+
+        ! ---- %get: a copy that carries the payload ----
+        call t%get("mp", mcopy)
+        call check(error, mcopy%nrows() == 3_int64, "%get copies every row of a map column")
+        if (allocated(error)) return
+        call check(error, mcopy%is_null_row(2_int64) .and. .not. mcopy%is_null_row(1_int64), &
+            "and its nullness -- an empty column would answer this differently")
+        if (allocated(error)) return
+        call t%get("st", scopy)
+        call check(error, scopy%nrows() == 3_int64, "%get copies every row of a struct column")
+        if (allocated(error)) return
+        call check(error, scopy%is_null_row(2_int64) .and. .not. scopy%is_null_row(1_int64), &
+            "and its nullness")
+        if (allocated(error)) return
+
+        ! ---- INDEPENDENCE: mutating the copy must not reach the table ----
+        call mcopy%set_null_row(1_int64)
+        call scopy%set_null_row(1_int64)
+        call t%col("mp", mp)
+        call t%col("st", sp)
+        call check(error, .not. mp%is_null_row(1_int64), &
+            "%get on a map column is a genuine copy: the table is untouched")
+        if (allocated(error)) return
+        call check(error, .not. sp%is_null_row(1_int64), &
+            "%get on a struct column is a genuine copy too")
+        if (allocated(error)) return
+
+        ! ---- %ref through a column handle ----
+        call t%column("mp", h)
+        call h%ref(mp)
+        call check(error, associated(mp) .and. mp%nrows() == 3_int64, &
+            "%ref reaches the map column through a handle")
+        if (allocated(error)) return
+        call t%column("st", h)
+        call h%ref(sp)
+        call check(error, associated(sp) .and. sp%nrows() == 3_int64, &
+            "%ref reaches the struct column through a handle")
+        if (allocated(error)) return
+
+        ! ---- %set: the copy's nulls land in the table ----
+        call t%set("mp", mcopy)
+        call t%set("st", scopy)
+        call t%col("mp", mp)
+        call t%col("st", sp)
+        call check(error, mp%is_null_row(1_int64) .and. mp%nrows() == 3_int64, &
+            "%set wrote the map copy's null in, without changing the row count")
+        if (allocated(error)) return
+        call check(error, sp%is_null_row(1_int64) .and. sp%nrows() == 3_int64, &
+            "%set wrote the struct copy's null in, without changing the row count")
+    end subroutine test_map_and_struct_accessors
+
     !> A container column in the SLICE regime, assembled from several row groups.
     !!
     !! `materialize_slice` cannot `%paste` a container (there are no fixed-width row slots to
@@ -350,6 +450,94 @@ contains
         end do
         call check(error, same, "every slice row matches the same row of the whole-file read")
     end subroutine test_container_slice
+
+    !> A MAP column read as a SLICE, which is the row-group-at-a-time assembly path.
+    !!
+    !! `test_container_slice` above drives that path for a list column. A map column reaches a
+    !! DIFFERENT chunk reader -- `matchunk_map`, which allocates a `parquet_map_column` for the
+    !! chunk and narrows to it with its own `select type` -- and the kind switch that dispatches to
+    !! it has its own `case (PK_MAP)` arm. Neither runs on the whole-file read the map tests above
+    !! use, because that path assembles the column in one piece.
+    !!
+    !! The assertion is per row against the whole-file read, not a row count: a chunk reader that
+    !! narrowed to the wrong container type would leave the `select type` unmatched and assemble a
+    !! column of the right LENGTH holding nothing.
+    subroutine test_map_column_slice(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: whole, part
+        type(parquet_map_column), pointer :: pw, pp
+        integer(int64) :: k, lo, hi, n
+        logical :: same
+        !
+        call parquet_open_table(whole, MAP_FIXTURE)
+        call whole%col("m_int32", pw)
+        n = pw%nrows()
+        call check(error, n >= 3_int64, "the fixture must have rows to slice")
+        if (allocated(error)) return
+        ! Two slices, each trimming one end, because the fixture's rows are not interchangeable:
+        ! row 1 carries entries, row 2 is a null map and row 3 is present but empty. A slice that
+        ! avoided row 1 would compare three rows that are all empty and pass against a chunk
+        ! reader that assembled nothing at all.
+        lo = 1_int64
+        hi = n - 1_int64
+        call parquet_open_table(part, MAP_FIXTURE, lo, hi)
+        call part%col("m_int32", pp)
+        call check(error, pp%nrows() == hi - lo + 1_int64, "the slice holds exactly its own rows")
+        if (allocated(error)) return
+        same = .true.
+        do k = 1_int64, pp%nrows()
+            if (pp%length(k) /= pw%length(lo + k - 1_int64)) same = .false.
+            if (pp%is_null(k) .neqv. pw%is_null(lo + k - 1_int64)) same = .false.
+        end do
+        call check(error, same, "every slice row matches the same row of the whole-file read")
+        if (allocated(error)) return
+        call check(error, pp%length(1_int64) > 0_int64, &
+            "and the carried row really holds its entries -- the guard against an empty assembly")
+        if (allocated(error)) return
+        ! The other end: a slice starting past row 1, so the LEADING trim runs.
+        lo = 2_int64
+        hi = n
+        call parquet_open_table(part, MAP_FIXTURE, lo, hi)
+        call part%col("m_int32", pp)
+        call check(error, pp%nrows() == hi - lo + 1_int64, "the trailing slice holds its own rows")
+        if (allocated(error)) return
+        same = .true.
+        do k = 1_int64, pp%nrows()
+            if (pp%length(k) /= pw%length(lo + k - 1_int64)) same = .false.
+            if (pp%is_null(k) .neqv. pw%is_null(lo + k - 1_int64)) same = .false.
+        end do
+        call check(error, same, "every row of the trailing slice matches the whole-file read too")
+        if (allocated(error)) return
+        call check(error, any([(pp%length(k) > 0_int64, k = 1_int64, pp%nrows())]), &
+            "and it too carries a row with entries")
+    end subroutine test_map_column_slice
+
+    !> `%print_stat` reports a DEFERRED-WIDTH list column as pending, in both report layouts.
+    !!
+    !! A plain LIST column read without `list_columns="container"` has a width that only the data
+    !! knows, and measuring it would read the column -- which a report must never do. So the slot
+    !! is marked `width_pending` and the report prints "pending" for it. There are two layouts,
+    !! with the min/max/nulls columns and without, each with its own `print` statement and its own
+    !! column widths, and `stats=.false.` is the only way to reach the narrow one.
+    !!
+    !! The residency check afterwards is the point of the whole arm: reporting must leave the
+    !! column exactly as unread as it found it.
+    subroutine test_print_stat_deferred_width_list(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: t
+        !
+        ! Deliberately WITHOUT list_columns="container": that token is what would give the column
+        ! a known width and take it off this path entirely.
+        call parquet_open_table(t, LIST_FIXTURE)
+        call check(error, t%residency("ragged") == RES_EMPTY, &
+            "the list column must start unread for its width to still be deferred")
+        if (allocated(error)) return
+        call t%print_stat(stats=.false., all=.true.)
+        call t%print_stat(all=.true.)
+        call check(error, t%residency("ragged") == RES_EMPTY, &
+            "%print_stat must not read the column to report that its width is pending")
+    end subroutine test_print_stat_deferred_width_list
+
 
     !> A container column under `bounded=.true.`, including the case a chunked assembly is most
     !! likely to get wrong: a covering row group the filter empties ENTIRELY.

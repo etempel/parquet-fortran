@@ -59,6 +59,12 @@ contains
             new_unittest("parse_column reaches the three temporal targets", test_parse_temporal), &
             new_unittest("parse_column carries the column's unit across", test_parse_keeps_unit), &
             new_unittest("format_column renders integers exactly", test_format_integers), &
+            new_unittest("format_column renders float32, logical and time columns", &
+                test_format_every_remaining_kind), &
+            new_unittest("parse_column nulls a bad row for every numeric and logical target", &
+                test_parse_rejects_bad_rows_every_target), &
+            new_unittest("parse_column invalid=error spelled out matches the default", &
+                test_parse_invalid_error_spelled_out), &
             new_unittest("format_column honours fmt", test_format_fmt), &
             new_unittest("format_column leaves a Null row Null", test_format_keeps_nulls), &
             new_unittest("format_column renders temporal columns as ISO-8601", test_format_temporal), &
@@ -310,6 +316,127 @@ contains
         call check(error, trim(txt(1)) == "-7" .and. trim(txt(2)) == "0" .and. &
             trim(txt(3)) == "12345", "every row rendered as its (i0) form")
     end subroutine test_format_integers
+
+    !> `%format_column` over the three source kinds the tests above do not render.
+    !!
+    !! The renderer is a `select case` with one arm per source kind, and each arm takes its own
+    !! typed data pointer before calling `pf_to_str`. `test_format_integers` covers the integer
+    !! arms and `test_format_temporal` the date one; float32, logical and time are arms nothing
+    !! else reaches, and an arm wired to the wrong pointer type would not compile but one wired to
+    !! the wrong COLUMN would render the neighbour's values silently.
+    subroutine test_format_every_remaining_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        type(parquet_time) :: tm(3)
+        character(len=:), allocatable :: txt(:)
+        !
+        call tm(1)%set(1, 2, 3)
+        call tm(2)%set(12, 0, 0)
+        call tm(3)%set(23, 59, 59)
+        call parquet_new_table(t)
+        call t%add_column("f", [1.5_real32, -2.25_real32, 0.0_real32])
+        call t%add_column("b", [.true., .false., .true.])
+        call t%add_column("tm", tm)
+
+        call t%format_column("f")
+        call check(error, t%kind("f") == PK_STRING, "the float32 column is text afterwards")
+        if (allocated(error)) return
+        call t%get("f", txt)
+        ! The exact spelling of a real is compiler-dependent, so what is asserted is that each row
+        ! rendered its OWN value -- a renderer reading the wrong column would repeat one of them.
+        call check(error, index(txt(1), "1.5") > 0 .and. index(txt(2), "-2.2") > 0 &
+            .and. index(txt(3), "0") > 0, "each float32 row rendered its own value")
+        if (allocated(error)) return
+
+        call t%format_column("b")
+        call t%get("b", txt)
+        call check(error, trim(txt(1)) /= trim(txt(2)) .and. trim(txt(1)) == trim(txt(3)), &
+            "the logical rows render as two distinct tokens, matching where the values match")
+        if (allocated(error)) return
+
+        call t%format_column("tm")
+        call t%get("tm", txt)
+        call check(error, index(txt(2), "12:00:00") > 0 .and. index(txt(3), "23:59:59") > 0, &
+            "a time column renders as ISO-8601 time-of-day")
+    end subroutine test_format_every_remaining_kind
+
+    !> An unreadable row reaching `parse_reject` for each numeric and logical target.
+    !!
+    !! `test_parse_invalid_null` drives the rejection path for int32 alone. Every other target
+    !! kind has its own copy of the `if (ok) ... else call parse_reject` pair inside its own
+    !! allocation and loop, and the `else` half of each is what turns an unreadable row into a
+    !! Null under `invalid="null"` instead of aborting. A target whose `else` branch was missing
+    !! would store whatever `pf_from_str` left behind -- a zero, most likely -- and read back as a
+    !! valid row holding a plausible wrong number, which is why the null flag is asserted and not
+    !! only the value.
+    subroutine test_parse_rejects_bad_rows_every_target(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        integer(int64), allocatable :: v64(:)
+        real(real32), allocatable :: r32(:)
+        real(real64), allocatable :: r64(:)
+        logical, allocatable :: vb(:), valid(:)
+        !
+        ! Row 2 is unreadable as any of the four targets; rows 1 and 3 are readable as all of them.
+        call parquet_new_table(t)
+        call t%add_column("a", [character(len=4) :: "1", "zzz", "0"])
+        call t%add_column("b", [character(len=4) :: "1", "zzz", "0"])
+        call t%add_column("c", [character(len=4) :: "1", "zzz", "0"])
+        call t%add_column("d", [character(len=4) :: "T", "zzz", "F"])
+
+        call t%parse_column("a", PK_INT64, invalid="null")
+        call t%get("a", v64, is_valid=valid)
+        call check(error, valid(1) .and. .not. valid(2) .and. valid(3), &
+            "int64: exactly the unreadable row is Null")
+        if (allocated(error)) return
+        call check(error, v64(1) == 1_int64 .and. v64(3) == 0_int64, &
+            "int64: the readable rows kept their own values")
+        if (allocated(error)) return
+
+        call t%parse_column("b", PK_FLOAT32, invalid="null")
+        call t%get("b", r32, is_valid=valid)
+        call check(error, valid(1) .and. .not. valid(2) .and. valid(3) .and. r32(1) == 1.0_real32, &
+            "float32: exactly the unreadable row is Null")
+        if (allocated(error)) return
+
+        call t%parse_column("c", PK_FLOAT64, invalid="null")
+        call t%get("c", r64, is_valid=valid)
+        call check(error, valid(1) .and. .not. valid(2) .and. valid(3) .and. r64(1) == 1.0_real64, &
+            "float64: exactly the unreadable row is Null")
+        if (allocated(error)) return
+
+        call t%parse_column("d", PK_LOGICAL, invalid="null")
+        call t%get("d", vb, is_valid=valid)
+        call check(error, valid(1) .and. .not. valid(2) .and. valid(3), &
+            "logical: exactly the unreadable row is Null")
+        if (allocated(error)) return
+        call check(error, vb(1) .and. .not. vb(3), "logical: the readable rows kept their values")
+    end subroutine test_parse_rejects_bad_rows_every_target
+
+    !> `invalid="error"` spelled out is the default, and must behave as omitting it does.
+    !!
+    !! The policy word is validated before any row is read, so the arm that ACCEPTS "error" is
+    !! separate from the path a caller who omits `invalid=` takes. On a column with nothing
+    !! unreadable both must simply succeed; that equality is the assertion, and the malformed
+    !! case belongs with the other aborts in test/error_scenarios.f90.
+    subroutine test_parse_invalid_error_spelled_out(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        integer(int32), allocatable :: implied(:), spelled(:)
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", [character(len=3) :: "1", "2", "3"])
+        call t%add_column("b", [character(len=3) :: "1", "2", "3"])
+        call t%parse_column("a", PK_INT32)
+        call t%parse_column("b", PK_INT32, invalid="error")
+        call t%get("a", implied)
+        call t%get("b", spelled)
+        call check(error, all(spelled == implied), &
+            "invalid=""error"" spelled out must parse exactly as omitting it does")
+        if (allocated(error)) return
+        call check(error, all(spelled == [1_int32, 2_int32, 3_int32]), &
+            "and both must actually have parsed the values (vacuity guard)")
+    end subroutine test_parse_invalid_error_spelled_out
 
     !> `fmt` reaches `pf_to_str` and changes the text.
     subroutine test_format_fmt(error)

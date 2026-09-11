@@ -619,10 +619,17 @@ contains
         character(len=*), intent(in) :: proc !! calling binding, for the message.
         integer(int32) :: r32                !! the same row.
         character(len=32) :: txt
+        ! Deliberately untested, and not reachable at test scale: `row` is a TABLE row number, so
+        ! tripping this needs an indexed table of more than 2**31 rows -- some 2.1 billion -- which
+        ! is a fixture no suite can build. The guard itself is not dead: it is the reason a caller
+        ! who asks for an int32 answer on a table that large is told so rather than handed a
+        ! wrapped negative row, and the engines refuse the same case on their own int32 forms.
         if (row > int(huge(0_int32), int64)) then
+            ! GCOVR_EXCL_START -- see the note above.
             write(txt, "(I0)") row
             error stop IP // trim(proc) // ": row " // trim(txt) // " does not fit the int32 " // &
                 "answer asked for; use an int64 row variable"
+            ! GCOVR_EXCL_STOP
         end if
         r32 = int(row, int32)
     end function tix_narrow

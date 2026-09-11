@@ -161,6 +161,10 @@ contains
                 test_join_carries_source_nulls), &
             new_unittest("the merged key, the carried key and the suffix rule", &
                 test_join_names), &
+            new_unittest("a clashing suffixed name takes the suffix again", &
+                test_join_suffix_applied_twice), &
+            new_unittest("a join on two nullable keys combines both validity masks", &
+                test_join_two_nullable_keys), &
             new_unittest("the separated-string key form joins as the array form does", &
                 test_join_string_form), &
             new_unittest("columns= and residency, all four combinations", &
@@ -870,6 +874,98 @@ contains
         call check(error, c%has_column("payload_r") .and. c%has_column("payload"), &
             "other_suffix= must rename the incoming column and leave this table's own alone")
     end subroutine test_join_names
+
+    !> A suffixed name that clashes with a name ALREADY decided takes the suffix a second time.
+    !!
+    !! `join_name_taken` asks two questions: is the candidate a column of this table, and is it a
+    !! destination name some earlier incoming column already claimed? `test_join_names` above
+    !! exercises only the first. The second needs an incoming column whose own name is what a
+    !! PREVIOUS column's suffixing produced -- here the right table carries both `x` and `x_2`, so
+    !! `x` becomes `x_2` and then `x_2` finds that taken and becomes `x_2_2`.
+    !!
+    !! Without that second question the join would emit `x_2` twice, which is not an abort but a
+    !! table with two columns of one name -- the silent outcome this guard exists to prevent.
+    subroutine test_join_suffix_applied_twice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: got(:)
+        !
+        call parquet_new_table(a)
+        call a%add_column("id", [1_int64, 2_int64])
+        call a%add_column("x", [10_int64, 20_int64])
+        call parquet_new_table(b)
+        call b%add_column("id", [1_int64, 2_int64])
+        call b%add_column("x", [100_int64, 200_int64])
+        call b%add_column("x_2", [1000_int64, 2000_int64])
+        call a%join(b, ["id"], how="left")
+        call check(error, a%has_column("x") .and. a%has_column("x_2") .and. a%has_column("x_2_2"), &
+            "the second clash must take the suffix again rather than reusing x_2")
+        if (allocated(error)) return
+        call check(error, a%ncols() == 4, &
+            "exactly four columns: id, this table's x, and the two incoming ones")
+        if (allocated(error)) return
+        ! WHICH column ended up where, which the names alone cannot show: a join that renamed
+        ! correctly but wired the values the other way round would satisfy every check above.
+        call a%get("x", got)
+        call check(error, all(got == [10_int64, 20_int64]), "this table's own x is untouched")
+        if (allocated(error)) return
+        call a%get("x_2", got)
+        call check(error, all(got == [100_int64, 200_int64]), &
+            "the incoming x became x_2 and kept its own values")
+        if (allocated(error)) return
+        call a%get("x_2_2", got)
+        call check(error, all(got == [1000_int64, 2000_int64]), &
+            "and the incoming x_2 became x_2_2, not the other way round")
+    end subroutine test_join_suffix_applied_twice
+
+    !> A join on TWO key columns that are both nullable, so two validity masks are combined.
+    !!
+    !! `hash_key_codes` builds one tuple column per key and carries a validity mask beside it. The
+    !! first key to report nulls MOVES its mask in; every later one must be AND-ed onto what is
+    !! already there. With a single nullable key the move-in arm alone runs, and a build that
+    !! dropped the AND would keep only the first key's nulls -- so a row null in the SECOND key
+    !! only would be treated as a real key and could match.
+    !!
+    !! The fixture puts the two nulls in different rows for exactly that reason: row 2 is null in
+    !! the first key and row 3 in the second, so neither mask covers the other.
+    subroutine test_join_two_nullable_keys(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: p(:)
+        integer(int64) :: k, matched
+        !
+        call parquet_new_table(a)
+        call a%add_column("k1", [1_int64, 2_int64, 3_int64, 4_int64])
+        call a%add_column("k2", [10_int64, 20_int64, 30_int64, 40_int64])
+        call a%add_column("pa", [1_int64, 2_int64, 3_int64, 4_int64])
+        call a%set_null("k1", [.true., .false., .true., .true.])
+        call a%set_null("k2", [.true., .true., .false., .true.])
+        call parquet_new_table(b)
+        call b%add_column("k1", [1_int64, 2_int64, 3_int64, 4_int64])
+        call b%add_column("k2", [10_int64, 20_int64, 30_int64, 40_int64])
+        call b%add_column("pb", [100_int64, 200_int64, 300_int64, 400_int64])
+        call a%join(b, ["k1", "k2"], how="left")
+        call check(error, a%nrows() == 4_int64, "a left join keeps every left row")
+        if (allocated(error)) return
+        call a%get("pb", p)
+        matched = 0_int64
+        do k = 1_int64, a%nrows()
+            if (.not. a%is_null("pb", k)) matched = matched + 1_int64
+        end do
+        ! Rows 1 and 4 are valid in both keys and must match; rows 2 and 3 are each null in ONE
+        ! key, and a null key matches nothing -- which is what the AND of the two masks decides.
+        call check(error, matched == 2_int64, &
+            "exactly the two rows valid in BOTH keys may match")
+        if (allocated(error)) return
+        call check(error, .not. a%is_null("pb", 1_int64) .and. .not. a%is_null("pb", 4_int64), &
+            "and they are rows 1 and 4")
+        if (allocated(error)) return
+        call check(error, a%is_null("pb", 2_int64) .and. a%is_null("pb", 3_int64), &
+            "a row null in EITHER key is unmatched, not only one null in the first")
+        if (allocated(error)) return
+        call check(error, p(1) == 100_int64 .and. p(4) == 400_int64, &
+            "and the matched rows carried their own counterpart")
+    end subroutine test_join_two_nullable_keys
     !
     !> The separated-string key form joins exactly as the array form does.
     subroutine test_join_string_form(error)

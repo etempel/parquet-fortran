@@ -546,6 +546,24 @@ program error_scenarios
         call scenario_read_dictionary_binary_unsupported()
     case ("print_rows_negative_count")
         call scenario_print_rows_negative_count()
+    case ("print_rows_negative_last")
+        call scenario_print_rows_negative_last()
+    case ("print_rows_follows_message_stream")
+        call scenario_print_rows_follows_message_stream()
+    case ("get_matrix_unsupported_column")
+        call scenario_get_matrix_unsupported_column()
+    case ("keep_columns_many_missing")
+        call scenario_keep_columns_many_missing()
+    case ("join_columns_unsupported")
+        call scenario_join_columns_unsupported()
+    case ("derive_schema_blank_name")
+        call scenario_derive_schema_blank_name()
+    case ("open_writer_like_nothing_resident")
+        call scenario_open_writer_like_nothing_resident()
+    case ("sink_schema_names_an_unreadable_column")
+        call scenario_sink_schema_names_an_unreadable_column()
+    case ("agg_int64_sum_overflow")
+        call scenario_agg_int64_sum_overflow()
     case ("print_rows_rows_with_first")
         call scenario_print_rows_rows_with_first()
     case ("print_rows_slice_out_of_range")
@@ -1188,6 +1206,10 @@ program error_scenarios
         call scenario_join_engine_twin("sort", "require_1m", threads=4)
     case ("join_max_rows_hash")
         call scenario_join_engine_twin("hash", "max_rows")
+    case ("join_max_rows_hash_string_key")
+        call scenario_join_max_rows_hash_keyshape("string")
+    case ("join_max_rows_hash_tuple_key")
+        call scenario_join_max_rows_hash_keyshape("tuple")
     case ("join_max_rows_arr_i32_hash")
         call scenario_join_engine_twin("hash", "max_rows_arr_i32")
     case ("join_max_rows_arr_i64_hash")
@@ -3174,6 +3196,10 @@ program error_scenarios
         call scenario_table_index_kind_mismatch()
     case ("table_index_kind_mismatch_temporal")
         call scenario_table_index_kind_mismatch_temporal()
+    case ("table_index_date_key_on_int")
+        call scenario_table_index_date_key_on_int("date")
+    case ("table_index_time_key_on_int")
+        call scenario_table_index_date_key_on_int("time")
     case ("table_index_find_many_length")
         call scenario_table_index_find_many_length()
     case ("table_index_threads_zero")
@@ -28963,5 +28989,317 @@ contains
         call parquet_get_nrows(r, n)
         print '(a,i0)', "a literal list was applied to a date column, nrows=", n
     end subroutine scenario_filter_temporal_literal_list
+
+
+    !> `%print_rows(last=-1)` is refused exactly as `first=-1` is, and by its OWN guard.
+    !!
+    !! The two bounds are validated by two separate `if` blocks, each writing the offending value
+    !! into the message, so a `last=` guard that had been dropped -- or that reported `first`'s
+    !! value -- would leave `print_rows_negative_count` green. The positive `last=` is the control.
+    subroutine scenario_print_rows_negative_last()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/print_rows_negative_last.parquet"
+
+        call write_print_rows_fixture(file)
+        call parquet_open_table(t, file)
+        call t%print_rows(last=2)
+        print '(a)', "control: a positive last= printed"
+        call t%print_rows(last=-1)
+        print '(a)', "unexpectedly accepted a negative last="
+    end subroutine scenario_print_rows_negative_last
+
+    !> `columns=` naming a column whose TYPE this library cannot read is refused where it is
+    !! named, rather than producing an output column holding nothing.
+    !!
+    !! `m_intkey` in the map fixture is an integer-keyed map, which this library does not read at
+    !! all -- the table classifies it as unsupported and holds no values for it. Carrying it
+    !! across a join would have nothing to carry, so the refusal names it. An ordinary readable
+    !! column carried by the same call is the control -- deliberately a SCALAR one, since a map
+    !! column is refused a step earlier for being a container at all, which is a different guard
+    !! with a different message.
+    subroutine scenario_join_columns_unsupported()
+        type(parquet_table) :: a, b
+        integer(int64), parameter :: IDS(4) = [10_int64, 20_int64, 30_int64, 40_int64]
+
+        call parquet_open_table(b, "test/fixtures/map_payloads.parquet")
+        call b%add_column("id", IDS)
+        call b%add_column("ok", IDS)
+        call join_fixture(a, IDS)
+        call a%join(b, "id", columns="ok", how="left")
+        print '(a,i0)', "control: a readable payload column came across, cols=", a%ncols()
+        call join_fixture(a, IDS)
+        call a%join(b, "id", columns="m_intkey", how="left")   ! -> aborts (holds no values)
+        print '(a,i0)', "unexpectedly carried an unreadable column across, cols=", a%ncols()
+    end subroutine scenario_join_columns_unsupported
+
+
+    !> `parquet_derive_schema(name="")` is refused here rather than left to `%init`, whose message
+    !! would name a procedure the caller never called. MAML requires a `table:` value.
+    !!
+    !! A non-blank `name=` is the control, so the abort is about the blank and not about `name=`
+    !! being present at all.
+    subroutine scenario_derive_schema_blank_name()
+        type(parquet_table) :: t
+        type(parquet_schema) :: s
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call parquet_derive_schema(t, s, name="named")
+        print '(a)', "control: a non-blank name= derived a schema"
+        call parquet_derive_schema(t, s, name="   ")
+        print '(a)', "unexpectedly accepted a blank name="
+    end subroutine scenario_derive_schema_blank_name
+
+    !> `parquet_open_writer_like` on a table with nothing resident says THAT, rather than writing
+    !! a file with no columns in it.
+    !!
+    !! A schema cannot be derived from columns that have not been read, and a caller who has just
+    !! opened a file has read nothing -- so the message names both ways out, materializing or
+    !! passing `schema=`. The materialized table is the control.
+    subroutine scenario_open_writer_like_nothing_resident()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=*), parameter :: src = "test_run/error_scenario_writerlike_src.parquet"
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_writerlike_ctrl.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_writerlike_bad.parquet"
+        type(parquet_writer) :: sw
+
+        call parquet_open_writer(sw, src)
+        call parquet_write_column(sw, "a", [1_int32, 2_int32])
+        call parquet_close_writer(sw)
+        call parquet_open_table(t, src)
+        call t%materialize_all()
+        call parquet_open_writer_like(w, ctrl, t)
+        call parquet_close_writer(w)
+        print '(a)', "control: a materialized table derived a schema"
+        call parquet_open_table(t, src)
+        call parquet_open_writer_like(w, bad, t)   ! -> aborts (nothing resident)
+        print '(a)', "unexpectedly derived a schema from a table with nothing resident"
+    end subroutine scenario_open_writer_like_nothing_resident
+
+    !> A sink schema naming a template column that holds NO VALUES is refused at open, not at the
+    !! first append.
+    !!
+    !! `m_intkey` is an integer-keyed map, which this library cannot read -- the template has the
+    !! column but no values for it, so there would be nothing to write. That is a different guard
+    !! from `sink_schema_names_a_missing_column`, whose column is absent altogether, and the
+    !! readable column opened first is the control that tells the two apart. That control is a
+    !! plain int32 column added to the template rather than one of the fixture's own maps: a map
+    !! declared as a scalar field is refused further in, by the writer's own column init, so it
+    !! would abort the control instead of passing it.
+    subroutine scenario_sink_schema_names_an_unreadable_column()
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: tmpl
+        type(parquet_schema) :: s, s2
+        character(len=*), parameter :: ctrl = "test_run/error_scenario_sink_unreadable_ctrl.parquet"
+        character(len=*), parameter :: bad = "test_run/error_scenario_sink_unreadable_bad.parquet"
+
+        call parquet_open_table(tmpl, "test/fixtures/map_payloads.parquet")
+        call tmpl%add_column("ok", [1_int32, 2_int32, 3_int32, 4_int32])
+        call s%init("sink")
+        call s%add_field("ok", "int32")
+        call parquet_open_table_writer(out, ctrl, tmpl, schema=s)
+        call parquet_close_table_writer(out)
+        print '(a)', "control: a schema naming a readable column opened"
+        ! A SECOND schema object: %init refuses to re-initialize one that is already built.
+        call s2%init("sink")
+        call s2%add_field("m_intkey", "int32")
+        call parquet_open_table_writer(out, bad, tmpl, schema=s2)   ! -> aborts (holds no values)
+        print '(a)', "unexpectedly opened a sink over a column that holds no values"
+    end subroutine scenario_sink_schema_names_an_unreadable_column
+
+    !> An int64 group sum that overflows is REFUSED rather than wrapped, and the message names
+    !! the group and points at the real64 form.
+    !!
+    !! Wrapping is the failure this guard exists to prevent: a wrapped sum is a plausible negative
+    !! number that no caller would question. The group that does not overflow is the control, and
+    !! it shares the aggregate call with the one that does -- so a guard that refused every int64
+    !! sum would fail the control instead.
+    subroutine scenario_agg_int64_sum_overflow()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: g
+        integer(int64) :: vals(4)
+        integer(int64), allocatable :: sums(:)
+        integer(int32) :: keys(4)
+
+        ! Group 1 sums to 2 and group 2 overflows: two values just over half of huge(int64).
+        keys = [1_int32, 1_int32, 2_int32, 2_int32]
+        vals = [1_int64, 1_int64, huge(0_int64) / 2_int64 + 1_int64, huge(0_int64) / 2_int64 + 1_int64]
+        call parquet_new_table(t)
+        call t%add_column("k", keys(1:2))
+        call t%add_column("v", vals(1:2))
+        call t%group_by(["k"], g)
+        call g%agg("v", "sum", sums)
+        print '(a,i0)', "control: a group whose int64 sum fits was summed, s=", sums(1)
+        call parquet_new_table(t)
+        call t%add_column("k", keys)
+        call t%add_column("v", vals)
+        call t%group_by(["k"], g)
+        call g%agg("v", "sum", sums)   ! -> aborts (group 2 overflows)
+        print '(a)', "unexpectedly wrapped an overflowing int64 group sum"
+    end subroutine scenario_agg_int64_sum_overflow
+
+
+    !> `%print_rows` with no `unit=` follows `message_stream`, so setting it to stderr moves the
+    !! whole table there.
+    !!
+    !! Out-of-process because `message_stream` is process-global: a unit test that set it would
+    !! change where every concurrently running suite's output went. Nothing aborts here -- the
+    !! assertion is WHICH stream the table landed on, which is what `check_scenario_streams` can
+    !! see and the exit status cannot.
+    !!
+    !! Both settings are exercised in one run, so the scenario also shows the setting is what
+    !! decides: the marker column name appears on stderr while the stdout line printed after the
+    !! switch back does not carry it.
+    subroutine scenario_print_rows_follows_message_stream()
+        type(parquet_table) :: t
+
+        call parquet_new_table(t)
+        call t%add_column("streammarker", [1_int32, 2_int32])
+        call parquet_set_message_stream("stderr")
+        call t%print_rows()
+        call parquet_set_message_stream("stdout")
+        print '(a)', "control: the stream was put back to stdout"
+    end subroutine scenario_print_rows_follows_message_stream
+
+
+    !> `%get_matrix` naming a column whose type this library cannot read is refused by the shared
+    !! `matrix_prepare`, which `%set_matrix` uses as well.
+    !!
+    !! The readable pair read first is the control: without it the abort would be satisfied by a
+    !! `%get_matrix` that refused every call.
+    subroutine scenario_get_matrix_unsupported_column()
+        type(parquet_table) :: t
+        real(real64), allocatable :: m(:,:)
+
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%add_column("a", [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call t%add_column("b", [5.0_real64, 6.0_real64, 7.0_real64, 8.0_real64])
+        call t%get_matrix(["a", "b"], m)
+        print '(a,i0)', "control: a readable pair came back, rows=", size(m, 2)
+        call t%get_matrix(["m_intkey"], m)   ! -> aborts (holds no values)
+        print '(a)', "unexpectedly read a column that holds no values"
+    end subroutine scenario_get_matrix_unsupported_column
+
+    !> A long list of absent column names is TRUNCATED in the message rather than printed whole.
+    !!
+    !! `%keep_columns` reports EVERY absent name at once -- unlike `%get_matrix`, which resolves
+    !! one name at a time and stops at the first -- so it is the verb whose message can run long,
+    !! and the listing is capped at 100 characters and closed with an ellipsis. A caller who
+    !! mistyped a whole name array gets a readable message rather than a screenful.
+    !!
+    !! The `%keep_columns` that succeeds is the control: without it the abort would be satisfied
+    !! by a verb that refused every call.
+    subroutine scenario_keep_columns_many_missing()
+        type(parquet_table) :: t
+        character(len=12) :: many(20)
+        integer :: k
+
+        ! Twelve characters is exactly what `many` holds: "absent_col" is ten, leaving room for a
+        ! two-digit index. Twenty of them run well past the 100-character cap under test.
+        do k = 1, 20
+            write(many(k), '(a,i0)') "absent_col", k
+        end do
+        call parquet_new_table(t)
+        call t%add_column("a", [1.0_real64, 2.0_real64])
+        call t%add_column("b", [3.0_real64, 4.0_real64])
+        call t%keep_columns(["a"])
+        print '(a,i0)', "control: keep_columns kept the named column, ncols=", t%ncols()
+        call t%keep_columns(many)   ! -> aborts, listing truncated at 100 chars
+        print '(a)', "unexpectedly kept twenty columns that do not exist"
+    end subroutine scenario_keep_columns_many_missing
+
+
+    !> The hash engine's `max_rows=` refusal over a STRING key and over a TWO-COLUMN key.
+    !!
+    !! Reporting a refused join's largest key group (`hash_biggest`) probes the multimap in
+    !! whichever shape the keys were built in, and the three shapes are three different
+    !! `%get_many` calls: a `parquet_string_column` for a lone string key, a tuple array for a
+    !! composite key, and a plain code array for everything else. Every existing `max_rows`
+    !! scenario joins on one int64 column, so only the third ever runs.
+    !!
+    !! `which` picks the shape; both halves force the hash engine first, since the sort engine
+    !! computes the same number by a different route and would leave these arms unrun.
+    subroutine scenario_join_max_rows_hash_keyshape(which)
+        use iso_c_binding, only : c_int64_t
+        character(len=*), intent(in) :: which !! "string" or "tuple".
+        interface
+            subroutine set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
+                import :: c_int64_t
+                integer(c_int64_t), value :: mode !! 0 automatic, 1 sort, 2 hash.
+            end subroutine set_join_engine
+        end interface
+        type(parquet_table) :: a, b, w
+        !
+        call set_join_engine(2_c_int64_t)
+        ! Three rows on each side sharing ONE key value: nine pairs, so a ceiling of 8 refuses and
+        ! a ceiling of 9 does not. The control join is what shows the refusal is the ceiling's.
+        if (which == "string") then
+            call keyshape_string_fixture(a)
+            call keyshape_string_fixture(b)
+            call a%clone(w)
+            call w%join(b, ["k"], max_rows=9_int64)
+            print '(a,i0)', "the string-keyed join fitted under its ceiling, rows=", w%nrows()
+            call a%join(b, ["k"], max_rows=8_int64)
+        else
+            call keyshape_tuple_fixture(a)
+            call keyshape_tuple_fixture(b)
+            call a%clone(w)
+            call w%join(b, ["k1", "k2"], max_rows=9_int64)
+            print '(a,i0)', "the two-column join fitted under its ceiling, rows=", w%nrows()
+            call a%join(b, ["k1", "k2"], max_rows=8_int64)
+        end if
+        print '(a,i0)', "unexpectedly built an over-sized join, rows=", a%nrows()
+    end subroutine scenario_join_max_rows_hash_keyshape
+
+    !> Three rows under one string key, for the hash engine's string-key probe.
+    subroutine keyshape_string_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table.
+        call parquet_new_table(t)
+        call t%add_column("k", [character(len=3) :: "aa", "aa", "aa"])
+        call t%add_column("p", [1_int64, 2_int64, 3_int64])
+    end subroutine keyshape_string_fixture
+
+    !> Three rows under one COMPOSITE key, for the hash engine's tuple probe.
+    subroutine keyshape_tuple_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table.
+        call parquet_new_table(t)
+        call t%add_column("k1", [1_int64, 1_int64, 1_int64])
+        call t%add_column("k2", [2_int64, 2_int64, 2_int64])
+        call t%add_column("p", [1_int64, 2_int64, 3_int64])
+    end subroutine keyshape_tuple_fixture
+
+
+    !> A DATE key offered to an index whose column is not a date, and the same for a TIME key.
+    !!
+    !! The refusal names the key class the CALLER asked for -- "a parquet_date", "a parquet_time"
+    !! -- and each class has its own word in the message. `table_index_kind_mismatch_temporal`
+    !! reaches the timestamp word by offering a timestamp to a date index; the date and time words
+    !! are reached only by offering those, and a message that named the wrong type would send a
+    !! caller looking at the wrong half of their code.
+    !!
+    !! The int32 column is the target in both halves precisely because it matches NEITHER, so the
+    !! word under test cannot be the column's own. The matching lookup first is the control.
+    subroutine scenario_table_index_date_key_on_int(which)
+        character(len=*), intent(in) :: which !! "date" or "time".
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_date) :: d
+        type(parquet_time) :: tm
+        integer(int64) :: row
+
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call ix%find(30_int32, row)
+        print '(a,i0)', "control: the int key the index is built on was found, row=", row
+        if (which == "date") then
+            call d%set(2024, 6, 3)
+            call ix%find(d, row)   ! -> aborts (a parquet_date key on an integer index)
+        else
+            call tm%set(12, 0, 0)
+            call ix%find(tm, row)  ! -> aborts (a parquet_time key on an integer index)
+        end if
+        print '(a,i0)', "unexpectedly accepted a temporal key on an integer index, row=", row
+    end subroutine scenario_table_index_date_key_on_int
 
 end program error_scenarios

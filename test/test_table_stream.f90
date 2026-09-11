@@ -80,6 +80,7 @@ contains
                 test_sink_auto_chunk_size), &
             new_unittest("chunk_size= reaches the flush rule and %chunk_size()", &
                 test_sink_explicit_chunk_size), &
+            new_unittest("%filename() reports the sink's path", test_sink_filename), &
             new_unittest("%flush writes the pending rows and does nothing with none pending", &
                 test_sink_flush_boundary), &
             new_unittest("the close writes the rows below the threshold", &
@@ -747,12 +748,13 @@ contains
     subroutine test_open_writer_like_carries_metadata(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, plain
-        type(parquet_schema) :: s
+        type(parquet_schema) :: s, s2
         type(parquet_writer) :: w
         real(real64) :: v(NROW)
         character(len=:), allocatable :: val
         logical :: ok
         integer :: i
+        character(len=*), parameter :: fboth = "test_run/table_stream_meta_both.parquet"
         character(len=*), parameter :: fsrc = "test_run/table_stream_meta_source.parquet"
         character(len=*), parameter :: fall = "test_run/table_stream_meta_all.parquet"
         character(len=*), parameter :: fkey = "test_run/table_stream_meta_keys.parquet"
@@ -802,6 +804,26 @@ contains
         call parquet_open_table(plain, fnone)
         call plain%get_file_metadata("origin", val, found=ok)
         call check(error, .not. ok, "an open without the request carries nothing")
+        if (allocated(error)) return
+        !
+        ! schema= AND the metadata request TOGETHER, which every block above leaves out: with a
+        ! schema given there is nothing to derive, so the given one is taken as the writer's own
+        ! precisely so the source's metadata has somewhere to be carried into. `s2` deliberately
+        ! declares NO metadata of its own -- so a key that arrives can only have come from the
+        ! source file, which is what makes this more than a re-test of copy_metadata=.
+        call s2%init("given")
+        call s2%add_field("v", "float64")
+        call parquet_open_writer_like(w, fboth, t, schema=s2, copy_metadata=.true.)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        call parquet_open_table(plain, fboth)
+        call plain%get_file_metadata("origin", val, found=ok)
+        call check(error, ok .and. val == "survey_A", &
+            "schema= together with copy_metadata= must carry the source metadata into the " // &
+            "schema the caller gave")
+        if (allocated(error)) return
+        call check(error, plain%has_column("v"), &
+            "and the given schema is still what declares the file's columns")
     end subroutine test_open_writer_like_carries_metadata
     !
     !> The 18-kind fixture the chunked-path test reads back: nine scalar kinds and their nine
@@ -1653,6 +1675,32 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_sink_uneven_batches
+
+    !> `%filename()` reports the path the sink was opened on.
+    !!
+    !! The sink's four introspection bindings each run `sink_check_usable` before answering, so
+    !! that a closed or never-opened sink raises a message naming the binding rather than handing
+    !! back a stale field. `%is_open`, `%chunk_size` and `%row_groups` are asserted by the batch
+    !! tests above; `%filename` is the one nothing else calls, and the guard in front of it is
+    !! what makes it worth calling at all.
+    subroutine test_sink_filename(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_writer) :: out
+        type(parquet_table) :: seed
+        character(len=*), parameter :: f = "test_run/table_stream_sink_filename.parquet"
+        character(len=:), allocatable :: got
+        !
+        call batch_table(1, 3, seed)
+        call parquet_open_table_writer(out, f, seed)
+        call out%filename(got)
+        call check(error, got == f, "%filename() must report the path the sink was opened on")
+        if (allocated(error)) return
+        call out%append(seed)
+        call out%filename(got)
+        call check(error, got == f, "and must still report it after a write")
+        if (allocated(error)) return
+        call parquet_close_table_writer(out)
+    end subroutine test_sink_filename
     !
     !> Without `chunk_size=` the threshold is the library's estimate from the schema, with every
     !! vector column's width resolved from the template first: a wide vector column gives a

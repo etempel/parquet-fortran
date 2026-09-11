@@ -65,6 +65,8 @@ contains
             new_unittest("set_matrix leaves existing nulls when told to", test_set_matrix_modify_nulls), &
             new_unittest("set_matrix over a name string writes the same columns", test_set_matrix_name_string), &
             new_unittest("set_matrix neither detaches nor moves storage", test_set_matrix_keeps_pointers), &
+            new_unittest("set_matrix writes every kind in both name forms", &
+                test_set_matrix_every_kind), &
             new_unittest("drop_columns removes several and keeps the order", test_drop_columns_order), &
             new_unittest("drop_columns ignore_missing skips what is absent", test_drop_columns_ignore_missing), &
             new_unittest("drop_columns that drops nothing changes nothing", test_drop_columns_nothing_dropped), &
@@ -424,6 +426,109 @@ contains
         ! And the table can still read what it never read, which is what "does not detach" buys.
         call check(error, t%residency("untouched") == RES_EMPTY, "the third column is still unread")
     end subroutine test_set_matrix_keeps_pointers
+
+    !> `%set_matrix` over the four kinds the real64 tests above do not reach, in both name forms.
+    !!
+    !! Ten specifics exist -- five kinds crossed with "names as an array" and "names as one
+    !! comma-separated string" -- and the tests above drive only the real64 pair. The other eight
+    !! are not near-copies that can be assumed from it: each names its OWN `PK_*` kind in the
+    !! `matrix_check_kinds` call that guards it, and each declares its own `buf` for the
+    !! per-column `%set`, so a kind wired to the wrong constant is a mistake this sweep sees and
+    !! the real64 pair cannot.
+    !!
+    !! Each block writes twice with different values -- once through the array form and once
+    !! through the string form -- and reads back per column rather than through `%get_matrix`.
+    !! Reading back the way it was written would let a matching pair of bugs cancel; `%get` is
+    !! the independent witness. The two writes differ in value so the second cannot pass on what
+    !! the first left behind.
+    subroutine test_set_matrix_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=2), parameter :: names(2) = ["c1", "c2"]
+        integer(int32) :: m32(2,3)
+        integer(int64) :: m64(2,3)
+        real(real32) :: mf32(2,3)
+        logical :: mb(2,3)
+        integer(int32), allocatable :: v32(:)
+        integer(int64), allocatable :: v64(:)
+        real(real32), allocatable :: vf32(:)
+        logical, allocatable :: vb(:)
+
+        ! ---- int32 ----
+        call parquet_new_table(t)
+        call t%add_column("c1", [0_int32, 0_int32, 0_int32])
+        call t%add_column("c2", [0_int32, 0_int32, 0_int32])
+        m32(1,:) = [1_int32, 2_int32, 3_int32]
+        m32(2,:) = [4_int32, 5_int32, 6_int32]
+        call t%set_matrix(names, m32)
+        call t%get("c1", v32)
+        call check(error, all(v32 == m32(1,:)), "int32: row 1 of the matrix is column c1")
+        if (allocated(error)) return
+        call t%get("c2", v32)
+        call check(error, all(v32 == m32(2,:)), "int32: row 2 of the matrix is column c2")
+        if (allocated(error)) return
+        m32 = m32 + 10_int32
+        call t%set_matrix("c1, c2", m32)
+        call t%get("c2", v32)
+        call check(error, all(v32 == m32(2,:)), "int32: the name-string form writes the same columns")
+        if (allocated(error)) return
+
+        ! ---- int64 ----
+        call parquet_new_table(t)
+        call t%add_column("c1", [0_int64, 0_int64, 0_int64])
+        call t%add_column("c2", [0_int64, 0_int64, 0_int64])
+        m64(1,:) = [1_int64, 2_int64, 3_int64]
+        m64(2,:) = [4_int64, 5_int64, 6_int64]
+        call t%set_matrix(names, m64)
+        call t%get("c1", v64)
+        call check(error, all(v64 == m64(1,:)), "int64: row 1 of the matrix is column c1")
+        if (allocated(error)) return
+        call t%get("c2", v64)
+        call check(error, all(v64 == m64(2,:)), "int64: row 2 of the matrix is column c2")
+        if (allocated(error)) return
+        m64 = m64 + 10_int64
+        call t%set_matrix("c1, c2", m64)
+        call t%get("c2", v64)
+        call check(error, all(v64 == m64(2,:)), "int64: the name-string form writes the same columns")
+        if (allocated(error)) return
+
+        ! ---- real32 ----
+        call parquet_new_table(t)
+        call t%add_column("c1", [0.0_real32, 0.0_real32, 0.0_real32])
+        call t%add_column("c2", [0.0_real32, 0.0_real32, 0.0_real32])
+        mf32(1,:) = [1.5_real32, 2.5_real32, 3.5_real32]
+        mf32(2,:) = [4.5_real32, 5.5_real32, 6.5_real32]
+        call t%set_matrix(names, mf32)
+        call t%get("c1", vf32)
+        call check(error, all(vf32 == mf32(1,:)), "real32: row 1 of the matrix is column c1")
+        if (allocated(error)) return
+        call t%get("c2", vf32)
+        call check(error, all(vf32 == mf32(2,:)), "real32: row 2 of the matrix is column c2")
+        if (allocated(error)) return
+        mf32 = mf32 + 10.0_real32
+        call t%set_matrix("c1, c2", mf32)
+        call t%get("c2", vf32)
+        call check(error, all(vf32 == mf32(2,:)), "real32: the name-string form writes the same columns")
+        if (allocated(error)) return
+
+        ! ---- logical ----
+        call parquet_new_table(t)
+        call t%add_column("c1", [.false., .false., .false.])
+        call t%add_column("c2", [.false., .false., .false.])
+        mb(1,:) = [.true., .false., .true.]
+        mb(2,:) = [.false., .true., .true.]
+        call t%set_matrix(names, mb)
+        call t%get("c1", vb)
+        call check(error, all(vb .eqv. mb(1,:)), "logical: row 1 of the matrix is column c1")
+        if (allocated(error)) return
+        call t%get("c2", vb)
+        call check(error, all(vb .eqv. mb(2,:)), "logical: row 2 of the matrix is column c2")
+        if (allocated(error)) return
+        mb = .not. mb
+        call t%set_matrix("c1, c2", mb)
+        call t%get("c2", vb)
+        call check(error, all(vb .eqv. mb(2,:)), "logical: the name-string form writes the same columns")
+    end subroutine test_set_matrix_every_kind
 
     ! ---- %drop_columns ------------------------------------------------------------------------
 

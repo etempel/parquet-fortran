@@ -1186,13 +1186,21 @@ contains
                 "promote one to the other -- an identifier above 2**53 does not survive that -- " // &
                 "so cast one side with %cast first" // lsfx // rsfx
         end if
+        ! Unreachable through the public API, and kept as a belt-and-braces check: the only kinds
+        ! whose colwidth() is not 1 are the *_VEC ones and the containers, and the key-kind guard
+        ! above has already refused every one of them -- "there is no defined order on a whole
+        ! vector row". So two columns that BOTH got this far are both scalar, and both 1 wide.
+        ! It stays because the two guards answer different questions, and a future kind that is
+        ! ordered AND wide would need this one rather than silently joining mismatched rows.
         if (self%cache%cols(li)%values%colwidth() /= other%cache%cols(ri)%values%colwidth()) then
+            ! GCOVR_EXCL_START -- unreachable; see the comment above.
             write(lw, "(I0)") self%cache%cols(li)%values%colwidth()
             write(rw, "(I0)") other%cache%cols(ri)%values%colwidth()
             call table_context_suffix(self%cache, trim(lname), lsfx)
             error stop EP // "join: key '" // trim(lname) // "' is " // trim(lw) // " wide but '" // &
                 trim(rname) // "' is " // trim(rw) // "; two key columns must have the same " // &
                 "width" // lsfx
+            ! GCOVR_EXCL_STOP
         end if
     end subroutine join_check_key_kinds
     !
@@ -1596,12 +1604,26 @@ contains
         !$omp end parallel do
         do c = 1_int64, int(nt, int64)
             if (part_bad(c) /= 0_int64) then
+                ! GCOVR_EXCL_START -- deliberately untested; not reachable at test scale.
+                ! Reporting this needs one key whose left and right group sizes MULTIPLY past
+                ! 2**63 -- roughly two billion rows on each side of a single key, which is a
+                ! fixture no test suite can build and which would not fit in memory if it could.
+                ! The guard that decides it, `nleft(g) > huge(0_int64) / nright(g)`, is checked
+                ! per group above and IS counted; what is excluded is only the message this arm
+                ! writes once a partition has already been marked bad.
+                !
+                ! The sibling overflow guard on the running pair TOTAL is reachable, and is
+                ! reached, through the `parquet_debug_join_add_checked` hook that exists for
+                ! exactly this reason (test/error_scenarios.f90's `join_pair_count_overflow`).
+                ! Adding an equivalent hook here would make this arm testable too, and is the
+                ! change to make if it ever needs to be.
                 g = part_bad(c)
                 write(tl, "(I0)") nleft(g)
                 write(tr, "(I0)") nright(g)
                 error stop EP // "join: one key value has " // trim(tl) // " rows on the " // &
                     "left and " // trim(tr) // " on the right; their product overflows a " // &
                     "64-bit row count. Deduplicate a side, or add require='m:1'."
+                ! GCOVR_EXCL_STOP
             end if
         end do
         n_pairs = 0_int64

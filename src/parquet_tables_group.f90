@@ -1396,7 +1396,7 @@ contains
             call agg_abort(GP // PROC // ": the int64 sum of '" // trim(name) // "' over group " // trim(t) // &
                 " overflows; it is refused rather than wrapped -- use the real64 form for an " // &
                 "approximate sum")
-        end subroutine agg_overflow
+        end subroutine agg_overflow ! GCOVR_EXCL_LINE -- unreachable: agg_abort never returns.
     end procedure grp_agg_stat_int
     !
     !> %agg specific, the caller's per-column procedure; the contract is on the interface in the

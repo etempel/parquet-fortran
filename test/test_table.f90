@@ -154,6 +154,8 @@ contains
             new_unittest("validate_qc checks every declaring column and holds none", &
                 test_validate_qc), &
             new_unittest("print_stat reports without reading anything", test_print_stat), &
+            new_unittest("print_stat(stats=.false.) over a pending column", &
+                test_print_stat_pending_without_stats), &
             new_unittest("nrows_unfiltered and row_group_extent report the physical geometry", &
                 test_row_geometry_queries), &
             new_unittest("the automatic parquet_row_index column names each row's file row", &
@@ -190,6 +192,12 @@ contains
             new_unittest("widening: every narrow-to-wide route", test_widening_every_route), &
             new_unittest("all 18 kinds: %print_stat summarizes every one", &
                 test_print_stat_every_kind), &
+            new_unittest("all 18 kinds: %print_stat over columns that hold nulls", &
+                test_print_stat_with_nulls_in_every_kind), &
+            new_unittest("%print_stat over a struct column counts nulls and nothing else", &
+                test_print_stat_struct_column), &
+            new_unittest("%print_stat over an all-NaN vector column and a map column", &
+                test_print_stat_all_nan_and_map), &
             new_unittest("filename and file metadata are reported back from the source file", &
                 test_filename_and_metadata), &
             new_unittest("set_element writes one cell, in both row-index kinds", test_set_element), &
@@ -5453,6 +5461,146 @@ contains
         call check(error, t%is_null("s_i32", 2_int64), &
             "%print_stat must summarize without disturbing the data it reports on")
     end subroutine test_print_stat_every_kind
+
+    !> **`%print_stat` when every column holds a null, and when one holds nothing else.**
+    !!
+    !! Each of the eighteen `stat_*` helpers is two scans, not one. The fast one runs when
+    !! `parquet_column_any_null` says there is nothing to skip and takes a whole-array `minval` /
+    !! `maxval`; the other walks in blocks, consults the row validity of each, and accumulates the
+    !! extremes over the valid rows alone. `test_print_stat_every_kind` above nulls ONE column, so
+    !! seventeen of the eighteen take the fast scan only and their block walk -- the half that can
+    !! read a null row's slot and report a minimum that is not in the column -- runs for nothing.
+    !!
+    !! Nulling a row of every column is what puts all eighteen block walks on the same footing.
+    !! The all-null column added afterwards reaches the arm past it: with no valid row at all
+    !! there is no minimum to print, and the helper must return having printed "-" rather than
+    !! the sentinel `huge()` it seeded the accumulator with.
+    subroutine test_print_stat_with_nulls_in_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test_run/table_printstat_nulls_every_kind.parquet"
+        character(len=6), parameter :: COLS(18) = [character(len=6) :: &
+            "s_i32", "s_i64", "s_f32", "s_f64", "s_bool", "s_str", "s_date", "s_time", "s_ts", &
+            "v_i32", "v_i64", "v_f32", "v_f64", "v_bool", "v_str", "v_date", "v_time", "v_ts"]
+        logical, allocatable :: mask(:)
+        integer :: k
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call check(error, t%ncols() == 18, "the matrix fixture must still carry all 18 kinds")
+        if (allocated(error)) return
+        ! Row 2 of every column, so every helper's block walk has a row to skip. Row 2 rather
+        ! than row 1 or NROW, so a walk that dropped the first or last block would still be
+        ! reporting over the nulled row.
+        do k = 1, 18
+            call t%set_null(trim(COLS(k)), 2_int64)
+        end do
+        do k = 1, 18
+            call check(error, t%is_null(trim(COLS(k)), 2_int64), &
+                "every column must really be null at row 2 before the report runs")
+            if (allocated(error)) return
+        end do
+        call t%print_stat(all=.true.)
+
+        ! The all-null column: no valid row, so no extreme exists to report.
+        allocate(mask(t%nrows()))
+        mask = .false.
+        call t%set_null("s_f64", mask)
+        call t%set_null("v_i64", mask)
+        call t%get_valid_mask("s_f64", mask)
+        call check(error, .not. any(mask), "s_f64 must now be entirely null")
+        if (allocated(error)) return
+        call t%get_valid_mask("v_i64", mask)
+        call check(error, .not. any(mask), "and so must v_i64")
+        if (allocated(error)) return
+        call t%print_stat(all=.true.)
+        call check(error, t%is_null("s_i32", 2_int64), &
+            "%print_stat must summarize without disturbing the data it reports on")
+    end subroutine test_print_stat_with_nulls_in_every_kind
+
+    !> `%print_stat` over a STRUCT column, whose summary is the null count and nothing else.
+    !!
+    !! A struct's rows all carry the same field count by construction, so a length extreme would
+    !! print the same number twice and the kind switch deliberately falls to its `case default`
+    !! -- the one arm that reports only how many rows are null. That arm's block walk over the
+    !! row validity is reached by no other kind, and a struct column is the only way to run it.
+    subroutine test_print_stat_struct_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_struct_column) :: sc
+        character(len=8) :: fields(2)
+        integer :: kinds(2)
+        logical, allocatable :: mask(:)
+
+        fields(1) = "f1"
+        fields(2) = "f2"
+        kinds(1) = PK_INT32
+        kinds(2) = PK_FLOAT64
+        call sc%init(fields, kinds, 4_int64)
+        call sc%clear_null_row(1_int64)
+        call sc%clear_null_row(3_int64)
+        call sc%clear_null_row(4_int64)
+        call parquet_new_table(t)
+        call t%add_column("st", sc)
+        call check(error, t%kind("st") == PK_STRUCT, "the column must be a struct")
+        if (allocated(error)) return
+        ! Exactly one null row, so a walk that counted every row -- or none -- is distinguishable
+        ! from one that counted correctly.
+        call t%get_valid_mask("st", mask)
+        call check(error, count(.not. mask) == 1, &
+            "one of the four rows is null, which is what the report has to count")
+        if (allocated(error)) return
+        call t%print_stat(all=.true.)
+        call t%get_valid_mask("st", mask)
+        call check(error, count(.not. mask) == 1, "and reporting must not change it")
+    end subroutine test_print_stat_struct_column
+
+    !> `%print_stat` over a float VECTOR column whose every value is NaN, and over a MAP column.
+    !!
+    !! Two arms nothing else reaches meet here.
+    !!
+    !! **All-NaN.** The float scans skip NaN while looking for the extremes, so a column of
+    !! nothing but NaN leaves `first` still .true. at the end -- the same state an all-NULL column
+    !! leaves. The two must NOT report the same thing: "-" is reserved for a column with nothing
+    !! to report, and NaN values ARE values, so the arm reports one of the column's own NaNs back.
+    !! (Its own, rather than a fresh `0.0/0.0`, which nagfor traps on.) `test_print_stat_with_
+    !! nulls_in_every_kind` reaches the all-null state; only an all-NaN column reaches this one.
+    !!
+    !! **A map column.** `container_row_length` narrows the container to ask its row length, and
+    !! its list arm is what the list fixtures drive. The map arm is a separate `type is` branch,
+    !! and an unmatched `select type` would report every row as length 0 rather than abort.
+    subroutine test_print_stat_all_nan_and_map(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real32) :: v32(2, 3)
+        real(real64) :: v64(2, 3)
+        real(real32) :: nan32
+        real(real64) :: nan64
+
+        nan32 = ieee_value(0.0_real32, ieee_quiet_nan)
+        nan64 = ieee_value(0.0_real64, ieee_quiet_nan)
+        v32 = nan32
+        v64 = nan64
+        call parquet_new_table(t)
+        call t%add_column("f32v", v32)
+        call t%add_column("f64v", v64)
+        ! A column that is all NaN but has NO nulls: the two states are different, and reaching
+        ! this arm needs the NaN one on its own.
+        call check(error, .not. t%has_nulls("f32v") .and. .not. t%has_nulls("f64v"), &
+            "the all-NaN columns must carry no nulls, or the null arm would answer first")
+        if (allocated(error)) return
+        call t%print_stat(all=.true.)
+
+        ! The map arm of the container row-length scan.
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%materialize_all()
+        call check(error, t%kind("m_int32") == PK_MAP, "the column must be a map")
+        if (allocated(error)) return
+        call t%print_stat(all=.true.)
+        call check(error, t%kind("m_int32") == PK_MAP, &
+            "and reporting on it must not change what it is")
+    end subroutine test_print_stat_all_nan_and_map
     !
     !> **`%get_element(..., found=)` on every kind.** One rule holds across `%get`, `%get_slice`
     !> and `%get_element`: a reported miss leaves the result DEFINED AND EMPTY, never undefined.
@@ -9995,6 +10143,37 @@ contains
         call check(error, t%residency("avg_ok") == RES_EMPTY, &
             "%print_stat must not resolve a deferred LIST column's width")
     end subroutine test_print_stat
+
+    !> `%print_stat(stats=.false.)` over a column that has not been read.
+    !!
+    !! The report has two layouts -- with the min/max/nulls columns and without -- and a row for a
+    !! column that is still PENDING in each. `test_print_stat` drives the pending row under the
+    !! full layout; the narrow one is a separate `print` statement with its own column widths, and
+    !! a mismatch there would misalign every subsequent row rather than fail loudly.
+    !!
+    !! Asserted through the report's own text, and paired with the residency check that makes the
+    !! row genuinely pending: a materialized column would take the other branch entirely.
+    subroutine test_print_stat_pending_without_stats(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test_run/table_query_printstat_nostats.parquet"
+        type(parquet_writer) :: w
+
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "a", [1_int32, 2_int32, 3_int32])
+        call parquet_write_column(w, "b", [1.5_real64, 2.5_real64, 3.5_real64])
+        call parquet_close_writer(w)
+        call parquet_open_table(t, f)
+        call check(error, t%residency("a") == RES_EMPTY .and. t%residency("b") == RES_EMPTY, &
+            "both columns must still be pending for the pending row to be printed")
+        if (allocated(error)) return
+        call t%print_stat(stats=.false.)
+        call t%print_stat(stats=.false., all=.true.)
+        ! The negative control: printing must not have read anything, which is the whole promise
+        ! of the pending row -- a report that materialized to fill it in would defeat the point.
+        call check(error, t%residency("a") == RES_EMPTY .and. t%residency("b") == RES_EMPTY, &
+            "%print_stat must not read a column to report that it is pending")
+    end subroutine test_print_stat_pending_without_stats
     !
     !> %validate_qc checks every qc-declaring column and leaves the table's residency alone.
     !!

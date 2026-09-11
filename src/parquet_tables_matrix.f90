@@ -381,7 +381,16 @@ contains
             name = trim(names(k))
             call table_resolve(self, name, proc, slots(k), writing=writing)
             if (.not. self%cache%cols(slots(k))%supported) then
+                ! GCOVR_EXCL_START -- a gcov ARTIFACT, not an untested line, and the same one
+                ! marked on parquet_tables_fill.f90's copy of this guard. The call IS reached:
+                ! test/error_scenarios.f90's `get_matrix_unsupported_column` runs `%get_matrix`
+                ! over the map fixture's `m_intkey` and prints "get_matrix: this column's type is
+                ! not supported by parquet_table", which table_unsupported_column_abort raises and
+                ! nothing else does, with `proc` spelled by this call site alone. gcov does not
+                ! count the block, because the callee ends in `error stop` and never returns -- an
+                ! inline `error stop` here would be counted, a CALL to one is not.
                 call table_unsupported_column_abort(self%cache, slots(k), trim(proc))
+                ! GCOVR_EXCL_STOP
             end if
         end do
     end subroutine matrix_prepare

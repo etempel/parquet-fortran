@@ -66,7 +66,10 @@ contains
                 test_print_rows_max_columns), &
             new_unittest("printing changes nothing: generation, residency and a live pointer", &
                 test_print_rows_changes_nothing), &
-            new_unittest("the permitted edge of every argument bound", test_print_rows_argument_edges) &
+            new_unittest("the permitted edge of every argument bound", test_print_rows_argument_edges), &
+            new_unittest("a real outside the fixed range prints in exponent form", &
+                test_print_rows_scientific_reals), &
+            new_unittest("a struct cell prints its field count", test_print_rows_struct_cell) &
             ]
     end subroutine collect_tests_table_display
 
@@ -141,6 +144,81 @@ contains
         call check(error, count_lines_starting(lines, n, "...") == 1, &
             "exactly one ... row must separate the head from the tail")
     end subroutine test_print_rows_defaults
+
+    !> A real too large or too small for fixed notation renders in the exponent form.
+    !!
+    !! `real_text` decides between a fixed and a scientific rendering from the exponent it reads
+    !! back out of an `ES` write: below 1e-4 or at or above `10**digits` it emits the `1.5e+30`
+    !! form, trimming trailing zeros and padding the exponent to two digits as C does. Every
+    !! other display test uses values in the single digits, so only the fixed half runs; the
+    !! branch here is the one that has to assemble the exponent by hand.
+    !!
+    !! Both signs of the exponent are printed because the sign is chosen by a two-armed `if`, and
+    !! a value between them pins that the branch is not simply taken for everything.
+    subroutine test_print_rows_scientific_reals(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(parquet_table) :: t
+        character(len=*), parameter :: out = "test_run/table_display_scientific.txt"
+        character(len=LINEW), allocatable :: lines(:)
+        integer :: n, u
+
+        call parquet_new_table(t)
+        call t%add_column("x", [1.5e30_real64, 2.5e-8_real64, 3.25_real64])
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_rows(unit=u)
+        close(u)
+        call read_lines(out, lines, n)
+
+        call check(error, find_token(lines, n, "e+30") > 0, &
+            "a value at or above 10**digits must render with a positive exponent")
+        if (allocated(error)) return
+        call check(error, find_token(lines, n, "e-08") > 0, &
+            "a value below 1e-4 must render with a negative exponent, padded to two digits")
+        if (allocated(error)) return
+        ! The control: the branch must not swallow an ordinary value.
+        call check(error, find_token(lines, n, "3.25") > 0, &
+            "and a value inside the fixed range must still render in fixed notation")
+    end subroutine test_print_rows_scientific_reals
+
+    !> A STRUCT cell prints its field count, as a list cell prints items and a map cell pairs.
+    !!
+    !! `container_text` narrows the container with a `select type` and has one arm per container
+    !! kind. `test_print_rows_container_cells` covers the list and map arms; the struct arm is
+    !! reached by nothing else, and an unmatched `select type` would leave the cell EMPTY rather
+    !! than abort -- so what is asserted is the text, not that printing succeeded.
+    subroutine test_print_rows_struct_cell(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(parquet_table) :: t
+        type(parquet_struct_column) :: sc
+        character(len=*), parameter :: out = "test_run/table_display_struct_cell.txt"
+        character(len=LINEW), allocatable :: lines(:)
+        character(len=8) :: fields(3)
+        integer :: kinds(3)
+        integer :: n, u
+
+        fields(1) = "f1"
+        fields(2) = "f2"
+        fields(3) = "f3"
+        kinds(1) = PK_INT32
+        kinds(2) = PK_FLOAT64
+        kinds(3) = PK_INT64
+        call sc%init(fields, kinds, 2_int64)
+        call sc%clear_null_row(1_int64)
+        call parquet_new_table(t)
+        call t%add_column("st", sc)
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_rows(unit=u)
+        close(u)
+        call read_lines(out, lines, n)
+
+        ! Three fields were declared, so the cell must say three -- a count taken from the wrong
+        ! place (the row count, say) would read "2 fields" here.
+        call check(error, find_token(lines, n, "3 fields") > 0, &
+            "a struct cell must print its FIELD count")
+        if (allocated(error)) return
+        call check(error, find_token(lines, n, "struct") > 0, &
+            "and the kind row must name the container kind")
+    end subroutine test_print_rows_struct_cell
 
     !> **`first=` and `last=` each select one end, and both clamp to the table.**
     !>

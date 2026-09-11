@@ -52,7 +52,17 @@ contains
             new_unittest("queries are reads: no detach, no generation bump", test_query_is_a_read), &
             new_unittest("lookups from several threads agree with the serial ones", test_lookups_in_parallel), &
             new_unittest("a string column: find_all equals pf_match_all, find_many equals pf_match", &
-                test_string_column) &
+                test_string_column), &
+            new_unittest("find/find_all/find_many in their int32 row forms", &
+                test_query_every_int32_row_form), &
+            new_unittest("find_all over every temporal key, in both row widths", &
+                test_find_all_every_temporal_key), &
+            new_unittest("the remaining string and real64 query forms", &
+                test_query_remaining_key_forms), &
+            new_unittest("a null temporal key finds nothing in find_all, both widths", &
+                test_find_all_null_temporal_key), &
+            new_unittest("find_many on a unique index, in every key shape", &
+                test_find_many_unique_index_key_shapes) &
             ]
     end subroutine collect_tests_table_index
 
@@ -684,4 +694,362 @@ contains
         call ix%find_all("x", rows)
         call check(error, size(rows) == 1 .and. rows(1) == 1_int64, "find_all on a unique string index is one row")
     end subroutine test_string_column
+
+    !> The int32-row half of `%find`, `%find_all` and `%find_many`, over int32 and real32 keys.
+    !!
+    !! Every query binding comes in two row widths, and the tests above take the int64 one almost
+    !! everywhere. The int32 forms are not thin casts of it: each routes through `tix_narrow`,
+    !! which is the guard that refuses a row number too large for int32, and each has its own
+    !! absent-key arm that must hand back a ZERO-LENGTH array rather than a wrong one. Both
+    !! index flavours are swept, because `%find_all`'s unique and multimap branches are separate
+    !! code and the unique one's absent-key arm is reached by nothing else.
+    subroutine test_query_every_int32_row_form(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int32) :: row32, many32(3)
+        integer(int32), allocatable :: rows32(:)
+        integer(int64) :: nf
+        !
+        ! Rows 1, 3 and 6 hold 10; rows 2 and 5 hold 20; row 4 holds 30. Interleaved, so a
+        ! binding that assumed equal keys were adjacent would fail here.
+        call parquet_new_table(t)
+        call t%add_column("k", [10_int32, 20_int32, 10_int32, 30_int32, 20_int32, 10_int32])
+        call t%add_column("r", [1.5_real32, 2.5_real32, 1.5_real32, 3.5_real32, 2.5_real32, 1.5_real32])
+
+        ! ---- multimap ----
+        call t%build_index("k", ix, unique=.false.)
+        call ix%find(10_int32, row32)
+        call check(error, row32 == 1_int32, "find(int32 key, int32 row) is the FIRST row of the group")
+        if (allocated(error)) return
+        call ix%find_all(10_int32, rows32)
+        call check(error, size(rows32) == 3 .and. all(rows32 == [1_int32, 3_int32, 6_int32]), &
+            "find_all(int32 key, int32 rows) lists every row of the group, ascending")
+        if (allocated(error)) return
+        call ix%find_all(99_int32, rows32)
+        call check(error, allocated(rows32) .and. size(rows32) == 0, &
+            "an absent key gives a zero-length array, not an unallocated one")
+        if (allocated(error)) return
+        call ix%find_many([10_int32, 99_int32, 30_int32], many32, n_found=nf)
+        call check(error, all(many32 == [1_int32, 0_int32, 4_int32]) .and. nf == 2_int64, &
+            "find_many(int32 keys, int32 rows) answers 0 for the absent key and counts the rest")
+        if (allocated(error)) return
+
+        call t%build_index("r", ix, unique=.false.)
+        call ix%find(1.5_real32, row32)
+        call check(error, row32 == 1_int32, "find(real32 key, int32 row)")
+        if (allocated(error)) return
+        call ix%find_all(2.5_real32, rows32)
+        call check(error, all(rows32 == [2_int32, 5_int32]), "find_all(real32 key, int32 rows)")
+        if (allocated(error)) return
+        call ix%find_all(9.5_real32, rows32)
+        call check(error, size(rows32) == 0, "an absent real32 key gives a zero-length array")
+        if (allocated(error)) return
+        call ix%find_many([1.5_real32, 9.5_real32, 3.5_real32], many32)
+        call check(error, all(many32 == [1_int32, 0_int32, 4_int32]), &
+            "find_many(real32 keys, int32 rows)")
+        if (allocated(error)) return
+
+        ! ---- unique, which is the other branch of find_all entirely ----
+        call parquet_new_table(t)
+        call t%add_column("k", [10_int32, 20_int32, 30_int32])
+        call t%add_column("r", [1.5_real32, 2.5_real32, 3.5_real32])
+        call t%build_index("k", ix)
+        call ix%find_all(20_int32, rows32)
+        call check(error, size(rows32) == 1 .and. rows32(1) == 2_int32, &
+            "find_all on a UNIQUE int32 index is the one row")
+        if (allocated(error)) return
+        call ix%find_all(99_int32, rows32)
+        call check(error, size(rows32) == 0, "and a zero-length array when the key is absent")
+        if (allocated(error)) return
+        call t%build_index("r", ix)
+        call ix%find_all(2.5_real32, rows32)
+        call check(error, size(rows32) == 1 .and. rows32(1) == 2_int32, &
+            "find_all on a UNIQUE real32 index is the one row")
+        if (allocated(error)) return
+        call ix%find_all(9.5_real32, rows32)
+        call check(error, size(rows32) == 0, "and a zero-length array when that key is absent")
+    end subroutine test_query_every_int32_row_form
+
+    !> `%find_all` over each temporal key type, in BOTH row widths.
+    !!
+    !! A timestamp key is a PAIR -- seconds and nanoseconds -- so it reaches a different engine
+    !! helper (`tix_all_pair_*`) from the single-component date and time keys, and each of those
+    !! helpers has its own int32 and int64 form. Six cells, none of them reachable from the
+    !! scalar `%find` the temporal test above uses.
+    !!
+    !! Each column repeats one value so the multimap branch returns more than one row; a
+    !! find_all that answered only the first would be indistinguishable from `%find` otherwise.
+    subroutine test_find_all_every_temporal_key(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_date) :: d(4), dq
+        type(parquet_time) :: tm(4), tq
+        type(parquet_timestamp) :: ts(4), tsq
+        integer(int32), allocatable :: r32(:)
+        integer(int64), allocatable :: r64(:)
+        !
+        ! Rows 1 and 3 share a value in each column; rows 2 and 4 are distinct.
+        call d(1)%set(2024, 3, 1)
+        call d(2)%set(1999, 12, 31)
+        call d(3)%set(2024, 3, 1)
+        call d(4)%set(2000, 1, 1)
+        call tm(1)%set(12, 0, 0)
+        call tm(2)%set(1, 2, 3)
+        call tm(3)%set(12, 0, 0)
+        call tm(4)%set(23, 59, 59)
+        call ts(1)%set(2024, 3, 1, 12, 30, 0)
+        call ts(2)%set(1999, 12, 31, 1, 2, 3)
+        call ts(3)%set(2024, 3, 1, 12, 30, 0)
+        call ts(4)%set(2000, 1, 1, 0, 0, 0)
+        call parquet_new_table(t)
+        call t%add_column("d", d)
+        call t%add_column("tm", tm)
+        call t%add_column("ts", ts)
+
+        call dq%set(2024, 3, 1)
+        call tq%set(12, 0, 0)
+        call tsq%set(2024, 3, 1, 12, 30, 0)
+
+        call t%build_index("d", ix, unique=.false.)
+        call ix%find_all(dq, r32)
+        call check(error, all(r32 == [1_int32, 3_int32]), "find_all(date, int32 rows)")
+        if (allocated(error)) return
+        call ix%find_all(dq, r64)
+        call check(error, all(r64 == [1_int64, 3_int64]), "find_all(date, int64 rows)")
+        if (allocated(error)) return
+
+        call t%build_index("tm", ix, unique=.false.)
+        call ix%find_all(tq, r32)
+        call check(error, all(r32 == [1_int32, 3_int32]), "find_all(time, int32 rows)")
+        if (allocated(error)) return
+        call ix%find_all(tq, r64)
+        call check(error, all(r64 == [1_int64, 3_int64]), "find_all(time, int64 rows)")
+        if (allocated(error)) return
+
+        call t%build_index("ts", ix, unique=.false.)
+        call ix%find_all(tsq, r32)
+        call check(error, all(r32 == [1_int32, 3_int32]), "find_all(timestamp, int32 rows)")
+        if (allocated(error)) return
+        call ix%find_all(tsq, r64)
+        call check(error, all(r64 == [1_int64, 3_int64]), "find_all(timestamp, int64 rows)")
+        if (allocated(error)) return
+
+        ! The unique branch of the PAIR helper, including its absent-key arm -- a different
+        ! path from the multimap `get_all` the six cells above take.
+        call parquet_new_table(t)
+        call t%add_column("ts", ts(1:2))
+        call t%build_index("ts", ix)
+        call ix%find_all(tsq, r64)
+        call check(error, size(r64) == 1 .and. r64(1) == 1_int64, &
+            "find_all(timestamp) on a unique index is the one row")
+        if (allocated(error)) return
+        call ix%find_all(tsq, r32)
+        call check(error, size(r32) == 1 .and. r32(1) == 1_int32, "and in int32 rows too")
+        if (allocated(error)) return
+        call tsq%set(1900, 1, 1, 0, 0, 0)
+        call ix%find_all(tsq, r64)
+        call check(error, size(r64) == 0, "an absent timestamp gives a zero-length array")
+        if (allocated(error)) return
+        call ix%find_all(tsq, r32)
+        call check(error, size(r32) == 0, "and the same in int32 rows")
+    end subroutine test_find_all_every_temporal_key
+
+    !> The remaining `%find_many` and `%find_all` string and real64 cells.
+    !!
+    !! `test_string_column` above drives the character-array form into int64 answers and the
+    !! `parquet_string_column` form into int32 ones. The OPPOSITE pairing of each is what is
+    !! swept here, together with `%find_all` over a string key in int32 rows and `%find_many`
+    !! over real64 keys in int64 rows -- the cells a caller picks freely and nothing else calls.
+    subroutine test_query_remaining_key_forms(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_string_column) :: probes
+        character(len=3) :: keys(3)
+        integer(int32) :: m32(3)
+        integer(int64) :: m64(3), nf
+        integer(int32), allocatable :: r32(:)
+        integer :: i
+        !
+        ! "bb" at rows 1 and 4, "a" at rows 2 and 5, "ccc" at row 3 alone.
+        call parquet_new_table(t)
+        call t%add_column("s", [character(len=3) :: "bb", "a", "ccc", "bb", "a"])
+        call t%add_column("x", [1.5_real64, 2.5_real64, 3.5_real64, 1.5_real64, 2.5_real64])
+        keys = [character(len=3) :: "a", "zz", "ccc"]
+        call probes%clear()
+        do i = 1, 3
+            call probes%append_string(trim(keys(i)))
+        end do
+
+        call t%build_index("s", ix, unique=.false.)
+        call ix%find_many(keys, m32, n_found=nf)
+        call check(error, all(m32 == [2_int32, 0_int32, 3_int32]) .and. nf == 2_int64, &
+            "find_many(character keys, int32 rows): first row per key, 0 for the absent one")
+        if (allocated(error)) return
+        call ix%find_many(probes, m64, n_found=nf)
+        call check(error, all(m64 == [2_int64, 0_int64, 3_int64]) .and. nf == 2_int64, &
+            "find_many(parquet_string_column keys, int64 rows) agrees with the character form")
+        if (allocated(error)) return
+        call ix%find_all("bb", r32)
+        call check(error, all(r32 == [1_int32, 4_int32]), &
+            "find_all(string key, int32 rows) on a multimap")
+        if (allocated(error)) return
+
+        call t%build_index("x", ix, unique=.false.)
+        call ix%find_many([1.5_real64, 9.5_real64, 3.5_real64], m64, n_found=nf)
+        call check(error, all(m64 == [1_int64, 0_int64, 3_int64]) .and. nf == 2_int64, &
+            "find_many(real64 keys, int64 rows)")
+        if (allocated(error)) return
+
+        ! The unique branch of the string find_all, both widths, present and absent.
+        call parquet_new_table(t)
+        call t%add_column("s", [character(len=3) :: "x", "yy", "zzz"])
+        call t%build_index("s", ix)
+        call ix%find_all("yy", r32)
+        call check(error, size(r32) == 1 .and. r32(1) == 2_int32, &
+            "find_all(string key, int32 rows) on a UNIQUE index is the one row")
+        if (allocated(error)) return
+        call ix%find_all("nope", r32)
+        call check(error, size(r32) == 0, "and a zero-length array when the key is absent")
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: r64(:)
+            call ix%find_all("nope", r64)
+            call check(error, allocated(r64) .and. size(r64) == 0, &
+                "the int64 form's absent-key arm allocates a zero-length array too")
+        end block
+    end subroutine test_query_remaining_key_forms
+
+    !> A NULL temporal key finds nothing, in every temporal type and both row widths.
+    !!
+    !! Null is not a value: every temporal `%find_all` specific answers a zero-length array for a
+    !! null key WITHOUT consulting the engine at all, because a null element's raw storage is a
+    !! real key -- 1970-01-01 for a date, midnight for a time -- and asking the engine would hand
+    !! back the rows holding that instant. `test_temporal_columns` pins that rule for `%find` and
+    !! `%count`; `%find_all` has its own copy of the guard in each of its six specifics.
+    !!
+    !! The fixture therefore CONTAINS the epoch row that a leaked null would find, which is what
+    !! makes the assertion discriminating: without it, a specific that dropped the guard would
+    !! answer zero rows anyway and pass.
+    subroutine test_find_all_null_temporal_key(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_date) :: d(3), dq
+        type(parquet_time) :: tm(3), tq
+        type(parquet_timestamp) :: ts(3), tsq
+        integer(int32), allocatable :: r32(:)
+        integer(int64), allocatable :: r64(:)
+        !
+        ! Row 1 of each column is the epoch instant -- the value a null element's raw storage
+        ! carries -- so a guard that was dropped would return row 1 rather than nothing.
+        call d(1)%set_raw(0_int32)
+        call d(2)%set(2024, 3, 1)
+        call d(3)%set(1999, 12, 31)
+        call tm(1)%set(0, 0, 0)
+        call tm(2)%set(12, 0, 0)
+        call tm(3)%set(23, 59, 59)
+        call ts(1)%set(1970, 1, 1, 0, 0, 0)
+        call ts(2)%set(2024, 3, 1, 12, 30, 0)
+        call ts(3)%set(1999, 12, 31, 1, 2, 3)
+        call parquet_new_table(t)
+        call t%add_column("d", d)
+        call t%add_column("tm", tm)
+        call t%add_column("ts", ts)
+
+        call dq%set_null()
+        call tq%set_null()
+        call tsq%set_null()
+
+        call t%build_index("d", ix, unique=.false.)
+        ! The positive control first: the epoch row IS findable by its own genuine value, so the
+        ! zero-length answers below are about the null and not about an empty index.
+        call d(1)%set_raw(0_int32)
+        call ix%find_all(d(1), r64)
+        call check(error, size(r64) == 1 .and. r64(1) == 1_int64, &
+            "control: the epoch date row is found by its own value")
+        if (allocated(error)) return
+        call ix%find_all(dq, r32)
+        call check(error, allocated(r32) .and. size(r32) == 0, &
+            "a null date key finds nothing, in int32 rows")
+        if (allocated(error)) return
+        call ix%find_all(dq, r64)
+        call check(error, allocated(r64) .and. size(r64) == 0, &
+            "and nothing in int64 rows -- not the 1970-01-01 row")
+        if (allocated(error)) return
+
+        call t%build_index("tm", ix, unique=.false.)
+        call ix%find_all(tq, r32)
+        call check(error, size(r32) == 0, "a null time key finds nothing, in int32 rows")
+        if (allocated(error)) return
+        call ix%find_all(tq, r64)
+        call check(error, size(r64) == 0, "and nothing in int64 rows -- not the midnight row")
+        if (allocated(error)) return
+
+        call t%build_index("ts", ix, unique=.false.)
+        call ix%find_all(tsq, r32)
+        call check(error, size(r32) == 0, "a null timestamp key finds nothing, in int32 rows")
+        if (allocated(error)) return
+        call ix%find_all(tsq, r64)
+        call check(error, size(r64) == 0, "and nothing in int64 rows -- not the epoch row")
+    end subroutine test_find_all_null_temporal_key
+
+    !> `%find_many` on a UNIQUE index, in the three key shapes whose unique arm nothing else runs.
+    !!
+    !! Each bulk specific branches on `%is_unique()`: a unique index goes through the map's
+    !! `get_many` and counts the non-zero answers itself, while a multimap goes through
+    !! `get_first_many`, which counts them for it. The two are different engines with different
+    !! `n_found` bookkeeping, and the tests above drive the MULTIMAP arm for every shape -- so the
+    !! unique arm of the timestamp-pair, character-array and string-column forms rests on nothing.
+    !!
+    !! `n_found` is asserted beside the rows in each, because that is the half a unique arm
+    !! computes rather than receives: a count taken over the wrong comparison would leave the row
+    !! answers right and the count wrong.
+    subroutine test_find_many_unique_index_key_shapes(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        type(parquet_string_column) :: probes
+        type(parquet_timestamp) :: ts(3), tq(3)
+        character(len=3) :: keys(3)
+        integer(int32) :: m32(3)
+        integer(int64) :: m64(3), nf
+        integer :: i
+        !
+        call ts(1)%set(2024, 3, 1, 12, 30, 0)
+        call ts(2)%set(1999, 12, 31, 1, 2, 3)
+        call ts(3)%set(2000, 1, 1, 0, 0, 0)
+        call parquet_new_table(t)
+        call t%add_column("ts", ts)
+        call t%build_index("ts", ix)
+        call check(error, ix%is_unique(), "the timestamp index must be the unique flavour")
+        if (allocated(error)) return
+        tq(1) = ts(3)
+        call tq(2)%set(1900, 1, 1, 0, 0, 0)   ! absent
+        tq(3) = ts(1)
+        call ix%find_many(tq, m32, n_found=nf)
+        call check(error, all(m32 == [3_int32, 0_int32, 1_int32]) .and. nf == 2_int64, &
+            "timestamp keys into int32 rows on a unique index, with the absent key counted out")
+        if (allocated(error)) return
+
+        keys = [character(len=3) :: "yy", "no", "x"]
+        call parquet_new_table(t)
+        call t%add_column("s", [character(len=3) :: "x", "yy", "zzz"])
+        call t%build_index("s", ix)
+        call check(error, ix%is_unique(), "the string index must be the unique flavour")
+        if (allocated(error)) return
+        call ix%find_many(keys, m32, n_found=nf)
+        call check(error, all(m32 == [2_int32, 0_int32, 1_int32]) .and. nf == 2_int64, &
+            "character keys into int32 rows on a unique index")
+        if (allocated(error)) return
+        call probes%clear()
+        do i = 1, 3
+            call probes%append_string(trim(keys(i)))
+        end do
+        call ix%find_many(probes, m64, n_found=nf)
+        call check(error, all(m64 == [2_int64, 0_int64, 1_int64]) .and. nf == 2_int64, &
+            "a parquet_string_column of the same keys into int64 rows must agree exactly")
+    end subroutine test_find_many_unique_index_key_shapes
 end module test_table_index

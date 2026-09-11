@@ -9491,7 +9491,15 @@ rounding barriers: `a - s` is rationalised to `-4/(a + s)`, giving `exp(0.5 - a/
 uniform proposal's exponent is `(m - z)*(m + z)` rather than `m*m - z*z`. A barrier would work only
 where it was written; rationalising cannot be undone by a flag. `hypot(a, 2)` rather than
 `sqrt(a*a + 4)` keeps `a*a` from overflowing above `1.3e154`, which would make `s` infinite and the
-threshold 0 — the same hang from the other direction. This is `.claude/rules/fortran-gotchas.md`'s
+threshold 0 — the same hang from the other direction. **`a + s` overflows in its own right above
+about `9e307`**, and the collapse is the same: the threshold goes to 0 and `lam` to `+Infinity`, so
+the tilted case is selected correctly but its accept test is `exp(-Infinity)` and nothing is ever
+accepted. Observed with a standardised bound of `1e308` (`lo = 1e308, hi = huge(1.0_real64)`, and
+equally `lo = 0, mu = -1e308, sigma = 1`): spins forever under gfortran, aborts on the overflow
+under nagfor. Like the `1.3e154` case this is argued unreachable from bounds a caller would write
+rather than defended, so what it forbids is a FIXTURE reaching it —
+`test_normal_trunc_unbounded_forms`' centring arm carries `sigma = 1e300` to hold its standardised
+bound at `1e8` for exactly this reason. This is `.claude/rules/fortran-gotchas.md`'s
 "a DIFFERENCE of two nearly-equal doubles carries ~8 digits, the rest is the compiler", with a hang
 rather than a wrong digit as the symptom.
 

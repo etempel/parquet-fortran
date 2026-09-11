@@ -78,6 +78,15 @@ in `code-style.md`.
   without overflowing (`sub64`/`add64`, `src/parquet_random.f90`); a deliberately overflowing site
   must be guarded by a comparison against an overflow-free implementation (`feature_risks.md`
   Risk-94).
+- **A `huge()` sentinel standing for "unbounded" is a NUMBER: centring, scaling or differencing it
+  OVERFLOWS.** The overflow delivers the infinity that was meant, so gfortran and ifx look correct
+  and nagfor's `-ieee=stop` aborts on the documented call; a quiet build is no evidence. Produce
+  the infinity with `ieee_value` instead, behind a guard formed so it cannot itself overflow
+  (`huge() + ctr` before a subtraction, `huge()*scl` before a division by an `scl` below one),
+  each NESTED inside the sign test that makes its own threshold safe to form -- `tn_standardise`
+  and `tn_width` (`src/parquet_random.f90`). A caller's true `+/-Infinity` needs none of it, so
+  the two spellings diverge unless a test asserts they draw the same values
+  (`test_normal_trunc_unbounded_forms`).
 - **A list-directed `read(text, *, iostat=ios) n` is not a strict parse**: `"5 6"` yields 5 with
   `iostat == 0`. Parse caller-supplied text by hand (trim, one optional sign, digits and nothing
   else), then convert (`env_int64`, `src/parquet_settings.f90`; `settings_env_two_numbers` scenario).

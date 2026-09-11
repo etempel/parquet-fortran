@@ -41,6 +41,21 @@ module test_random_dist
     !! deterministic, which is the whole premise of the module being tested.
     integer(int64), parameter :: dist_seed = 20260821_int64
 
+    !> Standardised magnitude past which the truncated-normal fixtures stop computing.
+    !!
+    !! `tn_q` and `tn_phi` return a flat 0 or 1 out here, which is both what keeps `x*x` from
+    !! overflowing for an infinite bound and the widest window `trunc_gate`'s flat control can be
+    !! drawn on -- so the three share the one constant, and a control drawn past a cutoff the
+    !! conditional CDF has already saturated is a sample of one cell.
+    !!
+    !! **37 rather than a rounder 40 because that is the largest magnitude at which both
+    !! `erfc(x/sqrt(2))` and `exp(-x*x/2)` are still NORMAL numbers**: at 38 both are subnormal,
+    !! and producing one raises `IEEE_UNDERFLOW`, which nagfor reports as a line at program exit
+    !! attached to nothing. Nothing is lost by stopping here -- `P(Z > 37)` is about `6e-300`,
+    !! below one ulp of any interval mass the gate divides by, so every cell index is the one the
+    !! uncut function gives.
+    real(real64), parameter :: TN_CUT = 37.0_real64
+
 contains
 
     !> Registers every test in the `random_dist` suite.
@@ -1726,6 +1741,14 @@ contains
     !! case; this asserts that, so a caller need not reach for `ieee_arithmetic` to truncate on one
     !! side. The infinity is built with `ieee_value`, never as an overflowing expression, because
     !! nagfor traps the overflow that would build it arithmetically.
+    !!
+    !! **The last three arms are the ones the two above cannot reach**, and every one of them
+    !! aborted under nagfor before `tn_standardise` and `tn_width` existed: standardising a
+    !! `huge()` bound by a `sigma` below one, spanning two of them at once, and centring one on a
+    !! `mu` of the opposite sign at the same magnitude. Each is representable only as the infinity
+    !! the equivalence promises, and the plain arithmetic reached that infinity by raising
+    !! `IEEE_OVERFLOW` on the way. They assert values rather than "it did not abort", so they say
+    !! the same thing on a compiler that masks the trap.
     subroutine test_normal_trunc_unbounded_forms(error)
         use ieee_arithmetic, only: ieee_value, ieee_positive_inf, ieee_negative_inf
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
@@ -1760,6 +1783,61 @@ contains
         call rng%seed(dist_seed, 76_int64)
         call rng%normal_truncated(ninf, pinf, x1)
         call check(error, x1 == x1, "an unbounded truncated normal returned a NaN")
+        if (allocated(error)) return
+
+        ! A sigma below one: `huge(1.0_real64)/sigma` is past the top of the range.
+        do k = 1, 200
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(0.0_real64, huge(1.0_real64), x1, mu=-0.25_real64, sigma=0.5_real64)
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(0.0_real64, pinf, x2, mu=-0.25_real64, sigma=0.5_real64)
+            call check(error, x1 == x2, &
+                "a huge() upper bound and +Infinity gave different draws under a sigma below one, where the " // &
+                "standardised bound is no longer representable")
+            if (allocated(error)) return
+
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(-huge(1.0_real64), 0.0_real64, x1, mu=0.25_real64, sigma=0.5_real64)
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(ninf, 0.0_real64, x2, mu=0.25_real64, sigma=0.5_real64)
+            call check(error, x1 == x2, &
+                "a -huge() lower bound and -Infinity gave different draws under a sigma below one")
+            if (allocated(error)) return
+        end do
+
+        ! Two huge() bounds at once: the standardised WIDTH is what is not representable here,
+        ! and every case rule is decided by comparing it against a threshold below exp(0.5).
+        do k = 1, 50
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(-huge(1.0_real64), huge(1.0_real64), x1)
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(ninf, pinf, x2)
+            call check(error, x1 == x2, &
+                "-huge() to huge() and -Infinity to +Infinity gave different draws, so the untruncated " // &
+                "spelling of an untruncated draw is not the untruncated draw")
+            if (allocated(error)) return
+        end do
+
+        ! A mu a full range from the bound, where the CENTRING is what overflows. `sigma` is large
+        ! enough to bring the standardised bound back to 1e8: a bound past about 9e307 makes
+        ! `tn_threshold`'s own `a + s` overflow, which is the regime `feature_risks.md` Risk-251
+        ! argues is unreachable from bounds a caller would write, and which hangs rather than
+        ! aborts where the trap is masked. This arm is about the centring, not about that.
+        do k = 1, 50
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(0.0_real64, huge(1.0_real64), x1, &
+                                      mu=-1.0e308_real64, sigma=1.0e300_real64)
+            call rng%seed(dist_seed, int(k, int64))
+            call rng%normal_truncated(0.0_real64, pinf, x2, &
+                                      mu=-1.0e308_real64, sigma=1.0e300_real64)
+            call check(error, x1 == x2, &
+                "a huge() upper bound and +Infinity gave different draws against a mu a full range below " // &
+                "them, where the centring itself is not representable")
+            if (allocated(error)) return
+            call check(error, x1 >= 0.0_real64, &
+                "a truncated draw centred a full range below its own interval came back outside it")
+            if (allocated(error)) return
+        end do
     end subroutine test_normal_trunc_unbounded_forms
 
     !> The truncated normal is `pure`: usable in a `do concurrent` body, with the same values.
@@ -1956,14 +2034,15 @@ contains
     !!
     !! Written as `erfc(x/sqrt(2))/2` rather than `1 - Phi(x)` so the far-tail intervals do not
     !! cancel: at `x = 4` the two differ in the fifth significant digit of the answer. The cutoff
-    !! at 40 keeps `x*x` from overflowing for an infinite bound, which nagfor traps; beyond it the
-    !! true value is below `tiny(1.0_real64)` anyway.
+    !! at `TN_CUT` keeps `x*x` from overflowing for an infinite bound, which nagfor traps, and
+    !! keeps `erfc` out of the subnormal range; beyond it the true value is no longer measurable
+    !! against any interval mass this suite uses.
     pure function tn_q(x) result(q)
         real(real64), intent(in) :: x       !! the point to measure the upper tail from
         real(real64) :: q                   !! `P(Z > x)`, in `[0, 1]`
-        if (x >= 40.0_real64) then
+        if (x >= TN_CUT) then
             q = 0.0_real64
-        else if (x <= -40.0_real64) then
+        else if (x <= -TN_CUT) then
             q = 1.0_real64
         else
             q = 0.5_real64 * erfc(x / sqrt(2.0_real64))
@@ -1974,7 +2053,7 @@ contains
     pure function tn_phi(x) result(p)
         real(real64), intent(in) :: x       !! the point to evaluate the density at
         real(real64) :: p                   !! the density there
-        if (abs(x) >= 40.0_real64) then
+        if (abs(x) >= TN_CUT) then
             p = 0.0_real64
         else
             p = exp(-0.5_real64 * x * x) / sqrt(8.0_real64 * atan(1.0_real64))
@@ -1986,6 +2065,14 @@ contains
     !! `flat` is what makes the negative control possible: `.false.` is the library's own draw and
     !! `.true.` is a uniform sample on the same interval -- the exact output a wrong envelope
     !! anchor produces, and the one a shape test must reject.
+    !!
+    !! **The control is drawn on the interval clamped to `TN_CUT`, not on the interval itself.**
+    !! A one-sided tail is spelled with a `huge()` bound, and a uniform draw is not defined on an
+    !! unbounded interval: taken literally it returns values around 1e308, whose `x*x` overflows
+    !! (nagfor traps it) and whose conditional CDF is pinned at 1, so every draw falls in the last
+    !! cell and the control degenerates to a sample of one cell. Clamping costs nothing the
+    !! chi-square can see -- past `TN_CUT` the CDF is already saturated -- and sharpens the
+    !! control into a flat sample over the window the gate can actually resolve.
     !!
     !! The cell index is the EXACT conditional CDF, so the chi-square is distribution-free rather
     !! than a comparison against another sampler.
@@ -2003,6 +2090,12 @@ contains
         integer(int64) :: k, counts(NCELL), cell
         real(real64) :: x, u, s, s2, mean, var, expect, dn
         real(real64) :: qa, qb, mass, emean, evar, m4
+        real(real64) :: flo, fhi
+
+        ! The finite window the flat control is drawn on. See the note above; an unclamped
+        ! `hi - lo` would also overflow outright were both bounds ever given as `huge()`.
+        flo = max(lo, -TN_CUT)
+        fhi = min(hi, TN_CUT)
 
         qa = tn_q(lo)
         qb = tn_q(hi)
@@ -2018,7 +2111,7 @@ contains
         do k = 1_int64, n
             if (flat) then
                 call rng%uniform(u)
-                x = lo + u * (hi - lo)
+                x = flo + u * (fhi - flo)
             else
                 call rng%normal_truncated(lo, hi, x)
             end if

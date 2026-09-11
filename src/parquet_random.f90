@@ -93,12 +93,13 @@ module parquet_random
     use iso_fortran_env, only: int32, int64, real32, real64
     use parquet_expkey, only: exp_key, ek_round => ek_rnd
     use parquet_ziggurat, only: zig_layers, zig_r, zig_w, zig_k, zig_f
+    use ieee_arithmetic, only: ieee_value, ieee_positive_inf, ieee_negative_inf
 
-    ! **This module depends on `iso_fortran_env` and on ONE project module, and both halves of that
-    ! matter.** A program that only draws random numbers links no settings, no sorting, and so no
-    ! `parquet_bindings` and no Arrow. Everything that needed more than the bare generator (the
-    ! permutation, the subset/resample forms, the weighted draw) lives in `parquet_sampling`, which
-    ! is free to import whatever it needs precisely because this one is not.
+    ! **This module depends on `iso_fortran_env`, `ieee_arithmetic` and ONE project module, and
+    ! both halves of that matter.** A program that only draws random numbers links no settings, no
+    ! sorting, and so no `parquet_bindings` and no Arrow. Everything that needed more than the bare
+    ! generator (the permutation, the subset/resample forms, the weighted draw) lives in
+    ! `parquet_sampling`, which is free to import whatever it needs precisely because this one is not.
     !
     ! Both imports are admissible because each is itself a leaf -- `iso_fortran_env` and nothing
     ! else -- so the standalone scripts can compile them alongside this file. The distributions
@@ -3463,6 +3464,84 @@ contains
         t = (2.0_real64 / (a + s)) * exp(0.5_real64 - a / (a + s))
     end function tn_threshold
 
+    !> One bound on the standardised scale: `(v - ctr)/scl`, saturating instead of overflowing.
+    !!
+    !! **The plain quotient is not representable for the bounds a caller actually writes.** A
+    !! one-sided truncation is spelled `huge(1.0_real64)`, and standardising that by any `sigma`
+    !! below one overflows; so does centring it on a `mu` of the opposite sign at the same
+    !! magnitude. `IEEE_OVERFLOW` is silent under gfortran and ifx, where the result is the
+    !! infinity this returns directly, and fatal under nagfor's default `-ieee=stop` -- so the
+    !! promise that `huge(1.0_real64)` and a true infinity are the same truncation held only
+    !! where the trap was masked. Saturating here is what makes it hold everywhere.
+    !!
+    !! Each guard is NESTED inside the sign test that makes its own threshold safe to form, not
+    !! `.and.`-ed with it: `.and.` does not short-circuit, and `huge() + ctr` overflows for the
+    !! sign of `ctr` the outer test excludes.
+    !!
+    !! An infinite or NaN `ctr` reaches the same answers as the plain arithmetic, because the
+    !! thresholds it is compared against are infinite in the same direction: that keeps
+    !! `normal_truncated_draw`'s one bound guard covering an infinite `mu` and a NaN anywhere.
+    pure function tn_standardise(v, ctr, scl) result(z)
+        real(real64), intent(in) :: v               !! the bound, in the caller's units
+        real(real64), intent(in) :: ctr             !! the resolved `mu`, subtracted first
+        real(real64), intent(in) :: scl             !! the resolved `sigma`; strictly positive
+        real(real64) :: z                           !! the standardised bound, `+/-Infinity` where it saturates
+        real(real64) :: num
+
+        ! The centring, which overflows only for two values of opposite signs a full range apart.
+        if (ctr < 0.0_real64) then
+            if (v > huge(1.0_real64) + ctr) then
+                z = ieee_value(0.0_real64, ieee_positive_inf)
+                return
+            end if
+        else if (ctr > 0.0_real64) then
+            if (v < -huge(1.0_real64) + ctr) then
+                z = ieee_value(0.0_real64, ieee_negative_inf)
+                return
+            end if
+        end if
+        num = v - ctr
+
+        ! The scaling, which overflows only below a `scl` of one -- where `huge()*scl` is the
+        ! exact threshold and cannot overflow itself. A NaN fails both tests and falls through to
+        ! the division, which propagates it.
+        if (scl < 1.0_real64) then
+            if (abs(num) > huge(1.0_real64) * scl) then
+                if (num > 0.0_real64) then
+                    z = ieee_value(0.0_real64, ieee_positive_inf)
+                else
+                    z = ieee_value(0.0_real64, ieee_negative_inf)
+                end if
+                return
+            end if
+        end if
+        z = num / scl
+    end function tn_standardise
+
+    !> The standardised interval's width: `b - a`, saturating instead of overflowing.
+    !!
+    !! Two bounds a full range apart -- `[-huge, huge]`, which is how a caller says "do not
+    !! truncate" -- have a width that is not representable, and every case rule below compares
+    !! that width against a threshold of at most `exp(0.5)`. Saturating therefore decides each
+    !! rule exactly as the unrepresentable width would, and as the infinite bounds already do.
+    !! Requires `a < b`, which `normal_truncated_draw` has established; the width is invariant
+    !! under the mirroring below, so one evaluation serves both orientations.
+    pure function tn_width(a, b) result(w)
+        real(real64), intent(in) :: a               !! standardised lower bound
+        real(real64), intent(in) :: b               !! standardised upper bound; `b > a`
+        real(real64) :: w                           !! `b - a`, or `+Infinity` where it saturates
+
+        ! Nested, not `.and.`-ed: `huge() + a` overflows for the sign of `a` the outer test
+        ! excludes. With `a >= 0` and `b > a` the difference is bounded by `b` and cannot overflow.
+        if (a < 0.0_real64) then
+            if (b > huge(1.0_real64) + a) then
+                w = ieee_value(0.0_real64, ieee_positive_inf)
+                return
+            end if
+        end if
+        w = b - a
+    end function tn_width
+
     !> The truncated normal draw, with the accepting case reported. See `stream_normal_truncated`.
     !!
     !! Robert (1995), *Simulation of truncated normal variables*, Statistics and Computing
@@ -3493,6 +3572,10 @@ contains
     !! **Infinite bounds need no special case anywhere.** `b - a` is `+Infinity`, which satisfies
     !! every case rule's `>=`; `z <= b` is then always true; and `huge(1.0_real64)` behaves
     !! identically, so a caller need not reach for `ieee_arithmetic` to truncate on one side.
+    !! That last equivalence is what `tn_standardise` and `tn_width` exist for: standardising a
+    !! `huge()` bound, or spanning two of them, is not representable, and the plain arithmetic
+    !! reaches the infinity by raising `IEEE_OVERFLOW` on the way -- which nagfor turns into an
+    !! abort. They deliver the same value without raising it.
     pure subroutine normal_truncated_draw(self, lo, hi, x, path, tries, mu, sigma)
         class(pf_random_stream), intent(inout) :: self  !! the stream to advance
         real(real64), intent(in) :: lo              !! lower bound of the support, in `x`'s units
@@ -3502,7 +3585,7 @@ contains
         integer(int64), intent(out) :: tries        !! proposals this draw consumed; at least 1
         real(real64), intent(in), optional :: mu    !! untruncated mean; default 0
         real(real64), intent(in), optional :: sigma !! untruncated standard deviation; default 1
-        real(real64) :: a, b, m, t, z, u, e, lam, ctr, scl
+        real(real64) :: a, b, m, t, z, u, e, lam, ctr, scl, w
         logical :: mirrored
 
         ctr = 0.0_real64
@@ -3513,20 +3596,21 @@ contains
             error stop "pf_random_stream%normal_truncated: sigma must be strictly positive " // &
                        "(a scale of zero or less is not a distribution, and NaN is not a scale)"
         end if
-        a = (lo - ctr) / scl
-        b = (hi - ctr) / scl
+        a = tn_standardise(lo, ctr, scl)
+        b = tn_standardise(hi, ctr, scl)
         if (.not. (a < b)) then
             error stop "pf_random_stream%normal_truncated: the lower bound must be strictly " // &
                        "below the upper bound after centring and scaling (an empty or " // &
                        "single-point support is not a distribution, and NaN is not a bound)"
         end if
+        w = tn_width(a, b)
 
         tries = 0_int64
         mirrored = .false.
         m = 0.0_real64
         if (a < 0.0_real64 .and. b > 0.0_real64) then
             ! The interval straddles the mode, so the target's maximum is interior, at 0.
-            if (b - a >= trunc_straddle_crossover) then
+            if (w >= trunc_straddle_crossover) then
                 path = 1
                 do
                     tries = tries + 1_int64
@@ -3547,7 +3631,7 @@ contains
                 b = -t
                 mirrored = .true.
             end if
-            if (b - a >= tn_threshold(a)) then
+            if (w >= tn_threshold(a)) then
                 ! Exponential tilting. `lam` maximises the tilted envelope and solves
                 ! `lam*lam = a*lam + 1`, so `lam >= a >= 0` always and the accept probability
                 ! below never exceeds 1.
@@ -3578,7 +3662,7 @@ contains
         do
             tries = tries + 1_int64
             call stream_uniform(self, u)
-            z = a + u * (b - a)
+            z = a + u * w
             call stream_uniform(self, u)
             ! `(m - z)*(m + z)` rather than `m*m - z*z`: the same quantity, formed without the
             ! cancellation that makes the second one meaningless for a large `m` -- see

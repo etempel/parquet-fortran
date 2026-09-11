@@ -122,6 +122,12 @@ done | sort | uniq -c | sort -rn
   such a value below ~1e-8 relative pins one toolchain's rounding. An external reference computed
   the cancelling way cannot certify a cancellation-free implementation; use a high-precision oracle
   (`test_max_pixrad_high_precision`).
+- **A RUNTIME `10.0_real64 ** (-k)` is not the correctly rounded decimal power** (a variable
+  exponent folds nothing): measured up to 282 ulp out under nagfor and 7 under gfortran on one
+  machine, so two compilers do not even agree on which value is under test. Never build a test
+  point, a tolerance reference or a golden input that way; use an exact literal, a generated
+  table, or `scale(1.0_real64, -k)` where a power of two will do (exact, F2018 16.9.171;
+  `test_probit_round_trips`). A LITERAL exponent is folded correctly and is not in this class.
 - **An OpenMP `reduction(+:...)` over reals is not bit-reproducible** across calls or thread counts;
   measure the tolerance floor by calling twice, or use an ordered/compensated sum.
 - **Nested OpenMP needs both `omp_set_nested(.true.)` and `omp_set_max_active_levels(2)`**

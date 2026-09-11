@@ -531,10 +531,16 @@ contains
         ! Down the tail the budget widens as `z*z`, for the reason `pf_norm_cdf`'s own does: the
         ! round trip inherits `Phi`'s sensitivity to its rounded argument, which is roughly
         ! `2*z*z` ulp and is a property of the function rather than of either implementation.
-        ! Measured worst case is about 1180 ulp near p = 1e-182, against a bound of 6900 there.
+        ! Measured worst case is about 890 ulp near p = 3.3e-142, against a bound of 1320 there.
+        !
+        ! **The test point is `scale(1, -k)`, never `10.0_real64 ** (-k)`.** A runtime power is
+        ! not the correctly rounded decimal power -- nagfor's is up to 282 ulp out, gfortran's
+        ! within 7 -- so the two would round-trip DIFFERENT probabilities, and at a budget with
+        ! this little headroom that difference alone decides pass from fail. `scale` is exact on
+        ! every compiler, so every machine tests the same points (`fortran-gotchas.md`).
         nbad = 0
-        do k = 2, 300
-            p = 10.0_real64 ** (-k)
+        do k = 7, 1000
+            p = scale(1.0_real64, -k)
             back = pf_probit(p)
             if (ulp_gap(pf_norm_cdf(back), p) > 2.0_real64 * back * back + 32.0_real64) &
                 nbad = nbad + 1

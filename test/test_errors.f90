@@ -2125,6 +2125,25 @@ contains
             new_unittest("map %adopt_rows with a wrong final offset aborts", &
                 test_map_adopt_rows_offset_mismatch_aborts), &
             new_unittest("map %adopt_rows with non-string keys aborts", test_map_adopt_rows_bad_key_kind_aborts), &
+            new_unittest("a list row handle outliving its row aborts", test_list_stale_handle_aborts), &
+            new_unittest("map %gather_rows naming a row that does not exist aborts", &
+                test_map_gather_out_of_range_aborts), &
+            new_unittest("map %append_from between different value kinds aborts", &
+                test_map_append_from_kind_mismatch_aborts), &
+            new_unittest("map %append_from handed a list aborts", test_map_append_from_not_a_map_aborts), &
+            new_unittest("map %adopt_rows with an unsupported value kind aborts", &
+                test_map_adopt_rows_bad_value_kind_aborts), &
+            new_unittest("map %adopt_rows with mismatched key and value counts aborts", &
+                test_map_adopt_rows_length_mismatch_aborts), &
+            new_unittest("map %adopt_rows with a short row_valid aborts", &
+                test_map_adopt_rows_row_valid_length_aborts), &
+            new_unittest("map %append_from onto a column with no value kind aborts", &
+                test_map_append_from_uninitialized_aborts), &
+            new_unittest("a map row handle outliving its row aborts", test_map_stale_handle_aborts), &
+            new_unittest("map %append_row with a short is_valid aborts", &
+                test_map_append_is_valid_length_aborts), &
+            new_unittest("a lookup message truncates a very long key", &
+                test_map_missing_key_preview_aborts), &
             new_unittest("a chunked map read under an active sort aborts", test_map_chunk_refuses_sort_aborts), &
             new_unittest("the bare map token is rejected", test_maml_map_bare_token_aborts), &
             new_unittest("a map token with a container value is rejected", test_maml_map_nested_value_aborts), &
@@ -4503,6 +4522,93 @@ contains
             failure_message="%adopt_rows with non-string keys was expected to abort", &
             required_stderr="map keys must be a string column")
     end subroutine test_map_adopt_rows_bad_key_kind_aborts
+
+    subroutine test_list_stale_handle_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_stale_handle", expect_abort=.true., &
+            failure_message="a list row handle outliving its row was expected to abort", &
+            required_stderr="no longer refers to a valid row")
+    end subroutine test_list_stale_handle_aborts
+
+    subroutine test_map_gather_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_gather_out_of_range", expect_abort=.true., &
+            failure_message="%gather_rows naming a row that does not exist was expected to abort", &
+            required_stderr="gather_rows: source row index out of range")
+    end subroutine test_map_gather_out_of_range_aborts
+
+    subroutine test_map_append_from_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_append_from_kind_mismatch", &
+            expect_abort=.true., &
+            failure_message="%append_from between maps of different value kinds was expected to abort", &
+            required_stderr="cannot append a map<string,float64>")
+    end subroutine test_map_append_from_kind_mismatch_aborts
+
+    subroutine test_map_append_from_not_a_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_append_from_not_a_map", &
+            expect_abort=.true., &
+            failure_message="%append_from handed a list was expected to abort", &
+            required_stderr="cannot append a list<int32> onto a map")
+    end subroutine test_map_append_from_not_a_map_aborts
+
+    subroutine test_map_adopt_rows_bad_value_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_adopt_rows_bad_value_kind", &
+            expect_abort=.true., &
+            failure_message="%adopt_rows with an unsupported value kind was expected to abort", &
+            required_stderr="is not a supported map value kind")
+    end subroutine test_map_adopt_rows_bad_value_kind_aborts
+
+    subroutine test_map_adopt_rows_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_adopt_rows_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="%adopt_rows with mismatched key and value counts was expected to abort", &
+            required_stderr="keys and values hold different entry counts")
+    end subroutine test_map_adopt_rows_length_mismatch_aborts
+
+    subroutine test_map_adopt_rows_row_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_adopt_rows_row_valid_length", &
+            expect_abort=.true., &
+            failure_message="%adopt_rows with a short row_valid was expected to abort", &
+            required_stderr="row_valid has a different length from the row count")
+    end subroutine test_map_adopt_rows_row_valid_length_aborts
+
+    subroutine test_map_append_from_uninitialized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_append_from_uninitialized", &
+            expect_abort=.true., &
+            failure_message="%append_from onto a column with no value kind was expected to abort", &
+            required_stderr="has no value kind; call %init first")
+    end subroutine test_map_append_from_uninitialized_aborts
+
+    subroutine test_map_stale_handle_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_stale_handle", expect_abort=.true., &
+            failure_message="a map row handle outliving its row was expected to abort", &
+            required_stderr="no longer refers to a valid row")
+    end subroutine test_map_stale_handle_aborts
+
+    subroutine test_map_append_is_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_append_is_valid_length", &
+            expect_abort=.true., &
+            failure_message="%append_row with a short is_valid was expected to abort", &
+            required_stderr="is_valid has a different length from values")
+    end subroutine test_map_append_is_valid_length_aborts
+
+    !> The key inside the message is TRUNCATED, so the assertion is that the quoted text stops
+    !> short of the 300 characters the scenario passed while still naming the key.
+    subroutine test_map_missing_key_preview_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_missing_key_preview", &
+            expect_abort=.true., &
+            failure_message="a lookup for a 300-character key was expected to abort", &
+            required_stderr="...")
+    end subroutine test_map_missing_key_preview_aborts
 
     subroutine test_map_chunk_refuses_sort_aborts(error)
         type(error_type), allocatable, intent(out) :: error

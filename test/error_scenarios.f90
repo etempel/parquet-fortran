@@ -272,6 +272,28 @@ program error_scenarios
         call scenario_map_adopt_rows_offset_mismatch()
     case ("map_adopt_rows_bad_key_kind")
         call scenario_map_adopt_rows_bad_key_kind()
+    case ("list_stale_handle")
+        call scenario_list_stale_handle()
+    case ("map_gather_out_of_range")
+        call scenario_map_gather_out_of_range()
+    case ("map_append_from_kind_mismatch")
+        call scenario_map_append_from_kind_mismatch()
+    case ("map_append_from_not_a_map")
+        call scenario_map_append_from_not_a_map()
+    case ("map_adopt_rows_bad_value_kind")
+        call scenario_map_adopt_rows_bad_value_kind()
+    case ("map_adopt_rows_length_mismatch")
+        call scenario_map_adopt_rows_length_mismatch()
+    case ("map_adopt_rows_row_valid_length")
+        call scenario_map_adopt_rows_row_valid_length()
+    case ("map_append_from_uninitialized")
+        call scenario_map_append_from_uninitialized()
+    case ("map_stale_handle")
+        call scenario_map_stale_handle()
+    case ("map_append_is_valid_length")
+        call scenario_map_append_is_valid_length()
+    case ("map_missing_key_preview")
+        call scenario_map_missing_key_preview()
     case ("map_chunk_refuses_sort")
         call scenario_map_chunk_refuses_sort()
     case ("maml_map_bare_token")
@@ -25063,6 +25085,154 @@ contains
         call vals%append_values([2_int32])
         call mc%adopt_rows(offs, keys, vals)
     end subroutine scenario_map_adopt_rows_bad_key_kind
+
+    !> A row handle whose row has been dropped out from under it. The handle stores an INDEX, not
+    !> a reference, so a structural change can leave it naming a row that no longer exists --
+    !> which is a stale read rather than a crash, and is why every accessor is guarded.
+    subroutine scenario_list_stale_handle()
+        type(parquet_list_column), target :: lc
+        type(parquet_list_row) :: h
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32])
+        call lc%append_row([2_int32])
+        h = lc%view(2_int64)
+        call lc%gather_rows([1_int64])     ! row 2 is gone; the handle still names it
+        print '(a,i0)', "the handle now names row ", h%row_index()   ! -> aborts
+    end subroutine scenario_list_stale_handle
+
+    !> `%gather_rows` naming a source row that does not exist. Every index is checked BEFORE
+    !> anything is rebuilt, so a refused gather leaves the column exactly as it was.
+    subroutine scenario_map_gather_out_of_range()
+        type(parquet_map_column) :: mc
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        call mc%gather_rows([1_int64, 7_int64])   ! -> aborts (no row 7)
+        print '(a,i0)', "unexpectedly gathered a row that does not exist, nrows=", mc%nrows()
+    end subroutine scenario_map_gather_out_of_range
+
+    !> `%append_from` between two maps whose VALUE kinds differ. The two entry columns are
+    !> appended wholesale, so a mismatch would leave the destination holding values of two kinds
+    !> with nothing recording which row has which -- the message names both.
+    subroutine scenario_map_append_from_kind_mismatch()
+        type(parquet_map_column) :: dst, src
+        call dst%init(PK_INT32)
+        call dst%append_row(["a"], [1_int32])
+        call src%init(PK_FLOAT64)
+        call src%append_row(["b"], [2.0_real64])
+        call dst%append_from(src)     ! -> aborts
+        print '(a,i0)', "unexpectedly appended a float64 map onto an int32 one, nrows=", dst%nrows()
+    end subroutine scenario_map_append_from_kind_mismatch
+
+    !> `%append_from` handed a container that is not a map at all. The argument is declared
+    !> `class(parquet_container_column)` so the table layer can walk containers generically, which
+    !> is exactly what makes this reachable: the `class default` arm is the type check.
+    subroutine scenario_map_append_from_not_a_map()
+        type(parquet_map_column) :: dst
+        type(parquet_list_column) :: src
+        call dst%init(PK_INT32)
+        call src%init(PK_INT32)
+        call src%append_row([1_int32])
+        call dst%append_from(src)     ! -> aborts
+        print '(a,i0)', "unexpectedly appended a list onto a map, nrows=", dst%nrows()
+    end subroutine scenario_map_append_from_not_a_map
+
+    !> `%adopt_rows` handed a values column whose kind cannot be a map value at all.
+    subroutine scenario_map_adopt_rows_bad_value_kind()
+        type(parquet_map_column) :: mc
+        integer(int64), allocatable :: offs(:)
+        type(parquet_column) :: keys, vals
+        allocate(offs(2))
+        offs = [0_int64, 1_int64]
+        call keys%init(PK_STRING, 0_int64)
+        call keys%append_values(["a"])
+        ! `vals` is left DEFAULT-INITIALIZED, which is a PK_NONE column -- the one kind that is
+        ! neither a supported scalar value nor a container, and so the only one this arm sees.
+        call mc%adopt_rows(offs, keys, vals)   ! -> aborts
+        print '(a,i0)', "unexpectedly adopted an unsupported value kind, nrows=", mc%nrows()
+    end subroutine scenario_map_adopt_rows_bad_value_kind
+
+    !> `%adopt_rows` handed keys and values of different lengths. Entry `j` is key `j` paired with
+    !> value `j`, so a length mismatch means some entries have one half and not the other -- and
+    !> nothing downstream could tell which.
+    subroutine scenario_map_adopt_rows_length_mismatch()
+        type(parquet_map_column) :: mc
+        integer(int64), allocatable :: offs(:)
+        type(parquet_column) :: keys, vals
+        allocate(offs(2))
+        offs = [0_int64, 1_int64]
+        call keys%init(PK_STRING, 0_int64)
+        call keys%append_values(["a", "b"])   ! two keys
+        call vals%init(PK_INT32, 0_int64)
+        call vals%append_values([1_int32])    ! one value
+        call mc%adopt_rows(offs, keys, vals)  ! -> aborts
+        print '(a,i0)', "unexpectedly adopted mismatched entry counts, nrows=", mc%nrows()
+    end subroutine scenario_map_adopt_rows_length_mismatch
+
+    !> `%adopt_rows` handed a `row_valid` of the wrong length. It is one flag per ROW, and a short
+    !> one would leave the trailing rows' nullness read from whatever the caller's array did not
+    !> cover.
+    subroutine scenario_map_adopt_rows_row_valid_length()
+        type(parquet_map_column) :: mc
+        integer(int64), allocatable :: offs(:)
+        type(parquet_column) :: keys, vals
+        allocate(offs(3))
+        offs = [0_int64, 1_int64, 2_int64]    ! two rows
+        call keys%init(PK_STRING, 0_int64)
+        call keys%append_values(["a", "b"])
+        call vals%init(PK_INT32, 0_int64)
+        call vals%append_values([1_int32, 2_int32])
+        call mc%adopt_rows(offs, keys, vals, row_valid=[.true.])   ! -> aborts (one flag, two rows)
+        print '(a,i0)', "unexpectedly adopted a short row_valid, nrows=", mc%nrows()
+    end subroutine scenario_map_adopt_rows_row_valid_length
+
+    !> `%append_from` onto a column that has never been `%init`ed. The value kind is what makes an
+    !> append meaningful, and the source's cannot supply it: a destination that silently took the
+    !> source's kind would make the first append decide the column's type.
+    subroutine scenario_map_append_from_uninitialized()
+        type(parquet_map_column) :: dst, src
+        call src%init(PK_INT32)
+        call src%append_row(["a"], [1_int32])
+        call dst%append_from(src)     ! -> aborts (dst has no value kind)
+        print '(a,i0)', "unexpectedly appended onto an uninitialized map, nrows=", dst%nrows()
+    end subroutine scenario_map_append_from_uninitialized
+
+    !> A map row handle whose row has been dropped out from under it; the map twin of
+    !> `scenario_list_stale_handle`, and a separate guard in a separate type.
+    subroutine scenario_map_stale_handle()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: h
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        call mc%append_row(["b"], [2_int32])
+        h = mc%view(2_int64)
+        call mc%gather_rows([1_int64])     ! row 2 is gone; the handle still names it
+        print '(a,i0)', "the handle now names row ", h%row_index()   ! -> aborts
+    end subroutine scenario_map_stale_handle
+
+    !> `%append_row` handed an `is_valid` of a different length from the values. It is one flag per
+    !> VALUE, and a short one would leave the trailing entries' nullness undefined.
+    subroutine scenario_map_append_is_valid_length()
+        type(parquet_map_column) :: mc
+        call mc%init(PK_INT32)
+        call mc%append_row(["a", "b"], [1_int32, 2_int32], is_valid=[.true.])   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a short is_valid, entries=", mc%total_entries()
+    end subroutine scenario_map_append_is_valid_length
+
+    !> A lookup message quoting a key longer than the cap. Caller-supplied text inside an
+    !> `error stop` message is truncated, per CLAUDE.md: ifx's ERROR STOP runtime corrupts the heap
+    !> once the composed message reaches 8192 bytes, and the key is entirely the caller's.
+    subroutine scenario_map_missing_key_preview()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: h
+        character(len=300) :: longkey
+        integer(int32) :: v
+        longkey = repeat("k", 300)
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        h = mc%view(1_int64)
+        call h%get(longkey, v)     ! -> aborts, quoting a truncated key
+        print '(a,i0)', "unexpectedly found a 300-character key, v=", v
+    end subroutine scenario_map_missing_key_preview
 
     !> A chunked map read while a read-time sort is installed. Every row-group-scoped operation
     !> refuses, because a permutation destroys row-group locality -- the map specific inherits

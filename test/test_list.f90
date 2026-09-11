@@ -56,7 +56,18 @@ contains
             new_unittest("a handle stays valid across appends", test_handle_survives_append), &
             new_unittest("an unassigned handle reports itself invalid", test_unassigned_handle), &
             new_unittest("kind_text and summary describe the column", test_kind_text_and_summary), &
-            new_unittest("validate accepts a well-formed column", test_validate) ]
+            new_unittest("validate accepts a well-formed column", test_validate), &
+            new_unittest("every row-addressing binding agrees through its int32 specific", &
+                test_int32_row_indices), &
+            new_unittest("a row handle tells a null row from an empty present one", &
+                test_row_handle_is_empty), &
+            new_unittest("kind_text spells every payload kind", test_kind_text_every_payload), &
+            new_unittest("the row bitmap grows without losing the nulls already set", &
+                test_validity_bitmap_grows), &
+            new_unittest("an uninitialized column survives the structural operations", &
+                test_uninitialised_column_operations), &
+            new_unittest("init carries a unit into the payload column", &
+                test_init_carries_the_unit) ]
     end subroutine collect_tests_parquet_list
 
     !> A default-initialized column has no rows, no payload kind and no elements.
@@ -838,5 +849,221 @@ contains
         call dst%append_from(empty)
         call check(error, dst%size() == 5_int64, "appending an empty column changes nothing")
     end subroutine test_append_from
+
+    !> Every row-addressing binding answers the same through its `int32` specific.
+    !!
+    !! `%length`, `%is_null`, `%is_empty`, `%view`, `%set_null` and `%clear_null` are each a
+    !! generic over an `int32` and an `int64` row index, and the `int32` half is a one-line
+    !! forward. That is exactly the shape a forwarding defect hides in -- a specific that dropped
+    !! an argument, or narrowed rather than widened, would still compile and would still answer
+    !! something -- and nothing called any of them, so the whole `int32` half of this type's row
+    !! addressing was untested.
+    !!
+    !! Each is compared against its `int64` sibling over the same row rather than against a
+    !! literal, so the assertion survives a change to the fixture.
+    subroutine test_int32_row_indices(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column), target :: lc
+        type(parquet_list_row) :: h32, h64
+        integer(int32) :: i32
+        integer(int64) :: i64
+
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32, 3_int32])
+        call lc%append_null_row()
+        call lc%append_row([4_int32])
+        i32 = 1_int32
+        i64 = 1_int64
+
+        call check(error, lc%length(i32) == lc%length(i64), "%length disagrees across the two kinds")
+        if (allocated(error)) return
+        call check(error, lc%is_null(i32) .eqv. lc%is_null(i64), "%is_null disagrees")
+        if (allocated(error)) return
+        call check(error, lc%is_empty(i32) .eqv. lc%is_empty(i64), "%is_empty disagrees")
+        if (allocated(error)) return
+        h32 = lc%view(i32)
+        h64 = lc%view(i64)
+        call check(error, h32%row_index() == h64%row_index(), "%view hands back a different row")
+        if (allocated(error)) return
+
+        ! The null row, where the two answers are the other way round -- so a specific that
+        ! ignored its argument and always read row 1 would be caught here rather than agreeing.
+        i32 = 2_int32
+        i64 = 2_int64
+        call check(error, lc%is_null(i32) .and. lc%is_null(i64), "row 2 is the null row")
+        if (allocated(error)) return
+        call check(error, lc%is_empty(i32) .and. lc%length(i32) == 0_int64, &
+            "a null row is empty and zero-length through the int32 specific too")
+        if (allocated(error)) return
+
+        ! The two MUTATORS, which have to be seen through a later query rather than a return value.
+        i32 = 3_int32
+        call lc%set_null(i32)
+        call check(error, lc%is_null(3_int64), "%set_null through the int32 specific did nothing")
+        if (allocated(error)) return
+        call lc%clear_null(i32)
+        call check(error, .not. lc%is_null(3_int64), "%clear_null through the int32 specific did nothing")
+        if (allocated(error)) return
+        call check(error, lc%is_empty(3_int64), &
+            "a row cleared back to present holds no elements, as the int64 form documents")
+        if (allocated(error)) return
+        call check(error, lc%validate(), "the column still satisfies its invariants")
+    end subroutine test_int32_row_indices
+
+    !> A row handle answers `%is_empty` for a null row, an empty row and a filled one.
+    !!
+    !! The handle's `%is_empty` forwards to the column's, and "a null row is empty" is a
+    !! documented answer rather than an accident -- so the three cases are asserted separately:
+    !! absent, present-but-zero-length, and non-empty. `%is_null` is what tells the first two
+    !! apart, and a handle that answered `%is_empty` from the offsets alone would get the null
+    !! row right by luck and this test would not notice; hence the pairing.
+    subroutine test_row_handle_is_empty(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column), target :: lc
+        type(parquet_list_row) :: h
+        integer(int32) :: none(0)
+
+        call lc%init(PK_INT32)
+        call lc%append_row([7_int32, 8_int32])
+        call lc%append_null_row()
+        call lc%append_row(none)
+
+        h = lc%view(1_int64)
+        call check(error, .not. h%is_empty(), "a row holding two elements is not empty")
+        if (allocated(error)) return
+        call check(error, .not. h%is_null(), "and it is not null")
+        if (allocated(error)) return
+
+        h = lc%view(2_int64)
+        call check(error, h%is_empty(), "a NULL row is empty")
+        if (allocated(error)) return
+        call check(error, h%is_null(), "and it is null, which is what tells it from the next one")
+        if (allocated(error)) return
+
+        h = lc%view(3_int64)
+        call check(error, h%is_empty(), "a present row of length zero is empty")
+        if (allocated(error)) return
+        call check(error, .not. h%is_null(), "and it is NOT null -- the two states are different")
+    end subroutine test_row_handle_is_empty
+
+    !> `%kind_text` spells every payload kind this column accepts.
+    !!
+    !! The spelling is a `select case` with one arm per `PK_*`, and it is what a schema, a
+    !! `%summary` and every container diagnostic are built from -- so an arm naming the wrong kind
+    !! is a wrong schema rather than a cosmetic slip. Five arms had no caller.
+    !!
+    !! `PK_NONE` is the uninitialized column, which must describe itself rather than abort: a
+    !! printer is what someone reaches for to find out what state an object is in.
+    subroutine test_kind_text_every_payload(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column) :: lc
+        character(len=:), allocatable :: txt
+        integer, parameter :: KINDS(9) = [PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
+                                          PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP]
+        character(len=9), parameter :: NAMES(9) = [ &
+            "int32    ", "int64    ", "float32  ", "float64  ", "logical  ", &
+            "string   ", "date     ", "time     ", "timestamp"]
+        integer :: k
+
+        ! The uninitialized column first: it has no payload kind at all.
+        call lc%kind_text(txt)
+        call check(error, txt == "list<none>", "an uninitialized column spells itself, got '"//txt//"'")
+        if (allocated(error)) return
+
+        do k = 1, size(KINDS)
+            call lc%init(KINDS(k))
+            call lc%kind_text(txt)
+            call check(error, txt == "list<"//trim(NAMES(k))//">", &
+                "kind_text named the payload '"//txt//"' rather than list<"//trim(NAMES(k))//">")
+            if (allocated(error)) return
+        end do
+    end subroutine test_kind_text_every_payload
+
+    !> The row bitmap GROWS when a null lands past the block it was first sized for.
+    !!
+    !! Validity is a packed `int64` bitmap, so the first null allocates one 64-row block and a
+    !! null in row 65 has to reallocate and CARRY the existing bits across. A growth that
+    !! allocated without copying would lose every earlier null silently -- the rows would come
+    !! back present, holding whatever their offsets say -- so the test nulls a row in the first
+    !! block, forces the growth, and then re-reads the first one.
+    subroutine test_validity_bitmap_grows(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column) :: lc
+        integer :: k
+
+        call lc%init(PK_INT32)
+        do k = 1, 200
+            call lc%append_row([int(k, int32)])
+        end do
+        call check(error, lc%nrows() == 200_int64, "the fixture must hold 200 rows")
+        if (allocated(error)) return
+
+        ! Row 3 is in the first 64-row block; row 130 is two blocks further on.
+        call lc%set_null(3_int64)
+        call check(error, lc%has_validity_storage(), "the first null must allocate the bitmap")
+        if (allocated(error)) return
+        call lc%set_null(130_int64)
+        call check(error, lc%is_null(130_int64), "the null past the first block did not take")
+        if (allocated(error)) return
+        call check(error, lc%is_null(3_int64), &
+            "growing the bitmap lost the null set before it -- the old bits were not carried")
+        if (allocated(error)) return
+        call check(error, lc%null_count() == 2_int64, "both nulls must be counted")
+        if (allocated(error)) return
+        call check(error, .not. lc%is_null(129_int64) .and. .not. lc%is_null(131_int64), &
+            "the growth must not null the rows either side of the one asked for")
+        if (allocated(error)) return
+        call check(error, lc%validate(), "the column still satisfies its invariants")
+    end subroutine test_validity_bitmap_grows
+
+    !> An UNINITIALIZED column survives the structural operations rather than aborting.
+    !!
+    !! A column that has never been `%init`ed has no payload kind, and its payload is a `PK_NONE`
+    !! `parquet_column` that `%gather` would refuse. Every structural operation therefore has to
+    !! notice it has no rows and return before touching the payload -- which is a real state, not
+    !! a contrived one: it is what a declared-but-unused column looks like.
+    subroutine test_uninitialised_column_operations(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column) :: lc
+        integer(int64) :: none(0)
+        character(len=:), allocatable :: txt
+
+        call check(error, .not. lc%is_init(), "the fixture must start uninitialized")
+        if (allocated(error)) return
+        call lc%gather_rows(none)
+        call check(error, lc%nrows() == 0_int64, "gathering no rows leaves no rows")
+        if (allocated(error)) return
+        call check(error, lc%validate(), "and leaves the column well-formed")
+        if (allocated(error)) return
+        call lc%summary(txt)
+        call check(error, index(txt, "0 rows") > 0, "it still describes itself, got '"//txt//"'")
+    end subroutine test_uninitialised_column_operations
+
+    !> `%init(..., unit=)` carries the unit into the payload column.
+    !!
+    !! The unit is the payload `parquet_column`'s own, and `%init` has a separate call for the
+    !! present and absent cases -- so the arm that passes it through was never taken. A list of
+    !! measurements that lost its unit on the way into the file is a silent data defect, not a
+    !! cosmetic one.
+    subroutine test_init_carries_the_unit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column), target :: lc, plain
+        type(parquet_column), pointer :: p
+        character(len=:), allocatable :: u
+
+        call lc%init(PK_FLOAT64, unit="km/s")
+        call parquet_list_column_payload(lc, p)
+        call check(error, associated(p), "the payload column must be reachable")
+        if (allocated(error)) return
+        call p%unit_string(u)
+        call check(error, u == "km/s", "the payload lost the unit %init was given, got '"//u//"'")
+        if (allocated(error)) return
+
+        ! The negative control: without `unit=` the payload carries none.
+        call plain%init(PK_FLOAT64)
+        call parquet_list_column_payload(plain, p)
+        call p%unit_string(u)
+        call check(error, u == "", "a payload built without a unit must not have one, got '"//u//"'")
+    end subroutine test_init_carries_the_unit
 
 end module test_list

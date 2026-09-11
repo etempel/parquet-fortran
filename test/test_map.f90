@@ -56,7 +56,19 @@ contains
             new_unittest("map ensure_validity covers both null levels", test_ensure_validity), &
             new_unittest("map grow_rows appends null rows", test_grow_rows), &
             new_unittest("map adopt_container carries one into a parquet_column", test_adopt_container), &
-            new_unittest("map reserve and shrink_to_fit move capacity only", test_capacity) &
+            new_unittest("map reserve and shrink_to_fit move capacity only", test_capacity), &
+            new_unittest("every row-addressing binding agrees through its int32 specific", &
+                test_int32_row_indices), &
+            new_unittest("a row handle reports the row it names", test_row_handle_queries), &
+            new_unittest("a null value comes back invalid, for every value kind", &
+                test_null_values_every_kind), &
+            new_unittest("map kind_text spells every value kind", test_kind_text_every_value_kind), &
+            new_unittest("the row bitmap grows without losing the nulls already set", &
+                test_validity_bitmap_grows), &
+            new_unittest("an uninitialized column survives the structural and base bindings", &
+                test_uninitialised_and_base_bindings), &
+            new_unittest("init carries a unit, and appending an empty map is a no-op", &
+                test_init_unit_and_empty_append) &
             ]
     end subroutine collect_tests_parquet_map
 
@@ -683,5 +695,381 @@ contains
         if (allocated(error)) return
         call check(error, src%size() == 3_int64, "the source column is unchanged")
     end subroutine test_append_from
+
+    !> Every row-addressing binding answers the same through its `int32` specific.
+    !!
+    !! `%length`, `%is_null`, `%is_empty`, `%view`, `%set_null` and `%clear_null` are each a
+    !! generic over an `int32` and an `int64` row index, and the `int32` half is a one-line
+    !! forward that nothing called -- so the whole `int32` half of this type's row addressing was
+    !! untested. A specific that dropped its argument, or read a fixed row, would still compile
+    !! and still answer something.
+    !!
+    !! Each is compared against its `int64` sibling over the same row rather than against a
+    !! literal, and the null row is addressed as well as the filled one, so a specific that
+    !! ignored its argument could not agree by accident.
+    subroutine test_int32_row_indices(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: h32, h64
+        integer(int32) :: i32
+        integer(int64) :: i64
+
+        call mc%init(PK_INT32)
+        call mc%append_row(["a", "b"], [1_int32, 2_int32])
+        call mc%append_null_row()
+        call mc%append_row(["c"], [3_int32])
+        i32 = 1_int32
+        i64 = 1_int64
+
+        call check(error, mc%length(i32) == mc%length(i64), "%length disagrees across the two kinds")
+        if (allocated(error)) return
+        call check(error, mc%is_null(i32) .eqv. mc%is_null(i64), "%is_null disagrees")
+        if (allocated(error)) return
+        call check(error, mc%is_empty(i32) .eqv. mc%is_empty(i64), "%is_empty disagrees")
+        if (allocated(error)) return
+        h32 = mc%view(i32)
+        h64 = mc%view(i64)
+        call check(error, h32%row_index() == h64%row_index(), "%view hands back a different row")
+        if (allocated(error)) return
+
+        ! The null row, whose answers are the opposite of row 1's.
+        i32 = 2_int32
+        call check(error, mc%is_null(i32) .and. mc%is_empty(i32) .and. mc%length(i32) == 0_int64, &
+            "a null row is null, empty and zero-length through the int32 specifics too")
+        if (allocated(error)) return
+
+        ! The two MUTATORS, seen through a later query rather than a return value.
+        i32 = 3_int32
+        call mc%set_null(i32)
+        call check(error, mc%is_null(3_int64), "%set_null through the int32 specific did nothing")
+        if (allocated(error)) return
+        call mc%clear_null(i32)
+        call check(error, .not. mc%is_null(3_int64), "%clear_null through the int32 specific did nothing")
+        if (allocated(error)) return
+        call check(error, mc%is_empty(3_int64), &
+            "a row cleared back to present holds no entries, as the int64 form documents")
+        if (allocated(error)) return
+        call check(error, mc%validate(), "the column still satisfies its invariants")
+    end subroutine test_int32_row_indices
+
+    !> What a row handle reports about the row it names.
+    !!
+    !! `%row_index`, `%is_null`, `%is_empty`, `%element_kind` and `%nested` are the queries a
+    !! caller makes before deciding which `%get` to call, and none of them had a caller. Each is
+    !! guarded, so a handle that had gone stale would abort rather than answer -- which is what
+    !! makes them safe to call first.
+    !!
+    !! `%nested` over a SCALAR-valued map is the case asserted here: `inner` comes back null and
+    !! `lo > hi`, so a caller that reached for it without checking `%element_kind` gets an empty
+    !! loop rather than a wrong answer. The container case is
+    !! `test_container_nested.f90`'s, where there is an inner column to read.
+    subroutine test_row_handle_queries(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: h
+        class(parquet_container_column), pointer :: inner
+        integer(int64) :: lo, hi
+        character(len=0) :: nokeys(0)
+        integer(int32) :: novals(0)
+
+        call mc%init(PK_INT32)
+        call mc%append_row(["a", "b"], [1_int32, 2_int32])
+        call mc%append_null_row()
+        call mc%append_row(nokeys, novals)
+
+        h = mc%view(1_int64)
+        call check(error, h%row_index() == 1_int64, "%row_index must name the row it was made from")
+        if (allocated(error)) return
+        call check(error, h%element_kind() == PK_INT32, "%element_kind must name the VALUE kind")
+        if (allocated(error)) return
+        call check(error, .not. h%is_null() .and. .not. h%is_empty(), &
+            "a row holding two entries is neither null nor empty")
+        if (allocated(error)) return
+
+        h = mc%view(2_int64)
+        call check(error, h%row_index() == 2_int64, "%row_index must follow the handle")
+        if (allocated(error)) return
+        call check(error, h%is_null() .and. h%is_empty(), "a null row is null AND empty")
+        if (allocated(error)) return
+
+        h = mc%view(3_int64)
+        call check(error, h%is_empty() .and. .not. h%is_null(), &
+            "a present row of length zero is empty and NOT null -- the two states differ")
+        if (allocated(error)) return
+
+        ! `%nested` on a map whose values are not a container at all.
+        h = mc%view(1_int64)
+        call h%nested(inner, lo, hi)
+        call check(error, .not. associated(inner), &
+            "a scalar-valued map has no inner container to hand back")
+        if (allocated(error)) return
+        call check(error, lo > hi, "and it reports an empty entry range rather than a wrong one")
+    end subroutine test_row_handle_queries
+
+    !> A NULL value comes back as `is_valid = .false.`, for every value kind.
+    !!
+    !! Two levels of nullness meet here and they are different questions: the ROW may be absent,
+    !! and an entry's VALUE may be null while its key is present. Every `%get` and `%get_at`
+    !! specific has its own line for the second -- a per-kind `parquet_column_is_null` probe
+    !! before the payload is read -- and only the `int32` and `string` ones had a caller.
+    !!
+    !! A specific that skipped the probe would return whatever sits in the payload gap: a plausible
+    !! number, reported as valid. So the assertion is on `is_valid` AND on the key still being
+    !! found, which is what distinguishes "null value" from "no such key".
+    subroutine test_null_values_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: h
+        logical :: ok, got
+        integer(int64) :: vl
+        real(real32) :: vf
+        real(real64) :: vd
+        logical :: vb
+        type(parquet_date) :: vdate
+        type(parquet_time) :: vtime
+        type(parquet_timestamp) :: vts
+
+        call mc%init(PK_INT64)
+        call mc%append_row(["k"], [7_int64], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vl, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "int64: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vl, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "int64 by position: same answer")
+        if (allocated(error)) return
+
+        call mc%init(PK_FLOAT32)
+        call mc%append_row(["k"], [1.5_real32], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vf, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "float32: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vf, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "float32 by position: same answer")
+        if (allocated(error)) return
+
+        call mc%init(PK_FLOAT64)
+        call mc%append_row(["k"], [1.5_real64], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vd, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "float64: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vd, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "float64 by position: same answer")
+        if (allocated(error)) return
+
+        call mc%init(PK_LOGICAL)
+        call mc%append_row(["k"], [.true.], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vb, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "logical: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vb, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "logical by position: same answer")
+        if (allocated(error)) return
+
+        call vdate%set(2026, 9, 11)
+        call mc%init(PK_DATE)
+        call mc%append_row(["k"], [vdate], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vdate, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "date: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vdate, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "date by position: same answer")
+        if (allocated(error)) return
+
+        call vtime%set(12, 30, 0)
+        call mc%init(PK_TIME)
+        call mc%append_row(["k"], [vtime], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vtime, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "time: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vtime, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "time by position: same answer")
+        if (allocated(error)) return
+
+        call vts%set(2026, 9, 11, 12, 30, 0)
+        call mc%init(PK_TIMESTAMP)
+        call mc%append_row(["k"], [vts], is_valid=[.false.])
+        h = mc%view(1_int64)
+        call h%get("k", vts, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "timestamp: the key is found and its value is null")
+        if (allocated(error)) return
+        call h%get_at(1, vts, is_valid=ok, found=got)
+        call check(error, got .and. .not. ok, "timestamp by position: same answer")
+        if (allocated(error)) return
+
+        ! The negative control: a PRESENT value of the same kind must report valid, or every
+        ! assertion above would pass for a specific that reported .false. unconditionally.
+        call mc%init(PK_INT64)
+        call mc%append_row(["k"], [7_int64])
+        h = mc%view(1_int64)
+        call h%get("k", vl, is_valid=ok, found=got)
+        call check(error, got .and. ok .and. vl == 7_int64, "a present value must report valid")
+    end subroutine test_null_values_every_kind
+
+    !> `%kind_text` spells every value kind this column accepts.
+    !!
+    !! The spelling is a `select case` with one arm per `PK_*`, and it is what a MAML schema and
+    !! every container diagnostic are built from -- so an arm naming the wrong kind writes a wrong
+    !! schema. Eight of the eleven arms had no caller.
+    subroutine test_kind_text_every_value_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column) :: mc
+        character(len=:), allocatable :: txt
+        integer, parameter :: KINDS(9) = [PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
+                                          PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP]
+        character(len=9), parameter :: NAMES(9) = [ &
+            "int32    ", "int64    ", "float32  ", "float64  ", "logical  ", &
+            "string   ", "date     ", "time     ", "timestamp"]
+        integer :: k
+
+        ! The uninitialized column first: it has no value kind at all and must still describe
+        ! itself rather than abort.
+        call mc%kind_text(txt)
+        call check(error, txt == "map<string,none>", &
+            "an uninitialized column spells itself, got '"//txt//"'")
+        if (allocated(error)) return
+
+        do k = 1, size(KINDS)
+            call mc%init(KINDS(k))
+            call mc%kind_text(txt)
+            call check(error, txt == "map<string,"//trim(NAMES(k))//">", &
+                "kind_text named the values '"//txt//"' rather than map<string,"//trim(NAMES(k))//">")
+            if (allocated(error)) return
+        end do
+    end subroutine test_kind_text_every_value_kind
+
+    !> The row bitmap GROWS when a null lands past the block it was first sized for.
+    !!
+    !! Validity is a packed `int64` bitmap, so the first null allocates one 64-row block and a
+    !! null in a later block has to reallocate and CARRY the existing bits across. A growth that
+    !! allocated without copying would lose every earlier null silently -- those rows would come
+    !! back present, holding whatever their offsets say -- so a row in the first block is nulled,
+    !! the growth is forced, and the first one is read again.
+    subroutine test_validity_bitmap_grows(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column) :: mc
+        character(len=2) :: key
+        integer :: k
+
+        call mc%init(PK_INT32)
+        do k = 1, 200
+            write (key, '(i2.2)') mod(k, 100)
+            call mc%append_row([key], [int(k, int32)])
+        end do
+        call check(error, mc%nrows() == 200_int64, "the fixture must hold 200 rows")
+        if (allocated(error)) return
+
+        call mc%set_null(3_int64)
+        call check(error, mc%has_validity_storage(), "the first null must allocate the bitmap")
+        if (allocated(error)) return
+        call mc%set_null(130_int64)
+        call check(error, mc%is_null(130_int64), "the null past the first block did not take")
+        if (allocated(error)) return
+        call check(error, mc%is_null(3_int64), &
+            "growing the bitmap lost the null set before it -- the old bits were not carried")
+        if (allocated(error)) return
+        call check(error, mc%null_count() == 2_int64, "both nulls must be counted")
+        if (allocated(error)) return
+        call check(error, .not. mc%is_null(129_int64) .and. .not. mc%is_null(131_int64), &
+            "the growth must not null the rows either side of the one asked for")
+        if (allocated(error)) return
+        call check(error, mc%validate(), "the column still satisfies its invariants")
+    end subroutine test_validity_bitmap_grows
+
+    !> The structural operations on an UNINITIALIZED column, and the base-class row bindings.
+    !!
+    !! A column that has never been `%init`ed has no value kind, and its two entry columns are
+    !! `PK_NONE` `parquet_column`s that `%gather` would refuse -- so every structural operation
+    !! has to notice it has no rows and return before touching them. That is a real state: it is
+    !! what a declared-but-unused column looks like.
+    !!
+    !! `%clear_null_row` is the `parquet_container_column` binding, reached through a polymorphic
+    !! pointer rather than the concrete type. It forwards to `%clear_null`, and a container walked
+    !! generically -- which is how the table layer reaches one -- goes through it rather than
+    !! through the specific.
+    subroutine test_uninitialised_and_base_bindings(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column), target :: mc
+        class(parquet_container_column), pointer :: base
+        integer(int64) :: none(0)
+        character(len=:), allocatable :: txt
+
+        call check(error, .not. mc%is_init(), "the fixture must start uninitialized")
+        if (allocated(error)) return
+        call mc%gather_rows(none)
+        call check(error, mc%nrows() == 0_int64, "gathering no rows leaves no rows")
+        if (allocated(error)) return
+        call check(error, mc%validate(), "and leaves the column well-formed")
+        if (allocated(error)) return
+        call mc%summary(txt)
+        call check(error, index(txt, "0 rows") > 0, "it still describes itself, got '"//txt//"'")
+        if (allocated(error)) return
+
+        ! The base-class row bindings, through a polymorphic pointer.
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        base => mc
+        call base%set_null_row(1_int64)
+        call check(error, mc%is_null(1_int64), "%set_null_row through the base binding did nothing")
+        if (allocated(error)) return
+        call check(error, base%is_null_row(1_int64), "and the base query must agree")
+        if (allocated(error)) return
+        call base%clear_null_row(1_int64)
+        call check(error, .not. mc%is_null(1_int64), &
+            "%clear_null_row through the base binding did nothing")
+        if (allocated(error)) return
+        call check(error, mc%validate(), "the column still satisfies its invariants")
+    end subroutine test_uninitialised_and_base_bindings
+
+    !> `%init(..., unit=)` carries the unit into the values column, and `%append_from` an EMPTY
+    !! map is a no-op.
+    !!
+    !! The unit is the values `parquet_column`'s own, and `%init` has a separate call for the
+    !! present and absent cases, so the arm that passes it through was never taken. A map of
+    !! measurements that lost its unit on the way into a file is a silent data defect.
+    !!
+    !! The empty `%append_from` shares this test because it is the other one-line early return in
+    !! this type's lifecycle: appending a source with no rows must leave the destination
+    !! untouched, INCLUDING an uninitialized destination -- the return comes before the
+    !! `require_init` guard, so `%append_from` of an empty map onto a fresh column must not abort.
+    subroutine test_init_unit_and_empty_append(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column), target :: mc, plain, empty, dst
+        type(parquet_column), pointer :: p
+        character(len=:), allocatable :: u
+
+        call mc%init(PK_FLOAT64, unit="km/s")
+        call parquet_map_column_values(mc, p)
+        call check(error, associated(p), "the values column must be reachable")
+        if (allocated(error)) return
+        call p%unit_string(u)
+        call check(error, u == "km/s", "the values lost the unit %init was given, got '"//u//"'")
+        if (allocated(error)) return
+        call plain%init(PK_FLOAT64)
+        call parquet_map_column_values(plain, p)
+        call p%unit_string(u)
+        call check(error, u == "", "a values column built without a unit must not have one")
+        if (allocated(error)) return
+
+        ! An empty source onto an UNINITIALIZED destination: the early return comes before the
+        ! initialization guard, so this must not abort.
+        call dst%append_from(empty)
+        call check(error, dst%nrows() == 0_int64 .and. .not. dst%is_init(), &
+            "appending an empty map must leave the destination exactly as it was")
+        if (allocated(error)) return
+
+        ! And onto a populated one, where the negative control is that the rows survive.
+        call dst%init(PK_INT32)
+        call dst%append_row(["a"], [1_int32])
+        call dst%append_from(empty)
+        call check(error, dst%nrows() == 1_int64, "an empty append must not disturb existing rows")
+        if (allocated(error)) return
+        call check(error, dst%validate(), "the column still satisfies its invariants")
+    end subroutine test_init_unit_and_empty_append
 
 end module test_map

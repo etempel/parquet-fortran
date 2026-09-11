@@ -254,7 +254,65 @@ contains
         call check(error, mc%length(1_int64) == 2_int64, "row 1 holds two entries")
         if (allocated(error)) return
         call check(error, mc%length(2_int64) == 1_int64, "row 2 holds one entry")
+        if (allocated(error)) return
+
+        ! Read it back through the PUBLIC route a caller has -- `%view(i)` then `%nested` -- which
+        ! is what makes the built column usable rather than merely well-formed. `%key_at` stays
+        ! 1-based WITHIN the row while `lo`/`hi` index the flattened value column, so entry `pos`
+        ! of this row is value row `lo + pos - 1`: the pairing a caller has to get right, and the
+        ! reason `%nested` hands back both.
+        call check_map_entry(error, mc, 1_int64, 1, "a", 101_int32)
+        if (allocated(error)) return
+        call check_map_entry(error, mc, 1_int64, 2, "b", 102_int32)
+        if (allocated(error)) return
+        call check_map_entry(error, mc, 2_int64, 1, "c", 103_int32)
     end subroutine test_map_of_struct_build
+
+    !> Asserts the key and the nested `id` field of one entry of a `map<string, struct<id>>`.
+    !!
+    !! Written against `%view`/`%nested`/`%key_at` alone, the way `element_id` is for the list
+    !! side: if this helper cannot be written with the public surface, the feature is not usable
+    !! and the test above would be asserting something no caller can reach.
+    subroutine check_map_entry(error, mc, row, pos, want_key, want_id)
+        type(error_type), allocatable, intent(out) :: error  !! set on the first failed check.
+        type(parquet_map_column), intent(in), target :: mc   !! the map to read.
+        integer(int64), intent(in) :: row                    !! 1-based map row.
+        integer(int32), intent(in) :: pos                    !! 1-based position within that row.
+        character(len=*), intent(in) :: want_key             !! the key expected there.
+        integer(int32), intent(in) :: want_id                !! the nested `id` expected there.
+        class(parquet_container_column), pointer :: inner
+        type(parquet_map_row) :: h
+        type(parquet_struct_row) :: r
+        integer(int64) :: lo, hi
+        integer(int32) :: got
+        character(len=:), allocatable :: key
+
+        h = mc%view(row)
+        call check(error, h%row_index() == row, "%row_index must name the row asked for")
+        if (allocated(error)) return
+        call check(error, h%element_kind() == PK_STRUCT, "%element_kind must report the value kind")
+        if (allocated(error)) return
+        call check(error, .not. h%is_null() .and. .not. h%is_empty(), &
+            "a populated row is neither null nor empty")
+        if (allocated(error)) return
+        call h%key_at(pos, key)
+        call check(error, key == want_key, "the key at that position is '"//key//"'")
+        if (allocated(error)) return
+
+        call h%nested(inner, lo, hi)
+        call check(error, associated(inner), "%nested must hand back the inner container")
+        if (allocated(error)) return
+        call check(error, lo + int(pos, int64) - 1_int64 <= hi, &
+            "the entry range %nested reported does not cover that position")
+        if (allocated(error)) return
+        got = -1_int32
+        select type (inner)
+        type is (parquet_struct_column)
+            r = inner%view(lo + int(pos, int64) - 1_int64)
+            call r%get_field("id", got)
+        end select
+        call check(error, got == want_id, "the nested struct field read through %nested is wrong")
+    end subroutine check_map_entry
 
     !> `struct<label:int32, vals:list<int32>>`.
     subroutine test_struct_of_list_build(error)

@@ -613,8 +613,14 @@ contains
             call parquet_kind_name(payload%kindof(), kname)
             error stop EP//"adopt_rows: "//kname//" is not a supported list payload kind"
         end if
+        ! **Unreachable, and kept as the belt to the kind check's braces.** Every kind that gets
+        ! past the test above carries width 1 by construction: `%init` refuses a `width=` on a
+        ! scalar kind, `%adopt_container` and `%adopt_string_column` both settle it at 1, and the
+        ! only kinds that can hold a wider one are the `*_VEC` family -- which `is_adoptable_payload`
+        ! has already refused. It stays because the two facts are established in another module and
+        ! a change there must not silently reach the offsets.
         if (payload%colwidth() /= 1_int32) then
-            error stop EP//"adopt_rows: the payload must be a scalar (width 1) column"
+            error stop EP//"adopt_rows: the payload must be a scalar (width 1) column" ! GCOVR_EXCL_LINE
         end if
         if (offsets(1) /= 0_int64) error stop EP//"adopt_rows: offsets(1) must be 0"
         do i = 1_int64, n
@@ -813,6 +819,14 @@ contains
     !> Verifies the class invariants, returning .false. and a diagnostic when one is broken.
     !!
     !! Cheap enough to call from a test after any structural change, which is what it is for.
+    !!
+    !! **Every failure arm below is excluded from coverage, and the success arms are not.** This
+    !! procedure IS the self-check: each arm names an invariant that the public API cannot break,
+    !! so reaching one means a component was written past the type's own bindings -- which no test
+    !! can do from outside the module, and which is exactly the state this exists to catch if a
+    !! future change ever introduces it. Excluding them keeps that safety net from reading as a
+    !! coverage gap. The two `ok = .true.` returns are reachable and deliberately left counted.
+    !! `parquet_struct_column%validate` carries the same note for the same reason.
     function validate(self, message) result(ok)
         class(parquet_list_column), intent(in) :: self                  !! the column.
         character(len=:), allocatable, intent(out), optional :: message !! diagnostic on failure.
@@ -821,46 +835,64 @@ contains
         ok = .false.
         if (present(message)) message = ""
         if (self%nrows_ < 0_int64) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "negative row count"
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (self%elem_kind == PK_NONE) then
             if (self%nrows_ /= 0_int64) then
+                ! GCOVR_EXCL_START -- unreachable; see the note above.
                 if (present(message)) message = "rows stored in a column with no payload kind"
                 return
+                ! GCOVR_EXCL_STOP
             end if
             ok = .true.
             return
         end if
         if (.not. allocated(self%offsets)) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "payload kind is set but offsets are not allocated"
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (size(self%offsets, kind=int64) < self%nrows_ + 1_int64) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "offsets shorter than nrows+1"
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (self%offsets(1) /= 0_int64) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "offsets(1) is not 0"
             return
+            ! GCOVR_EXCL_STOP
         end if
         do i = 1_int64, self%nrows_
             if (self%offsets(i + 1_int64) < self%offsets(i)) then
+                ! GCOVR_EXCL_START -- unreachable; see the note above.
                 if (present(message)) message = "offsets are not monotonic"
                 return
+                ! GCOVR_EXCL_STOP
             end if
         end do
         if (self%offsets(self%nrows_ + 1_int64) /= self%payload%length()) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "final offset does not match the payload row count"
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (self%payload%kindof() /= self%elem_kind) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "payload kind does not match element_kind"
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (self%has_nulls_ .and. .not. allocated(self%validity)) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "has_nulls is set but the bitmap is not allocated"
             return
+            ! GCOVR_EXCL_STOP
         end if
         ok = .true.
     end function validate

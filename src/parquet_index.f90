@@ -4152,5 +4152,5 @@ module parquet_index
         end subroutine ix_sorted_build
     end interface
 
-end module parquet_index
+end module parquet_index ! GCOVR_EXCL_LINE
 

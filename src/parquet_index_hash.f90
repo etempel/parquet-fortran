@@ -90,11 +90,13 @@ contains
     !! The LOOKUP path is deliberately left unbounded and pays nothing. It does not need a bound of
     !! its own: a bounded, correct insert is what stops the table ever filling, so protecting the
     !! one place that could create the condition protects every reader of it too.
+    ! GCOVR_EXCL_START
     subroutine ix_hash_table_full()
 
         call ix_abort("pf_index_map: the hash table is full, which cannot happen while the " // &
             "load factor holds -- the key count and the table's real occupancy have diverged")
     end subroutine ix_hash_table_full
+    ! GCOVR_EXCL_STOP
 
     module procedure ix_hash_insert_scalar
         integer(int64) :: s, m, walked
@@ -273,7 +275,7 @@ contains
         integer(int64) :: need
 
         if (want > huge(0_int64) / 100_int64) &
-            error stop "pf_index_map: key count is too large for a hash table"
+            error stop "pf_index_map: key count is too large for a hash table" ! GCOVR_EXCL_LINE
         need = (want * 100_int64 + IX_MAX_LOAD_PCT - 1_int64) / IX_MAX_LOAD_PCT
         cap = IX_MIN_HASH_CAP
         do while (cap < need)

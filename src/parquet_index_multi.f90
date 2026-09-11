@@ -965,7 +965,7 @@ contains
         if (self%vmax > int(huge(0_int32), int64)) error stop "pf_index_multimap%csr" // &
             ": a stored value is too large for an int32 answer; take it as int64"
         if (self%nr + 1_int64 > int(huge(0_int32), int64)) error stop "pf_index_multimap%csr" // &
-            ": more rows are stored than an int32 offset can name; take the offsets as int64"
+            ": more rows are stored than an int32 offset can name; take the offsets as int64" ! GCOVR_EXCL_LINE
         if (allocated(self%goff)) then
             allocate(offsets(size(self%goff, kind=int64)))
             offsets = int(self%goff, int32)

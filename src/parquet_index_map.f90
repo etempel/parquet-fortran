@@ -1462,10 +1462,10 @@ contains
         integer(int64), intent(in) :: n !! keys being indexed.
         integer(int64) :: b             !! slots the direct backend may use.
 
-        if (n > huge(0_int64) / IX_DIRECT_PER_KEY) then
+        if (n > huge(0_int64) / IX_DIRECT_PER_KEY) then    ! GCOVR_EXCL_START
             b = huge(0_int64)
             return
-        end if
+        end if                                             ! GCOVR_EXCL_STOP
         b = IX_DIRECT_PER_KEY * n
         if (b < IX_DIRECT_FLOOR) b = IX_DIRECT_FLOOR
     end function ix_budget
@@ -2180,8 +2180,11 @@ contains
 
         v = 0_int64
         if (self%hcap <= 0_int64) return
+        ! Every caller is the STRING map, whose tuple is `(hash, occurrence)` and whose `ncomp`
+        ! is therefore always 2 (`ix_str_start`); the scalar arm is the shape's general case and
+        ! no fixture reaches it.
         if (self%ncomp <= 1) then
-            v = ix_probe_1(self%slots, self%hcap - 1_int64, key(1))
+            v = ix_probe_1(self%slots, self%hcap - 1_int64, key(1))   ! GCOVR_EXCL_LINE
         else
             v = ix_probe_n(self%hrec, self%ncomp, self%hcap - 1_int64, key)
         end if
@@ -2206,10 +2209,13 @@ contains
                 idx = self%dvals(key - self%kmin1 + 1_int64)
             end if
         case (IX_HASH)
+            ! `ix_hash_reserve` always leaves a table behind, so a map whose backend is `IX_HASH`
+            ! never has `hcap == 0`; a reset map carries `IX_DIRECT` instead. The arm is the
+            ! backend switch's general case and no fixture reaches it.
             if (self%hcap > 0_int64) then
                 idx = ix_probe_1(self%slots, self%hcap - 1_int64, key)
             else
-                idx = 0_int64
+                idx = 0_int64                                         ! GCOVR_EXCL_LINE
             end if
         case (IX_SORTED)
             idx = ix_sorted_find(self, key)
@@ -3393,8 +3399,10 @@ contains
             end if
             self%dvals(off) = 1_int64
         end do
-        call ix_abort("pf_index_map%build: duplicate keys were detected but could not be named")
-    end subroutine ix_name_duplicate_1
+        ! The scatter above counted an occupied slot twice, so the walk must meet it again;
+        ! the backstop is here so that a disagreement aborts rather than returning silently.
+        call ix_abort("pf_index_map%build: duplicate keys were detected but could not be named") ! GCOVR_EXCL_LINE
+    end subroutine ix_name_duplicate_1                                                          ! GCOVR_EXCL_LINE
 
     !> Names the duplicate tuple a threaded composite direct scatter detected. See
     !! `ix_name_duplicate_1`.
@@ -3424,8 +3432,9 @@ contains
             end if
             self%dvals(off) = 1_int64
         end do
-        call ix_abort("pf_index_map%build: duplicate keys were detected but could not be named")
-    end subroutine ix_name_duplicate_n
+        ! See `ix_name_duplicate_1`: unreachable unless the scatter and this walk disagree.
+        call ix_abort("pf_index_map%build: duplicate keys were detected but could not be named") ! GCOVR_EXCL_LINE
+    end subroutine ix_name_duplicate_n                                                          ! GCOVR_EXCL_LINE
 
     !> Renders a key tuple as `[a, b, c]` for an error message.
     subroutine ix_tuple_text(key, out)
@@ -3648,7 +3657,7 @@ contains
             ! partitioned insert's own floor the serial loop is the only pass that ran, and a clean
             ! run of it means there was no duplicate to name.
             if (nt > 1 .and. part_ok) call ix_abort("pf_index_map%build: duplicate keys were " // &
-                "detected but could not be named")
+                "detected but could not be named")                              ! GCOVR_EXCL_LINE
         case (IX_SORTED)
             self%backend = IX_SORTED
             if (hv) then
@@ -3669,7 +3678,7 @@ contains
         write (p, "(i0)") at
         call ix_abort("pf_index_map%build: duplicate key " // trim(t) // " at position " // &
             trim(p) // " (every key must be unique)")
-    end subroutine ix_report_duplicate_1
+    end subroutine ix_report_duplicate_1      ! GCOVR_EXCL_LINE -- `ix_abort` never returns
 
     !> Reports a duplicate key tuple the serial hash insert loop met.
     subroutine ix_report_duplicate_n(key, at)
@@ -3682,7 +3691,7 @@ contains
         write (p, "(i0)") at
         call ix_abort("pf_index_map%build: duplicate key " // txt // " at position " // &
             trim(p) // " (every key tuple must be unique)")
-    end subroutine ix_report_duplicate_n
+    end subroutine ix_report_duplicate_n      ! GCOVR_EXCL_LINE -- `ix_abort` never returns
 
     !> Builds a map with `ncomp` components from a rank-2 key array shaped `(n, ncomp)`.
     !!
@@ -3876,7 +3885,7 @@ contains
             ! partitioned insert's own floor the serial loop is the only pass that ran, and a clean
             ! run of it means there was no duplicate to name.
             if (nt > 1 .and. part_ok) call ix_abort("pf_index_map%build: duplicate keys were " // &
-                "detected but could not be named")
+                "detected but could not be named")                              ! GCOVR_EXCL_LINE
         case (IX_SORTED)
             self%backend = IX_SORTED
             ! `keys(:, 1)` is a contiguous column, so this passes the caller's own storage.
@@ -4293,7 +4302,7 @@ contains
     subroutine mm_pair_overflow()
         call ix_abort(MM // "probe_many: the pair count exceeds what the answer can hold in int64; " // &
             "probe fewer keys at a time, or fewer that repeat this heavily")
-    end subroutine mm_pair_overflow
+    end subroutine mm_pair_overflow           ! GCOVR_EXCL_LINE -- `ix_abort` never returns
 
     ! ---- Storage lifecycle ----
 

@@ -3176,6 +3176,30 @@ program error_scenarios
         call scenario_index_keys_int32_negative()
     case ("multimap_csr_int32_value")
         call scenario_multimap_csr_int32_value()
+    case ("index_keys_int32_on_string_map")
+        call scenario_index_keys_int32_on_string_map()
+    case ("index_keys_rank1_int32_on_composite")
+        call scenario_index_keys_rank1_int32_on_composite()
+    case ("index_keys_rank2_int32_on_string_map")
+        call scenario_index_keys_rank2_int32_on_string_map()
+    case ("multimap_keys_rank2_on_string_map")
+        call scenario_multimap_keys_rank2_on_string_map()
+    case ("multimap_keys_int32_on_string_map")
+        call scenario_multimap_keys_int32_on_string_map()
+    case ("multimap_keys_rank1_int32_on_composite")
+        call scenario_multimap_keys_rank1_int32_on_composite()
+    case ("multimap_keys_rank2_int32_on_string_map")
+        call scenario_multimap_keys_rank2_int32_on_string_map()
+    case ("multimap_string_keys_column_on_integer")
+        call scenario_multimap_string_keys_column_on_integer()
+    case ("multimap_string_bulk_length")
+        call scenario_multimap_string_bulk_length()
+    case ("multimap_string_bulk_on_integer")
+        call scenario_multimap_string_bulk_on_integer()
+    case ("index_pool_reserve_negative")
+        call scenario_index_pool_reserve_negative()
+    case ("index_get_or_add_many_threaded_int32_overflow")
+        call scenario_index_get_or_add_many_threaded_int32_overflow()
     case ("index_string_control")
         call scenario_index_string_control()
     case ("table_index_string_key_on_int")
@@ -27636,6 +27660,145 @@ contains
         call mm%csr(off32, rows32)
         print '(a,i0)', "unexpectedly answered csr in int32, rows=", size(rows32)
     end subroutine scenario_multimap_csr_int32_value
+    !
+    !> `%keys` into an `int32` RANK-1 list, asked of a map holding string keys.
+    !>
+    !> The `int32` forms repeat their `int64` siblings' guards rather than delegating to them, so
+    !> each copy needs its own scenario: a dropped check here answers an integer list of hashes for
+    !> a map whose keys are strings, which is a plausible array rather than a visible failure.
+    subroutine scenario_index_keys_int32_on_string_map()
+        type(pf_index_map) :: m
+        integer(int32), allocatable :: list(:)
+
+        call m%build(["a", "b"])
+        call m%keys(list)
+        print '(a,i0)', "an int32 key list from a string map was accepted, n=", size(list)
+    end subroutine scenario_index_keys_int32_on_string_map
+    !
+    !> `%keys` into an `int32` RANK-1 list, asked of a map with composite keys.
+    subroutine scenario_index_keys_rank1_int32_on_composite()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2)
+        integer(int32), allocatable :: flat(:)
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        call m%build(pairs, method="hash")
+        call m%keys(flat)
+        print '(a,i0)', "an int32 rank-1 key list was returned for a composite map, n=", size(flat)
+    end subroutine scenario_index_keys_rank1_int32_on_composite
+    !
+    !> `%keys` into an `int32` RANK-2 list, asked of a map holding string keys.
+    subroutine scenario_index_keys_rank2_int32_on_string_map()
+        type(pf_index_map) :: m
+        integer(int32), allocatable :: rows(:,:)
+
+        call m%build(["a", "b"])
+        call m%keys(rows)
+        print '(a,i0)', "an int32 rank-2 key list from a string map was accepted, rows=", size(rows, 1)
+    end subroutine scenario_index_keys_rank2_int32_on_string_map
+    !
+    !> `%keys` into an `int64` RANK-2 list, asked of a multimap holding string keys.
+    subroutine scenario_multimap_keys_rank2_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: rows(:,:)
+
+        call mm%build(["a", "b", "a"])
+        call mm%keys(rows)
+        print '(a,i0)', "a rank-2 key list from a string multimap was accepted, rows=", size(rows, 1)
+    end subroutine scenario_multimap_keys_rank2_on_string_map
+    !
+    !> `%keys` into an `int32` RANK-1 list, asked of a multimap holding string keys.
+    subroutine scenario_multimap_keys_int32_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int32), allocatable :: list(:)
+
+        call mm%build(["a", "b", "a"])
+        call mm%keys(list)
+        print '(a,i0)', "an int32 key list from a string multimap was accepted, n=", size(list)
+    end subroutine scenario_multimap_keys_int32_on_string_map
+    !
+    !> `%keys` into an `int32` RANK-1 list, asked of a multimap with composite keys.
+    subroutine scenario_multimap_keys_rank1_int32_on_composite()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: pairs(3, 2)
+        integer(int32), allocatable :: flat(:)
+
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64]
+        pairs(:, 2) = [3_int64, 4_int64, 3_int64]
+        call mm%build(pairs, method="hash")
+        call mm%keys(flat)
+        print '(a,i0)', "an int32 rank-1 key list was returned for a composite multimap, n=", size(flat)
+    end subroutine scenario_multimap_keys_rank1_int32_on_composite
+    !
+    !> `%keys` into an `int32` RANK-2 list, asked of a multimap holding string keys.
+    subroutine scenario_multimap_keys_rank2_int32_on_string_map()
+        type(pf_index_multimap) :: mm
+        integer(int32), allocatable :: rows(:,:)
+
+        call mm%build(["a", "b", "a"])
+        call mm%keys(rows)
+        print '(a,i0)', "an int32 rank-2 key list from a string multimap was accepted, rows=", size(rows, 1)
+    end subroutine scenario_multimap_keys_rank2_int32_on_string_map
+    !
+    !> A `parquet_string_column` asked of a multimap holding INTEGER keys: the mirror of
+    !> `scenario_multimap_string_keys_rank1`, and a separate guard from it.
+    subroutine scenario_multimap_string_keys_column_on_integer()
+        type(pf_index_multimap) :: mm
+        type(parquet_string_column) :: list
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%keys(list)
+        print '(a,i0)', "a string key column from an integer multimap was accepted, n=", list%size()
+    end subroutine scenario_multimap_string_keys_column_on_integer
+    !
+    !> A string bulk lookup whose answer array is a different length from its keys.
+    subroutine scenario_multimap_string_bulk_length()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: rows(3)
+
+        call mm%build(["a", "b", "a"])
+        call mm%get_first_many(["a", "b"], rows(1:3))
+        print '(a,i0)', "a mismatched string bulk lookup was accepted, rows1=", rows(1)
+    end subroutine scenario_multimap_string_bulk_length
+    !
+    !> A string bulk lookup on a multimap holding integer keys: the bulk forms carry their own
+    !> guard, separate from the scalar one `scenario_multimap_string_on_integer` reaches.
+    subroutine scenario_multimap_string_bulk_on_integer()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: rows(2)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%get_first_many(["a", "b"], rows)
+        print '(a,i0)', "a string bulk lookup on an integer multimap was accepted, rows1=", rows(1)
+    end subroutine scenario_multimap_string_bulk_on_integer
+    !
+    !> `pf_index_pool%reserve` refuses a negative count rather than treating it as zero.
+    subroutine scenario_index_pool_reserve_negative()
+        type(pf_index_pool) :: p
+
+        call p%reserve(4)               ! control: a legal count
+        print '(a,i0)', "a reserve of 4 was accepted, memory=", p%memory_bytes()
+        call p%reserve(-1)              ! -> aborts
+        print '(a,i0)', "a negative reserve was accepted, memory=", p%memory_bytes()
+    end subroutine scenario_index_pool_reserve_negative
+    !
+    !> The THREADED `%get_or_add_many` checks its codes in ONE pass once the team has finished,
+    !> rather than row by row, so the refusal has a second implementation reaching the same
+    !> message. Without OpenMP the thread rule answers 1 and the serial per-row check refuses the
+    !> same call, which is why the wrapper asserts the message rather than the path.
+    subroutine scenario_index_get_or_add_many_threaded_int32_overflow()
+        type(pf_index_map) :: m
+        integer(int64) :: keys(4096), i
+        integer(int32) :: codes(4096)
+
+        do i = 1_int64, 4096_int64
+            keys(i) = i + 1_int64
+        end do
+        call m%build([1_int64], [int(huge(0_int32), int64)], method="hash")
+        call m%get_or_add_many(keys, codes, threads=2)   ! -> aborts
+        print '(a,i0)', "oversized codes were narrowed into an int32 answer, got=", codes(1)
+    end subroutine scenario_index_get_or_add_many_threaded_int32_overflow
     !
     !> Every legal string-key path of both types, in one process: proves the guards above do not
     !> fire on the forms they must not, on every entry the scenarios refuse one shape of.

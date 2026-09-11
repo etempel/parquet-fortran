@@ -55,6 +55,10 @@ contains
             new_unittest("int32 and int64 entry points answer alike", test_mm_int32_forms), &
             new_unittest("csr and keys answer the same arrays in int32 as in int64", &
                 test_mm_csr_and_keys_int32), &
+            new_unittest("every mixed int32/int64 build and scalar lookup answers alike", &
+                test_mm_int32_mixed_builds_and_scalars), &
+            new_unittest("every mixed int32/int64 bulk lookup answers alike", &
+                test_mm_int32_mixed_bulk_forms), &
             new_unittest("an empty build and an all-equal key array are valid", test_mm_empty_and_all_equal), &
             new_unittest("explicit values are stored in position order", test_mm_explicit_values), &
             new_unittest("get_range and csr describe the same ranges", test_mm_get_range_and_csr), &
@@ -784,6 +788,242 @@ contains
         call check(error, all(shape(t32) == shape(t64)) .and. all(int(t32, kind=int64) == t64), &
             "the rank-2 keys form must answer the same tuples in both kinds")
     end subroutine test_mm_csr_and_keys_int32
+
+    !> Every MIXED `int32`/`int64` build and scalar lookup answers exactly what its `int64` sibling
+    !! does.
+    !!
+    !! `test_mm_int32_forms` reaches the pairings where keys and values are narrow together; the
+    !! generics also accept each MIXED pairing -- wide keys with narrow values, narrow keys with
+    !! wide values, narrow keys with no values at all -- and every one of those is a specific of its
+    !! own, carrying its own converted copy of one argument and forwarding the rest. A specific that
+    !! converted the wrong argument, or dropped `method=`, would build a PLAUSIBLE multimap rather
+    !! than fail, so each form is compared here against the `int64` build of the same fixture, CSR
+    !! for CSR. The scalar lookups are compared the same way, answer against answer.
+    subroutine test_mm_int32_mixed_builds_and_scalars(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_multimap) :: a, b, c, fresh
+        integer(int64) :: keys(300), vals(300), pairs(300, 2), i
+        integer(int64) :: probe64, tup64(2), lo64, hi64, lo32, hi32
+        integer(int32) :: keys32(300), vals32(300), pairs32(300, 2), probe32, tup32(2)
+        integer(int64), allocatable :: offa(:), ma(:), offb(:), mb(:), rows64(:)
+        integer(int32), allocatable :: off32(:), rows32(:)
+
+        call fill_repeating_keys(keys, 40_int64, 3_int64, 15_int64, 9797_int64)
+        do i = 1_int64, 300_int64
+            vals(i) = 2_int64 * i + 1_int64
+            pairs(i, 1) = keys(i)
+            pairs(i, 2) = mod(keys(i), 3_int64)
+        end do
+        keys32 = int(keys, int32)
+        vals32 = int(vals, int32)
+        pairs32 = int(pairs, int32)
+
+        ! ---- rank-1 builds ----
+        call a%build(keys, vals, method="hash")
+        call a%csr(offa, ma)
+        call b%build(keys, vals32, method="hash")
+        call b%csr(offb, mb)
+        call check(error, size(offa) == size(offb) .and. all(offa == offb) .and. all(ma == mb), &
+            "build(int64 keys, int32 values) must equal the all-int64 build")
+        if (allocated(error)) return
+        call b%build(keys32, vals, method="hash")
+        call b%csr(offb, mb)
+        call check(error, size(offa) == size(offb) .and. all(offa == offb) .and. all(ma == mb), &
+            "build(int32 keys, int64 values) must equal the all-int64 build")
+        if (allocated(error)) return
+        ! With no values a row's stored value is its POSITION, so the comparison is against the
+        ! int64 no-values build rather than against the one carrying `vals`.
+        call b%build(keys, method="hash")
+        call b%csr(offb, mb)
+        call c%build(keys32, method="hash")
+        call c%csr(offa, ma)
+        call check(error, size(offa) == size(offb) .and. all(offa == offb) .and. all(ma == mb), &
+            "build(int32 keys) with no values must equal the int64 no-values build")
+        if (allocated(error)) return
+
+        ! ---- rank-2 builds ----
+        call a%build(pairs, vals, method="hash")
+        call a%csr(offa, ma)
+        call b%build(pairs, vals32, method="hash")
+        call b%csr(offb, mb)
+        call check(error, size(offa) == size(offb) .and. all(offa == offb) .and. all(ma == mb), &
+            "build(int64 tuples, int32 values) must equal the all-int64 build")
+        if (allocated(error)) return
+        call b%build(pairs32, vals, method="hash")
+        call b%csr(offb, mb)
+        call check(error, size(offa) == size(offb) .and. all(offa == offb) .and. all(ma == mb), &
+            "build(int32 tuples, int64 values) must equal the all-int64 build")
+        if (allocated(error)) return
+        call b%build(pairs32, vals32, method="hash")
+        call b%csr(offb, mb)
+        call check(error, size(offa) == size(offb) .and. all(offa == offb) .and. all(ma == mb), &
+            "build(int32 tuples, int32 values) must equal the all-int64 build")
+        if (allocated(error)) return
+
+        ! ---- scalar-key lookups, int32 against int64 ----
+        call a%build(keys, vals, method="hash")
+        probe64 = keys(7)
+        probe32 = int(probe64, int32)
+        call check(error, a%count(probe64) > 1_int64, "fixture: the probed key must repeat")
+        if (allocated(error)) return
+        call check(error, a%get(probe32) == a%get(probe64), "get(int32 key) must equal get(int64 key)")
+        if (allocated(error)) return
+        call check(error, a%count(probe32) == a%count(probe64), &
+            "count(int32 key) must equal count(int64 key)")
+        if (allocated(error)) return
+        call check(error, a%get_first(probe32) == a%get_first(probe64), &
+            "get_first(int32 key) must equal get_first(int64 key)")
+        if (allocated(error)) return
+        call a%get_all(probe64, rows64)
+        call a%get_all(probe32, rows32)
+        call check(error, size(rows32) == size(rows64) .and. all(int(rows32, int64) == rows64), &
+            "get_all(int32 key) into int32 rows must equal the int64 answer")
+        if (allocated(error)) return
+        deallocate(rows64)
+        call a%get_all(probe32, rows64)
+        call check(error, size(rows64) == size(rows32) .and. all(int(rows32, int64) == rows64), &
+            "get_all(int32 key) into int64 rows must equal the int32 answer")
+        if (allocated(error)) return
+        call a%get_range(probe64, lo64, hi64)
+        call a%get_range(probe32, lo32, hi32)
+        call check(error, lo32 == lo64 .and. hi32 == hi64, &
+            "get_range(int32 key) must equal get_range(int64 key)")
+        if (allocated(error)) return
+
+        ! ---- tuple lookups, int32 against int64 ----
+        call c%build(pairs, vals, method="hash")
+        tup64 = [pairs(7, 1), pairs(7, 2)]
+        tup32 = int(tup64, int32)
+        call check(error, c%count(tup64) >= 1_int64, "fixture: the probed tuple must be present")
+        if (allocated(error)) return
+        call check(error, c%get(tup32) == c%get(tup64), "get(int32 tuple) must equal get(int64 tuple)")
+        if (allocated(error)) return
+        call check(error, c%get_first(tup32) == c%get_first(tup64), &
+            "get_first(int32 tuple) must equal get_first(int64 tuple)")
+        if (allocated(error)) return
+        deallocate(rows64, rows32)
+        call c%get_all(tup64, rows64)
+        call c%get_all(tup32, rows32)
+        call check(error, size(rows32) == size(rows64) .and. all(int(rows32, int64) == rows64), &
+            "get_all(int32 tuple) into int32 rows must equal the int64 answer")
+        if (allocated(error)) return
+        deallocate(rows64)
+        call c%get_all(tup32, rows64)
+        call check(error, size(rows64) == size(rows32) .and. all(int(rows32, int64) == rows64), &
+            "get_all(int32 tuple) into int64 rows must equal the int32 answer")
+        if (allocated(error)) return
+        call c%get_range(tup64, lo64, hi64)
+        call c%get_range(tup32, lo32, hi32)
+        call check(error, lo32 == lo64 .and. hi32 == hi64 .and. hi64 >= lo64, &
+            "get_range(int32 tuple) must equal get_range(int64 tuple)")
+        if (allocated(error)) return
+
+        ! ---- the int32 CSR of a multimap that was never built ----
+        call fresh%csr(off32, rows32)
+        call check(error, size(off32) == 1 .and. off32(1) == 1_int32 .and. size(rows32) == 0, &
+            "an unbuilt multimap must answer an empty int32 CSR starting at 1")
+    end subroutine test_mm_int32_mixed_builds_and_scalars
+
+    !> Every MIXED `int32`/`int64` BULK lookup answers exactly what its `int64` sibling does.
+    !!
+    !! The bulk forms multiply out further than the scalar ones -- the key array and the answer
+    !! array carry independent kinds -- and each combination is a specific with its own loop, its
+    !! own narrowing check and its own optional forwarding. The probe sets below contain absent
+    !! keys as well as present ones, for the reason this suite's header gives: a specific that
+    !! answered something for an absent key would pass a hits-only comparison.
+    subroutine test_mm_int32_mixed_bulk_forms(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_multimap) :: a, c
+        integer(int64) :: keys(300), vals(300), pairs(300, 2), pk(120), pp(120, 2), i, nf64, nf32
+        integer(int32) :: keys32(300), pk32(120), pp32(120, 2)
+        integer(int64) :: want64(120), got64(120)
+        integer(int32) :: got32(120)
+        integer(int64), allocatable :: offw(:), mw(:), offg(:), mg(:)
+        integer(int32), allocatable :: mg32(:)
+
+        call fill_repeating_keys(keys, 40_int64, 3_int64, 15_int64, 31337_int64)
+        do i = 1_int64, 300_int64
+            vals(i) = 2_int64 * i + 1_int64
+            pairs(i, 1) = keys(i)
+            pairs(i, 2) = mod(keys(i), 3_int64)
+        end do
+        keys32 = int(keys, int32)
+        ! Every third probe is displaced by 1, which no key can equal (the distinct values are
+        ! three apart), so the set is a mixture of hits and misses.
+        do i = 1_int64, 120_int64
+            pk(i) = keys(1_int64 + mod(i * 7_int64, 300_int64)) + merge(1_int64, 0_int64, mod(i, 3_int64) == 0_int64)
+            pp(i, 1) = pk(i)
+            pp(i, 2) = mod(pk(i), 3_int64)
+        end do
+        pk32 = int(pk, int32)
+        pp32 = int(pp, int32)
+        call a%build(keys, vals, method="hash")
+        call c%build(pairs, vals, method="hash")
+
+        ! ---- get_first_many ----
+        call a%get_first_many(pk, want64, n_found=nf64)
+        call check(error, nf64 > 0_int64 .and. nf64 < 120_int64, &
+            "fixture: the probe set must contain both hits and misses")
+        if (allocated(error)) return
+        call a%get_first_many(pk32, got32, n_found=nf32)
+        call check(error, nf32 == nf64 .and. all(int(got32, int64) == want64), &
+            "get_first_many(int32 keys, int32 rows) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%get_first_many(pp, want64)
+        call c%get_first_many(pp32, got32)
+        call check(error, all(int(got32, int64) == want64), &
+            "get_first_many(int32 tuples, int32 rows) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%get_first_many(pp32, got64)
+        call check(error, all(got64 == want64), &
+            "get_first_many(int32 tuples, int64 rows) must equal the int64 answer")
+        if (allocated(error)) return
+
+        ! ---- get_many ----
+        call a%get_many(pk, want64)
+        call a%get_many(pk32, got32)
+        call check(error, all(int(got32, int64) == want64), &
+            "get_many(int32 keys, int32 groups) must equal the int64 answer")
+        if (allocated(error)) return
+        call a%get_many(pk32, got64)
+        call check(error, all(got64 == want64), &
+            "get_many(int32 keys, int64 groups) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%get_many(pp, want64)
+        call c%get_many(pp32, got32)
+        call check(error, all(int(got32, int64) == want64), &
+            "get_many(int32 tuples, int32 groups) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%get_many(pp32, got64)
+        call check(error, all(got64 == want64), &
+            "get_many(int32 tuples, int64 groups) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%get_many(pp, got32)
+        call check(error, all(int(got32, int64) == want64), &
+            "get_many(int64 tuples, int32 groups) must equal the int64 answer")
+        if (allocated(error)) return
+
+        ! ---- probe_many ----
+        call a%probe_many(pk, offw, mw)
+        call check(error, size(mw) > 120, "fixture: the probes must match with repeats")
+        if (allocated(error)) return
+        call a%probe_many(pk32, offg, mg)
+        call check(error, all(offg == offw) .and. all(mg == mw), &
+            "probe_many(int32 keys, int64 matches) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%probe_many(pp, offw, mw)
+        call c%probe_many(pp32, offg, mg32)
+        call check(error, all(offg == offw) .and. all(int(mg32, int64) == mw), &
+            "probe_many(int32 tuples, int32 matches) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%probe_many(pp32, offg, mg)
+        call check(error, all(offg == offw) .and. all(mg == mw), &
+            "probe_many(int32 tuples, int64 matches) must equal the int64 answer")
+        if (allocated(error)) return
+        call c%probe_many(pp, offg, mg32)
+        call check(error, all(offg == offw) .and. all(int(mg32, int64) == mw), &
+            "probe_many(int64 tuples, int32 matches) must equal the int64 answer")
+    end subroutine test_mm_int32_mixed_bulk_forms
 
     !> A zero-key build is valid on every backend, and an all-equal key array is one group.
     subroutine test_mm_empty_and_all_equal(error)

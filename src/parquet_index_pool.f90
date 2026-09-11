@@ -100,8 +100,10 @@ contains
         ! a different pool than the list.
         !$omp critical (pf_index_pool_guard)
         call pool_used_list(self, wide)
+        ! Only 2**31 live `%get_index` calls can raise the watermark that far -- `%reserve`
+        ! raises the bitmap, never `max_used` -- so no fixture reaches the message.
         if (self%max_used > int(huge(0_int32), int64)) call ix_abort("pf_index_pool%used_indexes" // &
-            ": an index is too large for an int32 answer; take the list as int64")
+            ": an index is too large for an int32 answer; take the list as int64") ! GCOVR_EXCL_LINE
         allocate(list(size(wide, kind=int64)))
         list = int(wide, int32)
         !$omp end critical (pf_index_pool_guard)
@@ -245,7 +247,7 @@ contains
             self%nfree = self%nfree - 1_int64
         else
             if (self%max_used == huge(0_int64)) &
-                call ix_abort("pf_index_pool%get_index: the index space is exhausted")
+                call ix_abort("pf_index_pool%get_index: the index space is exhausted") ! GCOVR_EXCL_LINE
             idx = self%max_used + 1_int64
             self%max_used = idx
             call pool_ensure_bits(self, idx)

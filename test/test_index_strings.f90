@@ -76,7 +76,11 @@ contains
             new_unittest("a threaded string get_or_add_many codes densely and lists keys in code order", &
                 test_str_partitioned_get_or_add_many), &
             new_unittest("colliding strings send the threaded passes to the serial loop, which answers", &
-                test_str_collision_threaded) &
+                test_str_collision_threaded), &
+            new_unittest("a string build stores explicit values, and a mask excludes a key", &
+                test_str_build_with_values), &
+            new_unittest("every int32 answer form equals its int64 sibling", &
+                test_str_int32_answer_forms) &
             ]
     end subroutine collect_tests_index_strings
 
@@ -693,6 +697,149 @@ contains
         call check(error, size(r32) == 4 .and. all(int(r32, int64) == r64), "get_all in int32 equals int64")
     end subroutine test_str_multimap_bulk_forms
 
+    !> A string build carrying EXPLICIT values stores them, from both key sources and in both
+    !! value kinds, and a masked build from a character array skips what the mask excludes.
+    !!
+    !! The no-values forms number the keys by position, so a specific that dropped `values` on the
+    !! way through would still answer a dense, plausible map -- every assertion here therefore
+    !! reads a value back and compares it against the one supplied, never merely against itself.
+    !! The mask is checked the same way: the excluded key must be ABSENT, not merely renumbered.
+    subroutine test_str_build_with_values(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        type(parquet_string_column) :: sc
+        integer(int64) :: v64(7)
+        integer(int32) :: v32(7)
+        integer :: i
+
+        do i = 1, 7
+            v64(i) = 10_int64 * int(i, int64) + 3_int64
+        end do
+        v32 = int(v64, int32)
+        call sc%clear()
+        do i = 1, 7
+            call sc%append_string(trim(KEYS(i)))
+        end do
+
+        ! A character array with int32 values, then the same values as int64.
+        call m%build(KEYS, v32)
+        do i = 1, 7
+            call check(error, m%get(trim(KEYS(i))) == v64(i), &
+                "build(character keys, int32 values) must store the value given for " // trim(KEYS(i)))
+            if (allocated(error)) return
+        end do
+        call m%build(KEYS, v64)
+        do i = 1, 7
+            call check(error, m%get(trim(KEYS(i))) == v64(i), &
+                "build(character keys, int64 values) must store the value given for " // trim(KEYS(i)))
+            if (allocated(error)) return
+        end do
+        ! A string column with int32 values answers the same map.
+        call m%build(sc, v32)
+        do i = 1, 7
+            call check(error, m%get(trim(KEYS(i))) == v64(i), &
+                "build(string column, int32 values) must store the value given for " // trim(KEYS(i)))
+            if (allocated(error)) return
+        end do
+
+        ! A masked build from a character array: the masked key is not stored at all.
+        call m%build(KEYS, valid=[.true., .true., .true., .false., .true., .true., .true.])
+        call check(error, m%nkeys() == 6_int64, "a masked string build stores only the unmasked keys")
+        if (allocated(error)) return
+        call check(error, m%get(trim(KEYS(4))) == 0_int64, "the masked key must be absent")
+        if (allocated(error)) return
+        call check(error, m%get(trim(KEYS(5))) == 5_int64, &
+            "an unmasked key keeps its own position as its value")
+    end subroutine test_str_build_with_values
+
+    !> Every `int32` answer form the string surface carries, against its `int64` sibling.
+    !!
+    !! `%get_or_add` into an `int32`, the map's masked `%get_many` into an `int32`, and the
+    !! multimap's `%get_many`/`%probe_many` from a character ARRAY into `int32` answers are each a
+    !! specific of their own; the column-sourced siblings of the last two are covered by
+    !! `test_str_multimap_bulk_forms`. Each is compared against the `int64` form of the same call,
+    !! and the probe set below contains absent keys as well as present ones.
+    subroutine test_str_int32_answer_forms(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        type(pf_index_multimap) :: mm
+        type(parquet_string_column) :: kcol
+        character(len=6), allocatable :: chr(:)
+        character(len=6) :: pchr(6)
+        integer(int64) :: g64(6), idx64, nf64, nf32
+        integer(int32) :: g32(6), idx32
+        integer(int64), allocatable :: off64(:), m64(:), offg(:), mg64(:), ra64(:), rb64(:)
+        integer(int32), allocatable :: mg32(:)
+        integer(int64) :: v64(9)
+        integer(int32) :: v32(9)
+        integer :: i
+
+        call repeats_fixture(chr, kcol)
+        pchr = [character(len=6) :: "a", "zz", "cc cc", "a", "", "dd"]
+
+        ! %get_or_add into an int32 answer, against the int64 form on the same map.
+        call m%init(strings=.true.)
+        call m%get_or_add("alpha", idx64)
+        call m%get_or_add("beta", idx32)
+        call check(error, int(idx32, int64) == 2_int64, "get_or_add into an int32 numbers the second key 2")
+        if (allocated(error)) return
+        call m%get_or_add("alpha", idx32)
+        call check(error, int(idx32, int64) == idx64, "get_or_add into an int32 re-answers the stored index")
+        if (allocated(error)) return
+
+        ! The map's masked %get_many into an int32 answer array.
+        ! A MAP needs unique keys, so the masked lookup runs over the suite's distinct fixture;
+        ! `chr`, which repeats, is the multimap's below. Probe 4 repeats probe 1, so masking it
+        ! is the negative control: the same key answers 0 there and its index here.
+        call m%build(KEYS)
+        call m%get_many(pchr, g64, valid=[.true., .true., .true., .false., .true., .true.])
+        call m%get_many(pchr, g32, valid=[.true., .true., .true., .false., .true., .true.])
+        call check(error, all(int(g32, int64) == g64), &
+            "a masked get_many into an int32 answer must equal the int64 answer")
+        if (allocated(error)) return
+        call check(error, g64(4) == 0_int64 .and. g64(1) > 0_int64, &
+            "fixture: the mask must exclude a key that is otherwise present")
+        if (allocated(error)) return
+
+        ! The multimap's character-array bulk forms with int32 answers.
+        call mm%build(kcol)
+        call mm%get_many(pchr, g64, n_found=nf64)
+        call mm%get_many(pchr, g32, n_found=nf32)
+        call check(error, nf32 == nf64 .and. all(int(g32, int64) == g64), &
+            "get_many(character keys, int32 groups) must equal the int64 answer")
+        if (allocated(error)) return
+        call check(error, nf64 > 0_int64 .and. nf64 < 6_int64, &
+            "fixture: the probe set must contain both hits and misses")
+        if (allocated(error)) return
+        call mm%probe_many(pchr, off64, m64)
+        call mm%probe_many(pchr, offg, mg32)
+        call check(error, all(offg == off64) .and. all(int(mg32, int64) == m64), &
+            "probe_many(character keys, int32 matches) must equal the int64 answer")
+        if (allocated(error)) return
+        call check(error, size(m64) > 3, "fixture: the probes must match with repeats")
+        if (allocated(error)) return
+        call mm%probe_many(kcol, offg, mg32)
+        call mm%probe_many(kcol, off64, mg64)
+        call check(error, all(offg == off64) .and. all(int(mg32, int64) == mg64), &
+            "probe_many(string column, int32 matches) must equal the int64 answer")
+        if (allocated(error)) return
+
+        ! The multimap's string builds carrying int32 values, from both key sources.
+        do i = 1, 9
+            v64(i) = 100_int64 - int(i, int64)
+        end do
+        v32 = int(v64, int32)
+        call mm%build(chr, v32)
+        call mm%get_all("a", ra64)
+        call check(error, size(ra64) == 4 .and. all(ra64 == [v64(1), v64(3), v64(6), v64(9)]), &
+            "a multimap built from a character array with int32 values stores those values")
+        if (allocated(error)) return
+        call mm%build(kcol, v32)
+        call mm%get_all("a", rb64)
+        call check(error, size(rb64) == size(ra64) .and. all(rb64 == ra64), &
+            "the string-column build with int32 values stores the same values")
+    end subroutine test_str_int32_answer_forms
+
     !> Two thousand rows over ten keys: the grouping pass reserves for every row, the
     !! right-sized rebuild follows, and every group id and every row survives it.
     subroutine test_str_rightsize_rebuild(error)
@@ -900,14 +1047,14 @@ contains
     subroutine test_str_partitioned_get_or_add_many(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         type(pf_index_map) :: s, p, q
-        type(parquet_string_column) :: sc, list
+        type(parquet_string_column) :: sc, sc2, list
         character(len=12), allocatable :: stream(:), more(:)
         integer(int64), allocatable :: c1(:), c2(:), c3(:), cm1(:), cm2(:)
         integer(int32), allocatable :: c32(:)
-        logical, allocatable :: mask(:)
+        logical, allocatable :: mask(:), m2(:)
         character(len=:), allocatable :: tok
         integer(int64), parameter :: n = 60000_int64, k = 20000_int64, nmore = 10000_int64
-        integer(int64) :: i, bad, c
+        integer(int64) :: i, bad, c, nadd, before
         integer :: nt
         character(len=16) :: txt
 
@@ -921,7 +1068,7 @@ contains
                 "ever partitions")
             return
         end if
-        allocate(stream(n), more(nmore), c1(n), c2(n), c3(nmore), cm1(n), cm2(n), c32(n), mask(n))
+        allocate(stream(n), more(nmore), c1(n), c2(n), c3(nmore), cm1(n), cm2(n), c32(n), mask(n), m2(nmore))
         call sc%clear()
         do i = 1_int64, n
             write (txt, "(a,i0)") "s", 1_int64 + mod(i * 7919_int64, k)
@@ -983,6 +1130,33 @@ contains
         call check(error, bad == 0_int64 .and. p%nkeys() == k + nmore / 2_int64, &
             "on a filled map an old string keeps its code and a new one is added above the watermark")
         if (allocated(error)) return
+        ! The same call under a mask. The FILLED map's threaded pass is a different arm from the
+        ! fresh one above -- it looks every row up on the team and then adds the misses serially --
+        ! and a masked miss must be left out of both halves. `mask` itself will not do: it keeps
+        ! every odd row, and the new strings are exactly the odd ones, so nothing would be
+        ! excluded and the assertion would hold whatever the mask did.
+        nadd = 0_int64
+        do i = 1_int64, nmore
+            m2(i) = mod(i, 3_int64) /= 0_int64
+            if (mod(i, 2_int64) == 1_int64) then
+                write (txt, "(a,i0)") "u", i
+                more(i) = txt
+                if (m2(i)) nadd = nadd + 1_int64
+            else
+                more(i) = stream(i)
+            end if
+        end do
+        before = p%nkeys()
+        call p%get_or_add_many(more, c3, valid=m2)
+        call check(error, all(pack(c3, .not. m2) == 0_int64), &
+            "a masked row answers 0 on the filled map's threaded pass")
+        if (allocated(error)) return
+        call check(error, p%nkeys() == before + nadd, &
+            "only the unmasked new strings were added by the filled map's threaded pass")
+        if (allocated(error)) return
+        call check(error, nadd > 0_int64 .and. nadd < nmore / 2_int64, &
+            "fixture: the mask must exclude some of the new strings and keep others")
+        if (allocated(error)) return
         ! The column with nulls, under a mask: null and masked rows are 0 and add nothing.
         call s%clear()
         call s%init(strings=.true.)
@@ -1003,6 +1177,62 @@ contains
         call q%init(strings=.true.)
         call q%get_or_add_many(stream, c32)
         call check(error, codes_consistent(c1, int(c32, int64), k), "the int32 form codes consistently")
+        if (allocated(error)) return
+        ! A COLUMN into a map that already holds strings: the filled map's threaded pass again,
+        ! over column storage this time, where a null element is skipped exactly as a masked row
+        ! is. Every column call above ran on a FRESH map and took the other arm.
+        call q%clear()
+        call q%init(strings=.true.)
+        call q%get_or_add_many(stream(1:nmore), c3, threads=1)
+        before = q%nkeys()
+        call q%get_or_add_many(sc, cm2, valid=mask)
+        call check(error, all(pack(cm2, .not. mask) == 0_int64), &
+            "a masked row answers 0 on the filled map's threaded column pass")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 101_int64, n, 101_int64
+            if (cm2(i) /= 0_int64) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "a null element answers 0 on that pass too")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (.not. mask(i)) cycle
+            if (mod(i, 101_int64) == 0_int64) cycle
+            if (cm2(i) /= q%get(trim(stream(i)))) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, &
+            "every unmasked, non-null row's code is what %get answers for its string afterwards")
+        if (allocated(error)) return
+        call check(error, q%nkeys() > before, &
+            "fixture: the column must carry strings the filled map did not already hold")
+        if (allocated(error)) return
+        ! One EMPTY element in the column. A zero-byte key is a key like any other -- distinct
+        ! from a null, which answers 0 -- and it reaches the pass through a branch of its own,
+        ! since there are no bytes to point at. The column above carries nulls but no empty
+        ! string, so nothing until here takes that branch.
+        call sc2%clear()
+        do i = 1_int64, nmore
+            if (mod(i, 53_int64) == 0_int64) then
+                call sc2%append_string("")
+            else
+                write (txt, "(a,i0)") "e", i
+                call sc2%append_string(trim(txt))
+            end if
+        end do
+        call q%clear()
+        call q%init(strings=.true.)
+        call q%get_or_add_many(["seed"], cm2(1:1))
+        call q%get_or_add_many(sc2, c3, threads=2)
+        bad = 0_int64
+        do i = 53_int64, nmore, 53_int64
+            if (c3(i) /= q%get("")) bad = bad + 1_int64
+        end do
+        call check(error, q%get("") > 0_int64 .and. bad == 0_int64, &
+            "an empty element is stored as a key on the filled map's threaded column pass")
+        if (allocated(error)) return
+        call check(error, c3(1) /= q%get("") .and. c3(1) > 0_int64, &
+            "and a non-empty element beside it keeps a code of its own")
         if (allocated(error)) return
         ! Fewer new strings than the threading floor, on a team asked for explicitly: the tuple
         ! pass adds them serially inside the threaded call, and the string map must take that
@@ -1044,6 +1274,7 @@ contains
         type(pf_index_map) :: m, p
         type(parquet_string_column) :: keys
         integer(int64), allocatable :: codes(:)
+        character(len=16), allocatable :: chr(:)
         integer(int64), parameter :: n = 20000_int64
         integer(int64) :: i, bad
         integer :: nt
@@ -1083,6 +1314,34 @@ contains
         if (allocated(error)) return
         call check(error, all(codes == [(i, i = 1_int64, n)]), &
             "the serial pass numbered the distinct colliding strings by first appearance")
+        if (allocated(error)) return
+        ! The same fresh-map pass over a CHARACTER ARRAY: a specific of its own, with its own
+        ! fallback, which the column call above does not exercise.
+        allocate(chr(n))
+        do i = 1_int64, n
+            write (txt, "(a,i0)") "k", i
+            chr(i) = txt
+        end do
+        call p%clear()
+        call p%init(strings=.true.)
+        call p%get_or_add_many(chr, codes)
+        call check(error, parquet_debug_index_spills() == -1_int64 .and. p%nkeys() == n, &
+            "the character-array fresh pass met the collision, and the serial pass stored every key")
+        if (allocated(error)) return
+        call check(error, all(codes == [(i, i = 1_int64, n)]), &
+            "the character-array fallback numbered the colliding strings by first appearance")
+        if (allocated(error)) return
+        ! And the character-array BUILD, whose fallback is a third copy of the same recovery:
+        ! the partitioned pass reports equal tuples, the map is emptied and the serial loop runs.
+        call m%build(chr)
+        call check(error, parquet_debug_index_spills() == -1_int64 .and. m%nkeys() == n, &
+            "a character-array build met the collision, and the serial loop stored every key")
+        if (allocated(error)) return
+        bad = 0_int64
+        do i = 1_int64, n
+            if (m%get(trim(chr(i))) /= i) bad = bad + 1_int64
+        end do
+        call check(error, bad == 0_int64, "every colliding key answers its row after the build's fallback")
         if (allocated(error)) return
         ! Vacuity guard: without the hook the same build partitions.
         call parquet_debug_set_index_string_hash_bits(0)

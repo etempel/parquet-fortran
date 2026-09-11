@@ -84,7 +84,7 @@ contains
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
-                                            p22(:)
+                                            p22(:), p23(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2820,8 +2820,36 @@ contains
             new_unittest("agg with a NaN weight aborts", test_table_group_agg_nan_weight_aborts), &
             new_unittest("agg with an infinite weight aborts", test_table_group_agg_infinite_weight_aborts) &
             ]
+        ! The `int32` and string-keyed refusals of `parquet_index`: each repeats its `int64`
+        ! sibling's guard rather than delegating to it, so each copy needs a scenario of its own.
+        p23 = [ &
+            new_unittest("an int32 key list from a string map aborts", &
+                test_index_keys_int32_on_string_map_aborts), &
+            new_unittest("an int32 rank-1 key list from a composite map aborts", &
+                test_index_keys_rank1_int32_on_composite_aborts), &
+            new_unittest("an int32 rank-2 key list from a string map aborts", &
+                test_index_keys_rank2_int32_on_string_map_aborts), &
+            new_unittest("a threaded int32 get_or_add_many with an oversized code aborts", &
+                test_index_get_or_add_many_threaded_int32_overflow_aborts), &
+            new_unittest("a reserve of a negative count on a pool aborts", &
+                test_index_pool_reserve_negative_aborts), &
+            new_unittest("a rank-2 key list from a string multimap aborts", &
+                test_multimap_keys_rank2_on_string_map_aborts), &
+            new_unittest("an int32 key list from a string multimap aborts", &
+                test_multimap_keys_int32_on_string_map_aborts), &
+            new_unittest("an int32 rank-1 key list from a composite multimap aborts", &
+                test_multimap_keys_rank1_int32_on_composite_aborts), &
+            new_unittest("an int32 rank-2 key list from a string multimap aborts", &
+                test_multimap_keys_rank2_int32_on_string_map_aborts), &
+            new_unittest("a string key column from an integer multimap aborts", &
+                test_multimap_string_keys_column_on_integer_aborts), &
+            new_unittest("a string bulk lookup of the wrong length aborts", &
+                test_multimap_string_bulk_length_aborts), &
+            new_unittest("a string bulk lookup on an integer multimap aborts", &
+                test_multimap_string_bulk_on_integer_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21]
+            p19, p21, p23]
     end subroutine collect_tests_parquet_errors
 
 
@@ -3381,6 +3409,118 @@ contains
             failure_message="a code above huge(int32) was expected to abort an int32 get_or_add_many", &
             required_stderr="too large for an int32 result")
     end subroutine test_index_get_or_add_many_int32_overflow_aborts
+    !
+    !> See `scenario_index_keys_int32_on_string_map` (test/error_scenarios.f90).
+    subroutine test_index_keys_int32_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_int32_on_string_map", &
+            expect_abort=.true., &
+            failure_message="an int32 key list from a string map was expected to abort", &
+            required_stderr="this map holds string keys")
+    end subroutine test_index_keys_int32_on_string_map_aborts
+    !
+    !> See `scenario_index_keys_rank1_int32_on_composite` (test/error_scenarios.f90).
+    subroutine test_index_keys_rank1_int32_on_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_rank1_int32_on_composite", &
+            expect_abort=.true., &
+            failure_message="an int32 rank-1 key list from a composite map was expected to abort", &
+            required_stderr="this map has composite keys")
+    end subroutine test_index_keys_rank1_int32_on_composite_aborts
+    !
+    !> See `scenario_index_keys_rank2_int32_on_string_map` (test/error_scenarios.f90).
+    subroutine test_index_keys_rank2_int32_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_rank2_int32_on_string_map", &
+            expect_abort=.true., &
+            failure_message="an int32 rank-2 key list from a string map was expected to abort", &
+            required_stderr="this map holds string keys")
+    end subroutine test_index_keys_rank2_int32_on_string_map_aborts
+    !
+    !> See `scenario_index_get_or_add_many_threaded_int32_overflow` (test/error_scenarios.f90).
+    !> The threaded pass checks every code once the team has finished rather than row by row, so
+    !> this is a second guard reaching the same message, not the one
+    !> `test_index_get_or_add_many_int32_overflow_aborts` covers.
+    subroutine test_index_get_or_add_many_threaded_int32_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_or_add_many_threaded_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="a threaded int32 get_or_add_many with oversized codes was expected to abort", &
+            required_stderr="too large for an int32 result")
+    end subroutine test_index_get_or_add_many_threaded_int32_overflow_aborts
+    !
+    !> See `scenario_index_pool_reserve_negative` (test/error_scenarios.f90). The scenario reserves
+    !> a legal count first, so this passing means the guard fired on the negative one alone.
+    subroutine test_index_pool_reserve_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_pool_reserve_negative", &
+            expect_abort=.true., &
+            failure_message="a negative pool reserve was expected to abort", &
+            required_stderr="pf_index_pool%reserve: n must be >= 0")
+    end subroutine test_index_pool_reserve_negative_aborts
+    !
+    !> See `scenario_multimap_keys_rank2_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_keys_rank2_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_keys_rank2_on_string_map", &
+            expect_abort=.true., &
+            failure_message="a rank-2 key list from a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys")
+    end subroutine test_multimap_keys_rank2_on_string_map_aborts
+    !
+    !> See `scenario_multimap_keys_int32_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_keys_int32_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_keys_int32_on_string_map", &
+            expect_abort=.true., &
+            failure_message="an int32 key list from a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys")
+    end subroutine test_multimap_keys_int32_on_string_map_aborts
+    !
+    !> See `scenario_multimap_keys_rank1_int32_on_composite` (test/error_scenarios.f90).
+    subroutine test_multimap_keys_rank1_int32_on_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_keys_rank1_int32_on_composite", &
+            expect_abort=.true., &
+            failure_message="an int32 rank-1 key list from a composite multimap was expected to abort", &
+            required_stderr="this multimap has composite keys")
+    end subroutine test_multimap_keys_rank1_int32_on_composite_aborts
+    !
+    !> See `scenario_multimap_keys_rank2_int32_on_string_map` (test/error_scenarios.f90).
+    subroutine test_multimap_keys_rank2_int32_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_keys_rank2_int32_on_string_map", &
+            expect_abort=.true., &
+            failure_message="an int32 rank-2 key list from a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys")
+    end subroutine test_multimap_keys_rank2_int32_on_string_map_aborts
+    !
+    !> See `scenario_multimap_string_keys_column_on_integer` (test/error_scenarios.f90).
+    subroutine test_multimap_string_keys_column_on_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_keys_column_on_integer", &
+            expect_abort=.true., &
+            failure_message="a string key column from an integer multimap was expected to abort", &
+            required_stderr="this multimap holds integer keys")
+    end subroutine test_multimap_string_keys_column_on_integer_aborts
+    !
+    !> See `scenario_multimap_string_bulk_length` (test/error_scenarios.f90).
+    subroutine test_multimap_string_bulk_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_bulk_length", &
+            expect_abort=.true., &
+            failure_message="a string bulk lookup of the wrong length was expected to abort", &
+            required_stderr="the keys and the answer array must have the same length")
+    end subroutine test_multimap_string_bulk_length_aborts
+    !
+    !> See `scenario_multimap_string_bulk_on_integer` (test/error_scenarios.f90).
+    subroutine test_multimap_string_bulk_on_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_bulk_on_integer", &
+            expect_abort=.true., &
+            failure_message="a string bulk lookup on an integer multimap was expected to abort", &
+            required_stderr="look up with integer keys")
+    end subroutine test_multimap_string_bulk_on_integer_aborts
     !
     !> See `scenario_index_build_valid_length` (test/error_scenarios.f90).
     subroutine test_index_build_valid_length_aborts(error)

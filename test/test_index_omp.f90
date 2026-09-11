@@ -61,6 +61,8 @@ contains
                 test_partitioned_build_answers), &
             new_unittest("a threaded get_or_add_many codes densely and consistently", &
                 test_partitioned_get_or_add_many), &
+            new_unittest("a threaded get_or_add_many adds nothing when every key is present, " // &
+                "and honours a mask below the floor", test_goam_no_new_keys_and_masked_few), &
             new_unittest("a multimap grouped on a team answers as the serial one", test_mm_threaded_grouping), &
             new_unittest("the partitioned insert has a work floor, and only the automatic path takes it", &
                 test_partitioned_build_floor), &
@@ -1361,6 +1363,99 @@ contains
         if (allocated(error)) return
         call check(error, codes_consistent(c1, c2, kt), "the composite codes are a relabelling of the serial ones")
     end subroutine test_partitioned_get_or_add_many
+
+    !> The two arms the partitioned `%get_or_add_many` keeps for work too small to divide: a call
+    !! whose keys are ALL already stored, and one whose few new keys arrive under a mask.
+    !!
+    !! Both answer unremarkably, which is why they need asserting rather than assuming. The pass
+    !! counts its misses before opening a team of its own and returns on zero; below the
+    !! per-thread floor it inserts the misses one at a time in the caller's order instead. Either
+    !! arm could stop honouring the mask, or stop adding the keys at all, and every assertion in
+    !! `test_partitioned_get_or_add_many` would still hold -- that test's calls all carry enough
+    !! new keys to partition. `threads=2` is explicit on the small calls because the automatic
+    !! rule would answer 1 for two hundred rows and take the ordinary serial loop instead, which
+    !! is a different path from the one under test.
+    subroutine test_goam_no_new_keys_and_masked_few(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: p, t
+        integer(int64), allocatable :: distinct(:), stream(:), c1(:), c2(:), few(:), cf(:)
+        integer(int64), allocatable :: pairs(:,:), fewpairs(:,:)
+        logical, allocatable :: fewmask(:)
+        integer(int64), parameter :: n = 120000_int64, k = 40000_int64, nfew = 200_int64
+        integer(int64) :: i, j, nk0
+        integer :: nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the partitioned pass never runs and both " // &
+            "calls below take the ordinary serial loop, which is not the code under test")
+        return
+#endif
+        nt = pf_index_threads(n)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no call " // &
+                "ever partitions")
+            return
+        end if
+        allocate(distinct(k), stream(n), c1(n), c2(n), few(nfew), cf(nfew), fewmask(nfew))
+        allocate(pairs(n, 2), fewpairs(nfew, 2))
+        do j = 1_int64, k
+            distinct(j) = j * 1000003_int64 + 17_int64
+        end do
+        do i = 1_int64, n
+            stream(i) = distinct(1_int64 + mod(i * 7919_int64, k))
+            pairs(i, 1) = stream(i)
+            pairs(i, 2) = mod(i * i, 3_int64)
+        end do
+        ! None of these keys is stored: `distinct` is spaced a million apart, so `+ 1` misses.
+        do j = 1_int64, nfew
+            few(j) = distinct(j) + 1_int64
+            fewpairs(j, 1) = few(j)
+            fewpairs(j, 2) = 7_int64
+            fewmask(j) = mod(j, 2_int64) == 1_int64
+        end do
+
+        ! ---- scalar keys ----
+        call p%init()
+        call p%get_or_add_many(stream, c1)
+        nk0 = p%nkeys()
+        call check(error, nk0 == k, "fixture: the first pass stored every distinct key")
+        if (allocated(error)) return
+        call p%get_or_add_many(stream, c2)
+        call check(error, p%nkeys() == nk0 .and. all(c2 == c1), &
+            "a threaded get_or_add_many whose keys are all present adds nothing and re-answers the same codes")
+        if (allocated(error)) return
+        call p%get_or_add_many(few, cf, valid=fewmask, threads=2)
+        call check(error, all(pack(cf, .not. fewmask) == 0_int64), &
+            "a masked row answers 0 on the partitioned pass's serial arm")
+        if (allocated(error)) return
+        call check(error, p%nkeys() == nk0 + count(fewmask, kind=int64), &
+            "only the unmasked new keys were added")
+        if (allocated(error)) return
+        call check(error, minval(pack(cf, fewmask)) == nk0 + 1_int64 .and. &
+            maxval(pack(cf, fewmask)) == nk0 + count(fewmask, kind=int64), &
+            "the new codes continue densely above the watermark")
+        if (allocated(error)) return
+
+        ! ---- tuples: the composite pass keeps the same two arms ----
+        call t%init(ncomp=2)
+        call t%get_or_add_many(pairs, c1)
+        nk0 = t%nkeys()
+        call check(error, nk0 > k, "fixture: the tuples are more numerous than the scalar keys")
+        if (allocated(error)) return
+        call t%get_or_add_many(pairs, c2)
+        call check(error, t%nkeys() == nk0 .and. all(c2 == c1), &
+            "a composite get_or_add_many whose tuples are all present adds nothing and re-answers the same codes")
+        if (allocated(error)) return
+        call t%get_or_add_many(fewpairs, cf, valid=fewmask, threads=2)
+        call check(error, all(pack(cf, .not. fewmask) == 0_int64), &
+            "a masked row answers 0 on the composite pass's serial arm")
+        if (allocated(error)) return
+        call check(error, t%nkeys() == nk0 + count(fewmask, kind=int64), &
+            "only the unmasked new tuples were added")
+        if (allocated(error)) return
+        call check(error, minval(pack(cf, fewmask)) == nk0 + 1_int64, &
+            "the new composite codes continue above the watermark")
+    end subroutine test_goam_no_new_keys_and_masked_few
 
     !> A multimap built on a team -- its grouping pass is the map's threaded `%get_or_add_many`
     !! -- answers every count, every first row and every `%probe_many` range as the serial build

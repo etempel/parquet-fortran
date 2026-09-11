@@ -958,7 +958,7 @@ contains
         write (pos, "(i0)") at
         call ix_abort(SP // "build: duplicate key """ // txt // """ at position " // trim(pos) // &
             " (every key must be unique)")
-    end subroutine ix_str_report_duplicate
+    end subroutine ix_str_report_duplicate    ! GCOVR_EXCL_LINE -- `ix_abort` never returns
 
     !> Copies bytes into a scalar string, for a message. Cold path only.
     subroutine ix_str_text(b, n, out)
@@ -1924,4 +1924,4 @@ contains
         call mm_layout(self, g, values, nv, ng)
     end subroutine mm_str_build_col
 
-end submodule parquet_index_str
+end submodule parquet_index_str ! GCOVR_EXCL_LINE

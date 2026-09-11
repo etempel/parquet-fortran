@@ -327,6 +327,7 @@ contains
         integer(int64) :: keys(5), i
         character(len=6) :: methods(3)
         integer :: k
+        logical :: found
 
         keys = [2_int64, 4_int64, 8_int64, 16_int64, 32_int64]
         methods = ["direct", "hash  ", "sorted"]
@@ -344,6 +345,18 @@ contains
                 "a map built from rank-1 keys has one component, on " // trim(methods(k)))
             if (allocated(error)) return
         end do
+        ! The MUTATION side spells it the same way: the tuple `%remove` hands a 1-component map
+        ! to the scalar remove rather than probing a one-wide tuple table that does not exist.
+        call m%build(keys, method="hash")
+        call m%remove([keys(3)], found)
+        call check(error, found .and. m%get(keys(3)) == 0_int64 .and. m%nkeys() == 4_int64, &
+            "a 1-tuple remove takes the key out of a scalar map")
+        if (allocated(error)) return
+        call m%remove([keys(3)], found)
+        call check(error, .not. found, "and reports the second attempt as not-found")
+        if (allocated(error)) return
+        call check(error, m%get(keys(2)) == 2_int64 .and. m%get(keys(4)) == 4_int64, &
+            "its neighbours keep their values")
     end subroutine test_scalar_is_one_tuple
 
     !> `%contains` is exactly `%get(...) > 0`, for hits and misses, on every backend.

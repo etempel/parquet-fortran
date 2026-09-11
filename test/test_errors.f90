@@ -1938,6 +1938,8 @@ contains
             new_unittest("a negative disc radius aborts", test_healpix_radius_negative_aborts), &
             new_unittest("a zero-length disc centre aborts", test_healpix_vector_zero_aborts), &
             new_unittest("a NaN in the disc centre aborts", test_healpix_vector_nan_aborts), &
+            new_unittest("an infinite disc centre component is refused by its own guard", &
+                test_healpix_disc_vector_infinite_aborts), &
             new_unittest("an unknown scheme selector aborts", test_healpix_bad_scheme_aborts), &
             new_unittest("a listpix too small for the disc aborts", test_healpix_buffer_aborts), &
             new_unittest("a run buffer with the wrong number of rows aborts", &
@@ -17234,5 +17236,16 @@ contains
             failure_message="a parquet_time key on an integer index was expected to abort", &
             required_stderr="a parquet_time")
     end subroutine test_table_index_time_key_on_int_aborts
+
+
+    !> An infinite centre component is a different guard from the NaN one: `max` propagates an
+    !! infinity where it does not propagate a NaN, so the NaN scenario can never reach this arm.
+    subroutine test_healpix_disc_vector_infinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_vector_infinite", &
+            expect_abort=.true., &
+            failure_message="an infinite disc centre component was expected to abort", &
+            required_stderr="is not finite")
+    end subroutine test_healpix_disc_vector_infinite_aborts
 
 end module test_errors

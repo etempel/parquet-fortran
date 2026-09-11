@@ -2636,4 +2636,4 @@ module parquet_healpix
     end interface
 
 
-end module parquet_healpix
+end module parquet_healpix ! GCOVR_EXCL_LINE

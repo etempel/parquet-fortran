@@ -44,6 +44,12 @@ contains
         testsuite = [ &
             new_unittest("every conversion binding equals the free procedure it delegates to", &
                          test_delegation_matches), &
+            new_unittest("every int32 grid binding agrees with its int64 twin", &
+                         test_grid_int32_bindings_agree), &
+            new_unittest("past the int32 ceiling every int32 binding reports its sentinel", &
+                         test_grid_int32_sentinels_past_the_ceiling), &
+            new_unittest("the unbuilt arms and an out-of-range order", &
+                         test_grid_unbuilt_and_bad_order), &
             new_unittest("the disc bindings equal pf_query_disc in both schemes", &
                          test_disc_delegation), &
             new_unittest("the accessors report what init was given", &
@@ -156,6 +162,301 @@ contains
         end do
         call check(error, ncase, 7 * 2 * 6, "the delegation sweep did not run every case")
     end subroutine test_delegation_matches
+
+    !> Every int32 grid binding, A/B'd against its int64 twin on a grid that fits int32.
+    !!
+    !! `test_delegation_matches` above drives the int32 path of two bindings -- `%ang2pix` and
+    !! `%pix2ang` -- and the int64 path of the rest. Every other int32 binding is its own
+    !! procedure with its own `hpx_grid_fits_i32` guard in front of it and its own narrowing of
+    !! the answer, so the half of the type a caller working in int32 actually uses was reached by
+    !! nothing.
+    !!
+    !! The int64 twin is the oracle throughout: same grid, same inputs, and the answers must be
+    !! equal after widening. Both schemes are swept because the bindings branch on `scheme_id`
+    !! internally, and a RING/NEST mix-up inside one of them would otherwise show only in whichever
+    !! scheme happened to be tested.
+    subroutine test_grid_int32_bindings_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: N = 12
+        type(pf_healpix_grid) :: g, g2
+        integer :: isch, scheme, k
+        integer(int64), parameter :: NS = 256_int64
+        integer(int32) :: ip32, n32, out32
+        integer(int64) :: ip64, n64, out64, step, npix, gns
+        integer(int32) :: list32(4096), b32(N), u32(N)
+        integer(int64) :: list64(4096), b64(N), u64(N)
+        integer(int32), allocatable :: al32(:)
+        integer(int64), allocatable :: al64(:)
+        real(real64) :: v(3), v32(3), v64(3), ra, dec, ra64, dec64, th, ph
+        real(real64) :: ras(N), decs(N), ra32s(N), dec32s(N), ra64s(N), dec64s(N)
+        real(real64) :: ths(N), phs(N), th64s(N), ph64s(N), vb32(3, N), vb64(3, N)
+
+        npix = 12_int64 * NS * NS
+        step = npix / int(N, int64)
+        do isch = 1, 2
+            scheme = merge(PF_HP_RING, PF_HP_NEST, isch == 1)
+            call g%init(NS, scheme)
+
+            ! ---- the scalar conversions ----
+            v = [0.6_real64, -0.3_real64, 0.7416198487095663_real64]
+            call g%vec2pix(v, ip32)
+            call g%vec2pix(v, ip64)
+            call check(error, int(ip32, int64), ip64, "%vec2pix int32 disagreed with int64")
+            if (allocated(error)) return
+            call g%pix2vec(ip32, v32)
+            call g%pix2vec(ip64, v64)
+            call check(error, maxval(abs(v32 - v64)), 0.0_real64, &
+                       "%pix2vec int32 disagreed with int64", thr=0.0_real64)
+            if (allocated(error)) return
+
+            call g%radec2pix(123.5_real64, -17.25_real64, ip32)
+            call g%radec2pix(123.5_real64, -17.25_real64, ip64)
+            call check(error, int(ip32, int64), ip64, "%radec2pix int32 disagreed with int64")
+            if (allocated(error)) return
+            call g%pix2radec(ip32, ra, dec)
+            call g%pix2radec(ip64, ra64, dec64)
+            call check(error, ra, ra64, "%pix2radec int32 ra disagreed", thr=0.0_real64)
+            if (allocated(error)) return
+            call check(error, dec, dec64, "%pix2radec int32 dec disagreed", thr=0.0_real64)
+            if (allocated(error)) return
+
+            ! ---- the disc bindings, vector-centred ----
+            call g%query_disc_count(v, 0.01_real64, n32)
+            call g%query_disc_count(v, 0.01_real64, n64)
+            call check(error, int(n32, int64), n64, "%query_disc_count int32 disagreed")
+            if (allocated(error)) return
+            call check(error, n64 > 0_int64, "the fixture disc must hold pixels (vacuity guard)")
+            if (allocated(error)) return
+            call g%query_disc(v, 0.01_real64, list32, n32)
+            call g%query_disc(v, 0.01_real64, list64, n64)
+            call check(error, all(int(list32(1:n32), int64) == list64(1:n64)), &
+                       "%query_disc int32 returned different pixels")
+            if (allocated(error)) return
+            call g%query_disc_alloc(v, 0.01_real64, al32, n32)
+            call g%query_disc_alloc(v, 0.01_real64, al64, n64)
+            call check(error, size(al32) == int(n32) .and. size(al64) == int(n64), &
+                       "%query_disc_alloc must allocate to exactly nlist")
+            if (allocated(error)) return
+            call check(error, all(int(al32, int64) == al64), &
+                       "%query_disc_alloc int32 returned different pixels")
+            if (allocated(error)) return
+
+            ! ---- the RA/Dec disc bindings, in BOTH kinds: neither was reached before ----
+            call g%query_disc_radec_count(123.5_real64, -17.25_real64, 0.6_real64, n32)
+            call g%query_disc_radec_count(123.5_real64, -17.25_real64, 0.6_real64, n64)
+            call check(error, int(n32, int64), n64, "%query_disc_radec_count disagreed across kinds")
+            if (allocated(error)) return
+            call check(error, n64 > 0_int64, "the RA/Dec disc must hold pixels (vacuity guard)")
+            if (allocated(error)) return
+            call g%query_disc_radec(123.5_real64, -17.25_real64, 0.6_real64, list32, n32)
+            call g%query_disc_radec(123.5_real64, -17.25_real64, 0.6_real64, list64, n64)
+            call check(error, all(int(list32(1:n32), int64) == list64(1:n64)), &
+                       "%query_disc_radec returned different pixels across kinds")
+            if (allocated(error)) return
+            call g%query_disc_radec_alloc(123.5_real64, -17.25_real64, 0.6_real64, al32, n32)
+            call g%query_disc_radec_alloc(123.5_real64, -17.25_real64, 0.6_real64, al64, n64)
+            call check(error, all(int(al32, int64) == al64) .and. size(al32) == int(n32), &
+                       "%query_disc_radec_alloc disagreed across kinds")
+            if (allocated(error)) return
+            ! The RA/Dec disc must be the vector disc of the same centre, which is what keeps this
+            ! from being two spellings of one wrong answer.
+            call g%radec2pix(123.5_real64, -17.25_real64, ip64)
+            call check(error, any(al64 == ip64), &
+                       "the RA/Dec disc must contain the pixel its own centre lands in")
+            if (allocated(error)) return
+
+            ! ---- the bulk bindings ----
+            do k = 1, N
+                b64(k) = (int(k, int64) - 1_int64) * step
+                b32(k) = int(b64(k), int32)
+                ras(k) = real(k, real64) * 29.0_real64
+                decs(k) = real(k, real64) * 7.0_real64 - 45.0_real64
+            end do
+            call g%pix2ang_bulk(b32, ths, phs)
+            call g%pix2ang_bulk(b64, th64s, ph64s)
+            call check(error, all(ths == th64s) .and. all(phs == ph64s), &
+                       "%pix2ang_bulk int32 disagreed with int64")
+            if (allocated(error)) return
+            call g%ang2pix_bulk(th64s, ph64s, u32)
+            call g%ang2pix_bulk(th64s, ph64s, u64)
+            call check(error, all(int(u32, int64) == u64), &
+                       "%ang2pix_bulk int32 disagreed with int64")
+            if (allocated(error)) return
+            call check(error, all(u64 == b64), &
+                       "and the bulk angle round trip must return the pixels it started from")
+            if (allocated(error)) return
+            call g%pix2vec_bulk(b32, vb32)
+            call g%pix2vec_bulk(b64, vb64)
+            call check(error, all(vb32 == vb64), "%pix2vec_bulk int32 disagreed with int64")
+            if (allocated(error)) return
+            call g%vec2pix_bulk(vb64, u32)
+            call g%vec2pix_bulk(vb64, u64)
+            call check(error, all(int(u32, int64) == u64), &
+                       "%vec2pix_bulk int32 disagreed with int64")
+            if (allocated(error)) return
+            call g%pix2radec_bulk(b32, ra32s, dec32s)
+            call g%pix2radec_bulk(b64, ra64s, dec64s)
+            call check(error, all(ra32s == ra64s) .and. all(dec32s == dec64s), &
+                       "%pix2radec_bulk int32 disagreed with int64")
+            if (allocated(error)) return
+            call g%radec2pix_bulk(ras, decs, u32)
+            call g%radec2pix_bulk(ras, decs, u64)
+            call check(error, all(int(u32, int64) == u64), &
+                       "%radec2pix_bulk int32 disagreed with int64")
+            if (allocated(error)) return
+
+            ! ---- resolution change ----
+            g2 = g%at_nside(1024_int32)
+            call g2%get_nside(gns)
+            call check(error, gns == 1024_int64 .and. g2%scheme() == scheme, &
+                       "%at_nside(int32) must keep the scheme at the new resolution")
+            if (allocated(error)) return
+            g2 = g%at_order(6_int32)
+            call g2%get_nside(gns)
+            call check(error, gns == 64_int64 .and. g2%frame() == g%frame(), &
+                       "%at_order(int32) must keep the frame at the new order")
+            if (allocated(error)) return
+        end do
+
+        ! ---- %ud_pix, which is NEST-only, so it gets its own grid pair ----
+        call g%init(NS, PF_HP_NEST)
+        g2 = g%at_order(6_int32)
+        call g%pix2ang(0_int64, th, ph)
+        call g%ud_pix(12345_int32, 6_int32, out32)
+        call g%ud_pix(12345_int64, 6_int64, out64)
+        call check(error, int(out32, int64), out64, "%ud_pix(order, int32) disagreed with int64")
+        if (allocated(error)) return
+        call check(error, out64 >= 0_int64, "the coarsened index must be in domain (vacuity guard)")
+        if (allocated(error)) return
+        call g%ud_pix(12345_int32, g2, out32)
+        call g%ud_pix(12345_int64, g2, out64)
+        call check(error, int(out32, int64) == out64 .and. out64 == int(out32, int64), &
+                   "%ud_pix(grid, int32) disagreed with int64")
+        if (allocated(error)) return
+        call check(error, out64 == int(out32, int64), &
+                   "the grid form must agree with the order form it delegates to")
+    end subroutine test_grid_int32_bindings_agree
+
+    !> Past the int32 ceiling, every int32 binding reports its sentinel and the int64 twin answers.
+    !!
+    !! `hpx_grid_fits_i32` is the guard in front of every int32 binding, and it is the whole reason
+    !! they are separate procedures: an nside above 8192 has more pixels than an int32 index can
+    !! hold, so the binding must refuse rather than hand back a wrapped negative pixel. Each
+    !! binding carries its own copy of that guard and its own sentinel -- -1 for an index, -999 for
+    !! a coordinate -- and a copy that was forgotten would silently truncate.
+    !!
+    !! Every assertion is PAIRED with the int64 twin answering normally for the same call, which
+    !! is what shows the sentinel comes from the ceiling and not from a grid that is simply broken.
+    subroutine test_grid_int32_sentinels_past_the_ceiling(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(pf_healpix_grid) :: g
+        integer(int64), parameter :: BIG = 1048576_int64   ! 2**20, well past the int32 ceiling
+        integer(int32) :: ip32, n32
+        integer(int64) :: ip64, n64, gns
+        integer(int32) :: list32(64)
+        real(real64) :: v(3), vv(3), ra, dec, th, ph
+
+        call g%init(BIG, PF_HP_RING)
+        call g%get_nside(gns)
+        call check(error, gns == BIG, "the oversized grid must have been built")
+        if (allocated(error)) return
+        v = [0.6_real64, -0.3_real64, 0.7416198487095663_real64]
+
+        call g%vec2pix(v, ip32)
+        call g%vec2pix(v, ip64)
+        call check(error, ip32, -1_int32, "%vec2pix int32 past the ceiling must be -1")
+        if (allocated(error)) return
+        call check(error, ip64 > 0_int64, "...while the int64 form answers for the same grid")
+        if (allocated(error)) return
+
+        call g%pix2vec(0_int32, vv)
+        call check(error, maxval(abs(vv + 999.0_real64)), 0.0_real64, &
+                   "%pix2vec int32 past the ceiling must be -999 in every component", thr=0.0_real64)
+        if (allocated(error)) return
+        call g%pix2ang(0_int32, th, ph)
+        call check(error, th, -999.0_real64, "%pix2ang int32 past the ceiling must be -999", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        call g%pix2radec(0_int32, ra, dec)
+        call check(error, ra, -999.0_real64, "%pix2radec int32 past the ceiling must be -999", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        call g%radec2pix(123.5_real64, -17.25_real64, ip32)
+        call check(error, ip32, -1_int32, "%radec2pix int32 past the ceiling must be -1")
+        if (allocated(error)) return
+
+        ! The DISC bindings deliberately do not join this list: they ABORT past the ceiling
+        ! rather than answering a sentinel, because a disc has no in-band value that could mean
+        ! "this grid is too fine" -- nlist = -1 would be indistinguishable from a buffer report.
+        ! Those abort paths live in test/error_scenarios.f90 as `healpix_grid_disc_*` scenarios.
+        call g%query_disc_count(v, 0.0001_real64, n64)
+        call check(error, n64 > 0_int64, &
+                   "the int64 disc must still answer on the oversized grid, which is what the " // &
+                   "int32 bindings above are being refused for the lack of")
+    end subroutine test_grid_int32_sentinels_past_the_ceiling
+
+    !> The unbuilt-grid arms the sentinel test above does not reach, and an out-of-range order.
+    !!
+    !! `%resol`, `%max_pixrad` and `%vec2pix` each carry their own `nside_v <= 0` arm, and
+    !! `hpx_grid_pow2` answers 0 for an order outside `0 .. 29` precisely so that the caller's
+    !! validation refuses it -- which is what makes `%at_order(-1)` an unbuilt grid rather than an
+    !! abort. Every one of those is a total-function promise: a query on a grid nobody built
+    !! answers a sentinel instead of reading uninitialised state.
+    subroutine test_grid_unbuilt_and_bad_order(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(pf_healpix_grid) :: g, d
+        integer(int64) :: ip64, gns
+        integer(int32) :: ip32
+        real(real64) :: v(3)
+
+        v = [0.6_real64, -0.3_real64, 0.7416198487095663_real64]
+        call check(error, g%resol(), -1.0_real64, "%resol on an unbuilt grid must be -1", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, g%max_pixrad(), -1.0_real64, &
+                   "%max_pixrad on an unbuilt grid must be -1", thr=0.0_real64)
+        if (allocated(error)) return
+        call g%vec2pix(v, ip64)
+        call check(error, ip64, -1_int64, "%vec2pix on an unbuilt grid must be -1")
+        if (allocated(error)) return
+        call g%vec2pix(v, ip32)
+        call check(error, ip32, -1_int32, "and the int32 form must be -1 as well")
+        if (allocated(error)) return
+
+        ! An order outside 0..29 derives an UNBUILT grid rather than aborting, because pow2
+        ! answers 0 and the resolution check refuses it.
+        call g%init(256_int64, PF_HP_NEST)
+        d = g%at_order(-1_int32)
+        call check(error, d%is_set(), .false., "a negative order must derive an unbuilt grid")
+        if (allocated(error)) return
+        d = g%at_order(99_int64)
+        call check(error, d%is_set(), .false., "and so must an order past the maximum")
+        if (allocated(error)) return
+        ! The control: an order INSIDE the range derives a built grid, so the two answers above
+        ! are about the order and not about %at_order refusing everything.
+        d = g%at_order(4_int32)
+        call d%get_nside(gns)
+        call check(error, d%is_set() .and. gns == 16_int64, &
+                   "an order inside the range must derive a built grid")
+        if (allocated(error)) return
+
+        ! %ud_pix is NEST-only in both kinds: a RING grid answers the sentinel.
+        call g%init(256_int64, PF_HP_RING)
+        call g%ud_pix(10_int32, 4_int32, ip32)
+        call check(error, ip32, -1_int32, "%ud_pix on a RING grid must be -1 in int32")
+        if (allocated(error)) return
+        call g%ud_pix(10_int64, 4_int64, ip64)
+        call check(error, ip64, -1_int64, "and -1 in int64")
+        if (allocated(error)) return
+        ! And a destination grid that is not NEST is refused by the two-grid form.
+        call g%init(256_int64, PF_HP_NEST)
+        call d%init(16_int64, PF_HP_RING)
+        call g%ud_pix(10_int32, d, ip32)
+        call check(error, ip32, -1_int32, "a non-NEST destination grid must give -1 in int32")
+        if (allocated(error)) return
+        call g%ud_pix(10_int64, d, ip64)
+        call check(error, ip64, -1_int64, "and -1 in int64")
+    end subroutine test_grid_unbuilt_and_bad_order
 
     !> The three disc bindings, against `pf_query_disc` and friends, in both schemes.
     subroutine test_disc_delegation(error)

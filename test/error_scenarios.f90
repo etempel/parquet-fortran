@@ -2770,6 +2770,8 @@ program error_scenarios
         call scenario_healpix_disc_vector_zero()
     case ("healpix_disc_vector_nan")
         call scenario_healpix_disc_vector_nan()
+    case ("healpix_disc_vector_infinite")
+        call scenario_healpix_disc_vector_infinite()
     case ("healpix_disc_bad_scheme")
         call scenario_healpix_disc_bad_scheme()
     case ("healpix_disc_buffer_too_small")
@@ -29301,5 +29303,29 @@ contains
         end if
         print '(a,i0)', "unexpectedly accepted a temporal key on an integer index, row=", row
     end subroutine scenario_table_index_date_key_on_int
+
+
+    !> An INFINITE component in the disc centre is refused by its own guard, distinct from the
+    !! NaN one above.
+    !!
+    !! The two are separate checks because they are separate mistakes, and because `max` does not
+    !! propagate a NaN the way it propagates an infinity -- `scenario_healpix_disc_vector_nan`
+    !! reaches the "holds a NaN" message and can never reach this one, which tests the largest
+    !! COMPONENT for finiteness. That component test is deliberate: the centre is scale invariant,
+    !! so a squared-length test would reject `[1e-300, 0, 1e-300]` as zero and raise
+    !! IEEE_UNDERFLOW doing it. The finite vector accepted first is the control.
+    subroutine scenario_healpix_disc_vector_infinite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        integer(int64) :: listpix(64), nlist
+        real(real64) :: inf
+
+        inf = ieee_value(0.0_real64, ieee_positive_inf)
+        ! A radius that actually selects pixels: a control returning an empty disc would show
+        ! only that the call did not abort, not that it did the work.
+        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, nlist)
+        print '(a,i0)', "control: a finite centre vector was accepted, nlist=", nlist
+        call pf_query_disc(4_int64, [inf, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted an infinite component in the centre vector"
+    end subroutine scenario_healpix_disc_vector_infinite
 
 end program error_scenarios

@@ -1427,6 +1427,7 @@ scenarios=(
     "healpix_disc_radius_negative:1"
     "healpix_disc_vector_zero:1"
     "healpix_disc_vector_nan:1"
+    "healpix_disc_vector_infinite:1"
     "healpix_disc_bad_scheme:1"
     "healpix_disc_buffer_too_small:1"
     "healpix_disc_runs_bad_rows:1"

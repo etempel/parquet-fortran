@@ -111,7 +111,19 @@ contains
                          test_angdist_deg_reference), &
             new_unittest("angdist_deg agrees with angdist, and keeps its four symmetries", &
                          test_angdist_deg_agrees), &
-            new_unittest("angdist_deg is total: NaN in, NaN out", test_angdist_deg_total) &
+            new_unittest("angdist_deg is total: NaN in, NaN out", test_angdist_deg_total), &
+            new_unittest("every int32 arithmetic entry point agrees with its int64 twin", &
+                         test_arith_int32_agrees_with_int64), &
+            new_unittest("the int32 arithmetic entry points have their own domain bounds", &
+                         test_arith_int32_out_of_domain), &
+            new_unittest("the int32 scalar conversions agree with their int64 twins", &
+                         test_core_int32_agrees_with_int64), &
+            new_unittest("every int32 bulk entry point agrees with its int64 twin", &
+                         test_bulk_int32_agrees_with_int64), &
+            new_unittest("every bulk entry point accepts a zero-length input", &
+                         test_bulk_empty_input_is_a_no_op), &
+            new_unittest("query_disc_count and query_disc_alloc agree in the int32 kind", &
+                         test_query_disc_int32_kind) &
             ]
     end subroutine collect_tests_parquet_healpix
 
@@ -1537,6 +1549,379 @@ contains
                    0.0_real64, "an out-of-range declination was not read as the direction it names", &
                    thr=1.0e-13_real64)
     end subroutine test_angdist_deg_total
+
+    !> Every int32 arithmetic entry point, A/B'd against its int64 twin over the whole int32 range.
+    !!
+    !! **The int32 forms are not casts of the int64 ones.** Each carries its OWN domain bound --
+    !! `hpx_nside_max_i32` is 8192, where the int64 bound is 2**29 -- and each rewrites the range
+    !! guards in int32 before widening to do the arithmetic. Three things can go wrong in that
+    !! rewrite and none of them is visible from the int64 side: the wrong cap (so nside 16384 is
+    !! accepted and overflows), a guard that compares in int32 where the product `12*nside*nside`
+    !! does not fit, and a narrowing cast applied before the bound check rather than after.
+    !!
+    !! The int64 twin is the oracle because it is the same mathematics with room to spare, and it
+    !! is exercised by the round-trip tests above. Agreement across every power-of-two nside up to
+    !! the int32 ceiling, at pixels chosen at both ends and in the middle of each map, is what
+    !! makes a divergence a real one rather than a rounding artifact -- these are exact integer
+    !! answers apart from the two areal quantities, which are compared exactly because both sides
+    !! evaluate the identical real64 expression.
+    subroutine test_arith_int32_agrees_with_int64(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer(int32) :: ns32, ip32, ir32
+        integer(int64) :: ns64, ip64, npix
+        integer :: e, k
+        integer(int64) :: probes(5)
+        integer(int32) :: ends(3)
+
+        do e = 0, 13
+            ns32 = ishft(1_int32, e)
+            ns64 = int(ns32, int64)
+            npix = 12_int64 * ns64 * ns64
+
+            call check(error, pf_nside2pixarea(ns32) == pf_nside2pixarea(ns64), &
+                "nside2pixarea disagrees across kinds")
+            if (allocated(error)) return
+            call check(error, pf_nside2resol(ns32) == pf_nside2resol(ns64), &
+                "nside2resol disagrees across kinds")
+            if (allocated(error)) return
+
+            ! Both ends of the map and the middle: the polar caps and the equatorial belt are
+            ! different formulae inside, so one probe would exercise only one of them.
+            probes = [0_int64, 1_int64, npix / 2_int64, npix - 2_int64, npix - 1_int64]
+            do k = 1, 5
+                ip64 = probes(k)
+                if (ip64 < 0_int64 .or. ip64 >= npix) cycle
+                ip32 = int(ip64, int32)
+                call check(error, int(pf_pix2ring_ring(ns32, ip32), int64) == &
+                    pf_pix2ring_ring(ns64, ip64), "pix2ring_ring disagrees across kinds")
+                if (allocated(error)) return
+                call check(error, int(pf_pix2ring_nest(ns32, ip32), int64) == &
+                    pf_pix2ring_nest(ns64, ip64), "pix2ring_nest disagrees across kinds")
+                if (allocated(error)) return
+            end do
+
+            ! Every ring of the map at the small nsides; the two ends and the equator beyond that,
+            ! since 4*8192-1 rings is more than this assertion needs to be convincing.
+            if (ns32 <= 32_int32) then
+                do ir32 = 1_int32, 4_int32 * ns32 - 1_int32
+                    call check(error, pf_ring2z(ns32, ir32) == pf_ring2z(ns64, int(ir32, int64)), &
+                        "ring2z disagrees across kinds")
+                    if (allocated(error)) return
+                end do
+            else
+                ends = [1_int32, 2_int32 * ns32, 4_int32 * ns32 - 1_int32]
+                do k = 1, 3
+                    ir32 = ends(k)
+                    call check(error, pf_ring2z(ns32, ir32) == pf_ring2z(ns64, int(ir32, int64)), &
+                        "ring2z disagrees across kinds at an end or the equator")
+                    if (allocated(error)) return
+                end do
+            end if
+        end do
+
+        ! The vacuity guard: the sweep above would be satisfied by five functions that all
+        ! returned their out-of-domain sentinel every time.
+        call check(error, pf_nside2pixarea(4_int32) > 0.0_real64 .and. &
+            pf_pix2ring_ring(4_int32, 100_int32) > 0_int32 .and. &
+            pf_ring2z(4_int32, 5_int32) > -2.0_real64, &
+            "the swept entry points must answer in domain, not their sentinels")
+    end subroutine test_arith_int32_agrees_with_int64
+
+    !> Each int32 entry point's OWN out-of-domain arms, including the int32-only ceiling.
+    !!
+    !! `nside = 16384` is the case the int64 form accepts and the int32 form must not: it is a
+    !! valid nside, and perfectly representable, but above `hpx_nside_max_i32`. A cap copied from
+    !! the int64 side would accept it here and compute `12*16384*16384`, which overflows int32 --
+    !! so this is the assertion that the two bounds really are different, and it is asserted
+    !! against the int64 form ANSWERING for the same nside, which is what pins it as a deliberate
+    !! API ceiling rather than a shared domain limit.
+    subroutine test_arith_int32_out_of_domain(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer(int32), parameter :: NS = 16_int32
+        integer(int32), parameter :: NPIX = 12_int32 * NS * NS
+
+        ! Above the int32 ceiling: refused here, accepted on the int64 side.
+        call check(error, pf_nside2pixarea(16384_int32) == -1.0_real64, &
+            "nside above the int32 ceiling must give the area sentinel")
+        if (allocated(error)) return
+        call check(error, pf_nside2pixarea(16384_int64) > 0.0_real64, &
+            "...while the int64 form answers for the same nside, so the ceiling is the int32 API's")
+        if (allocated(error)) return
+        call check(error, pf_nside2resol(16384_int32) == -1.0_real64, &
+            "nside above the int32 ceiling must give the resolution sentinel")
+        if (allocated(error)) return
+
+        ! Not a power of two, and zero: both refused by the domain test itself.
+        call check(error, pf_nside2pixarea(3_int32) == -1.0_real64 .and. &
+            pf_nside2resol(0_int32) == -1.0_real64, &
+            "a non-power-of-two and a zero nside are out of domain")
+        if (allocated(error)) return
+
+        ! A pixel index off each end of a valid map, in both schemes.
+        call check(error, pf_pix2ring_ring(NS, -1_int32) == -1_int32 .and. &
+            pf_pix2ring_ring(NS, NPIX) == -1_int32, &
+            "a RING pixel off either end of the map is out of domain")
+        if (allocated(error)) return
+        call check(error, pf_pix2ring_nest(NS, -1_int32) == -1_int32 .and. &
+            pf_pix2ring_nest(NS, NPIX) == -1_int32, &
+            "a NEST pixel off either end of the map is out of domain")
+        if (allocated(error)) return
+        call check(error, pf_pix2ring_nest(3_int32, 0_int32) == -1_int32, &
+            "and a bad nside is refused before the pixel is looked at")
+        if (allocated(error)) return
+
+        ! A ring index off each end, and a bad nside.
+        call check(error, pf_ring2z(NS, 0_int32) == -2.0_real64 .and. &
+            pf_ring2z(NS, 4_int32 * NS) == -2.0_real64, &
+            "a ring off either end is out of domain")
+        if (allocated(error)) return
+        call check(error, pf_ring2z(3_int32, 1_int32) == -2.0_real64, &
+            "and a bad nside gives the ring sentinel too")
+        if (allocated(error)) return
+        ! The control: the rings just inside each end ARE in domain.
+        call check(error, pf_ring2z(NS, 1_int32) < 1.0_real64 .and. &
+            pf_ring2z(NS, 4_int32 * NS - 1_int32) > -1.0_real64, &
+            "the rings just inside each end must answer")
+    end subroutine test_arith_int32_out_of_domain
+
+    !> The int32 scalar conversions, A/B'd against their int64 twins over a whole map.
+    !!
+    !! Each of these is a forwarder that widens, calls the int64 body and narrows the answer back
+    !! -- which is exactly why they need driving: the narrowing cast is the only thing that can go
+    !! wrong, it is invisible from the int64 side, and a forwarder wired to the wrong twin (ring
+    !! where nest was meant, say) would still return a plausible pixel index.
+    !!
+    !! Every pixel of an nside-8 map is swept rather than a sample, because these are exact
+    !! integer maps: a disagreement anywhere is a real one, and a whole map is cheap at 768
+    !! pixels. The vector forms are compared componentwise and exactly -- both kinds evaluate the
+    !! identical real64 expression, so anything but equality is a wiring fault, not rounding.
+    subroutine test_core_int32_agrees_with_int64(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer(int32), parameter :: NS32 = 8_int32
+        integer(int64), parameter :: NS64 = 8_int64
+        integer(int32) :: p32, r32, n32, back32
+        integer(int64) :: p64, r64, n64, npix, back64
+        real(real64) :: v32(3), v64(3)
+
+        npix = 12_int64 * NS64 * NS64
+        do p64 = 0_int64, npix - 1_int64
+            p32 = int(p64, int32)
+
+            call pf_ring2nest(NS32, p32, n32)
+            call pf_ring2nest(NS64, p64, n64)
+            call check(error, int(n32, int64) == n64, "ring2nest disagrees across kinds")
+            if (allocated(error)) return
+
+            call pf_nest2ring(NS32, p32, r32)
+            call pf_nest2ring(NS64, p64, r64)
+            call check(error, int(r32, int64) == r64, "nest2ring disagrees across kinds")
+            if (allocated(error)) return
+
+            call pf_pix2vec_ring(NS32, p32, v32)
+            call pf_pix2vec_ring(NS64, p64, v64)
+            call check(error, all(v32 == v64), "pix2vec_ring disagrees across kinds")
+            if (allocated(error)) return
+
+            call pf_pix2vec_nest(NS32, p32, v32)
+            call pf_pix2vec_nest(NS64, p64, v64)
+            call check(error, all(v32 == v64), "pix2vec_nest disagrees across kinds")
+            if (allocated(error)) return
+
+            ! vec2pix_ring closes the loop: the centre of every pixel must land back in it, in
+            ! the int32 kind as in the int64 one. That is a stronger claim than agreement alone,
+            ! since two forwarders wired to the same wrong twin would agree with each other.
+            call pf_pix2vec_ring(NS64, p64, v64)
+            call pf_vec2pix_ring(NS32, v64, back32)
+            call pf_vec2pix_ring(NS64, v64, back64)
+            call check(error, int(back32, int64) == back64, &
+                "vec2pix_ring disagrees across kinds")
+            if (allocated(error)) return
+            call check(error, back64 == p64, "a pixel centre must land back in its own pixel")
+            if (allocated(error)) return
+        end do
+    end subroutine test_core_int32_agrees_with_int64
+
+    !> Every BULK entry point in its int32 kind, against the int64 twin of the same call.
+    !!
+    !! The bulk forms are not loops over the scalar ones from the caller's point of view: each
+    !! validates its own array sizes, resolves its own thread team and carries its own `nside`
+    !! domain bound -- `hpx_nside_max_i32` here, where the int64 form uses the larger one. Eight
+    !! of them, and the int32 half of six was reached by nothing.
+    !!
+    !! The same inputs go through both kinds and the answers must match element for element.
+    !! Directions are taken from pixel centres so the answers are exact rather than near a rim.
+    subroutine test_bulk_int32_agrees_with_int64(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer, parameter :: N = 24
+        integer(int32), parameter :: NS32 = 8_int32
+        integer(int64), parameter :: NS64 = 8_int64
+        integer(int32) :: ip32(N), got32(N)
+        integer(int64) :: ip64(N), got64(N)
+        real(real64) :: th32(N), ph32(N), th64(N), ph64(N)
+        real(real64) :: v32(3, N), v64(3, N)
+        integer :: k
+        integer(int64) :: step, npix
+
+        npix = 12_int64 * NS64 * NS64
+        step = npix / int(N, int64)
+        do k = 1, N
+            ip64(k) = (int(k, int64) - 1_int64) * step
+            ip32(k) = int(ip64(k), int32)
+        end do
+
+        ! pix2ang, both schemes: the int32 and int64 forms must produce identical angles.
+        call pf_pix2ang_ring_bulk(NS32, ip32, th32, ph32)
+        call pf_pix2ang_ring_bulk(NS64, ip64, th64, ph64)
+        call check(error, all(th32 == th64) .and. all(ph32 == ph64), &
+            "pix2ang_ring_bulk disagrees across kinds")
+        if (allocated(error)) return
+        call pf_pix2ang_nest_bulk(NS32, ip32, th32, ph32)
+        call pf_pix2ang_nest_bulk(NS64, ip64, th64, ph64)
+        call check(error, all(th32 == th64) .and. all(ph32 == ph64), &
+            "pix2ang_nest_bulk disagrees across kinds")
+        if (allocated(error)) return
+
+        ! ang2pix_nest closes that round trip in both kinds.
+        call pf_ang2pix_nest_bulk(NS32, th64, ph64, got32)
+        call pf_ang2pix_nest_bulk(NS64, th64, ph64, got64)
+        call check(error, all(int(got32, int64) == got64), &
+            "ang2pix_nest_bulk disagrees across kinds")
+        if (allocated(error)) return
+        call check(error, all(got64 == ip64), &
+            "and the round trip must return the pixels it started from")
+        if (allocated(error)) return
+
+        ! pix2vec, both schemes, then vec2pix back.
+        call pf_pix2vec_ring_bulk(NS32, ip32, v32)
+        call pf_pix2vec_ring_bulk(NS64, ip64, v64)
+        call check(error, all(v32 == v64), "pix2vec_ring_bulk disagrees across kinds")
+        if (allocated(error)) return
+        call pf_pix2vec_nest_bulk(NS32, ip32, v32)
+        call pf_pix2vec_nest_bulk(NS64, ip64, v64)
+        call check(error, all(v32 == v64), "pix2vec_nest_bulk disagrees across kinds")
+        if (allocated(error)) return
+
+        call pf_pix2vec_ring_bulk(NS64, ip64, v64)
+        call pf_vec2pix_ring_bulk(NS32, v64, got32)
+        call pf_vec2pix_ring_bulk(NS64, v64, got64)
+        call check(error, all(int(got32, int64) == got64), &
+            "vec2pix_ring_bulk disagrees across kinds")
+        if (allocated(error)) return
+        call check(error, all(got64 == ip64), &
+            "and every pixel centre lands back in its own pixel")
+        if (allocated(error)) return
+        call pf_vec2pix_nest_bulk(NS32, v64, got32)
+        call pf_vec2pix_nest_bulk(NS64, v64, got64)
+        call check(error, all(int(got32, int64) == got64), &
+            "vec2pix_nest_bulk disagrees across kinds")
+    end subroutine test_bulk_int32_agrees_with_int64
+
+    !> Every bulk entry point accepts a ZERO-LENGTH input and does nothing with it.
+    !!
+    !! Each bulk routine returns before resolving a thread team or checking `nside` when there is
+    !! no work, so this arm is ahead of every other guard in the procedure -- which means a bulk
+    !! call on an empty array must not abort even for an `nside` that would otherwise be refused.
+    !! That is the property asserted here, in both kinds, for all eight routines: nothing raises,
+    !! and the deliberately invalid `nside` proves the early return really is first.
+    subroutine test_bulk_empty_input_is_a_no_op(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer(int32) :: ip32(0), got32(0)
+        integer(int64) :: ip64(0), got64(0)
+        real(real64) :: th(0), ph(0), v(3, 0)
+        integer(int32), parameter :: BAD32 = 3_int32
+        integer(int64), parameter :: BAD64 = 3_int64
+
+        ! nside 3 is not a power of two, so every one of these would abort on a non-empty array.
+        call pf_ang2pix_ring_bulk(BAD32, th, ph, got32)
+        call pf_ang2pix_ring_bulk(BAD64, th, ph, got64)
+        call pf_ang2pix_nest_bulk(BAD32, th, ph, got32)
+        call pf_ang2pix_nest_bulk(BAD64, th, ph, got64)
+        call pf_pix2ang_ring_bulk(BAD32, ip32, th, ph)
+        call pf_pix2ang_ring_bulk(BAD64, ip64, th, ph)
+        call pf_pix2ang_nest_bulk(BAD32, ip32, th, ph)
+        call pf_pix2ang_nest_bulk(BAD64, ip64, th, ph)
+        call pf_vec2pix_ring_bulk(BAD32, v, got32)
+        call pf_vec2pix_ring_bulk(BAD64, v, got64)
+        call pf_vec2pix_nest_bulk(BAD32, v, got32)
+        call pf_vec2pix_nest_bulk(BAD64, v, got64)
+        call pf_pix2vec_ring_bulk(BAD32, ip32, v)
+        call pf_pix2vec_ring_bulk(BAD64, ip64, v)
+        call pf_pix2vec_nest_bulk(BAD32, ip32, v)
+        call pf_pix2vec_nest_bulk(BAD64, ip64, v)
+
+        ! Reaching here is the assertion -- every call above would have ended the process had its
+        ! nside been looked at. The check keeps the test from reading as a no-op to a human.
+        call check(error, size(got32) == 0 .and. size(got64) == 0, &
+            "every bulk entry point must return from a zero-length input before it checks nside")
+    end subroutine test_bulk_empty_input_is_a_no_op
+
+    !> `pf_query_disc_count` and `pf_query_disc_alloc` in their int32 kind, against the int64 twin.
+    !!
+    !! Both carry their own `hpx_nside_max_i32` domain check and their own narrowing of the count,
+    !! and `..._alloc` has two paths of its own beneath that: a REPLAY of the recorded runs, and a
+    !! second full walk for a disc whose runs overflowed the recording buffer. The replay writes
+    !! through an int32 output that nothing else reaches. Both paths are driven here -- a small
+    !! disc for the replay, and the whole sphere for the fallback, which is the same shape
+    !! `test_disc_alloc_run_overflow` uses for the int64 kind.
+    !!
+    !! Both schemes, because the replay converts RING runs to NEST indices on the way out and the
+    !! int32 arm of that conversion is its own line.
+    subroutine test_query_disc_int32_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer(int32), parameter :: NS32 = 256_int32
+        integer(int64), parameter :: NS64 = 256_int64
+        integer(int32) :: n32
+        integer(int64) :: n64, npix, k
+        integer(int32), allocatable :: got32(:)
+        integer(int64), allocatable :: got64(:)
+        real(real64), parameter :: V(3) = [0.6_real64, -0.3_real64, 0.7416198487095663_real64]
+        integer :: isch, scheme
+        logical :: ok
+
+        do isch = 1, 2
+            scheme = merge(PF_HP_RING, PF_HP_NEST, isch == 1)
+
+            call pf_query_disc_count(NS32, V, 0.05_real64, n32, scheme=scheme)
+            call pf_query_disc_count(NS64, V, 0.05_real64, n64, scheme=scheme)
+            call check(error, int(n32, int64), n64, "query_disc_count disagreed across kinds")
+            if (allocated(error)) return
+            call check(error, n64 > 0_int64, "the fixture disc must hold pixels (vacuity guard)")
+            if (allocated(error)) return
+
+            ! The replay path: a small disc records runs, and they are replayed into the int32
+            ! output array.
+            call pf_query_disc_alloc(NS32, V, 0.05_real64, got32, n32, scheme=scheme)
+            call pf_query_disc_alloc(NS64, V, 0.05_real64, got64, n64, scheme=scheme)
+            call check(error, int(size(got32), int64), int(size(got64), int64), &
+                       "query_disc_alloc allocated different sizes across kinds")
+            if (allocated(error)) return
+            call check(error, all(int(got32, int64) == got64), &
+                       "query_disc_alloc returned different pixels across kinds")
+            if (allocated(error)) return
+            call check(error, int(n32, int64) == n64 .and. int(size(got32), int64) == n64, &
+                       "query_disc_alloc must allocate to exactly nlist")
+            if (allocated(error)) return
+        end do
+
+        ! The fallback path: a disc past pi/2 overflows the run buffer, so the answer is built by
+        ! a second walk rather than a replay. Asserted in RING, where the whole sphere comes back
+        ! in ascending pixel order and any gap is visible.
+        npix = 12_int64 * NS64 * NS64
+        call pf_query_disc_alloc(NS32, [0.0_real64, 0.0_real64, 1.0_real64], 4.0_real64, got32, n32)
+        call check(error, int(n32, int64), npix, &
+                   "an int32 disc past pi/2 radians should still hold every pixel")
+        if (allocated(error)) return
+        call check(error, int(size(got32), int64), npix, "the allocated int32 array is the wrong size")
+        if (allocated(error)) return
+        ok = .true.
+        do k = 1_int64, npix
+            if (int(got32(k), int64) /= k - 1_int64) then
+                ok = .false.
+                exit
+            end if
+        end do
+        call check(error, ok, "the whole-sphere int32 disc did not come back in ascending order")
+    end subroutine test_query_disc_int32_kind
 
     !> `pf_angdist` is exact at the two ends of its range and stable just inside them.
     !>

@@ -988,6 +988,29 @@ sigma = s%probit_scale()                      ! and optionally prob, method
 `%probit_fit` ignores the accumulator's weights, so that it answers what the one-shot procedure
 answers under the same name.
 
+### What the probit family costs
+
+`Phi⁻¹` is not free, and on a large array it is the part that dominates rather than the ordering.
+Three things follow, all of them measured by `bench/benchmark_stats.sh --mode=probit`:
+
+- **`pf_probit_scale` is by far the cheapest of the three estimators**, because it pays no
+  per-element probit at all — one ordering and two quantile probes. Reach for it when a robust
+  sigma is all that is wanted.
+- **`pf_probit_fit` costs about what `pf_probit_scale` costs plus one `pf_probit` per element**, and
+  on a large array that second term is the larger of the two by several times. It is still one
+  ordering, so it is the ordering you were going to pay for either way — the extra is the kernel.
+- **`pf_normal_scores` is the same trade**, and the comparison that shows it is `pf_zscore`: the two
+  do the same per-element work except that one sorts and takes a probit, and the gap between them
+  is tens of times, growing with the population.
+
+`pf_probit_mean` orders nothing, so it is one probit per element plus the exclusion pass every
+reduction here pays for — which makes it about as expensive as a probit and no more.
+
+None of this is a reason to avoid the family; it is a reason to know that a normal score is a
+transcendental per row rather than an arithmetic one, and to prefer `pf_probit_scale` when the
+whole line is not wanted. [The normal distribution](utils.html#what-the-four-cost) has the kernel's
+own side of it.
+
 ## `pf_cumsum`, `pf_cumprod`, `pf_cummax`, `pf_cummin` — the running folds
 
 ```fortran

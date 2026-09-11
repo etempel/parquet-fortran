@@ -150,6 +150,19 @@ strictly increasing map for sorting, sort by `p`.
 That is a real answer rather than a failure, and it sets `IEEE_UNDERFLOW` as any gradual underflow
 does.
 
+### What the four cost
+
+`pf_probit` is by a wide margin the dearest of the four: it starts from a rational approximation and
+then refines, so each call is several library transcendentals where `pf_norm_cdf` and `pf_norm_sf`
+are one apiece and `pf_norm_pdf` is one exponential. Against a bare accumulation loop over the same
+array, the three forward functions cost a few times a memory touch and `pf_probit` costs tens of
+times one — and it is dearer again in the **tails**, where it changes branch, than in the middle.
+
+None of that matters for a handful of calls. It matters when a probit is paid per element, which is
+what `pf_normal_scores` and `pf_probit_fit` do: see
+[Statistics](statistics.html#what-the-probit-family-costs).
+`bench/benchmark_stats.sh --mode=probit` measures all of it.
+
 ## Angles: wrapping and converting
 
 ```fortran

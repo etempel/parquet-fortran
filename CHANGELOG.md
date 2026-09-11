@@ -8,42 +8,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **The standard normal distribution in `parquet_utils`: `pf_probit`, `pf_norm_cdf`, `pf_norm_sf`
-  and `pf_norm_pdf`.** Four `pure elemental` functions, `real32` and `real64`, computing in the
-  kind they are handed. `pf_probit(p)` is the probit, the quantile function of the standard
-  normal: `-Infinity` at 0, `+Infinity` at 1, a quiet NaN outside `[0, 1]`, exactly `0` at
-  `p = 0.5`, antisymmetric about it bit for bit wherever `1-p` is an exact double, and accurate to
-  about 3 ulp over the whole range including the subnormal tail, where `pf_probit(5e-324)` is
-  about `-38.47` rather than `-Infinity`. `pf_norm_sf(z)` is the upper tail computed in its own
-  right and never as `1 - pf_norm_cdf(z)`, which has no significant digits left past about
-  `z = 8`. Nothing in the family validates or aborts. See
-  [The normal distribution](doc/pages/utilities/utils.md#the-normal-distribution-probit-cdf-density).
-- **Normal scores in `parquet_stats`: `pf_normal_scores(values, s [, ...])`.** Replaces each value
-  by the normal quantile its midrank marks — rankits, the van der Waerden transform, the x-axis of
-  a Q-Q plot. `s` is the same size as `values` and in the caller's original order; ties share one
-  score, and ranks are taken over the surviving elements. `method=` chooses the plotting position:
-  `"blom"` (the default), `"weibull"`, `"tukey"`, `"hazen"`, `"cunnane"` or `"filliben"`, the
-  median rank. An excluded element is marked in `out_valid` or written as a quiet NaN; under
-  `skipnan = .false.` every score is NaN. There is no `weights` argument and no `pf_stats` binding.
-  See
-  [pf_normal_scores](doc/pages/utilities/statistics.md#pf_normal_scores--rankits-the-x-axis-of-a-q-q-plot).
-- **The normal-probability plot in `parquet_stats`: `pf_probit_fit` and `pf_probit_scale`.**
+- **Probit-function statistics: `pf_probit` and the `parquet_stats` family built on it.**
+  `pf_probit`, `pf_norm_cdf`, `pf_norm_sf` and `pf_norm_pdf` (`parquet_utils`, `pure elemental`,
+  `real32` and `real64`, computing in the kind they are handed) are the standard normal quantile
+  function, distribution function, survival function and density. `pf_probit(p)` is `-Infinity` at
+  0, `+Infinity` at 1, a quiet NaN outside `[0, 1]`, exactly `0` at `p = 0.5`, antisymmetric about
+  it bit for bit wherever `1-p` is an exact double, and accurate to about 3 ulp over the whole
+  range including the subnormal tail, where `pf_probit(5e-324)` is about `-38.47` rather than
+  `-Infinity`; `pf_norm_sf(z)` is the upper tail computed in its own right and never as
+  `1 - pf_norm_cdf(z)`, which has no significant digits left past about `z = 8`. Nothing in that
+  family validates or aborts.
+
+  On top of it, four `parquet_stats` generics. `pf_normal_scores(values, s [, ...])` replaces each
+  value by the normal quantile its midrank marks — rankits, the van der Waerden transform, the
+  x-axis of a Q-Q plot — with `s` in the caller's original order, ties sharing one score, ranks
+  taken over the surviving elements, and `method=` choosing the plotting position: `"blom"` (the
+  default), `"weibull"`, `"tukey"`, `"hazen"`, `"cunnane"` or `"filliben"`, the median rank.
   `pf_probit_fit(values, loc, sigma [, corr, ...])` is the least-squares line of the sorted
   survivors on the normal scores of their plotting positions: `loc` is the intercept, which is the
-  mean of the survivors; `sigma` is the slope, a scale estimate that reads the whole sample; and
-  the optional `corr` is the probability-plot correlation coefficient. `method=` takes
-  `pf_normal_scores`' six plotting-position tokens, and `method="filliben"` reproduces
-  `scipy.stats.probplot`. `pf_probit_scale(values, sigma [, prob, ...])` is
-  `(Q(1-prob) - Q(prob)) / (2 Phi^-1(1-prob))`, the scale a symmetric quantile pair implies for
-  Gaussian data, `prob = 0.25` by default and outside `(0, 0.5)` an abort. Both cost one ordering;
-  `pf_stats` gains `%probit_fit` and `%probit_scale`. See
-  [pf_probit_fit and pf_probit_scale](doc/pages/utilities/statistics.md#pf_probit_fit-and-pf_probit_scale--the-normal-probability-plot).
-- **Averaging probabilities on the probit scale: `pf_probit_mean(p, m [, ...])`.**
-  `Phi(sum(w*Phi^-1(p)) / sum(w))`, which is to `Phi`/`Phi^-1` what `pf_gmean` is to `exp`/`log`.
-  A value outside `[0, 1]` gives a quiet NaN with `ok = .false.`; a `0` in the population gives
-  exactly `0` and a `1` gives exactly `1`, and a population holding both gives NaN. `pf_stats`
-  gains `%probit_mean`, which needs `retain`. See
-  [pf_probit_mean](doc/pages/utilities/statistics.md#pf_probit_mean--averaging-probabilities).
+  mean of the survivors, `sigma` is the slope, and the optional `corr` is the probability-plot
+  correlation coefficient; `method="filliben"` reproduces `scipy.stats.probplot`.
+  `pf_probit_scale(values, sigma [, prob, ...])` is `(Q(1-prob) - Q(prob)) / (2 Phi^-1(1-prob))`,
+  the scale a symmetric quantile pair implies for Gaussian data, `prob = 0.25` by default and
+  outside `(0, 0.5)` an abort. `pf_probit_mean(values, m [, ...])` averages probabilities on the
+  probit scale and maps the result back: a value outside `[0, 1]` gives a quiet NaN with
+  `ok = .false.`, a `0` in the population gives exactly `0` and a `1` gives exactly `1`, and a
+  population holding both gives NaN.
+
+  An excluded element is marked in `out_valid` or written as a quiet NaN, exactly as `pf_zscore`
+  does; under `skipnan = .false.` every answer is NaN. `pf_normal_scores` and `pf_probit_fit` take
+  no `weights` and `pf_normal_scores` has no `pf_stats` binding; `pf_stats` gains `%probit_fit`,
+  `%probit_scale` and `%probit_mean`. See
+  [Statistics](doc/pages/utilities/statistics.md#pf_probit_fit-and-pf_probit_scale--the-normal-probability-plot)
+  and [The normal distribution](doc/pages/utilities/utils.md#the-normal-distribution-probit-cdf-density).
 - **A cylinder along the line of sight: `pf_spatial_index%within_los` and `%pairs_within_los`.**
   `sx%pairs_within_los(b_perp, b_par, i, j)` returns every pair, once and with `i < j`, whose
   transverse separation about an observer is within `b_perp` and whose parallel separation is

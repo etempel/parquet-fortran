@@ -20,6 +20,8 @@
 !!     costs differ by more than the threading question is worth.
 !!   - **`thread`** -- the ceiling on what threading pass two could ever return, measured on a
 !!     replica of that pass over a resident buffer, on a thread ladder.
+!!   - **`probit`** -- what `Phi**(-1)` costs per element, and whether that price survives the
+!!     ordering the statistics built on it already pay for.
 !!
 !! **The replica is validated rather than trusted.** CLAUDE.md is explicit that a benchmark
 !! replicating library code is untested code, so `--mode=thread` does not merely time its replica:
@@ -50,9 +52,11 @@
 program benchmark_stats
 
     use parquet, only : pf_sum, pf_mean, pf_variance, pf_moments, pf_count_valid, &
-        pf_iqr, pf_median, pf_sigma_clipped_stats, parquet_debug_stats_sorts, &
+        pf_iqr, pf_median, pf_mad, pf_sigma_clipped_stats, parquet_debug_stats_sorts, &
         parquet_debug_set_stats_quantile_sort_min, parquet_debug_stats_team, &
-        parquet_debug_set_stats_min_per_thread
+        parquet_debug_set_stats_min_per_thread, &
+        pf_zscore, pf_normal_scores, pf_probit_fit, pf_probit_scale, pf_probit_mean, &
+        pf_probit, pf_norm_cdf, pf_norm_sf, pf_norm_pdf
     use iso_fortran_env, only : int32, int64, real64, error_unit, output_unit
 #ifdef _OPENMP
     use omp_lib, only : omp_get_wtime, omp_get_max_threads, omp_get_num_procs, omp_set_num_threads
@@ -105,9 +109,11 @@ program benchmark_stats
     case ("teamsweep"); call mode_teamsweep(nrows, rounds, sink)
     case ("iqr");    call mode_iqr(nrows, rounds, sink)
     case ("clip");   call mode_clip(nrows, rounds, sink)
+    case ("probit"); call mode_probit(nrows, rounds, sink)
     case default
         write (error_unit, "(a,a)") "benchmark_stats: unknown --mode=", trim(mode)
-        write (error_unit, "(a)") "  known modes: floor, phases, shapes, thread, library, teamsweep"
+        write (error_unit, "(a)") "  known modes: floor, phases, shapes, thread, library, teamsweep,"
+        write (error_unit, "(a)") "               iqr, clip, probit"
         stop 2
     end select
 
@@ -930,6 +936,252 @@ contains
         write (output_unit, "(a)") "  `sorts std` would mean the deviations are not being re-ordered and this question is closed."
     end subroutine mode_clip
 
+
+    ! ==========================================================================================
+    ! Mode 9 -- probit: what the normal kernel costs, and where the ordering hides it
+    ! ==========================================================================================
+
+    !> What does `Phi**(-1)` cost, and does it matter once a sort is in the way?
+    !!
+    !! `pf_probit` is a rational start followed by a fixed number of safeguarded refinement steps,
+    !! each of which is a transcendental. That is a real per-element price and the guide should
+    !! quote a shape rather than an adjective, so this mode measures it three ways:
+    !!
+    !!   1. **the kernel alone**, against a bare accumulation over the same warm array, so the
+    !!      refinement's price is nanoseconds per element rather than "a few operations";
+    !!   2. **`pf_normal_scores` against `pf_zscore`** over one array at four sizes. The two do the
+    !!      same per-element work except that one sorts, so the ratio is exactly the question "does
+    !!      the ordering or the kernel dominate?", answered at each size rather than in general;
+    !!   3. **`pf_probit_fit` and `pf_probit_scale` against `pf_mad`**, the three one-ordering
+    !!      robust estimators, with `parquet_debug_stats_sorts()` printed per call. That column is
+    !!      what makes "one ordering" a measurement instead of a claim -- a fit that quietly sorted
+    !!      twice would be a perfectly ordinary-looking row in the timing columns alone.
+    !!
+    !! No arm here replicates library code, so there is no bit-exactness gate of `--mode=thread`'s
+    !! kind to pass; what each arm times is the shipped procedure.
+    subroutine mode_probit(n, rounds, sink)
+        integer(int64), intent(in) :: n      !! population size.
+        integer, intent(in) :: rounds        !! rounds per arm; the best is kept.
+        real(real64), intent(inout) :: sink  !! keep-it-live accumulator.
+        real(real64), allocatable :: p(:), ptail(:), zin(:), x(:), sc(:), zs(:)
+        real(real64) :: t_floor, t_probit, t_tail, t_cdf, t_sf, t_pdf, t_pmean, t0, acc
+        real(real64) :: t_z, t_ns, t_mad, t_psc, t_pfit
+        real(real64) :: mv, loc, sg, cr
+        integer(int64) :: sizes(4), m, k1, i, s_mad, s_psc, s_pfit, before
+        integer :: r, k
+
+        ! ---- Arm 1: the kernel, per element, against a bare loop over the same array ----
+        k1 = min(n, 10000000_int64)
+        call make_uniform(p, k1, 0.0_real64, 1.0_real64)
+        ! The tail arm: `pf_probit` branches at `min(p, 1-p) = 0.1`, so the two rows below bracket
+        ! the cost rather than averaging it away. A caller whose probabilities are selection
+        ! functions near zero pays the second, not the first.
+        call make_uniform(ptail, k1, 0.0_real64, 0.05_real64)
+        ! Eight rather than a wider spread: `pf_norm_cdf` and `pf_norm_pdf` underflow to a
+        ! constant far outside it, so a wider range would time the early exit and call it the
+        ! function. Eight is also where `1 - Phi(z)` runs out of significant digits, which is the
+        ! range `pf_norm_sf` exists for.
+        call make_uniform(zin, k1, -8.0_real64, 8.0_real64)
+
+        t_floor = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            acc = 0.0_real64
+            do i = 1_int64, k1
+                acc = acc + p(i)
+            end do
+            t_floor = min(t_floor, now() - t0)
+            sink = sink + acc
+        end do
+        t_probit = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            acc = 0.0_real64
+            do i = 1_int64, k1
+                acc = acc + pf_probit(p(i))
+            end do
+            t_probit = min(t_probit, now() - t0)
+            sink = sink + acc
+        end do
+        t_tail = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            acc = 0.0_real64
+            do i = 1_int64, k1
+                acc = acc + pf_probit(ptail(i))
+            end do
+            t_tail = min(t_tail, now() - t0)
+            sink = sink + acc
+        end do
+        t_cdf = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            acc = 0.0_real64
+            do i = 1_int64, k1
+                acc = acc + pf_norm_cdf(zin(i))
+            end do
+            t_cdf = min(t_cdf, now() - t0)
+            sink = sink + acc
+        end do
+        t_sf = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            acc = 0.0_real64
+            do i = 1_int64, k1
+                acc = acc + pf_norm_sf(zin(i))
+            end do
+            t_sf = min(t_sf, now() - t0)
+            sink = sink + acc
+        end do
+        t_pdf = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            acc = 0.0_real64
+            do i = 1_int64, k1
+                acc = acc + pf_norm_pdf(zin(i))
+            end do
+            t_pdf = min(t_pdf, now() - t0)
+            sink = sink + acc
+        end do
+        ! The whole procedure over the same probabilities: one probit per element plus the
+        ! exclusion pass and the compaction every reduction in this module pays for. Its gap from
+        ! the bare `pf_probit` row is that overhead and nothing else.
+        call pf_probit_mean(p(1:k1), mv)
+        t_pmean = huge(0.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call pf_probit_mean(p(1:k1), mv)
+            t_pmean = min(t_pmean, now() - t0)
+            sink = sink + mv
+        end do
+
+        write (output_unit, "(a,i0,a)") "  The normal family, element by element over ", k1, " values."
+        write (output_unit, "(a)") "  The floor is a bare `acc = acc + p(i)` over the same warm array: nothing can beat it,"
+        write (output_unit, "(a)") "  and the gap above it is what the kernel actually costs."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  arm                      ns/elem   x floor"
+        write (output_unit, "(a)") "  ------------------------------------------"
+        call row2("bare accumulation", t_floor, t_floor, k1)
+        call row2("pf_probit", t_probit, t_floor, k1)
+        call row2("pf_probit (p < 0.05)", t_tail, t_floor, k1)
+        call row2("pf_norm_cdf", t_cdf, t_floor, k1)
+        call row2("pf_norm_sf", t_sf, t_floor, k1)
+        call row2("pf_norm_pdf", t_pdf, t_floor, k1)
+        call row2("pf_probit_mean (whole)", t_pmean, t_floor, k1)
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  pf_probit is the inverse and pays for the refinement; the three forward functions are"
+        write (output_unit, "(a)") "  one erfc or one exp each. The two pf_probit rows BRACKET the cost: the kernel branches at"
+        write (output_unit, "(a)") "  min(p, 1-p) = 0.1, and a tail-heavy population pays the second row rather than the first."
+        write (output_unit, "(a)") "  pf_probit_mean adds the exclusion pass and the compaction on top of one probit per element."
+        write (output_unit, "(a)") ""
+
+        ! ---- Arm 2: the same per-element work, with and without an ordering ----
+        sizes = [1000_int64, 100000_int64, 1000000_int64, n]
+        write (output_unit, "(a)") "  pf_normal_scores against pf_zscore: identical shape, except that one of them SORTS."
+        write (output_unit, "(a)") "  No `sorts` column here: pf_normal_scores orders through pf_argsort directly, and"
+        write (output_unit, "(a)") "  parquet_debug_stats_sorts() counts only parquet_stats_order's own choke point."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "          n    zscore ms   nscores ms    nscores/zscore"
+        write (output_unit, "(a)") "  --------------------------------------------------------"
+        do k = 1, 4
+            m = sizes(k)
+            if (m > n) cycle
+            call make_values(x, m)
+            if (allocated(sc)) deallocate(sc)
+            if (allocated(zs)) deallocate(zs)
+            allocate(sc(m), zs(m))
+            ! First touch on both result arrays before either timer starts: the page faults would
+            ! otherwise land entirely on whichever arm ran first.
+            call pf_zscore(x(1:m), zs)
+            call pf_normal_scores(x(1:m), sc)
+
+            t_z = huge(0.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call pf_zscore(x(1:m), zs)
+                t_z = min(t_z, now() - t0)
+                sink = sink + zs(1)
+            end do
+            t_ns = huge(0.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call pf_normal_scores(x(1:m), sc)
+                t_ns = min(t_ns, now() - t0)
+                sink = sink + sc(1)
+            end do
+            write (output_unit, "(2x,i9,2x,f11.4,2x,f11.4,2x,f17.2)") m, &
+                t_z * 1000.0_real64, t_ns * 1000.0_real64, t_ns / t_z
+        end do
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  A ratio that GROWS with n means the ordering dominates and the kernel is noise; one that"
+        write (output_unit, "(a)") "  stays flat would mean the opposite, and the guide's wording would have to change."
+        write (output_unit, "(a)") ""
+
+        ! ---- Arm 3: the three one-ordering robust estimators ----
+        write (output_unit, "(a)") "  The robust scale estimators: pf_mad, pf_probit_scale, pf_probit_fit."
+        write (output_unit, "(a)") "  `sorts` is parquet_debug_stats_sorts() over ONE call. **pf_mad's is 0 and that is**"
+        write (output_unit, "(a)") "  **correct**: unweighted, it SELECTS its two medians through pf_nth_element rather than"
+        write (output_unit, "(a)") "  ordering, so the column separates the two algorithms rather than counting one of them."
+        write (output_unit, "(a)") "  The other two must each read exactly 1, and the program stops if either does not."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "          n       mad ms     scale ms       fit ms   fit/mad   sorts mad  scale  fit"
+        write (output_unit, "(a)") "  ----------------------------------------------------------------------------------"
+        do k = 1, 4
+            m = sizes(k)
+            if (m > n) cycle
+            call make_values(x, m)
+
+            call pf_mad(x(1:m), mv)
+            t_mad = huge(0.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call pf_mad(x(1:m), mv)
+                t_mad = min(t_mad, now() - t0)
+                sink = sink + mv
+            end do
+            before = parquet_debug_stats_sorts()
+            call pf_mad(x(1:m), mv)
+            s_mad = parquet_debug_stats_sorts() - before
+
+            call pf_probit_scale(x(1:m), sg)
+            t_psc = huge(0.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call pf_probit_scale(x(1:m), sg)
+                t_psc = min(t_psc, now() - t0)
+                sink = sink + sg
+            end do
+            before = parquet_debug_stats_sorts()
+            call pf_probit_scale(x(1:m), sg)
+            s_psc = parquet_debug_stats_sorts() - before
+
+            call pf_probit_fit(x(1:m), loc, sg, cr)
+            t_pfit = huge(0.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call pf_probit_fit(x(1:m), loc, sg, cr)
+                t_pfit = min(t_pfit, now() - t0)
+                sink = sink + loc + sg + cr
+            end do
+            before = parquet_debug_stats_sorts()
+            call pf_probit_fit(x(1:m), loc, sg, cr)
+            s_pfit = parquet_debug_stats_sorts() - before
+
+            write (output_unit, "(2x,i9,2x,f11.4,2x,f11.4,2x,f11.4,2x,f9.2,2x,i8,2x,i5,2x,i3)") m, &
+                t_mad * 1000.0_real64, t_psc * 1000.0_real64, t_pfit * 1000.0_real64, &
+                t_pfit / t_mad, s_mad, s_psc, s_pfit
+            if (s_pfit /= 1_int64 .or. s_psc /= 1_int64) then
+                write (error_unit, "(a)") "benchmark_stats: pf_probit_fit or pf_probit_scale did not cost ONE ordering."
+                write (error_unit, "(a)") "  That is the property both are built on; the timings above are moot."
+                stop 1
+            end if
+        end do
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  fit/mad compares two whole answers rather than two implementations of one: pf_probit_fit"
+        write (output_unit, "(a)") "  orders and then pays one probit per element, pf_mad selects twice and pays none. It is"
+        write (output_unit, "(a)") "  what a caller choosing between them sees."
+    end subroutine mode_probit
+
     ! ==========================================================================================
     ! Shared helpers
     ! ==========================================================================================
@@ -953,6 +1205,42 @@ contains
             x(i) = (v - 0.5_real64) * 1000.0_real64
         end do
     end subroutine make_values
+
+    !> Builds a UNIFORM population on `(lo, hi)`, in a scrambled order, every element written.
+    !!
+    !! **Not `make_values`' logistic recurrence, and the reason is a measurement error it caused.**
+    !! `v = 4v(1-v)` has an ARCSINE stationary distribution, which piles up at both ends of the
+    !! interval: 41% of its samples land where `min(p, 1-p) < 0.1`, against 20% for a uniform
+    !! spread. That is exactly where `pf_probit` changes to its more expensive tail branch, so a
+    !! fixture built that way over-reports the kernel's cost by about a fifth -- and reports it as
+    !! the cost the statistics pay, when the plotting positions they feed it are uniform by
+    !! construction. Measured: the discrepancy showed up as `pf_probit_fit` costing LESS than the
+    !! ordering plus a standalone probit loop over the same number of elements, which is
+    !! impossible.
+    !!
+    !! A Weyl sequence `frac(i*phi)` instead: equidistributed by construction, so the branch mix
+    !! is the uniform one, and non-monotone, so nothing downstream sees a sorted input. It is not a
+    !! shuffle and is not used as one -- only the VALUES are timed here, never an ordering of them.
+    subroutine make_uniform(v, n, lo, hi)
+        real(real64), allocatable, intent(out) :: v(:) !! the population.
+        integer(int64), intent(in) :: n                !! how many elements.
+        real(real64), intent(in) :: lo                 !! interval start, exclusive.
+        real(real64), intent(in) :: hi                 !! interval end, exclusive.
+        real(real64), parameter :: PHI = 0.6180339887498949_real64
+        integer(int64) :: i
+        real(real64) :: u, w
+
+        allocate(v(n))
+        u = 0.5_real64
+        do i = 1_int64, n
+            u = u + PHI
+            if (u >= 1.0_real64) u = u - 1.0_real64
+            ! Never exactly an endpoint: `pf_probit(0)` is -Infinity, which would turn a timing
+            ! loop's accumulator into a NaN and take the whole checksum with it.
+            w = 0.5_real64 / real(n, real64) + u * (1.0_real64 - 1.0_real64 / real(n, real64))
+            v(i) = lo + w * (hi - lo)
+        end do
+    end subroutine make_uniform
 
     !> The thread ladder: 1, then doubling to the machine's maximum, or one explicit count.
     subroutine thread_ladder(want, ladder, nl)

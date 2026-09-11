@@ -9,6 +9,7 @@
 # Usage:
 #   bench/benchmark_stats.sh                       # every mode
 #   bench/benchmark_stats.sh --mode=thread         # one mode
+#   bench/benchmark_stats.sh --mode=probit         # the normal kernel and what hides it
 #   NROWS=50000000 bench/benchmark_stats.sh --mode=floor
 #
 # Config (env-overridable, matching this repo's other bench/*.sh wrappers):
@@ -41,6 +42,18 @@
 #           right. Both arms are the shipped `pf_iqr` with the sort threshold moved either side of
 #           2 by the debug override, so neither is a replica, and the two answers are compared bit
 #           for bit before any timing is believed.
+#   probit  Three tables, and each answers a different half of "what does the normal kernel cost?".
+#           The first is the `x floor` column over a bare accumulation loop: `pf_probit` pays for
+#           its refinement steps and the three forward functions pay for one erfc or one exp, so
+#           this is where the guide's per-element claim comes from. The second is
+#           `nscores/zscore`, two procedures of identical per-element shape except that one sorts
+#           -- a ratio that GROWS with n says the ordering dominates and the kernel is noise. The
+#           third is `fit/mad` over the three robust scale estimators, with a `sorts` column per
+#           call; the program exits nonzero unless pf_probit_fit and pf_probit_scale each cost
+#           exactly one ordering, since that is the property both are built on and a second sort
+#           would look like an ordinary slow row. pf_mad reads 0 there because unweighted it
+#           SELECTS rather than orders, which is why fit/mad compares two answers rather than two
+#           implementations of one.
 #   clip    The `ratio` and `sorts mad` columns, which answer P8-3. `stdfunc="mad_std"` orders the
 #           DEVIATIONS once per clipping round on top of the single ordering of the values, so a
 #           `sorts mad` that grows with the round count is the O(k n log n) shape the interval
@@ -78,12 +91,16 @@ NROWS="${NROWS:-10000000}"
 ROUNDS="${ROUNDS:-5}"
 THREADS="${THREADS:-}"
 
-MODES=(floor phases shapes thread library teamsweep iqr clip)
+MODES=(floor phases shapes thread library teamsweep iqr clip probit)
 for arg in "$@"; do
     case "$arg" in
         --mode=*) MODES=("${arg#--mode=}") ;;
         -h|--help)
-            sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            # Derived from the separator rather than a fixed line count: this header grows
+            # every time a mode is added, and a stale `2,NNp` silently truncates the help
+            # halfway through a paragraph with nothing to say it has.
+            awk 'NR > 1 && /^# -{20,}$/ { exit } NR > 1 { sub(/^# ?/, ""); print }' \
+                "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *)

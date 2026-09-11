@@ -1124,7 +1124,13 @@ contains
     !! payload is rebuilt by a single `parquet_column%gather` over the surviving element indices,
     !! the same call `%gather_rows` uses: one kind-dispatched pass that carries the per-element
     !! validity and works for a string payload.
-    subroutine drop_row_elements(self, i)
+    !!
+    !! (Coverage note: this header line never registers as "hit" in gcov even though every other
+    !! line of the body does -- which is what proves the procedure runs. The same gcov attribution
+    !! artifact is documented at length above `date_parse` in `src/parquet_temporal.f90`, where six
+    !! headers behave this way and their bodies, `error stop` lines included, are all attributed
+    !! normally. Excluded as an artifact, not as a gap.)
+    subroutine drop_row_elements(self, i) ! GCOVR_EXCL_LINE -- gcov attribution artifact
         class(parquet_list_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: i                   !! 1-based row index, already bounds-checked.
         integer(int64) :: lo, hi, len, total, k, pos, e

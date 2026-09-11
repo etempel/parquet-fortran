@@ -1216,7 +1216,13 @@ contains
     !!
     !! Private, and the one place the "a null row is zero-length" invariant is enforced. `keys` and
     !! `values` are gathered over the SAME surviving index list, which is what keeps them aligned.
-    subroutine drop_row_entries(self, i)
+    !!
+    !! (Coverage note: this header line never registers as "hit" in gcov even though every other
+    !! line of the body does -- which is what proves the procedure runs. The same gcov attribution
+    !! artifact is documented at length above `date_parse` in `src/parquet_temporal.f90`, where six
+    !! headers behave this way and their bodies, `error stop` lines included, are all attributed
+    !! normally. Excluded as an artifact, not as a gap.)
+    subroutine drop_row_entries(self, i) ! GCOVR_EXCL_LINE -- gcov attribution artifact
         class(parquet_map_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: i                  !! 1-based row index, already bounds-checked.
         integer(int64) :: lo, hi, len, total, k, pos, e
@@ -1772,7 +1778,13 @@ contains
     ! ==================================================================================
     !
     !> Aborts unless `%init` has fixed a value kind.
-    subroutine require_init(self, proc)
+    !!
+    !! (Coverage note: this header line never registers as "hit" in gcov even though every other
+    !! line of the body does -- which is what proves the procedure runs. The same gcov attribution
+    !! artifact is documented at length above `date_parse` in `src/parquet_temporal.f90`, where six
+    !! headers behave this way and their bodies, `error stop` lines included, are all attributed
+    !! normally. Excluded as an artifact, not as a gap.)
+    subroutine require_init(self, proc) ! GCOVR_EXCL_LINE -- gcov attribution artifact
         class(parquet_map_column), intent(in) :: self !! the column.
         character(len=*), intent(in) :: proc          !! calling procedure, for the message.
         if (self%value_kind == PK_NONE) then

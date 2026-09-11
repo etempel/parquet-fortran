@@ -991,17 +991,26 @@ contains
         type(parquet_list_column) :: lc
         integer :: k
 
+        ! **The order matters, and it is what makes this test reach the growth at all.** The
+        ! bitmap is sized from the row count at the moment the first null arrives, so nulling a
+        ! row of a column that is ALREADY 200 rows long allocates all four blocks in one go and
+        ! nothing ever grows. Nulling row 3 while the column is short takes one block; the rows
+        ! appended afterwards do not touch the bitmap; and the null at row 130 is then the call
+        ! that has to reallocate and carry.
         call lc%init(PK_INT32)
-        do k = 1, 200
+        do k = 1, 10
+            call lc%append_row([int(k, int32)])
+        end do
+        call lc%set_null(3_int64)
+        call check(error, lc%has_validity_storage(), "the first null must allocate the bitmap")
+        if (allocated(error)) return
+        do k = 11, 200
             call lc%append_row([int(k, int32)])
         end do
         call check(error, lc%nrows() == 200_int64, "the fixture must hold 200 rows")
         if (allocated(error)) return
 
-        ! Row 3 is in the first 64-row block; row 130 is two blocks further on.
-        call lc%set_null(3_int64)
-        call check(error, lc%has_validity_storage(), "the first null must allocate the bitmap")
-        if (allocated(error)) return
+        ! Row 130 is two blocks past the one the bitmap was sized for.
         call lc%set_null(130_int64)
         call check(error, lc%is_null(130_int64), "the null past the first block did not take")
         if (allocated(error)) return

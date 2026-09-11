@@ -581,6 +581,43 @@ contains
         error stop what // ": every " // argname // " must be a finite number (no NaN, no infinity)"
     end procedure spatial_check_finite
 
+    !> The ceiling every `int32` guard in this module compares against -- see the interface in
+    !! parquet_spatial.f90.
+    module procedure spatial_int32_ceiling
+        cap = int(huge(0_int32), kind=int64)
+        if (dbg_int32_ceiling > 0_int64) cap = dbg_int32_ceiling
+    end procedure spatial_int32_ceiling
+
+    !> Refuses an `int32` answer this index is too large to name -- see the interface.
+    module procedure spatial_check_rows_i32
+        if (n <= spatial_int32_ceiling()) return
+        error stop what // ": this index holds more rows than an int32 answer can name; use an int64 one"
+    end procedure spatial_check_rows_i32
+
+    !> Refuses an `int32` CSR offset array the neighbour list is too long for -- see the interface.
+    module procedure spatial_check_total_i32
+        ! `total + 1` is the largest offset written (`offsets(n+1)` is one past the last entry), and
+        ! it is formed here rather than at the call site so that the +1 cannot be forgotten.
+        if (total + 1_int64 <= spatial_int32_ceiling()) return
+        error stop what // &
+            ": the neighbour list is longer than an int32 offset can name; take offsets as int64"
+    end procedure spatial_check_total_i32
+
+    !> Narrows one scalar to `int32`, or aborts naming it -- see the interface.
+    module procedure spatial_fit_i32
+        character(len=32) :: got, limit
+
+        out = 0_int32
+        if (value <= spatial_int32_ceiling()) then
+            out = int(value, kind=int32)
+            return
+        end if
+        write (got, '(i0)') value
+        write (limit, '(i0)') spatial_int32_ceiling()
+        error stop what // ": the " // noun // " is " // trim(got) // &
+            ", above the largest int32 answer " // trim(limit) // "; take it as int64"
+    end procedure spatial_fit_i32
+
     !> Builds `self` over the caller's coordinates.
     module procedure spatial_build_worker
         integer(int64) :: n, ns

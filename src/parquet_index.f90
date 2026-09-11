@@ -552,7 +552,9 @@ module parquet_index
         procedure :: probe_stats => map_probe_stats     !! Hash probe lengths, for tuning and tests.
         !> The stored keys: rank 1 for a single-component map, rank 2 for a composite one, a
         !! parquet_string_column for a string-keyed one.
-        generic :: keys => map_keys_r1, map_keys_r2, map_keys_s
+        procedure, private :: map_keys_r1_i32, map_keys_r2_i32
+        generic :: keys => map_keys_r1, map_keys_r2, map_keys_s, &
+            map_keys_r1_i32, map_keys_r2_i32
         procedure, private :: map_keys_r1, map_keys_r2
         procedure, private :: map_keys_s !! %keys specific receiving a parquet_string_column.
     end type pf_index_map
@@ -607,7 +609,10 @@ module parquet_index
         !> Whether an index is currently held.
         generic :: is_used => pool_is_used_i32, pool_is_used_i64
         procedure, private :: pool_is_used_i32, pool_is_used_i64
-        procedure :: used_indexes => pool_used_indexes  !! Every held index, ascending.
+        procedure, private :: pool_used_indexes_i32     !! %used_indexes into an int32 list.
+        procedure, private :: pool_used_indexes_i64     !! %used_indexes into an int64 list.
+        !> Every held index, ascending, in the kind of the argument.
+        generic :: used_indexes => pool_used_indexes_i32, pool_used_indexes_i64
         procedure :: compact => pool_compact            !! Give back grown storage; then smallest-first.
         !> Pre-size for a known number of indexes.
         generic :: reserve => pool_reserve_i32, pool_reserve_i64
@@ -748,7 +753,10 @@ module parquet_index
         !
         ! ---- Introspection ----
         !
-        procedure :: csr => mm_csr                        !! The CSR pair, copied out.
+        procedure, private :: mm_csr_i32                  !! %csr into int32 arrays.
+        procedure, private :: mm_csr_i64                  !! %csr into int64 arrays.
+        !> The CSR pair, copied out, in the kind of the arguments.
+        generic :: csr => mm_csr_i32, mm_csr_i64
         procedure :: ngroups => mm_ngroups                !! Distinct keys stored.
         procedure :: nkeys => mm_nkeys                    !! Rows stored, repeats included.
         procedure :: ncomponents => mm_ncomponents        !! Components per key; 0 if never built.
@@ -757,7 +765,9 @@ module parquet_index
         procedure :: get_method => mm_get_method          !! The distinct-key map's backend, as a token.
         !> The distinct keys: rank 1 for a single-component multimap, rank 2 for a composite one,
         !! a parquet_string_column for a string-keyed one.
-        generic :: keys => mm_keys_r1, mm_keys_r2, mm_keys_s
+        procedure, private :: mm_keys_r1_i32, mm_keys_r2_i32
+        generic :: keys => mm_keys_r1, mm_keys_r2, mm_keys_s, &
+            mm_keys_r1_i32, mm_keys_r2_i32
         procedure, private :: mm_keys_r1, mm_keys_r2
         procedure, private :: mm_keys_s !! %keys specific receiving a parquet_string_column.
     end type pf_index_multimap
@@ -1942,6 +1952,21 @@ module parquet_index
         class(pf_index_map), intent(in) :: self !! the map.
             integer(int64), allocatable, intent(out) :: list(:,:) !! the key tuples, one per row.
         end subroutine map_keys_r2
+        !> `%keys` of a single-component map into an `int32` list. See `map_keys_r1`.
+        !!
+        !! **The bound check is TWO-SIDED.** A key is a caller's own value and may be negative, so
+        !! unlike a stored row index it can fall off either end of `int32`; either aborts rather
+        !! than truncating. The keys are collected in `int64` and narrowed, because what they are
+        !! bounded by is not known until they have been read.
+        pure module subroutine map_keys_r1_i32(self, list)
+        class(pf_index_map), intent(in) :: self !! the map; must have `ncomponents() <= 1`.
+            integer(int32), allocatable, intent(out) :: list(:) !! the keys, one per element.
+        end subroutine map_keys_r1_i32
+        !> `%keys` of a composite map into an `int32` list. See `map_keys_r1_i32`.
+        pure module subroutine map_keys_r2_i32(self, list)
+        class(pf_index_map), intent(in) :: self !! the map.
+            integer(int32), allocatable, intent(out) :: list(:,:) !! the key tuples, one per row.
+        end subroutine map_keys_r2_i32
     end interface
 
     ! ---- pf_index_map: string keys (parquet_index_str). A string key is its exact bytes: an
@@ -2314,10 +2339,18 @@ module parquet_index
             logical :: ok !! `.true.` when that index is out.
         end function pool_is_used_i64
         !> Every held index, ascending. Allocated zero-length when none are -- never unallocated.
-        module subroutine pool_used_indexes(self, list)
+        module subroutine pool_used_indexes_i64(self, list)
         class(pf_index_pool), intent(in) :: self !! the pool.
             integer(int64), allocatable, intent(out) :: list(:) !! the held indexes, ascending.
-        end subroutine pool_used_indexes
+        end subroutine pool_used_indexes_i64
+        !> `%used_indexes` into an `int32` list. See `pool_used_indexes_i64`.
+        !!
+        !! An index is a positive watermark position, so one comparison against the highest one
+        !! ever handed out settles the whole list; it aborts rather than truncating.
+        module subroutine pool_used_indexes_i32(self, list)
+        class(pf_index_pool), intent(in) :: self !! the pool.
+            integer(int32), allocatable, intent(out) :: list(:) !! the held indexes, ascending.
+        end subroutine pool_used_indexes_i32
         !> Gives back storage the pool grew, and makes the smallest free index the next one out.
         !!
         !! Pure memory optimisation as far as the ACTIVE indexes are concerned: every index
@@ -3400,11 +3433,21 @@ module parquet_index
         !! `rows(offsets(g) : offsets(g+1) - 1)`, ascending by position. For a caller that walks
         !! the ranges itself, a group-by or a join's build side, or wants every group at once.
         !! Both are allocated even for an empty or unbuilt multimap: `[1]` and zero-length.
-        pure module subroutine mm_csr(self, offsets, rows)
+        pure module subroutine mm_csr_i64(self, offsets, rows)
         class(pf_index_multimap), intent(in) :: self !! the multimap.
             integer(int64), allocatable, intent(out) :: offsets(:) !! group starts; length `ngroups + 1`.
             integer(int64), allocatable, intent(out) :: rows(:) !! the stored values, grouped by key.
-        end subroutine mm_csr
+        end subroutine mm_csr_i64
+        !> `%csr` into `int32` arrays. See `mm_csr_i64`.
+        !!
+        !! **Two ceilings, both checked before anything is allocated.** `rows` holds stored values,
+        !! so it is bounded by the largest one; `offsets` counts POSITIONS in `rows` and is bounded
+        !! by `%nkeys() + 1`, which is a different number. Either one aborts rather than truncating.
+        pure module subroutine mm_csr_i32(self, offsets, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int32), allocatable, intent(out) :: offsets(:) !! group starts; length `ngroups + 1`.
+            integer(int32), allocatable, intent(out) :: rows(:) !! the stored values, grouped by key.
+        end subroutine mm_csr_i32
         !> Distinct keys stored, i.e. groups; 0 for an empty or unbuilt multimap.
         pure module function mm_ngroups(self) result(n)
         class(pf_index_multimap), intent(in) :: self !! the multimap.
@@ -3453,6 +3496,17 @@ module parquet_index
         class(pf_index_multimap), intent(in) :: self !! the multimap.
             integer(int64), allocatable, intent(out) :: list(:,:) !! the distinct key tuples, one per row.
         end subroutine mm_keys_r2
+        !> `%keys` of a single-component multimap into an `int32` list. See `map_keys_r1_i32` for
+        !! why the bound check is two-sided.
+        pure module subroutine mm_keys_r1_i32(self, list)
+        class(pf_index_multimap), intent(in) :: self !! the multimap; must have `ncomponents() <= 1`.
+            integer(int32), allocatable, intent(out) :: list(:) !! the distinct keys, one per element.
+        end subroutine mm_keys_r1_i32
+        !> `%keys` of a composite multimap into an `int32` list. See `mm_keys_r1_i32`.
+        pure module subroutine mm_keys_r2_i32(self, list)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            integer(int32), allocatable, intent(out) :: list(:,:) !! the distinct key tuples, one per row.
+        end subroutine mm_keys_r2_i32
     end interface
 
     ! ---- pf_index_multimap: string keys (parquet_index_str). The map's string rules, inherited:

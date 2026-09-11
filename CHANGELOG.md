@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`int32` answers from the bulk spatial and index queries.** `%all_within`, `%count_all_within`,
+  `%pairs_within`, their `_sky` forms and `%grid` (`pf_spatial_index`), `pf_connected_components`,
+  `%csr`, `%keys` and `%used_indexes` (`parquet_index`) and `pf_healpix_threads` allocate their
+  answer in the kind of the argument they are given, `integer(int32)` or `integer(int64)`, as the
+  caller-owned buffers of the single queries already did. One kind per call: the arrays one call
+  hands back share it, and `pf_connected_components` takes its edge list in that kind too, with
+  `nvert` keeping its own. An `int32` answer that cannot hold a value aborts before anything is
+  allocated rather than truncating, naming the quantity that was too large — which for a CSR's
+  `offsets` is the length of the neighbour list and not the row count, and for `%keys` is a bound
+  at either end. See [Ball search](doc/pages/utilities/spatial.md#ball-search) and
+  [Index maps](doc/pages/utilities/index-maps.md).
 - **Probit-function statistics: `pf_probit` and the `parquet_stats` family built on it.**
   `pf_probit`, `pf_norm_cdf`, `pf_norm_sf` and `pf_norm_pdf` (`parquet_utils`, `pure elemental`,
   `real32` and `real64`, computing in the kind they are handed) are the standard normal quantile
@@ -57,8 +68,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bounded in distance by the spread of the stored points within `b_par` of it in `los`, or as its
   covering ball where that is the cheaper walk, so a long thin cylinder tests few candidates it
   does not keep; build with `radius = b_perp`.
-  `bench/benchmark_spatial.sh` gains `MODE=los`, with `WALK=`, `SPREAD=` and `CELLS_PER_POINT=`
-  arms. See
+  `i` and `j` come back as `integer(int32)` or `integer(int64)`, as every allocated spatial answer
+  does. `bench/benchmark_spatial.sh` gains `MODE=los`, with `WALK=`, `SPREAD=` and
+  `CELLS_PER_POINT=` arms. See
   [Cylinders along the line of sight](doc/pages/utilities/spatial.md#cylinders-along-the-line-of-sight).
 - **Truncated normal draws: `rng%normal_truncated(lo, hi, x [, mu, sigma])`.** Draws a normal
   restricted to an interval, with the bounds, the location, the scale and the result all on one

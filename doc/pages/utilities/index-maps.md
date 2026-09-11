@@ -150,6 +150,13 @@ array aborts rather than truncating when a value will not fit, and so does `%get
 `int32` index. `%get` is never affected — it always answers `int64`. This needs a large stored
 *value*, not a large map: it is reachable with one key and an explicit `values=`.
 
+**The copy-out answers take the caller's kind too.** `%keys` (both ranks), `%used_indexes` on a
+pool and `%csr` on a multimap come back as `int32` or `int64`, and each aborts up front rather
+than truncating. `%keys` is the one whose check is **two-sided**: a key is your own value and may
+be as negative as `int64` allows, where a stored index never is. A multimap's `%csr` carries two
+ceilings — `rows` holds stored values, `offsets` counts positions in `rows` — and names which of
+the two it refused.
+
 A map that was never built answers 0 for every key rather than aborting, and costs nothing extra
 for the privilege.
 

@@ -325,6 +325,8 @@ something a reader is expected to have.
 | [Risk-254](#risk-254--a-plotting-position-denominated-by-sizevalues-instead-of-the-survivor-count-is-invisible) | A plotting position denominated by `size(values)` instead of the survivor count is invisible | 4 — covered |
 | [Risk-255](#risk-255--pf_probit_fits-loc-is-the-mean-and-that-is-only-the-intercept-while-every-plotting-position-is-symmetric) | `pf_probit_fit`'s `loc` is the MEAN, and that is only the intercept while every plotting position is symmetric | 4 — covered |
 | [Risk-256](#risk-256--clamping-p-away-from-0-1-in-pf_probit_mean-silently-changes-three-documented-answers) | Clamping `p` away from `{0, 1}` in `pf_probit_mean` silently changes three documented answers | 4 — covered |
+| [Risk-257](#risk-257--the-ceiling-an-int32-answer-can-overflow-is-not-always-the-row-count) | The ceiling an `int32` answer can overflow is not always the row count | 4 — covered |
+| [Risk-258](#risk-258--an-int32-bulk-form-is-a-second-route-through-the-same-walk) | An `int32` bulk form is a second route through the same walk | 4 — covered |
 
 ---
 
@@ -9664,3 +9666,69 @@ enough to be written — plus a control showing that the same population without
 strictly inside `(0, 1)`. `test_probit_mean_domain_and_weights` covers the ordering of the screen:
 a NaN at the default `skipnan` must leave the other three elements with a mean, which a
 range-before-NaN screen would have refused.
+
+### Risk-257 — The ceiling an `int32` answer can overflow is not always the row count
+
+Every `int32` answer `parquet_spatial` and `parquet_index` allocate is guarded by one comparison
+taken before anything is allocated, and **the quantity compared is not the same for every
+argument**:
+
+| Answer | Bounded by |
+|---|---|
+| `neighbours`, `i`, `j`, `counts`, `labels` | the row count (`%size()`, or `nvert`) |
+| a CSR's `offsets` | the **total number of neighbours**, plus one |
+| `%csr`'s `rows`, `%get_all`'s rows | the largest stored VALUE |
+| `%keys` | the largest **and smallest** stored key |
+| `%used_indexes` | the pool's watermark |
+
+Two of those rows are the trap. A CSR's `offsets` accumulates to the length of the neighbour list,
+which passes `huge(int32)` at a few tens of millions of points long before any row index does — so
+a guard copied from the neighbouring `neighbours` check compiles, passes every fixture that fits in
+memory, and returns wrapped offsets on the first run large enough to show it. And `%keys` answers
+the caller's own key values, which may be as negative as `int64` allows, where a stored index never
+is: `ix_narrow`'s one-sided test is right for a value and wrong for a key.
+
+**What it forbids.** Reusing a sibling specific's guard without re-deriving which quantity that
+particular argument is bounded by; a one-sided bound check on anything that is not a count.
+
+**Covered by** two error scenarios. `spatial_csr_int32_offsets`
+(`test/error_scenarios.f90`) lowers the `int32` ceiling to a value **above** the fixture's row
+count and below its neighbour total, so only a guard written against the total fires — a guard on
+the row count lets that call through, and the scenario's `required_stderr` names the offsets
+message rather than the rows one. `index_keys_int32_negative` holds a key below
+`-huge(int32) - 1`, which only a two-sided check refuses. `spatial_pairs_int32_rows` is the
+row-count control, and every one of the three answers the same query in `int64` first, so a run
+that aborts proves the ceiling governs the answer's kind and not the query.
+
+**The ceiling is reachable only because a hook lowers it.** `parquet_debug_set_spatial_int32_ceiling`
+(`src/parquet_spatial.f90`) exists for exactly this: every guard in that module reads the ceiling
+through `spatial_int32_ceiling()` rather than writing `huge(0_int32)` itself, so all of them —
+including the two that `%within` and `%nearest` already carried, untested since they were written —
+are reachable at a fixture of a few hundred points. A new guard that spells the limit out instead
+of calling the accessor is invisible to every test here.
+
+### Risk-258 — An `int32` bulk form is a second route through the same walk
+
+The `int32` specifics do not narrow a finished `int64` answer — that would raise the peak memory
+the feature exists to halve. They pass `out32=` where the `int64` form passes `out64=`, so the two
+kinds are separate paths through `spatial_scan`, `spatial_scan_axis` and `los_sweep_point`, and the
+pair sweeps additionally order each pair (`i < j`) in an arm of their own per kind.
+
+A difference in what is emitted, in what order, or in the emit-once `min_key` bookkeeping would
+make one kind answer differently from the other. Nothing inside a single-kind test can see it: both
+answers are plausible lists of rows.
+
+**What it forbids.** Adding a kind arm to a bulk sweep without a parity assertion; folding the
+`int32` arm into the `int64` one by narrowing afterwards, which passes the parity assertion and
+quietly costs what it was meant to save.
+
+**Covered by** the parity tests in `test/test_spatial.f90` —
+`test_pairs_int32_matches_int64`, `test_pairs_sky_and_los_int32_match`,
+`test_all_within_int32_matches`, `test_count_all_int32_matches` and `test_fof_chain_int32` — each
+asserting element-for-element equality between the two kinds on the same fixture, with every
+optional (`combine=`, `r_inner=`, `sorted=`) set, since a specific that drops one answers a
+different question in one kind only. `test_index_int32_lists` and `test_mm_csr_and_keys_int32` do
+the same for `%keys`, `%used_indexes` and `%csr`.
+`check_spatial_kind_specifics_forward_every_argument` (`tools/check_source_conventions.py`) is the
+static half: it reads each specific's own argument list out of the source and requires every one of
+them to be used, which is what a dropped `combine=` fails.

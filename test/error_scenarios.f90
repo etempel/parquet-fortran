@@ -2696,6 +2696,10 @@ program error_scenarios
         call scenario_spatial_pairs_bad_combine()
     case ("spatial_sky_pairs_sum_too_large")
         call scenario_spatial_sky_pairs_sum_too_large()
+    case ("spatial_pairs_int32_rows")
+        call scenario_spatial_pairs_int32_rows()
+    case ("spatial_csr_int32_offsets")
+        call scenario_spatial_csr_int32_offsets()
     case ("spatial_los_on_sky")
         call scenario_spatial_los_on_sky()
     case ("spatial_los_on_2d")
@@ -3168,6 +3172,10 @@ program error_scenarios
         call scenario_multimap_string_probe_on_integer()
     case ("multimap_string_keys_rank1")
         call scenario_multimap_string_keys_rank1()
+    case ("index_keys_int32_negative")
+        call scenario_index_keys_int32_negative()
+    case ("multimap_csr_int32_value")
+        call scenario_multimap_csr_int32_value()
     case ("index_string_control")
         call scenario_index_string_control()
     case ("table_index_string_key_on_int")
@@ -23154,6 +23162,58 @@ contains
         print '(a,i0)', "unexpectedly accepted a 60-degree radius under PF_LINK_SUM, pairs=", size(pi)
     end subroutine scenario_spatial_sky_pairs_sum_too_large
 
+    !> An `int32` pair list over an index holding more rows than an `int32` can name.
+    !!
+    !! **The ceiling is lowered by `parquet_debug_set_spatial_int32_ceiling`**, because the real
+    !! one needs an index of more than two billion points. The `int64` call above it is the
+    !! negative control: the ceiling governs which ANSWERS are refused and nothing else, so that
+    !! one must come back normally in the same process.
+    subroutine scenario_spatial_pairs_int32_rows()
+        type(pf_spatial_index) :: sx
+        real(real64) :: x(200), y(200), z(200)
+        integer(int64), allocatable :: i64(:), j64(:)
+        integer(int32), allocatable :: i32(:), j32(:)
+        integer :: i
+
+        do i = 1, 200
+            x(i) = real(mod(i * 7, 20), real64) / 20.0_real64
+            y(i) = real(mod(i * 11, 20), real64) / 20.0_real64
+            z(i) = real(mod(i * 13, 20), real64) / 20.0_real64
+        end do
+        call sx%build(x, y, z, radius=0.2_real64)
+        call parquet_debug_set_spatial_int32_ceiling(50_int64)
+        call sx%pairs_within(0.2_real64, i64, j64)
+        print '(a,i0)', "int64 pairs under a lowered ceiling=", size(i64)
+        call sx%pairs_within(0.2_real64, i32, j32)
+        print '(a,i0)', "unexpectedly answered pairs_within in int32, pairs=", size(i32)
+    end subroutine scenario_spatial_pairs_int32_rows
+
+    !> An `int32` CSR whose ROW count fits but whose neighbour list does not.
+    !!
+    !! **This is the guard that would be wrong if it were copied from its neighbour.** The ceiling
+    !! is set above the row count and below the neighbour total, so only a check written against
+    !! the total fires; one written against the row count would return wrapped offsets instead.
+    subroutine scenario_spatial_csr_int32_offsets()
+        type(pf_spatial_index) :: sx
+        real(real64) :: x(200), y(200), z(200)
+        integer(int64), allocatable :: off64(:), nb64(:)
+        integer(int32), allocatable :: off32(:), nb32(:)
+        integer :: i
+
+        do i = 1, 200
+            x(i) = real(mod(i * 7, 20), real64) / 20.0_real64
+            y(i) = real(mod(i * 11, 20), real64) / 20.0_real64
+            z(i) = real(mod(i * 13, 20), real64) / 20.0_real64
+        end do
+        call sx%build(x, y, z, radius=0.3_real64)
+        call sx%all_within(0.3_real64, off64, nb64)
+        print '(a,i0,a,i0)', "rows=", size(off64) - 1, " neighbours=", size(nb64)
+        ! Above the 200 rows, below the neighbour total printed above.
+        call parquet_debug_set_spatial_int32_ceiling(300_int64)
+        call sx%all_within(0.3_real64, off32, nb32)
+        print '(a,i0)', "unexpectedly answered all_within in int32, offsets=", size(off32)
+    end subroutine scenario_spatial_csr_int32_offsets
+
     !> A deterministic wedge for the line-of-sight scenarios: `n` points at distances 500..1500
     !> from the origin inside a few degrees, so every point has a line of sight, with the distance
     !> handed back beside the coordinates for a scenario that wants a `los` derived from it.
@@ -27538,6 +27598,44 @@ contains
         call mm%keys(list)
         print '(a,i0)', "an integer key list from a string multimap was accepted, n=", size(list)
     end subroutine scenario_multimap_string_keys_rank1
+
+    !> `%keys` into an `int32` list over a map holding a key below what `int32` can hold.
+    !!
+    !! **The two-sided half of the bound check.** A stored index value is never negative, so the
+    !! map's own narrowing tests one end only; a KEY is the caller's own value, and a one-sided
+    !! check would turn this one into a plausible positive key instead of refusing it. The `int64`
+    !! call above is the negative control.
+    subroutine scenario_index_keys_int32_negative()
+        type(pf_index_map) :: m
+        integer(int64) :: keys(4), vals(4)
+        integer(int64), allocatable :: got64(:)
+        integer(int32), allocatable :: got32(:)
+
+        keys = [1_int64, 2_int64, -3_int64, -3000000000_int64]
+        vals = [1_int64, 2_int64, 3_int64, 4_int64]
+        ! Hashed explicitly: a direct backend over a key range this wide would try to allocate it.
+        call m%build(keys, vals, method="hash")
+        call m%keys(got64)
+        print '(a,i0)', "int64 keys=", size(got64)
+        call m%keys(got32)
+        print '(a,i0)', "unexpectedly answered keys in int32, n=", size(got32)
+    end subroutine scenario_index_keys_int32_negative
+
+    !> `%csr` into `int32` arrays over a multimap holding a value above what `int32` can hold.
+    subroutine scenario_multimap_csr_int32_value()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: keys(4), vals(4)
+        integer(int64), allocatable :: off64(:), rows64(:)
+        integer(int32), allocatable :: off32(:), rows32(:)
+
+        keys = [1_int64, 1_int64, 2_int64, 2_int64]
+        vals = [1_int64, 2_int64, 3_int64, 3000000000_int64]
+        call mm%build(keys, vals, method="hash")
+        call mm%csr(off64, rows64)
+        print '(a,i0)', "int64 csr rows=", size(rows64)
+        call mm%csr(off32, rows32)
+        print '(a,i0)', "unexpectedly answered csr in int32, rows=", size(rows32)
+    end subroutine scenario_multimap_csr_int32_value
     !
     !> Every legal string-key path of both types, in one process: proves the guards above do not
     !> fire on the forms they must not, on every entry the scenarios refuse one shape of.

@@ -89,20 +89,27 @@ contains
     !> Every point's neighbours as CSR.
     module procedure spatial_all_within_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
-        integer(int64), allocatable :: counts(:)
+        integer(int64), allocatable :: counts(:), offsets(:)
+        ! The neighbour list is the big array and is filled in the kind asked for; `offsets` is
+        ! only n+1 long, so it is accumulated in int64 whatever was asked for and narrowed once.
+        integer(int32), allocatable :: nb32(:)
+        integer(int64), allocatable :: nb64(:)
         integer(int64) :: n, t, i, u, m, s0, e0, total
         real(real64) :: p(3), r, rin
         integer :: nt, nr, nri
-        logical :: direct, want_sort
+        logical :: direct, want_sort, want32
 
+        want32 = present(offsets32)
         call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads, radii_inner, nri)
         want_sort = .false.
         if (present(sorted)) want_sort = sorted
+        ! A neighbour is a row of this index, so `n` bounds every value the list can hold.
+        if (want32) call spatial_check_rows_i32(n, "pf_spatial_index%" // what)
         allocate (offsets(n + 1_int64))
         allocate (counts(max(n, 1_int64)))
         if (n == 0_int64) then
             offsets(1) = 1_int64
-            allocate (neighbours(0))
+            call csr_emit(offsets, nb32, nb64, offsets32, neighbours32, offsets64, neighbours64, want32, 0_int64)
             return
         end if
         call spatial_storage(self, xs, ys, zs)
@@ -127,7 +134,15 @@ contains
             offsets(i + 1_int64) = offsets(i) + counts(i)
         end do
         total = offsets(n + 1_int64) - 1_int64
-        allocate (neighbours(total))
+        ! **A DIFFERENT quantity from the row count checked above, and that is the whole point.**
+        ! `offsets` accumulates to the length of the neighbour list, which passes huge(int32) at a
+        ! few tens of millions of points long before any row index does (`feature_risks.md`).
+        if (want32) call spatial_check_total_i32(total, "pf_spatial_index%" // what)
+        if (want32) then
+            allocate (nb32(total), nb64(0))
+        else
+            allocate (nb64(total), nb32(0))
+        end if
         !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
         !$omp     private(t, i, u, m, p, r, rin, s0, e0)
         do t = 1_int64, n
@@ -142,10 +157,44 @@ contains
             r = radii(1)
             if (nr > 1) r = radii(i)
             rin = inner_at(radii_inner, nri, i)
-            call spatial_scan(self, p, r, m, out64=neighbours(s0:e0), r_inner=rin, sorted=want_sort)
+            ! Written out per kind: a slice of an ABSENT optional cannot be formed, and the branch
+            ! is loop-invariant.
+            if (want32) then
+                call spatial_scan(self, p, r, m, out32=nb32(s0:e0), r_inner=rin, sorted=want_sort)
+            else
+                call spatial_scan(self, p, r, m, out64=nb64(s0:e0), r_inner=rin, sorted=want_sort)
+            end if
         end do
         !$omp end parallel do
+        call csr_emit(offsets, nb32, nb64, offsets32, neighbours32, offsets64, neighbours64, want32, total)
     end procedure spatial_all_within_worker
+
+    !> Hands a CSR sweep's two arrays to whichever of the four arguments the caller passed.
+    !!
+    !! `offsets` is narrowed element-wise -- it is only n+1 long, and its ceiling was checked
+    !! against the neighbour total before the fill. The neighbour list is moved, never copied.
+    subroutine csr_emit(offsets, nb32, nb64, offsets32, neighbours32, offsets64, neighbours64, want32, total)
+        integer(int64), allocatable, intent(inout) :: offsets(:) !! the accumulated offsets, int64.
+        integer(int32), allocatable, intent(inout) :: nb32(:) !! the neighbour list, int32 arm.
+        integer(int64), allocatable, intent(inout) :: nb64(:) !! the neighbour list, int64 arm.
+        integer(int32), allocatable, intent(out), optional :: offsets32(:) !! the caller's int32 offsets.
+        integer(int32), allocatable, intent(out), optional :: neighbours32(:) !! the caller's int32 lists.
+        integer(int64), allocatable, intent(out), optional :: offsets64(:) !! the caller's int64 offsets.
+        integer(int64), allocatable, intent(out), optional :: neighbours64(:) !! the caller's int64 lists.
+        logical, intent(in) :: want32 !! .true. when the caller asked for the int32 arm.
+        integer(int64), intent(in) :: total !! entries the neighbour list holds.
+
+        if (want32) then
+            allocate (offsets32(size(offsets, kind=int64)))
+            offsets32 = int(offsets, kind=int32)
+            if (.not. allocated(nb32)) allocate (nb32(total))
+            call move_alloc(nb32, neighbours32)
+        else
+            call move_alloc(offsets, offsets64)
+            if (.not. allocated(nb64)) allocate (nb64(total))
+            call move_alloc(nb64, neighbours64)
+        end if
+    end subroutine csr_emit
 
     !> The inner radius that applies to row `i`, as a plain value.
     !>
@@ -169,31 +218,44 @@ contains
     !> How many neighbours each point has, in the caller's row order.
     module procedure spatial_count_all_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        ! Counted in int64 and narrowed once at the end: a neighbour count is bounded by `n`, so
+        ! the row-count guard below is what decides whether the int32 answer can carry it, and the
+        ! array is only n long -- there is nothing to be saved by narrowing inside the loop.
+        integer(int64), allocatable :: counts(:)
         integer(int64) :: n, t, i, u, m
         real(real64) :: p(3), r, rin
         integer :: nt, nr, nri
-        logical :: direct
+        logical :: direct, want32
 
+        want32 = present(counts32)
         call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads, radii_inner, nri)
+        if (want32) call spatial_check_rows_i32(n, "pf_spatial_index%" // what)
         allocate (counts(n))
-        if (n == 0_int64) return
-        call spatial_storage(self, xs, ys, zs)
-        direct = self%owns
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r, rin)
-        do t = 1_int64, n
-            i = self%idx(t)
-            u = t
-            if (.not. direct) u = i
-            p(1) = xs(u)
-            p(2) = ys(u)
-            p(3) = zs(u)
-            r = radii(1)
-            if (nr > 1) r = radii(i)
-            rin = inner_at(radii_inner, nri, i)
-            call spatial_scan(self, p, r, m, r_inner=rin)
-            counts(i) = m
-        end do
-        !$omp end parallel do
+        if (n > 0_int64) then
+            call spatial_storage(self, xs, ys, zs)
+            direct = self%owns
+            !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r, rin)
+            do t = 1_int64, n
+                i = self%idx(t)
+                u = t
+                if (.not. direct) u = i
+                p(1) = xs(u)
+                p(2) = ys(u)
+                p(3) = zs(u)
+                r = radii(1)
+                if (nr > 1) r = radii(i)
+                rin = inner_at(radii_inner, nri, i)
+                call spatial_scan(self, p, r, m, r_inner=rin)
+                counts(i) = m
+            end do
+            !$omp end parallel do
+        end if
+        if (want32) then
+            allocate (counts32(n))
+            counts32 = int(counts, kind=int32)
+        else
+            call move_alloc(counts, counts64)
+        end if
     end procedure spatial_count_all_worker
 
     !> The per-point walk radius and acceptance terms one `PF_LINK_*` rule needs.
@@ -261,14 +323,67 @@ contains
     end procedure spatial_link_terms
 
     !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
+    !> Allocates a pair sweep's two output buffers in the kind asked for, the other kind empty.
+    !!
+    !! **The unwanted kind is allocated at length zero rather than left unallocated**, so that the
+    !! sweep can always form the slice it passes to `spatial_scan` without testing `allocated()`
+    !! inside its loop. An empty allocation costs nothing.
+    subroutine pairs_alloc(a32, b32, a64, b64, want32, total)
+        integer(int32), allocatable, intent(out) :: a32(:) !! lower row of each pair, int32 arm.
+        integer(int32), allocatable, intent(out) :: b32(:) !! higher row of each pair, int32 arm.
+        integer(int64), allocatable, intent(out) :: a64(:) !! lower row of each pair, int64 arm.
+        integer(int64), allocatable, intent(out) :: b64(:) !! higher row of each pair, int64 arm.
+        logical, intent(in) :: want32 !! .true. when the caller asked for the int32 arm.
+        integer(int64), intent(in) :: total !! pairs the sweep will emit.
+
+        if (want32) then
+            allocate (a32(total), b32(total))
+            allocate (a64(0), b64(0))
+        else
+            allocate (a64(total), b64(total))
+            allocate (a32(0), b32(0))
+        end if
+    end subroutine pairs_alloc
+
+    !> Moves a pair sweep's filled buffers into whichever of the four arguments the caller passed.
+    !!
+    !! `move_alloc` rather than assignment: the answer is the largest array a pair sweep holds, and
+    !! copying it would double the peak the int32 arm exists to halve.
+    subroutine pairs_emit(a32, b32, a64, b64, ii32, jj32, ii64, jj64, want32)
+        integer(int32), allocatable, intent(inout) :: a32(:) !! lower row of each pair, int32 arm.
+        integer(int32), allocatable, intent(inout) :: b32(:) !! higher row of each pair, int32 arm.
+        integer(int64), allocatable, intent(inout) :: a64(:) !! lower row of each pair, int64 arm.
+        integer(int64), allocatable, intent(inout) :: b64(:) !! higher row of each pair, int64 arm.
+        integer(int32), allocatable, intent(out), optional :: ii32(:) !! the caller's int32 lower rows.
+        integer(int32), allocatable, intent(out), optional :: jj32(:) !! the caller's int32 higher rows.
+        integer(int64), allocatable, intent(out), optional :: ii64(:) !! the caller's int64 lower rows.
+        integer(int64), allocatable, intent(out), optional :: jj64(:) !! the caller's int64 higher rows.
+        logical, intent(in) :: want32 !! .true. when the caller asked for the int32 arm.
+
+        if (want32) then
+            call move_alloc(a32, ii32)
+            call move_alloc(b32, jj32)
+        else
+            call move_alloc(a64, ii64)
+            call move_alloc(b64, jj64)
+        end if
+    end subroutine pairs_emit
+
     module procedure spatial_pairs_within_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64), allocatable :: counts(:), heads(:), keys(:)
         real(real64), allocatable :: walk(:), urow(:), vrow(:), us(:), vs(:)
+        ! The answer is built in locals of ONE kind and moved into whichever pair the caller
+        ! asked for. The unwanted pair is allocated empty rather than left unallocated, so that
+        ! the slice below always has something to name; the branch picks the allocated one.
+        integer(int32), allocatable :: a32(:), b32(:)
+        integer(int64), allocatable :: a64(:), b64(:)
         integer(int64) :: n, t, i, u, m, s0, e0, total, k
         real(real64) :: p(3), r, rin, uself, vself
         integer :: nt, nr, rule
-        logical :: direct, want_bound
+        logical :: direct, want_bound, want32
+
+        want32 = present(ii32)
 
         rule = PF_LINK_MAX
         if (present(combine)) rule = combine
@@ -293,8 +408,12 @@ contains
         else
             call spatial_bulk_setup(self, walk, expect_metric, n, nr, nt, threads)
         end if
+        ! The row indices this sweep reports are bounded by `n`, so one comparison before anything
+        ! is allocated decides whether an int32 answer can carry them (`feature_risks.md`).
+        if (want32) call spatial_check_rows_i32(n, "pf_spatial_index%" // what)
         if (n == 0_int64) then
-            allocate (ii(0), jj(0))
+            call pairs_alloc(a32, b32, a64, b64, want32, 0_int64)
+            call pairs_emit(a32, b32, a64, b64, ii32, jj32, ii64, jj64, want32)
             return
         end if
         ! **One radius makes every rule the walk radius**, so the per-candidate bound is switched
@@ -357,7 +476,7 @@ contains
             heads(t + 1_int64) = heads(t) + counts(t)
         end do
         total = heads(n + 1_int64) - 1_int64
-        allocate (ii(total), jj(total))
+        call pairs_alloc(a32, b32, a64, b64, want32, total)
         !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
         !$omp     private(t, i, u, m, p, r, s0, e0, k, uself, vself)
         do t = 1_int64, n
@@ -371,27 +490,49 @@ contains
             p(3) = zs(u)
             r = walk(1)
             if (nr > 1) r = walk(i)
-            if (want_bound) then
-                uself = us(t)
-                vself = vs(t)
-                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, &
-                    r_inner=rin, bnd_u_self=uself, bnd_v_self=vself, bnd_u=us, bnd_v=vs)
-            else
-                call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys, r_inner=rin)
-            end if
             ! `i` is the endpoint that did the SEARCHING, which under a per-point radius is the one
-            ! with the larger ball and so not necessarily the lower row. Order each pair here, so
-            ! both forms carry the same contract: every unordered pair once, always with i < j.
-            do k = s0, e0
-                if (jj(k) > i) then
-                    ii(k) = i
+            ! with the larger ball and so not necessarily the lower row. Each arm orders its pairs
+            ! here, so both kinds carry the same contract: every unordered pair once, always with
+            ! i < j. The kinds are written out rather than folded because a slice of an ABSENT
+            ! optional cannot be formed at all, and the branch is loop-invariant.
+            if (want32) then
+                if (want_bound) then
+                    uself = us(t)
+                    vself = vs(t)
+                    call spatial_scan(self, p, r, m, out32=b32(s0:e0), min_key=keys(t), keys=keys, &
+                        r_inner=rin, bnd_u_self=uself, bnd_v_self=vself, bnd_u=us, bnd_v=vs)
                 else
-                    ii(k) = jj(k)
-                    jj(k) = i
+                    call spatial_scan(self, p, r, m, out32=b32(s0:e0), min_key=keys(t), keys=keys, r_inner=rin)
                 end if
-            end do
+                do k = s0, e0
+                    if (int(b32(k), kind=int64) > i) then
+                        a32(k) = int(i, kind=int32)
+                    else
+                        a32(k) = b32(k)
+                        b32(k) = int(i, kind=int32)
+                    end if
+                end do
+            else
+                if (want_bound) then
+                    uself = us(t)
+                    vself = vs(t)
+                    call spatial_scan(self, p, r, m, out64=b64(s0:e0), min_key=keys(t), keys=keys, &
+                        r_inner=rin, bnd_u_self=uself, bnd_v_self=vself, bnd_u=us, bnd_v=vs)
+                else
+                    call spatial_scan(self, p, r, m, out64=b64(s0:e0), min_key=keys(t), keys=keys, r_inner=rin)
+                end if
+                do k = s0, e0
+                    if (b64(k) > i) then
+                        a64(k) = i
+                    else
+                        a64(k) = b64(k)
+                        b64(k) = i
+                    end if
+                end do
+            end if
         end do
         !$omp end parallel do
+        call pairs_emit(a32, b32, a64, b64, ii32, jj32, ii64, jj64, want32)
     end procedure spatial_pairs_within_worker
 
     !> Gives every point the ORDER KEY that decides which endpoint of a pair reports it.
@@ -559,11 +700,15 @@ contains
         integer(int64), allocatable :: counts(:), heads(:), keys(:)
         real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:), qlo(:), qhi(:), suf(:), tmin(:), tmax(:)
         real(real64), allocatable :: wpar(:)
+        ! As the ball sweep: one kind is filled, the other allocated empty. See `pairs_alloc`.
+        integer(int32), allocatable :: a32(:), b32(:)
+        integer(int64), allocatable :: a64(:), b64(:)
         integer(int64) :: n, t, i, u, m, s0, e0, total, k, ng, a, b, ncyl, nbal, ntest
         real(real64) :: p(3), q(3), r, qq, scale, hcell, rg
         integer :: nt, nr, rule, lrule
-        logical :: direct, want_sep, ball_all, local, need_local
+        logical :: direct, want_sep, ball_all, local, need_local, want32
 
+        want32 = present(ii32)
         rule = PF_LINK_MAX
         if (present(combine)) rule = combine
         if (rule /= PF_LINK_MAX .and. rule /= PF_LINK_MIN .and. rule /= PF_LINK_MEAN .and. &
@@ -603,8 +748,11 @@ contains
             end if
         end do
         call spatial_bulk_setup(self, walk, PF_METRIC_EUCLIDEAN, n, nr, nt, threads)
+        ! One comparison before anything is allocated -- see the ball sweep for why it is `n`.
+        if (want32) call spatial_check_rows_i32(n, "pf_spatial_index%" // what)
         if (n == 0_int64) then
-            allocate (ii(0), jj(0))
+            call pairs_alloc(a32, b32, a64, b64, want32, 0_int64)
+            call pairs_emit(a32, b32, a64, b64, ii32, jj32, ii64, jj64, want32)
             if (present(dperp)) allocate (dperp(0))
             if (present(dpar)) allocate (dpar(0))
             return
@@ -751,7 +899,7 @@ contains
             heads(t + 1_int64) = heads(t) + counts(t)
         end do
         total = heads(n + 1_int64) - 1_int64
-        allocate (ii(total), jj(total))
+        call pairs_alloc(a32, b32, a64, b64, want32, total)
         ! Both separations are gathered whenever either is wanted, into locals that always exist
         ! inside the region: an optional allocatable dummy passed into a parallel region is the
         ! recorded ifx segfault, and the two calls are written out for the reason the ball sweep's
@@ -772,24 +920,45 @@ contains
             q = p - self%obs
             r = walk(1)
             if (nr > 1) r = walk(i)
-            if (want_sep) then
-                call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
-                    ncyl, nbal, ntest, out64=jj(s0:e0), dperp=dp(s0:e0), dpar=dl(s0:e0))
-            else
-                call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
-                    ncyl, nbal, ntest, out64=jj(s0:e0))
-            end if
-            ! `i` is the endpoint that did the searching, not necessarily the lower row.
-            do k = s0, e0
-                if (jj(k) > i) then
-                    ii(k) = i
+            ! `i` is the endpoint that did the searching, not necessarily the lower row. The
+            ! kinds are written out for the reason the ball sweep's are: a slice of an ABSENT
+            ! optional cannot be formed, and both branches are loop-invariant.
+            if (want32) then
+                if (want_sep) then
+                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
+                        m, ncyl, nbal, ntest, out32=b32(s0:e0), dperp=dp(s0:e0), dpar=dl(s0:e0))
                 else
-                    ii(k) = jj(k)
-                    jj(k) = i
+                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
+                        m, ncyl, nbal, ntest, out32=b32(s0:e0))
                 end if
-            end do
+                do k = s0, e0
+                    if (int(b32(k), kind=int64) > i) then
+                        a32(k) = int(i, kind=int32)
+                    else
+                        a32(k) = b32(k)
+                        b32(k) = int(i, kind=int32)
+                    end if
+                end do
+            else
+                if (want_sep) then
+                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
+                        m, ncyl, nbal, ntest, out64=b64(s0:e0), dperp=dp(s0:e0), dpar=dl(s0:e0))
+                else
+                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
+                        m, ncyl, nbal, ntest, out64=b64(s0:e0))
+                end if
+                do k = s0, e0
+                    if (b64(k) > i) then
+                        a64(k) = i
+                    else
+                        a64(k) = b64(k)
+                        b64(k) = i
+                    end if
+                end do
+            end if
         end do
         !$omp end parallel do
+        call pairs_emit(a32, b32, a64, b64, ii32, jj32, ii64, jj64, want32)
         dbg_los_cyl = dbg_los_cyl + ncyl
         dbg_los_balls = dbg_los_balls + nbal
         dbg_los_tested = dbg_los_tested + ntest
@@ -802,7 +971,7 @@ contains
     !> cheaper walk. Every route counts itself here, in its own body, so a test can tell which one
     !> ran.
     subroutine los_sweep_point(self, what, t, p, q, rwalk, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
-                               ncyl, nbal, ntest, out64, dperp, dpar)
+                               ncyl, nbal, ntest, out32, out64, dperp, dpar)
         type(pf_spatial_index), intent(in), target :: self !! the index being swept.
         character(len=*), intent(in) :: what !! the calling binding, for any message.
         integer(int64), intent(in) :: t !! the emitter's stored position.
@@ -822,6 +991,7 @@ contains
         integer(int64), intent(inout), optional :: ncyl !! incremented when the cylinder was walked.
         integer(int64), intent(inout), optional :: nbal !! incremented when a ball was walked.
         integer(int64), intent(inout), optional :: ntest !! incremented per candidate the accept test saw.
+        integer(int32), intent(inout), optional :: out32(:) !! the partners' rows in int32, if wanted.
         integer(int64), intent(inout), optional :: out64(:) !! the partners' rows, if wanted.
         real(real64), intent(inout), optional :: dperp(:) !! their transverse separations, if wanted.
         real(real64), intent(inout), optional :: dpar(:) !! their parallel separations, if wanted.
@@ -834,7 +1004,8 @@ contains
         bpself = bps(t)
         blself = bls(t)
         if (ball_all) then
-            call spatial_scan(self, p, rwalk, m, out64=out64, min_key=keys(t), keys=keys, los_rule=lrule, los_q=q, &
+            call spatial_scan(self, p, rwalk, m, out32=out32, out64=out64, min_key=keys(t), keys=keys, &
+                los_rule=lrule, los_q=q, &
                 los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls, &
                 dperp=dperp, dpar=dpar, ntested=ntest)
             if (present(nbal)) nbal = nbal + 1_int64
@@ -842,12 +1013,14 @@ contains
         end if
         call los_walk_shape(self%obs, q, dself, rwalk, hcell, qlo(t), qhi(t), use_ball, r, pa, pb, rw)
         if (use_ball) then
-            call spatial_scan(self, p, r, m, out64=out64, min_key=keys(t), keys=keys, los_rule=lrule, los_q=q, &
+            call spatial_scan(self, p, r, m, out32=out32, out64=out64, min_key=keys(t), keys=keys, &
+                los_rule=lrule, los_q=q, &
                 los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls, &
                 dperp=dperp, dpar=dpar, los_tiebreak=.true., ntested=ntest)
             if (present(nbal)) nbal = nbal + 1_int64
         else
-            call spatial_scan_axis(self, pa, pb, rw, rw, .false., what, m, out64=out64, min_key=keys(t), keys=keys, &
+            call spatial_scan_axis(self, pa, pb, rw, rw, .false., what, m, out32=out32, out64=out64, &
+                min_key=keys(t), keys=keys, &
                 los_rule=lrule, los_q=q, los_p=p, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, &
                 los_ls=ls, los_bps=bps, los_bls=bls, dperp=dperp, dpar=dpar, los_tiebreak=.true., ntested=ntest)
             if (present(ncyl)) ncyl = ncyl + 1_int64
@@ -1208,9 +1381,11 @@ contains
     !> what usually produces the edge list, is already threaded and dominates the runtime.
     module procedure spatial_components_worker
         integer(int64), allocatable :: parent(:), csize(:), lab(:)
-        integer(int64) :: e, a, b, ra, rb, v, root, nc, nedge
+        integer(int64) :: e, v, root, nc, nedge
         integer(int64) :: ms
+        logical :: want32
 
+        want32 = present(i32)
         ! The default is 1, the strict graph-theoretic reading in which every vertex belongs to
         ! some component. A group finder that wants singletons dropped says `min_size = 2` at the
         ! call, where the choice is visible; making that the default would have this routine answer
@@ -1218,41 +1393,46 @@ contains
         ms = 1_int64
         if (present(min_size)) ms = int(min_size, kind=int64)
         if (ms < 1_int64) error stop "pf_connected_components: min_size must be >= 1"
-        nedge = size(i, kind=int64)
-        if (size(j, kind=int64) /= nedge) error stop &
-            "pf_connected_components: the two endpoint arrays must be the same length"
+        if (want32) then
+            nedge = size(i32, kind=int64)
+            if (size(j32, kind=int64) /= nedge) error stop &
+                "pf_connected_components: the two endpoint arrays must be the same length"
+        else
+            nedge = size(i64, kind=int64)
+            if (size(j64, kind=int64) /= nedge) error stop &
+                "pf_connected_components: the two endpoint arrays must be the same length"
+        end if
         if (nvert < 0_int64) error stop "pf_connected_components: nvert must be >= 0"
-        allocate (labels(max(nvert, 0_int64)))
+        ! Every label, every component size and every edge endpoint is bounded by `nvert`, so one
+        ! comparison before anything is allocated decides whether the int32 answer can carry them.
+        ! Nested rather than `.and.`-ed: the ceiling is a function call, not a comparison.
+        if (want32) then
+            if (nvert > spatial_int32_ceiling()) error stop "pf_connected_components: " // &
+                "nvert is larger than an int32 answer can name; take the labels as int64"
+        end if
         if (nvert == 0_int64) then
-            if (present(ncomp)) ncomp = 0_int64
-            if (present(sizes)) allocate (sizes(0))
+            call comp_emit_empty(labels32, ncomp32, sizes32, labels64, ncomp64, sizes64, want32)
             return
         end if
-        labels = 0_int64
         allocate (parent(nvert), csize(nvert), lab(nvert))
         do v = 1_int64, nvert
             parent(v) = v
             csize(v) = 1_int64
             lab(v) = 0_int64
         end do
-        do e = 1_int64, nedge
-            a = i(e)
-            b = j(e)
-            if (a < 1_int64 .or. a > nvert .or. b < 1_int64 .or. b > nvert) error stop &
-                "pf_connected_components: every edge endpoint must be a vertex in 1..nvert"
-            ra = uf_find(parent, a)
-            rb = uf_find(parent, b)
-            if (ra == rb) cycle
-            ! Union by size, which is what keeps the trees shallow. Which root wins is an internal
-            ! choice and deliberately does NOT decide the labels -- see the numbering pass below.
-            if (csize(ra) < csize(rb)) then
-                parent(ra) = rb
-                csize(rb) = csize(rb) + csize(ra)
-            else
-                parent(rb) = ra
-                csize(ra) = csize(ra) + csize(rb)
-            end if
-        end do
+        ! The union-find itself runs in int64 whatever kind the caller handed in: a vertex index is
+        ! bounded by `nvert`, so nothing is lost, and the algorithm exists in ONE copy. Only the
+        ! edge read differs, and the two loops are written out so that a slice of an ABSENT
+        ! optional is never formed.
+        if (want32) then
+            do e = 1_int64, nedge
+                call comp_link(parent, csize, int(i32(e), kind=int64), int(j32(e), kind=int64), nvert)
+            end do
+        else
+            do e = 1_int64, nedge
+                call comp_link(parent, csize, i64(e), j64(e), nvert)
+            end do
+        end if
         ! **Numbering by ascending vertex of first appearance, and that is a contract.** Left to
         ! the union-find's own roots the numbering would depend on union-by-size tie-breaking, so
         ! the same catalogue could come back with differently numbered groups on another compiler.
@@ -1264,18 +1444,88 @@ contains
                 nc = nc + 1_int64
                 lab(root) = nc
             end if
-            labels(v) = lab(root)
         end do
-        if (present(ncomp)) ncomp = nc
-        if (present(sizes)) then
-            allocate (sizes(nc))
+        ! Written straight into the kind asked for rather than narrowed afterwards: `labels` is
+        ! length nvert and is the second-largest array a group finder holds.
+        if (want32) then
+            allocate (labels32(nvert))
             do v = 1_int64, nvert
-                root = uf_find(parent, v)
-                if (lab(root) == 0_int64) cycle
-                sizes(lab(root)) = csize(root)
+                labels32(v) = int(lab(uf_find(parent, v)), kind=int32)
             end do
+            if (present(ncomp32)) ncomp32 = int(nc, kind=int32)
+            if (present(sizes32)) then
+                allocate (sizes32(nc))
+                do v = 1_int64, nvert
+                    root = uf_find(parent, v)
+                    if (lab(root) == 0_int64) cycle
+                    sizes32(lab(root)) = int(csize(root), kind=int32)
+                end do
+            end if
+        else
+            allocate (labels64(nvert))
+            do v = 1_int64, nvert
+                labels64(v) = lab(uf_find(parent, v))
+            end do
+            if (present(ncomp64)) ncomp64 = nc
+            if (present(sizes64)) then
+                allocate (sizes64(nc))
+                do v = 1_int64, nvert
+                    root = uf_find(parent, v)
+                    if (lab(root) == 0_int64) cycle
+                    sizes64(lab(root)) = csize(root)
+                end do
+            end if
         end if
     end procedure spatial_components_worker
+
+    !> One edge of `pf_connected_components`: range-check both endpoints and union their trees.
+    !!
+    !! **The one copy of the union step.** Both edge loops call it, so the two kinds cannot drift
+    !! apart in what they accept or in how the forest is joined.
+    subroutine comp_link(parent, csize, a, b, nvert)
+        integer(int64), intent(inout) :: parent(:) !! the union-find forest.
+        integer(int64), intent(inout) :: csize(:) !! the size of each root's tree.
+        integer(int64), intent(in) :: a !! one endpoint, in 1..nvert.
+        integer(int64), intent(in) :: b !! the other endpoint, in 1..nvert.
+        integer(int64), intent(in) :: nvert !! how many vertices the graph has.
+        integer(int64) :: ra, rb
+
+        if (a < 1_int64 .or. a > nvert .or. b < 1_int64 .or. b > nvert) error stop &
+            "pf_connected_components: every edge endpoint must be a vertex in 1..nvert"
+        ra = uf_find(parent, a)
+        rb = uf_find(parent, b)
+        if (ra == rb) return
+        ! Union by size, which is what keeps the trees shallow. Which root wins is an internal
+        ! choice and deliberately does NOT decide the labels -- see the numbering pass above.
+        if (csize(ra) < csize(rb)) then
+            parent(ra) = rb
+            csize(rb) = csize(rb) + csize(ra)
+        else
+            parent(rb) = ra
+            csize(ra) = csize(ra) + csize(rb)
+        end if
+    end subroutine comp_link
+
+    !> The answer for a graph with no vertices, in whichever kind was asked for.
+    subroutine comp_emit_empty(labels32, ncomp32, sizes32, labels64, ncomp64, sizes64, want32)
+        integer(int32), allocatable, intent(out), optional :: labels32(:) !! length 0, int32 arm.
+        integer(int32), intent(out), optional :: ncomp32 !! 0, int32 arm.
+        integer(int32), allocatable, intent(out), optional :: sizes32(:) !! length 0, int32 arm.
+        integer(int64), allocatable, intent(out), optional :: labels64(:) !! length 0, int64 arm.
+        integer(int64), intent(out), optional :: ncomp64 !! 0, int64 arm.
+        integer(int64), allocatable, intent(out), optional :: sizes64(:) !! length 0, int64 arm.
+        logical, intent(in) :: want32 !! .true. when the caller asked for the int32 arm.
+
+        if (want32) then
+            allocate (labels32(0))
+            if (present(ncomp32)) ncomp32 = 0_int32
+            if (present(sizes32)) allocate (sizes32(0))
+        else
+            allocate (labels64(0))
+            if (present(ncomp64)) ncomp64 = 0_int64
+            if (present(sizes64)) allocate (sizes64(0))
+        end if
+    end subroutine comp_emit_empty
 
     !> The union-find root of `v`, with full path compression.
     integer(int64) function uf_find(parent, v) result(r)

@@ -624,6 +624,10 @@ threads still got up to 64 here. A caller who wants *more* than the ceiling says
 with `threads=`, which is not capped by either. See
 [Settings](../operating/settings.html#threads-for-a-bulk-healpix-conversion).
 
+`pf_healpix_threads(n)` reports what a bulk call over `n` elements would resolve to, after every
+rule above — it answers for the context you ask from, so inside a parallel region it correctly
+reports 1. `n` takes either integer kind.
+
 Note the spelling: this module's array-with-threads forms end in `_bulk`, where `parquet_random`'s
 array forms are spelled `pf_random_fill_*`. Two tiers, two conventions, and neither is going to
 change.

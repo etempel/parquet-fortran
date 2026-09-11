@@ -331,8 +331,11 @@ contains
         end if
         if (want_tie) want_min = .false.
         ntest = 0_int64
-        if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
-            "pf_spatial_index%within: this index holds more rows than an int32 buffer can name; use an int64 one"
+        ! Nested rather than `.and.`-ed: `.and.` does not short-circuit, and this runs per scan.
+        if (has32) then
+            if (self%npts > spatial_int32_ceiling()) error stop "pf_spatial_index%within: " // &
+                "this index holds more rows than an int32 buffer can name; use an int64 one"
+        end if
         cap = 0_int64
         if (has32 .or. has64 .or. hasd .or. hasdp .or. hasdl) cap = huge(0_int64)
         if (has32) cap = min(cap, size(out32, kind=int64))
@@ -789,9 +792,11 @@ contains
             error stop "pf_spatial_index%" // what // & ! GCOVR_EXCL_LINE
                 ": dperp and dpar are line-of-sight outputs and need los_rule" ! GCOVR_EXCL_LINE
         end if
-        if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
-            "pf_spatial_index%" // what // &
-            ": this index holds more rows than an int32 buffer can name; use an int64 one"
+        ! Nested rather than `.and.`-ed: `.and.` does not short-circuit, and this runs per scan.
+        if (has32) then
+            if (self%npts > spatial_int32_ceiling()) error stop "pf_spatial_index%" // what // &
+                ": this index holds more rows than an int32 buffer can name; use an int64 one"
+        end if
         cap = 0_int64
         if (has32 .or. has64 .or. hasd .or. hasap .or. hasat .or. hasdp .or. hasdl) cap = huge(0_int64)
         if (has32) cap = min(cap, size(out32, kind=int64))

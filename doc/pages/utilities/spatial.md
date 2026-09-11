@@ -124,6 +124,19 @@ The query point is a 2- or 3-element array and must match the rank the index was
 output buffer may be `integer(int32)` or `integer(int64)`; the indices are rows of the arrays you
 built from, in the caller's own order, whether or not the index copied them.
 
+**The answers this module ALLOCATES take the caller's kind too.** `%all_within`,
+`%count_all_within`, `%pairs_within`, their sky and line-of-sight forms, `%grid` and
+`pf_connected_components` all come back in whichever of the two integer kinds the arguments were
+declared with, and `int32` halves what the largest of those arrays costs — on a
+Friends-of-Friends run the pair list is the biggest thing in memory. One kind per call: the
+arrays a single call hands back share it, and mixing them matches no specific, so it is a
+compile-time error rather than a silent conversion.
+
+**An `int32` answer that cannot hold a value aborts before anything is allocated, rather than
+truncating.** Which quantity is too large is named in the message, and it is not always the row
+count: a CSR's `offsets` counts positions in the neighbour list, so it can overflow on a
+catalogue whose row indices fit comfortably.
+
 Optional arguments are shown in square brackets below; they are ordinary Fortran optionals, not
 literal syntax.
 
@@ -558,7 +571,9 @@ radius sweep. Run both fixtures: the clustered one is the one that resembles a r
 
 **`nside=` is the HEALPix counterpart of `cell=`.** It forces the resolution and skips the tuner,
 must be a power of two, and is still subject to the pixels-per-point cap. `cell=` is refused on a
-HEALPix index and `nside=` on a 3D-grid one, rather than either being quietly ignored.
+HEALPix index and `nside=` on a 3D-grid one, rather than either being quietly ignored. It is the
+one argument in this module that takes `integer(int64)` only, so write the literal as
+`nside=4096_int64`.
 
 **Reporting an index's shape.** `%backend()` answers `PF_SKY_GRID3D` or `PF_SKY_HEALPIX`;
 `%nside()` and `%npix()` answer the HEALPix resolution and pixel count, or zero on a grid index.
@@ -637,6 +652,22 @@ integer(int64) :: ncomp
 call sx%pairs_within(link_length, i, j)
 call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, min_size=2)
 ```
+
+**The same chain in `int32` costs half the memory**, which on a large catalogue is the difference
+between a run that fits and one that does not. Declare the arrays `integer(int32)` and both calls
+answer in that kind; `nvert` keeps its own choice, so `sx%size()` may be passed as it comes:
+
+```fortran
+integer(int32), allocatable :: i(:), j(:), labels(:), sizes(:)
+integer(int32) :: ncomp
+
+call sx%pairs_within(link_length, i, j)
+call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, min_size=2)
+```
+
+The edge list, `labels`, `ncomp` and `sizes` share one kind; a call that mixes them matches no
+specific. A catalogue with more rows than an `int32` can name aborts at the first of the two
+calls rather than truncating.
 
 With a linking length that varies per object, `combine=` decides what "linked" means for two
 objects carrying different lengths — the default links them when either length reaches, and

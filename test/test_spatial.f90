@@ -76,6 +76,20 @@ contains
             new_unittest("within fills distances that match the coordinates", test_within_distances), &
             new_unittest("count_within agrees with within", test_count_within_agrees), &
             new_unittest("an int32 buffer returns the same rows as an int64 one", test_within_int32_buffer), &
+            new_unittest("pairs_within answers the same in int32 as in int64", &
+                         test_pairs_int32_matches_int64), &
+            new_unittest("pairs_within_sky and pairs_within_los answer the same in int32", &
+                         test_pairs_sky_and_los_int32_match), &
+            new_unittest("all_within answers the same CSR in int32 as in int64", &
+                         test_all_within_int32_matches), &
+            new_unittest("count_all_within answers the same counts in int32 as in int64", &
+                         test_count_all_int32_matches), &
+            new_unittest("the whole Friends-of-Friends chain agrees in int32 and int64", &
+                         test_fof_chain_int32), &
+            new_unittest("connected components accepts an int32 edge list with either nvert kind", &
+                         test_components_int32_edges), &
+            new_unittest("grid answers in both kinds and the int32 ceiling hook is reversible", &
+                         test_grid_int32_and_ceiling_hook), &
             new_unittest("a 2D index matches a brute-force scan", test_2d_matches_brute_force), &
             new_unittest("a 2D index has exactly one cell along z", test_2d_grid_is_flat), &
             new_unittest("a flat, a collinear and a single-point cloud all build", test_degenerate_axes_build), &
@@ -5295,5 +5309,260 @@ contains
         call parquet_debug_set_spatial_los_walk(walk_auto)
         call parquet_debug_reset_spatial_counters()
     end subroutine test_los_walk_choice_follows_the_cell
+
+    ! ---- int32 answers: the same answer in the caller's kind ----
+    !
+    ! Every one of these is a PARITY assertion, element for element, and that is the only thing
+    ! that forbids the two kinds drifting apart: an int32 form does not narrow the int64 answer,
+    ! it passes `out32=` where the other passes `out64=`, so the two are separate routes through
+    ! `spatial_scan` and nothing else would notice one of them emitting differently
+    ! (`feature_risks.md`). Element-wise rather than set-wise is right here: both kinds run the
+    ! same sweep in the same order within one process, so equality is exact.
+
+    !> `%pairs_within` answers the same in `int32` as in `int64`, on both radius forms.
+    subroutine test_pairs_int32_matches_int64(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rr(:)
+        integer(int32), allocatable :: i32(:), j32(:)
+        integer(int64), allocatable :: i64(:), j64(:)
+        type(pf_spatial_index) :: sx
+
+        call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.12_real64)
+        call sx%pairs_within(0.12_real64, i64, j64)
+        call sx%pairs_within(0.12_real64, i32, j32)
+        call check(error, size(i64, kind=int64) > 0_int64, "the pair fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, pairs_same_kinds(i32, j32, i64, j64), &
+            "pairs_within must answer the same in int32 as in int64")
+        if (allocated(error)) return
+        ! The per-point form, with every optional set: a specific that drops `combine=` or
+        ! `r_inner=` answers a different question, and only forwarding both makes the two agree.
+        allocate (rr(size(x, kind=int64)))
+        rr = 0.09_real64
+        rr(1:50) = 0.16_real64
+        call sx%pairs_within(rr, i64, j64, combine=PF_LINK_MEAN, r_inner=0.02_real64)
+        call sx%pairs_within(rr, i32, j32, combine=PF_LINK_MEAN, r_inner=0.02_real64)
+        call check(error, size(i64, kind=int64) > 0_int64, "the per-point pair fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, pairs_same_kinds(i32, j32, i64, j64), &
+            "pairs_within must forward combine= and r_inner= from both kinds")
+    end subroutine test_pairs_int32_matches_int64
+
+    !> `%pairs_within_sky` and `%pairs_within_los` answer the same in `int32` as in `int64`.
+    subroutine test_pairs_sky_and_los_int32_match(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), los(:), bp(:), bl(:)
+        integer(int32), allocatable :: i32(:), j32(:)
+        integer(int64), allocatable :: i64(:), j64(:)
+        integer(int64) :: a, n
+        type(pf_spatial_index) :: sk, sx
+
+        call make_sky(400_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=4.0_real64)
+        call sk%pairs_within_sky(4.0_real64, i64, j64)
+        call sk%pairs_within_sky(4.0_real64, i32, j32)
+        call check(error, size(i64, kind=int64) > 0_int64, "the sky pair fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, pairs_same_kinds(i32, j32, i64, j64), &
+            "pairs_within_sky must answer the same in int32 as in int64")
+        if (allocated(error)) return
+        ! The line-of-sight sweep reaches `spatial_scan_axis` as well as `spatial_scan`, so an
+        ! `out32` forwarded to only one of the two walks would show here and nowhere else.
+        call make_wedge(200_int64, 60_int64, 500.0_real64, 1500.0_real64, 4_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (los(n), bp(n), bl(n))
+        do a = 1_int64, n
+            los(a) = d(a)
+        end do
+        bp = 35.0_real64
+        bl = 90.0_real64
+        call sx%build(x, y, z, radius=35.0_real64, los=los)
+        call sx%pairs_within_los(bp, bl, i64, j64, combine=PF_LINK_MEAN)
+        call sx%pairs_within_los(bp, bl, i32, j32, combine=PF_LINK_MEAN)
+        call check(error, size(i64, kind=int64) > 0_int64, "the los pair fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, pairs_same_kinds(i32, j32, i64, j64), &
+            "pairs_within_los must answer the same in int32 as in int64")
+    end subroutine test_pairs_sky_and_los_int32_match
+
+    !> `%all_within` and `%all_within_sky` answer the same CSR in `int32` as in `int64`.
+    subroutine test_all_within_int32_matches(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rr(:), ra(:), dec(:)
+        integer(int32), allocatable :: o32(:), n32(:)
+        integer(int64), allocatable :: o64(:), n64(:)
+        type(pf_spatial_index) :: sx, sk
+
+        call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.12_real64)
+        call sx%all_within(0.12_real64, o64, n64)
+        call sx%all_within(0.12_real64, o32, n32)
+        call check(error, size(n64, kind=int64) > 0_int64, "the CSR fixture must find some neighbours")
+        if (allocated(error)) return
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "all_within must answer the same CSR in int32 as in int64")
+        if (allocated(error)) return
+        ! `sorted=` orders each row, which is a second route through the walk's tail.
+        allocate (rr(size(x, kind=int64)))
+        rr = 0.10_real64
+        rr(1:50) = 0.18_real64
+        call sx%all_within(rr, o64, n64, sorted=.true.)
+        call sx%all_within(rr, o32, n32, sorted=.true.)
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "all_within must answer the same sorted CSR in both kinds")
+        if (allocated(error)) return
+        call make_sky(400_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=4.0_real64)
+        call sk%all_within_sky(4.0_real64, o64, n64)
+        call sk%all_within_sky(4.0_real64, o32, n32)
+        call check(error, size(n64, kind=int64) > 0_int64, "the sky CSR fixture must find some neighbours")
+        if (allocated(error)) return
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "all_within_sky must answer the same CSR in both kinds")
+    end subroutine test_all_within_int32_matches
+
+    !> `%count_all_within` and `%count_all_within_sky` answer the same counts in both kinds.
+    subroutine test_count_all_int32_matches(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:)
+        integer(int32), allocatable :: c32(:)
+        integer(int64), allocatable :: c64(:)
+        type(pf_spatial_index) :: sx, sk
+
+        call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.12_real64)
+        call sx%count_all_within(0.12_real64, c64)
+        call sx%count_all_within(0.12_real64, c32)
+        call check(error, sum(c64) > 0_int64, "the counts fixture must find some neighbours")
+        if (allocated(error)) return
+        call check(error, size(c32, kind=int64) == size(c64, kind=int64), &
+            "count_all_within must answer the same length in both kinds")
+        if (allocated(error)) return
+        call check(error, all(int(c32, kind=int64) == c64), &
+            "count_all_within must answer the same counts in both kinds")
+        if (allocated(error)) return
+        call make_sky(400_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=4.0_real64)
+        call sk%count_all_within_sky(4.0_real64, c64)
+        call sk%count_all_within_sky(4.0_real64, c32)
+        call check(error, all(int(c32, kind=int64) == c64) .and. sum(c64) > 0_int64, &
+            "count_all_within_sky must answer the same counts in both kinds")
+    end subroutine test_count_all_int32_matches
+
+    !> The whole Friends-of-Friends chain in `int32` gives the `int64` chain's answer.
+    subroutine test_fof_chain_int32(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int32), allocatable :: i32(:), j32(:), lab32(:), sz32(:)
+        integer(int64), allocatable :: i64(:), j64(:), lab64(:), sz64(:)
+        integer(int32) :: nc32
+        integer(int64) :: nc64
+        type(pf_spatial_index) :: sx
+
+        call make_clustered_cloud(600_int64, x, y, z)
+        call sx%build(x, y, z, radius=0.05_real64)
+        call sx%pairs_within(0.05_real64, i64, j64)
+        call pf_connected_components(i64, j64, sx%size(), lab64, ncomp=nc64, sizes=sz64, min_size=2)
+        call sx%pairs_within(0.05_real64, i32, j32)
+        call pf_connected_components(i32, j32, int(sx%size(), kind=int32), lab32, ncomp=nc32, &
+                                     sizes=sz32, min_size=2)
+        call check(error, nc64 > 1_int64, "the group fixture must find more than one group")
+        if (allocated(error)) return
+        call check(error, int(nc32, kind=int64) == nc64, "the two chains must find the same number of groups")
+        if (allocated(error)) return
+        call check(error, all(int(lab32, kind=int64) == lab64), &
+            "the two chains must label every vertex the same; the numbering is a contract")
+        if (allocated(error)) return
+        call check(error, all(int(sz32, kind=int64) == sz64), "the two chains must report the same group sizes")
+    end subroutine test_fof_chain_int32
+
+    !> `pf_connected_components` over an `int32` edge list, with either `nvert` kind.
+    subroutine test_components_int32_edges(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        integer(int32) :: ei(4), ej(4), nc32
+        integer(int64) :: ei64(4), ej64(4), nc64
+        integer(int32), allocatable :: lab32(:), sz32(:), lab32b(:)
+        integer(int64), allocatable :: lab64(:), sz64(:)
+
+        ! Two components among the first five vertices, and vertices 6..9 isolated -- which is the
+        ! case `nvert` exists for, and the one a vertex count taken from the edge list would lose.
+        ei = [1_int32, 2_int32, 4_int32, 4_int32]
+        ej = [2_int32, 3_int32, 5_int32, 5_int32]
+        ei64 = int(ei, kind=int64)
+        ej64 = int(ej, kind=int64)
+        call pf_connected_components(ei, ej, 9_int32, lab32, ncomp=nc32, sizes=sz32, min_size=2)
+        call pf_connected_components(ei64, ej64, 9_int64, lab64, ncomp=nc64, sizes=sz64, min_size=2)
+        call check(error, size(lab32, kind=int64) == 9_int64, "labels must be length nvert, isolated vertices included")
+        if (allocated(error)) return
+        call check(error, int(nc32, kind=int64) == nc64 .and. nc64 == 2_int64, "min_size=2 must find exactly two groups")
+        if (allocated(error)) return
+        call check(error, all(int(lab32, kind=int64) == lab64), "an int32 edge list must label as the int64 one does")
+        if (allocated(error)) return
+        call check(error, all(int(sz32, kind=int64) == sz64), "an int32 edge list must size its groups as int64 does")
+        if (allocated(error)) return
+        call check(error, lab32(6) == 0_int32 .and. lab32(9) == 0_int32, "an isolated vertex must be labelled 0")
+        if (allocated(error)) return
+        ! The same edge list against an int64 `nvert`: the two kinds are independent by design.
+        call pf_connected_components(ei, ej, 9_int64, lab32b, min_size=2)
+        call check(error, all(lab32b == lab32), "nvert's kind must not change the answer")
+    end subroutine test_components_int32_edges
+
+    !> `%grid` answers the same cell counts in both kinds, and the ceiling hook is reversible.
+    subroutine test_grid_int32_and_ceiling_hook(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int32) :: nx32, ny32, nz32
+        integer(int64) :: nx64, ny64, nz64
+        integer(int32), allocatable :: i32(:), j32(:)
+        type(pf_spatial_index) :: sx
+
+        call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.12_real64)
+        call sx%grid(nx64, ny64, nz64)
+        call sx%grid(nx32, ny32, nz32)
+        call check(error, nx64 > 1_int64, "the grid fixture must have more than one cell along x")
+        if (allocated(error)) return
+        call check(error, int(nx32, kind=int64) == nx64 .and. int(ny32, kind=int64) == ny64 .and. &
+                   int(nz32, kind=int64) == nz64, "grid must answer the same counts in both kinds")
+        if (allocated(error)) return
+        ! A ceiling above the fixture changes nothing, and the reset puts the real one back. That
+        ! the hook can also make an int32 answer ABORT is what the error scenarios show: an abort
+        ! cannot be observed in process, and leaving the hook lowered here would leak into every
+        ! later test in this suite.
+        call parquet_debug_set_spatial_int32_ceiling(1000_int64)
+        call sx%pairs_within(0.12_real64, i32, j32)
+        call check(error, size(i32, kind=int64) > 0_int64, "a ceiling above the row count must refuse nothing")
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        call sx%grid(nx32, ny32, nz32)
+        call check(error, int(nx32, kind=int64) == nx64, "resetting the counters must restore the real ceiling")
+    end subroutine test_grid_int32_and_ceiling_hook
+
+    !> Whether two pair lists agree element for element across the two kinds.
+    logical function pairs_same_kinds(i32, j32, i64, j64) result(same)
+        integer(int32), intent(in) :: i32(:) !! lower rows, int32 answer.
+        integer(int32), intent(in) :: j32(:) !! higher rows, int32 answer.
+        integer(int64), intent(in) :: i64(:) !! lower rows, int64 answer.
+        integer(int64), intent(in) :: j64(:) !! higher rows, int64 answer.
+
+        same = size(i32, kind=int64) == size(i64, kind=int64) .and. &
+               size(j32, kind=int64) == size(j64, kind=int64)
+        if (.not. same) return
+        same = all(int(i32, kind=int64) == i64) .and. all(int(j32, kind=int64) == j64)
+    end function pairs_same_kinds
+
+    !> Whether two CSR answers agree element for element across the two kinds.
+    logical function csr_same_kinds(o32, n32, o64, n64) result(same)
+        integer(int32), intent(in) :: o32(:) !! offsets, int32 answer.
+        integer(int32), intent(in) :: n32(:) !! neighbours, int32 answer.
+        integer(int64), intent(in) :: o64(:) !! offsets, int64 answer.
+        integer(int64), intent(in) :: n64(:) !! neighbours, int64 answer.
+
+        same = size(o32, kind=int64) == size(o64, kind=int64) .and. &
+               size(n32, kind=int64) == size(n64, kind=int64)
+        if (.not. same) return
+        same = all(int(o32, kind=int64) == o64) .and. all(int(n32, kind=int64) == n64)
+    end function csr_same_kinds
 
 end module test_spatial

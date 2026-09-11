@@ -83,13 +83,19 @@ contains
         if (cfg_healpix_threads > 0 .and. cfg_healpix_threads < cap) cap = cfg_healpix_threads
     end function hpx_auto_cap
 
-    module procedure pf_healpix_threads
+    module procedure hpx_threads_n64
         ! A pass-through onto the one resolver, deliberately: a second copy of the rule here could
         ! answer differently from what a bulk call actually does, which is the one thing this
         ! procedure exists to rule out. `what` is only ever used for the explicit-request abort,
         ! which this path cannot reach because it passes no request.
         nt = hpx_threads(n=n, what="pf_healpix_threads")
-    end procedure pf_healpix_threads
+    end procedure hpx_threads_n64
+
+    module procedure hpx_threads_n32
+        ! Widening cannot overflow, so this specific exists only so that a default integer literal
+        ! resolves -- `pf_healpix_threads(1000)` rather than `pf_healpix_threads(1000_int64)`.
+        nt = hpx_threads(n=int(n, int64), what="pf_healpix_threads")
+    end procedure hpx_threads_n32
 
     module procedure hpx_threads
         integer :: n_req

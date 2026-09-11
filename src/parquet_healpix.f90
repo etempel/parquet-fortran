@@ -1734,6 +1734,19 @@ module parquet_healpix
         module procedure hpx_vec2ang_bulk
     end interface pf_vec2ang_bulk
 
+    !> Threads a bulk call over `n` elements would open, after every rule and the affinity clamp.
+    !!
+    !! The whole resolution in one call: this tier's work rule (one thread per thousand elements),
+    !! the `healpix_threads` cap, the measured ceiling, the CPU affinity mask, and the rule that a
+    !! call already inside an OpenMP parallel region runs serially. `1` means serial.
+    !!
+    !! **It answers for the context you ask from**, so calling it inside a parallel region correctly
+    !! reports 1. A build without OpenMP always reports 1. `n` takes either integer kind.
+    interface pf_healpix_threads
+        module procedure hpx_threads_n32
+        module procedure hpx_threads_n64
+    end interface pf_healpix_threads
+
     ! ---- Interfaces: Tier B bulk forms ----
     !
     ! Implemented in submodule parquet_healpix_bulk, the only file in this tier containing an
@@ -1876,18 +1889,17 @@ module parquet_healpix
             integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
         end subroutine hpx_vec2ang_bulk
 
-        !> Threads a bulk call over `n` elements would open, after every rule and the affinity clamp.
-        !>
-        !> The whole resolution in one call: this tier's work rule (one thread per thousand
-        !> elements), the `healpix_threads` cap, the measured ceiling, the CPU affinity mask, and the
-        !> rule that a call already inside an OpenMP parallel region runs serially. `1` means serial.
-        !>
-        !> **It answers for the context you ask from**, so calling it inside a parallel region
-        !> correctly reports 1. A build without OpenMP always reports 1.
-        module function pf_healpix_threads(n) result(nt)
+        !> `pf_healpix_threads` with an int32 element count. See the generic.
+        module function hpx_threads_n32(n) result(nt)
+            integer(int32), intent(in) :: n !! elements the bulk call would process.
+            integer :: nt !! threads that call would open; 1 means serially.
+        end function hpx_threads_n32
+
+        !> `pf_healpix_threads` with an int64 element count. See the generic.
+        module function hpx_threads_n64(n) result(nt)
             integer(int64), intent(in) :: n !! elements the bulk call would process.
             integer :: nt !! threads that call would open; 1 means serially.
-        end function pf_healpix_threads
+        end function hpx_threads_n64
 
         !> Threads to open for a bulk call of `n` elements, after every rule and the affinity clamp.
         module function hpx_threads(threads, n, what) result(nt)

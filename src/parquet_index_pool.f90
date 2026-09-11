@@ -86,11 +86,26 @@ contains
         !$omp end critical (pf_index_pool_guard)
     end procedure pool_is_used_i64
 
-    module procedure pool_used_indexes
+    module procedure pool_used_indexes_i64
         !$omp critical (pf_index_pool_guard)
         call pool_used_list(self, list)
         !$omp end critical (pf_index_pool_guard)
-    end procedure pool_used_indexes
+    end procedure pool_used_indexes_i64
+
+    module procedure pool_used_indexes_i32
+        integer(int64), allocatable :: wide(:)
+
+        ! The whole read happens under the guard, watermark check included: the pool is documented
+        ! safe to mutate from several threads, so a check taken outside it could be answered about
+        ! a different pool than the list.
+        !$omp critical (pf_index_pool_guard)
+        call pool_used_list(self, wide)
+        if (self%max_used > int(huge(0_int32), int64)) call ix_abort("pf_index_pool%used_indexes" // &
+            ": an index is too large for an int32 answer; take the list as int64")
+        allocate(list(size(wide, kind=int64)))
+        list = int(wide, int32)
+        !$omp end critical (pf_index_pool_guard)
+    end procedure pool_used_indexes_i32
 
     module procedure pool_compact
         !$omp critical (pf_index_pool_guard)

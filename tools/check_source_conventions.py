@@ -5140,6 +5140,51 @@ def check_join_specifics_forward_every_argument():
     return problems
 
 
+
+def check_spatial_kind_specifics_forward_every_argument():
+    """Every kind-carrying `pf_spatial_index` specific passes on every argument it takes.
+
+    The `int32` and `int64` forms of `%pairs_within`, `%all_within`, `%count_all_within` and their
+    sky and line-of-sight siblings differ in no BEHAVIOUR: each is a forward onto one bulk worker,
+    or onto a shared `_impl` that forwards again. An argument dropped from one of those lists is
+    the hardest defect in the area to see -- `combine=`, `r_inner=` and `sorted=` all change the
+    ANSWER rather than aborting, so a specific that silently drops one still returns a plausible
+    list, and only the sibling kind would have disagreed. There are two dozen forwarding sites and
+    the parity tests compare one fixture each, so covering every optional by fixture is not
+    proportionate; comparing each forward against its own argument list is, and it does not go
+    stale because both sides are read out of the source.
+    """
+    path = SRC / "parquet_spatial.f90"
+    if not path.exists():
+        return ["%s: not found -- this check needs updating" % path]
+    text = path.read_text()
+    wanted = re.compile(r"^(?:bind_(?:pairs|all|count)_\w+|components_\w+|\w+_impl)$")
+    problems = []
+    found = 0
+    for m in re.finditer(r"^    subroutine ([a-z0-9_]+)\(([^)]*(?:&\s*\n\s*[^)]*)*)\)\n"
+                         r"(.*?)^    end subroutine \1$", text, re.S | re.M):
+        name, arglist, body = m.group(1), m.group(2), m.group(3)
+        if not wanted.match(name):
+            continue
+        found += 1
+        args = [a.strip() for a in re.sub(r"&\s*\n\s*", "", arglist).split(",") if a.strip()]
+        # The executable part only: a dummy named in its own declaration proves nothing.
+        # The executable part starts after the blank line that closes the declarations.
+        parts = body.split("\n\n", 1)
+        exec_part = parts[1] if len(parts) > 1 else ""
+        for dummy in args:
+            if dummy == "self":
+                continue          # passed positionally, and checked by the compiler
+            if not re.search(r"\b%s\b" % re.escape(dummy), exec_part):
+                problems.append("src/parquet_spatial.f90: %s takes `%s` and never uses it -- an "
+                                "argument dropped from a kind specific is silent, see this "
+                                "check's docstring" % (name, dummy))
+    if found < 20:
+        problems.append("src/parquet_spatial.f90: matched only %d kind-carrying specifics -- this "
+                        "check has gone blind" % found)
+    return problems
+
+
 def check_index_map_components_are_adopted_and_reset():
     """`ix_adopt` moves and `ix_reset_storage` releases EVERY component of `pf_index_map`.
 
@@ -5830,6 +5875,8 @@ CHECKS = (
      check_view_call_sites_declare_target),
     ("every %join specific forwards every argument it takes",
      check_join_specifics_forward_every_argument),
+    ("every kind-carrying spatial specific forwards every argument it takes",
+     check_spatial_kind_specifics_forward_every_argument),
     ("every filter operator is handled at every consuming site",
      check_filter_operators_are_handled_everywhere),
 )

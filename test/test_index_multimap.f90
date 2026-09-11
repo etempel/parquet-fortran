@@ -53,6 +53,8 @@ contains
             new_unittest("get_many answers the group id per key", test_mm_get_many_groups), &
             new_unittest("composite keys group by the whole tuple", test_mm_composite), &
             new_unittest("int32 and int64 entry points answer alike", test_mm_int32_forms), &
+            new_unittest("csr and keys answer the same arrays in int32 as in int64", &
+                test_mm_csr_and_keys_int32), &
             new_unittest("an empty build and an all-equal key array are valid", test_mm_empty_and_all_equal), &
             new_unittest("explicit values are stored in position order", test_mm_explicit_values), &
             new_unittest("get_range and csr describe the same ranges", test_mm_get_range_and_csr), &
@@ -740,6 +742,48 @@ contains
         call check(error, b%count([keys(5), mod(keys(5), 3_int64)]) >= 1_int64, &
             "fixture: the looked-up tuple is present")
     end subroutine test_mm_int32_forms
+
+    !> `%csr` and `%keys` answer the same arrays in `int32` as in `int64`.
+    subroutine test_mm_csr_and_keys_int32(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_multimap) :: mm
+        integer(int64) :: keys(300), vals(300), pairs(300, 2), i
+        integer(int64), allocatable :: off64(:), rows64(:), k64(:), t64(:,:)
+        integer(int32), allocatable :: off32(:), rows32(:), k32(:), t32(:,:)
+
+        call fill_repeating_keys(keys, 40_int64, 3_int64, 15_int64, 4242_int64)
+        do i = 1_int64, 300_int64
+            vals(i) = i
+        end do
+        call mm%build(keys, vals, method="sorted")
+        call mm%csr(off64, rows64)
+        call mm%csr(off32, rows32)
+        call check(error, size(off64, kind=int64) > 1_int64, "the csr fixture must hold some groups")
+        if (allocated(error)) return
+        call check(error, size(off32, kind=int64) == size(off64, kind=int64) .and. &
+                   size(rows32, kind=int64) == size(rows64, kind=int64), &
+            "csr must answer the same shape in both kinds")
+        if (allocated(error)) return
+        call check(error, all(int(off32, kind=int64) == off64) .and. all(int(rows32, kind=int64) == rows64), &
+            "csr must answer the same offsets and rows in both kinds")
+        if (allocated(error)) return
+        call mm%keys(k64)
+        call mm%keys(k32)
+        call check(error, size(k32, kind=int64) == size(k64, kind=int64) .and. all(int(k32, kind=int64) == k64), &
+            "keys must answer the same keys in both kinds")
+        if (allocated(error)) return
+        ! A composite multimap, whose keys come back rank 2, and negative components with them.
+        call mm%clear()
+        do i = 1_int64, 300_int64
+            pairs(i, 1) = mod(i, 7_int64) - 3_int64
+            pairs(i, 2) = mod(i, 5_int64)
+        end do
+        call mm%build(pairs, vals, method="hash")
+        call mm%keys(t64)
+        call mm%keys(t32)
+        call check(error, all(shape(t32) == shape(t64)) .and. all(int(t32, kind=int64) == t64), &
+            "the rank-2 keys form must answer the same tuples in both kinds")
+    end subroutine test_mm_csr_and_keys_int32
 
     !> A zero-key build is valid on every backend, and an all-equal key array is one group.
     subroutine test_mm_empty_and_all_equal(error)

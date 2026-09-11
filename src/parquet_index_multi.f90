@@ -947,7 +947,7 @@ contains
     ! Introspection. Read-only, so unguarded like the lookups.
     ! ============================================================================================
 
-    module procedure mm_csr
+    module procedure mm_csr_i64
         if (allocated(self%goff)) then
             offsets = self%goff
             rows = self%grows
@@ -956,7 +956,27 @@ contains
             offsets(1) = 1_int64
             allocate(rows(0))
         end if
-    end procedure mm_csr
+    end procedure mm_csr_i64
+
+    module procedure mm_csr_i32
+        ! Both checks up front, against the two DIFFERENT quantities the two arrays are bounded by
+        ! -- see the interface. `pure`, so the aborts are bare `error stop` rather than `ix_abort`;
+        ! a pure procedure may not contain the OpenMP critical that reporter carries.
+        if (self%vmax > int(huge(0_int32), int64)) error stop "pf_index_multimap%csr" // &
+            ": a stored value is too large for an int32 answer; take it as int64"
+        if (self%nr + 1_int64 > int(huge(0_int32), int64)) error stop "pf_index_multimap%csr" // &
+            ": more rows are stored than an int32 offset can name; take the offsets as int64"
+        if (allocated(self%goff)) then
+            allocate(offsets(size(self%goff, kind=int64)))
+            offsets = int(self%goff, int32)
+            allocate(rows(size(self%grows, kind=int64)))
+            rows = int(self%grows, int32)
+        else
+            allocate(offsets(1))
+            offsets(1) = 1_int32
+            allocate(rows(0))
+        end if
+    end procedure mm_csr_i32
 
     module procedure mm_ngroups
         n = self%ng
@@ -1032,6 +1052,40 @@ contains
         if (self%map%nk == 0_int64) return
         call ix_collect_keys(self%map, list)
     end procedure mm_keys_r2
+
+    ! The two int32 forms repeat their int64 siblings' bodies for the reason stated above: a call
+    ! passing `self%map` to a `class(pf_index_map)` dummy beside an allocatable `intent(out)` is
+    ! the gfortran 15.2 ICE, and delegating to `map_keys_r1_i32` would be exactly that call.
+    module procedure mm_keys_r1_i32
+        integer(int64), allocatable :: pairs(:,:)
+
+        if (self%map%is_str) error stop MM // "keys: this multimap holds string keys; " // &
+            "ask for a parquet_string_column"
+        if (self%map%ncomp > 1) error stop MM // "keys: this multimap has composite keys; " // &
+            "ask for a rank-2 list"
+        allocate(list(self%map%nk))
+        if (self%map%nk == 0_int64) return
+        allocate(pairs(self%map%nk, 1))
+        call ix_collect_keys(self%map, pairs)
+        call ix_keys_fit_i32(minval(pairs(:, 1)), maxval(pairs(:, 1)), MM // "keys")
+        list = int(pairs(:, 1), int32)
+    end procedure mm_keys_r1_i32
+
+    module procedure mm_keys_r2_i32
+        integer(int64), allocatable :: pairs(:,:)
+        integer :: nc
+
+        if (self%map%is_str) error stop MM // "keys: this multimap holds string keys; " // &
+            "ask for a parquet_string_column"
+        nc = self%map%ncomp
+        if (nc < 1) nc = 1
+        allocate(list(self%map%nk, nc))
+        if (self%map%nk == 0_int64) return
+        allocate(pairs(self%map%nk, nc))
+        call ix_collect_keys(self%map, pairs)
+        call ix_keys_fit_i32(minval(pairs), maxval(pairs), MM // "keys")
+        list = int(pairs, int32)
+    end procedure mm_keys_r2_i32
 
     ! ============================================================================================
     ! The debug hook

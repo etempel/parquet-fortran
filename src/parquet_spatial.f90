@@ -82,6 +82,7 @@ module parquet_spatial
     public :: parquet_debug_set_spatial_los_walk
     public :: parquet_debug_set_spatial_los_spread
     public :: parquet_debug_spatial_los_walk
+    public :: parquet_debug_set_spatial_int32_ceiling
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -111,6 +112,8 @@ module parquet_spatial
     interface pf_connected_components
         module procedure components_n32
         module procedure components_n64
+        module procedure components_k32_n32
+        module procedure components_k32_n64
     end interface pf_connected_components
 
     ! ---- Metric identifiers ----
@@ -368,7 +371,10 @@ module parquet_spatial
         procedure :: cell_size => bind_cell_size !! The cell side chosen, ready to pass back as `cell=`.
         procedure :: cells => bind_cells !! How many cells the grid has.
         procedure :: cell_sides => bind_cell_sides !! The cell side per axis, as the grid uses it.
-        procedure :: grid => bind_grid !! Cells along each axis.
+        procedure, private :: bind_grid_i32 !! %grid into int32 cell counts.
+        procedure, private :: bind_grid_i64 !! %grid into int64 cell counts.
+        !> Cells along each axis, in the kind of the arguments: `call sx%grid(nx, ny, nz)`.
+        generic :: grid => bind_grid_i32, bind_grid_i64
         procedure :: metric => bind_metric !! PF_METRIC_EUCLIDEAN or PF_METRIC_SKY.
         procedure :: backend => bind_backend !! PF_SKY_GRID3D or PF_SKY_HEALPIX.
         procedure :: nside => bind_nside !! HEALPix resolution parameter, or 0 on a 3D-grid index.
@@ -408,14 +414,20 @@ module parquet_spatial
         !! DIRECTED: row `i`'s list holds the points within `radius(i)` of it, so a per-point
         !! radius gives a list that is deliberately not symmetric. `%pairs_within` is the
         !! symmetric one.
-        generic :: all_within => bind_all_within_r0, bind_all_within_r1
+        procedure, private :: bind_all_within_r0_i32 !! %all_within, one radius, int32 answer.
+        procedure, private :: bind_all_within_r1_i32 !! %all_within, radius per point, int32 answer.
+        generic :: all_within => bind_all_within_r0, bind_all_within_r1, &
+            bind_all_within_r0_i32, bind_all_within_r1_i32
         procedure, private :: bind_pairs_within_r0 !! %pairs_within with one radius.
         procedure, private :: bind_pairs_within_r1 !! %pairs_within with one radius per point.
         !> Every neighbouring pair once, as two parallel index arrays with `i < j`.
         !!
         !! SYMMETRIC: a pair qualifies when EITHER ball reaches the other, `d <= max(r_i, r_j)`,
         !! so it does not matter which endpoint would have been doing the searching.
-        generic :: pairs_within => bind_pairs_within_r0, bind_pairs_within_r1
+        procedure, private :: bind_pairs_within_r0_i32 !! %pairs_within, one radius, int32 answer.
+        procedure, private :: bind_pairs_within_r1_i32 !! %pairs_within, radius per point, int32 answer.
+        generic :: pairs_within => bind_pairs_within_r0, bind_pairs_within_r1, &
+            bind_pairs_within_r0_i32, bind_pairs_within_r1_i32
         procedure, private :: bind_within_los_i32 !! %within_los into an int32 buffer.
         procedure, private :: bind_within_los_i64 !! %within_los into an int64 buffer.
         !> Points inside the cylinder about `p` along its own line of sight from the observer: a
@@ -427,26 +439,41 @@ module parquet_spatial
         !> Every pair once, with `i < j`, whose transverse and parallel separations along the line
         !! of sight from the observer both fall inside what the `combine=` rule makes of the two
         !! points' lengths.
-        generic :: pairs_within_los => bind_pairs_los_r0, bind_pairs_los_r1
+        procedure, private :: bind_pairs_los_r0_i32 !! %pairs_within_los, one pair of lengths, int32.
+        procedure, private :: bind_pairs_los_r1_i32 !! %pairs_within_los, lengths per point, int32.
+        generic :: pairs_within_los => bind_pairs_los_r0, bind_pairs_los_r1, &
+            bind_pairs_los_r0_i32, bind_pairs_los_r1_i32
         procedure, private :: bind_count_all_r0 !! %count_all_within with one radius.
         procedure, private :: bind_count_all_r1 !! %count_all_within with one radius per point.
         !> How many neighbours each point has, without materialising them.
         !!
         !! DIRECTED, exactly as `%all_within` -- it is that query's row lengths. Do NOT use it to
         !! size a `%pairs_within` result: the two count different things under a per-point radius.
-        generic :: count_all_within => bind_count_all_r0, bind_count_all_r1
+        procedure, private :: bind_count_all_r0_i32 !! %count_all_within, one radius, int32 answer.
+        procedure, private :: bind_count_all_r1_i32 !! %count_all_within, radius per point, int32 answer.
+        generic :: count_all_within => bind_count_all_r0, bind_count_all_r1, &
+            bind_count_all_r0_i32, bind_count_all_r1_i32
         procedure, private :: bind_all_sky_r0 !! %all_within_sky with one angular radius.
         procedure, private :: bind_all_sky_r1 !! %all_within_sky with one angular radius per point.
         !> Every point's neighbours on the sky, as one CSR structure. Radii in degrees.
-        generic :: all_within_sky => bind_all_sky_r0, bind_all_sky_r1
+        procedure, private :: bind_all_sky_r0_i32 !! %all_within_sky, one radius, int32 answer.
+        procedure, private :: bind_all_sky_r1_i32 !! %all_within_sky, radius per point, int32 answer.
+        generic :: all_within_sky => bind_all_sky_r0, bind_all_sky_r1, &
+            bind_all_sky_r0_i32, bind_all_sky_r1_i32
         procedure, private :: bind_pairs_sky_r0 !! %pairs_within_sky with one angular radius.
         procedure, private :: bind_pairs_sky_r1 !! %pairs_within_sky with one angular radius per point.
         !> Every neighbouring pair on the sky once, with `i < j`. Radii in degrees.
-        generic :: pairs_within_sky => bind_pairs_sky_r0, bind_pairs_sky_r1
+        procedure, private :: bind_pairs_sky_r0_i32 !! %pairs_within_sky, one radius, int32 answer.
+        procedure, private :: bind_pairs_sky_r1_i32 !! %pairs_within_sky, radius per point, int32 answer.
+        generic :: pairs_within_sky => bind_pairs_sky_r0, bind_pairs_sky_r1, &
+            bind_pairs_sky_r0_i32, bind_pairs_sky_r1_i32
         procedure, private :: bind_count_all_sky_r0 !! %count_all_within_sky with one angular radius.
         procedure, private :: bind_count_all_sky_r1 !! %count_all_within_sky with one per point.
         !> How many neighbours each point has on the sky. Radii in degrees.
-        generic :: count_all_within_sky => bind_count_all_sky_r0, bind_count_all_sky_r1
+        procedure, private :: bind_count_all_sky_r0_i32 !! %count_all_within_sky, one radius, int32 answer.
+        procedure, private :: bind_count_all_sky_r1_i32 !! %count_all_within_sky, radius per point, int32 answer.
+        generic :: count_all_within_sky => bind_count_all_sky_r0, bind_count_all_sky_r1, &
+            bind_count_all_sky_r0_i32, bind_count_all_sky_r1_i32
         procedure, private :: bind_near_k32_i32 !! %nearest, int32 k, int32 buffer.
         procedure, private :: bind_near_k32_i64 !! %nearest, int32 k, int64 buffer.
         procedure, private :: bind_near_k64_i32 !! %nearest, int64 k, int32 buffer.
@@ -475,6 +502,13 @@ module parquet_spatial
 
     !> Cell size forced by `parquet_debug_set_spatial_cell`; <= 0 means "not forced".
     real(real64), save :: dbg_cell = -1.0_real64
+    !> The `int32` ceiling every guard in this module compares against; <= 0 means the real
+    !! `huge(0_int32)`.
+    !!
+    !! Forced by `parquet_debug_set_spatial_int32_ceiling`, and the only way to reach any of those
+    !! guards at a fixture size: every one of them needs an index of more than two billion points,
+    !! or a neighbour list that long, to fire on its own.
+    integer(int64), save :: dbg_int32_ceiling = 0_int64
     !> How many candidates the most recent tuning run evaluated. 0 means the probe did not run.
     integer(int64), save :: dbg_probe_count = 0_int64
     !> How many automatic rebuilds have happened since the counters were reset.
@@ -545,6 +579,44 @@ module parquet_spatial
             character(len=*), intent(in) :: what !! the entry point's name, for the message.
             character(len=*), intent(in) :: argname !! what the values are, for the message.
         end subroutine spatial_check_finite
+
+        !> The largest value an `int32` answer from this module may carry.
+        !!
+        !! **The one home for the number.** Every `int32` guard here reads it rather than writing
+        !! `huge(0_int32)` itself, which is what makes all of them reachable at fixture size through
+        !! `parquet_debug_set_spatial_int32_ceiling`.
+        module function spatial_int32_ceiling() result(cap)
+            integer(int64) :: cap !! the ceiling in force; `huge(0_int32)` unless a test lowered it.
+        end function spatial_int32_ceiling
+
+        !> Refuses an `int32` answer over an index this call cannot name in `int32`.
+        !!
+        !! **Called once per call, before anything is allocated or written**, so a bulk answer never
+        !! fails half-way through its array. Impure on purpose: a `pure` guard-only subroutine's
+        !! call is deleted by ifx at `-O0` (`api-conventions.md`).
+        module subroutine spatial_check_rows_i32(n, what)
+            integer(int64), intent(in) :: n !! the largest row index this call could report.
+            character(len=*), intent(in) :: what !! the entry point's full name, for the message.
+        end subroutine spatial_check_rows_i32
+
+        !> Refuses an `int32` CSR offset array over a neighbour list this call cannot index.
+        !!
+        !! **A different quantity from `spatial_check_rows_i32`'s, and that is the whole point**:
+        !! `offsets` accumulates to the total number of neighbours and passes `huge(0_int32)` long
+        !! before any row index does, so guarding it on the row count would wrap silently
+        !! (`feature_risks.md`). Impure, for the reason above.
+        module subroutine spatial_check_total_i32(total, what)
+            integer(int64), intent(in) :: total !! entries the neighbour list will hold.
+            character(len=*), intent(in) :: what !! the entry point's full name, for the message.
+        end subroutine spatial_check_total_i32
+
+        !> Narrows one scalar to `int32`, or aborts naming it. Impure, for the reason above.
+        module subroutine spatial_fit_i32(value, what, noun, out)
+            integer(int64), intent(in) :: value !! the quantity to narrow.
+            character(len=*), intent(in) :: what !! the entry point's full name, for the message.
+            character(len=*), intent(in) :: noun !! what the quantity is, for the message.
+            integer(int32), intent(out) :: out !! the narrowed value.
+        end subroutine spatial_fit_i32
     end interface
 
     ! ---- Build, rebuild and the grid itself (parquet_spatial_build.f90) ----
@@ -999,27 +1071,32 @@ module parquet_spatial
 
     interface
         !> Every point's neighbours as CSR: row `i` occupies `neighbours(offsets(i):offsets(i+1)-1)`.
-        module subroutine spatial_all_within_worker(self, radii, offsets, neighbours, expect_metric, &
-            threads, radii_inner, sorted)
+        module subroutine spatial_all_within_worker(self, radii, expect_metric, what, &
+            offsets32, neighbours32, offsets64, neighbours64, threads, radii_inner, sorted)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
-            integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
-            integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
+            character(len=*), intent(in) :: what !! the calling binding, for any message.
+            integer(int32), allocatable, intent(out), optional :: offsets32(:) !! length n+1, int32.
+            integer(int32), allocatable, intent(out), optional :: neighbours32(:) !! the lists, int32.
+            integer(int64), allocatable, intent(out), optional :: offsets64(:) !! length n+1, int64.
+            integer(int64), allocatable, intent(out), optional :: neighbours64(:) !! the lists, int64.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
             real(real64), intent(in), optional :: radii_inner(:) !! inner radii, making each ball an annulus.
             logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
         end subroutine spatial_all_within_worker
 
         !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
-        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, expect_metric, what, &
-            threads, r_inner, combine)
+        module subroutine spatial_pairs_within_worker(self, radii, expect_metric, what, &
+            ii32, jj32, ii64, jj64, threads, r_inner, combine)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
-            integer(int64), allocatable, intent(out) :: ii(:) !! the lower row index of each pair.
-            integer(int64), allocatable, intent(out) :: jj(:) !! the higher row index of each pair.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             character(len=*), intent(in) :: what !! the calling binding, for any message.
+            integer(int32), allocatable, intent(out), optional :: ii32(:) !! lower row of each pair, int32.
+            integer(int32), allocatable, intent(out), optional :: jj32(:) !! higher row of each pair, int32.
+            integer(int64), allocatable, intent(out), optional :: ii64(:) !! lower row of each pair, int64.
+            integer(int64), allocatable, intent(out), optional :: jj64(:) !! higher row of each pair, int64.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
             real(real64), intent(in), optional :: r_inner !! an inner radius; SCALAR only, see the worker.
             integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
@@ -1048,11 +1125,14 @@ module parquet_spatial
         end subroutine spatial_link_terms
 
         !> How many neighbours each point has, in the caller's row order.
-        module subroutine spatial_count_all_worker(self, radii, counts, expect_metric, threads, radii_inner)
+        module subroutine spatial_count_all_worker(self, radii, expect_metric, what, counts32, counts64, &
+            threads, radii_inner)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
-            integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
+            character(len=*), intent(in) :: what !! the calling binding, for any message.
+            integer(int32), allocatable, intent(out), optional :: counts32(:) !! length n, int32.
+            integer(int64), allocatable, intent(out), optional :: counts64(:) !! length n, int64.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
             real(real64), intent(in), optional :: radii_inner(:) !! inner radii, making each ball an annulus.
         end subroutine spatial_count_all_worker
@@ -1067,14 +1147,20 @@ module parquet_spatial
         end subroutine spatial_kth_worker
 
         !> Labels the connected components of an undirected graph given as an edge list.
-        module subroutine spatial_components_worker(i, j, nvert, labels, ncomp, sizes, min_size)
-            integer(int64), intent(in) :: i(:) !! one endpoint of each edge.
-            integer(int64), intent(in) :: j(:) !! the other endpoint of each edge.
+        module subroutine spatial_components_worker(nvert, min_size, i32, j32, labels32, ncomp32, sizes32, &
+            i64, j64, labels64, ncomp64, sizes64)
             integer(int64), intent(in) :: nvert !! how many vertices the graph has.
-            integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
-            integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
-            integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
             integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
+            integer(int32), intent(in), optional :: i32(:) !! one endpoint of each edge, int32 arm.
+            integer(int32), intent(in), optional :: j32(:) !! the other endpoint of each edge, int32 arm.
+            integer(int32), allocatable, intent(out), optional :: labels32(:) !! length nvert, int32 arm.
+            integer(int32), intent(out), optional :: ncomp32 !! how many components earned a label, int32.
+            integer(int32), allocatable, intent(out), optional :: sizes32(:) !! length ncomp, int32 arm.
+            integer(int64), intent(in), optional :: i64(:) !! one endpoint of each edge, int64 arm.
+            integer(int64), intent(in), optional :: j64(:) !! the other endpoint of each edge, int64 arm.
+            integer(int64), allocatable, intent(out), optional :: labels64(:) !! length nvert, int64 arm.
+            integer(int64), intent(out), optional :: ncomp64 !! how many components earned a label, int64.
+            integer(int64), allocatable, intent(out), optional :: sizes64(:) !! length ncomp, int64 arm.
         end subroutine spatial_components_worker
 
         !> Rebuilds `self` when `radii` would choose a cell more than `spatial_rebuild_factor` from
@@ -1122,14 +1208,16 @@ module parquet_spatial
         end subroutine spatial_los_prepare
 
         !> Every pair inside the line-of-sight cylinder the rule builds, exactly once, `i < j`.
-        module subroutine spatial_pairs_los_worker(self, b_perp, b_par, ii, jj, what, threads, combine, &
-                                                  dperp, dpar)
+        module subroutine spatial_pairs_los_worker(self, b_perp, b_par, what, ii32, jj32, ii64, jj64, &
+                                                  threads, combine, dperp, dpar)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: b_perp(:) !! one transverse length, or one per point, in the coordinates' units.
             real(real64), intent(in) :: b_par(:) !! one parallel length, or one per point, in `los`'s units.
-            integer(int64), allocatable, intent(out) :: ii(:) !! the lower row index of each pair.
-            integer(int64), allocatable, intent(out) :: jj(:) !! the higher row index of each pair.
             character(len=*), intent(in) :: what !! the calling binding, for any message.
+            integer(int32), allocatable, intent(out), optional :: ii32(:) !! lower row of each pair, int32.
+            integer(int32), allocatable, intent(out), optional :: jj32(:) !! higher row of each pair, int32.
+            integer(int64), allocatable, intent(out), optional :: ii64(:) !! lower row of each pair, int64.
+            integer(int64), allocatable, intent(out), optional :: jj64(:) !! higher row of each pair, int64.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
             integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
             real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
@@ -1377,8 +1465,8 @@ contains
         cz = self%cell(3)
     end subroutine bind_cell_sides
 
-    !> Cells along each axis. A 2D index always reports `nz == 1`.
-    subroutine bind_grid(self, nx, ny, nz)
+    !> Cells along each axis, into `int64`. A 2D index always reports `nz == 1`.
+    subroutine bind_grid_i64(self, nx, ny, nz)
         class(pf_spatial_index), intent(in) :: self !! the index queried.
         integer(int64), intent(out) :: nx !! cells along x.
         integer(int64), intent(out) :: ny !! cells along y.
@@ -1387,7 +1475,23 @@ contains
         nx = self%grid_n(1)
         ny = self%grid_n(2)
         nz = self%grid_n(3)
-    end subroutine bind_grid
+    end subroutine bind_grid_i64
+
+    !> Cells along each axis, into `int32`. See `bind_grid_i64`.
+    !>
+    !> Aborts rather than truncating if an axis has more cells than an `int32` can name. Guarded
+    !> for one vocabulary rather than because it is reachable: the tuner's cell budget keeps every
+    !> axis far below that, and only `parquet_debug_set_spatial_int32_ceiling` brings it into view.
+    subroutine bind_grid_i32(self, nx, ny, nz)
+        class(pf_spatial_index), intent(in) :: self !! the index queried.
+        integer(int32), intent(out) :: nx !! cells along x.
+        integer(int32), intent(out) :: ny !! cells along y.
+        integer(int32), intent(out) :: nz !! cells along z; 1 for a 2D index.
+
+        call spatial_fit_i32(self%grid_n(1), "pf_spatial_index%grid", "cell count along x", nx)
+        call spatial_fit_i32(self%grid_n(2), "pf_spatial_index%grid", "cell count along y", ny)
+        call spatial_fit_i32(self%grid_n(3), "pf_spatial_index%grid", "cell count along z", nz)
+    end subroutine bind_grid_i32
 
     !> `PF_METRIC_EUCLIDEAN` or `PF_METRIC_SKY`.
     integer function bind_metric(self) result(m)
@@ -1881,13 +1985,37 @@ contains
         logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
 
         if (present(r_inner)) then
-            call spatial_all_within_worker(self, [radius], offsets, neighbours, PF_METRIC_EUCLIDEAN, &
-                threads, radii_inner=[r_inner], sorted=sorted)
+            call spatial_all_within_worker(self, [radius], PF_METRIC_EUCLIDEAN, "all_within", &
+                offsets64=offsets, neighbours64=neighbours, threads=threads, radii_inner=[r_inner], sorted=sorted)
         else
-            call spatial_all_within_worker(self, [radius], offsets, neighbours, PF_METRIC_EUCLIDEAN, &
-                threads, sorted=sorted)
+            call spatial_all_within_worker(self, [radius], PF_METRIC_EUCLIDEAN, "all_within", &
+                offsets64=offsets, neighbours64=neighbours, threads=threads, sorted=sorted)
         end if
     end subroutine bind_all_within_r0
+
+    !> `%all_within` with one radius, into `int32` arrays. See `bind_all_within_r0`.
+    !>
+    !> **Two different ceilings, both checked before anything is allocated.** A neighbour is a row
+    !> of this index, so `neighbours` is bounded by the row count; `offsets` accumulates to the
+    !> LENGTH of the neighbour list and passes `huge(int32)` long before any row index does. Either
+    !> one aborts, naming which it was.
+    subroutine bind_all_within_r0_i32(self, radius, offsets, neighbours, threads, r_inner, sorted)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: radius !! the search radius, the same for every point.
+        integer(int32), allocatable, intent(out) :: offsets(:) !! length n+1; `offsets(1) == 1`.
+        integer(int32), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! one inner radius for every point.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
+
+        if (present(r_inner)) then
+            call spatial_all_within_worker(self, [radius], PF_METRIC_EUCLIDEAN, "all_within", &
+                offsets32=offsets, neighbours32=neighbours, threads=threads, radii_inner=[r_inner], sorted=sorted)
+        else
+            call spatial_all_within_worker(self, [radius], PF_METRIC_EUCLIDEAN, "all_within", &
+                offsets32=offsets, neighbours32=neighbours, threads=threads, sorted=sorted)
+        end if
+    end subroutine bind_all_within_r0_i32
 
     !> `%all_within` with an independent radius per point.
     !>
@@ -1905,9 +2033,24 @@ contains
         real(real64), intent(in), optional :: r_inner(:) !! inner radii; one value or one per point.
         logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
 
-        call spatial_all_within_worker(self, radius, offsets, neighbours, PF_METRIC_EUCLIDEAN, &
-            threads, radii_inner=r_inner, sorted=sorted)
+        call spatial_all_within_worker(self, radius, PF_METRIC_EUCLIDEAN, "all_within", &
+            offsets64=offsets, neighbours64=neighbours, threads=threads, radii_inner=r_inner, sorted=sorted)
     end subroutine bind_all_within_r1
+
+    !> `%all_within` with a radius per point, into `int32` arrays. See `bind_all_within_r1` for the
+    !> query and `bind_all_within_r0_i32` for the two ceilings an `int32` answer is checked against.
+    subroutine bind_all_within_r1_i32(self, radius, offsets, neighbours, threads, r_inner, sorted)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
+        integer(int32), allocatable, intent(out) :: offsets(:) !! length n+1; `offsets(1) == 1`.
+        integer(int32), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner(:) !! inner radii; one value or one per point.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
+
+        call spatial_all_within_worker(self, radius, PF_METRIC_EUCLIDEAN, "all_within", &
+            offsets32=offsets, neighbours32=neighbours, threads=threads, radii_inner=r_inner, sorted=sorted)
+    end subroutine bind_all_within_r1_i32
 
     !> `%pairs_within` with one radius for every point.
     !>
@@ -1926,9 +2069,26 @@ contains
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner !! an inner radius; pairs closer than this are dropped.
 
-        call spatial_pairs_within_worker(self, [radius], i, j, PF_METRIC_EUCLIDEAN, "pairs_within", &
-            threads, r_inner)
+        call spatial_pairs_within_worker(self, [radius], PF_METRIC_EUCLIDEAN, "pairs_within", &
+            ii64=i, jj64=j, threads=threads, r_inner=r_inner)
     end subroutine bind_pairs_within_r0
+
+    !> `%pairs_within` with one radius, into `int32` arrays. See `bind_pairs_within_r0`.
+    !>
+    !> **Halves what the pair list costs**, which on a Friends-of-Friends run is the largest array
+    !> held. Aborts before anything is allocated if the index holds more rows than an `int32` can
+    !> name; the pair COUNT is not the constrained quantity and may exceed it freely.
+    subroutine bind_pairs_within_r0_i32(self, radius, i, j, threads, r_inner)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: radius !! the search radius, the same for every point.
+        integer(int32), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int32), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! an inner radius; pairs closer than this are dropped.
+
+        call spatial_pairs_within_worker(self, [radius], PF_METRIC_EUCLIDEAN, "pairs_within", &
+            ii32=i, jj32=j, threads=threads, r_inner=r_inner)
+    end subroutine bind_pairs_within_r0_i32
 
     !> `%pairs_within` with an independent radius per point.
     !>
@@ -1971,9 +2131,26 @@ contains
         real(real64), intent(in), optional :: r_inner !! one inner radius for every pair; scalar only.
         integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
 
-        call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, "pairs_within", &
-            threads, r_inner, combine)
+        call spatial_pairs_within_worker(self, radius, PF_METRIC_EUCLIDEAN, "pairs_within", &
+            ii64=i, jj64=j, threads=threads, r_inner=r_inner, combine=combine)
     end subroutine bind_pairs_within_r1
+
+    !> `%pairs_within` with a radius per point, into `int32` arrays. See `bind_pairs_within_r1`.
+    !>
+    !> Same rules, same `combine=`, same `r_inner=` constraint; see `bind_pairs_within_r0_i32` for
+    !> what the `int32` answer costs and refuses.
+    subroutine bind_pairs_within_r1_i32(self, radius, i, j, threads, r_inner, combine)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
+        integer(int32), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int32), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! one inner radius for every pair; scalar only.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
+
+        call spatial_pairs_within_worker(self, radius, PF_METRIC_EUCLIDEAN, "pairs_within", &
+            ii32=i, jj32=j, threads=threads, r_inner=r_inner, combine=combine)
+    end subroutine bind_pairs_within_r1_i32
 
     !> `%pairs_within_los` with one transverse and one parallel length for every point.
     !>
@@ -2017,9 +2194,25 @@ contains
         real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
         real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair, in `los`'s units.
 
-        call spatial_pairs_los_worker(self, [b_perp], [b_par], i, j, "pairs_within_los", threads, &
-            dperp=dperp, dpar=dpar)
+        call spatial_pairs_los_worker(self, [b_perp], [b_par], "pairs_within_los", ii64=i, jj64=j, &
+            threads=threads, dperp=dperp, dpar=dpar)
     end subroutine bind_pairs_los_r0
+
+    !> `%pairs_within_los` with one pair of lengths, into `int32` arrays. See `bind_pairs_los_r0`
+    !> for the query and `bind_pairs_within_r0_i32` for what the `int32` answer costs and refuses.
+    subroutine bind_pairs_los_r0_i32(self, b_perp, b_par, i, j, threads, dperp, dpar)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: b_perp !! the transverse radius, the same for every point; >= 0.
+        real(real64), intent(in) :: b_par !! the parallel half-length, the same for every point, in `los`'s units; >= 0.
+        integer(int32), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int32), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
+        real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair, in `los`'s units.
+
+        call spatial_pairs_los_worker(self, [b_perp], [b_par], "pairs_within_los", ii32=i, jj32=j, &
+            threads=threads, dperp=dperp, dpar=dpar)
+    end subroutine bind_pairs_los_r0_i32
 
     !> `%pairs_within_los` with an independent pair of lengths per point, in the caller's row order.
     !>
@@ -2051,9 +2244,26 @@ contains
         real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
         real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair, in `los`'s units.
 
-        call spatial_pairs_los_worker(self, b_perp, b_par, i, j, "pairs_within_los", threads, combine, &
-            dperp, dpar)
+        call spatial_pairs_los_worker(self, b_perp, b_par, "pairs_within_los", ii64=i, jj64=j, &
+            threads=threads, combine=combine, dperp=dperp, dpar=dpar)
     end subroutine bind_pairs_los_r1
+
+    !> `%pairs_within_los` with lengths per point, into `int32` arrays. See `bind_pairs_los_r1`
+    !> for the query and `bind_pairs_within_r0_i32` for what the `int32` answer costs and refuses.
+    subroutine bind_pairs_los_r1_i32(self, b_perp, b_par, i, j, combine, threads, dperp, dpar)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: b_perp(:) !! one transverse radius per point, in the coordinates' units; >= 0.
+        real(real64), intent(in) :: b_par(:) !! one parallel half-length per point, in `los`'s units; >= 0.
+        integer(int32), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int32), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`, the union.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), allocatable, intent(out), optional :: dperp(:) !! transverse separation per pair.
+        real(real64), allocatable, intent(out), optional :: dpar(:) !! parallel separation per pair, in `los`'s units.
+
+        call spatial_pairs_los_worker(self, b_perp, b_par, "pairs_within_los", ii32=i, jj32=j, &
+            threads=threads, combine=combine, dperp=dperp, dpar=dpar)
+    end subroutine bind_pairs_los_r1_i32
 
     !> `%count_all_within` with one radius for every point.
     subroutine bind_count_all_r0(self, radius, counts, threads, r_inner)
@@ -2064,11 +2274,33 @@ contains
         real(real64), intent(in), optional :: r_inner !! one inner radius for every point.
 
         if (present(r_inner)) then
-            call spatial_count_all_worker(self, [radius], counts, PF_METRIC_EUCLIDEAN, threads, [r_inner])
+            call spatial_count_all_worker(self, [radius], PF_METRIC_EUCLIDEAN, "count_all_within", &
+                counts64=counts, threads=threads, radii_inner=[r_inner])
         else
-            call spatial_count_all_worker(self, [radius], counts, PF_METRIC_EUCLIDEAN, threads)
+            call spatial_count_all_worker(self, [radius], PF_METRIC_EUCLIDEAN, "count_all_within", &
+                counts64=counts, threads=threads)
         end if
     end subroutine bind_count_all_r0
+
+    !> `%count_all_within` with one radius, into an `int32` array. See `bind_count_all_r0`.
+    !>
+    !> A neighbour count is bounded by the row count, so one comparison before anything is
+    !> allocated decides whether an `int32` answer can carry it.
+    subroutine bind_count_all_r0_i32(self, radius, counts, threads, r_inner)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: radius !! the search radius, the same for every point.
+        integer(int32), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! one inner radius for every point.
+
+        if (present(r_inner)) then
+            call spatial_count_all_worker(self, [radius], PF_METRIC_EUCLIDEAN, "count_all_within", &
+                counts32=counts, threads=threads, radii_inner=[r_inner])
+        else
+            call spatial_count_all_worker(self, [radius], PF_METRIC_EUCLIDEAN, "count_all_within", &
+                counts32=counts, threads=threads)
+        end if
+    end subroutine bind_count_all_r0_i32
 
     !> `%count_all_within` with an independent radius per point.
     subroutine bind_count_all_r1(self, radius, counts, threads, r_inner)
@@ -2078,8 +2310,22 @@ contains
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner(:) !! inner radii; one value or one per point.
 
-        call spatial_count_all_worker(self, radius, counts, PF_METRIC_EUCLIDEAN, threads, r_inner)
+        call spatial_count_all_worker(self, radius, PF_METRIC_EUCLIDEAN, "count_all_within", &
+            counts64=counts, threads=threads, radii_inner=r_inner)
     end subroutine bind_count_all_r1
+
+    !> `%count_all_within` with a radius per point, into an `int32` array. See `bind_count_all_r1`
+    !> for the query and `bind_count_all_r0_i32` for what the `int32` answer refuses.
+    subroutine bind_count_all_r1_i32(self, radius, counts, threads, r_inner)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
+        integer(int32), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner(:) !! inner radii; one value or one per point.
+
+        call spatial_count_all_worker(self, radius, PF_METRIC_EUCLIDEAN, "count_all_within", &
+            counts32=counts, threads=threads, radii_inner=r_inner)
+    end subroutine bind_count_all_r1_i32
 
     ! ---- Bulk queries on the sky ----
     !
@@ -2101,15 +2347,50 @@ contains
         real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
         logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
 
+        call all_sky_r0_impl(self, radius_deg, threads, r_inner_deg, sorted, offsets64=offsets, &
+            neighbours64=neighbours)
+    end subroutine bind_all_sky_r0
+
+    !> `%all_within_sky` with one angular radius, into `int32` arrays. See `bind_all_sky_r0` for
+    !> the query and `bind_all_within_r0_i32` for the two ceilings an `int32` answer is checked
+    !> against.
+    subroutine bind_all_sky_r0_i32(self, radius_deg, offsets, neighbours, threads, r_inner_deg, sorted)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer(int32), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
+        integer(int32), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
+
+        call all_sky_r0_impl(self, radius_deg, threads, r_inner_deg, sorted, offsets32=offsets, &
+            neighbours32=neighbours)
+    end subroutine bind_all_sky_r0_i32
+
+    !> The body both `%all_within_sky` single-radius specifics share.
+    subroutine all_sky_r0_impl(self, radius_deg, threads, r_inner_deg, sorted, offsets32, neighbours32, &
+                               offsets64, neighbours64)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
+        integer(int32), allocatable, intent(out), optional :: offsets32(:) !! length n+1, int32.
+        integer(int32), allocatable, intent(out), optional :: neighbours32(:) !! the lists, int32.
+        integer(int64), allocatable, intent(out), optional :: offsets64(:) !! length n+1, int64.
+        integer(int64), allocatable, intent(out), optional :: neighbours64(:) !! the lists, int64.
+
         if (present(r_inner_deg)) then
             call spatial_all_within_worker(self, sky_chords([radius_deg], "all_within_sky"), &
-                offsets, neighbours, PF_METRIC_SKY, threads, &
-                sky_chords([r_inner_deg], "all_within_sky"), sorted)
+                PF_METRIC_SKY, "all_within_sky", offsets32=offsets32, neighbours32=neighbours32, &
+                offsets64=offsets64, neighbours64=neighbours64, threads=threads, &
+                radii_inner=sky_chords([r_inner_deg], "all_within_sky"), sorted=sorted)
         else
             call spatial_all_within_worker(self, sky_chords([radius_deg], "all_within_sky"), &
-                offsets, neighbours, PF_METRIC_SKY, threads, sorted=sorted)
+                PF_METRIC_SKY, "all_within_sky", offsets32=offsets32, neighbours32=neighbours32, &
+                offsets64=offsets64, neighbours64=neighbours64, threads=threads, sorted=sorted)
         end if
-    end subroutine bind_all_sky_r0
+    end subroutine all_sky_r0_impl
 
     !> `%all_within_sky` with an independent angular radius per point, in the caller's row order.
     subroutine bind_all_sky_r1(self, radius_deg, offsets, neighbours, threads, r_inner_deg, sorted)
@@ -2121,15 +2402,50 @@ contains
         real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
         logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
 
+        call all_sky_r1_impl(self, radius_deg, threads, r_inner_deg, sorted, offsets64=offsets, &
+            neighbours64=neighbours)
+    end subroutine bind_all_sky_r1
+
+    !> `%all_within_sky` with a radius per point, into `int32` arrays. See `bind_all_sky_r1` for
+    !> the query and `bind_all_within_r0_i32` for the two ceilings an `int32` answer is checked
+    !> against.
+    subroutine bind_all_sky_r1_i32(self, radius_deg, offsets, neighbours, threads, r_inner_deg, sorted)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer(int32), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
+        integer(int32), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
+
+        call all_sky_r1_impl(self, radius_deg, threads, r_inner_deg, sorted, offsets32=offsets, &
+            neighbours32=neighbours)
+    end subroutine bind_all_sky_r1_i32
+
+    !> The body both `%all_within_sky` per-point-radius specifics share.
+    subroutine all_sky_r1_impl(self, radius_deg, threads, r_inner_deg, sorted, offsets32, neighbours32, &
+                               offsets64, neighbours64)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
+        integer(int32), allocatable, intent(out), optional :: offsets32(:) !! length n+1, int32.
+        integer(int32), allocatable, intent(out), optional :: neighbours32(:) !! the lists, int32.
+        integer(int64), allocatable, intent(out), optional :: offsets64(:) !! length n+1, int64.
+        integer(int64), allocatable, intent(out), optional :: neighbours64(:) !! the lists, int64.
+
         if (present(r_inner_deg)) then
             call spatial_all_within_worker(self, sky_chords(radius_deg, "all_within_sky"), &
-                offsets, neighbours, PF_METRIC_SKY, threads, &
-                sky_chords(r_inner_deg, "all_within_sky"), sorted)
+                PF_METRIC_SKY, "all_within_sky", offsets32=offsets32, neighbours32=neighbours32, &
+                offsets64=offsets64, neighbours64=neighbours64, threads=threads, &
+                radii_inner=sky_chords(r_inner_deg, "all_within_sky"), sorted=sorted)
         else
             call spatial_all_within_worker(self, sky_chords(radius_deg, "all_within_sky"), &
-                offsets, neighbours, PF_METRIC_SKY, threads, sorted=sorted)
+                PF_METRIC_SKY, "all_within_sky", offsets32=offsets32, neighbours32=neighbours32, &
+                offsets64=offsets64, neighbours64=neighbours64, threads=threads, sorted=sorted)
         end if
-    end subroutine bind_all_sky_r1
+    end subroutine all_sky_r1_impl
 
     !> `%pairs_within_sky` with one angular radius for every point.
     !>
@@ -2146,17 +2462,47 @@ contains
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+
+        call pairs_sky_r0_impl(self, radius_deg, threads, r_inner_deg, ii64=i, jj64=j)
+    end subroutine bind_pairs_sky_r0
+
+    !> `%pairs_within_sky` with one angular radius, into `int32` arrays. See `bind_pairs_sky_r0`
+    !> for the query and `bind_pairs_within_r0_i32` for what the `int32` answer costs and refuses.
+    subroutine bind_pairs_sky_r0_i32(self, radius_deg, i, j, threads, r_inner_deg)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer(int32), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int32), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+
+        call pairs_sky_r0_impl(self, radius_deg, threads, r_inner_deg, ii32=i, jj32=j)
+    end subroutine bind_pairs_sky_r0_i32
+
+    !> The body both `%pairs_within_sky` single-radius specifics share: convert the angles to
+    !> chords and hand the four kind-carrying arguments straight on to the sweep.
+    subroutine pairs_sky_r0_impl(self, radius_deg, threads, r_inner_deg, ii32, jj32, ii64, jj64)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+        integer(int32), allocatable, intent(out), optional :: ii32(:) !! lower row of each pair, int32.
+        integer(int32), allocatable, intent(out), optional :: jj32(:) !! higher row of each pair, int32.
+        integer(int64), allocatable, intent(out), optional :: ii64(:) !! lower row of each pair, int64.
+        integer(int64), allocatable, intent(out), optional :: jj64(:) !! higher row of each pair, int64.
         real(real64), allocatable :: cin(:)
 
         if (present(r_inner_deg)) then
             cin = sky_chords([r_inner_deg], "pairs_within_sky")
             call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, "pairs_within_sky", threads, cin(1))
+                PF_METRIC_SKY, "pairs_within_sky", ii32=ii32, jj32=jj32, ii64=ii64, jj64=jj64, &
+                threads=threads, r_inner=cin(1))
         else
             call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, "pairs_within_sky", threads)
+                PF_METRIC_SKY, "pairs_within_sky", ii32=ii32, jj32=jj32, ii64=ii64, jj64=jj64, &
+                threads=threads)
         end if
-    end subroutine bind_pairs_sky_r0
+    end subroutine pairs_sky_r0_impl
 
     !> `%pairs_within_sky` with an independent angular radius per point.
     !>
@@ -2188,6 +2534,36 @@ contains
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner_deg !! one inner angular radius; scalar only.
         integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
+
+        call pairs_sky_r1_impl(self, radius_deg, threads, r_inner_deg, combine, ii64=i, jj64=j)
+    end subroutine bind_pairs_sky_r1
+
+    !> `%pairs_within_sky` with a radius per point, into `int32` arrays. See `bind_pairs_sky_r1`
+    !> for the query and `bind_pairs_within_r0_i32` for what the `int32` answer costs and refuses.
+    subroutine bind_pairs_sky_r1_i32(self, radius_deg, i, j, threads, r_inner_deg, combine)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer(int32), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int32), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! one inner angular radius; scalar only.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
+
+        call pairs_sky_r1_impl(self, radius_deg, threads, r_inner_deg, combine, ii32=i, jj32=j)
+    end subroutine bind_pairs_sky_r1_i32
+
+    !> The body both `%pairs_within_sky` per-point-radius specifics share: the `PF_LINK_SUM`
+    !> ceiling, the chord conversion, and the four kind-carrying arguments handed on to the sweep.
+    subroutine pairs_sky_r1_impl(self, radius_deg, threads, r_inner_deg, combine, ii32, jj32, ii64, jj64)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! one inner angular radius; scalar only.
+        integer, intent(in), optional :: combine !! one of the `PF_LINK_*` rules; absent is `PF_LINK_MAX`.
+        integer(int32), allocatable, intent(out), optional :: ii32(:) !! lower row of each pair, int32.
+        integer(int32), allocatable, intent(out), optional :: jj32(:) !! higher row of each pair, int32.
+        integer(int64), allocatable, intent(out), optional :: ii64(:) !! lower row of each pair, int64.
+        integer(int64), allocatable, intent(out), optional :: jj64(:) !! higher row of each pair, int64.
         real(real64), allocatable :: cin(:)
 
         ! Ahead of the chord conversion, so that a radius past the general 90-degree ceiling asked
@@ -2205,12 +2581,14 @@ contains
         if (present(r_inner_deg)) then
             cin = sky_chords([r_inner_deg], "pairs_within_sky")
             call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, "pairs_within_sky", threads, cin(1), combine)
+                PF_METRIC_SKY, "pairs_within_sky", ii32=ii32, jj32=jj32, ii64=ii64, jj64=jj64, &
+                threads=threads, r_inner=cin(1), combine=combine)
         else
             call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
-                i, j, PF_METRIC_SKY, "pairs_within_sky", threads, combine=combine)
+                PF_METRIC_SKY, "pairs_within_sky", ii32=ii32, jj32=jj32, ii64=ii64, jj64=jj64, &
+                threads=threads, combine=combine)
         end if
-    end subroutine bind_pairs_sky_r1
+    end subroutine pairs_sky_r1_impl
 
     !> `%count_all_within_sky` with one angular radius for every point.
     !>
@@ -2223,14 +2601,39 @@ contains
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
 
+        call count_sky_r0_impl(self, radius_deg, threads, r_inner_deg, counts64=counts)
+    end subroutine bind_count_all_sky_r0
+
+    !> `%count_all_within_sky` with one angular radius, into an `int32` array. See
+    !> `bind_count_all_sky_r0` and `bind_count_all_r0_i32`.
+    subroutine bind_count_all_sky_r0_i32(self, radius_deg, counts, threads, r_inner_deg)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer(int32), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+
+        call count_sky_r0_impl(self, radius_deg, threads, r_inner_deg, counts32=counts)
+    end subroutine bind_count_all_sky_r0_i32
+
+    !> The body both `%count_all_within_sky` single-radius specifics share.
+    subroutine count_sky_r0_impl(self, radius_deg, threads, r_inner_deg, counts32, counts64)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+        integer(int32), allocatable, intent(out), optional :: counts32(:) !! length n, int32.
+        integer(int64), allocatable, intent(out), optional :: counts64(:) !! length n, int64.
+
         if (present(r_inner_deg)) then
             call spatial_count_all_worker(self, sky_chords([radius_deg], "count_all_within_sky"), &
-                counts, PF_METRIC_SKY, threads, sky_chords([r_inner_deg], "count_all_within_sky"))
+                PF_METRIC_SKY, "count_all_within_sky", counts32=counts32, counts64=counts64, &
+                threads=threads, radii_inner=sky_chords([r_inner_deg], "count_all_within_sky"))
         else
             call spatial_count_all_worker(self, sky_chords([radius_deg], "count_all_within_sky"), &
-                counts, PF_METRIC_SKY, threads)
+                PF_METRIC_SKY, "count_all_within_sky", counts32=counts32, counts64=counts64, threads=threads)
         end if
-    end subroutine bind_count_all_sky_r0
+    end subroutine count_sky_r0_impl
 
     !> `%count_all_within_sky` with an independent angular radius per point.
     subroutine bind_count_all_sky_r1(self, radius_deg, counts, threads, r_inner_deg)
@@ -2240,14 +2643,39 @@ contains
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
 
+        call count_sky_r1_impl(self, radius_deg, threads, r_inner_deg, counts64=counts)
+    end subroutine bind_count_all_sky_r1
+
+    !> `%count_all_within_sky` with a radius per point, into an `int32` array. See
+    !> `bind_count_all_sky_r1` and `bind_count_all_r0_i32`.
+    subroutine bind_count_all_sky_r1_i32(self, radius_deg, counts, threads, r_inner_deg)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer(int32), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
+
+        call count_sky_r1_impl(self, radius_deg, threads, r_inner_deg, counts32=counts)
+    end subroutine bind_count_all_sky_r1_i32
+
+    !> The body both `%count_all_within_sky` per-point-radius specifics share.
+    subroutine count_sky_r1_impl(self, radius_deg, threads, r_inner_deg, counts32, counts64)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
+        integer(int32), allocatable, intent(out), optional :: counts32(:) !! length n, int32.
+        integer(int64), allocatable, intent(out), optional :: counts64(:) !! length n, int64.
+
         if (present(r_inner_deg)) then
             call spatial_count_all_worker(self, sky_chords(radius_deg, "count_all_within_sky"), &
-                counts, PF_METRIC_SKY, threads, sky_chords(r_inner_deg, "count_all_within_sky"))
+                PF_METRIC_SKY, "count_all_within_sky", counts32=counts32, counts64=counts64, &
+                threads=threads, radii_inner=sky_chords(r_inner_deg, "count_all_within_sky"))
         else
             call spatial_count_all_worker(self, sky_chords(radius_deg, "count_all_within_sky"), &
-                counts, PF_METRIC_SKY, threads)
+                PF_METRIC_SKY, "count_all_within_sky", counts32=counts32, counts64=counts64, threads=threads)
         end if
-    end subroutine bind_count_all_sky_r1
+    end subroutine count_sky_r1_impl
 
     ! ---- k nearest neighbours ----
 
@@ -2332,8 +2760,11 @@ contains
 
         m = 0_int64
         if (k < 1_int64) error stop "pf_spatial_index%nearest: k must be >= 1"
-        if (present(out32) .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
-            "pf_spatial_index%nearest: this index holds more rows than an int32 buffer can name; use an int64 one"
+        ! Nested rather than `.and.`-ed: `.and.` does not short-circuit, and this runs per query.
+        if (present(out32)) then
+            if (self%npts > spatial_int32_ceiling()) error stop "pf_spatial_index%nearest: " // &
+                "this index holds more rows than an int32 buffer can name; use an int64 one"
+        end if
         ! The expanding ball reaches the same clamped grid walk `%within` does, so the point needs
         ! the same screen -- this is the third and last choke point a caller-supplied point enters
         ! through, beside spatial_scan and spatial_scan_axis.
@@ -2551,7 +2982,8 @@ contains
         integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
         integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
 
-        call spatial_components_worker(i, j, int(nvert, kind=int64), labels, ncomp, sizes, min_size)
+        call spatial_components_worker(int(nvert, kind=int64), min_size, i64=i, j64=j, &
+            labels64=labels, ncomp64=ncomp, sizes64=sizes)
     end subroutine components_n32
 
     !> `pf_connected_components` with an `int64` vertex count. See `components_n32`.
@@ -2564,8 +2996,47 @@ contains
         integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
         integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
 
-        call spatial_components_worker(i, j, nvert, labels, ncomp, sizes, min_size)
+        call spatial_components_worker(nvert, min_size, i64=i, j64=j, &
+            labels64=labels, ncomp64=ncomp, sizes64=sizes)
     end subroutine components_n64
+
+    !> `pf_connected_components` over an `int32` edge list, with an `int32` vertex count.
+    !>
+    !> **One kind for the whole call.** The edge list, `labels`, `ncomp` and `sizes` are all
+    !> `int32` here, which is what `%pairs_within`'s own `int32` form hands straight on; mixing
+    !> kinds within one call matches no specific and is a compile-time error rather than a silent
+    !> conversion. `nvert` keeps its own choice of kind, so either width may name the vertex count.
+    !>
+    !> Aborts before anything is allocated if `nvert` is above what an `int32` label can name.
+    !> Everything else -- the labelling contract, `min_size`, the endpoint range check -- is
+    !> `components_n32`'s, and the union-find itself runs in `int64` either way.
+    subroutine components_k32_n32(i, j, nvert, labels, ncomp, sizes, min_size)
+        integer(int32), intent(in) :: i(:) !! one endpoint of each edge, in `1..nvert`.
+        integer(int32), intent(in) :: j(:) !! the other endpoint of each edge, in `1..nvert`.
+        integer(int32), intent(in) :: nvert !! how many vertices the graph has; >= 0.
+        integer(int32), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
+        integer(int32), intent(out), optional :: ncomp !! how many components earned a label.
+        integer(int32), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
+        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
+
+        call spatial_components_worker(int(nvert, kind=int64), min_size, i32=i, j32=j, &
+            labels32=labels, ncomp32=ncomp, sizes32=sizes)
+    end subroutine components_k32_n32
+
+    !> `pf_connected_components` over an `int32` edge list, with an `int64` vertex count. See
+    !> `components_k32_n32`.
+    subroutine components_k32_n64(i, j, nvert, labels, ncomp, sizes, min_size)
+        integer(int32), intent(in) :: i(:) !! one endpoint of each edge, in `1..nvert`.
+        integer(int32), intent(in) :: j(:) !! the other endpoint of each edge, in `1..nvert`.
+        integer(int64), intent(in) :: nvert !! how many vertices the graph has; >= 0.
+        integer(int32), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
+        integer(int32), intent(out), optional :: ncomp !! how many components earned a label.
+        integer(int32), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
+        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
+
+        call spatial_components_worker(nvert, min_size, i32=i, j32=j, &
+            labels32=labels, ncomp32=ncomp, sizes32=sizes)
+    end subroutine components_k32_n64
 
     ! ---- Shared argument checking ----
 
@@ -2741,6 +3212,22 @@ contains
         dbg_run_buf = n
     end subroutine parquet_debug_set_spatial_run_buffer
 
+    !> Forces the `int32` ceiling every guard in this module compares against. **Test-only.**
+    !>
+    !> `n <= 0` restores the real `huge(0_int32)`, and so does
+    !> `parquet_debug_reset_spatial_counters`. Without it none of those guards is reachable: each
+    !> needs an index of more than two billion points, or a neighbour list that long, and a test
+    !> that large is not a test. Lower it and a few hundred points reach every one of them.
+    !>
+    !> It changes nothing a caller can observe except which calls abort, so it is an override hook
+    !> and not a setting (`api-conventions.md`, Settings: a setting never changes what the library
+    !> ANSWERS, and this one only decides when an answer is refused).
+    subroutine parquet_debug_set_spatial_int32_ceiling(n)
+        integer(int64), intent(in) :: n !! the forced ceiling; <= 0 restores `huge(0_int32)`.
+
+        dbg_int32_ceiling = n
+    end subroutine parquet_debug_set_spatial_int32_ceiling
+
     !> How many pixels the HEALPix candidate walk has covered since the counters were reset.
     !>
     !> **The negative control for the backend, and it works in both directions.** An A/B test that
@@ -2775,6 +3262,7 @@ contains
         dbg_los_cyl = 0_int64
         dbg_los_balls = 0_int64
         dbg_los_tested = 0_int64
+        dbg_int32_ceiling = 0_int64
     end subroutine parquet_debug_reset_spatial_counters
 
     !> The bounds a line-of-sight walk rests on, as `%build` (or the last `%rebuild`) measured them.

@@ -2605,6 +2605,13 @@ contains
         auto_n = pf_healpix_threads(big)
         call check(error, auto_n >= 1, "the automatic answer is always at least one thread")
         if (allocated(error)) return
+        ! Both kinds, and a DEFAULT INTEGER literal, which is the whole point of the int32 form:
+        ! before it existed `pf_healpix_threads(1000)` did not compile at all.
+        call check(error, pf_healpix_threads(int(big, kind=int32)) == auto_n, &
+            "the int32 element count answers as the int64 one does")
+        if (allocated(error)) return
+        call check(error, pf_healpix_threads(1000) >= 1, "a default integer literal resolves")
+        if (allocated(error)) return
         call check(error, auto_n <= avail, &
             "the automatic answer never exceeds what OpenMP and the affinity mask allow")
         if (allocated(error)) return

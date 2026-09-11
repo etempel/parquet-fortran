@@ -104,6 +104,8 @@ contains
             new_unittest("the pool reuses before it grows", test_pool_reuse_before_growth), &
             new_unittest("is_used answers for every index and none other", test_pool_is_used), &
             new_unittest("used_indexes lists what is held, ascending", test_pool_used_indexes), &
+            new_unittest("used_indexes and keys answer the same list in int32 as in int64", &
+                         test_index_int32_lists), &
             new_unittest("compact hands out the smallest free index first", test_pool_compact_order), &
             new_unittest("without compact the pool stays LIFO", test_pool_lifo_control), &
             new_unittest("compact keeps every held index and lowers the watermark", test_pool_compact_state), &
@@ -1973,6 +1975,51 @@ contains
         if (allocated(error)) return
         call check(error, held(65) == 129_int64, "and the walk resumes after the empty word")
     end subroutine test_pool_used_indexes
+
+    !> `%used_indexes` and `%keys` answer the same list in `int32` as in `int64`.
+    !>
+    !> Parity element for element: the `int32` forms are a second route through the same walk and
+    !> the same key collection, so only comparing them forbids one of the two drifting.
+    subroutine test_index_int32_lists(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_pool) :: p
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: held64(:), keys64(:), tup64(:,:)
+        integer(int32), allocatable :: held32(:), keys32(:), tup32(:,:)
+        integer(int64) :: i, idx, keys(6), vals(6), pairs(6, 2)
+
+        do i = 1_int64, 50_int64
+            idx = p%get_index()
+        end do
+        call p%free_index(7_int64)
+        call p%used_indexes(held64)
+        call p%used_indexes(held32)
+        call check(error, size(held32, kind=int64) == size(held64, kind=int64), &
+            "used_indexes must answer the same length in both kinds")
+        if (allocated(error)) return
+        call check(error, all(int(held32, kind=int64) == held64) .and. size(held64, kind=int64) == 49_int64, &
+            "used_indexes must answer the same indexes in both kinds")
+        if (allocated(error)) return
+        ! **A negative key inside the int32 range.** Keys are the caller's own values, so the
+        ! narrowing has to carry the sign; the out-of-range case is an error scenario, since it
+        ! aborts.
+        keys = [-2000000000_int64, -7_int64, 0_int64, 5_int64, 11_int64, 2000000000_int64]
+        vals = [1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64]
+        call m%build(keys, vals, method="hash")
+        call m%keys(keys64)
+        call m%keys(keys32)
+        call check(error, size(keys32, kind=int64) == 6_int64 .and. all(int(keys32, kind=int64) == keys64), &
+            "keys must answer the same keys in both kinds, negative ones included")
+        if (allocated(error)) return
+        call m%clear()
+        pairs(:, 1) = [-9_int64, -9_int64, 3_int64, 3_int64, 8_int64, 8_int64]
+        pairs(:, 2) = [1_int64, 2_int64, 1_int64, 2_int64, 1_int64, 2_int64]
+        call m%build(pairs, vals, method="hash")
+        call m%keys(tup64)
+        call m%keys(tup32)
+        call check(error, all(shape(tup32) == shape(tup64)) .and. all(int(tup32, kind=int64) == tup64), &
+            "the rank-2 keys form must answer the same tuples in both kinds")
+    end subroutine test_index_int32_lists
 
     !> After `%compact` the smallest free index is handed out first, ascending.
     subroutine test_pool_compact_order(error)

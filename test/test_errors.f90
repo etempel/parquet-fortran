@@ -1917,6 +1917,10 @@ contains
             new_unittest("rebuilding a copy=.false. index aborts", test_spatial_rebuild_needs_copy_aborts), &
             new_unittest("a radius array of the wrong length aborts", test_spatial_bulk_radius_aborts), &
             new_unittest("an unknown combine= value aborts", test_spatial_pairs_bad_combine_aborts), &
+            new_unittest("an int32 pair list over too many rows aborts", &
+                test_spatial_pairs_int32_rows_aborts), &
+            new_unittest("an int32 CSR over too long a neighbour list aborts", &
+                test_spatial_csr_int32_offsets_aborts), &
             new_unittest("PF_LINK_SUM past 45 degrees on the sky aborts", &
                          test_spatial_sky_pairs_sum_too_large_aborts), &
             new_unittest("copy=.false. over a strided section aborts", test_spatial_copy_false_strided_aborts), &
@@ -2556,6 +2560,10 @@ contains
                 test_multimap_string_probe_on_integer_aborts), &
             new_unittest("an integer key list from a string multimap aborts", &
                 test_multimap_string_keys_rank1_aborts), &
+            new_unittest("an int32 keys answer over a key below int32 aborts", &
+                test_index_keys_int32_negative_aborts), &
+            new_unittest("an int32 csr over a stored value above int32 aborts", &
+                test_multimap_csr_int32_value_aborts), &
             new_unittest("every legal string-key path of both types completes", &
                 test_index_string_control_completes), &
             new_unittest("a string key on an integer index aborts", &
@@ -3948,6 +3956,23 @@ contains
             failure_message="keys() into an integer list on a string multimap was expected to abort", &
             required_stderr="this multimap holds string keys; ask for a parquet_string_column")
     end subroutine test_multimap_string_keys_rank1_aborts
+
+    !> See `scenario_index_keys_int32_negative` (test/error_scenarios.f90). A key BELOW the int32
+    !> range, which only a two-sided bound check refuses.
+    subroutine test_index_keys_int32_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_int32_negative", expect_abort=.true., &
+            failure_message="a key below the int32 range was expected to be refused by %keys", &
+            required_stderr="a stored key is outside the range an int32 answer can hold")
+    end subroutine test_index_keys_int32_negative_aborts
+
+    !> See `scenario_multimap_csr_int32_value` (test/error_scenarios.f90).
+    subroutine test_multimap_csr_int32_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_csr_int32_value", expect_abort=.true., &
+            failure_message="a stored value above the int32 range was expected to be refused by %csr", &
+            required_stderr="a stored value is too large for an int32 answer")
+    end subroutine test_multimap_csr_int32_value_aborts
     !
     !> See `scenario_index_string_control` (test/error_scenarios.f90).
     subroutine test_index_string_control_completes(error)
@@ -6264,6 +6289,26 @@ contains
             failure_message="an unknown combine= value was expected to abort", &
             required_stderr="combine= must be PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN or PF_LINK_SUM")
     end subroutine test_spatial_pairs_bad_combine_aborts
+
+    !> See `scenario_spatial_pairs_int32_rows` (test/error_scenarios.f90). The scenario answers the
+    !> same query in `int64` first, so a run that aborts proves the ceiling governs the ANSWER's
+    !> kind and not the query.
+    subroutine test_spatial_pairs_int32_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_pairs_int32_rows", expect_abort=.true., &
+            failure_message="an int32 pair list over an index too large to name was expected to abort", &
+            required_stderr="%pairs_within: this index holds more rows than an int32 answer can name")
+    end subroutine test_spatial_pairs_int32_rows_aborts
+
+    !> See `scenario_spatial_csr_int32_offsets` (test/error_scenarios.f90). The required text is
+    !> what pins the guard to the NEIGHBOUR TOTAL: a guard written against the row count would let
+    !> this call through, since the ceiling is deliberately above the row count.
+    subroutine test_spatial_csr_int32_offsets_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_csr_int32_offsets", expect_abort=.true., &
+            failure_message="an int32 CSR over too long a neighbour list was expected to abort", &
+            required_stderr="the neighbour list is longer than an int32 offset can name")
+    end subroutine test_spatial_csr_int32_offsets_aborts
 
     !> The message must name the rule's own 45-degree limit, not the general 90-degree ceiling:
     !> the check runs ahead of the chord conversion precisely so that a caller reads the number

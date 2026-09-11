@@ -807,6 +807,37 @@ contains
         call ix_collect_keys(self, list)
     end procedure map_keys_r2
 
+    module procedure map_keys_r1_i32
+        integer(int64), allocatable :: pairs(:,:)
+
+        if (self%is_str) error stop "pf_index_map%keys: this map holds string keys; " // &
+            "ask for a parquet_string_column"
+        if (self%ncomp > 1) error stop "pf_index_map%keys: this map has composite keys; " // &
+            "ask for a rank-2 list"
+        allocate(list(self%nk))
+        if (self%nk == 0_int64) return
+        allocate(pairs(self%nk, 1))
+        call ix_collect_keys(self, pairs)
+        call ix_keys_fit_i32(minval(pairs(:, 1)), maxval(pairs(:, 1)), "pf_index_map%keys")
+        list = int(pairs(:, 1), int32)
+    end procedure map_keys_r1_i32
+
+    module procedure map_keys_r2_i32
+        integer(int64), allocatable :: pairs(:,:)
+        integer :: nc
+
+        if (self%is_str) error stop "pf_index_map%keys: this map holds string keys; " // &
+            "ask for a parquet_string_column"
+        nc = self%ncomp
+        if (nc < 1) nc = 1
+        allocate(list(self%nk, nc))
+        if (self%nk == 0_int64) return
+        allocate(pairs(self%nk, nc))
+        call ix_collect_keys(self, pairs)
+        call ix_keys_fit_i32(minval(pairs), maxval(pairs), "pf_index_map%keys")
+        list = int(pairs, int32)
+    end procedure map_keys_r2_i32
+
     ! ============================================================================================
     ! The build's thread rule, reported
     ! ============================================================================================
@@ -1101,6 +1132,21 @@ contains
             "a stored index value is too large for an int32 result; take it as int64"
         out = int(v, int32)
     end function ix_narrow
+
+    !> Aborts unless every element of a collected KEY list fits `int32`.
+    !!
+    !! **Two-sided, unlike `ix_narrow`.** A stored index value is non-negative, so one comparison
+    !! settles it; a key is a caller's own value and may be as negative as `int64` allows, and a
+    !! one-sided check would truncate such a key into a plausible positive one. Checked once over
+    !! the whole list, so a narrowed answer never fails half-way through its array.
+    pure subroutine ix_keys_fit_i32(lo, hi, what)
+        integer(int64), intent(in) :: lo !! the smallest collected key.
+        integer(int64), intent(in) :: hi !! the largest collected key.
+        character(len=*), intent(in) :: what !! the entry point's full name, for the message.
+
+        if (hi > int(huge(0_int32), int64) .or. lo < -int(huge(0_int32), int64) - 1_int64) &
+            error stop what // ": a stored key is outside the range an int32 answer can hold; take it as int64"
+    end subroutine ix_keys_fit_i32
 
     !> Checks that an index value fits `int32` and returns it unchanged.
     !!

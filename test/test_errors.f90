@@ -432,6 +432,10 @@ contains
                 test_sorting_search_unsorted_aborts), &
             new_unittest("sorting: an over-long search target aborts", &
                 test_sorting_search_target_too_long_aborts), &
+            new_unittest("sorting: a bulk search answer array of the wrong length aborts", &
+                test_sorting_search_many_answer_length_aborts), &
+            new_unittest("sorting: an over-long bulk search target aborts", &
+                test_sorting_search_many_target_too_long_aborts), &
             new_unittest("sorting: an unknown rank method aborts", &
                 test_sorting_rank_bad_method_aborts), &
             new_unittest("sorting: an all-null minmax aborts", &
@@ -9773,6 +9777,28 @@ contains
             failure_message="an over-long search target was expected to abort", &
             required_stderr="so no exact comparison exists")
     end subroutine test_sorting_search_target_too_long_aborts
+
+    !> Bulk search abort path: see scenario_sorting_search_many_answer_length in
+    !> test/error_scenarios.f90. A correctly sized array answers first, as the control.
+    subroutine test_sorting_search_many_answer_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_search_many_answer_length", &
+            expect_abort=.true., &
+            failure_message="a bulk search answer array of the wrong length was expected to abort", &
+            required_stderr="it takes one per target")
+    end subroutine test_sorting_search_many_answer_length_aborts
+
+    !> Bulk search abort path: see scenario_sorting_search_many_target_too_long in
+    !> test/error_scenarios.f90. Shorter targets answer first, as the control.
+    subroutine test_sorting_search_many_target_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_search_many_target_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long bulk search target was expected to abort", &
+            required_stderr="so no exact comparison exists")
+    end subroutine test_sorting_search_many_target_too_long_aborts
 
     !> pf_rank abort path: see scenario_sorting_rank_bad_method in test/error_scenarios.f90.
     !> Asserts the message NAMES the valid tokens, the same standard `rounding=` is held to.

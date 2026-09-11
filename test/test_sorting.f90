@@ -182,6 +182,8 @@ contains
             new_unittest("an empty array still gives an insertion point", test_search_degenerate), &
             new_unittest("searches: every type x three operations x both index kinds", &
                 test_search_every_specific), &
+            new_unittest("bulk searches: every type x three operations x both index kinds", &
+                test_search_every_specific_many), &
             new_unittest("unique reports distinct values in order", test_unique_basic), &
             new_unittest("unique excludes and counts nulls", test_unique_nulls), &
             new_unittest("float distinctness is exact", test_unique_float_exact), &
@@ -280,8 +282,14 @@ contains
                 test_match_nan_and_zero), &
             new_unittest("pf_match answers the same shape for every element type", &
                 test_match_all_types), &
+            new_unittest("match, match_all and in: every type x both index kinds", &
+                test_match_every_specific), &
             new_unittest("pf_match and pf_match_all handle every empty-input combination", &
                 test_match_empty), &
+            new_unittest("two empty arrays answer alike for every element type", &
+                test_match_empty_every_type), &
+            new_unittest("remap's unmapped policies hold for every value kind", &
+                test_remap_every_value_kind), &
             new_unittest("two character arrays of different widths match on their content", &
                 test_match_string_widths), &
             new_unittest("a pf_sort_keys built from an EMPTY array reports zero rows", &
@@ -2768,6 +2776,215 @@ contains
             end block
         end block
     end subroutine test_search_every_specific
+    !
+    !> The BULK search specifics, for every element type and both index kinds.
+    !!
+    !! `test_search_every_specific` drives the scalar forms of the same matrix; this is its bulk
+    !! twin, and the two are separate specifics with separate bodies -- the bulk form extracts the
+    !! array's sort key ONCE and answers every target against it, which is a different code path
+    !! from the scalar form's, not a loop over it.
+    !!
+    !! **Three targets, of multiplicity one, two and three.** A bulk form that answered every
+    !! target with the first target's result, or that walked the target array off by one, gives a
+    !! plausible sorted-looking answer; only targets whose correct answers all differ can see it.
+    !! The expected numbers are written out rather than taken from the scalar form, so a defect
+    !! shared by both forms cannot hide here either.
+    subroutine test_search_every_specific_many(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Lower bounds of classes 1, 2 and 3 in `SWSRT`, whose runs are one, two and three long.
+        integer, parameter :: MLOW(3) = [1, 2, 4]
+        integer, parameter :: MUPP(3) = [2, 4, 7]  !! their upper bounds.
+        integer, parameter :: MFST(3) = [1, 2, 4]  !! the first index of each run.
+        integer, parameter :: MLST(3) = [1, 3, 6]  !! the last index of each run.
+        !> The same four for the logical fixture, searching for `.false.` then `.true.`.
+        integer, parameter :: MLOWB(2) = [1, 4], MUPPB(2) = [4, 7]
+        integer, parameter :: MFSTB(2) = [1, 4], MLSTB(2) = [3, 6]
+        integer(int32) :: a32(3), b32(3), c32(3), d32(3)
+        integer(int64) :: a64(3), b64(3), c64(3), d64(3)
+        integer(int32) :: p32(2), q32(2), r32(2), s32(2)
+        integer(int64) :: p64(2), q64(2), r64(2), s64(2)
+        integer :: k
+
+        block
+            integer(int32) :: v(SWN), t(3)
+            v = 10_int32 * int(SWSRT, int32)
+            t = [10_int32, 20_int32, 30_int32]
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "int32 bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN), t(3)
+            v = 100_int64 * int(SWSRT, int64)
+            t = [100_int64, 200_int64, 300_int64]
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "int64 bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN), t(3)
+            v = real(SWSRT, real32) + 0.5_real32
+            t = [1.5_real32, 2.5_real32, 3.5_real32]
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "real32 bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN), t(3)
+            v = real(SWSRT, real64) + 0.25_real64
+            t = [1.25_real64, 2.25_real64, 3.25_real64]
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "real64 bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            ! `logical` has two values, so its sweep is two targets rather than three.
+            logical :: t(2)
+            t = [.false., .true.]
+            call pf_lower_bound(SWSRTB, t, p32)
+            call pf_lower_bound(SWSRTB, t, p64)
+            call pf_upper_bound(SWSRTB, t, q32)
+            call pf_upper_bound(SWSRTB, t, q64)
+            call pf_equal_range(SWSRTB, t, r32, s32)
+            call pf_equal_range(SWSRTB, t, r64, s64)
+            call check(error, many_search_ok(p32, p64, q32, q64, r32, r64, s32, s64, &
+                MLOWB, MUPPB, MFSTB, MLSTB), "logical bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN), t(3)
+            do k = 1, SWN
+                v(k) = swchr(SWSRT(k))
+            end do
+            do k = 1, 3
+                t(k) = swchr(k)
+            end do
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "character bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN), t(3)
+            integer(int32) :: raw(3)
+            raw = [1001_int32, 1002_int32, 1003_int32]
+            call v%set_raw(1000_int32 + int(SWSRT, int32))
+            call t%set_raw(raw)
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "parquet_date bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN), t(3)
+            integer(int64) :: raw(3)
+            raw = [2001_int64, 2002_int64, 2003_int64]
+            call v%set_raw(2000_int64 + int(SWSRT, int64))
+            call t%set_raw(raw)
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "parquet_time bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN), t(3)
+            integer(int64) :: raw(3)
+            raw = [3001_int64, 3002_int64, 3003_int64]
+            call v%set_raw(3000_int64 + int(SWSRT, int64), 7_int32)
+            call t%set_raw(raw, 7_int32)
+            call pf_lower_bound(v, t, a32)
+            call pf_lower_bound(v, t, a64)
+            call pf_upper_bound(v, t, b32)
+            call pf_upper_bound(v, t, b64)
+            call pf_equal_range(v, t, c32, d32)
+            call pf_equal_range(v, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "parquet_timestamp bulk searches, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            character(len=2) :: t(3)
+            do k = 1, SWN
+                call sc%append_string(swchr(SWSRT(k)))
+            end do
+            do k = 1, 3
+                t(k) = swchr(k)
+            end do
+            call pf_lower_bound(sc, t, a32)
+            call pf_lower_bound(sc, t, a64)
+            call pf_upper_bound(sc, t, b32)
+            call pf_upper_bound(sc, t, b64)
+            call pf_equal_range(sc, t, c32, d32)
+            call pf_equal_range(sc, t, c64, d64)
+            call check(error, many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, &
+                MLOW, MUPP, MFST, MLST), "parquet_string_column bulk searches, both index kinds")
+        end block
+    end subroutine test_search_every_specific_many
+    !
+    !> The four bulk search answers in both index kinds against the four expected lists.
+    !!
+    !! Taking all four operations together is what makes a body wired to the wrong one visible:
+    !! each expected list differs from the others at some target, so a mix-up cannot coincide.
+    pure function many_search_ok(a32, a64, b32, b64, c32, c64, d32, d64, low, upp, fst, lst) result(ok)
+        integer(int32), intent(in) :: a32(:) !! the int32 lower bounds.
+        integer(int64), intent(in) :: a64(:) !! the int64 lower bounds.
+        integer(int32), intent(in) :: b32(:) !! the int32 upper bounds.
+        integer(int64), intent(in) :: b64(:) !! the int64 upper bounds.
+        integer(int32), intent(in) :: c32(:) !! the int32 equal-range firsts.
+        integer(int64), intent(in) :: c64(:) !! the int64 equal-range firsts.
+        integer(int32), intent(in) :: d32(:) !! the int32 equal-range lasts.
+        integer(int64), intent(in) :: d64(:) !! the int64 equal-range lasts.
+        integer, intent(in) :: low(:)        !! the expected lower bounds, one per target.
+        integer, intent(in) :: upp(:)        !! the expected upper bounds.
+        integer, intent(in) :: fst(:)        !! the expected equal-range firsts.
+        integer, intent(in) :: lst(:)        !! the expected equal-range lasts.
+        logical :: ok                        !! .true. when all eight answers match.
+
+        ok = all(a32 == int(low, int32)) .and. all(a64 == int(low, int64)) &
+            .and. all(b32 == int(upp, int32)) .and. all(b64 == int(upp, int64)) &
+            .and. all(c32 == int(fst, int32)) .and. all(c64 == int(fst, int64)) &
+            .and. all(d32 == int(lst, int32)) .and. all(d64 == int(lst, int64))
+    end function many_search_ok
     !
     !> The four search answers in both index kinds against one expected list. Taking all four
     !> together is what makes a body wired to the wrong operation visible: each of the three
@@ -8026,6 +8243,246 @@ contains
         end block
     end subroutine test_match_all_types
     !
+    !> The MATCH specifics, for every element type and both index kinds.
+    !!
+    !! `test_match_all_types` drives `pf_match`'s `int64` form over the same eleven types; this
+    !! adds the `int32` form, both index kinds of `pf_match_all`, and `pf_in` -- each a separate
+    !! generated specific with its own narrowing or reduction step, none of which the `int64`
+    !! `pf_match` call exercises.
+    !!
+    !! **The right-hand side repeats a value on purpose.** With every element distinct, every CSR
+    !! range is length 0 or 1 and an `offsets` array that had lost a cumulative step would still
+    !! look right; `right` here holds the first value twice, so one range is length two and the
+    !! offsets have to accumulate. The three answers are also cross-checked against each other --
+    !! `pf_match` must name the FIRST index of each range, and `pf_in` must be exactly "the range
+    !! is non-empty" -- so a defect that moved all three the same way still fails.
+    subroutine test_match_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> `left` is three distinct values, `right` is [third, first, first].
+        integer(int64), parameter :: MWANT(3) = [2_int64, 0_int64, 1_int64]
+        integer(int64), parameter :: MOFF(4) = [1_int64, 3_int64, 3_int64, 4_int64]
+        integer(int64), parameter :: MMTC(3) = [2_int64, 3_int64, 1_int64]
+        !> The same three for the logical fixture, whose two values both repeat on the right.
+        integer(int64), parameter :: BWANT(3) = [2_int64, 1_int64, 2_int64]
+        integer(int64), parameter :: BOFF(4) = [1_int64, 3_int64, 4_int64, 6_int64]
+        integer(int64), parameter :: BMTC(5) = [2_int64, 3_int64, 1_int64, 2_int64, 3_int64]
+        integer(int32), allocatable :: m32(:), o32(:), t32(:)
+        integer(int64), allocatable :: m64(:), o64(:), t64(:)
+        logical, allocatable :: msk(:)
+        integer :: k
+
+        block
+            integer(int32) :: l(3), r(3)
+            l = [11_int32, 22_int32, 33_int32]
+            r = [33_int32, 11_int32, 11_int32]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "int32 match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: l(3), r(3)
+            l = [11_int64, 22_int64, 33_int64]
+            r = [33_int64, 11_int64, 11_int64]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "int64 match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: l(3), r(3)
+            l = [1.5_real32, 2.5_real32, 3.5_real32]
+            r = [3.5_real32, 1.5_real32, 1.5_real32]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "real32 match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: l(3), r(3)
+            l = [1.5_real64, 2.5_real64, 3.5_real64]
+            r = [3.5_real64, 1.5_real64, 1.5_real64]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "real64 match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            ! `logical` has two values, so the three-distinct shape does not fit: this is the same
+            ! question asked with the fixture the type can express, and both values repeat.
+            logical :: l(3), r(3)
+            l = [.true., .false., .true.]
+            r = [.false., .true., .true.]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, BWANT, BOFF, BMTC), &
+                "logical match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=4) :: l(3), r(3)
+            l = ["aaa ", "bbb ", "ccc "]
+            r = ["ccc ", "aaa ", "aaa "]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "character match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: l(3), r(3)
+            integer(int32) :: lraw(3), rraw(3)
+            lraw = [1001_int32, 1002_int32, 1003_int32]
+            rraw = [1003_int32, 1001_int32, 1001_int32]
+            call l%set_raw(lraw)
+            call r%set_raw(rraw)
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "parquet_date match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: l(3), r(3)
+            integer(int64) :: lraw(3), rraw(3)
+            lraw = [2001_int64, 2002_int64, 2003_int64]
+            rraw = [2003_int64, 2001_int64, 2001_int64]
+            call l%set_raw(lraw)
+            call r%set_raw(rraw)
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "parquet_time match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            ! A timestamp becomes TWO engine keys, so it is the one type whose concatenation
+            ! appends a pair of buffers rather than one.
+            type(parquet_timestamp) :: l(3), r(3)
+            integer(int64) :: lraw(3), rraw(3)
+            lraw = [3001_int64, 3002_int64, 3003_int64]
+            rraw = [3003_int64, 3001_int64, 3001_int64]
+            call l%set_raw(lraw, 7_int32)
+            call r%set_raw(rraw, 7_int32)
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "parquet_timestamp match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: l, r
+            character(len=3) :: rs(3)
+            rs = ["ccc", "aaa", "aaa"]
+            call l%append_string("aaa")
+            call l%append_string("bbb")
+            call l%append_string("ccc")
+            do k = 1, 3
+                call r%append_string(rs(k))
+            end do
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "parquet_string_column match, match_all and in, both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: l, r
+            integer(int32) :: lv(3), rv(3)
+            lv = [11_int32, 22_int32, 33_int32]
+            rv = [33_int32, 11_int32, 11_int32]
+            call l%init(PK_INT32, 3_int64)
+            call l%set_all(lv)
+            call r%init(PK_INT32, 3_int64)
+            call r%set_all(rv)
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m64)
+            call pf_match_all(l, r, o32, t32)
+            call pf_match_all(l, r, o64, t64)
+            call pf_in(l, r, msk)
+            call check(error, match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, MWANT, MOFF, MMTC), &
+                "parquet_column match, match_all and in, both index kinds")
+        end block
+    end subroutine test_match_every_specific
+    !
+    !> One fixture's `pf_match`, `pf_match_all` and `pf_in` answers, in both index kinds, against
+    !> the expected lists AND against each other.
+    !!
+    !! The cross-checks are what a list of expected values alone would not give: `pf_match` must
+    !! name the first index of its element's CSR range, and `pf_in` must be exactly "that range is
+    !! non-empty". A defect that moved all three consistently still fails the expected lists, and
+    !! one that moved only one of them fails the cross-check.
+    pure function match_sweep_ok(m32, m64, o32, o64, t32, t64, msk, want, woff, wmt) result(ok)
+        integer(int32), intent(in) :: m32(:) !! the int32 pf_match answer.
+        integer(int64), intent(in) :: m64(:) !! the int64 pf_match answer.
+        integer(int32), intent(in) :: o32(:) !! the int32 pf_match_all offsets.
+        integer(int64), intent(in) :: o64(:) !! the int64 pf_match_all offsets.
+        integer(int32), intent(in) :: t32(:) !! the int32 pf_match_all matches.
+        integer(int64), intent(in) :: t64(:) !! the int64 pf_match_all matches.
+        logical, intent(in) :: msk(:)        !! the pf_in mask.
+        integer(int64), intent(in) :: want(:) !! the expected pf_match answer.
+        integer(int64), intent(in) :: woff(:) !! the expected offsets.
+        integer(int64), intent(in) :: wmt(:)  !! the expected matches.
+        logical :: ok                         !! .true. when every answer matches.
+        integer(int64) :: i, n
+
+        n = size(want, kind=int64)
+        ! Sizes first: every comparison below indexes these, and `all()` over a zero-length
+        ! mismatch is vacuously true.
+        ok = size(m32, kind=int64) == n .and. size(m64, kind=int64) == n &
+            .and. size(msk, kind=int64) == n &
+            .and. size(o32, kind=int64) == n + 1_int64 .and. size(o64, kind=int64) == n + 1_int64 &
+            .and. size(t32, kind=int64) == size(wmt, kind=int64) &
+            .and. size(t64, kind=int64) == size(wmt, kind=int64)
+        if (.not. ok) return
+        ok = all(m64 == want) .and. all(int(m32, int64) == m64) &
+            .and. all(o64 == woff) .and. all(int(o32, int64) == o64) &
+            .and. all(t64 == wmt) .and. all(int(t32, int64) == t64)
+        if (.not. ok) return
+        ! pf_match names the first index of the range, and pf_in is "the range is non-empty".
+        do i = 1_int64, n
+            if (woff(i + 1_int64) > woff(i)) then
+                ok = ok .and. m64(i) == wmt(woff(i)) .and. msk(i)
+            else
+                ok = ok .and. m64(i) == 0_int64 .and. .not. msk(i)
+            end if
+        end do
+    end function match_sweep_ok
+    !
     !> The degenerate sizes, which are where an off-by-one in the CSR shows up first.
     subroutine test_match_empty(error)
         type(error_type), allocatable, intent(out) :: error
@@ -8060,6 +8517,203 @@ contains
         call pf_match_all(none, none, off, mt)
         call check(error, size(off) == 1 .and. size(mt) == 0, "two empty arrays produce an empty CSR")
     end subroutine test_match_empty
+    !
+    !> Two empty arrays, for every element type.
+    !!
+    !! `test_match_empty` asks the four empty-input combinations of one type; this asks the
+    !! both-empty one of every type, because each type extracts its own sort key and each has its
+    !! own zero-length arm before the engine is entered. An arm that allocated nothing rather than
+    !! a zero-length array leaves the caller with an unallocated result, which is a crash at the
+    !! next `size()` rather than an answer.
+    subroutine test_match_empty_every_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), allocatable :: m(:), off(:), mt(:)
+        logical, allocatable :: inmask(:)
+
+        block
+            integer(int64) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "int64 empty match")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "real32 empty match")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "real64 empty match")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "logical empty match")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=3) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "character empty match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "parquet_date empty match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "parquet_time empty match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: none(0)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "parquet_timestamp empty match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: none
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "parquet_string_column empty match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: none
+            call none%init(PK_INT32, 0_int64)
+            call pf_match(none, none, m)
+            call pf_match_all(none, none, off, mt)
+            call pf_in(none, none, inmask)
+            call check(error, empty_match_ok(m, off, mt, inmask), "parquet_column empty match")
+        end block
+    end subroutine test_match_empty_every_type
+    !
+    !> The three empty answers: nothing matched, one sentinel offset, no pairs, no members.
+    !!
+    !! Every result is tested for being ALLOCATED as well as empty -- an arm that returned without
+    !! allocating leaves the caller's array unallocated, which reads as a crash at the next
+    !! `size()` rather than as a wrong answer here.
+    pure function empty_match_ok(m, off, mt, inmask) result(ok)
+        integer(int64), allocatable, intent(in) :: m(:)      !! the pf_match answer.
+        integer(int64), allocatable, intent(in) :: off(:)    !! the pf_match_all offsets.
+        integer(int64), allocatable, intent(in) :: mt(:)     !! the pf_match_all matches.
+        logical, allocatable, intent(in) :: inmask(:)        !! the pf_in mask.
+        logical :: ok                                        !! .true. when all four are right.
+
+        ok = allocated(m) .and. allocated(off) .and. allocated(mt) .and. allocated(inmask)
+        if (.not. ok) return
+        ok = size(m) == 0 .and. size(mt) == 0 .and. size(inmask) == 0 .and. size(off) == 1
+        if (ok) ok = off(1) == 1_int64
+    end function empty_match_ok
+    !
+    !> The three unmapped-element policies, for every VALUE kind `pf_remap` writes.
+    !!
+    !! `test_remap_unmapped_policies` establishes what the three policies mean, on the `int32`
+    !! value side. The fill is a separate body per value kind, each with its own "the type's zero"
+    !! and its own `default=` substitution, so the assertion that matters here is that an unmapped
+    !! element comes back as that kind's zero (or blank) rather than as whatever the buffer held --
+    !! an uninitialised fill answers a plausible number and nothing else in the call notices.
+    subroutine test_remap_every_value_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(5) = [10, 99, 20, 77, 10]
+        integer(int32), parameter :: K(2) = [10, 20]
+        logical, parameter :: WANTFND(5) = [.true., .false., .true., .false., .true.]
+        logical, allocatable :: fnd(:)
+
+        block
+            integer(int64) :: to(2)
+            integer(int64), allocatable :: got(:)
+            to = [1_int64, 2_int64]
+            call pf_remap(V, K, to, got, default=-1_int64)
+            call check(error, all(got == [1_int64, -1_int64, 2_int64, -1_int64, 1_int64]), &
+                "int64 values: default= must fill every unmapped element")
+            if (allocated(error)) return
+            call pf_remap(V, K, to, got, found=fnd)
+            call check(error, all(fnd .eqv. WANTFND) .and. &
+                all(got == [1_int64, 0_int64, 2_int64, 0_int64, 1_int64]), &
+                "int64 values: found= leaves an unmapped element at the type's zero")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: to(2)
+            real(real32), allocatable :: got(:)
+            to = [1.5_real32, 2.5_real32]
+            call pf_remap(V, K, to, got, default=-1.0_real32)
+            call check(error, all(got == [1.5_real32, -1.0_real32, 2.5_real32, -1.0_real32, 1.5_real32]), &
+                "real32 values: default= must fill every unmapped element")
+            if (allocated(error)) return
+            call pf_remap(V, K, to, got, found=fnd)
+            call check(error, all(fnd .eqv. WANTFND) .and. &
+                all(got == [1.5_real32, 0.0_real32, 2.5_real32, 0.0_real32, 1.5_real32]), &
+                "real32 values: found= leaves an unmapped element at the type's zero")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: to(2)
+            real(real64), allocatable :: got(:)
+            to = [1.5_real64, 2.5_real64]
+            call pf_remap(V, K, to, got, default=-1.0_real64)
+            call check(error, all(got == [1.5_real64, -1.0_real64, 2.5_real64, -1.0_real64, 1.5_real64]), &
+                "real64 values: default= must fill every unmapped element")
+            if (allocated(error)) return
+            call pf_remap(V, K, to, got, found=fnd)
+            call check(error, all(fnd .eqv. WANTFND) .and. &
+                all(got == [1.5_real64, 0.0_real64, 2.5_real64, 0.0_real64, 1.5_real64]), &
+                "real64 values: found= leaves an unmapped element at the type's zero")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: to(2)
+            logical, allocatable :: got(:)
+            to = [.true., .false.]
+            call pf_remap(V, K, to, got, default=.true.)
+            call check(error, all(got .eqv. [.true., .true., .false., .true., .true.]), &
+                "logical values: default= must fill every unmapped element")
+            if (allocated(error)) return
+            call pf_remap(V, K, to, got, found=fnd)
+            call check(error, all(fnd .eqv. WANTFND) .and. &
+                all(got .eqv. [.true., .false., .false., .false., .true.]), &
+                "logical values: found= leaves an unmapped element at .false.")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=3) :: to(2)
+            character(len=:), allocatable :: got(:)
+            to = ["aaa", "bbb"]
+            call pf_remap(V, K, to, got, default="zzz")
+            call check(error, all(got == ["aaa", "zzz", "bbb", "zzz", "aaa"]), &
+                "character values: default= must fill every unmapped element")
+            if (allocated(error)) return
+            call pf_remap(V, K, to, got, found=fnd)
+            call check(error, all(fnd .eqv. WANTFND) .and. &
+                all(got == ["aaa", "   ", "bbb", "   ", "aaa"]), &
+                "character values: found= leaves an unmapped element blank")
+        end block
+    end subroutine test_remap_every_value_kind
     !
     !> Two `character` arrays of different declared lengths compare at the wider of the two.
     !>

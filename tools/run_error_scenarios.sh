@@ -1000,6 +1000,8 @@ scenarios=(
     "join_detached_column:1"
     "sorting_search_unsorted:1"
     "sorting_search_target_too_long:1"
+    "sorting_search_many_answer_length:1"
+    "sorting_search_many_target_too_long:1"
     "sorting_rank_bad_method:1"
     "sorting_minmax_all_null:1"
     "sorting_minmax_all_null_i32:1"

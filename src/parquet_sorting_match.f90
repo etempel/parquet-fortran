@@ -1366,22 +1366,26 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_i64(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             is_valid_left=is_valid, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_i64
@@ -1409,22 +1413,26 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_f32(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             is_valid_left=is_valid, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_f32
@@ -1452,22 +1460,26 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_f64(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             is_valid_left=is_valid, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_f64
@@ -1495,22 +1507,26 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_bool(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             is_valid_left=is_valid, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_bool
@@ -1538,22 +1554,26 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_chr(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             is_valid_left=is_valid, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_chr
@@ -1580,21 +1600,25 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_date(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_date
@@ -1621,21 +1645,25 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_time(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_time
@@ -1662,21 +1690,25 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = size(from_keys, kind=int64)
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_ts(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_ts
@@ -1703,21 +1735,25 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = from_keys%size()
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_strcol(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_strcol
@@ -1744,21 +1780,25 @@ contains
         ! so at once rather than after O(n log n) of work they cannot use.
         nr = from_keys%length()
         if (nr /= n_to) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") nr
             write (b_str, "(i0)") n_to
             error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
                 "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
                 "value per key"
+            ! GCOVR_EXCL_STOP
         end if
         call match_keys_col(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
             threads=threads)
         call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
         if (dup_at > 0_int64) then
+            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
             write (a_str, "(i0)") dup_first
             write (b_str, "(i0)") dup_at
             error stop EP // "pf_remap: from_keys repeats a key at positions " // &
                 trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
                 "distinct, since a repeated key has no defined value"
+            ! GCOVR_EXCL_STOP
         end if
         call match_walk_first(perm, tie, isnull, nl, nr, first)
     end subroutine remap_match_col
@@ -1826,10 +1866,12 @@ contains
         if (.not. present(default) .and. .not. present(found)) then
             do i = 1_int64, n
                 if (first(i) == 0_int64) then
+                    ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
                     write (a_str, "(i0)") i
                     error stop EP // "pf_remap: the value at position " // trim(a_str) // &
                         " matches no key in from_keys; pass default= for a fallback " // &
                         "value, or found= to be told which elements were unmapped"
+                    ! GCOVR_EXCL_STOP
                 end if
             end do
         end if
@@ -1867,10 +1909,12 @@ contains
         if (.not. present(default) .and. .not. present(found)) then
             do i = 1_int64, n
                 if (first(i) == 0_int64) then
+                    ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
                     write (a_str, "(i0)") i
                     error stop EP // "pf_remap: the value at position " // trim(a_str) // &
                         " matches no key in from_keys; pass default= for a fallback " // &
                         "value, or found= to be told which elements were unmapped"
+                    ! GCOVR_EXCL_STOP
                 end if
             end do
         end if
@@ -1908,10 +1952,12 @@ contains
         if (.not. present(default) .and. .not. present(found)) then
             do i = 1_int64, n
                 if (first(i) == 0_int64) then
+                    ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
                     write (a_str, "(i0)") i
                     error stop EP // "pf_remap: the value at position " // trim(a_str) // &
                         " matches no key in from_keys; pass default= for a fallback " // &
                         "value, or found= to be told which elements were unmapped"
+                    ! GCOVR_EXCL_STOP
                 end if
             end do
         end if
@@ -1949,10 +1995,12 @@ contains
         if (.not. present(default) .and. .not. present(found)) then
             do i = 1_int64, n
                 if (first(i) == 0_int64) then
+                    ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
                     write (a_str, "(i0)") i
                     error stop EP // "pf_remap: the value at position " // trim(a_str) // &
                         " matches no key in from_keys; pass default= for a fallback " // &
                         "value, or found= to be told which elements were unmapped"
+                    ! GCOVR_EXCL_STOP
                 end if
             end do
         end if
@@ -1991,10 +2039,12 @@ contains
         if (.not. present(default) .and. .not. present(found)) then
             do i = 1_int64, n
                 if (first(i) == 0_int64) then
+                    ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.
                     write (a_str, "(i0)") i
                     error stop EP // "pf_remap: the value at position " // trim(a_str) // &
                         " matches no key in from_keys; pass default= for a fallback " // &
                         "value, or found= to be told which elements were unmapped"
+                    ! GCOVR_EXCL_STOP
                 end if
             end do
         end if

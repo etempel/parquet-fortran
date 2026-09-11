@@ -1202,6 +1202,10 @@ program error_scenarios
         call scenario_sorting_search_unsorted()
     case ("sorting_search_target_too_long")
         call scenario_sorting_search_target_too_long()
+    case ("sorting_search_many_answer_length")
+        call scenario_sorting_search_many_answer_length()
+    case ("sorting_search_many_target_too_long")
+        call scenario_sorting_search_many_target_too_long()
     case ("sorting_rank_bad_method")
         call scenario_sorting_rank_bad_method()
     case ("sorting_minmax_all_null")
@@ -21801,6 +21805,32 @@ contains
         call pf_lower_bound(v, "bbbb", pos)   ! -> aborts (4 non-blank characters, 3 per element)
         print '(a,i0)', "unexpectedly searched with an over-long target, pos=", pos
     end subroutine scenario_sorting_search_target_too_long
+
+    !> A BULK search whose answer array is not one entry per target is refused rather than filling
+    !! what fits. A short array would leave the caller with answers for some targets and whatever
+    !! the buffer held for the rest -- indistinguishable from a real position.
+    subroutine scenario_sorting_search_many_answer_length()
+        integer(int32) :: v(4) = [10, 20, 30, 40]
+        integer(int32) :: t(3) = [15, 25, 35]
+        integer(int64) :: fits(3), short(2)
+        call pf_lower_bound(v, t, fits)          ! control: one entry per target
+        print '(a,i0)', "control: the matching answer array gave pos(1)=", fits(1)
+        call pf_lower_bound(v, t, short)         ! -> aborts
+        print '(a,i0)', "a short answer array was accepted, pos(1)=", short(1)
+    end subroutine scenario_sorting_search_many_answer_length
+
+    !> `scenario_sorting_search_target_too_long` for the BULK form, whose padding is done per
+    !! target in a separate worker from the scalar form's.
+    subroutine scenario_sorting_search_many_target_too_long()
+        character(len=3) :: v(3) = ["aaa", "bbb", "ccc"]
+        character(len=4) :: ok_t(2) = ["bb  ", "cc  "]
+        character(len=4) :: bad_t(2) = ["bb  ", "bbbb"]
+        integer(int64) :: pos(2)
+        call pf_lower_bound(v, ok_t, pos)        ! control: both targets fit once trimmed
+        print '(a,i0)', "control: the shorter targets gave pos(1)=", pos(1)
+        call pf_lower_bound(v, bad_t, pos)       ! -> aborts (4 non-blank characters, 3 per element)
+        print '(a,i0)', "an over-long bulk target was accepted, pos(2)=", pos(2)
+    end subroutine scenario_sorting_search_many_target_too_long
 
     !> An unrecognized `method=` token aborts naming the valid ones, exactly as `rounding=` does --
     !! a string selector is only acceptable because an unknown value fails loudly.

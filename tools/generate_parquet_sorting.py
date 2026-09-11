@@ -131,6 +131,22 @@ REMAP_ZERO = {
     "bool": ".false.", "chr": '""',
 }
 
+#: The key and value tag whose pf_remap guards are PROVEN by out-of-process error scenarios:
+#: `remap_length_mismatch`, `remap_duplicate_key` and `remap_unmapped_no_policy`
+#: (test/error_scenarios.f90), all of which use int32 keys and int32 values.
+#:
+#: Those three guards are written ONCE here and emitted per type, so every other type's copy is
+#: the same text with a different declaration. Each is excluded from coverage instead of being
+#: given a near-identical scenario of its own -- eleven key types and six value types would cost
+#: twenty-five more scenarios to re-prove one template. The exclusion says "deliberately
+#: untested", not "unreachable": these guards are reachable, and the one that matters is tested.
+#:
+#: Both ways of getting this wrong are LOUD rather than silent, which is what makes the choice
+#: safe to leave here. Delete the scenarios above and this tag's copies go uncovered, visibly.
+#: Add a scenario for another type and that type's exclusion turns up in tools/coverage.sh's
+#: "excluded lines with positive hits" report, which is the signal to widen this.
+REMAP_GUARD_PROVEN_TAG = "i32"
+
 
 def remap_to_decl(v, name="to_values"):
     """Declaration of pf_remap\'s value-per-key array."""
@@ -6436,6 +6452,9 @@ contains
 
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
+        # The two guards below are one generated template; only one type's copy is worth an
+        # out-of-process scenario. See REMAP_GUARD_PROVEN_TAG.
+        guard_excl = tag != REMAP_GUARD_PROVEN_TAG
         w(f"    !> The KEY half of every pf_remap specific over {what} keys: refuses a lookup table")
         w("    !! that is the wrong length or that repeats a key, then matches every value against it.")
         w("    !!")
@@ -6463,11 +6482,15 @@ contains
         w("        ! so at once rather than after O(n log n) of work they cannot use.")
         w(f"        nr = {rows_of(t, 'from_keys')}")
         w("        if (nr /= n_to) then")
+        if guard_excl:
+            w("            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.")
         w("            write (a_str, \"(i0)\") nr")
         w("            write (b_str, \"(i0)\") n_to")
         w("            error stop EP // \"pf_remap: from_keys has \" // trim(a_str) // \" keys but \" // &")
         w("                \"to_values has \" // trim(b_str) // \" values; a lookup table takes one \" // &")
         w("                \"value per key\"")
+        if guard_excl:
+            w("            ! GCOVR_EXCL_STOP")
         w("        end if")
         w(f"        call match_keys_{tag}(values, from_keys, \"pf_remap\", nl, nr, perm, tie, isnull, &")
         if nulls == "arg":
@@ -6475,17 +6498,23 @@ contains
         w("            threads=threads)")
         w("        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)")
         w("        if (dup_at > 0_int64) then")
+        if guard_excl:
+            w("            ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.")
         w("            write (a_str, \"(i0)\") dup_first")
         w("            write (b_str, \"(i0)\") dup_at")
         w("            error stop EP // \"pf_remap: from_keys repeats a key at positions \" // &")
         w("                trim(a_str) // \" and \" // trim(b_str) // \"; a lookup table must be \" // &")
         w("                \"distinct, since a repeated key has no defined value\"")
+        if guard_excl:
+            w("            ! GCOVR_EXCL_STOP")
         w("        end if")
         w("        call match_walk_first(perm, tie, isnull, nl, nr, first)")
         w(f"    end subroutine remap_match_{tag}")
         w("    !")
 
     for v in REMAP_VALUES:
+        # As in the key half above: one template, one scenario. See REMAP_GUARD_PROVEN_TAG.
+        fill_excl = v[0] != REMAP_GUARD_PROVEN_TAG
         w(f"    !> The VALUE half of every pf_remap specific with {v[2]} values: the gather, and the")
         w("    !! policy for an element that matched no key.")
         w(f"    subroutine remap_fill_{v[0]}(first, to_values, out, default, found)")
@@ -6510,10 +6539,14 @@ contains
         w("        if (.not. present(default) .and. .not. present(found)) then")
         w("            do i = 1_int64, n")
         w("                if (first(i) == 0_int64) then")
+        if fill_excl:
+            w("                    ! GCOVR_EXCL_START -- deliberately untested; see REMAP_GUARD_PROVEN_TAG.")
         w("                    write (a_str, \"(i0)\") i")
         w("                    error stop EP // \"pf_remap: the value at position \" // trim(a_str) // &")
         w("                        \" matches no key in from_keys; pass default= for a fallback \" // &")
         w("                        \"value, or found= to be told which elements were unmapped\"")
+        if fill_excl:
+            w("                    ! GCOVR_EXCL_STOP")
         w("                end if")
         w("            end do")
         w("        end if")

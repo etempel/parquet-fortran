@@ -120,13 +120,17 @@ call row%get(v, is_valid=ok)   ! ok == [T, F, T]
 Reading a null row is not an error — nulls are ordinary in a list column, so `%get` yields a
 zero-size array rather than aborting.
 
-**`%set_null(i)` does not move any data.** It sets one bit; the row's elements stay where they are
-and no later row shifts, which is what keeps it O(1) and keeps every outstanding handle correct.
-The nulled row reports length 0 and yields a zero-size `%get` from that moment on, and its former
-elements are unreachable. They are dropped by the next rebuild (`%gather_rows`). `%clear_null(i)`
-makes the row present again with whatever its offsets still describe — which is nothing for a row
-that was appended null, and its original elements for a row nulled afterwards, provided no rebuild
-has happened in between.
+**`%set_null(i)` drops the row's elements.** A null row is zero-length: the elements are removed
+and every later offset moves down with them, so `%set_null` costs a pass over the payload rather
+than being O(1). Row indices do not change, so every outstanding row handle stays correct; only
+payload positions move. The nulled row reports length 0 and yields a zero-size `%get`.
+
+This is what Parquet requires, not tidiness — a list whose null slot still spans elements is
+refused when the column is written, so a column that kept them could be built and then never
+written.
+
+`%clear_null(i)` makes the row present again and **empty**: it clears one bit, and the elements are
+already gone. Only `%append_row` gives a row elements.
 
 ## The row handle
 
@@ -176,8 +180,7 @@ returning a plausible answer.
   and leaves `src` empty.
 - **`%gather_rows(idx)`** rebuilds the column so row `k` becomes the row that was at `idx(k)`. The
   list may be any length, may repeat a row and may omit one, so it serves reordering, filtering and
-  duplication alike. It is also what compacts away the elements of rows that were nulled after
-  being appended.
+  duplication alike. Elements belonging to rows the list does not name are dropped.
 - **`%validate([message])`** checks the class invariants — offsets monotonic, `offsets(1) == 0`,
   the final offset matching the payload's row count — and is cheap enough to call from a test after
   any structural change.
@@ -192,9 +195,8 @@ Four queries answer about the column as a whole, without touching a row or alloc
 - **`%size()`** — the number of rows, as used in the first example above.
 - **`%null_count()`** — how many of them are **null rows**. Element nulls are not counted here;
   they live in the payload column and belong to the rows that hold them.
-- **`%total_elements()`** — the payload's element count, which is the last offset. A null row
-  contributes whatever its offsets still describe, so this counts storage rather than reachable
-  values until the next `%gather_rows` rebuild compacts it.
+- **`%total_elements()`** — the payload's element count, which is the last offset. A null row is
+  zero-length, so this is the sum of `%length(i)` over every row.
 - **`%capacity()`** — how many rows the offsets array can hold before it grows again, which is the
   third member of the `%reserve`/`%shrink_to_fit` trio and the way to see what those two did.
 

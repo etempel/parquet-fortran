@@ -3792,6 +3792,22 @@ contains
             [character(len=8) :: "blom", "weibull", "tukey", "hazen", "cunnane"]
         real(real64), parameter :: AVAL(5) = &
             [0.375_real64, 0.0_real64, 1.0_real64 / 3.0_real64, 0.5_real64, 0.4_real64]
+        !> Filliben's median rank: the two ends are closed forms and the interior is its own
+        !! formula.
+        !!
+        !! **These are PARAMETERs, and the five `AVAL` positions below deliberately are not.** The
+        !! interior denominator here is a constant the compiler can see, and a fast floating-point
+        !! model turns a division by one of those into a multiply by the reciprocal -- 1 ulp out,
+        !! which `pf_probit` amplifies into roughly ten, against a bit-equality assertion
+        !! (`fortran-gotchas.md`, ifx). Folding it as a `parameter` instead is correctly rounded on
+        !! every compiler and agrees with the true division the library performs on its run-time
+        !! `m`. `rm + 1 - 2*a` is a different case: it is an FMA-contractable shape, so the library
+        !! and a matching run-time expression contract alike and agree, while a folded constant --
+        !! being unfused -- would not.
+        real(real64), parameter :: FPOS(M) = &
+            [1.0_real64 - 0.5_real64 ** (1.0_real64 / real(M, real64)), &
+             ((real(i, real64) - 0.3175_real64) / (real(M, real64) + 0.365_real64), i = 2, M - 1), &
+             0.5_real64 ** (1.0_real64 / real(M, real64))]
 
         do i = 1, M
             x(i) = real(i, real64) * 3.0_real64   ! strictly increasing, so rank(i) = i.
@@ -3824,10 +3840,8 @@ contains
 
         ! "filliben" is the MEDIAN rank and is a different SHAPE, not a different constant: two
         ! closed forms at the ends and an interior formula between.
-        want(1) = pf_probit(1.0_real64 - 0.5_real64 ** (1.0_real64 / rm))
-        want(M) = pf_probit(0.5_real64 ** (1.0_real64 / rm))
-        do i = 2, M - 1
-            want(i) = pf_probit((real(i, real64) - 0.3175_real64) / (rm + 0.365_real64))
+        do i = 1, M
+            want(i) = pf_probit(FPOS(i))
         end do
         call pf_normal_scores(x, s, method="FILLIBEN")
         call check(error, all(s == want), &

@@ -30,7 +30,7 @@
 !! This suite is pure computation with no files and no process-global state, so it stays out of
 !! `run_tester.f90`'s parallelism exclusion list and runs concurrently.
 module test_utils
-    use testdrive, only: new_unittest, unittest_type, error_type, check
+    use testdrive, only: new_unittest, unittest_type, error_type, check, skip_test
     use parquet_utils
     use test_path_vectors
     use test_probit_golden
@@ -38,7 +38,8 @@ module test_utils
     use, intrinsic :: ieee_arithmetic, only: ieee_support_flag, ieee_get_flag, &
         ieee_set_flag, ieee_underflow, ieee_divide_by_zero, ieee_invalid, &
         ieee_is_nan, ieee_is_finite, ieee_is_negative, ieee_value, ieee_quiet_nan, &
-        ieee_positive_inf, ieee_negative_inf
+        ieee_positive_inf, ieee_negative_inf, ieee_support_underflow_control, &
+        ieee_get_underflow_mode
     implicit none
     private
 
@@ -182,28 +183,61 @@ contains
         res = .not. ieee_is_finite(x) .and. .not. ieee_is_nan(x) .and. .not. ieee_is_negative(x)
     end function is_pos_inf
 
+    !> Whether this build flushes subnormals to zero, so no procedure here can be asked about one.
+    !!
+    !! **ifx turns flush-to-zero AND denormals-are-zero on by default at `-O1` and above**, which
+    !! is what a flagless `fpm test` selects; gfortran and nagfor leave gradual underflow in force.
+    !! It is a process-wide MXCSR setting established by the main program, so a library procedure
+    !! sees the argument already collapsed to zero and cannot recover it: `pf_probit` of the
+    !! smallest subnormal answers `-Infinity` rather than about `-38.47`. A test over subnormal
+    !! inputs therefore reports what the BUILD does, not what the kernel does, and says so by
+    !! skipping (`fortran-gotchas.md`, ifx).
+    function subnormals_are_flushed() result(res)
+        logical :: res !! `.true.` when underflow is abrupt, so subnormal inputs read as zero.
+        logical :: gradual
+
+        res = .false.
+        if (.not. ieee_support_underflow_control(1.0_real64)) return
+        call ieee_get_underflow_mode(gradual)
+        res = .not. gradual
+    end function subnormals_are_flushed
+
     !> `pf_probit` against the 50-digit oracle at every grid point, both branches and the seam.
     !!
     !! The grid is `P_GRID`, which straddles the branch seam at `q = 0.1` by construction and runs
     !! from the smallest subnormal double to `1 - 1e-16`. A kernel with a wrong seam, a wrong
     !! starting estimate or one refinement step too few fails here by a factor of hundreds.
+    !!
+    !! **The subnormal points are dropped where the build flushes them**, since the argument has
+    !! already collapsed to zero before the kernel sees it and every gap would read `Infinity`
+    !! (`subnormals_are_flushed`). The rest of the grid still exercises both branches and the seam,
+    !! and `test_probit_subnormal_tail` is the test that reports the loss by skipping outright.
     subroutine test_probit_matches_oracle(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
-        integer :: k, nbad, worst_at
+        integer :: k, nbad, nchecked, worst_at
         real(real64) :: gap, worst
+        logical :: flushed
         character(len=:), allocatable :: wp, wg
 
+        flushed = subnormals_are_flushed()
         nbad = 0
+        nchecked = 0
         worst = 0.0_real64
         worst_at = 1
         do k = 1, NP
+            if (flushed .and. P_GRID(k) < tiny(1.0_real64)) cycle
             gap = ulp_gap(pf_probit(P_GRID(k)), PROBIT_GRID(k))
-            if (gap > worst) then
+            nchecked = nchecked + 1
+            if (nchecked == 1 .or. gap > worst) then
                 worst = gap
                 worst_at = k
             end if
             if (gap > PROBIT_ULP_BUDGET) nbad = nbad + 1
         end do
+        ! Without this the test passes by asserting nothing, should the grid ever become entirely
+        ! subnormal or the drop above lose its bound.
+        call check(error, nchecked > 0, "every grid point was dropped -- the oracle comparison asserted nothing")
+        if (allocated(error)) return
         call pf_to_str(P_GRID(worst_at), wp)
         call pf_to_str(worst, wg)
         call check(error, nbad, 0, "pf_probit is outside its ulp budget at " // wp // &
@@ -420,6 +454,16 @@ contains
         integer :: k, nbad
         logical :: saved, supported
         real(real64) :: res
+
+        ! Nothing here is a statement about the kernel when the build collapses every subnormal to
+        ! zero before the call: the skip names the flag that restores the property.
+        if (subnormals_are_flushed()) then
+            call skip_test(error, "needs gradual underflow: this build flushes subnormals to zero, so " // &
+                "a subnormal probability reaches pf_probit as 0 and the answer is -Infinity by " // &
+                "construction (ifx enables -ftz at -O1 and above; build with -no-ftz or " // &
+                "-fp-model=precise to assert this)")
+            return
+        end if
 
         ! Reading and narrowing values at the bottom of the exponent range sets IEEE_UNDERFLOW,
         ! and the suite runs concurrently, so the flag is saved and put back: leaving one raised
@@ -659,39 +703,51 @@ contains
     !!
     !! Asserted as bit equality rather than within a tolerance: the contract is that a program's
     !! outputs are unchanged by adopting it, which a tolerance would not check.
+    !!
+    !! **The reference quotients are PARAMETERs, never a division written as executable code.** A
+    !! division whose denominator the compiler can see is a constant becomes a multiply by the
+    !! reciprocal under a fast floating-point model, and that is not the correctly rounded quotient
+    !! -- so the assertion's own right-hand side stops being `a/b` while `pf_safe_div` still
+    !! returns it (`fortran-gotchas.md`, ifx). A `parameter` expression is folded by the front end
+    !! instead, correctly rounded under every compiler and `-fp-model`. This also keeps the fixture
+    !! free of run-time division, which is what the nagfor fixture rule asks for.
     subroutine test_safe_div_matches_division(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
-        real(real64) :: a(6), b(6)
-        real(real32) :: a4(6), b4(6)
         integer :: i, nbad
-
         ! The fifth pair spans the exponent range deliberately, but its QUOTIENT must stay finite:
-        ! an overflowing quotient is raised by `a(i)/b(i)` on the assertion's own side as much as
-        ! inside the procedure, and nagfor unmasks the overflow trap by default, so the pair that
-        ! overflows aborts the runner instead of testing anything.
-        a = [1.0_real64, -1.0_real64, 3.0_real64, -7.5_real64, 1.0e300_real64, 0.0_real64]
-        b = [3.0_real64, 7.0_real64, -11.0_real64, 0.25_real64, 1.0e-7_real64, 5.0_real64]
-        a4 = [1.0_real32, -1.0_real32, 3.0_real32, -7.5_real32, 1.0e30_real32, 0.0_real32]
-        b4 = [3.0_real32, 7.0_real32, -11.0_real32, 0.25_real32, 1.0e-7_real32, 5.0_real32]
+        ! nagfor unmasks the overflow trap by default, so a pair whose quotient overflows aborts
+        ! the runner (and, folded as a `parameter`, fails the build) instead of testing anything.
+        real(real64), parameter :: A64(6) = &
+            [1.0_real64, -1.0_real64, 3.0_real64, -7.5_real64, 1.0e300_real64, 0.0_real64]
+        real(real64), parameter :: B64(6) = &
+            [3.0_real64, 7.0_real64, -11.0_real64, 0.25_real64, 1.0e-7_real64, 5.0_real64]
+        real(real32), parameter :: A32(6) = &
+            [1.0_real32, -1.0_real32, 3.0_real32, -7.5_real32, 1.0e30_real32, 0.0_real32]
+        real(real32), parameter :: B32(6) = &
+            [3.0_real32, 7.0_real32, -11.0_real32, 0.25_real32, 1.0e-7_real32, 5.0_real32]
+        !> The correctly rounded quotients. Written as the division itself, so the pairing with the
+        !! arrays above stays readable and no digit is transcribed by hand.
+        real(real64), parameter :: Q64(6) = [(A64(i) / B64(i), i = 1, 6)]
+        real(real32), parameter :: Q32(6) = [(A32(i) / B32(i), i = 1, 6)]
 
         nbad = 0
-        do i = 1, size(a)
-            if (pf_safe_div(a(i), b(i)) /= a(i) / b(i)) nbad = nbad + 1
+        do i = 1, size(A64)
+            if (pf_safe_div(A64(i), B64(i)) /= Q64(i)) nbad = nbad + 1
         end do
         call check(error, nbad, 0, "pf_safe_div disagrees with a/b on a real64 non-zero denominator")
         if (allocated(error)) return
 
         nbad = 0
-        do i = 1, size(a4)
-            if (pf_safe_div(a4(i), b4(i)) /= a4(i) / b4(i)) nbad = nbad + 1
+        do i = 1, size(A32)
+            if (pf_safe_div(A32(i), B32(i)) /= Q32(i)) nbad = nbad + 1
         end do
         call check(error, nbad, 0, "pf_safe_div disagrees with a/b on a real32 non-zero denominator")
         if (allocated(error)) return
 
         ! Elemental, so a whole array goes through one call and must agree element for element.
-        call check(error, all(pf_safe_div(a, b) == a / b), "the elemental real64 form disagrees with a/b")
+        call check(error, all(pf_safe_div(A64, B64) == Q64), "the elemental real64 form disagrees with a/b")
         if (allocated(error)) return
-        call check(error, all(pf_safe_div(a4, b4) == a4 / b4), "the elemental real32 form disagrees with a/b")
+        call check(error, all(pf_safe_div(A32, B32) == Q32), "the elemental real32 form disagrees with a/b")
     end subroutine test_safe_div_matches_division
 
     !> A zero denominator gives the value the division would have given, by construction.

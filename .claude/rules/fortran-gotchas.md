@@ -246,6 +246,23 @@ done | sort | uniq -c | sort -rn
 - **The same transcendental expression can differ by 1–2 ulp between a bulk loop and a scalar
   evaluation at `-O0`** (identical at `-O2`); assert a re-derived value at a tolerance above the
   round-trip error, never at zero (`test_count_within_sky`, 1e-9 degrees).
+- **ifx's default `-fp-model=fast` rewrites a division whose denominator it can see is CONSTANT as
+  a multiply by the reciprocal**, which is not the correctly rounded quotient — so a test that
+  re-derives a reference that way tests the rewrite instead of the library, against a bit-equality
+  assertion. Fold such a reference as a `parameter`: a constant expression goes through the front
+  end and is correctly rounded under every compiler and `-fp-model`
+  (`test_safe_div_matches_division`, `test_normal_scores_every_method_token`). A flagless
+  `fpm test` selects this; `-prec-div` or `-fp-model=precise` turns it off.
+  **Do not apply the same fix to an FMA-contractable shape.** `rm + 1 - 2*a` contracts at run time,
+  so the library and a matching run-time expression agree while an unfused folded constant does
+  not; that reference stays run-time arithmetic.
+- **ifx turns flush-to-zero AND denormals-are-zero on at `-O1` and above**; gfortran and nagfor
+  leave gradual underflow in force. It is a process-wide MXCSR setting made by the main program, so
+  a library procedure receives a subnormal argument already collapsed to zero and cannot recover
+  it — `pf_probit` of the smallest subnormal answers `-Infinity` rather than about `-38.47`. A test
+  over subnormal inputs therefore reports the BUILD, not the kernel: detect it with
+  `ieee_get_underflow_mode` and skip, naming the flag (`subnormals_are_flushed`,
+  `test/test_utils.f90`). `-no-ftz` or `-fp-model=precise` restores it.
 - **An ABSENT optional allocatable dummy passed into an OpenMP region and on to an optional dummy
   segfaults at `-O0 -check all`** (`SIGSEGV` at the call; clean on gfortran and ifx release). Never
   pass an optional array dummy into a parallel region: fill a local that always exists and

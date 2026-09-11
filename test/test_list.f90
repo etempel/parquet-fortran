@@ -45,7 +45,8 @@ contains
             new_unittest("gather_rows reorders, repeats and drops rows", test_gather_rows), &
             new_unittest("append_from concatenates two list columns and rebases the offsets", &
                 test_append_from), &
-            new_unittest("gather_rows compacts a nulled row's elements away", test_gather_drops_nulled), &
+            new_unittest("set_null drops a row's elements at once and a rebuild agrees", &
+                test_gather_drops_nulled), &
             new_unittest("growth is geometric and shrink_to_fit gives it back", test_capacity_policy), &
             new_unittest("reserve does not add rows", test_reserve_adds_no_rows), &
             new_unittest("ensure_validity materializes both levels", test_ensure_validity), &
@@ -341,7 +342,14 @@ contains
             "%init(kind, nrows) creates that many null rows")
     end subroutine test_grow_rows
 
-    !> `%set_null` marks exactly one row, and `%clear_null` unmarks exactly one row.
+    !> `%set_null` marks exactly one row and drops that row's elements; `%clear_null` unmarks one
+    !! row and brings it back EMPTY.
+    !!
+    !! The element drop is the invariant Arrow's Parquet writer requires -- a null list slot
+    !! spanning elements is refused outright -- so `%total_elements` falling by the row's former
+    !! length is asserted here rather than left implicit. The row AFTER the nulled one is read back
+    !! in full: its payload elements moved down, and only its OFFSETS moving with them keeps it
+    !! readable.
     subroutine test_set_and_clear_null(error)
         type(error_type), allocatable, intent(out) :: error !! set on failure.
         type(parquet_list_column), target :: lc
@@ -354,6 +362,8 @@ contains
         call lc%append_row([4_int32, 5_int32, 6_int32])
         call check(error, .not. lc%has_validity_storage(), "a null-free column allocates no bitmap")
         if (allocated(error)) return
+        call check(error, lc%total_elements() == 6_int64, "six elements before anything is nulled")
+        if (allocated(error)) return
 
         call lc%set_null(2_int64)
         call check(error, lc%is_null(2_int64), "the named row became null")
@@ -363,17 +373,31 @@ contains
         if (allocated(error)) return
         call check(error, lc%length(2_int64) == 0_int64, "a nulled row reports length 0")
         if (allocated(error)) return
-        ! Row 3 must still be readable and unmoved: %set_null is O(1) precisely because it does
-        ! not touch the payload, and a version that did would shift every later row.
+        call check(error, lc%total_elements() == 4_int64, &
+            "the nulled row's two elements were dropped, not merely hidden")
+        if (allocated(error)) return
+        ! Row 3's elements moved down by two; its offsets moved with them, so it still reads back
+        ! as itself. A drop that forgot the offsets tail would return row 2's old values here.
         row = lc%view(3_int64)
         call row%get(v)
-        call check(error, size(v) == 3 .and. v(1) == 4_int32, "the row after a nulled one is unmoved")
+        call check(error, size(v) == 3, "the row after a nulled one still holds three elements")
+        if (allocated(error)) return
+        call check(error, v(1) == 4_int32 .and. v(2) == 5_int32 .and. v(3) == 6_int32, &
+            "and they are its own values, not the dropped row's")
+        if (allocated(error)) return
+        ! Row 1 is before the nulled row, so nothing about it may have moved at all.
+        row = lc%view(1_int64)
+        call row%get(v)
+        call check(error, size(v) == 1 .and. v(1) == 1_int32, "the row before a nulled one is untouched")
         if (allocated(error)) return
 
         call lc%clear_null(2_int64)
         call check(error, .not. lc%is_null(2_int64), "clear_null makes the row present again")
         if (allocated(error)) return
-        call check(error, lc%length(2_int64) == 2_int64, "the row's own offsets were never disturbed")
+        call check(error, lc%length(2_int64) == 0_int64, &
+            "and it comes back EMPTY -- clear_null is one bit, not an undo")
+        if (allocated(error)) return
+        call check(error, lc%total_elements() == 4_int64, "clearing the bit restores no element")
     end subroutine test_set_and_clear_null
 
     !> A deep copy shares nothing with its source: mutating either must not move the other.
@@ -479,9 +503,12 @@ contains
         call check(error, all(v == [41_int32, 42_int32, 43_int32]), "the repeated copy holds the same values")
     end subroutine test_gather_rows
 
-    !> A row nulled after being appended keeps its payload elements until the next rebuild, and
-    !! the rebuild is what drops them. Documented behaviour, and easy to regress in either
-    !! direction -- dropping them too early would corrupt every later row's offsets.
+    !> `%set_null` drops the row's elements at once, and a later rebuild finds nothing left to
+    !! drop. Nulling the FIRST row is the case that catches an offsets tail left unshifted: every
+    !! remaining row is after it, so the damage is maximal and `%validate` sees it.
+    !!
+    !! Both halves are worth asserting. Dropping too LATE is what made Arrow's Parquet writer
+    !! refuse the column; dropping without shifting the offsets would corrupt every later row.
     subroutine test_gather_drops_nulled(error)
         type(error_type), allocatable, intent(out) :: error !! set on failure.
         type(parquet_list_column) :: lc
@@ -490,16 +517,20 @@ contains
         call lc%append_row([1_int32, 2_int32])
         call lc%append_row([3_int32, 4_int32, 5_int32])
         call lc%set_null(1_int64)
-        call check(error, lc%total_elements() == 5_int64, &
-            "nulling a row does not remove its elements from the payload")
+        call check(error, lc%total_elements() == 3_int64, &
+            "nulling a row removes its elements from the payload straight away")
         if (allocated(error)) return
-        call check(error, lc%length(2_int64) == 3_int64, "the later row's offsets are undisturbed")
+        call check(error, lc%length(2_int64) == 3_int64, "the later row keeps its own length")
+        if (allocated(error)) return
+        call check(error, lc%validate(), "the column still satisfies its invariants after the drop")
         if (allocated(error)) return
 
+        ! The identity gather is now a no-op as far as elements go; it used to be what performed
+        ! the drop, so the two paths agreeing is the thing to pin.
         call lc%gather_rows([1_int64, 2_int64])
         call check(error, lc%size() == 2_int64, "the identity gather kept both rows")
         if (allocated(error)) return
-        call check(error, lc%total_elements() == 3_int64, "the rebuild dropped the nulled row's elements")
+        call check(error, lc%total_elements() == 3_int64, "the rebuild had nothing left to drop")
         if (allocated(error)) return
         call check(error, lc%is_null(1_int64), "the rebuilt row is still null")
         if (allocated(error)) return

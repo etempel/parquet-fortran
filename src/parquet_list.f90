@@ -31,12 +31,17 @@
 !! `parquet_string_column` already uses, so handing these buffers to Arrow is a copy rather than
 !! a translation.
 !!
-!! **Null rows keep their offsets.** Marking a row null does not move any payload element -- the
-!! offsets stay monotonic and every later row keeps its position, which is what makes `%set_null`
-!! O(1). A null row reports `%length(i) == 0` and yields a zero-size array from `%get`, matching
-!! Arrow, which leaves the contents of a null slot undefined and expects readers to ignore them.
-!! Whatever elements such a row held before it was nulled are unreachable from that moment on and
-!! are dropped by the next rebuild (`%gather_rows`).
+!! **A null row is ZERO-LENGTH.** `%set_null(i)` removes the row's payload elements and shifts
+!! every later offset down, so the offsets never describe a span for a row the validity bitmap
+!! calls absent. This is a requirement, not a tidiness: Arrow's Parquet writer refuses a list whose
+!! null slot spans elements outright ("Lists with non-zero length null components are not
+!! supported"), and the refusal arrives as an uncatchable C++ exception, so a column that kept
+!! those elements could be built and then never written. `%set_null` is therefore O(n) in the
+!! payload rather than O(1); row indices do not move, only payload positions.
+!!
+!! The corollary is that `%clear_null(i)` brings back an EMPTY row, never the elements the row
+!! held before: it clears one bit and nothing else. `%append_row` is the only way to give a row
+!! elements.
 !!
 !! Depends only on `iso_fortran_env` plus `parquet_columns` and the two element-domain modules it
 !! already brings in. It reaches no `bind(C)` interface, reads no setting and prints nothing --
@@ -280,7 +285,7 @@ contains
     !! indices, rather than row by row: that is a single kind-dispatched pass which also carries
     !! the per-element validity and works for a string payload, none of which this module would
     !! want to reimplement. **Elements belonging to rows that `idx` does not name are dropped**,
-    !! which is what compacts away a nulled row's unreachable elements (see the module doc).
+    !! which is what compacts a permutation that omits or repeats rows.
     subroutine lc_gather_rows(self, idx)
         class(parquet_list_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: idx(:)              !! 1-based source row per destination row.
@@ -683,8 +688,8 @@ contains
     !
     !> Total elements stored across every row, i.e. `offsets(nrows+1)`.
     !!
-    !! Counts elements belonging to rows that were nulled after being appended: those are
-    !! unreachable but still physically present until the next rebuild (see the module doc).
+    !! A null row contributes nothing: `%set_null` drops the row's elements (see the module doc),
+    !! so this is the sum of `%length(i)` over every row.
     pure function total_elements(self) result(n)
         class(parquet_list_column), intent(in) :: self !! the column.
         integer(int64) :: n                            !! elements stored.
@@ -1065,12 +1070,12 @@ contains
         call self%set_null_i64(int(i, int64))
     end subroutine set_null_i32
     !
-    !> int64 specific of set_null: marks row `i` a null (absent) list.
+    !> int64 specific of set_null: marks row `i` a null (absent) list and drops its elements.
     !!
-    !! O(1): the row's payload elements are NOT removed and no later row moves, which is what
-    !! keeps the offsets monotonic and every outstanding handle's index correct. The nulled row
-    !! reports `%length(i) == 0` and yields a zero-size `%get` from that moment on; its former
-    !! elements are unreachable and are dropped by the next `%gather_rows` rebuild.
+    !! O(n) in the payload, not O(1): the row's elements are removed and every later offset moves
+    !! down by the row's former length, so that a null row really is zero-length (see the module
+    !! doc for why Arrow requires it). Row indices, and therefore every outstanding row handle's
+    !! index, are unaffected -- only payload positions shift.
     subroutine set_null_i64(self, i)
         class(parquet_list_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: i                   !! 1-based row index.
@@ -1078,7 +1083,41 @@ contains
         call ensure_validity_cap(self, self%nrows_)
         self%has_nulls_ = .true.
         call bit_set(self%validity, i)
+        call drop_row_elements(self, i)
     end subroutine set_null_i64
+    !
+    !> Removes row `i`'s payload elements and closes the gap in `offsets`, leaving the row empty.
+    !!
+    !! Private, and the one place the "a null row is zero-length" invariant is enforced. The
+    !! payload is rebuilt by a single `parquet_column%gather` over the surviving element indices,
+    !! the same call `%gather_rows` uses: one kind-dispatched pass that carries the per-element
+    !! validity and works for a string payload.
+    subroutine drop_row_elements(self, i)
+        class(parquet_list_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: i                   !! 1-based row index, already bounds-checked.
+        integer(int64) :: lo, hi, len, total, k, pos, e
+        integer(int64), allocatable :: keep(:)
+
+        lo = self%offsets(i) + 1_int64
+        hi = self%offsets(i + 1_int64)
+        len = hi - lo + 1_int64
+        ! Already empty -- a row appended null, or one nulled twice. Returning here also keeps an
+        ! uninitialized column out of parquet_column%gather, which aborts on a PK_NONE payload.
+        if (len <= 0_int64) return
+        total = self%offsets(self%nrows_ + 1_int64)
+        allocate(keep(max(total - len, 1_int64)))
+        pos = 0_int64
+        do e = 1_int64, total
+            if (e < lo .or. e > hi) then
+                pos = pos + 1_int64
+                keep(pos) = e
+            end if
+        end do
+        call self%payload%gather(keep(1:total - len))
+        do k = i + 1_int64, self%nrows_ + 1_int64
+            self%offsets(k) = self%offsets(k) - len
+        end do
+    end subroutine drop_row_elements
     !
     !> int32 specific of clear_null; see the clear_null generic.
     subroutine clear_null_i32(self, i)
@@ -1087,12 +1126,11 @@ contains
         call self%clear_null_i64(int(i, int64))
     end subroutine clear_null_i32
     !
-    !> int64 specific of clear_null: marks row `i` present again.
+    !> int64 specific of clear_null: marks row `i` present again, EMPTY.
     !!
-    !! The row comes back with whatever elements its offsets still describe -- which for a row
-    !! that was appended null is none, and for a row nulled after being appended is the elements
-    !! it had, provided no rebuild has happened in between. Nothing else can restore those, so
-    !! this is deliberately not "undo": it clears one bit.
+    !! Not an undo: it clears one bit. `%set_null` already dropped the row's elements to keep a
+    !! null row zero-length (module doc), so the row comes back with no elements whatever it held
+    !! before. Only `%append_row` gives a row elements.
     subroutine clear_null_i64(self, i)
         class(parquet_list_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: i                   !! 1-based row index.

@@ -13794,8 +13794,16 @@ contains
     !> message. The negative control is in the same process and has to be: the guard keys on
     !> OWNERSHIP, not on `omp_in_parallel()`, so a sink this thread opened inside the region is
     !> appended to first and prints a marker the wrapper checks for.
+    !> `mine` is declared HERE and not in the block below, although only the block uses it: a
+    !> `parquet_table_writer` has an allocatable component, and ifx segfaults on such a type
+    !> declared in a `block` lexically inside a parallel region (`fortran-gotchas.md`, ifx). The
+    !> ownership guard is unaffected -- it keys on the thread and region recorded on the sink's
+    !> buffer table when `parquet_open_table_writer` runs, which is still inside the region and
+    !> still this thread, not on where the variable is declared. `rows` stays block-local because
+    !> `parquet_table` has no allocatable component and is exempt.
     subroutine scenario_sink_shared_in_parallel()
         type(parquet_table_writer) :: shared
+        type(parquet_table_writer) :: mine
         type(parquet_table) :: seed
         character(len=*), parameter :: out_shared = "test_run/es_sink_omp_shared.parquet"
         character(len=*), parameter :: out_mine = "test_run/es_sink_omp_mine.parquet"
@@ -13805,7 +13813,6 @@ contains
         !$omp parallel num_threads(2) default(shared)
         !$omp single
         block
-            type(parquet_table_writer) :: mine   ! block-local; see the wrapper for the shape a program uses
             type(parquet_table) :: rows
             call sink_scenario_table(rows)
             call parquet_open_table_writer(mine, out_mine, rows)

@@ -194,10 +194,13 @@ and leaves it empty. `%gather_rows(idx)` rebuilds the column so row *k* becomes 
 `idx(k)` — which serves reordering, filtering and duplication at once, and drops the entries of any
 row the permutation does not name.
 
-`%set_null(i)` is O(1): the row's entries are not removed and no later row moves, so every
-outstanding handle's index stays correct. The nulled row reports `%size() == 0` and finds no key
-from that moment on; its former entries are dropped by the next `%gather_rows`. Until then
-`%clear_null(i)` puts the row back exactly as it was, entries and all.
+`%set_null(i)` drops the row's entries from both the key and the value column and moves every later
+offset down with them, so a null row is zero-length. Row indices do not change, so every
+outstanding handle's index stays correct; only entry positions move, and the cost is a pass over
+the entry columns rather than O(1). This is what Parquet requires: a map whose null slot still
+spans entries is refused when the column is written. The nulled row reports `%size() == 0` and
+finds no key. `%clear_null(i)` puts the row back **empty** — it clears one bit, and the entries are
+already gone.
 
 `%validate([message])` checks the class invariants — offsets monotonic, `offsets(1) == 0`, keys and
 values holding the same entry count, the row bitmap allocated whenever the column claims a null —

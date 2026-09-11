@@ -304,6 +304,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`parquet_list_column%set_null` and `parquet_map_column%set_null` drop the row's elements or
+  entries, so a null row is zero-length.** `%clear_null` brings the row back empty rather than
+  restoring them, `%total_elements`/`%total_entries` fall by the row's former length, and both
+  calls are O(n) in the payload rather than O(1). A column carrying such a row can now be written:
+  writing one previously aborted the process from inside Arrow.
 - **`pf_mad(scale="normal")` and `pf_sigma_clipped_stats(stdfunc="mad_std")` scale by the
   correctly rounded `1/Phi^-1(3/4)`.** The constant was `1.482602218505602`, one ulp above the
   nearest double; it is now `1.4826022185056018`. Results move by at most 1.5e-16 relative.

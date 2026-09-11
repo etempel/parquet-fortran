@@ -49,7 +49,8 @@ contains
                 test_append_from), &
             new_unittest("map deep_copy is independent", test_deep_copy), &
             new_unittest("map move_from empties the source", test_move_from), &
-            new_unittest("map clear_null restores the entries", test_clear_null_restores), &
+            new_unittest("map set_null drops the entries and clear_null returns an empty row", &
+                test_clear_null_restores), &
             new_unittest("map kind_text and summary describe the column", test_kind_text), &
             new_unittest("map adopt_rows builds from moved-in columns", test_adopt_rows), &
             new_unittest("map ensure_validity covers both null levels", test_ensure_validity), &
@@ -449,8 +450,13 @@ contains
         call check(error, v == 1_int32, "the moved value is intact")
     end subroutine test_move_from
 
-    !> `%set_null` is O(1) and does not remove the row's entries, so `%clear_null` brings them
-    !> back -- provided no rebuild has happened in between.
+    !> `%set_null` drops the row's entries, so `%clear_null` brings the row back EMPTY.
+    !!
+    !! The drop is the invariant Arrow's Parquet writer requires -- a null slot spanning entries is
+    !! refused outright -- so `%total_entries` is asserted, not just `%length`. A following row is
+    !! read back by key to prove `keys` and `values` moved down together: gathering one and not the
+    !! other would leave the two columns misaligned, which reads as a wrong VALUE under the right
+    !! key rather than as a missing entry.
     subroutine test_clear_null_restores(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_map_column), target :: mc
@@ -459,19 +465,31 @@ contains
 
         call mc%init(PK_INT32)
         call mc%append_row(["a", "b"], [1_int32, 2_int32])
+        call mc%append_row(["c", "d"], [3_int32, 4_int32])
+        call check(error, mc%total_entries() == 4_int64, "four entries before anything is nulled")
+        if (allocated(error)) return
+
         call mc%set_null(1_int64)
         call check(error, mc%is_null(1_int64), "the row is null after set_null")
         if (allocated(error)) return
         call check(error, mc%length(1_int64) == 0_int64, "a null row reports no entries")
         if (allocated(error)) return
+        call check(error, mc%total_entries() == 2_int64, &
+            "the nulled row's two entries were dropped, not merely hidden")
+        if (allocated(error)) return
+        ! Row 2's entries moved down by two, in both columns at once.
+        row = mc%view(2_int64)
+        call row%get("d", v)
+        call check(error, v == 4_int32, "the row after a nulled one keeps its keys aligned to its values")
+        if (allocated(error)) return
+
         call mc%clear_null(1_int64)
         call check(error, .not. mc%is_null(1_int64), "clear_null makes the row present again")
         if (allocated(error)) return
-        call check(error, mc%length(1_int64) == 2_int64, "and its entries are back")
+        call check(error, mc%length(1_int64) == 0_int64, &
+            "and it comes back EMPTY -- clear_null is one bit, not an undo")
         if (allocated(error)) return
-        row = mc%view(1_int64)
-        call row%get("b", v)
-        call check(error, v == 2_int32, "with their values intact")
+        call check(error, mc%total_entries() == 2_int64, "clearing the bit restores no entry")
     end subroutine test_clear_null_restores
 
     !> `%kind_text` spells the type the way a MAML schema does, and `%summary` describes the

@@ -243,16 +243,22 @@ contains
         real(real64) :: total, run, denom
         integer(int64) :: i
 
+        ! **Both arms below are unreachable from the one call site this helper has**, and are
+        ! kept because the procedure is written as a total function of its arguments. That call
+        ! is `quantile_sorted`'s, inside the `else` of its own `present(w)` test and after its
+        ! own `m == 1` return -- so `w` is always present here and `m` is always at least two.
+        ! Excluded rather than deleted: a second caller would want them, and deleting them would
+        ! move the guard to whoever wrote it.
         if (m == 1_int64) then
-            pos(1) = 0.0_real64
+            pos(1) = 0.0_real64                ! GCOVR_EXCL_START -- no caller passes m == 1
             return
-        end if
+        end if                                 ! GCOVR_EXCL_STOP
         if (.not. present(w)) then
-            do i = 1_int64, m
+            do i = 1_int64, m                  ! GCOVR_EXCL_START -- the one caller always passes w
                 pos(i) = real(i - 1_int64, real64) / real(m - 1_int64, real64)
             end do
             return
-        end if
+        end if                                 ! GCOVR_EXCL_STOP
         total = 0.0_real64
         do i = 1_int64, m
             total = total + w(i)
@@ -286,10 +292,14 @@ contains
         integer(int64) :: m, i, lo, hi
 
         m = size(x, kind=int64)
+        ! Every caller has already refused an empty population: `one_shot_quantiles` returns NaN
+        ! for `m == 0` before it dispatches, `mad_f64` returns before `raw_mad`, and
+        ! `obj_quantile_at` is behind `obj_undefined`. The backstop stays so this helper answers
+        ! its own degenerate case rather than indexing `x(1)`, and is excluded as defensive.
         if (m == 0_int64) then
-            res = stats_nan()
+            res = stats_nan()                  ! GCOVR_EXCL_START -- every caller guards m > 0
             return
-        end if
+        end if                                 ! GCOVR_EXCL_STOP
         if (m == 1_int64) then
             res = x(1)
             return
@@ -319,9 +329,13 @@ contains
                     return
                 end if
             end do
-            res = x(m)
+            ! The loop cannot finish: `run` accumulates exactly the terms `total` did, in the
+            ! same order, so `run >= want` holds at the last element for every `p <= 1` -- and
+            ! `p` is validated. Kept so the branch has a defined result rather than falling into
+            ! the code below with `lo` unset, and excluded as the backstop it is.
+            res = x(m)                         ! GCOVR_EXCL_START -- the loop always returns
             return
-        end if
+        end if                                 ! GCOVR_EXCL_STOP
 
         if (.not. present(w)) then
             ! **The unweighted position is taken on the RANK scale, `g = p*(m-1)`, not by dividing
@@ -458,10 +472,12 @@ contains
         real(real64) :: gpos, t, x_lo, x_hi
         integer(int64) :: lo, hi
 
+        ! The selection route's own copy of `quantile_sorted`'s backstop, and unreachable for
+        ! the same reason: every caller refuses an empty population before it dispatches.
         if (m == 0_int64) then
-            res = stats_nan()
+            res = stats_nan()                  ! GCOVR_EXCL_START -- every caller guards m > 0
             return
-        end if
+        end if   ! GCOVR_EXCL_STOP -- the bare `return` above is a gcov attribution artifact
         if (m == 1_int64) then
             res = x(1)
             return
@@ -524,10 +540,13 @@ contains
                 equal = equal + wi
             end if
         end do
+        ! `total` is a sum of the SURVIVORS' weights, and a survivor's weight is strictly
+        ! positive -- a zero one removes its element upstream, in `stats_compact`. So this can
+        ! only vanish for `m == 0`, which both callers have already refused. Defensive, excluded.
         if (total <= 0.0_real64) then
-            res = stats_nan()
+            res = stats_nan()                  ! GCOVR_EXCL_START -- every survivor weighs > 0
             return
-        end if
+        end if                                 ! GCOVR_EXCL_STOP
         select case (code)
         case (PS_RANK)
             if (equal > 0.0_real64) then
@@ -985,10 +1004,14 @@ contains
         integer(int64) :: n, k
 
         n = hi - lo + 1_int64
+        ! An empty slice never arrives. `slice_mad_std` refuses one before it calls; the clip loop
+        ! passes an interval that always holds at least the element its own centre came from,
+        ! because the centre is a median or mean OF that interval and the bounds straddle it; and
+        ! the final call uses the interval the loop left. Defensive, and excluded as such.
         if (n <= 0_int64) then
-            res = stats_nan()
+            res = stats_nan()                  ! GCOVR_EXCL_START -- no caller passes an empty slice
             return
-        end if
+        end if                                 ! GCOVR_EXCL_STOP
         k = lo + (n - 1_int64) / 2_int64
         if (mod(n, 2_int64) == 1_int64) then
             res = xs(k)

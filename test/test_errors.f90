@@ -84,7 +84,7 @@ contains
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
-                                            p22(:), p23(:), p24(:)
+                                            p22(:), p23(:), p24(:), p25(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2897,8 +2897,30 @@ contains
             new_unittest("the unconfigured default logger describes itself", &
                 test_logging_implicit_print) &
             ]
+        p25 = [ &
+            new_unittest("one pf_bucketize code per BIN rather than per element aborts", &
+                test_stats_bucketize_codes_size_aborts), &
+            new_unittest("a short pf_zscore out_valid aborts", &
+                test_stats_zscore_out_valid_size_aborts), &
+            new_unittest("a short pf_normal_scores s aborts", &
+                test_stats_normal_scores_size_aborts), &
+            new_unittest("a short pf_normal_scores out_valid aborts", &
+                test_stats_normal_scores_out_valid_size_aborts), &
+            new_unittest("a short sigma-clip keep mask aborts", &
+                test_stats_sigma_clip_keep_size_aborts), &
+            new_unittest("an order statistic off an accumulator that was never computed aborts", &
+                test_stats_obj_order_without_population_aborts), &
+            new_unittest("%quantiles with fewer outputs than probabilities aborts", &
+                test_stats_obj_quantiles_out_size_aborts), &
+            new_unittest("%trim_mean trimming half from each tail aborts", &
+                test_stats_obj_trim_mean_prop_aborts), &
+            new_unittest("%percentile_of_score refuses a non-finite score", &
+                test_stats_obj_percentile_score_non_finite_aborts), &
+            new_unittest("%print with no unit= resolves the message stream", &
+                test_stats_print_default_stream) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24]
+            p19, p21, p23, p24, p25]
     end subroutine collect_tests_parquet_errors
 
 
@@ -9827,6 +9849,114 @@ contains
             failure_message="one pf_bin_edges boundary per bin was expected to abort", &
             required_stderr="bins need one more boundary than that")
     end subroutine test_stats_bin_edges_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bucketize_codes_size in test/error_scenarios.f90.
+    subroutine test_stats_bucketize_codes_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bucketize_codes_size", &
+            expect_abort=.true., &
+            failure_message="one pf_bucketize code per bin was expected to abort", &
+            required_stderr="pf_bucketize: codes has")
+    end subroutine test_stats_bucketize_codes_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_zscore_out_valid_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_zscore_out_valid_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_zscore_out_valid_size", &
+            expect_abort=.true., &
+            failure_message="a short pf_zscore out_valid was expected to abort", &
+            required_stderr="pf_zscore: out_valid has")
+    end subroutine test_stats_zscore_out_valid_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_normal_scores_size in test/error_scenarios.f90.
+    subroutine test_stats_normal_scores_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_normal_scores_size", &
+            expect_abort=.true., &
+            failure_message="a short pf_normal_scores s was expected to abort", &
+            required_stderr="pf_normal_scores: s has")
+    end subroutine test_stats_normal_scores_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_normal_scores_out_valid_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_normal_scores_out_valid_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_normal_scores_out_valid_size", &
+            expect_abort=.true., &
+            failure_message="a short pf_normal_scores out_valid was expected to abort", &
+            required_stderr="pf_normal_scores: out_valid has")
+    end subroutine test_stats_normal_scores_out_valid_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_sigma_clip_keep_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_sigma_clip_keep_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_sigma_clip_keep_size", &
+            expect_abort=.true., &
+            failure_message="a short sigma-clip keep mask was expected to abort", &
+            required_stderr="pf_sigma_clipped_stats: keep has")
+    end subroutine test_stats_sigma_clip_keep_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_obj_order_without_population in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_obj_order_without_population_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_obj_order_without_population", &
+            expect_abort=.true., &
+            failure_message="a quantile off an uncomputed accumulator was expected to abort", &
+            required_stderr="holds no population yet")
+    end subroutine test_stats_obj_order_without_population_aborts
+
+    !> parquet_stats abort path: see scenario_stats_obj_quantiles_out_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_obj_quantiles_out_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_obj_quantiles_out_size", &
+            expect_abort=.true., &
+            failure_message="%quantiles with a short out was expected to abort", &
+            required_stderr="pf_stats%quantiles: out has")
+    end subroutine test_stats_obj_quantiles_out_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_obj_trim_mean_prop in test/error_scenarios.f90.
+    subroutine test_stats_obj_trim_mean_prop_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_obj_trim_mean_prop", &
+            expect_abort=.true., &
+            failure_message="%trim_mean(0.5) was expected to abort", &
+            required_stderr="prop must satisfy 0 <= prop < 0.5")
+    end subroutine test_stats_obj_trim_mean_prop_aborts
+
+    !> parquet_stats abort path: see scenario_stats_obj_percentile_score_non_finite in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_obj_percentile_score_non_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, &
+            "stats_obj_percentile_score_non_finite", expect_abort=.true., &
+            failure_message="%percentile_of_score of a NaN was expected to abort", &
+            required_stderr="score must be finite")
+    end subroutine test_stats_obj_percentile_score_non_finite_aborts
+
+    !> `%print` with no `unit=` resolves the destination from `parquet_message_stream` and exits
+    !> cleanly: see scenario_stats_print_default_stream in test/error_scenarios.f90. Out of
+    !> process because that setting names a console stream and no file, so nothing in process can
+    !> capture either destination.
+    subroutine test_stats_print_default_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "stats_print_default_stream", &
+            expect_abort=.false., &
+            failure_message="%print with no unit= was expected to write and exit cleanly")
+    end subroutine test_stats_print_default_stream
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

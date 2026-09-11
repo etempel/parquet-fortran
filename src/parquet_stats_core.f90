@@ -713,11 +713,21 @@ contains
         ! The central moments are handed on unrefined for the same reason and are NaN in their own
         ! right -- `(x - Inf)**2` is `Inf` for a finite element and `Inf - Inf` for the infinite
         ! one -- which is numpy's answer for the variance here, so nothing needs forcing.
+        !
+        ! **Reached only by an OVERFLOW, and no portable fixture can build one.** The screen above
+        ! has already returned for every population holding an infinity, so arriving here with a
+        ! non-finite `mu` means finite values whose weighted sum, or whose weight sum, overflowed
+        ! in the block tree. Producing that in a test means executing the overflow, and nagfor
+        ! unmasks the IEEE traps by default (`-ieee=stop`): the run dies inside the library rather
+        ! than reporting anything. The trap cannot be masked around it either -- NAG's
+        ! `ieee_set_halting_mode` does not lift it, measured against 7.2 and recorded above. The
+        ! branch stays because the condition is real in production (a column of 1e300s), and is
+        ! excluded rather than chased with a fixture that would break one supported compiler.
         nonfinite_mean = .false.
         if (mu /= mu) then
-            nonfinite_mean = .true.
+            nonfinite_mean = .true.                        ! GCOVR_EXCL_LINE
         else if (abs(mu) > huge(0.0_real64)) then
-            nonfinite_mean = .true.
+            nonfinite_mean = .true.                        ! GCOVR_EXCL_LINE
         end if
         !
         ! A moment above `nm` was never accumulated, so it is marked undefined rather than left
@@ -725,13 +735,13 @@ contains
         ! gives the `nm == 0` path, for the same reason: a caller that reads one anyway gets this
         ! module's own "undefined" answer instead of a plausible wrong number.
         if (nonfinite_mean) then
-            acc%mean = mu
+            acc%mean = mu                                  ! GCOVR_EXCL_START -- see above
             acc%m2 = merge(q2(1), stats_nan(), nm >= 2)
             acc%m3 = merge(q3(1), stats_nan(), nm >= 3)
             acc%m4 = merge(q4(1), stats_nan(), nm >= 4)
             call stats_hand_over(xb, wb, keep_x, keep_w)
             return
-        end if
+        end if                                             ! GCOVR_EXCL_STOP
         delta = q1(1) / acc%w_sum
         acc%mean = mu + delta
         acc%m2 = stats_nan()
@@ -1048,6 +1058,12 @@ contains
         if (acc%empty .or. acc%saw_nan .or. acc%w_sum <= 0.0_real64) return
         p2 = acc%m2 / acc%w_sum
         p3 = acc%m3 / acc%w_sum
+        ! A population holding an INFINITY leaves every central moment NaN (`stats_engine`'s own
+        ! screen), so `p2` arrives as one -- and `<=` is a signalling comparison that raises
+        ! IEEE_INVALID against a NaN, which nagfor unmasks by default into a dead process. The
+        ! NaN leaves first and quietly; `res` already holds the NaN this returns with, so the
+        ! answer is the one the fall-through produced.
+        if (p2 /= p2) return
         if (p2 <= 0.0_real64) return
         res = p3 / (p2 * sqrt(p2))
         if (bias) return
@@ -1072,6 +1088,7 @@ contains
         if (acc%empty .or. acc%saw_nan .or. acc%w_sum <= 0.0_real64) return
         p2 = acc%m2 / acc%w_sum
         p4 = acc%m4 / acc%w_sum
+        if (p2 /= p2) return                  ! see `stats_skew`: `<=` on a NaN raises invalid
         if (p2 <= 0.0_real64) return
         res = p4 / (p2 * p2) - 3.0_real64
         if (.not. bias) then
@@ -1614,6 +1631,18 @@ contains
                 w = weights(i)
             end if
             call stats_single(x, w, one)
+            ! **A kept NaN must not reach `stats_chan`'s extremes.** That routine settles `vmin`
+            ! and `vmax` with `<` and `>`, which are SIGNALLING predicates: against a NaN they
+            ! raise IEEE_INVALID, and nagfor unmasks the traps by default (`-ieee=stop`), so the
+            ! process dies -- on data this module documents itself as ANSWERING rather than
+            ! refusing. Marking the one-element accumulator poisoned takes `stats_chan`'s own
+            ! `b%saw_nan` short-circuit instead, which folds the counts and undefines the moments
+            ! without comparing anything, so the answer is unchanged and the comparison never
+            ! happens. `acc%saw_nan` is .false. until a NaN is actually kept, so the clean path
+            ! is one assignment and no branch. The two-pass engine keeps a kept NaN out of its
+            ! own extremes for the same reason (`stats_engine`'s `saw_nan_l` guard), and after
+            ! this the two routes agree about `%vmin`/`%vmax` on a poisoned population as well.
+            one%saw_nan = acc%saw_nan
             call stats_chan(blk, one)
             c = c + 1_int64
             if (c == STATS_BLOCK) then

@@ -332,6 +332,13 @@ contains
         else
             call stats_pair_moments(kx, ky, kw, m, mx, my, sxx, sxy, syy, w_sum, w_sq)
         end if
+        ! **The NaN leaves FIRST, as its own statement.** An infinity in either variable makes all
+        ! three centred sums NaN (the screen in `stats_pair_moments`), and `<=` is a SIGNALLING
+        ! comparison: against a NaN it raises IEEE_INVALID, which nagfor unmasks by default
+        ! (`-ieee=stop`) into a dead process -- on data this module documents itself as answering
+        ! with a NaN rather than refusing. `/=` is the one predicate that is quiet on a NaN, so it
+        ! is what the screen uses, and `r` and `ok` already hold the answer this returns with.
+        if (sxx /= sxx .or. syy /= syy) return
         ! No `ddof` anywhere: the one in the covariance and the two in the standard deviations
         ! cancel exactly, which is why this procedure does not offer the argument at all.
         if (sxx <= 0.0_real64 .or. syy <= 0.0_real64) return
@@ -372,7 +379,7 @@ contains
     module procedure zscore_f64
         real(real64) :: mu, sd
         integer(int64) :: n, nv, nnull, nnan, i
-        logical :: saw_nan, skip, excluded, any_excluded
+        logical :: saw_nan, skip, excluded, any_excluded, bad_sd
 
         n = size(values, kind=int64)
         if (size(z, kind=int64) /= n) &
@@ -395,7 +402,14 @@ contains
         ! makes EVERY output undefined. That covers the empty population, the single-element one at
         ! the default `ddof = 1`, a constant population, and a NaN surviving under
         ! `skipnan = .false.` -- four data conditions with one answer and no branch each.
-        if (.not. (sd > 0.0_real64)) then
+        ! Written as two statements rather than one because `sd` can be a NaN -- a kept NaN under
+        ! `skipnan = .false.`, or an infinity in the population -- and `>` is a SIGNALLING
+        ! comparison that raises IEEE_INVALID against one, which nagfor unmasks by default
+        ! (`-ieee=stop`) into a dead process. `/=` is quiet, and a NaN belongs in this branch
+        ! anyway, so the answer is unchanged and the comparison is never reached with one.
+        bad_sd = (sd /= sd)
+        if (.not. bad_sd) bad_sd = .not. (sd > 0.0_real64)
+        if (bad_sd) then
             do i = 1_int64, n
                 z(i) = stats_nan()
             end do

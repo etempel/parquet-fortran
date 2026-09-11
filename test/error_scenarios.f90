@@ -1174,6 +1174,26 @@ program error_scenarios
         call scenario_stats_bin_edges_nbins()
     case ("stats_bin_edges_size")
         call scenario_stats_bin_edges_size()
+    case ("stats_bucketize_codes_size")
+        call scenario_stats_bucketize_codes_size()
+    case ("stats_zscore_out_valid_size")
+        call scenario_stats_zscore_out_valid_size()
+    case ("stats_normal_scores_size")
+        call scenario_stats_normal_scores_size()
+    case ("stats_normal_scores_out_valid_size")
+        call scenario_stats_normal_scores_out_valid_size()
+    case ("stats_sigma_clip_keep_size")
+        call scenario_stats_sigma_clip_keep_size()
+    case ("stats_obj_order_without_population")
+        call scenario_stats_obj_order_without_population()
+    case ("stats_obj_quantiles_out_size")
+        call scenario_stats_obj_quantiles_out_size()
+    case ("stats_obj_trim_mean_prop")
+        call scenario_stats_obj_trim_mean_prop()
+    case ("stats_obj_percentile_score_non_finite")
+        call scenario_stats_obj_percentile_score_non_finite()
+    case ("stats_print_default_stream")
+        call scenario_stats_print_default_stream()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_match_kind_mismatch")
@@ -21392,6 +21412,148 @@ contains
         call pf_bin_edges(x, 3, three)  ! -> aborts (three bins need four boundaries)
         print '(a,es12.5)', "unexpectedly accepted one edge per bin, edges(1)=", three(1)
     end subroutine scenario_stats_bin_edges_size
+
+    !> `codes` is one per ELEMENT, so a caller sizing it from the bin count instead of the
+    !! population aborts. Same class as the `is_valid` and `weights` length checks: the caller
+    !! believes it is describing this array and is describing a different one.
+    subroutine scenario_stats_bucketize_codes_size()
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: edges(4) = [0.0_real64, 3.0_real64, 6.0_real64, 10.0_real64]
+        integer(int32) :: five(5), three(3)
+
+        call pf_bucketize(x, edges, five)   ! one code per element: accepted
+        if (five(1) < 1) print '(a)', "the first element should land in a bin"
+        call pf_bucketize(x, edges, three)  ! -> aborts (three codes for five elements)
+        print '(a,i0)', "unexpectedly accepted one code per bin, codes(1)=", three(1)
+    end subroutine scenario_stats_bucketize_codes_size
+
+    !> `out_valid` is a per-element OUTPUT, so a short one would be written past its end or leave
+    !! the caller reading exclusions that belong to other elements. Checked separately from `z`
+    !! because they are separate guards, and one written for `z` alone passes every `z` test.
+    subroutine scenario_stats_zscore_out_valid_size()
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: z(5)
+        logical :: five(5), three(3)
+
+        call pf_zscore(x, z, out_valid=five)    ! one flag per element: accepted
+        if (.not. five(1)) print '(a)', "a finite element should be marked valid"
+        call pf_zscore(x, z, out_valid=three)   ! -> aborts (three flags for five elements)
+        print '(a,l1)', "unexpectedly accepted a short out_valid, out_valid(1)=", three(1)
+    end subroutine scenario_stats_zscore_out_valid_size
+
+    !> `pf_normal_scores` fills one score per element, so a short `s` is the same misuse.
+    subroutine scenario_stats_normal_scores_size()
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: five(5), three(3)
+
+        call pf_normal_scores(x, five)   ! one score per element: accepted
+        if (five(1) > five(3)) print '(a)', "the smallest value should take the smallest score"
+        call pf_normal_scores(x, three)  ! -> aborts (three scores for five elements)
+        print '(a,es12.5)', "unexpectedly accepted a short s, s(1)=", three(1)
+    end subroutine scenario_stats_normal_scores_size
+
+    !> And its own `out_valid`, which is a third guard again rather than the second one reused.
+    subroutine scenario_stats_normal_scores_out_valid_size()
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: s(5)
+        logical :: five(5), three(3)
+
+        call pf_normal_scores(x, s, out_valid=five)    ! accepted
+        if (.not. five(1)) print '(a)', "a finite element should be marked valid"
+        call pf_normal_scores(x, s, out_valid=three)   ! -> aborts
+        print '(a,l1)', "unexpectedly accepted a short out_valid, out_valid(1)=", three(1)
+    end subroutine scenario_stats_normal_scores_out_valid_size
+
+    !> `keep` names the survivors of the clip ELEMENT BY ELEMENT against the original array, so a
+    !! short one would report a different population's survivors -- and the whole point of the
+    !! mask is to be indexed back into the caller's own data.
+    subroutine scenario_stats_sigma_clip_keep_size()
+        real(real64) :: x(6) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 99.0_real64]
+        real(real64) :: m, med, sd
+        logical :: six(6), three(3)
+
+        call pf_sigma_clipped_stats(x, m, med, sd, keep=six)    ! one flag per element: accepted
+        if (six(6)) print '(a)', "the outlier should have been clipped away"
+        call pf_sigma_clipped_stats(x, m, med, sd, keep=three)  ! -> aborts
+        print '(a,l1)', "unexpectedly accepted a short keep, keep(1)=", three(1)
+    end subroutine scenario_stats_sigma_clip_keep_size
+
+    !> An order statistic off an accumulator that holds NOTHING is a programming error rather than
+    !! an empty population: `%compute` or `%init` has not run, so there is no population to be
+    !! empty. Answering NaN would hide the missing call behind a number the caller might use.
+    subroutine scenario_stats_obj_order_without_population()
+        type(pf_stats) :: s
+        real(real64) :: q
+        q = s%quantile(0.5_real64)   ! -> aborts (never computed or initialised)
+        print '(a,es12.5)', "unexpectedly read a quantile off an empty accumulator, q=", q
+    end subroutine scenario_stats_obj_order_without_population
+
+    !> `%quantiles` fills one output per probability, and the two arrays are the caller's -- so a
+    !! mismatch is the same misuse the one-shot forms refuse.
+    subroutine scenario_stats_obj_quantiles_out_size()
+        type(pf_stats) :: s
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: three(3), two(2)
+
+        call s%compute(x)
+        call s%quantiles([0.1_real64, 0.5_real64, 0.9_real64], three)   ! accepted
+        if (three(1) > three(3)) print '(a)', "the quantiles should be non-decreasing"
+        call s%quantiles([0.1_real64, 0.5_real64, 0.9_real64], two)     ! -> aborts (2 vs 3)
+        print '(a,es12.5)', "unexpectedly accepted a short out, out(1)=", two(1)
+    end subroutine scenario_stats_obj_quantiles_out_size
+
+    !> Trimming half or more from each tail leaves nothing to average, so `prop >= 0.5` aborts --
+    !! the object binding's own copy of the check the one-shot `pf_trim_mean` makes.
+    subroutine scenario_stats_obj_trim_mean_prop()
+        type(pf_stats) :: s
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: m
+
+        call s%compute(x)
+        m = s%trim_mean(0.25_real64)   ! accepted
+        if (m /= m) print '(a)', "a quarter-trimmed mean should be a number"
+        m = s%trim_mean(0.5_real64)    ! -> aborts
+        print '(a,es12.5)', "unexpectedly trimmed half from each tail, m=", m
+    end subroutine scenario_stats_obj_trim_mean_prop
+
+    !> A NaN or infinite `score` can only come from the caller's own arithmetic, so locating it in
+    !! the population is meaningless and the object says so rather than answering NaN.
+    subroutine scenario_stats_obj_percentile_score_non_finite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_stats) :: s
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        real(real64) :: p
+
+        call s%compute(x)
+        p = s%percentile_of_score(4.0_real64)                          ! accepted
+        if (p < 0.0_real64) print '(a)', "a percentile should not be negative"
+        p = s%percentile_of_score(ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,es12.5)', "unexpectedly located a NaN score, p=", p
+    end subroutine scenario_stats_obj_percentile_score_non_finite
+
+    !> `%print` with no `unit=` resolves the destination from `parquet_message_stream`.
+    !!
+    !! Out of process because that setting takes "stdout"/"stderr" and no file, so nothing in
+    !! process can capture either destination -- the same reason `%print_stat`'s scenario exists.
+    !! Exits cleanly: the assertion is that both tokens are honoured and neither aborts.
+    subroutine scenario_stats_print_default_stream()
+        type(pf_stats) :: s
+        real(real64) :: x(5) = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 9.0_real64]
+        character(len=:), allocatable :: saved
+
+        call parquet_get_message_stream(saved)
+        call s%compute(x)
+        call parquet_set_message_stream("stdout")
+        call s%print(name="on stdout")
+        call parquet_set_message_stream("stderr")
+        call s%print(name="on stderr")
+        ! And the uncomputed arm, which returns after one line rather than reading anything.
+        block
+            type(pf_stats) :: empty
+            call empty%print(name="empty, on stderr")
+        end block
+        call parquet_set_message_stream(saved)
+    end subroutine scenario_stats_print_default_stream
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

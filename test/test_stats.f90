@@ -49,7 +49,7 @@ module test_stats
         FIT_SIGMA_FILLIBEN, FIT_CORR_FILLIBEN, SCALE_P25, SCALE_P16, PMEAN, PMEAN_W
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_get_flag, &
-        ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_is_nan
+        ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_invalid, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
@@ -58,7 +58,7 @@ module test_stats
 
     !> How many scalar reductions `test_kind_sweep` covers. Declared once so its six per-kind
     !! arms, and the name table they share, cannot disagree about the count.
-    integer, parameter :: NSCALAR = 16
+    integer, parameter :: NSCALAR = 17
 
 contains
 
@@ -281,7 +281,39 @@ contains
             new_unittest("the streaming accuracy loss is bounded, and the two-pass route is exact", &
                 test_streaming_accuracy_bound), &
             new_unittest("an infinity in either variable leaves pf_cov and pf_corr NaN, never aborting", &
-                test_pair_non_finite) &
+                test_pair_non_finite), &
+            new_unittest("a weighted pf_stats answers what the weighted one-shot forms answer", &
+                test_weighted_object_order_statistics), &
+            new_unittest("%update and %merge carry the weights, and fill in 1 for a batch " // &
+                "without them", test_weighted_update_and_merge_keep_the_weights), &
+            new_unittest("an armed but empty accumulator answers NaN rather than reading keep", &
+                test_empty_retained_object_reads_are_nan), &
+            new_unittest("a -0.0 weight is a zero weight in every weights= loop", &
+                test_minus_zero_weight_is_a_zero_weight), &
+            new_unittest("pf_mode reads weights over every kind, and answers an all-null " // &
+                "population", test_mode_weights_and_all_null_across_kinds), &
+            new_unittest("the streaming accumulator excludes and poisons as the two-pass " // &
+                "route does", test_streaming_update_excludes_and_poisons), &
+            new_unittest("the bias corrections refuse the sample sizes they are not defined for", &
+                test_bias_corrections_refuse_small_samples), &
+            new_unittest("an explicitly spelled default lands where leaving it out does", &
+                test_explicit_defaults_match_the_implicit_ones), &
+            new_unittest("a kept NaN poisons the general engine walk as it poisons the fast one", &
+                test_kept_nan_poisons_the_general_engine_walk), &
+            new_unittest("the binning family excludes what every other reduction excludes", &
+                test_binning_excludes_nulls_and_nans), &
+            new_unittest("pf_cov and pf_corr over two columns intersect their validity masks", &
+                test_pairwise_columns_intersect_their_masks), &
+            new_unittest("both signs of infinity, in either variable, leave the pair NaN", &
+                test_pairwise_infinities_both_signs), &
+            new_unittest("pf_probit_fit answers an infinite population with that infinity", &
+                test_probit_fit_infinite_extremes), &
+            new_unittest("inverted_cdf, and the exact tie nearest has to break", &
+                test_selection_route_and_nearest_tie), &
+            new_unittest("an absorbing weight keeps the quantile positions ordered", &
+                test_absorbing_weight_keeps_positions_ordered), &
+            new_unittest("no reduction raises an IEEE exception on a non-finite population", &
+                test_no_reduction_raises_on_a_non_finite_population) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -2625,17 +2657,33 @@ contains
     subroutine test_selection_and_sort_paths_agree(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64), allocatable :: x(:)
-        real(real64) :: sel(NQP), srt(NQP)
+        real(real64) :: sel(NQP), srt(NQP), sel_icdf, srt_icdf, sel_one, srt_one
         integer :: k
 
         call golden_fixture(64_int64, x)
         ! A huge floor: every count is below it, so every probe SELECTS.
         call parquet_debug_set_stats_quantile_sort_min(1000000_int64)
         call pf_quantiles(x, G_QPROBS, sel, method="linear")
+        ! `inverted_cdf` and a one-element population are SEPARATE arms inside the selection
+        ! route -- a clamped `ceil(p*m)` handed to `pf_nth_element`, and a direct return -- so
+        ! neither is reached by the "linear" probes above, and the override is the only way to
+        ! reach either at all. They ride this test rather than one of their own because the
+        ! override is process-global and this suite runs its tests concurrently: one writer.
+        call pf_quantile(x, 0.5_real64, sel_icdf, method="inverted_cdf")
+        call pf_quantile(x(1:1), 0.3_real64, sel_one)
         ! A floor of zero: nothing is below it, so the population is ORDERED once.
         call parquet_debug_set_stats_quantile_sort_min(0_int64)
         call pf_quantiles(x, G_QPROBS, srt, method="linear")
+        call pf_quantile(x, 0.5_real64, srt_icdf, method="inverted_cdf")
+        call pf_quantile(x(1:1), 0.3_real64, srt_one)
         call parquet_debug_set_stats_quantile_sort_min(-1_int64)
+
+        call check(error, sel_icdf == srt_icdf, &
+            "the two routes disagree on inverted_cdf, which each implements in its own way")
+        if (allocated(error)) return
+        call check(error, sel_one == x(1) .and. srt_one == x(1), &
+            "a one-element population is that element on both routes")
+        if (allocated(error)) return
 
         do k = 1, NQP
             call check(error, sel(k) == srt(k), &
@@ -5562,6 +5610,8 @@ contains
         call sweep_vectors(error, xd, xs, xi, xl, cx, yd, cy)
         if (allocated(error)) return
         call sweep_logical(error, wd)
+        if (allocated(error)) return
+        call sweep_probit_mean(error)
     end subroutine test_kind_sweep
 
     !> The scalar reductions over the `real64` reference population.
@@ -5588,6 +5638,7 @@ contains
         case (14); call pf_percentile_of_score(x, 4.0_real64, res)
         case (15); call pf_mad(x, res)
         case (16); call pf_mean(x, res, weights=w)
+        case (17); call pf_probit_scale(x, res)
         end select
     end subroutine scalar_f64
 
@@ -5615,6 +5666,7 @@ contains
         case (14); call pf_percentile_of_score(x, 4.0_real64, res)
         case (15); call pf_mad(x, res)
         case (16); call pf_mean(x, res, weights=w)
+        case (17); call pf_probit_scale(x, res)
         end select
     end subroutine scalar_r32
 
@@ -5642,6 +5694,7 @@ contains
         case (14); call pf_percentile_of_score(x, 4.0_real64, res)
         case (15); call pf_mad(x, res)
         case (16); call pf_mean(x, res, weights=w)
+        case (17); call pf_probit_scale(x, res)
         end select
     end subroutine scalar_i32
 
@@ -5669,6 +5722,7 @@ contains
         case (14); call pf_percentile_of_score(x, 4.0_real64, res)
         case (15); call pf_mad(x, res)
         case (16); call pf_mean(x, res, weights=w)
+        case (17); call pf_probit_scale(x, res)
         end select
     end subroutine scalar_i64
 
@@ -5696,6 +5750,7 @@ contains
         case (14); call pf_percentile_of_score(x, 4.0_real64, res)
         case (15); call pf_mad(x, res)
         case (16); call pf_mean(x, res, weights=w)
+        case (17); call pf_probit_scale(x, res)
         end select
     end subroutine scalar_col
 
@@ -5709,7 +5764,7 @@ contains
             "pf_sem                  ", "pf_skewness             ", "pf_kurtosis             ", &
             "pf_median               ", "pf_quantile             ", "pf_iqr                  ", &
             "pf_trim_mean            ", "pf_percentile_of_score  ", "pf_mad                  ", &
-            "pf_mean(weights=)       "]
+            "pf_mean(weights=)       ", "pf_probit_scale         "]
         res = NAMES(f)
     end function fam_name
 
@@ -5742,6 +5797,38 @@ contains
         call pf_zscore(xl, gv); call check(error, all(gv == wv), "pf_zscore over int64")
         if (allocated(error)) return
         call pf_zscore(cx, gv); call check(error, all(gv == wv), "pf_zscore over a column")
+        if (allocated(error)) return
+
+        ! The probit family's other three entry points. `pf_probit_scale` answers one `real64`
+        ! and rides the scalar loop above; these do not -- `pf_normal_scores` fills a vector and
+        ! `pf_probit_fit` fills three scalars at once. `pf_probit_mean` needs a population inside
+        ! `[0, 1]`, which this one is not, and so gets its own arm (`sweep_probit_mean`).
+        call pf_normal_scores(xd, wv)
+        call pf_normal_scores(xs, gv)
+        call check(error, all(gv == wv), "pf_normal_scores over real32")
+        if (allocated(error)) return
+        call pf_normal_scores(xi, gv)
+        call check(error, all(gv == wv), "pf_normal_scores over int32")
+        if (allocated(error)) return
+        call pf_normal_scores(xl, gv)
+        call check(error, all(gv == wv), "pf_normal_scores over int64")
+        if (allocated(error)) return
+        call pf_normal_scores(cx, gv)
+        call check(error, all(gv == wv), "pf_normal_scores over a column")
+        if (allocated(error)) return
+
+        call pf_probit_fit(xd, wm, wmd, corr=wsd)
+        call pf_probit_fit(xs, gm, gmd, corr=gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "pf_probit_fit over real32")
+        if (allocated(error)) return
+        call pf_probit_fit(xi, gm, gmd, corr=gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "pf_probit_fit over int32")
+        if (allocated(error)) return
+        call pf_probit_fit(xl, gm, gmd, corr=gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "pf_probit_fit over int64")
+        if (allocated(error)) return
+        call pf_probit_fit(cx, gm, gmd, corr=gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "pf_probit_fit over a column")
         if (allocated(error)) return
 
         do c = 1, 4
@@ -5999,6 +6086,14 @@ contains
         call pf_zscore(ref, wv)
         call pf_zscore(xb, gv); call check(error, all(gv == wv), "pf_zscore over logical")
         if (allocated(error)) return
+        call pf_normal_scores(ref, wv)
+        call pf_normal_scores(xb, gv)
+        call check(error, all(gv == wv), "pf_normal_scores over logical")
+        if (allocated(error)) return
+        call pf_probit_fit(ref, wm, wmd, corr=wsd)
+        call pf_probit_fit(xb, gm, gmd, corr=gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "pf_probit_fit over logical")
+        if (allocated(error)) return
         do c = 1, 4
             call cum_f64(c, ref, wv)
             call cum_bool(c, xb, gv)
@@ -6038,6 +6133,83 @@ contains
         call pf_corr(xb, xb, got); call check(error, got == want, "pf_corr over logical")
     end subroutine sweep_logical
 
+    !> `pf_probit_mean` across all six kinds, on populations its DOMAIN admits.
+    !!
+    !! It cannot ride `test_kind_sweep`'s scalar loop, and that is a property of the statistic
+    !! rather than an inconvenience: the loop's population is `[3, 1, 4, ...]`, every value
+    !! outside `[0, 1]` gives a quiet NaN, and `NaN == NaN` is false -- so the sweep's own
+    !! assertion would fail on an answer that is entirely correct.
+    !!
+    !! The real kinds therefore take dyadic fractions, which are exact in `real32` as in
+    !! `real64`; the widening is lossless and the two must agree BIT FOR BIT rather than nearly,
+    !! which is what makes `==` the right assertion here as it is there.
+    !!
+    !! `integer` and `logical` populations can hold only 0 and 1, so they take the two LIMITS
+    !! the documentation promises exactly -- an all-zero population is exactly 0 and an all-one
+    !! population exactly 1 -- and a mixed one is NaN because that limit is `-Inf + Inf`. Those
+    !! are the only in-domain populations those three kinds have, and asserting them is what
+    !! reaches their forwarding specifics at all.
+    subroutine sweep_probit_mean(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 6
+        real(real64) :: pd(N), want, got
+        real(real32) :: ps(N)
+        integer(int32) :: zi(N), oi(N)
+        integer(int64) :: zl(N), ol(N)
+        logical :: zb(N), ob(N)
+        type(parquet_column) :: cp
+        integer :: k
+
+        pd = [0.25_real64, 0.5_real64, 0.75_real64, 0.125_real64, 0.375_real64, 0.625_real64]
+        ps = real(pd, real32)
+        call check(error, all(real(ps, real64) == pd), &
+            "the fixture is not exact in real32 -- a bit-for-bit comparison below would be unfair")
+        if (allocated(error)) return
+        call cp%init(PK_FLOAT64, int(N, int64))
+        do k = 1, N
+            call cp%set_at(int(k, int64), pd(k))
+        end do
+
+        call pf_probit_mean(pd, want)
+        call check(error, want > 0.0_real64 .and. want < 1.0_real64, &
+            "the fixture's probit mean is outside (0, 1) -- the comparisons below prove nothing")
+        if (allocated(error)) return
+        call pf_probit_mean(ps, got)
+        call check(error, got == want, "pf_probit_mean over real32")
+        if (allocated(error)) return
+        call pf_probit_mean(cp, got)
+        call check(error, got == want, "pf_probit_mean over a column")
+        if (allocated(error)) return
+
+        zi = 0_int32;   oi = 1_int32
+        zl = 0_int64;   ol = 1_int64
+        zb = .false.;   ob = .true.
+        call pf_probit_mean(zi, got)
+        call check(error, got == 0.0_real64, "an all-zero int32 population is exactly 0")
+        if (allocated(error)) return
+        call pf_probit_mean(oi, got)
+        call check(error, got == 1.0_real64, "an all-one int32 population is exactly 1")
+        if (allocated(error)) return
+        call pf_probit_mean(zl, got)
+        call check(error, got == 0.0_real64, "an all-zero int64 population is exactly 0")
+        if (allocated(error)) return
+        call pf_probit_mean(ol, got)
+        call check(error, got == 1.0_real64, "an all-one int64 population is exactly 1")
+        if (allocated(error)) return
+        call pf_probit_mean(zb, got)
+        call check(error, got == 0.0_real64, "an all-false logical population is exactly 0")
+        if (allocated(error)) return
+        call pf_probit_mean(ob, got)
+        call check(error, got == 1.0_real64, "an all-true logical population is exactly 1")
+        if (allocated(error)) return
+
+        ! The mixed case, which is the reason the two above are separate populations rather than
+        ! one: both limits at once is `-Inf + Inf`, and every kind must answer the same NaN.
+        zi(1) = 1_int32
+        call pf_probit_mean(zi, got)
+        call check(error, ieee_is_nan(got), "0 and 1 together give a NaN, whatever the kind")
+    end subroutine sweep_probit_mean
+
     !> The scalar reductions through the `logical` generic.
     subroutine scalar_bool(f, x, y, w, res)
         integer, intent(in) :: f              !! which family, 1..NSCALAR.
@@ -6062,6 +6234,7 @@ contains
         case (14); call pf_percentile_of_score(x, 4.0_real64, res)
         case (15); call pf_mad(x, res)
         case (16); call pf_mean(x, res, weights=w)
+        case (17); call pf_probit_scale(x, res)
         end select
     end subroutine scalar_bool
 
@@ -6812,5 +6985,1073 @@ contains
             if (.not. close_to(got(k), want(k))) all_close = .false.
         end do
     end function all_close
+
+    !> A WEIGHTED, retaining `pf_stats` answers what the weighted one-shot forms answer.
+    !!
+    !! Every order-statistic binding on this object has two arms -- one reading `keep` alone and
+    !! one reading `keep` beside `keep_w` -- and only the unweighted arm was under test. The
+    !! second is not a variation on the first: a weighted quantile is taken on the CUMULATIVE
+    !! WEIGHT scale rather than the rank scale, so an arm that quietly ignored `keep_w` would
+    !! return a perfectly plausible number computed for a population nobody asked about.
+    !!
+    !! Each assertion is `==` against the one-shot array form given the same `weights=`, because
+    !! the two reach the same worker over the same survivors in the same order: not close, the
+    !! same bits. A tolerance here would accept exactly the defect the test exists to catch.
+    !!
+    !! The weights are deliberately unequal and not a permutation of each other, so a binding
+    !! that used them in the wrong order would disagree.
+    subroutine test_weighted_object_order_statistics(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 11
+        real(real64) :: x(N), w(N), want, got, wq(3), gq(3)
+        type(pf_stats) :: s
+
+        x = [5.0_real64, 1.0_real64, 9.0_real64, 3.0_real64, 7.0_real64, 2.0_real64, &
+             8.0_real64, 4.0_real64, 6.0_real64, 0.5_real64, 9.5_real64]
+        w = [1.0_real64, 4.0_real64, 2.0_real64, 1.0_real64, 3.0_real64, 5.0_real64, &
+             1.0_real64, 2.0_real64, 1.0_real64, 6.0_real64, 1.0_real64]
+
+        call s%compute(x, weights=w)
+        call check(error, s%retains(), "the fixture must retain, or none of the tier-B arms run")
+        if (allocated(error)) return
+
+        call pf_quantile(x, 0.3_real64, want, weights=w)
+        got = s%quantile(0.3_real64)
+        call check(error, got == want, "%quantile disagrees with the weighted pf_quantile")
+        if (allocated(error)) return
+
+        call pf_median(x, want, weights=w)
+        got = s%median()
+        call check(error, got == want, "%median disagrees with the weighted pf_median")
+        if (allocated(error)) return
+
+        call pf_iqr(x, want, weights=w)
+        got = s%iqr()
+        call check(error, got == want, "%iqr disagrees with the weighted pf_iqr")
+        if (allocated(error)) return
+
+        call pf_trim_mean(x, 0.2_real64, want, weights=w)
+        got = s%trim_mean(0.2_real64)
+        call check(error, got == want, "%trim_mean disagrees with the weighted pf_trim_mean")
+        if (allocated(error)) return
+
+        call pf_percentile_of_score(x, 6.0_real64, want, weights=w)
+        got = s%percentile_of_score(6.0_real64)
+        call check(error, got == want, &
+            "%percentile_of_score disagrees with the weighted pf_percentile_of_score")
+        if (allocated(error)) return
+
+        call pf_mad(x, want, weights=w)
+        got = s%mad()
+        call check(error, got == want, "%mad disagrees with the weighted pf_mad")
+        if (allocated(error)) return
+
+        call pf_probit_scale(x, want, weights=w)
+        got = s%probit_scale()
+        call check(error, got == want, "%probit_scale disagrees with the weighted pf_probit_scale")
+        if (allocated(error)) return
+
+        call pf_quantiles(x, [0.1_real64, 0.5_real64, 0.9_real64], wq, weights=w)
+        call s%quantiles([0.1_real64, 0.5_real64, 0.9_real64], gq)
+        call check(error, all(gq == wq), "%quantiles disagrees with the weighted pf_quantiles")
+        if (allocated(error)) return
+
+        ! The negative control the rest of this test needs: drop the weights and the answers must
+        ! MOVE. Without it every assertion above would still pass had `keep_w` been ignored on
+        ! both sides at once.
+        call pf_quantile(x, 0.3_real64, want)
+        call check(error, s%quantile(0.3_real64) /= want, &
+            "the weighted and unweighted quantiles agree -- this fixture cannot see the weights")
+        if (allocated(error)) return
+
+        ! `%probit_mean` takes its own population: the values above are outside `[0, 1]`, which
+        ! that statistic answers with a NaN by its documented domain rule.
+        call s%compute(x / 10.0_real64, weights=w)
+        call pf_probit_mean(x / 10.0_real64, want, weights=w)
+        got = s%probit_mean()
+        call check(error, got == want, "%probit_mean disagrees with the weighted pf_probit_mean")
+    end subroutine test_weighted_object_order_statistics
+
+    !> `%update` and `%merge` carry the weights, and fill in 1 for a batch that has none.
+    !!
+    !! A weighted accumulator's `keep_w` has to stay in step with `keep` through every route that
+    !! grows either, and there are four: an update that carries weights, an update that does not
+    !! (every element of that batch weighs 1), a merge from another weighted accumulator, and a
+    !! merge from an unweighted one (same rule). Each writes `keep_w` in its own loop, so none is
+    !! covered by testing another, and a slip in any leaves the two arrays describing different
+    !! populations -- with no symptom at all until an order statistic is read.
+    !!
+    !! The reference is the one-shot form over the concatenated population, which is what
+    !! `%update` and `%merge` promise to equal EXACTLY while `retain` is on.
+    subroutine test_weighted_update_and_merge_keep_the_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: a(4), b(5), c(3), wa(4), wb(5), wc(3)
+        real(real64) :: all_x(12), all_w(12), all_w6(12), want, want6
+        type(pf_stats) :: s, t
+
+        a = [3.0_real64, 8.0_real64, 1.0_real64, 6.0_real64]
+        b = [5.0_real64, 2.0_real64, 9.0_real64, 4.0_real64, 7.0_real64]
+        c = [0.5_real64, 9.5_real64, 2.5_real64]
+        wa = [2.0_real64, 1.0_real64, 4.0_real64, 3.0_real64]
+        wb = [1.0_real64, 5.0_real64, 2.0_real64, 1.0_real64, 3.0_real64]
+        wc = [6.0_real64, 6.0_real64, 6.0_real64]
+        all_x(1:4) = a;   all_x(5:9) = b;   all_x(10:12) = c
+        all_w(1:4) = wa;  all_w(5:9) = wb;  all_w(10:12) = 1.0_real64
+        all_w6 = all_w;   all_w6(10:12) = wc
+
+        ! The fixture's own precondition: the last batch's weight has to be legible in the answer,
+        ! or "the unweighted arm filled in 1" and "the unweighted arm dropped the batch's weights
+        ! entirely" would be the same assertion.
+        call pf_median(all_x, want, weights=all_w)
+        call pf_median(all_x, want6, weights=all_w6)
+        call check(error, want /= want6, &
+            "weighting the last batch at 6 rather than 1 moves nothing -- this fixture is blind")
+        if (allocated(error)) return
+
+        ! `%compute`, then a weighted `%update` -- the growth that finds `keep_w` already
+        ! allocated and non-empty -- then an UNWEIGHTED one, whose elements each weigh 1.
+        call s%compute(a, weights=wa)
+        call s%update(b, weights=wb)
+        call s%update(c)
+        call check(error, s%median() == want, "%update lost the weights in the concatenation")
+        if (allocated(error)) return
+        call pf_mean(all_x, want6, weights=all_w)
+        call check(error, s%mean() == want6, "%update's weighted mean is not the one-shot mean")
+        if (allocated(error)) return
+
+        ! The same population assembled by MERGE instead: weighted into weighted, then
+        ! UNWEIGHTED into weighted, which is the arm that fills 1 for every element it takes.
+        call s%compute(a, weights=wa)
+        call t%compute(b, weights=wb)
+        call s%merge(t)
+        call t%compute(c)
+        call s%merge(t)
+        call check(error, s%median() == want, "%merge lost the weights in the fold")
+        if (allocated(error)) return
+        call pf_quantile(all_x, 0.8_real64, want6, weights=all_w)
+        call check(error, s%quantile(0.8_real64) == want6, &
+            "%merge's weighted quantile is not the one-shot weighted quantile")
+        if (allocated(error)) return
+
+        ! The negative control for that fill: the same merge with the source actually weighted
+        ! must land on the OTHER reference. A merge that ignored the source's weights would
+        ! answer `want` both times.
+        call pf_median(all_x, want6, weights=all_w6)
+        call s%compute(a, weights=wa)
+        call t%compute(b, weights=wb)
+        call s%merge(t)
+        call t%compute(c, weights=wc)
+        call s%merge(t)
+        call check(error, s%median() == want6, "%merge ignored the weighted source's own weights")
+    end subroutine test_weighted_update_and_merge_keep_the_weights
+
+    !> An armed but EMPTY retaining accumulator answers NaN rather than reading `keep`.
+    !!
+    !! `%init` leaves `keep` unallocated, so every tier-B binding has to answer the empty
+    !! population before it associates that array with a non-optional dummy -- which is not a
+    !! detail of taste: passing an unallocated allocatable there is not conforming, and nagfor's
+    !! `-C=array` is the only build that says so.
+    !!
+    !! The answer is the same NaN the one-shot forms give an empty array, so this also pins that
+    !! `%init` followed by a read is not a special case a caller has to know about.
+    subroutine test_empty_retained_object_reads_are_nan(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: empty(0), want
+        type(pf_stats) :: s
+
+        call s%init()
+        call check(error, s%is_computed(), "%init must leave the accumulator live")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(s%probit_mean()), "%probit_mean of an empty population")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(s%percentile_of_score(1.0_real64)), &
+            "%percentile_of_score of an empty population")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(s%quantile(0.5_real64)), "%quantile of an empty population")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(s%trim_mean(0.25_real64)), "%trim_mean of an empty population")
+        if (allocated(error)) return
+
+        ! The one-shot forms answer the same NaN for the same population, which is the point.
+        call pf_probit_mean(empty, want)
+        call check(error, ieee_is_nan(want), "pf_probit_mean of an empty array must be NaN too")
+    end subroutine test_empty_retained_object_reads_are_nan
+
+    !> A `-0.0` weight is a ZERO weight, and every `weights=` loop in the family says so.
+    !!
+    !! **This is the one input that takes the fast weight screen's slow path and survives it.**
+    !! Each loop screens a weight by reading its bits as an `int64` and branching when they fall
+    !! outside `[0, STATS_W_LIM)`; a negative zero has the sign bit set, so it reads negative and
+    !! goes to `stats_check_weight` -- which accepts it, because `-0.0 < 0.0` is false -- and the
+    !! `<= 0` test after the call is what finally excludes it. Every other value on that branch
+    !! aborts, so without a negative zero the line after the validator call is never executed in
+    !! any of the seven loops that have one.
+    !!
+    !! The contract asserted is the one `STATS_W_LIM`'s own documentation states: the answer is
+    !! the same as for `+0.0` in that position, which is the same as for the element removed.
+    !! Getting it wrong is silent -- the element would be counted at weight zero instead of
+    !! dropped, which changes `pf_count_valid` and every effective-size denominator.
+    subroutine test_minus_zero_weight_is_a_zero_weight(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 6
+        real(real64) :: x(N), y(N), wz(N), wp(N), edges(4)
+        real(real64) :: mz, mp, cz, cp, hz(3), hp(3), ez(3), ep(3)
+        real(real32) :: xs(N)
+        integer(int32) :: xi(N), kz(N), kp(N), mi1, mi2
+        integer(int64) :: xl(N), nz, np, negbits
+        logical :: xb(N)
+
+        x = [4.0_real64, 1.0_real64, 7.0_real64, 2.0_real64, 9.0_real64, 5.0_real64]
+        y = [1.0_real64, 8.0_real64, 3.0_real64, 6.0_real64, 2.0_real64, 4.0_real64]
+        xs = real(x, real32)
+        xi = int(x, int32)
+        xl = int(x, int64)
+        xb = [.true., .false., .true., .true., .false., .true.]
+        edges = [0.0_real64, 3.0_real64, 6.0_real64, 10.0_real64]
+
+        ! Built by setting the sign bit of a `+0.0` at run time, and checked before it is used:
+        ! a literal `-0.0` is one the compiler may fold, and `sign(0.0, -1.0)` is not a reliable
+        ! spelling under every `-fp-model`. `==` cannot tell the two zeros apart, so the
+        ! precondition has to be read from the bits.
+        wp = 1.0_real64
+        wz = 1.0_real64
+        negbits = transfer(0.0_real64, 0_int64)
+        negbits = ibset(negbits, 63)
+        wz(3) = transfer(negbits, 0.0_real64)
+        wp(3) = 0.0_real64
+        ! A `+0.0` beside it, so both halves of the screen are exercised by one population: the
+        ! positive zero takes the FAST arm (`wbits == 0`) and the negative zero the slow one.
+        wz(5) = 0.0_real64
+        wp(5) = 0.0_real64
+        call check(error, wz(3) == 0.0_real64 .and. transfer(wz(3), 0_int64) < 0_int64, &
+            "the fixture's -0.0 is not a negative zero -- every assertion below proves nothing")
+        if (allocated(error)) return
+        call check(error, transfer(wz(5), 0_int64) == 0_int64, &
+            "the fixture's +0.0 is not a positive zero, so the fast arm is not being reached")
+        if (allocated(error)) return
+
+        ! The counting entry point, over every kind that has a `weights=` loop of its own. The
+        ! answer is 4 rather than 6 in each: both zero-weighted elements are out of the
+        ! population, however their sign bit is set.
+        call pf_count_valid(x, nz, weights=wz)
+        call check(error, nz == 4_int64, "both zero weights must remove their elements")
+        if (allocated(error)) return
+        call pf_count_valid(xs, np, weights=wz)
+        call check(error, np == nz, "pf_count_valid over real32 disagrees on a -0.0 weight")
+        if (allocated(error)) return
+        call pf_count_valid(xi, np, weights=wz)
+        call check(error, np == nz, "pf_count_valid over int32 disagrees on a -0.0 weight")
+        if (allocated(error)) return
+        call pf_count_valid(xl, np, weights=wz)
+        call check(error, np == nz, "pf_count_valid over int64 disagrees on a -0.0 weight")
+        if (allocated(error)) return
+        call pf_count_valid(xb, np, weights=wz)
+        call check(error, np == nz, "pf_count_valid over logical disagrees on a -0.0 weight")
+        if (allocated(error)) return
+
+        ! The two-pass engine's own loop, and the negative control that makes the rest legible:
+        ! the mean must MOVE when the third element leaves.
+        call pf_mean(x, mz, weights=wz)
+        call pf_mean(x, mp, weights=wp)
+        call check(error, mz == mp, "a -0.0 weight and a +0.0 weight must give the same mean")
+        if (allocated(error)) return
+        call pf_mean([x(1:2), x(4), x(6)], mp)
+        call check(error, mz == mp, "a zero-weighted element must be gone, not merely weightless")
+        if (allocated(error)) return
+        call pf_mean(x, mp)
+        call check(error, mz /= mp, &
+            "dropping the third element changed nothing -- this fixture cannot see a zero weight")
+        if (allocated(error)) return
+
+        ! The binning family, whose three loops each carry their own copy of the screen.
+        call pf_histogram(x, edges, hz, weights=wz)
+        call pf_histogram(x, edges, hp, weights=wp)
+        call check(error, all(hz == hp), "pf_histogram disagrees on a -0.0 weight")
+        if (allocated(error)) return
+        call pf_bucketize(x, edges, kz, weights=wz)
+        call pf_bucketize(x, edges, kp, weights=wp)
+        call check(error, all(kz == kp), "pf_bucketize disagrees on a -0.0 weight")
+        if (allocated(error)) return
+        call pf_bin_edges(x, 2, ez, weights=wz)
+        call pf_bin_edges(x, 2, ep, weights=wp)
+        call check(error, all(ez == ep), "pf_bin_edges disagrees on a -0.0 weight")
+        if (allocated(error)) return
+
+        ! The PAIRWISE compaction, which screens the weight once for the pair rather than twice.
+        call pf_cov(x, y, cz, weights=wz)
+        call pf_cov(x, y, cp, weights=wp)
+        call check(error, cz == cp, "pf_cov disagrees on a -0.0 weight")
+        if (allocated(error)) return
+        call pf_corr(x, y, cz, weights=wz)
+        call pf_corr(x, y, cp, weights=wp)
+        call check(error, cz == cp, "pf_corr disagrees on a -0.0 weight")
+        if (allocated(error)) return
+
+        ! The modal survivor scan, whose screen sits in a different submodule again.
+        call pf_mode(xi, mi1, weights=wz)
+        call pf_mode(xi, mi2, weights=wp)
+        call check(error, mi1 == mi2, "pf_mode disagrees on a -0.0 weight")
+        if (allocated(error)) return
+
+        ! The STRING-COLUMN modal scan, which screens its weights through the survivor
+        ! permutation rather than through the values, and so carries a third copy of the screen.
+        block
+            type(parquet_string_column) :: col
+            character(len=:), allocatable :: m1, m2
+            integer :: j
+            do j = 1, N
+                call col%append_string(repeat(char(iachar("a") + int(x(j))), 2))
+            end do
+            call pf_mode(col, m1, weights=wz)
+            call pf_mode(col, m2, weights=wp)
+            call check(error, m1 == m2, "the string-column pf_mode disagrees on a -0.0 weight")
+        end block
+    end subroutine test_minus_zero_weight_is_a_zero_weight
+
+    !> `pf_mode` reads `weights=` over EVERY kind, and answers an all-null population.
+    !!
+    !! The modal scan is written out once per element type, and each copy gathers the survivors'
+    !! weights into its own permuted array before walking the runs. Only the `int32` and `real64`
+    !! copies were ever called with weights, so the gather in the other four was untested -- and
+    !! a gather that lost the permutation would not fail loudly: it would report a real value
+    !! from the population as the mode, just not the modal one.
+    !!
+    !! The empty-survivor arm is per-kind for the same reason, and has its own shape in each: the
+    !! `logical` copy allocates a zero-length `modes`, the string-column copy a zero-length
+    !! DEFERRED-LENGTH one, which is a different statement that a shared test cannot reach.
+    subroutine test_mode_weights_and_all_null_across_kinds(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 7
+        integer(int64) :: vl(N), ml, cnt, nnull
+        logical :: vb(N), mb, mask(N), ok
+        character(len=5) :: vc(N)
+        character(len=:), allocatable :: mc
+        type(parquet_string_column) :: col
+        real(real64) :: w(N)
+
+        ! "b" occurs three times and "a" twice, so "b" is the unweighted mode; the weights below
+        ! put 10 on each "a" and 1 on everything else, which must move it to "a".
+        vl = [2_int64, 1_int64, 2_int64, 1_int64, 2_int64, 3_int64, 3_int64]
+        vb = [.true., .false., .true., .false., .true., .true., .true.]
+        vc = ["b    ", "a    ", "b    ", "a    ", "b    ", "c    ", "c    "]
+        w = [1.0_real64, 10.0_real64, 1.0_real64, 10.0_real64, 1.0_real64, 1.0_real64, 1.0_real64]
+
+        call pf_mode(vl, ml, count=cnt)
+        call check(error, ml == 2_int64, "the unweighted int64 mode must be the commonest value")
+        if (allocated(error)) return
+        call pf_mode(vl, ml, count=cnt, weights=w)
+        call check(error, ml == 1_int64 .and. cnt == 2_int64, &
+            "weights must move the int64 mode; count stays an ELEMENT count")
+        if (allocated(error)) return
+
+        call pf_mode(vb, mb, count=cnt)
+        call check(error, mb, "the unweighted logical mode must be .true., the commoner value")
+        if (allocated(error)) return
+        call pf_mode(vb, mb, count=cnt, weights=w)
+        call check(error, (.not. mb) .and. cnt == 2_int64, &
+            "weights must move the logical mode to .false.")
+        if (allocated(error)) return
+
+        call pf_mode(vc, mc, count=cnt)
+        call check(error, mc == "b", "the unweighted character mode must be b")
+        if (allocated(error)) return
+        call pf_mode(vc, mc, count=cnt, weights=w)
+        call check(error, mc == "a" .and. cnt == 2_int64, &
+            "weights must move the character-array mode to a")
+        if (allocated(error)) return
+
+        call col%append_string("b")
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%append_string("a")
+        call col%append_string("b")
+        call col%append_string("c")
+        call col%append_string("c")
+        call pf_mode(col, mc, count=cnt)
+        call check(error, mc == "b", "the unweighted string-column mode must be b")
+        if (allocated(error)) return
+        call pf_mode(col, mc, count=cnt, weights=w)
+        call check(error, mc == "a" .and. cnt == 2_int64, &
+            "weights must move the string-column mode to a")
+        if (allocated(error)) return
+
+        ! Every element excluded: each kind reports no mode rather than inventing one, and says
+        ! through `n_null` how many elements it lost.
+        mask = .false.
+        call pf_mode(vb, mb, count=cnt, is_valid=mask, n_null=nnull, ok=ok)
+        call check(error, .not. ok .and. cnt == 0_int64 .and. nnull == int(N, int64), &
+            "an all-null logical population must report ok=.false. and count its nulls")
+        if (allocated(error)) return
+        call col%clear()
+        call col%append_null()
+        call col%append_null()
+        call pf_mode(col, mc, count=cnt, n_null=nnull, ok=ok)
+        call check(error, .not. ok .and. cnt == 0_int64 .and. nnull == 2_int64, &
+            "an all-null string column must report ok=.false. and count its nulls")
+    end subroutine test_mode_weights_and_all_null_across_kinds
+
+    !> The STREAMING accumulator excludes and poisons exactly as the two-pass route does.
+    !!
+    !! `%compute(retain=.false.)` is still two passes over a resident array; the streaming walk is
+    !! reached only by `%init` followed by `%update`, which is what a loop over a file larger than
+    !! RAM does. That walk carries its own copy of the family's exclusion order -- nullness, then
+    !! NaN, then weight -- and its own poisoning rule, and none of it was under test: every
+    !! `%update` the suite performed handed over a clean, unweighted batch.
+    !!
+    !! The counts are asserted EXACTLY, because exclusion is counting rather than arithmetic and
+    !! a streamed count that drifts is a defect rather than a rounding loss. The mean is asserted
+    !! against a bound instead, which is the trade `test_streaming_accuracy_bound` documents: the
+    !! combination formulas are not the two-pass formulas.
+    !!
+    !! Three arms no other test reaches:
+    !!
+    !! * a batch every element of which is excluded, which contributes no block at all and must
+    !!   leave the running answer alone rather than clearing it;
+    !! * `skipnan = .false.` with a NaN, which poisons this accumulator for good;
+    !! * merging a poisoned accumulator into a clean one, which must poison the destination --
+    !!   the combination step's own arm, and the one that decides whether a partial that saw a
+    !!   NaN can be quietly folded away.
+    subroutine test_streaming_update_excludes_and_poisons(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: a(5), b(5), c(4), wa(5), wb(5), keep(11), nan, ref, rel
+        logical :: ma(5), allbad(4), had_inv, got_inv
+        type(pf_stats) :: s, t
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        a = [3.0_real64, 8.0_real64, 1.0_real64, 6.0_real64, 4.0_real64]
+        b = [5.0_real64, nan, 9.0_real64, 2.0_real64, 7.0_real64]
+        c = [11.0_real64, 12.0_real64, 13.0_real64, 14.0_real64]
+        ma = [.true., .true., .false., .true., .true.]
+        wa = [2.0_real64, 1.0_real64, 9.0_real64, 3.0_real64, 1.0_real64]
+        wb = [1.0_real64, 1.0_real64, 0.0_real64, 2.0_real64, 1.0_real64]
+        allbad = .false.
+
+        ! Batch one is masked, batch two carries a NaN and a zero weight, batch three is entirely
+        ! excluded. The survivors are a(1), a(2), a(4), a(5), b(1), b(4), b(5) -- seven of
+        ! fourteen -- and the third element of `a` and the third of `b` leave by different routes
+        ! that must be reported through different counters.
+        call s%init(retain=.false.)
+        call s%update(a, is_valid=ma, weights=wa)
+        call s%update(b, weights=wb)
+        call s%update(c, is_valid=allbad)
+        call check(error, s%n() == 14_int64, "%n counts every element offered, excluded or not")
+        if (allocated(error)) return
+        call check(error, s%n_valid() == 7_int64, "seven elements survive all three exclusions")
+        if (allocated(error)) return
+        call check(error, s%n_null() == 5_int64, "one masked element plus the whole third batch")
+        if (allocated(error)) return
+        call check(error, s%n_nan() == 1_int64, "the NaN must be counted as a NaN, not as a null")
+        if (allocated(error)) return
+
+        keep(1:4) = [a(1), a(2), a(4), a(5)]
+        keep(5:7) = [b(1), b(4), b(5)]
+        call pf_mean(keep(1:7), ref, weights=[wa(1), wa(2), wa(4), wa(5), wb(1), wb(4), wb(5)])
+        rel = abs(s%mean() - ref) / abs(ref)
+        call check(error, rel < 1.0e-12_real64, &
+            "the streamed weighted mean is not the mean of the survivors it reported")
+        if (allocated(error)) return
+
+        ! An entirely excluded batch must not disturb what came before it: the same two batches
+        ! without the third have to give the same answer bit for bit.
+        call t%init(retain=.false.)
+        call t%update(a, is_valid=ma, weights=wa)
+        call t%update(b, weights=wb)
+        call check(error, t%mean() == s%mean(), &
+            "a batch with no survivors changed the running mean")
+        if (allocated(error)) return
+
+        ! `skipnan = .false.`: the NaN stays in the population and every answer is NaN from then
+        ! on, including after a later clean batch.
+        !
+        ! **Guarded by IEEE_INVALID**, because a kept NaN is the one input on this path that can
+        ! reach an ordered comparison against one. `<` and `>` are signalling predicates, and
+        ! nagfor unmasks the traps by default, so a raised flag here is a dead process there and
+        ! a silent line at exit everywhere else -- which is why it is asserted rather than left
+        ! to a build nobody runs daily. The two-pass engine keeps a kept NaN out of its own
+        ! extremes for exactly this reason (`stats_engine`'s `saw_nan_l` guard).
+        call ieee_get_flag(ieee_invalid, had_inv)
+        call ieee_set_flag(ieee_invalid, .false.)
+        call s%clear()
+        call s%init(retain=.false., skipnan=.false.)
+        call s%update(b)
+        call ieee_get_flag(ieee_invalid, got_inv)
+        call ieee_set_flag(ieee_invalid, had_inv .or. got_inv)
+        call check(error, .not. got_inv, &
+            "streaming a kept NaN raised IEEE_INVALID; nagfor's -ieee=stop would abort here")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(s%mean()), "a kept NaN must poison the streamed mean")
+        if (allocated(error)) return
+        call s%update(a)
+        call check(error, ieee_is_nan(s%mean()), "a later clean batch must not un-poison it")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(s%variance()), "and the variance with it")
+        if (allocated(error)) return
+        call check(error, s%n_valid() == 10_int64, &
+            "a kept NaN is IN the population, so it is counted as a survivor")
+        if (allocated(error)) return
+
+        ! Merging that poisoned accumulator into a clean one must carry the poison across.
+        call t%clear()
+        call t%init(retain=.false., skipnan=.false.)
+        call t%update(a)
+        call check(error, .not. ieee_is_nan(t%mean()), "the clean destination starts clean")
+        if (allocated(error)) return
+        call t%merge(s)
+        call check(error, ieee_is_nan(t%mean()), &
+            "merging an accumulator that kept a NaN must poison the destination")
+    end subroutine test_streaming_update_excludes_and_poisons
+
+    !> The bias corrections refuse the sample sizes they are not defined for.
+    !!
+    !! `bias = .false.` multiplies the raw moment by a factor with `n - 2` (skewness) or
+    !! `(n - 2)(n - 3)` (kurtosis) underneath. At or below those sizes the correction is a
+    !! division by zero or by a negative, and the honest answer is that the corrected statistic
+    !! does not exist for this population -- which is what scipy answers too.
+    !!
+    !! The negative control is the same call one element larger, which must produce a number: a
+    !! guard that fired for every population would pass the NaN half on its own.
+    subroutine test_bias_corrections_refuse_small_samples(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: g, k
+
+        ! Skewness needs n > 2 once corrected.
+        call pf_skewness([1.0_real64, 5.0_real64], g, bias=.false.)
+        call check(error, ieee_is_nan(g), "the corrected skewness of two elements must be NaN")
+        if (allocated(error)) return
+        call pf_skewness([1.0_real64, 5.0_real64, 2.0_real64], g, bias=.false.)
+        call check(error, .not. ieee_is_nan(g), "three elements must give a corrected skewness")
+        if (allocated(error)) return
+
+        ! Kurtosis needs n > 3.
+        call pf_kurtosis([1.0_real64, 5.0_real64, 2.0_real64], k, bias=.false.)
+        call check(error, ieee_is_nan(k), "the corrected kurtosis of three elements must be NaN")
+        if (allocated(error)) return
+        call pf_kurtosis([1.0_real64, 5.0_real64, 2.0_real64, 9.0_real64], k, bias=.false.)
+        call check(error, .not. ieee_is_nan(k), "four elements must give a corrected kurtosis")
+        if (allocated(error)) return
+
+        ! And the uncorrected forms, which are defined wherever the moment is: the guards above
+        ! belong to the correction rather than to the statistic.
+        call pf_skewness([1.0_real64, 5.0_real64], g, bias=.true.)
+        call check(error, .not. ieee_is_nan(g), "the uncorrected skewness of two elements exists")
+        if (allocated(error)) return
+        call pf_kurtosis([1.0_real64, 5.0_real64, 2.0_real64], k, bias=.true.)
+        call check(error, .not. ieee_is_nan(k), "the uncorrected kurtosis of three elements exists")
+    end subroutine test_bias_corrections_refuse_small_samples
+
+    !> `weight_type="reliability"` is spelled out, and `pf_zscore` forwards `ddof=`.
+    !!
+    !! Both are DEFAULTS that a caller may also state, and a default reached by two routes is a
+    !! place where the two can drift: `stats_weight_kind` has an arm for the explicit token and a
+    !! fall-through for the absent argument, and `pf_zscore` passes `ddof` on only when it was
+    !! given. Stating each explicitly must land exactly where leaving it out does.
+    !!
+    !! The negative control is the other token in each pair, which must move the answer -- without
+    !! it "the explicit token is honoured" and "the argument is ignored" look the same.
+    subroutine test_explicit_defaults_match_the_implicit_ones(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(6), w(6), a, b, za(6), zb(6)
+
+        x = [2.0_real64, 4.0_real64, 4.0_real64, 4.0_real64, 5.0_real64, 9.0_real64]
+        w = [1.0_real64, 3.0_real64, 1.0_real64, 2.0_real64, 1.0_real64, 4.0_real64]
+
+        call pf_variance(x, a, weights=w)
+        call pf_variance(x, b, weights=w, weight_type="reliability")
+        call check(error, a == b, '"reliability" spelled out must be the default it already is')
+        if (allocated(error)) return
+        call pf_variance(x, b, weights=w, weight_type="frequency")
+        call check(error, a /= b, &
+            '"frequency" gave the same answer as "reliability" -- this fixture cannot tell them apart')
+        if (allocated(error)) return
+
+        call pf_zscore(x, za)
+        call pf_zscore(x, zb, ddof=1)
+        call check(error, all(za == zb), "ddof=1 spelled out must be the default it already is")
+        if (allocated(error)) return
+        call pf_zscore(x, zb, ddof=0)
+        call check(error, .not. all(za == zb), &
+            "ddof=0 gave the same scores as ddof=1 -- pf_zscore is not forwarding the argument")
+    end subroutine test_explicit_defaults_match_the_implicit_ones
+
+    !> A kept NaN poisons the general engine loop as it poisons the fast one.
+    !!
+    !! `stats_engine` has TWO pass-one walks: a fast one for an unweighted, unmasked call whose
+    !! survivors need not be kept, and a general one for everything else. Each carries its own
+    !! copy of the NaN rule, and only the fast one was ever reached with `skipnan = .false.` --
+    !! so the general walk's poisoning, which is the one a weighted or masked call depends on,
+    !! was untested.
+    !!
+    !! Each arm is entered by a different argument, so all three are asserted rather than one
+    !! taken as representative.
+    subroutine test_kept_nan_poisons_the_general_engine_walk(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(6), w(6), nan, m
+        logical :: mask(6), ok
+        type(pf_stats) :: s
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        x = [2.0_real64, 4.0_real64, nan, 4.0_real64, 5.0_real64, 9.0_real64]
+        w = [1.0_real64, 3.0_real64, 1.0_real64, 2.0_real64, 1.0_real64, 4.0_real64]
+        mask = .true.
+
+        call pf_mean(x, m, weights=w, skipnan=.false., ok=ok)
+        call check(error, ieee_is_nan(m) .and. .not. ok, "a weighted call must keep the NaN too")
+        if (allocated(error)) return
+        call pf_mean(x, m, is_valid=mask, skipnan=.false., ok=ok)
+        call check(error, ieee_is_nan(m) .and. .not. ok, "a masked call must keep the NaN too")
+        if (allocated(error)) return
+        call s%compute(x, retain=.true., skipnan=.false.)
+        call check(error, ieee_is_nan(s%mean()), "a RETAINING call must keep the NaN too")
+        if (allocated(error)) return
+
+        ! The negative control: the same three calls with the default `skipnan` must each answer
+        ! the mean of the five real elements.
+        call pf_mean([x(1:2), x(4:6)], m)
+        call check(error, .not. ieee_is_nan(m), "the reference mean is itself a NaN")
+        if (allocated(error)) return
+        call pf_mean(x, m, weights=w, ok=ok)
+        call check(error, .not. ieee_is_nan(m) .and. ok, "skipnan=.true. must drop it again")
+    end subroutine test_kept_nan_poisons_the_general_engine_walk
+
+    !> `pf_histogram` and `pf_bin_edges` exclude what every other reduction excludes.
+    !!
+    !! The binning family walks its own loops rather than going through `stats_compact`, so each
+    !! of the three has its own copy of the exclusion order -- and the `is_valid` arm of
+    !! `pf_histogram` and the NaN arm of `pf_bin_edges` had no caller. A binning routine that
+    !! counted a null would put it in whichever bin its undefined payload happened to fall in,
+    !! which is a wrong tally rather than a crash.
+    subroutine test_binning_excludes_nulls_and_nans(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(7), edges(4), h(3), href(3), e(3), eref(3), nan
+        logical :: mask(7)
+        integer(int64) :: nnull, nnan
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        edges = [0.0_real64, 3.0_real64, 6.0_real64, 10.0_real64]
+        x = [1.0_real64, 4.0_real64, 7.0_real64, 2.0_real64, 5.0_real64, 8.0_real64, 9.0_real64]
+        mask = [.true., .true., .false., .true., .true., .true., .false.]
+
+        call pf_histogram(x, edges, h, is_valid=mask, n_null=nnull)
+        call pf_histogram([x(1:2), x(4:6)], edges, href)
+        call check(error, all(h == href), "pf_histogram must tally only the unmasked elements")
+        if (allocated(error)) return
+        call check(error, nnull == 2_int64, "and report how many it excluded")
+        if (allocated(error)) return
+        ! The negative control: counted rather than excluded, the two extra elements would land in
+        ! the last bin, so the tallies must differ.
+        call pf_histogram(x, edges, href)
+        call check(error, .not. all(h == href), &
+            "masking changed no bin -- this fixture cannot see an excluded element")
+        if (allocated(error)) return
+
+        ! `pf_bin_edges` sizes its range from the population, so a NaN it failed to skip would
+        ! propagate into both edges rather than into one bin.
+        x(3) = nan
+        call pf_bin_edges(x, 2, e, n_nan=nnan)
+        call pf_bin_edges([x(1:2), x(4:7)], 2, eref)
+        call check(error, all(e == eref), "pf_bin_edges must ignore a NaN as every reduction does")
+        if (allocated(error)) return
+        call check(error, nnan == 1_int64, "and report it through n_nan")
+    end subroutine test_binning_excludes_nulls_and_nans
+
+    !> `pf_cov` and `pf_corr` over two COLUMNS combine the two validity masks.
+    !!
+    !! A pairwise statistic needs an element to be present in BOTH samples, so the column form has
+    !! to intersect the two columns' own null masks before it computes anything. Either column may
+    !! carry no mask at all -- that is how "this column has no nulls" is spelled -- so the
+    !! intersection has four shapes, and the answer for each must be the one the array form gives
+    !! for the surviving pairs.
+    !!
+    !! Getting it wrong is silent and plausible: a covariance computed over a row whose `y` is
+    !! null reads whatever payload sat in the gap, which is a number.
+    subroutine test_pairwise_columns_intersect_their_masks(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 6
+        real(real64) :: xd(N), yd(N), want, got
+        type(parquet_column) :: cx, cy, cxn, cyn
+        integer :: k
+
+        xd = [2.0_real64, 4.0_real64, 6.0_real64, 8.0_real64, 10.0_real64, 12.0_real64]
+        yd = [1.0_real64, 5.0_real64, 2.0_real64, 9.0_real64, 3.0_real64, 7.0_real64]
+        call cx%init(PK_FLOAT64, int(N, int64))
+        call cy%init(PK_FLOAT64, int(N, int64))
+        call cxn%init(PK_FLOAT64, int(N, int64))
+        call cyn%init(PK_FLOAT64, int(N, int64))
+        do k = 1, N
+            call cx%set_at(int(k, int64), xd(k))
+            call cy%set_at(int(k, int64), yd(k))
+            call cxn%set_at(int(k, int64), xd(k))
+            call cyn%set_at(int(k, int64), yd(k))
+        end do
+        ! One null in each column, at DIFFERENT rows, so the intersection is smaller than either
+        ! mask and a form that took only one of them would answer something else.
+        call cxn%set_null(2_int64)
+        call cyn%set_null(5_int64)
+
+        ! Neither column has a mask: the pair takes the no-mask fast path.
+        call pf_cov(xd, yd, want)
+        call pf_cov(cx, cy, got)
+        call check(error, got == want, "two null-free columns must give the array answer")
+        if (allocated(error)) return
+
+        ! One mask, on the left and then on the right.
+        call pf_cov([xd(1), xd(3:N)], [yd(1), yd(3:N)], want)
+        call pf_cov(cxn, cy, got)
+        call check(error, got == want, "a null on the left must drop that PAIR")
+        if (allocated(error)) return
+        call pf_cov([xd(1:4), xd(6)], [yd(1:4), yd(6)], want)
+        call pf_cov(cx, cyn, got)
+        call check(error, got == want, "a null on the right must drop that pair")
+        if (allocated(error)) return
+
+        ! Both masks: the survivors are the rows present in each.
+        call pf_cov([xd(1), xd(3:4), xd(6)], [yd(1), yd(3:4), yd(6)], want)
+        call pf_cov(cxn, cyn, got)
+        call check(error, got == want, "two masks must INTERSECT, not merely one of them apply")
+        if (allocated(error)) return
+        call pf_corr([xd(1), xd(3:4), xd(6)], [yd(1), yd(3:4), yd(6)], want)
+        call pf_corr(cxn, cyn, got)
+        call check(error, got == want, "pf_corr must intersect them the same way")
+        if (allocated(error)) return
+
+        ! The negative control: taking only the left mask would answer this instead.
+        call pf_cov([xd(1), xd(3:N)], [yd(1), yd(3:N)], want)
+        call pf_cov(cxn, cyn, got)
+        call check(error, got /= want, "the right column's null was not applied")
+    end subroutine test_pairwise_columns_intersect_their_masks
+
+    !> Both SIGNS of infinity, in either variable, leave `pf_cov` and `pf_corr` NaN.
+    !!
+    !! The pairwise engine tracks the two variables' infinities in four flags of its own rather
+    !! than reading extremes it does not keep, and each flag has its own fold-back arm. The
+    !! existing non-finite test drives `x` positive and `x` both-signed; the mirrors -- `x`
+    !! negative only, `y` negative only, `y` both-signed -- were untested, and they are separate
+    !! statements rather than a symmetry the compiler provides.
+    !!
+    !! Nothing here may abort: an infinity is a data condition, and pass two is skipped entirely
+    !! so that `Inf - Inf` never happens. That is asserted through IEEE_INVALID rather than
+    !! assumed, because a raised flag is a dead process under nagfor and silent everywhere else.
+    !!
+    !! The block boundary is crossed in the same test: the pair walk sums into fixed-size blocks
+    !! and its roll-over had no fixture, every pairwise test until now having been smaller than
+    !! one block.
+    subroutine test_pairwise_infinities_both_signs(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 6, BIG = 300
+        real(real64) :: x(N), y(N), c, r, inf, ninf, bx(BIG), by(BIG), want
+        logical :: ok, had_inv, got_inv
+        integer :: k
+
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+        ninf = -inf
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        y = [2.0_real64, 1.0_real64, 4.0_real64, 3.0_real64, 6.0_real64, 5.0_real64]
+
+        call ieee_get_flag(ieee_invalid, had_inv)
+
+        ! x negative only.
+        x(3) = ninf
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_cov(x, y, c, ok=ok)
+        call ieee_get_flag(ieee_invalid, got_inv)
+        call check(error, ieee_is_nan(c) .and. .not. ok, "a -Inf in x must leave pf_cov NaN")
+        if (allocated(error)) return
+        call check(error, .not. got_inv, "a -Inf in x raised IEEE_INVALID; nagfor's -ieee=stop would abort here")
+        if (allocated(error)) return
+
+        ! y negative only.
+        x(3) = 3.0_real64
+        y(4) = ninf
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_cov(x, y, c, ok=ok)
+        call ieee_get_flag(ieee_invalid, got_inv)
+        call check(error, ieee_is_nan(c) .and. .not. ok, "a -Inf in y must leave pf_cov NaN")
+        if (allocated(error)) return
+        call check(error, .not. got_inv, "a -Inf in y raised IEEE_INVALID; nagfor's -ieee=stop would abort here")
+        if (allocated(error)) return
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_corr(x, y, r, ok=ok)
+        call ieee_get_flag(ieee_invalid, got_inv)
+        call check(error, ieee_is_nan(r) .and. .not. ok, "and pf_corr with it")
+        if (allocated(error)) return
+        call check(error, .not. got_inv, "pf_corr compared a NaN centred sum with <=, which raises IEEE_INVALID")
+        if (allocated(error)) return
+
+        ! y both signs, which cancel to a NaN mean rather than to an infinite one.
+        y(2) = inf
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_cov(x, y, c, ok=ok)
+        call ieee_get_flag(ieee_invalid, got_inv)
+        call check(error, ieee_is_nan(c) .and. .not. ok, "both signs in y must leave pf_cov NaN")
+        if (allocated(error)) return
+        call check(error, .not. got_inv, "both signs in y raised IEEE_INVALID; nagfor's -ieee=stop would abort here")
+        if (allocated(error)) return
+        call ieee_set_flag(ieee_invalid, had_inv)
+
+        ! A population several blocks long, so the pair walk's roll-over runs. The answer is
+        ! still the identity `pf_cov(x, x) == pf_variance(x)`, which is what makes a block that
+        ! lost its partial sums visible rather than merely different.
+        do k = 1, BIG
+            bx(k) = real(mod(k * 37, 101), real64)
+            by(k) = real(mod(k * 53, 97), real64)
+        end do
+        call pf_variance(bx, want)
+        call pf_cov(bx, bx, c)
+        call check(error, c == want, &
+            "pf_cov(x, x) must still be pf_variance(x) once the pair walk spans several blocks")
+        if (allocated(error)) return
+        call pf_corr(bx, by, r, ok=ok)
+        call check(error, ok .and. abs(r) <= 1.0_real64, &
+            "a multi-block correlation must be a correlation")
+    end subroutine test_pairwise_infinities_both_signs
+
+    !> `pf_probit_fit` answers an infinite population with that infinity, not with arithmetic.
+    !!
+    !! The fit regresses the sorted values on their normal plotting positions, and an infinite
+    !! extreme makes the whole line degenerate: the mean IS that infinity, every deviation from
+    !! it is infinite or `Inf - Inf`, and the slope and correlation are NaN whichever way it is
+    !! computed. The routine therefore reads the two extremes of its own sorted buffer and
+    !! returns before the regression -- both because the answer is already known and because
+    !! running it would evaluate `Inf - Inf` and raise IEEE_INVALID.
+    !!
+    !! Both signs at once leaves even `loc` undefined, since that limit is `-Inf + Inf`.
+    subroutine test_probit_fit_infinite_extremes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(6), loc, sigma, corr, inf, ninf
+        logical :: had_inv, got_inv
+
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+        ninf = -inf
+        x = [3.0_real64, 1.0_real64, 4.0_real64, 1.0_real64, 5.0_real64, 9.0_real64]
+
+        call ieee_get_flag(ieee_invalid, had_inv)
+        call ieee_set_flag(ieee_invalid, .false.)
+
+        x(6) = inf
+        call pf_probit_fit(x, loc, sigma, corr=corr)
+        call check(error, loc > huge(1.0_real64), "a +Inf population's loc IS that infinity")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(sigma) .and. ieee_is_nan(corr), &
+            "its scale and correlation are undefined")
+        if (allocated(error)) return
+
+        x(6) = 9.0_real64
+        x(2) = ninf
+        call pf_probit_fit(x, loc, sigma, corr=corr)
+        call check(error, loc < -huge(1.0_real64), "a -Inf population's loc is the mirror")
+        if (allocated(error)) return
+
+        x(6) = inf
+        call pf_probit_fit(x, loc, sigma, corr=corr)
+        call check(error, ieee_is_nan(loc), "both signs leave even loc undefined")
+        if (allocated(error)) return
+
+        call ieee_get_flag(ieee_invalid, got_inv)
+        call ieee_set_flag(ieee_invalid, had_inv .or. got_inv)
+        call check(error, .not. got_inv, &
+            "pf_probit_fit ran its regression on an infinity and raised IEEE_INVALID")
+    end subroutine test_probit_fit_infinite_extremes
+
+    !> `inverted_cdf`, and the exact tie `nearest` has to break.
+    !!
+    !! A one-quantile unweighted call does not sort: it selects, which is a different
+    !! implementation of every interpolation rule and has to answer what the ordering route
+    !! answers. `inverted_cdf` had no unweighted caller at all, and `nearest` was only ever asked
+    !! at positions that were not exact ties -- the one case where the rule has to say something
+    !! beyond "the closer one".
+    !!
+    !! numpy breaks that tie to the EVEN zero-based index, so `p = 0.125` over five sorted values
+    !! sits exactly between ranks 0 and 1 and takes rank 0. The two routes are compared against
+    !! each other as well, since disagreeing there is a defect neither answer alone reveals.
+    subroutine test_selection_route_and_nearest_tie(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(5), q, qs(1), probs(1)
+
+        x = [10.0_real64, 20.0_real64, 30.0_real64, 40.0_real64, 50.0_real64]
+
+        ! The exact tie: p*(m-1) = 0.5, between ranks 0 and 1, and rank 0 is the even one.
+        call pf_quantile(x, 0.125_real64, q, method="nearest")
+        call check(error, q == 10.0_real64, "nearest must break an exact tie to the even rank")
+        if (allocated(error)) return
+        ! Its odd-index mirror, which must go the OTHER way: p*(m-1) = 1.5 takes rank 2.
+        call pf_quantile(x, 0.375_real64, q, method="nearest")
+        call check(error, q == 30.0_real64, "at an odd lower rank the tie goes upward")
+        if (allocated(error)) return
+
+        ! `inverted_cdf` unweighted, which reaches the selection route rather than the ordering
+        ! one: the smallest value whose cumulative share reaches p.
+        call pf_quantile(x, 0.5_real64, q, method="inverted_cdf")
+        call check(error, q == 30.0_real64, "inverted_cdf at p=0.5 over five values is the third")
+        if (allocated(error)) return
+        call pf_quantile(x, 0.01_real64, q, method="inverted_cdf")
+        call check(error, q == 10.0_real64, "and just above zero it is the smallest")
+        if (allocated(error)) return
+        call pf_quantile(x, 1.0_real64, q, method="inverted_cdf")
+        call check(error, q == 50.0_real64, "and at one it is the largest")
+        if (allocated(error)) return
+
+        ! The vector form must answer the same, over the ordering route both take as shipped.
+        ! The SELECTION route's own `inverted_cdf` arm is reached only through the debug
+        ! threshold, and rides `test_selection_and_sort_paths_agree`, which owns that override.
+        probs = [0.5_real64]
+        call pf_quantiles(x, probs, qs, method="inverted_cdf")
+        call check(error, qs(1) == 30.0_real64, "pf_quantiles disagrees with pf_quantile")
+    end subroutine test_selection_route_and_nearest_tie
+
+    !> A weight large enough to ABSORB the rest of the population puts every position at 0.
+    !!
+    !! The weighted quantile scale is `run / (total - w(i))`, and that denominator vanishes when
+    !! one weight is so much larger than the others that the total rounds to it. The element is
+    !! then simultaneously the minimum and the maximum of the weighted population, and position 0
+    !! is what keeps the position sequence non-decreasing -- without which the walk that finds
+    !! the bracketing pair would step past the end.
+    !!
+    !! This is an ordinary consequence of finite precision rather than a contrived input: a
+    !! weight of `1/err**2` over a measurement with a tiny error produces it.
+    subroutine test_absorbing_weight_keeps_positions_ordered(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(3), w(3), q, total, prev
+        integer :: k
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64]
+        w = [1.0e308_real64, 1.0e-300_real64, 1.0e-300_real64]
+        ! The precondition, read rather than assumed: the two small weights must vanish into the
+        ! sum, or the denominator this test is about never reaches zero.
+        total = w(1) + w(2) + w(3)
+        call check(error, total - w(1) == 0.0_real64, &
+            "the small weights did not absorb -- this fixture cannot reach the guard")
+        if (allocated(error)) return
+
+        ! The two ends are exact by rule, and everything between them is bracketed and
+        ! non-decreasing -- which is what a position sequence that stayed ordered buys, and what
+        ! a `0/0` position would have destroyed.
+        call pf_quantile(x, 0.0_real64, q, weights=w)
+        call check(error, q == 1.0_real64, "q(0) must be the smallest value")
+        if (allocated(error)) return
+        call pf_quantile(x, 1.0_real64, q, weights=w)
+        call check(error, q == 3.0_real64, "q(1) must be the largest value")
+        if (allocated(error)) return
+        prev = 1.0_real64
+        do k = 0, 10
+            call pf_quantile(x, real(k, real64) / 10.0_real64, q, weights=w)
+            call check(error, .not. ieee_is_nan(q) .and. q >= 1.0_real64 .and. q <= 3.0_real64, &
+                "an absorbed denominator left a quantile outside the population")
+            if (allocated(error)) return
+            call check(error, q >= prev, "the weighted quantiles are not non-decreasing in p")
+            if (allocated(error)) return
+            prev = q
+        end do
+    end subroutine test_absorbing_weight_keeps_positions_ordered
+
+    !> No reduction RAISES an IEEE exception on a non-finite population.
+    !!
+    !! **This is a contract about the process, not about the answer**, and it needs its own test
+    !! because every symptom of breaking it is somewhere else. A NaN or an infinity reaching an
+    !! ordered comparison -- `<`, `<=`, `>`, `>=` -- raises IEEE_INVALID, and:
+    !!
+    !! * under nagfor, whose default `-ieee=stop` unmasks the traps, the process DIES, taking
+    !!   every later suite in that runner with it and reporting the abort beside whichever test
+    !!   happened to be printing;
+    !! * under gfortran and ifx it is one line at program exit, attached to nothing, which is
+    !!   indistinguishable from noise.
+    !!
+    !! So the ordinary suite cannot see it, and four sites were raising: `pf_zscore`'s
+    !! `sd > 0` test, `stats_skew`'s and `stats_kurt`'s `p2 <= 0` test, and `pf_corr`'s
+    !! `sxx <= 0` test -- each against a value that is a NaN for exactly the populations this
+    !! module documents itself as ANSWERING rather than refusing. `/=` is the one quiet
+    !! predicate, so each now screens the NaN with it first, as its own statement.
+    !!
+    !! The flag is saved and restored around the whole test, and each call gets a cleared flag of
+    !! its own so that a failure names the procedure rather than the batch. Guarded on
+    !! `ieee_support_flag`, since a processor need not support reading it at all.
+    subroutine test_no_reduction_raises_on_a_non_finite_population(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(6), y(6), z(6), nan, inf, a, b, c, med, sd
+        logical :: raised, had, ok
+        character(len=200) :: culprits
+        type(pf_stats) :: s
+
+        if (.not. ieee_support_flag(ieee_invalid, 1.0_real64)) then
+            call skip_test(error, "this build cannot read IEEE_INVALID")
+            return
+        end if
+
+        culprits = ""
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+        x = [1.0_real64, 2.0_real64, nan, 4.0_real64, 5.0_real64, 6.0_real64]
+        y = [2.0_real64, 1.0_real64, 4.0_real64, 3.0_real64, 6.0_real64, 5.0_real64]
+        call ieee_get_flag(ieee_invalid, had)
+
+        ! A NaN KEPT in the population: every one of these answers NaN, and none may compare it.
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_zscore(x, z, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_zscore(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_normal_scores(x, z, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_normal_scores(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_median(x, a, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_median(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_mad(x, a, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_mad(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_sigma_clipped_stats(x, a, med, sd, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_sigma_clipped_stats(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_probit_fit(x, a, b, corr=c, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_probit_fit(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_probit_scale(x, a, skipnan=.false.)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_probit_scale(kept NaN)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call s%compute(x, skipnan=.false.)
+        a = s%mad()
+        b = s%quantile(0.5_real64)
+        c = s%probit_scale()
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_stats reads(kept NaN)"
+
+        ! An INFINITY in the population, which poisons the central moments without a NaN ever
+        ! being in the data the caller supplied.
+        x(3) = inf
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_zscore(x, z)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_zscore(infinity)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_skewness(x, a)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_skewness(infinity)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_kurtosis(x, a)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_kurtosis(infinity)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_sigma_clipped_stats(x, a, med, sd, ok=ok)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_sigma_clipped_stats(infinity)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_corr(x, y, a)
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_corr(infinity)"
+        call ieee_set_flag(ieee_invalid, .false.)
+        call pf_corr(x, y, a, method="spearman")
+        call ieee_get_flag(ieee_invalid, raised)
+        if (raised) culprits = trim(culprits) // " pf_corr spearman(infinity)"
+
+        call ieee_set_flag(ieee_invalid, had)
+        call check(error, len_trim(culprits) == 0, &
+            "these raised IEEE_INVALID on a population they answer rather than refuse:" // &
+            trim(culprits))
+    end subroutine test_no_reduction_raises_on_a_non_finite_population
 
 end module test_stats

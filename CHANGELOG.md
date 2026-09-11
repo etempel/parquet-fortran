@@ -387,6 +387,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not be read: every whole-column read of it, `parquet_table%materialize_all` included, aborted the
   process with `offset overflow while concatenating arrays`. Such a column is widened to 64-bit
   offsets as it is read.
+- Several `parquet_stats` reductions raised `IEEE_INVALID` on a population holding an infinity, or
+  a NaN kept under `skipnan=.false.`, while answering it correctly: `pf_zscore`, `pf_skewness`,
+  `pf_kurtosis` and `pf_corr` each compared a NaN with an ordered operator, and a `pf_stats`
+  accumulator fed such a population through `%update` did the same while combining its blocks.
+  Under a compiler that unmasks the IEEE traps, nagfor's default among them, that ends the process.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

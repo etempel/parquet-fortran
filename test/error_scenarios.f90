@@ -122,6 +122,36 @@ program error_scenarios
         call scenario_struct_init_dotted_name()
     case ("struct_init_bad_kind")
         call scenario_struct_init_bad_kind()
+    case ("struct_append_from_field_count")
+        call scenario_struct_append_from_field_count()
+    case ("struct_append_from_field_kind")
+        call scenario_struct_append_from_field_kind()
+    case ("struct_append_from_not_struct")
+        call scenario_struct_append_from_not_struct()
+    case ("struct_gather_rows_out_of_range")
+        call scenario_struct_gather_rows_out_of_range()
+    case ("struct_field_kind_not_narrowed")
+        call scenario_struct_field_kind_not_narrowed()
+    case ("struct_nested_not_narrowed")
+        call scenario_struct_nested_not_narrowed()
+    case ("struct_adopt_dotted_name")
+        call scenario_struct_adopt_dotted_name()
+    case ("struct_adopt_duplicate_name")
+        call scenario_struct_adopt_duplicate_name()
+    case ("struct_adopt_bad_kind")
+        call scenario_struct_adopt_bad_kind()
+    case ("struct_adopt_ragged_rows")
+        call scenario_struct_adopt_ragged_rows()
+    case ("struct_adopt_row_valid_length")
+        call scenario_struct_adopt_row_valid_length()
+    case ("struct_set_field_uninitialized")
+        call scenario_struct_set_field_uninitialized()
+    case ("struct_field_index_out_of_range")
+        call scenario_struct_field_index_out_of_range()
+    case ("struct_handle_unassociated")
+        call scenario_struct_handle_unassociated()
+    case ("struct_handle_stale_row")
+        call scenario_struct_handle_stale_row()
     case ("struct_get_wrong_kind")
         call scenario_struct_get_wrong_kind()
     case ("struct_get_not_narrowed")
@@ -23702,6 +23732,223 @@ contains
         call sc%init(["v"], [PK_INT32_VEC])
     end subroutine scenario_struct_init_bad_kind
 
+    !> `%append_from` onto a struct with a different number of fields. Two columns can look alike
+    !! -- both structs, both with rows -- and still have layouts that cannot be concatenated, so
+    !! each part of the layout is checked separately and reported by name.
+    subroutine scenario_struct_append_from_field_count()
+        type(parquet_struct_column) :: dst, src
+
+        call dst%init(["a  ", "b  "], [PK_INT32, PK_INT64])
+        call src%init(["a  "], [PK_INT32])
+        call src%append_row()
+        call dst%append_from(src)
+        print '(a)', "append_from accepted a struct with a different field count"
+    end subroutine scenario_struct_append_from_field_count
+    !
+    !> The same names in the same order but a different KIND at one position: the sharp case, since
+    !! nothing about the field set looks wrong until a value is read back at the other type.
+    subroutine scenario_struct_append_from_field_kind()
+        type(parquet_struct_column) :: dst, src
+
+        call dst%init(["a  "], [PK_INT32])
+        call src%init(["a  "], [PK_INT64])
+        call src%append_row()
+        call dst%append_from(src)
+        print '(a)', "append_from accepted a struct whose field kind differs"
+    end subroutine scenario_struct_append_from_field_kind
+    !
+    !> A container that is not a struct at all. `%append_from` takes the container base, so the
+    !! type test is what keeps a list from being concatenated onto a struct.
+    subroutine scenario_struct_append_from_not_struct()
+        type(parquet_struct_column) :: dst
+        type(parquet_list_column) :: src
+
+        call dst%init(["a  "], [PK_INT32])
+        call src%init(PK_INT32)
+        call src%append_row([1_int32, 2_int32])
+        call dst%append_from(src)
+        print '(a)', "append_from accepted a list column onto a struct"
+    end subroutine scenario_struct_append_from_not_struct
+    !
+    !> `%gather_rows` naming a source row the column does not have. Every index is checked BEFORE
+    !! anything is rebuilt, so a bad one aborts rather than leaving a half-rebuilt column.
+    subroutine scenario_struct_gather_rows_out_of_range()
+        type(parquet_struct_column) :: sc
+        integer(int64) :: ok_idx(2), bad_idx(2)
+
+        call sc%init(["v  "], [PK_INT32])
+        call sc%append_row()
+        call sc%append_row()
+        ok_idx = [2_int64, 1_int64]
+        bad_idx = [1_int64, 3_int64]
+        call sc%gather_rows(ok_idx)              ! control: a legal permutation
+        print '(a,i0)', "control: the permutation rebuilt the column, rows=", sc%size()
+        call sc%gather_rows(bad_idx)             ! -> aborts
+        print '(a)', "gather_rows accepted a source row index out of range"
+    end subroutine scenario_struct_gather_rows_out_of_range
+    !
+    !> `%field_kind` on a handle that still denotes a whole row. The handle answers about one field
+    !! once narrowed, and there is no sensible answer before that -- picking the first field would
+    !! be a plausible wrong one.
+    subroutine scenario_struct_field_kind_not_narrowed()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h, slot
+        integer :: k
+
+        call sc%init(["v  "], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(1)
+        slot = h%field("v")
+        k = slot%field_kind()                    ! control: a narrowed handle answers
+        print '(a,i0)', "control: the narrowed handle reported kind=", k
+        k = h%field_kind()                       ! -> aborts
+        print '(a,i0)', "an un-narrowed handle reported field_kind=", k
+    end subroutine scenario_struct_field_kind_not_narrowed
+    !
+    !> `%nested` on a handle that still denotes a whole row, for the same reason as `%field_kind`.
+    subroutine scenario_struct_nested_not_narrowed()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h
+        class(parquet_container_column), pointer :: inner
+        integer(int64) :: row
+
+        call sc%init(["v  "], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(1)
+        call h%nested(inner, row)                ! -> aborts
+        print '(a,l1)', "an un-narrowed handle returned a nested container, assoc=", &
+            associated(inner)
+    end subroutine scenario_struct_nested_not_narrowed
+    !
+    !> Every `%adopt_fields` guard below refuses a layout that would otherwise build a column whose
+    !! fields disagree with its names or with each other. They are separate guards with separate
+    !! messages, so each gets its own scenario rather than one standing for the rest.
+    !!
+    !! A field name carrying a dot: the same refusal `%init` makes, because a dotted name is how a
+    !! nested path is written and a field called `a.b` would be unaddressable.
+    subroutine scenario_struct_adopt_dotted_name()
+        type(parquet_struct_column) :: sc
+        type(parquet_column), allocatable :: fields(:)
+        character(len=3) :: names(1)
+
+        allocate(fields(1))
+        call fields(1)%init(PK_INT32, 2_int64)
+        names(1) = "a.b"
+        call sc%adopt_fields(names, fields)
+        print '(a)', "adopt_fields accepted a dotted field name"
+    end subroutine scenario_struct_adopt_dotted_name
+    !
+    !> Two fields of the same name: every lookup by name would answer the first, silently.
+    subroutine scenario_struct_adopt_duplicate_name()
+        type(parquet_struct_column) :: sc
+        type(parquet_column), allocatable :: fields(:)
+        character(len=3) :: names(2)
+
+        allocate(fields(2))
+        call fields(1)%init(PK_INT32, 2_int64)
+        call fields(2)%init(PK_INT64, 2_int64)
+        names(1) = "dup"
+        names(2) = "dup"
+        call sc%adopt_fields(names, fields)
+        print '(a)', "adopt_fields accepted a duplicate field name"
+    end subroutine scenario_struct_adopt_duplicate_name
+    !
+    !> A field column of a kind a struct field cannot be. The message names the kind.
+    subroutine scenario_struct_adopt_bad_kind()
+        type(parquet_struct_column) :: sc
+        type(parquet_column), allocatable :: fields(:)
+        character(len=3) :: names(1)
+
+        allocate(fields(1))
+        call fields(1)%init(PK_INT32_VEC, 2_int64, width=3_int32)
+        names(1) = "v  "
+        call sc%adopt_fields(names, fields)
+        print '(a)', "adopt_fields accepted an unsupported field kind"
+    end subroutine scenario_struct_adopt_bad_kind
+    !
+    !> Field columns of different lengths: the struct would have no single row count, and every
+    !! read past the shorter field would be out of bounds.
+    subroutine scenario_struct_adopt_ragged_rows()
+        type(parquet_struct_column) :: sc
+        type(parquet_column), allocatable :: fields(:)
+        character(len=3) :: names(2)
+
+        allocate(fields(2))
+        call fields(1)%init(PK_INT32, 3_int64)
+        call fields(2)%init(PK_INT64, 2_int64)
+        names(1) = "a  "
+        names(2) = "b  "
+        call sc%adopt_fields(names, fields)
+        print '(a)', "adopt_fields accepted fields of different lengths"
+    end subroutine scenario_struct_adopt_ragged_rows
+    !
+    !> A `row_valid` mask of the wrong length: silently padding or truncating it would mark the
+    !! wrong rows null.
+    subroutine scenario_struct_adopt_row_valid_length()
+        type(parquet_struct_column) :: sc
+        type(parquet_column), allocatable :: fields(:)
+        character(len=3) :: names(1)
+        logical :: rv(2)
+
+        allocate(fields(1))
+        call fields(1)%init(PK_INT32, 3_int64)
+        names(1) = "v  "
+        rv = [.true., .false.]
+        call sc%adopt_fields(names, fields, row_valid=rv)
+        print '(a)', "adopt_fields accepted a row_valid of the wrong length"
+    end subroutine scenario_struct_adopt_row_valid_length
+    !
+    !> Writing a field of a column whose field set was never fixed: there is nowhere to put the
+    !! value, and inventing a field here would make `%init` optional.
+    subroutine scenario_struct_set_field_uninitialized()
+        type(parquet_struct_column) :: sc
+
+        call sc%set_field(1_int64, 1, 5_int32)
+        print '(a)', "set_field was accepted on an uninitialized struct column"
+    end subroutine scenario_struct_set_field_uninitialized
+    !
+    !> A field index outside `1 .. %field_count()`. The index form is the primitive and takes no
+    !! name to check against, so this bound is the only thing standing between a loop that ran one
+    !! step too far and a write into a neighbouring field's storage.
+    subroutine scenario_struct_field_index_out_of_range()
+        type(parquet_struct_column) :: sc
+
+        call sc%init(["a  ", "b  "], [PK_INT32, PK_INT64])
+        call sc%append_row()
+        call sc%set_field(1_int64, 2, 7_int64)     ! control: the last declared field
+        print '(a,i0)', "control: the in-range field was written, fields=", sc%field_count()
+        call sc%set_field(1_int64, 3, 9_int64)     ! -> aborts
+        print '(a)', "set_field accepted a field index past the last one"
+    end subroutine scenario_struct_field_index_out_of_range
+    !
+    !> A row handle that was never given a column. Default-initialized handles exist, so reading
+    !! one has to be refused rather than answering about nothing.
+    subroutine scenario_struct_handle_unassociated()
+        type(parquet_struct_row) :: h
+        logical :: isnull
+
+        isnull = h%is_null()
+        print '(a,l1)', "an unassociated row handle answered is_null=", isnull
+    end subroutine scenario_struct_handle_unassociated
+    !
+    !> A handle whose row no longer exists. A handle borrows from its column, so clearing the
+    !! column leaves it pointing at a row that is gone -- answering from the old index would read
+    !! whatever the storage now holds.
+    subroutine scenario_struct_handle_stale_row()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h
+        logical :: isnull
+
+        call sc%init(["v  "], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(1)
+        isnull = h%is_null()                       ! control: the row is still there
+        print '(a,l1)', "control: the live handle answered is_null=", isnull
+        call sc%clear()
+        isnull = h%is_null()                       ! -> aborts
+        print '(a,l1)', "a stale row handle answered is_null=", isnull
+    end subroutine scenario_struct_handle_stale_row
+    !
     !> Reading a field through the wrong `%get` specific. A type mismatch, never a lookup failure,
     !> so it aborts with no soft-fail option -- the campaign's error-handling convention.
     subroutine scenario_struct_get_wrong_kind()

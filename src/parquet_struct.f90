@@ -768,8 +768,13 @@ contains
                 error stop EP//"adopt_fields: "//kname//" is not a supported struct field kind "// &
                     "(field '"//trim(names(j))//"')"
             end if
+            ! Unreachable, and kept as a belt-and-braces check: parquet_column%init refuses a
+            ! width above 1 for every kind that is not a *_VEC one, and is_adoptable_field above
+            ! has already refused every *_VEC kind -- so nothing that reaches here can be wide.
             if (fields(j)%colwidth() /= 1_int32) then
+                ! GCOVR_EXCL_START -- unreachable; see the comment above.
                 error stop EP//"adopt_fields: field '"//trim(names(j))//"' must be a scalar (width 1) column"
+                ! GCOVR_EXCL_STOP
             end if
         end do
         n = fields(1)%length()
@@ -946,6 +951,13 @@ contains
     !> Verifies the class invariants, returning .false. and a diagnostic when one is broken.
     !!
     !! Cheap enough to call from a test after any structural change, which is what it is for.
+    !!
+    !! **Every failure arm below is excluded from coverage, and the success arms are not.** This
+    !! procedure IS the self-check: each arm names an invariant that the public API cannot break,
+    !! so reaching one means a component was written past the type's own bindings -- which no test
+    !! can do from outside the module, and which is exactly the state this exists to catch if a
+    !! future change ever introduces it. Excluding them keeps that safety net from reading as a
+    !! coverage gap. The two `ok = .true.` returns are reachable and deliberately left counted.
     function validate(self, message) result(ok)
         class(parquet_struct_column), intent(in) :: self                !! the column.
         character(len=:), allocatable, intent(out), optional :: message !! diagnostic on failure.
@@ -954,34 +966,46 @@ contains
         ok = .false.
         if (present(message)) message = ""
         if (self%nrows_ < 0_int64) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "negative row count"
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (.not. allocated(self%fields)) then
             if (self%nrows_ /= 0_int64) then
+                ! GCOVR_EXCL_START -- unreachable; see the note above.
                 if (present(message)) message = "rows stored in a column with no fields"
                 return
+                ! GCOVR_EXCL_STOP
             end if
             ok = .true.
             return
         end if
         if (int(self%field_names%size()) /= size(self%fields)) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "field name count does not match the field column count"
             return
+            ! GCOVR_EXCL_STOP
         end if
         do j = 1, size(self%fields)
             if (self%fields(j)%length() /= self%nrows_) then
+                ! GCOVR_EXCL_START -- unreachable; see the note above.
                 if (present(message)) message = "a field column has a different row count from the struct"
                 return
+                ! GCOVR_EXCL_STOP
             end if
             if (.not. is_adoptable_field(self%fields(j)%kindof())) then
+                ! GCOVR_EXCL_START -- unreachable; see the note above.
                 if (present(message)) message = "a field has an unsupported kind"
                 return
+                ! GCOVR_EXCL_STOP
             end if
         end do
         if (self%has_nulls_ .and. .not. allocated(self%validity)) then
+            ! GCOVR_EXCL_START -- unreachable; see the note above.
             if (present(message)) message = "has_nulls is set but the bitmap is not allocated"
             return
+            ! GCOVR_EXCL_STOP
         end if
         ok = .true.
     end function validate
@@ -2233,7 +2257,8 @@ contains
         case (PK_DATE);      out = "date"
         case (PK_TIME);      out = "time"
         case (PK_TIMESTAMP); out = "timestamp"
-        case (PK_NONE);      out = "none"
+        ! Unreachable: is_supported_field admits no PK_NONE, so no declared field has that kind.
+        case (PK_NONE);      out = "none" ! GCOVR_EXCL_LINE
         case default;        out = "unsupported"
         end select
     end subroutine field_kind_text

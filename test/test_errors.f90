@@ -2102,6 +2102,36 @@ contains
                 test_struct_init_duplicate_name_aborts), &
             new_unittest("a struct field name containing a dot aborts", test_struct_init_dotted_name_aborts), &
             new_unittest("a struct field of an unsupported kind aborts", test_struct_init_bad_kind_aborts), &
+            new_unittest("append_from with a different field count aborts", &
+                test_struct_append_from_field_count_aborts), &
+            new_unittest("append_from with a different field kind aborts", &
+                test_struct_append_from_field_kind_aborts), &
+            new_unittest("append_from of a non-struct container aborts", &
+                test_struct_append_from_not_struct_aborts), &
+            new_unittest("gather_rows with a source index out of range aborts", &
+                test_struct_gather_rows_out_of_range_aborts), &
+            new_unittest("field_kind on an un-narrowed struct handle aborts", &
+                test_struct_field_kind_not_narrowed_aborts), &
+            new_unittest("nested on an un-narrowed struct handle aborts", &
+                test_struct_nested_not_narrowed_aborts), &
+            new_unittest("adopt_fields with a dotted field name aborts", &
+                test_struct_adopt_dotted_name_aborts), &
+            new_unittest("adopt_fields with a duplicate field name aborts", &
+                test_struct_adopt_duplicate_name_aborts), &
+            new_unittest("adopt_fields with an unsupported field kind aborts", &
+                test_struct_adopt_bad_kind_aborts), &
+            new_unittest("adopt_fields with fields of different lengths aborts", &
+                test_struct_adopt_ragged_rows_aborts), &
+            new_unittest("adopt_fields with a row_valid of the wrong length aborts", &
+                test_struct_adopt_row_valid_length_aborts), &
+            new_unittest("set_field on an uninitialized struct column aborts", &
+                test_struct_set_field_uninitialized_aborts), &
+            new_unittest("set_field with a field index out of range aborts", &
+                test_struct_field_index_out_of_range_aborts), &
+            new_unittest("an unassociated struct row handle aborts", &
+                test_struct_handle_unassociated_aborts), &
+            new_unittest("a stale struct row handle aborts", &
+                test_struct_handle_stale_row_aborts), &
             new_unittest("reading a struct field through the wrong specific aborts", &
                 test_struct_get_wrong_kind_aborts), &
             new_unittest("%get on an un-narrowed struct handle aborts", test_struct_get_not_narrowed_aborts), &
@@ -4242,6 +4272,126 @@ contains
             failure_message="a struct field of an unsupported kind was expected to abort", &
             required_stderr="not a supported struct field kind")
     end subroutine test_struct_init_bad_kind_aborts
+
+    subroutine test_struct_append_from_field_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_append_from_field_count", &
+            expect_abort=.true., &
+            failure_message="append_from with a different field count was expected to abort", &
+            required_stderr="fields onto one with")
+    end subroutine test_struct_append_from_field_count_aborts
+
+    subroutine test_struct_append_from_field_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_append_from_field_kind", &
+            expect_abort=.true., &
+            failure_message="append_from with a different field kind was expected to abort", &
+            required_stderr="in the source and")
+    end subroutine test_struct_append_from_field_kind_aborts
+
+    subroutine test_struct_append_from_not_struct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_append_from_not_struct", &
+            expect_abort=.true., &
+            failure_message="append_from of a non-struct container was expected to abort", &
+            required_stderr="cannot append a")
+    end subroutine test_struct_append_from_not_struct_aborts
+
+    subroutine test_struct_gather_rows_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_gather_rows_out_of_range", &
+            expect_abort=.true., &
+            failure_message="gather_rows with an out-of-range index was expected to abort", &
+            required_stderr="source row index out of range")
+    end subroutine test_struct_gather_rows_out_of_range_aborts
+
+    subroutine test_struct_field_kind_not_narrowed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_field_kind_not_narrowed", &
+            expect_abort=.true., &
+            failure_message="field_kind on an un-narrowed handle was expected to abort", &
+            required_stderr="narrow it with %field first")
+    end subroutine test_struct_field_kind_not_narrowed_aborts
+
+    subroutine test_struct_nested_not_narrowed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_nested_not_narrowed", &
+            expect_abort=.true., &
+            failure_message="nested on an un-narrowed handle was expected to abort", &
+            required_stderr="narrow it with %field first")
+    end subroutine test_struct_nested_not_narrowed_aborts
+
+    subroutine test_struct_adopt_dotted_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_adopt_dotted_name", &
+            expect_abort=.true., &
+            failure_message="adopt_fields with a dotted field name was expected to abort", &
+            required_stderr="a field name contains '.'")
+    end subroutine test_struct_adopt_dotted_name_aborts
+
+    subroutine test_struct_adopt_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_adopt_duplicate_name", &
+            expect_abort=.true., &
+            failure_message="adopt_fields with a duplicate field name was expected to abort", &
+            required_stderr="duplicate field name")
+    end subroutine test_struct_adopt_duplicate_name_aborts
+
+    subroutine test_struct_adopt_bad_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_adopt_bad_kind", &
+            expect_abort=.true., &
+            failure_message="adopt_fields with an unsupported field kind was expected to abort", &
+            required_stderr="is not a supported struct field kind")
+    end subroutine test_struct_adopt_bad_kind_aborts
+
+    subroutine test_struct_adopt_ragged_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_adopt_ragged_rows", &
+            expect_abort=.true., &
+            failure_message="adopt_fields with ragged field lengths was expected to abort", &
+            required_stderr="has a different row count")
+    end subroutine test_struct_adopt_ragged_rows_aborts
+
+    subroutine test_struct_adopt_row_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_adopt_row_valid_length", &
+            expect_abort=.true., &
+            failure_message="adopt_fields with a short row_valid was expected to abort", &
+            required_stderr="row_valid has a different length")
+    end subroutine test_struct_adopt_row_valid_length_aborts
+
+    subroutine test_struct_set_field_uninitialized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_set_field_uninitialized", &
+            expect_abort=.true., &
+            failure_message="set_field on an uninitialized column was expected to abort", &
+            required_stderr="has no fields; call %init first")
+    end subroutine test_struct_set_field_uninitialized_aborts
+
+    subroutine test_struct_field_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_field_index_out_of_range", &
+            expect_abort=.true., &
+            failure_message="set_field with an out-of-range field index was expected to abort", &
+            required_stderr="field index is out of range")
+    end subroutine test_struct_field_index_out_of_range_aborts
+
+    subroutine test_struct_handle_unassociated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_handle_unassociated", &
+            expect_abort=.true., &
+            failure_message="an unassociated struct row handle was expected to abort", &
+            required_stderr="not associated with a column")
+    end subroutine test_struct_handle_unassociated_aborts
+
+    subroutine test_struct_handle_stale_row_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_handle_stale_row", &
+            expect_abort=.true., &
+            failure_message="a stale struct row handle was expected to abort", &
+            required_stderr="no longer refers to a valid row")
+    end subroutine test_struct_handle_stale_row_aborts
 
     subroutine test_struct_get_wrong_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error

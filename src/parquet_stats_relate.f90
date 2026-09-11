@@ -143,18 +143,18 @@ contains
                 'refuses rather than inventing one'
     end subroutine corr_method
 
-    !> Resolves `pf_normal_scores`' `method=` token to its plotting position, or aborts.
-    !!
-    !! **Two shapes behind one argument, so the flag is not decoration.** Five of the six tokens
+    !> **Two shapes behind one argument, so the flag is not decoration.** Five of the six tokens
     !! name a constant `a` in `(r - a)/(m + 1 - 2a)`; "filliben" is the MEDIAN rank and is not of
     !! that family at all, so it comes back as its own flag rather than as an `a` that could not
     !! express it. Reaching for a sentinel `a` here -- a negative, say -- would put a number that
     !! is not a plotting position into a variable whose whole purpose is to hold one.
-    subroutine nscore_method(what, method, a, filliben)
-        character(len=*), intent(in) :: what               !! the public procedure's name.
-        character(len=*), intent(in), optional :: method   !! the caller's token, if any.
-        real(real64), intent(out) :: a                     !! the plotting-position constant.
-        logical, intent(out) :: filliben                   !! .true. for the median rank.
+    !!
+    !! **A separate module procedure rather than a contained one**, because `pf_probit_fit` lives
+    !! in `parquet_stats_order` and must resolve the same six tokens to the same six constants;
+    !! sibling submodules cannot reach each other's contained procedures. Implemented here and
+    !! declared in `parquet_stats`, above every call to it in this file -- nagfor requires that
+    !! order within one submodule.
+    module procedure nscore_method
         character(len=16) :: tok
         integer :: i, c
 
@@ -185,23 +185,22 @@ contains
                 '"; the tokens are "blom" (the default), "weibull", "tukey", "hazen", ' // &
                 '"cunnane" and "filliben"'
         end select
-    end subroutine nscore_method
+    end procedure nscore_method
 
-    !> The probability a midrank marks: what `Phi**(-1)` is actually asked for.
-    !!
-    !! **The result is never 0 and never 1**, for every token and every `m`, so `pf_probit` here
+    !> **The result is never 0 and never 1**, for every token and every `m`, so `pf_probit` here
     !! never returns an infinity. For the `a`-family that is arithmetic: `a` lies in `[0, 1/2]`,
     !! so the smallest position `(1-a)/(m+1-2a)` is positive and the largest `(m-a)/(m+1-2a)` is
     !! below 1 for any `a < 1`. Filliben's two end forms are `1 - 0.5**(1/m)` and `0.5**(1/m)`,
     !! both strictly inside. That is why this family needs no clamp, and a clamp added here would
     !! hide a genuine defect rather than guard against one.
-    pure function nscore_position(r, m, a, den, filliben) result(p)
-        real(real64), intent(in) :: r      !! the midrank, 1-based and possibly a half-integer.
-        integer(int64), intent(in) :: m    !! how many elements survived.
-        real(real64), intent(in) :: a      !! the plotting-position constant.
-        real(real64), intent(in) :: den    !! `m + 1 - 2a`, formed once by the caller.
-        logical, intent(in) :: filliben    !! .true. for the median rank.
-        real(real64) :: p
+    !!
+    !! Shared with `parquet_stats_order` for `nscore_method`'s reason, and the two travel together
+    !! on purpose: a token and the formula it selects that lived in different submodules could
+    !! resolve consistently and still be applied differently.
+    !!
+    !! `r` is a MIDRANK under `pf_normal_scores` and an ORDINAL rank under `pf_probit_fit`. The
+    !! formula does not care -- but the choice is the caller's and each says which it passes.
+    module procedure nscore_position
         real(real64) :: rm
 
         rm = real(m, real64)
@@ -227,7 +226,7 @@ contains
         else
             p = (r - a) / den
         end if
-    end function nscore_position
+    end procedure nscore_position
 
     !> The midranks of `v(1:m)`: each run of equal values gets the mean of the positions it spans.
     !!

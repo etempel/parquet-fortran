@@ -57,10 +57,15 @@ module parquet_stats
     ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs
     ! `tools/module_footprints.txt` exactly one file and adds nothing beneath it, and
     ! `check_parquet_stats_stays_arrow_free` is untouched because no Arrow is reachable from it.
-    ! `only:` rather than bare, unlike `parquet_sorting` above: one name is needed, and a
-    ! consumer who wants the probit itself should say `use parquet_utils` and get the whole
-    ! family rather than the one specific this module happens to need.
-    use parquet_utils, only : pf_probit
+    ! `only:` rather than bare, unlike `parquet_sorting` above: two names are needed, and a
+    ! consumer who wants the normal family itself should say `use parquet_utils` and get all four
+    ! of them rather than the specifics this module happens to need.
+    !
+    ! `pf_norm_cdf` is the return leg of `pf_probit_mean`, which averages on the probit scale and
+    ! maps back -- and it must be the LIBRARY's `Phi`, not `0.5*erfc(-z/sqrt(2))` written out
+    ! again here, or the round trip `pf_norm_cdf(pf_probit(p)) == p` would hold for the kernel and
+    ! not for this module.
+    use parquet_utils, only : pf_probit, pf_norm_cdf
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
@@ -117,12 +122,13 @@ module parquet_stats
 
     public :: pf_count_valid
     public :: pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem
-    public :: pf_gmean, pf_hmean
+    public :: pf_gmean, pf_hmean, pf_probit_mean
     public :: pf_skewness, pf_kurtosis, pf_moments
     public :: pf_median, pf_quantile, pf_quantiles
     public :: pf_iqr, pf_trim_mean, pf_percentile_of_score
     public :: pf_mad, pf_mode, pf_describe
     public :: pf_cov, pf_corr, pf_zscore, pf_normal_scores
+    public :: pf_probit_fit, pf_probit_scale
     public :: pf_sigma_clipped_stats
     public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
     public :: pf_bucketize, pf_histogram, pf_bin_edges
@@ -259,6 +265,7 @@ module parquet_stats
         procedure :: mean => obj_mean !! The weighted mean.
         procedure :: gmean => obj_gmean !! The weighted geometric mean; needs `retain`.
         procedure :: hmean => obj_hmean !! The weighted harmonic mean; needs `retain`.
+        procedure :: probit_mean => obj_probit_mean !! The probit-space mean; needs `retain`.
         procedure :: variance => obj_variance !! The variance, at `ddof` degrees of freedom.
         procedure :: stddev => obj_stddev !! The standard deviation.
         procedure :: sem => obj_sem !! The standard error of the mean.
@@ -274,6 +281,8 @@ module parquet_stats
         procedure :: trim_mean => obj_trim_mean !! The mean with a share trimmed from each tail.
         procedure :: percentile_of_score => obj_percentile_of_score !! Where a value sits, 0-1.
         procedure :: mad => obj_mad !! The median absolute deviation, scaled by default.
+        procedure :: probit_fit => obj_probit_fit !! The normal-probability line: loc, sigma, corr.
+        procedure :: probit_scale => obj_probit_scale !! The scale a quantile pair implies.
         procedure :: print => obj_print !! Writes the describe() block to a unit.
         procedure :: prepare_order => obj_prepare_order !! Builds tier B now rather than lazily.
         procedure :: release_order => obj_release_order !! Frees tier B, keeping tier A.
@@ -665,6 +674,52 @@ module parquet_stats
         module procedure hmean_bool
         module procedure hmean_col
     end interface pf_hmean
+    !
+    !> The mean of a set of PROBABILITIES, averaged on the probit scale.
+    !>
+    !> `Phi(sum(w*Phi**(-1)(p)) / sum(w))`: map each probability to the z it marks, average
+    !> the z's, map back. It is to `Phi`/`Phi**(-1)` exactly what `pf_gmean` is to
+    !> `exp`/`log`.
+    !>
+    !> **Why not `pf_mean`?** An arithmetic mean of probabilities is not wrong, but it is the
+    !> wrong average whenever the probabilities are the output of a threshold process -- a
+    !> selection function, a completeness fraction, a detection rate. Averaging in probit space
+    !> is what keeps the answer inside `[0, 1]` by construction, and what makes the average of
+    !> a uniformly shifted set of selection probabilities the shift of their average.
+    !>
+    !> **The domain, in full.** A value outside `[0, 1]` gives a quiet NaN with `ok = .false.`
+    !> -- it is not a probability. A `0` in the population gives exactly `0` and a `1` gives
+    !> exactly `1`, which are the limits: `Phi**(-1)(0)` is `-Inf` and one `-Inf` drags the
+    !> whole sum there. A population holding both a `0` and a `1` gives a NaN, because that sum
+    !> is `-Inf + Inf`. None of the four aborts; all are data conditions.
+    !>
+    !> Needs the retained values on the object (`%probit_mean`), for `%gmean`'s reason: a
+    !> probit-sum is a fifth accumulated quantity and charging every population a transcendental
+    !> per element in the hot loop to serve the few that ask is the wrong trade. It orders
+    !> nothing.
+    !>
+    !> Nulls, NaNs and zero-weight elements are excluded from the population, in that order, and
+    !> `n_null`/`n_nan` report how many. An undefined answer is a **quiet NaN** with
+    !> `ok = .false.`: this module never aborts on a data condition, because a per-group loop
+    !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
+    !> unrecognised token, or a negative, NaN or infinite weight.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
+    interface pf_probit_mean
+        module procedure probit_mean_f64
+        module procedure probit_mean_i32
+        module procedure probit_mean_i64
+        module procedure probit_mean_f32
+        module procedure probit_mean_bool
+        module procedure probit_mean_col
+    end interface pf_probit_mean
     !
     !> The variance of a population, in two passes so that it is shift-invariant.
     !>
@@ -1061,6 +1116,53 @@ module parquet_stats
         module procedure mad_col
     end interface pf_mad
     !
+    !> The scale a SYMMETRIC QUANTILE PAIR implies for Gaussian data.
+    !>
+    !> `sigma = (Q(1-prob) - Q(prob)) / (2 * Phi^-1(1-prob))`, with `prob = 0.25` by default --
+    !> so the default answer is `pf_iqr` divided by 1.3489795003921634. The divisor is what
+    !> turns a range into a standard deviation: for a normal population those two quantiles sit
+    !> `Phi^-1(1-prob)` scale units either side of the centre, so dividing the gap between them
+    !> by twice that recovers the scale, whatever `prob` was.
+    !>
+    !> **This GENERALISES `pf_mad(scale="normal")`.** That procedure is the `Phi^-1(3/4)` case
+    !> taken about the median of the DEVIATIONS; this one is the same consistency factor taken
+    !> between two quantiles of the VALUES. Both answer "sigma, robustly", and on clean
+    !> Gaussian data `pf_stddev`, `pf_mad` and `pf_probit_scale` agree to within sampling error
+    !> -- on a sample with a few wild points the first parts company with the other two, which
+    !> is the whole reason to reach for either.
+    !>
+    !> `prob = 0.15865525393145705` is the 16th/84th percentile pair, the other value in daily
+    !> use and the one whose divisor is exactly 2. `prob` outside `(0, 0.5)` ABORTS: `0.5` asks
+    !> for `0/0` and `0` asks for the whole range over an infinity.
+    !>
+    !> **`method=` here is `pf_quantile`'s interpolation rule**, since this is two `pf_quantile`
+    !> probes off one ordering -- NOT `pf_probit_fit`'s plotting-position token, which shares
+    !> the argument name and means something else entirely.
+    !>
+    !> A CONSTANT population gives exactly `0`, which is the right scale for it and not a
+    !> failure: `ok` stays .true. An empty one gives a quiet NaN with `ok = .false.`
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_probit_scale
+        module procedure probit_scale_f64
+        module procedure probit_scale_i32
+        module procedure probit_scale_i64
+        module procedure probit_scale_f32
+        module procedure probit_scale_bool
+        module procedure probit_scale_col
+    end interface pf_probit_scale
+    !
     !> Summarises a population into a `pf_stats`, ordered and ready -- pandas' `describe()`.
     !>
     !> Exactly `s%compute(values, ...)` followed by `s%prepare_order()`, which is the pairing
@@ -1211,6 +1313,61 @@ module parquet_stats
         module procedure normal_scores_bool
         module procedure normal_scores_col
     end interface pf_normal_scores
+    !
+    !> The least-squares line of a NORMAL-PROBABILITY PLOT: a location, a scale, and how
+    !> straight the plot is -- `scipy.stats.probplot(x, fit=True)`.
+    !>
+    !> Sort the survivors, give order statistic `r` the normal score of its plotting position
+    !> `(r - a)/(m + 1 - 2a)`, and fit `y = loc + sigma*Phi**(-1)(pp)` by least squares. `loc`
+    !> is the intercept, `sigma` the slope, and the optional `corr` is the correlation
+    !> coefficient of that fit -- the probability-plot correlation coefficient, which is a
+    !> normality diagnostic and costs nothing extra.
+    !>
+    !> **Why reach for this rather than `pf_mean` and `pf_stddev`?** The slope reads the whole
+    !> sample through its order statistics, so a few wild points move it far less than they
+    !> move a standard deviation, while a clean Gaussian sample gives all three of `sigma`,
+    !> `pf_stddev` and `pf_probit_scale` the same answer to within sampling error. And `corr`
+    !> says whether the Gaussian assumption behind that reading holds at all.
+    !>
+    !> **The ranks are ORDINAL here, not the midranks `pf_normal_scores` uses**, which is what
+    !> makes this scipy's `probplot` and what keeps the plotting positions symmetric about the
+    !> median -- so their normal scores sum to zero and `loc` is the MEAN of the survivors,
+    !> evaluated as a mean rather than as a regression intercept. Ties therefore take DIFFERENT
+    !> plotting positions at equal `y`, which is the same line either way and is what the
+    !> reference implementation does.
+    !>
+    !> `method=` chooses the plotting position from `pf_normal_scores`' six tokens -- `"blom"`
+    !> (the default), `"weibull"`, `"tukey"`, `"hazen"`, `"cunnane"` or `"filliben"`.
+    !>
+    !> **`method="filliben"` is what reproduces `scipy.stats.probplot`**, whose plotting
+    !> positions are the median ranks rather than this generic's default -- and under that token
+    !> `corr` is Filliben's statistic exactly. The default here is `"blom"`, which is the
+    !> position `pf_normal_scores` defaults to and the one the literature quotes; the two differ
+    !> in the third digit of `sigma` on a thousand points, so a comparison against scipy has to
+    !> name the token.
+    !>
+    !> Fewer than **two** survivors gives three NaNs with `ok = .false.` -- a line needs two
+    !> points. A CONSTANT population gives `sigma = 0`, `loc` equal to that constant, and `corr`
+    !> a NaN, since a constant has no variance to correlate; `ok` is `.false.` there only if
+    !> `corr` was asked for.
+    !>
+    !> There is deliberately **no `weights`**, for `pf_normal_scores`' reason: a weighted
+    !> plotting position is a definitional choice no reference library makes.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments. An undefined answer is a **quiet NaN** with `ok = .false.`, never an abort: this
+    !> module aborts on misuse and never on a data condition.
+    !>
+    !> Every argument may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)`
+    !> or `logical` array, or a scalar numeric `type(parquet_column)`.
+    interface pf_probit_fit
+        module procedure probit_fit_f64
+        module procedure probit_fit_i32
+        module procedure probit_fit_i64
+        module procedure probit_fit_f32
+        module procedure probit_fit_bool
+        module procedure probit_fit_col
+    end interface pf_probit_fit
     !
     !> astropy's `sigma_clipped_stats`: iteratively drop the outliers, then summarise the rest.
     !>
@@ -1751,6 +1908,49 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine hmean_f64
+        !> `pf_probit_mean` over a 64-bit real array: the mean ON THE PROBIT SCALE.
+        !>
+        !> `Phi(sum(w*Phi**(-1)(p)) / sum(w))`. It is to `Phi`/`Phi**(-1)` exactly what
+        !> `pf_gmean` is to `exp`/`log`, and it lives beside it for that reason.
+        !>
+        !> The domain rules are `pf_gmean`'s in shape and its own in detail. A value outside
+        !> `[0, 1]` gives a quiet NaN with `ok = .false.`; a `0` in the population gives exactly
+        !> `0` and a `1` gives exactly `1`, both being the limits; a population holding **both**
+        !> gives a NaN, because that limit is `-Inf + Inf`.
+        !>
+        !> **Those three answers arrive from the infinities rather than from a special case**,
+        !> and a guard that clamped `p` away from `{0, 1}` to avoid meeting one would silently
+        !> replace all three with finite numbers near the boundary. The NaN screen comes FIRST
+        !> and separately, because `p >= 0 .and. p <= 1` is false for a NaN and would count one
+        !> as an out-of-domain value -- and the two have different answers under
+        !> `skipnan = .false.`
+        module subroutine probit_mean_f64(values, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the probit-space mean, back on a 0-1 scale; NaN when it is undefined.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine probit_mean_f64
         !> `pf_variance` over a 64-bit real array, computed in TWO passes.
         !>
         !> The mean is taken first and the central moment accumulated against it, so the result
@@ -2416,6 +2616,88 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_f64
+        !> The scale a SYMMETRIC QUANTILE PAIR implies for Gaussian data.
+        !>
+        !> `sigma = (Q(1-prob) - Q(prob)) / (2 * Phi^-1(1-prob))`, with `prob = 0.25` by default --
+        !> so the default answer is `pf_iqr` divided by 1.3489795003921634. The divisor is what
+        !> turns a range into a standard deviation: for a normal population those two quantiles sit
+        !> `Phi^-1(1-prob)` scale units either side of the centre, so dividing the gap between them
+        !> by twice that recovers the scale, whatever `prob` was.
+        !>
+        !> **This GENERALISES `pf_mad(scale="normal")`.** That procedure is the `Phi^-1(3/4)` case
+        !> taken about the median of the DEVIATIONS; this one is the same consistency factor taken
+        !> between two quantiles of the VALUES. Both answer "sigma, robustly", and on clean
+        !> Gaussian data `pf_stddev`, `pf_mad` and `pf_probit_scale` agree to within sampling error
+        !> -- on a sample with a few wild points the first parts company with the other two, which
+        !> is the whole reason to reach for either.
+        !>
+        !> `prob = 0.15865525393145705` is the 16th/84th percentile pair, the other value in daily
+        !> use and the one whose divisor is exactly 2. `prob` outside `(0, 0.5)` ABORTS: `0.5` asks
+        !> for `0/0` and `0` asks for the whole range over an infinity.
+        !>
+        !> **`method=` here is `pf_quantile`'s interpolation rule**, since this is two `pf_quantile`
+        !> probes off one ordering -- NOT `pf_probit_fit`'s plotting-position token, which shares
+        !> the argument name and means something else entirely.
+        !>
+        !> A CONSTANT population gives exactly `0`, which is the right scale for it and not a
+        !> failure: `ok` stays .true. An empty one gives a quiet NaN with `ok = .false.`
+        module subroutine probit_scale_f64(values, sigma, prob, is_valid, weights, weight_type, skipnan, method, n_null, &
+                n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sigma
+            !! the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is
+            !! empty, and `0` for a constant one.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_scale_f64
         !> Summarises a population into a `pf_stats`, ordered and ready -- pandas' `describe()`.
         !>
         !> Exactly `s%compute(values, ...)` followed by `s%prepare_order()`, which is the pairing
@@ -2764,6 +3046,101 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_f64
+        !> `pf_probit_fit` over a 64-bit real array: the least-squares normal-probability line.
+        !!
+        !! **One ordering, and the fit is read straight off it.** The sorted survivors are the
+        !! `y` of the line and their plotting positions' normal scores are the `x`, so once the
+        !! values are in order the whole estimator is three running sums.
+        !!
+        !! Declared in this block rather than with the order family because it has TWO mandatory
+        !! outputs and a third optional one, which the single-output `ORDER_FAMILY` shape cannot
+        !! express -- exactly the reason `pf_sigma_clipped_stats` sits here. Both are implemented
+        !! in `parquet_stats_order` all the same.
+        module subroutine probit_fit_f64(values, loc, sigma, corr, is_valid, skipnan, method, &
+                n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            real(real64), intent(out) :: loc
+            !! the INTERCEPT of the line: a location estimate. Every one of the six plotting
+            !! positions is symmetric about the median, so the normal scores sum to zero and this
+            !! is the MEAN of the surviving values -- computed as the mean, not as a regression
+            !! intercept that ought to equal one. It is the mean rather than `pf_mean`'s last
+            !! bit: this is a plain sum over the sorted survivors and `pf_mean` refines its
+            !! quotient, so compare the two with a tolerance. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the SLOPE of the line: a scale estimate that reads the whole sample rather than
+            !! two quantiles of it, and is far less disturbed by a heavy tail than `pf_stddev`.
+            !! Exactly `0` for a constant population; NaN when fewer than two elements survive.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_fit_f64
+        !> Resolves a plotting-position `method=` token, or aborts naming all six.
+        !!
+        !! **Declared here so that ONE resolver serves two submodules.** `pf_normal_scores` lives
+        !! in `parquet_stats_relate` and `pf_probit_fit` in `parquet_stats_order`, sibling
+        !! submodules that cannot reach each other's contained procedures -- and the alternative
+        !! is two copies of the same six-token `select case`, which is how `method="cunnane"`
+        !! comes to mean two different constants in one library. Implemented in
+        !! `parquet_stats_relate`, the same "cross-subtree private-helper interfaces" mechanism
+        !! `stats_compact` uses in the other direction.
+        module subroutine nscore_method(what, method, a, filliben)
+            character(len=*), intent(in) :: what !! the public procedure's name, for messages.
+            character(len=*), intent(in), optional :: method !! the caller's token, if any.
+            real(real64), intent(out) :: a !! the plotting-position constant `a`.
+            logical, intent(out) :: filliben !! .true. for Filliben's median rank, which is not
+            !! of the `a`-family at all and so cannot come back as one.
+        end subroutine nscore_method
+        !> The probability a rank marks: what `Phi**(-1)` is actually asked for.
+        !!
+        !! Shared for `nscore_method`'s reason, and the pairing matters more than either half:
+        !! a token and the formula it selects that lived in different submodules could resolve
+        !! consistently and still be applied differently.
+        pure module function nscore_position(r, m, a, den, filliben) result(p)
+            real(real64), intent(in) :: r !! the rank, 1-based; a half-integer for a midrank.
+            integer(int64), intent(in) :: m !! how many elements survived.
+            real(real64), intent(in) :: a !! the plotting-position constant.
+            real(real64), intent(in) :: den !! `m + 1 - 2a`, formed once by the caller.
+            logical, intent(in) :: filliben !! .true. for Filliben's median rank.
+            real(real64) :: p !! the probability; never 0 and never 1, so no clamp is needed.
+        end function nscore_position
         !> `pf_cumsum` over a 64-bit real array: the running sum, element by element.
         module subroutine cumsum_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
             real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
@@ -3232,6 +3609,28 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine hmean_i32
+        !> `pf_probit_mean` over a 32-bit integer array.
+        module subroutine probit_mean_i32(values, m, is_valid, weights, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the probit-space mean; 0 for a zero, 1 for a one, NaN for both or out of range.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine probit_mean_i32
         !> `pf_variance` over a 32-bit integer array.
         module subroutine variance_i32(values, v, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
@@ -3711,6 +4110,58 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_i32
+        !> `pf_probit_scale` over a 32-bit integer array.
+        module subroutine probit_scale_i32(values, sigma, prob, is_valid, weights, weight_type, method, n_null, ok, &
+                threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sigma
+            !! the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is
+            !! empty, and `0` for a constant one.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_scale_i32
         !> `pf_describe` over a 32-bit integer array.
         module subroutine describe_i32(values, s, is_valid, weights, weight_type, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
@@ -3865,6 +4316,50 @@ module parquet_stats
             !! ties take the mean of the positions they span, so no tie-breaking the sort might
             !! choose can reach the result. It is a speed control and never an accuracy one.
         end subroutine normal_scores_i32
+        !> `pf_probit_fit` over a 32-bit integer array.
+        module subroutine probit_fit_i32(values, loc, sigma, corr, is_valid, method, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: loc
+            !! the intercept, which every token makes the MEAN of the
+            !! survivors. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the slope: the scale the normal-probability line implies.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_fit_i32
         !> `pf_sigma_clipped_stats` over a 32-bit integer array.
         module subroutine sigma_clipped_stats_i32(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -4199,6 +4694,33 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine hmean_i64
+        !> `pf_probit_mean` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine probit_mean_i64(values, m, is_valid, weights, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the probit-space mean; 0 for a zero, 1 for a one, NaN for both or out of range.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine probit_mean_i64
         !> `pf_variance` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -4743,6 +5265,63 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_i64
+        !> `pf_probit_scale` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine probit_scale_i64(values, sigma, prob, is_valid, weights, weight_type, method, n_null, ok, &
+                threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sigma
+            !! the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is
+            !! empty, and `0` for a constant one.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_scale_i64
         !> `pf_describe` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -4902,6 +5481,50 @@ module parquet_stats
             !! ties take the mean of the positions they span, so no tie-breaking the sort might
             !! choose can reach the result. It is a speed control and never an accuracy one.
         end subroutine normal_scores_i64
+        !> `pf_probit_fit` over a 64-bit integer array.
+        module subroutine probit_fit_i64(values, loc, sigma, corr, is_valid, method, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: loc
+            !! the intercept, which every token makes the MEAN of the
+            !! survivors. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the slope: the scale the normal-probability line implies.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_fit_i64
         !> `pf_sigma_clipped_stats` over a 64-bit integer array.
         module subroutine sigma_clipped_stats_i64(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -5240,6 +5863,34 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine hmean_f32
+        !> `pf_probit_mean` over a 32-bit real array.
+        module subroutine probit_mean_f32(values, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the probit-space mean; 0 for a zero, 1 for a one, NaN for both or out of range.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine probit_mean_f32
         !> `pf_variance` over a 32-bit real array.
         module subroutine variance_f32(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -5801,6 +6452,64 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_f32
+        !> `pf_probit_scale` over a 32-bit real array.
+        module subroutine probit_scale_f32(values, sigma, prob, is_valid, weights, weight_type, skipnan, method, n_null, &
+                n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sigma
+            !! the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is
+            !! empty, and `0` for a constant one.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_scale_f32
         !> `pf_describe` over a 32-bit real array.
         module subroutine describe_f32(values, s, is_valid, weights, weight_type, skipnan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -5967,6 +6676,57 @@ module parquet_stats
             !! ties take the mean of the positions they span, so no tie-breaking the sort might
             !! choose can reach the result. It is a speed control and never an accuracy one.
         end subroutine normal_scores_f32
+        !> `pf_probit_fit` over a 32-bit real array.
+        module subroutine probit_fit_f32(values, loc, sigma, corr, is_valid, skipnan, method, n_null, n_nan, ok, &
+                threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: loc
+            !! the intercept, which every token makes the MEAN of the
+            !! survivors. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the slope: the scale the normal-probability line implies.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_fit_f32
         !> `pf_sigma_clipped_stats` over a 32-bit real array.
         module subroutine sigma_clipped_stats_f32(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -6342,6 +7102,31 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine hmean_bool
+        !> `pf_probit_mean` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine probit_mean_bool(values, m, is_valid, weights, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: m !! the probit-space mean; 0 for a zero, 1 for a one, NaN for both or out of range.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine probit_mean_bool
         !> `pf_variance` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -6860,6 +7645,61 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_bool
+        !> `pf_probit_scale` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine probit_scale_bool(values, sigma, prob, is_valid, weights, weight_type, method, n_null, ok, &
+                threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: sigma
+            !! the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is
+            !! empty, and `0` for a constant one.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_scale_bool
         !> `pf_describe` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -7017,6 +7857,50 @@ module parquet_stats
             !! ties take the mean of the positions they span, so no tie-breaking the sort might
             !! choose can reach the result. It is a speed control and never an accuracy one.
         end subroutine normal_scores_bool
+        !> `pf_probit_fit` over a logical array.
+        module subroutine probit_fit_bool(values, loc, sigma, corr, is_valid, method, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: loc
+            !! the intercept, which every token makes the MEAN of the
+            !! survivors. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the slope: the scale the normal-probability line implies.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_fit_bool
         !> `pf_sigma_clipped_stats` over a logical array.
         module subroutine sigma_clipped_stats_bool(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -7383,6 +8267,41 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine hmean_col
+        !> `pf_probit_mean` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine probit_mean_col(values, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: m !! the probit-space mean; 0 for a zero, 1 for a one, NaN for both or out of range.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine probit_mean_col
         !> `pf_variance` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -8035,6 +8954,71 @@ module parquet_stats
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
             !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_col
+        !> `pf_probit_scale` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine probit_scale_col(values, sigma, prob, is_valid, weights, weight_type, skipnan, method, n_null, &
+                n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: sigma
+            !! the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is
+            !! empty, and `0` for a constant one.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_scale_col
         !> `pf_describe` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -8208,6 +9192,57 @@ module parquet_stats
             !! ties take the mean of the positions they span, so no tie-breaking the sort might
             !! choose can reach the result. It is a speed control and never an accuracy one.
         end subroutine normal_scores_col
+        !> `pf_probit_fit` over a scalar numeric `parquet_column`.
+        module subroutine probit_fit_col(values, loc, sigma, corr, is_valid, skipnan, method, n_null, n_nan, ok, &
+                threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: loc
+            !! the intercept, which every token makes the MEAN of the
+            !! survivors. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the slope: the scale the normal-probability line implies.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
+        end subroutine probit_fit_col
         !> `pf_sigma_clipped_stats` over a scalar numeric `parquet_column`.
         module subroutine sigma_clipped_stats_col(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
                 cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
@@ -8928,6 +9963,21 @@ module parquet_stats
             !! the accumulator; a query may complete a deferred recomputation.
             real(real64) :: res !! the weighted harmonic mean, or NaN when it is undefined.
         end function obj_hmean
+        !> The mean of the population ON THE PROBIT SCALE -- `Phi(sum(w*Phi**(-1)(p)) / sum(w))`.
+        !>
+        !> **Needs the retained values, so it aborts on a streaming accumulator**
+        !> (`retain = .false.`), exactly as `%gmean` does and for the same reason: a probit-sum is a
+        !> fifth accumulated quantity, and charging a transcendental per element in the hot loop to
+        !> every population that never asks for one is the wrong trade. It orders nothing.
+        !>
+        !> The population is read as PROBABILITIES. NaN for an empty one and for one holding a value
+        !> outside `[0, 1]`; **exactly 0 when any value is 0** and **exactly 1 when any value is 1**,
+        !> both being the limits; NaN when it holds both, since that limit is `-Inf + Inf`.
+        module function obj_probit_mean(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! the probit-space mean, or NaN when it is undefined.
+        end function obj_probit_mean
         !> The variance of the population.
         !>
         !> `ddof` at or above the effective size gives a NaN rather than a division -- including the
@@ -9238,6 +10288,72 @@ module parquet_stats
             !! come from the caller's own arithmetic.
             real(real64) :: res !! the deviation, or NaN for an empty population.
         end function obj_mad
+        !> The normal-probability line of the population: `pf_probit_fit` off the ordering.
+        !!
+        !! A subroutine rather than a function because it answers two quantities and optionally a
+        !! third, and a caller wanting only the scale should reach for `%probit_scale` instead of
+        !! discarding two results.
+        !!
+        !! Reads tier B and orders nothing that has not already been ordered, so a `%median`
+        !! followed by this is ONE sort; `parquet_debug_stats_sorts()` is what asserts it. Aborts
+        !! on a streaming accumulator, as every tier-B binding does.
+        !!
+        !! **Unweighted, whatever the accumulator carries.** The one-shot `pf_probit_fit` has no
+        !! `weights` argument at all, and a binding that quietly used the object's weights would
+        !! answer a different question under the same name; the weights are ignored here and the
+        !! guide says so.
+        module subroutine obj_probit_fit(self, loc, sigma, corr, method)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(out) :: loc !! the intercept: the mean of the population.
+            real(real64), intent(out) :: sigma !! the slope: the implied scale.
+            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`.
+            character(len=*), intent(in), optional :: method
+            !! the PLOTTING POSITION: which point of the distribution a rank is taken to mark.
+            !! `s(i) = Phi**(-1)((r - a)/(m + 1 - 2a))` for a midrank `r` among `m` survivors,
+            !! with `a` given by the token: "blom" (the default, `a = 3/8`, the standard rankit
+            !! and what R's `qqnorm` uses), "weibull" (`a = 0`, `r/(m+1)`, the van der Waerden
+            !! score), "tukey" (`a = 1/3`), "hazen" (`a = 1/2`) or "cunnane" (`a = 0.4`).
+            !! "filliben" is the MEDIAN rank and not of that family at all: `1 - 0.5**(1/m)` at
+            !! the first position, `0.5**(1/m)` at the last and `(i - 0.3175)/(m + 0.365)`
+            !! between. Any other token aborts, naming all six. Matched case-insensitively.
+        end subroutine obj_probit_fit
+        !> The scale a symmetric quantile pair implies -- `pf_probit_scale` off the ordering.
+        module function obj_probit_scale(self, prob, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            real(real64) :: res !! the implied scale, or NaN for an empty population.
+        end function obj_probit_scale
         !> Whether tier C is currently built.
         !!
         !! Test-facing, like `%is_ordered`: it is how `%update` dropping the cached deviation is

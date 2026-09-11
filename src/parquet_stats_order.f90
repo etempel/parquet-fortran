@@ -1182,6 +1182,207 @@ contains
     end procedure sigma_clipped_stats_f64
 
     ! ==================================================================================
+    ! Block C: the normal-probability plot -- pf_probit_fit and pf_probit_scale
+    !
+    ! Both read a Gaussian scale off an ordering, and both cost exactly one. `pf_probit_scale` is
+    ! two `pf_quantile` probes divided by a consistency factor; `pf_probit_fit` is the whole
+    ! sample regressed on its plotting positions. They are the same family as `pf_mad`: on clean
+    ! Gaussian data all three agree to within sampling error, and on a contaminated sample they
+    ! part company with `pf_stddev` rather than with each other.
+    ! ==================================================================================
+
+    !> Refuses a `prob` outside the OPEN interval `(0, 0.5)`, or accepts the default.
+    subroutine check_prob(what, prob)
+        character(len=*), intent(in) :: what       !! the public procedure's name, for the message.
+        real(real64), intent(in), optional :: prob !! the caller's tail probability, if any.
+
+        if (.not. present(prob)) return
+        ! **Written as the negation of the legal range so that a NaN is refused.** `prob <= 0.0
+        ! .or. prob >= 0.5` is FALSE for a NaN, so a guard spelled that way would pass one through
+        ! to `pf_quantile`, which would then abort with a message about a probability outside
+        ! [0, 1] -- naming an argument the caller never passed. Risk-172's shape.
+        if (.not. (prob > 0.0_real64 .and. prob < 0.5_real64)) &
+            error stop what // ": prob must satisfy 0 < prob < 0.5; prob=0.5 asks for a zero " // &
+                "range over a zero denominator, prob=0 asks for the whole range over an " // &
+                "infinity, and a value at or above 0.5 names the upper tail rather than the " // &
+                "lower one. The default is 0.25, which makes the answer the IQR over 1.3489795"
+    end subroutine check_prob
+
+    !> The least-squares line of ALREADY-SORTED values on the normal scores of their positions.
+    !!
+    !! **`loc` is the mean of the survivors, not `ybar - sigma*zbar`, and that is exact rather
+    !! than an approximation.** Every one of the six plotting-position rules is symmetric about
+    !! the median -- `p(r) + p(m+1-r) = 1` holds for the `a`-family by arithmetic and for
+    !! Filliben's median rank in all three of its pieces -- so the normal scores sum to zero and
+    !! the least-squares intercept IS the mean. Evaluating it as the mean rather than as a
+    !! difference of two nearly-equal quantities is the better-conditioned route. It is also why
+    !! `szz` and `szy` below are formed from the raw `z` rather than from `z - zbar`: the two are
+    !! the same sum, and the second would subtract a quantity that is zero.
+    !!
+    !! **It is the mean, not necessarily `pf_mean`'s LAST BIT.** This is a plain sum over the
+    !! sorted survivors; `pf_mean` sums pairwise and then refines its quotient, so the two agree
+    !! to a bit or two rather than exactly. Compare them with a tolerance -- `pf_mean`'s own
+    !! doc-comment says the same thing about comparing it with anything.
+    !!
+    !! **A `method=` token whose positions are NOT symmetric would silently break both**
+    !! (`feature_risks.md` Risk-255), as would replacing the ORDINAL ranks used here with
+    !! `pf_normal_scores`' midranks -- a tie takes two positions to one value and the symmetry
+    !! goes with it. The ordinal ranks are also what make this `scipy.stats.probplot`.
+    pure subroutine probit_line(xs, m, a, filliben, loc, sigma, corr)
+        real(real64), intent(in) :: xs(:)   !! the survivors, ASCENDING; the first `m` are live.
+        integer(int64), intent(in) :: m     !! how many survived; at least 2.
+        real(real64), intent(in) :: a       !! the plotting-position constant.
+        logical, intent(in) :: filliben     !! .true. for Filliben's median rank.
+        real(real64), intent(out) :: loc    !! the intercept: the mean of the survivors.
+        real(real64), intent(out) :: sigma  !! the slope: the implied Gaussian scale.
+        real(real64), intent(out) :: corr   !! the fit's correlation; NaN for a constant population.
+        real(real64) :: den, ybar, zi, dy, szz, szy, syy
+        integer(int64) :: i
+
+        loc = stats_nan()
+        sigma = stats_nan()
+        corr = stats_nan()
+        if (m < 2_int64) return
+        ! An infinity is answered from the ENDS rather than summed over, exactly as
+        ! `slice_mean_sd` does and for the same reason: `Inf + (-Inf)` and `Inf - Inf` both raise
+        ! IEEE_INVALID, and nagfor unmasks the traps by default, so reaching either would kill the
+        ! process on data this module documents itself as answering. `xs` is sorted, so two
+        ! comparisons settle it. The mean is that infinity (or a NaN for both signs); every
+        ! deviation from an infinite mean is infinite or `Inf - Inf`, so the slope and the
+        ! correlation are NaN either way.
+        if (xs(m) > huge(0.0_real64) .or. xs(1_int64) < -huge(0.0_real64)) then
+            if (xs(m) > huge(0.0_real64) .neqv. xs(1_int64) < -huge(0.0_real64)) then
+                if (xs(m) > huge(0.0_real64)) loc = xs(m)
+                if (xs(1_int64) < -huge(0.0_real64)) loc = xs(1_int64)
+            end if
+            return
+        end if
+        den = real(m, real64) + 1.0_real64 - 2.0_real64 * a
+        ybar = 0.0_real64
+        do i = 1_int64, m
+            ybar = ybar + xs(i)
+        end do
+        ybar = ybar / real(m, real64)
+        szz = 0.0_real64
+        szy = 0.0_real64
+        syy = 0.0_real64
+        do i = 1_int64, m
+            ! ORDINAL, not the midrank: `real(i)`, so a tie takes two DIFFERENT positions at one
+            ! value. That is what `scipy.stats.probplot` does, and it is what keeps the positions
+            ! symmetric -- see this procedure's own note above.
+            zi = pf_probit(nscore_position(real(i, real64), m, a, den, filliben))
+            dy = xs(i) - ybar
+            szz = szz + zi * zi
+            szy = szy + zi * dy
+            syy = syy + dy * dy
+        end do
+        loc = ybar
+        ! `szz` is positive for any `m >= 2` -- the positions are distinct and symmetric, so at
+        ! least two scores are non-zero -- but the test is written rather than assumed, because a
+        ! `0/0` here would not answer NaN under nagfor, it would end the process.
+        if (szz > 0.0_real64) sigma = szy / szz
+        ! A CONSTANT population has `syy = 0`: the slope is correctly `0` and the correlation is
+        ! genuinely undefined, which is the one shape where those two disagree about `ok`.
+        if (szz > 0.0_real64 .and. syy > 0.0_real64) corr = szy / sqrt(szz * syy)
+    end subroutine probit_line
+
+    module procedure probit_fit_f64
+        real(real64), allocatable :: keep(:), keep_w(:)
+        real(real64) :: a, c
+        integer(int64) :: m, nnull, nnan
+        logical :: filliben, poisoned
+
+        ! The token is resolved FIRST, before any traversal: an unrecognised `method=` is a misuse
+        ! and must abort whatever the data is, including for an empty population that would
+        ! otherwise return NaN and never look at it.
+        call nscore_method("pf_probit_fit", method, a, filliben)
+        call stats_compact(values, "pf_probit_fit", is_valid, skipnan=skipnan, keep_x=keep, &
+            keep_w=keep_w, n_valid=m, n_null=nnull, n_nan=nnan, saw_nan=poisoned)
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        loc = stats_nan()
+        sigma = stats_nan()
+        c = stats_nan()
+        ! `poisoned` has to be TESTED, not inherited: under `skipnan = .false.` a NaN sorts to one
+        ! end of the ordering and the line through the rest is a perfectly ordinary one
+        ! (`feature_risks.md` Risk-253).
+        !
+        ! **`m == 1` is NOT screened here**, deliberately: a line needs two points, and
+        ! `probit_line` is the one place that decides so -- for this procedure and for
+        ! `obj_probit_fit` alike. A second copy of the test here would be untestable, since
+        ! neither route can then reach a state the other would have caught, and it would be free
+        ! to drift.
+        if (m >= 1_int64 .and. .not. poisoned) then
+            call order_in_place(keep, keep_w, m, threads)
+            call probit_line(keep(1:m), m, a, filliben, loc, sigma, c)
+        end if
+        if (present(corr)) corr = c
+        ! Only the outputs the caller ASKED for are tested, which is `pf_moments`' reading of
+        ! `ok`: a constant population has a perfectly good `loc` and `sigma` and an undefined
+        ! `corr`, so reporting failure to a caller who never asked for the correlation would
+        ! report one that is not there.
+        if (present(ok)) then
+            ok = (loc == loc) .and. (sigma == sigma)
+            if (present(corr)) ok = ok .and. (c == c)
+        end if
+    end procedure probit_fit_f64
+
+    module procedure probit_scale_f64
+        real(real64) :: two(2), pr
+
+        call check_prob("pf_probit_scale", prob)
+        pr = 0.25_real64
+        if (present(prob)) pr = prob
+        ! Both quantiles from ONE call, exactly as `pf_iqr` takes both quartiles: they share one
+        ! ordering, they are computed the same way, and no later edit can give the two ends of a
+        ! symmetric pair different methods.
+        call one_shot_quantiles(values, "pf_probit_scale", [pr, 1.0_real64 - pr], two, is_valid, &
+            weights, weight_type, skipnan, method, n_null, n_nan, ok, threads)
+        ! The consistency factor: for a normal population those two quantiles sit
+        ! `Phi^-1(1-prob)` scale units either side of the centre, so the gap between them is
+        ! `2*Phi^-1(1-prob)` scale units wide whatever `prob` was. At the default `prob = 0.25`
+        ! the divisor is 1.3489795003921634, which makes this exactly `pf_iqr` over that number.
+        !
+        ! `pf_probit` rather than a frozen literal, because this factor depends on `prob` and only
+        ! the default could be frozen. `feature_risks.md` Risk-252 is what keeps the default in
+        ! step with `pf_mad`'s `MAD_NORMAL_SCALE`, which is frozen precisely because it does not
+        ! depend on anything.
+        sigma = (two(2) - two(1)) / (2.0_real64 * pf_probit(1.0_real64 - pr))
+    end procedure probit_scale_f64
+
+    module procedure obj_probit_fit
+        real(real64) :: a, c
+        logical :: filliben
+
+        call nscore_method("pf_stats%probit_fit", method, a, filliben)
+        call ensure_ordered(self, "pf_stats%probit_fit")
+        loc = stats_nan()
+        sigma = stats_nan()
+        c = stats_nan()
+        ! The object's weights are deliberately not read: the one-shot `pf_probit_fit` has no
+        ! `weights` argument at all, and a binding that answered a weighted question under the
+        ! same name would be the one place in this module where the two disagree.
+        !
+        ! `keep_n == 1` goes THROUGH `probit_line`, which is what decides that a line needs two
+        ! points -- see `probit_fit_f64` for why that test is not repeated here.
+        if (.not. obj_undefined(self)) &
+            call probit_line(self%keep(1:self%keep_n), self%keep_n, a, filliben, loc, sigma, c)
+        if (present(corr)) corr = c
+    end procedure obj_probit_fit
+
+    module procedure obj_probit_scale
+        real(real64) :: qlo, qhi, pr
+
+        call check_prob("pf_stats%probit_scale", prob)
+        pr = 0.25_real64
+        if (present(prob)) pr = prob
+        call ensure_ordered(self, "pf_stats%probit_scale")
+        call obj_quantile_at(self, pr, method, qlo)
+        call obj_quantile_at(self, 1.0_real64 - pr, method, qhi)
+        res = (qhi - qlo) / (2.0_real64 * pf_probit(1.0_real64 - pr))
+    end procedure obj_probit_scale
+
+    ! ==================================================================================
     ! pf_mode -- the most common value
     !
     ! Every specific is the same three steps: survive the exclusions, order the survivors, then

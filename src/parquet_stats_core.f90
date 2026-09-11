@@ -1251,6 +1251,96 @@ contains
             n_null, n_nan, ok)
     end procedure hmean_f64
 
+    !> The domain screen and the probit-space accumulation, over an ALREADY-COMPACTED population.
+    !!
+    !! Split out of `probit_mean_f64` so that `pf_stats%probit_mean` can answer off the object's
+    !! retained buffer without compacting a second time -- `power_mean_kept`'s reason exactly, and
+    !! the same part of the answer is the easy part to get quietly wrong.
+    !!
+    !! **The `0`, `1` and both-of-them rows are branched on, not computed.** They are the limits
+    !! of the mean, and letting the arithmetic reach them would mean forming `Phi**(-1)(0)` and
+    !! adding `-Infinity` -- and, for a population holding both, `-Inf + Inf`, which raises
+    !! IEEE_INVALID and is fatal under nagfor's default `-ieee=stop`. `pf_gmean` screens its zero
+    !! ahead of `log` for the same reason. **A clamp of `p` away from `{0, 1}` "to avoid the
+    !! infinity" would silently replace all three answers with finite numbers near the boundary**
+    !! (`feature_risks.md` Risk-256).
+    subroutine probit_mean_kept(keep, m, poisoned, res, ok, w)
+        real(real64), intent(in) :: keep(:)         !! the survivors; the first `m` are live.
+        integer(int64), intent(in) :: m             !! how many survivors there are.
+        logical, intent(in) :: poisoned             !! .true. when a kept NaN makes the answer NaN.
+        real(real64), intent(out) :: res            !! the probit-space mean, or NaN.
+        logical, intent(out) :: ok                  !! .false. when the answer is a NaN.
+        real(real64), intent(in), optional :: w(:)  !! the survivors' weights, when weighted.
+        real(real64) :: acc_sum, w_sum, wi
+        integer(int64) :: i
+        logical :: saw_zero, saw_one
+
+        res = stats_nan()
+        ok = .false.
+        if (m == 0_int64 .or. poisoned) return
+
+        ! Pass one: the domain screen, in full, before any arithmetic.
+        saw_zero = .false.
+        saw_one = .false.
+        do i = 1_int64, m
+            ! **The NaN screen is its own statement and comes FIRST.** `keep(i) >= 0.0 .and.
+            ! keep(i) <= 1.0` is false for a NaN, so a screen written that way would classify a
+            ! NaN as an out-of-domain VALUE -- and the two have different answers under
+            ! `skipnan = .false.`, where a NaN is what the caller asked to propagate rather than
+            ! an input to reject. Risk-172 is this exact shape. It is unreachable as things stand,
+            ! because `poisoned` above is what a kept NaN produces, which is precisely why the
+            ! ordering is written down rather than left to be re-derived.
+            if (keep(i) /= keep(i)) return
+            if (keep(i) < 0.0_real64 .or. keep(i) > 1.0_real64) return
+            if (keep(i) == 0.0_real64) saw_zero = .true.
+            if (keep(i) == 1.0_real64) saw_one = .true.
+        end do
+        ! A population holding BOTH is `-Inf + Inf`, which is genuinely undefined -- not zero, not
+        ! one, and not a half.
+        if (saw_zero .and. saw_one) return
+        if (saw_zero .or. saw_one) then
+            ! Exactly 0 or exactly 1: the limits, and reported as DEFINED answers because they
+            ! are ones. `pf_gmean` reports its zero the same way.
+            if (saw_zero) then
+                res = 0.0_real64
+            else
+                res = 1.0_real64
+            end if
+            ok = .true.
+            return
+        end if
+
+        ! Every survivor is now strictly inside `(0, 1)`, so every probit is finite.
+        acc_sum = 0.0_real64
+        w_sum = 0.0_real64
+        do i = 1_int64, m
+            wi = 1.0_real64
+            if (present(w)) wi = w(i)
+            acc_sum = acc_sum + wi * pf_probit(keep(i))
+            w_sum = w_sum + wi
+        end do
+        if (w_sum <= 0.0_real64) return
+        res = pf_norm_cdf(acc_sum / w_sum)
+        ok = (res == res)
+    end subroutine probit_mean_kept
+
+    module procedure probit_mean_f64
+        real(real64), allocatable :: keep(:), keep_w(:)
+        integer(int64) :: nv, nnull, nnan
+        logical :: poisoned, good
+
+        call stats_compact(values, "pf_probit_mean", is_valid, weights, skipnan, keep, keep_w, &
+            nv, nnull, nnan, poisoned)
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        if (allocated(keep_w)) then
+            call probit_mean_kept(keep, nv, poisoned, m, good, w=keep_w)
+        else
+            call probit_mean_kept(keep, nv, poisoned, m, good)
+        end if
+        if (present(ok)) ok = good
+    end procedure probit_mean_f64
+
     module procedure variance_f64
         type(stats_acc) :: acc
         logical :: freq
@@ -1969,17 +2059,20 @@ contains
         res = self%acc%mean
     end procedure obj_mean
 
-    !> The retain guard the two power-mean bindings share.
+    !> The retain guard the three transform-mean bindings share -- `%gmean`, `%hmean`, `%probit_mean`.
     !!
     !! Separate from `stats_require_live` because the two failures have different fixes and a
-    !! caller reading the message needs to be told which one they hit.
+    !! caller reading the message needs to be told which one they hit. Separate from
+    !! `ensure_ordered`'s guard too: these three need the retained VALUES and order nothing, so a
+    !! message about there being nothing to order would name the wrong fact.
     subroutine stats_require_hold(self, what)
         class(pf_stats), intent(in) :: self  !! the accumulator.
         character(len=*), intent(in) :: what !! the binding's name, for the message.
         if (.not. self%hold) &
             error stop what // ": this accumulator was created with retain=.false., so no " // &
-                "values were kept and a power mean cannot be formed from the central moments; " // &
-                "use retain=.true. (the default for %compute) if you need one"
+                "values were kept, and this mean is taken over the values themselves rather " // &
+                "than over the central moments; use retain=.true. (the default for %compute) " // &
+                "if you need one"
     end subroutine stats_require_hold
 
     module procedure obj_gmean
@@ -2031,6 +2124,28 @@ contains
             call power_mean_kept(self%keep, self%keep_n, .true., self%acc%saw_nan, res, good)
         end if
     end procedure obj_hmean
+
+    module procedure obj_probit_mean
+        logical :: good
+        call stats_require_live(self, "pf_stats%probit_mean")
+        call stats_require_hold(self, "pf_stats%probit_mean")
+        call stats_ensure(self)
+        ! **An accumulator that has retained nothing has no array to hand on**, exactly as
+        ! `%gmean` documents: `%init` leaves `keep` unallocated, so a `%probit_mean` straight
+        ! after it would associate an unallocated allocatable with a non-optional dummy. The
+        ! answer is unchanged -- `probit_mean_kept` returns NaN for an empty population in its
+        ! first statement -- so this reproduces it rather than replacing it.
+        if (self%keep_n == 0_int64) then
+            res = stats_nan()
+            return
+        end if
+        if (self%wtd) then
+            call probit_mean_kept(self%keep, self%keep_n, self%acc%saw_nan, res, good, &
+                w=self%keep_w)
+        else
+            call probit_mean_kept(self%keep, self%keep_n, self%acc%saw_nan, res, good)
+        end if
+    end procedure obj_probit_mean
 
     module procedure obj_variance
         integer :: dd

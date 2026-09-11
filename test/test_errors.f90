@@ -2225,6 +2225,14 @@ contains
                 test_stats_corr_bad_method_aborts), &
             new_unittest("an unrecognised plotting-position method aborts", &
                 test_stats_normal_scores_bad_method_aborts), &
+            new_unittest("pf_probit_fit reaches the same plotting-position resolver", &
+                test_stats_probit_fit_bad_method_aborts), &
+            new_unittest("a probit-scale prob outside (0, 0.5) aborts", &
+                test_stats_probit_scale_bad_prob_aborts), &
+            new_unittest("a negative weight aborts pf_probit_mean", &
+                test_stats_probit_mean_bad_weight_aborts), &
+            new_unittest("%probit_mean on a streaming pf_stats aborts", &
+                test_stats_object_probit_mean_without_retain_aborts), &
             new_unittest("a weighted Spearman correlation aborts", &
                 test_stats_spearman_with_weights_aborts), &
             new_unittest("two samples of different size abort", &
@@ -8808,6 +8816,52 @@ contains
             failure_message="an unrecognised plotting-position method was expected to abort", &
             required_stderr="unrecognised method")
     end subroutine test_stats_normal_scores_bad_method_aborts
+
+    !> parquet_stats abort path: see scenario_stats_probit_fit_bad_method in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_probit_fit_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_probit_fit_bad_method", &
+            expect_abort=.true., &
+            failure_message="an unrecognised plotting-position method was expected to abort " // &
+                "pf_probit_fit, which reaches the resolver from a different submodule than " // &
+                "pf_normal_scores does", &
+            required_stderr="pf_probit_fit: unrecognised method")
+    end subroutine test_stats_probit_fit_bad_method_aborts
+
+    !> parquet_stats abort path: see scenario_stats_probit_scale_bad_prob in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_probit_scale_bad_prob_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_probit_scale_bad_prob", &
+            expect_abort=.true., &
+            failure_message="pf_probit_scale(prob=0.5) was expected to abort", &
+            required_stderr="prob must satisfy 0 < prob < 0.5")
+    end subroutine test_stats_probit_scale_bad_prob_aborts
+
+    !> parquet_stats abort path: see scenario_stats_probit_mean_bad_weight in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_probit_mean_bad_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_probit_mean_bad_weight", &
+            expect_abort=.true., &
+            failure_message="a negative weight was expected to abort pf_probit_mean", &
+            required_stderr="pf_probit_mean")
+    end subroutine test_stats_probit_mean_bad_weight_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_probit_mean_without_retain in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_object_probit_mean_without_retain_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_probit_mean_without_retain", &
+            expect_abort=.true., &
+            failure_message="%probit_mean on a streaming pf_stats was expected to abort", &
+            required_stderr="pf_stats%probit_mean: this accumulator was created with retain=.false.")
+    end subroutine test_stats_object_probit_mean_without_retain_aborts
 
     !> parquet_stats abort path: see scenario_stats_spearman_with_weights in
     !> test/error_scenarios.f90. The scenario's own negative control is the weighted PEARSON call

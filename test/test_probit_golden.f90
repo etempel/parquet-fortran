@@ -176,4 +176,32 @@ module test_probit_golden
     real(real64), parameter :: PROBIT_Q3 = 0.67448975019608171_real64
     real(real64), parameter :: MAD_NORMAL_SCALE_REF = 1.4826022185056018_real64
 
+    !> How many elements the fixture statistics below are taken over.
+    integer, parameter :: NFIX = 1000
+
+    !> `pf_probit_fit` over the first `NFIX` values of `golden_fixture`, at the
+    !! default `method="blom"`. `LOC` is the mean of the population, which is
+    !! what a symmetric plotting-position rule makes the intercept.
+    real(real64), parameter :: FIT_LOC = 5.7628144531250003_real64
+    real(real64), parameter :: FIT_SIGMA = 282.35797386033511_real64
+    real(real64), parameter :: FIT_CORR = 0.97407761926500602_real64
+
+    !> The same fit under `method="filliben"`, whose positions are a different
+    !! FORMULA rather than a different constant -- so a token that fell through to
+    !! the default would match `FIT_*` instead of these.
+    real(real64), parameter :: FIT_LOC_FILLIBEN = 5.7628144531250003_real64
+    real(real64), parameter :: FIT_SIGMA_FILLIBEN = 282.59739019540768_real64
+    real(real64), parameter :: FIT_CORR_FILLIBEN = 0.97425265373147496_real64
+
+    !> `pf_probit_scale` over the same population at the default `prob = 0.25`,
+    !! and at the 16th/84th percentile pair, whose divisor is exactly 2.
+    real(real64), parameter :: SCALE_P25 = 383.61282709878918_real64
+    real(real64), parameter :: SCALE_P16 = 348.16817462659805_real64
+
+    !> `pf_probit_mean` over the first `NFIX` values of `golden_probs`, unweighted
+    !! and under `golden_weights_mod5` -- where every fifth weight is ZERO and
+    !! removes its element, so the two differ by more than a reweighting.
+    real(real64), parameter :: PMEAN = 0.51044587476837977_real64
+    real(real64), parameter :: PMEAN_W = 0.49124790939237672_real64
+
 end module test_probit_golden

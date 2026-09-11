@@ -138,10 +138,15 @@ module parquet_stats
     ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs
     ! `tools/module_footprints.txt` exactly one file and adds nothing beneath it, and
     ! `check_parquet_stats_stays_arrow_free` is untouched because no Arrow is reachable from it.
-    ! `only:` rather than bare, unlike `parquet_sorting` above: one name is needed, and a
-    ! consumer who wants the probit itself should say `use parquet_utils` and get the whole
-    ! family rather than the one specific this module happens to need.
-    use parquet_utils, only : pf_probit
+    ! `only:` rather than bare, unlike `parquet_sorting` above: two names are needed, and a
+    ! consumer who wants the normal family itself should say `use parquet_utils` and get all four
+    ! of them rather than the specifics this module happens to need.
+    !
+    ! `pf_norm_cdf` is the return leg of `pf_probit_mean`, which averages on the probit scale and
+    ! maps back -- and it must be the LIBRARY's `Phi`, not `0.5*erfc(-z/sqrt(2))` written out
+    ! again here, or the round trip `pf_norm_cdf(pf_probit(p)) == p` would hold for the kernel and
+    ! not for this module.
+    use parquet_utils, only : pf_probit, pf_norm_cdf
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
@@ -344,6 +349,29 @@ D["density"] = """            logical, intent(in), optional :: density
             !! was binned the density is undefined and every entry is a **quiet NaN** with
             !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
             !! zeros, `ok = .true.`) and an empty DENSITY is not."""
+D["corr"] = """            real(real64), intent(out), optional :: corr
+            !! the PROBABILITY-PLOT CORRELATION COEFFICIENT of the fitted line -- how straight the
+            !! normal-probability plot actually is, in [-1, 1] and near 1 for a Gaussian sample.
+            !! It is free once the line is fitted, since the same three sums answer it, so this is
+            !! the normality diagnostic the fit already contains rather than a second pass over
+            !! the data. Under `method="filliben"` it is Filliben's statistic exactly, which is
+            !! also `scipy.stats.probplot(x, fit=True)`'s third return value -- scipy's plotting
+            !! positions are the median ranks, not this generic's default. **NaN for a CONSTANT
+            !! population**, where the sorted values have no variance to correlate -- and that is
+            !! the one case where `loc` and `sigma` are both perfectly well defined while this is
+            !! not, so it is reported rather than inferred from `ok`."""
+D["prob"] = """            real(real64), intent(in), optional :: prob
+            !! the LOWER tail probability of the symmetric quantile pair, `0.25` by default --
+            !! which makes the answer `pf_iqr` divided by 1.3489795003921634. The other value in
+            !! daily use is `0.15865525393145705`, the 16th/84th percentile pair, whose divisor is
+            !! exactly 2. Must satisfy `0 < prob < 0.5`; anything else aborts, because `prob=0.5`
+            !! asks for `0/0` and `prob=0` asks for the whole range over an infinity. Both are
+            !! mistakes rather than preferences, which is the same reading `pf_trim_mean` gives
+            !! `prop`.
+            !!
+            !! **A probability, not a percentile**: `0.25`, never `25`.
+            !! `prob` and `1 - prob` are the two quantiles taken, so it does not matter which half
+            !! of the pair a caller thinks in -- but the argument is the LOWER one."""
 D["n_outside"] = """            integer(int64), intent(out), optional :: n_outside
             !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
             !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
@@ -493,6 +521,7 @@ TYPE_BLOCK = """    !
         procedure :: mean => obj_mean !! The weighted mean.
         procedure :: gmean => obj_gmean !! The weighted geometric mean; needs `retain`.
         procedure :: hmean => obj_hmean !! The weighted harmonic mean; needs `retain`.
+        procedure :: probit_mean => obj_probit_mean !! The probit-space mean; needs `retain`.
         procedure :: variance => obj_variance !! The variance, at `ddof` degrees of freedom.
         procedure :: stddev => obj_stddev !! The standard deviation.
         procedure :: sem => obj_sem !! The standard error of the mean.
@@ -508,6 +537,8 @@ TYPE_BLOCK = """    !
         procedure :: trim_mean => obj_trim_mean !! The mean with a share trimmed from each tail.
         procedure :: percentile_of_score => obj_percentile_of_score !! Where a value sits, 0-1.
         procedure :: mad => obj_mad !! The median absolute deviation, scaled by default.
+        procedure :: probit_fit => obj_probit_fit !! The normal-probability line: loc, sigma, corr.
+        procedure :: probit_scale => obj_probit_scale !! The scale a quantile pair implies.
         procedure :: print => obj_print !! Writes the describe() block to a unit.
         procedure :: prepare_order => obj_prepare_order !! Builds tier B now rather than lazily.
         procedure :: release_order => obj_release_order !! Frees tier B, keeping tier A.
@@ -642,6 +673,18 @@ QUERIES = [
       "",
       "NaN for an empty population and for one holding a negative value; **exactly 0 when any",
       "value is 0**, as scipy returns."]),
+    ("obj_probit_mean", "real(real64)",
+     "the probit-space mean, or NaN when it is undefined.", [],
+     ["The mean of the population ON THE PROBIT SCALE -- `Phi(sum(w*Phi**(-1)(p)) / sum(w))`.",
+      "",
+      "**Needs the retained values, so it aborts on a streaming accumulator**",
+      "(`retain = .false.`), exactly as `%gmean` does and for the same reason: a probit-sum is a",
+      "fifth accumulated quantity, and charging a transcendental per element in the hot loop to",
+      "every population that never asks for one is the wrong trade. It orders nothing.",
+      "",
+      "The population is read as PROBABILITIES. NaN for an empty one and for one holding a value",
+      "outside `[0, 1]`; **exactly 0 when any value is 0** and **exactly 1 when any value is 1**,",
+      "both being the limits; NaN when it holds both, since that limit is `-Inf + Inf`."]),
     ("obj_variance", "real(real64)", "the variance, or NaN when it is undefined.", ["ddof"],
      ["The variance of the population.",
       "",
@@ -802,6 +845,9 @@ def object_ifaces():
     tierb = OBJ_ORDER_IFACES
     tierb = tierb.replace("@@method@@", D["method"])
     tierb = tierb.replace("@@kind@@", D["kind"])
+    tierb = tierb.replace("@@nscore_method@@", NSCORE_D["method"])
+    tierb = tierb.replace("@@corr@@", D["corr"])
+    tierb = tierb.replace("@@prob@@", D["prob"])
     tierb = tierb.replace("@@scale@@", D["scale"])
     tierb = tierb.replace("@@center@@", D["center"])
     out.append(tierb.rstrip("\n"))
@@ -917,6 +963,36 @@ OBJ_ORDER_IFACES = """        !> The interpolating median of the population.
 @@center@@
             real(real64) :: res !! the deviation, or NaN for an empty population.
         end function obj_mad
+        !> The normal-probability line of the population: `pf_probit_fit` off the ordering.
+        !!
+        !! A subroutine rather than a function because it answers two quantities and optionally a
+        !! third, and a caller wanting only the scale should reach for `%probit_scale` instead of
+        !! discarding two results.
+        !!
+        !! Reads tier B and orders nothing that has not already been ordered, so a `%median`
+        !! followed by this is ONE sort; `parquet_debug_stats_sorts()` is what asserts it. Aborts
+        !! on a streaming accumulator, as every tier-B binding does.
+        !!
+        !! **Unweighted, whatever the accumulator carries.** The one-shot `pf_probit_fit` has no
+        !! `weights` argument at all, and a binding that quietly used the object's weights would
+        !! answer a different question under the same name; the weights are ignored here and the
+        !! guide says so.
+        module subroutine obj_probit_fit(self, loc, sigma, corr, method)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(out) :: loc !! the intercept: the mean of the population.
+            real(real64), intent(out) :: sigma !! the slope: the implied scale.
+@@corr@@
+@@nscore_method@@
+        end subroutine obj_probit_fit
+        !> The scale a symmetric quantile pair implies -- `pf_probit_scale` off the ordering.
+        module function obj_probit_scale(self, prob, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+@@prob@@
+@@method@@
+            real(real64) :: res !! the implied scale, or NaN for an empty population.
+        end function obj_probit_scale
         !> Whether tier C is currently built.
         !!
         !! Test-facing, like `%is_ordered`: it is how `%update` dropping the cached deviation is
@@ -1062,6 +1138,23 @@ ZSCORE_OPTS = ["is_valid", "ddof", "skipnan", "out_valid", "n_null", "ok"]
 #: does. `threads` IS here, unlike `pf_zscore`'s: the midrank walk is `pf_argsort`'s, and that
 #: sort takes a thread count.
 NSCORE_OPTS = ["is_valid", "skipnan", "method", "out_valid", "n_null", "ok", "threads"]
+#: `pf_probit_fit` -- `corr` is an OUTPUT and sits in the tier-A output-prefix block, ahead of
+#: every population argument, which is where the procedure declares it. That position is the one
+#: `check_stats_optional_argument_order` requires: an optional output a caller reaches for by
+#: keyword still has to keep every other list a subsequence of the one canonical sequence.
+#:
+#: **No `weights`, for `pf_normal_scores`' reason**: the plotting position of a weighted order
+#: statistic is a further definitional choice that no reference library makes, and a procedure
+#: that never had the argument refuses one at COMPILE time rather than at run time.
+PFIT_OPTS = ["corr", "is_valid", "skipnan", "method", "n_null", "n_nan", "ok", "threads"]
+#: `pf_probit_scale` -- `ORDER_OPTS` with `prob` in front of it. `prob` says what the statistic IS
+#: rather than which elements are in the population, so it goes at the head of the population
+#: block, exactly as `pf_sigma_clipped_stats` puts its clipping rule and `pf_histogram` its `right`
+#: and `density`. It takes `weights` and `method` where `pf_probit_fit` takes neither, and that is
+#: not an inconsistency: this procedure is two `pf_quantile` probes off one ordering, so it offers
+#: precisely what `pf_quantile` offers.
+PSCALE_OPTS = ["prob", "is_valid", "weights", "weight_type", "skipnan", "method", "n_null",
+               "n_nan", "ok", "threads"]
 #: `pf_cov` -- no `skipnan`, because a NaN in EITHER array always drops the pair: a two-sample
 #: statistic has no meaning over two populations of different length, so there is nothing for
 #: `skipnan = .false.` to select.
@@ -1159,6 +1252,25 @@ CORE_IFACES = [
            "quiet NaN, and both are branched on before the reciprocal, since `1/0` raises under",
            "nagfor's default trap policy."],
           ("h", "the harmonic mean; 0 for a zero, NaN for a negative or empty population."),
+          PLAIN_OPTS),
+    iface("probit_mean_f64",
+          ["`pf_probit_mean` over a 64-bit real array: the mean ON THE PROBIT SCALE.",
+           "",
+           "`Phi(sum(w*Phi**(-1)(p)) / sum(w))`. It is to `Phi`/`Phi**(-1)` exactly what",
+           "`pf_gmean` is to `exp`/`log`, and it lives beside it for that reason.",
+           "",
+           "The domain rules are `pf_gmean`'s in shape and its own in detail. A value outside",
+           "`[0, 1]` gives a quiet NaN with `ok = .false.`; a `0` in the population gives exactly",
+           "`0` and a `1` gives exactly `1`, both being the limits; a population holding **both**",
+           "gives a NaN, because that limit is `-Inf + Inf`.",
+           "",
+           "**Those three answers arrive from the infinities rather than from a special case**,",
+           "and a guard that clamped `p` away from `{0, 1}` to avoid meeting one would silently",
+           "replace all three with finite numbers near the boundary. The NaN screen comes FIRST",
+           "and separately, because `p >= 0 .and. p <= 1` is false for a NaN and would count one",
+           "as an out-of-domain value -- and the two have different answers under",
+           "`skipnan = .false.`"],
+          ("m", "the probit-space mean, back on a 0-1 scale; NaN when it is undefined."),
           PLAIN_OPTS),
     iface("variance_f64",
           ["`pf_variance` over a 64-bit real array, computed in TWO passes.",
@@ -1488,6 +1600,9 @@ ENTRY_FAMILY = [
      PLAIN_OPTS),
     ("hmean", "h", "the harmonic mean; 0 for a zero, NaN for a negative or empty population.",
      PLAIN_OPTS),
+    ("probit_mean", "m",
+     "the probit-space mean; 0 for a zero, 1 for a one, NaN for both or out of range.",
+     PLAIN_OPTS),
     ("variance", "v", "the variance; NaN when `n_valid <= ddof`.", MOMENT_OPTS),
     ("stddev", "sd", "the standard deviation; NaN when the variance is.", MOMENT_OPTS),
     ("sem", "se", "the standard error; NaN when the standard deviation is.", MOMENT_OPTS),
@@ -1676,7 +1791,62 @@ RELATE_IFACES = """        !> `pf_cov` over two 64-bit real arrays: the PAIRWISE
             real(real64), intent(out) :: median !! their median.
             real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
 @@sigclip_opts@@
-        end subroutine sigma_clipped_stats_f64"""
+        end subroutine sigma_clipped_stats_f64
+        !> `pf_probit_fit` over a 64-bit real array: the least-squares normal-probability line.
+        !!
+        !! **One ordering, and the fit is read straight off it.** The sorted survivors are the
+        !! `y` of the line and their plotting positions' normal scores are the `x`, so once the
+        !! values are in order the whole estimator is three running sums.
+        !!
+        !! Declared in this block rather than with the order family because it has TWO mandatory
+        !! outputs and a third optional one, which the single-output `ORDER_FAMILY` shape cannot
+        !! express -- exactly the reason `pf_sigma_clipped_stats` sits here. Both are implemented
+        !! in `parquet_stats_order` all the same.
+        module subroutine probit_fit_f64(values, loc, sigma, corr, is_valid, skipnan, method, &
+                n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            real(real64), intent(out) :: loc
+            !! the INTERCEPT of the line: a location estimate. Every one of the six plotting
+            !! positions is symmetric about the median, so the normal scores sum to zero and this
+            !! is the MEAN of the surviving values -- computed as the mean, not as a regression
+            !! intercept that ought to equal one. It is the mean rather than `pf_mean`'s last
+            !! bit: this is a plain sum over the sorted survivors and `pf_mean` refines its
+            !! quotient, so compare the two with a tolerance. NaN when fewer than two survive.
+            real(real64), intent(out) :: sigma
+            !! the SLOPE of the line: a scale estimate that reads the whole sample rather than
+            !! two quantiles of it, and is far less disturbed by a heavy tail than `pf_stddev`.
+            !! Exactly `0` for a constant population; NaN when fewer than two elements survive.
+@@pfit_opts@@
+        end subroutine probit_fit_f64
+        !> Resolves a plotting-position `method=` token, or aborts naming all six.
+        !!
+        !! **Declared here so that ONE resolver serves two submodules.** `pf_normal_scores` lives
+        !! in `parquet_stats_relate` and `pf_probit_fit` in `parquet_stats_order`, sibling
+        !! submodules that cannot reach each other's contained procedures -- and the alternative
+        !! is two copies of the same six-token `select case`, which is how `method="cunnane"`
+        !! comes to mean two different constants in one library. Implemented in
+        !! `parquet_stats_relate`, the same "cross-subtree private-helper interfaces" mechanism
+        !! `stats_compact` uses in the other direction.
+        module subroutine nscore_method(what, method, a, filliben)
+            character(len=*), intent(in) :: what !! the public procedure's name, for messages.
+            character(len=*), intent(in), optional :: method !! the caller's token, if any.
+            real(real64), intent(out) :: a !! the plotting-position constant `a`.
+            logical, intent(out) :: filliben !! .true. for Filliben's median rank, which is not
+            !! of the `a`-family at all and so cannot come back as one.
+        end subroutine nscore_method
+        !> The probability a rank marks: what `Phi**(-1)` is actually asked for.
+        !!
+        !! Shared for `nscore_method`'s reason, and the pairing matters more than either half:
+        !! a token and the formula it selects that lived in different submodules could resolve
+        !! consistently and still be applied differently.
+        pure module function nscore_position(r, m, a, den, filliben) result(p)
+            real(real64), intent(in) :: r !! the rank, 1-based; a half-integer for a midrank.
+            integer(int64), intent(in) :: m !! how many elements survived.
+            real(real64), intent(in) :: a !! the plotting-position constant.
+            real(real64), intent(in) :: den !! `m + 1 - 2a`, formed once by the caller.
+            logical, intent(in) :: filliben !! .true. for Filliben's median rank.
+            real(real64) :: p !! the probability; never 0 and never 1, so no clamp is needed.
+        end function nscore_position"""
 
 CUM_IFACES = """        !> `pf_cumsum` over a 64-bit real array: the running sum, element by element.
         module subroutine cumsum_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
@@ -1941,6 +2111,46 @@ RELATE_DOC = {
         "There is deliberately **no `weights`** and **no `pf_stats` binding**: a weighted midrank",
         "is a definitional choice no reference library makes, and tier B sorts in place and never",
         "hands values back in the caller's order."],
+    "pf_probit_fit": [
+        "The least-squares line of a NORMAL-PROBABILITY PLOT: a location, a scale, and how",
+        "straight the plot is -- `scipy.stats.probplot(x, fit=True)`.",
+        "",
+        "Sort the survivors, give order statistic `r` the normal score of its plotting position",
+        "`(r - a)/(m + 1 - 2a)`, and fit `y = loc + sigma*Phi**(-1)(pp)` by least squares. `loc`",
+        "is the intercept, `sigma` the slope, and the optional `corr` is the correlation",
+        "coefficient of that fit -- the probability-plot correlation coefficient, which is a",
+        "normality diagnostic and costs nothing extra.",
+        "",
+        "**Why reach for this rather than `pf_mean` and `pf_stddev`?** The slope reads the whole",
+        "sample through its order statistics, so a few wild points move it far less than they",
+        "move a standard deviation, while a clean Gaussian sample gives all three of `sigma`,",
+        "`pf_stddev` and `pf_probit_scale` the same answer to within sampling error. And `corr`",
+        "says whether the Gaussian assumption behind that reading holds at all.",
+        "",
+        "**The ranks are ORDINAL here, not the midranks `pf_normal_scores` uses**, which is what",
+        "makes this scipy's `probplot` and what keeps the plotting positions symmetric about the",
+        "median -- so their normal scores sum to zero and `loc` is the MEAN of the survivors,",
+        "evaluated as a mean rather than as a regression intercept. Ties therefore take DIFFERENT",
+        "plotting positions at equal `y`, which is the same line either way and is what the",
+        "reference implementation does.",
+        "",
+        "`method=` chooses the plotting position from `pf_normal_scores`' six tokens -- `\"blom\"`",
+        "(the default), `\"weibull\"`, `\"tukey\"`, `\"hazen\"`, `\"cunnane\"` or `\"filliben\"`.",
+        "",
+        "**`method=\"filliben\"` is what reproduces `scipy.stats.probplot`**, whose plotting",
+        "positions are the median ranks rather than this generic's default -- and under that token",
+        "`corr` is Filliben's statistic exactly. The default here is `\"blom\"`, which is the",
+        "position `pf_normal_scores` defaults to and the one the literature quotes; the two differ",
+        "in the third digit of `sigma` on a thousand points, so a comparison against scipy has to",
+        "name the token.",
+        "",
+        "Fewer than **two** survivors gives three NaNs with `ok = .false.` -- a line needs two",
+        "points. A CONSTANT population gives `sigma = 0`, `loc` equal to that constant, and `corr`",
+        "a NaN, since a constant has no variance to correlate; `ok` is `.false.` there only if",
+        "`corr` was asked for.",
+        "",
+        "There is deliberately **no `weights`**, for `pf_normal_scores`' reason: a weighted",
+        "plotting position is a definitional choice no reference library makes."],
     "pf_sigma_clipped_stats": [
         "astropy's `sigma_clipped_stats`: iteratively drop the outliers, then summarise the rest.",
         "",
@@ -2005,6 +2215,9 @@ ORDER_FAMILY = [
     ("mad", [], "m", "real(real64), intent(out) :: m",
      "the median absolute deviation, scaled unless `scale=\"raw\"`; NaN when the population is "
      "empty.", MAD_OPTS),
+    ("probit_scale", [], "sigma", "real(real64), intent(out) :: sigma",
+     "the scale a symmetric quantile pair implies for Gaussian data; NaN when the population is "
+     "empty, and `0` for a constant one.", PSCALE_OPTS),
     ("describe", [], "s", "type(pf_stats), intent(out) :: s",
      "the filled summary object: tier A computed and tier B already ordered, so every query on "
      "it afterwards is a read.", DESCRIBE_OPTS),
@@ -2230,6 +2443,16 @@ DESCRIBE_D["ok"] = """            logical, intent(out), optional :: ok
             !! and NaN-testing it by hand."""
 
 
+#: `pf_probit_fit`'s doc map. Its `method=` names a PLOTTING POSITION -- the same six tokens
+#: `pf_normal_scores` takes -- and not an interpolation rule, so it borrows `NSCORE_D`'s text.
+#: **`pf_probit_scale` keeps `ORDER_D`'s**, and the two really do mean different things by one
+#: argument name: that procedure is two `pf_quantile` probes off one ordering, so its `method=` is
+#: `pf_quantile`'s. The guide says so in both sections, because a caller who assumes otherwise
+#: gets a plausible number rather than an abort.
+PFIT_D = dict(ORDER_D)
+PFIT_D["method"] = NSCORE_D["method"]
+
+
 def order_dmap(base):
     """Which `threads` doc an ORDER_FAMILY row gets: `pf_describe` alone does both passes."""
     return DESCRIBE_D if base == "describe" else ORDER_D
@@ -2347,6 +2570,42 @@ def nscore_body(tag, widen, has_nan):
                             for o in mine]
     lines.append("        call " + wrap_call("normal_scores_f64", call))
     lines.append("    end procedure normal_scores_%s" % tag)
+    return "\n".join(lines)
+
+
+def pfit_iface(tag, decl, has_nan, kindword):
+    """One interface body for `pf_probit_fit`'s per-kind entry point."""
+    mine = kind_opts(PFIT_OPTS, has_nan)
+    args = wrap_args(["values", "loc", "sigma"] + mine)
+    lines = ["        !> `pf_probit_fit` over %s." % kindword]
+    lines.append("        module subroutine probit_fit_%s(%s)" % (tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            real(real64), intent(out) :: loc")
+    lines.append("            !! the intercept, which every token makes the MEAN of the")
+    lines.append("            !! survivors. NaN when fewer than two survive.")
+    lines.append("            real(real64), intent(out) :: sigma")
+    lines.append("            !! the slope: the scale the normal-probability line implies.")
+    for key in mine:
+        lines.append(PFIT_D[key])
+    lines.append("        end subroutine probit_fit_%s" % tag)
+    return "\n".join(lines)
+
+
+def pfit_body(tag, widen, has_nan):
+    """One `module procedure` body for `pf_probit_fit`'s per-kind entry point."""
+    mine = kind_opts(PFIT_OPTS, has_nan)
+    lines = ["    module procedure probit_fit_%s" % tag]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_probit_fit", is_valid, wide, mask)')
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", "loc", "sigma"] \
+        + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
+    lines.append("        call " + wrap_call("probit_fit_f64", call))
+    lines.append("    end procedure probit_fit_%s" % tag)
     return "\n".join(lines)
 
 
@@ -2739,6 +2998,29 @@ GENERIC_DOC = {
                  "",
                  "`sum(w)/sum(w/x)`, with the same domain rules as `pf_gmean`: a zero gives",
                  "exactly `0`, a negative gives a quiet NaN."],
+    "pf_probit_mean": [
+        "The mean of a set of PROBABILITIES, averaged on the probit scale.",
+        "",
+        "`Phi(sum(w*Phi**(-1)(p)) / sum(w))`: map each probability to the z it marks, average",
+        "the z's, map back. It is to `Phi`/`Phi**(-1)` exactly what `pf_gmean` is to",
+        "`exp`/`log`.",
+        "",
+        "**Why not `pf_mean`?** An arithmetic mean of probabilities is not wrong, but it is the",
+        "wrong average whenever the probabilities are the output of a threshold process -- a",
+        "selection function, a completeness fraction, a detection rate. Averaging in probit space",
+        "is what keeps the answer inside `[0, 1]` by construction, and what makes the average of",
+        "a uniformly shifted set of selection probabilities the shift of their average.",
+        "",
+        "**The domain, in full.** A value outside `[0, 1]` gives a quiet NaN with `ok = .false.`",
+        "-- it is not a probability. A `0` in the population gives exactly `0` and a `1` gives",
+        "exactly `1`, which are the limits: `Phi**(-1)(0)` is `-Inf` and one `-Inf` drags the",
+        "whole sum there. A population holding both a `0` and a `1` gives a NaN, because that sum",
+        "is `-Inf + Inf`. None of the four aborts; all are data conditions.",
+        "",
+        "Needs the retained values on the object (`%probit_mean`), for `%gmean`'s reason: a",
+        "probit-sum is a fifth accumulated quantity and charging every population a transcendental",
+        "per element in the hot loop to serve the few that ask is the wrong trade. It orders",
+        "nothing."],
     "pf_variance": ["The variance of a population, in two passes so that it is shift-invariant.",
                     "",
                     "`ddof = 1` by default (the sample variance, as pandas returns); pass",
@@ -2849,6 +3131,32 @@ ORDER_DOC = {
         "Both medians are taken with `linear` interpolation, because scipy reaches `np.median`;",
         "there is deliberately no `method=` here, since a token that made this disagree with",
         "scipy would be worse than no token at all."],
+    "pf_probit_scale": [
+        "The scale a SYMMETRIC QUANTILE PAIR implies for Gaussian data.",
+        "",
+        "`sigma = (Q(1-prob) - Q(prob)) / (2 * Phi^-1(1-prob))`, with `prob = 0.25` by default --",
+        "so the default answer is `pf_iqr` divided by 1.3489795003921634. The divisor is what",
+        "turns a range into a standard deviation: for a normal population those two quantiles sit",
+        "`Phi^-1(1-prob)` scale units either side of the centre, so dividing the gap between them",
+        "by twice that recovers the scale, whatever `prob` was.",
+        "",
+        "**This GENERALISES `pf_mad(scale=\"normal\")`.** That procedure is the `Phi^-1(3/4)` case",
+        "taken about the median of the DEVIATIONS; this one is the same consistency factor taken",
+        "between two quantiles of the VALUES. Both answer \"sigma, robustly\", and on clean",
+        "Gaussian data `pf_stddev`, `pf_mad` and `pf_probit_scale` agree to within sampling error",
+        "-- on a sample with a few wild points the first parts company with the other two, which",
+        "is the whole reason to reach for either.",
+        "",
+        "`prob = 0.15865525393145705` is the 16th/84th percentile pair, the other value in daily",
+        "use and the one whose divisor is exactly 2. `prob` outside `(0, 0.5)` ABORTS: `0.5` asks",
+        "for `0/0` and `0` asks for the whole range over an infinity.",
+        "",
+        "**`method=` here is `pf_quantile`'s interpolation rule**, since this is two `pf_quantile`",
+        "probes off one ordering -- NOT `pf_probit_fit`'s plotting-position token, which shares",
+        "the argument name and means something else entirely.",
+        "",
+        "A CONSTANT population gives exactly `0`, which is the right scale for it and not a",
+        "failure: `ok` stays .true. An empty one gives a quiet NaN with `ok = .false.`"],
     "pf_describe": [
         "Summarises a population into a `pf_stats`, ordered and ready -- pandas' `describe()`.",
         "",
@@ -3093,12 +3401,13 @@ def gen_spec():
     out = [SPEC_HEAD.rstrip("\n") + "\n"]
     out.append("    public :: pf_count_valid")
     out.append("    public :: pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem")
-    out.append("    public :: pf_gmean, pf_hmean")
+    out.append("    public :: pf_gmean, pf_hmean, pf_probit_mean")
     out.append("    public :: pf_skewness, pf_kurtosis, pf_moments")
     out.append("    public :: pf_median, pf_quantile, pf_quantiles")
     out.append("    public :: pf_iqr, pf_trim_mean, pf_percentile_of_score")
     out.append("    public :: pf_mad, pf_mode, pf_describe")
     out.append("    public :: pf_cov, pf_corr, pf_zscore, pf_normal_scores")
+    out.append("    public :: pf_probit_fit, pf_probit_scale")
     out.append("    public :: pf_sigma_clipped_stats")
     out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
     out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges")
@@ -3147,8 +3456,8 @@ def gen_spec():
     out.append(COUNT_COL_I32_IFACE)
     out.append(NARROW_IFACE)
     out.append("    end interface")
-    for name in ("pf_sum", "pf_mean", "pf_gmean", "pf_hmean", "pf_variance", "pf_stddev",
-                 "pf_sem", "pf_skewness", "pf_kurtosis", "pf_moments"):
+    for name in ("pf_sum", "pf_mean", "pf_gmean", "pf_hmean", "pf_probit_mean", "pf_variance",
+                 "pf_stddev", "pf_sem", "pf_skewness", "pf_kurtosis", "pf_moments"):
         out.append("    !")
         for line in GENERIC_DOC[name]:
             out.append(("    !> " + line).rstrip())
@@ -3159,7 +3468,7 @@ def gen_spec():
             out.append("        module procedure %s" % spec)
         out.append("    end interface %s" % name)
     for name in ("pf_median", "pf_quantile", "pf_quantiles", "pf_iqr", "pf_trim_mean",
-                 "pf_percentile_of_score", "pf_mad"):
+                 "pf_percentile_of_score", "pf_mad", "pf_probit_scale"):
         out.append("    !")
         for line in ORDER_DOC[name]:
             out.append(("    !> " + line).rstrip())
@@ -3180,7 +3489,7 @@ def gen_spec():
     for spec in GENERIC_SPECIFICS_ORDER["pf_describe"]:
         out.append("        module procedure %s" % spec)
     out.append("    end interface pf_describe")
-    for name in ("pf_cov", "pf_corr", "pf_zscore", "pf_normal_scores",
+    for name in ("pf_cov", "pf_corr", "pf_zscore", "pf_normal_scores", "pf_probit_fit",
                  "pf_sigma_clipped_stats"):
         out.append("    !")
         for line in RELATE_DOC[name]:
@@ -3246,6 +3555,7 @@ def gen_spec():
     relate = relate.replace("@@corr_opts@@", "\n".join(CORR_D[k] for k in CORR_OPTS))
     relate = relate.replace("@@zscore_opts@@", "\n".join(D[k] for k in ZSCORE_OPTS))
     relate = relate.replace("@@nscore_opts@@", "\n".join(NSCORE_D[k] for k in NSCORE_OPTS))
+    relate = relate.replace("@@pfit_opts@@", "\n".join(PFIT_D[k] for k in PFIT_OPTS))
     relate = relate.replace("@@sigclip_opts@@", "\n".join(ORDER_D[k] for k in SIGCLIP_OPTS))
     out.append(relate)
     cum = CUM_IFACES.replace("@@cum_opts@@", "\n".join(D[k] for k in CUM_OPTS))
@@ -3283,6 +3593,7 @@ def gen_spec():
                               CORR_OPTS, tag, decl, kindword, []))
         out.append(zscore_iface(tag, decl, has_nan, kindword))
         out.append(nscore_iface(tag, decl, has_nan, kindword))
+        out.append(pfit_iface(tag, decl, has_nan, kindword))
         out.append(sigclip_iface(tag, decl, has_nan, kindword))
         for base, word in CUM_WORDS:
             out.append(cum_iface(base, "the running %s, same size as `values`. An excluded "
@@ -3326,6 +3637,7 @@ def gen_kernel():
         bodies.append(pair_body("corr", "r", CORR_OPTS, tag, widen))
         bodies.append(zscore_body(tag, widen, has_nan))
         bodies.append(nscore_body(tag, widen, has_nan))
+        bodies.append(pfit_body(tag, widen, has_nan))
         bodies.append(sigclip_body(tag, widen, has_nan))
         for base, _ in CUM_WORDS:
             bodies.append(cum_body(base, tag, widen, has_nan))

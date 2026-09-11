@@ -163,6 +163,106 @@ def z_grid():
     return sorted({z for z in zs} | {-z for z in zs})
 
 
+# --------------------------------------------------------------------------------------
+# The recipe fixture, and the three statistics built on the kernel
+# --------------------------------------------------------------------------------------
+
+#: The population `golden_fixture` in test/test_stats.f90 produces, as an exact rational recipe.
+#: Mirrored there, not copied here as a table: `a(i)` is exact in int64 and the divisor is a power
+#: of two, so `x(i)` is the same double in both languages. `tools/generate_stats_vectors.py`
+#: carries the same five constants for the same fixture -- change one and the emitted values
+#: disagree with the Fortran side, which `test_probit_family_matches_the_oracle` reports.
+RECIPE_A, RECIPE_B, RECIPE_M = 7919, 12345, 1000003
+RECIPE_OFFSET, RECIPE_SCALE = 500001, 1024.0
+
+#: How many fixture elements the fit and the scale are taken over. Large enough that the plotting
+#: positions reach both tails and that a wrong denominator (`n` for `m`) would move the answer,
+#: small enough to stay a fast test.
+FIT_N = 1000
+
+#: The probability fixture `pf_probit_mean` is taken over, mirrored by `golden_probs` in
+#: test/test_stats.f90. `a(i) + 1` runs over `[1, 1000003]` and the divisor is 1000005, so every
+#: value is STRICTLY inside `(0, 1)` -- the boundary rows are asserted separately and exactly, and
+#: a fixture that stumbled onto one would silently turn this case into that one.
+PROB_DIV = 1000005.0
+
+
+def fixture(n):
+    """The `x(1:n)` a Fortran `golden_fixture(n, x)` call must produce, as exact doubles."""
+    out = []
+    for i in range(1, n + 1):
+        a = (i * i * RECIPE_A + RECIPE_B) % RECIPE_M
+        out.append((a - RECIPE_OFFSET) / RECIPE_SCALE)
+    return out
+
+
+def probs(n):
+    """The `p(1:n)` a Fortran `golden_probs(n, p)` call must produce, as exact doubles."""
+    out = []
+    for i in range(1, n + 1):
+        a = (i * i * RECIPE_A + RECIPE_B) % RECIPE_M
+        out.append((a + 1) / PROB_DIV)
+    return out
+
+
+def plotting_position(r, m, a, filliben):
+    """`nscore_position` at 50 digits: the probability rank `r` of `m` marks."""
+    rm = mpf(m)
+    if m == 1:
+        return mpf(1) / 2
+    if filliben:
+        if r == 1:
+            return 1 - mpf(0.5) ** (1 / rm)
+        if r == m:
+            return mpf(0.5) ** (1 / rm)
+        return (mpf(r) - mpf("0.3175")) / (rm + mpf("0.365"))
+    return (mpf(r) - a) / (rm + 1 - 2 * a)
+
+
+def probit_fit(values, a, filliben=False):
+    """`pf_probit_fit` at 50 digits: `(loc, sigma, corr)` of the normal-probability line.
+
+    The ranks are ORDINAL over the sorted values, which is what `scipy.stats.probplot` does and
+    what keeps the plotting positions symmetric -- so `loc` is the mean and the sums below need no
+    `z` centring. `probit_line` in src/parquet_stats_order.f90 is the implementation this pins.
+    """
+    ys = sorted(mpf(v) for v in values)
+    m = len(ys)
+    zs = [probit(plotting_position(r, m, a, filliben)) for r in range(1, m + 1)]
+    ybar = sum(ys) / m
+    szz = sum(z * z for z in zs)
+    szy = sum(z * (y - ybar) for z, y in zip(zs, ys))
+    syy = sum((y - ybar) ** 2 for y in ys)
+    return ybar, szy / szz, szy / msqrt(szz * syy)
+
+
+def quantile7(sorted_ys, pr):
+    """One quantile by Hyndman-Fan type 7 -- `method="linear"`, numpy's and this library's default."""
+    h = (len(sorted_ys) - 1) * mpf(pr)
+    lo = int(h)
+    if lo >= len(sorted_ys) - 1:
+        return sorted_ys[-1]
+    return sorted_ys[lo] + (h - lo) * (sorted_ys[lo + 1] - sorted_ys[lo])
+
+
+def probit_scale(values, pr):
+    """`pf_probit_scale` at 50 digits: `(Q(1-p) - Q(p)) / (2*Phi^-1(1-p))`."""
+    ys = sorted(mpf(v) for v in values)
+    return (quantile7(ys, 1 - mpf(pr)) - quantile7(ys, pr)) / (2 * probit(1 - mpf(pr)))
+
+
+def probit_mean(ps, ws=None):
+    """`pf_probit_mean` at 50 digits: `Phi(sum(w*Phi^-1(p)) / sum(w))`, zero weights excluded."""
+    acc, wsum = mpf(0), mpf(0)
+    for k, pv in enumerate(ps):
+        w = mpf(1) if ws is None else mpf(ws[k])
+        if w == 0:
+            continue                        # a zero weight REMOVES the element, as everywhere else
+        acc += w * probit(mpf(pv))
+        wsum += w
+    return norm_cdf(acc / wsum)
+
+
 def fortran_real(v):
     """`v` as a round-trip-exact Fortran `real64` literal."""
     text = "%.17g" % float(v)
@@ -260,6 +360,40 @@ def emit():
     out.append("    real(real64), parameter :: PROBIT_Q3 = %s" % fortran_real(probit(0.75)))
     out.append("    real(real64), parameter :: MAD_NORMAL_SCALE_REF = %s"
                % fortran_real(1 / probit(0.75)))
+    out.append("")
+    xs = fixture(FIT_N)
+    ps = probs(FIT_N)
+    ws = [float(i % 5) for i in range(1, FIT_N + 1)]
+    loc, sig, cor = probit_fit(xs, mpf("0.375"))
+    floc, fsig, fcor = probit_fit(xs, mpf(0), filliben=True)
+    out.append("    !> How many elements the fixture statistics below are taken over.")
+    out.append("    integer, parameter :: NFIX = %d" % FIT_N)
+    out.append("")
+    out.append("    !> `pf_probit_fit` over the first `NFIX` values of `golden_fixture`, at the")
+    out.append("    !! default `method=\"blom\"`. `LOC` is the mean of the population, which is")
+    out.append("    !! what a symmetric plotting-position rule makes the intercept.")
+    out.append("    real(real64), parameter :: FIT_LOC = %s" % fortran_real(loc))
+    out.append("    real(real64), parameter :: FIT_SIGMA = %s" % fortran_real(sig))
+    out.append("    real(real64), parameter :: FIT_CORR = %s" % fortran_real(cor))
+    out.append("")
+    out.append("    !> The same fit under `method=\"filliben\"`, whose positions are a different")
+    out.append("    !! FORMULA rather than a different constant -- so a token that fell through to")
+    out.append("    !! the default would match `FIT_*` instead of these.")
+    out.append("    real(real64), parameter :: FIT_LOC_FILLIBEN = %s" % fortran_real(floc))
+    out.append("    real(real64), parameter :: FIT_SIGMA_FILLIBEN = %s" % fortran_real(fsig))
+    out.append("    real(real64), parameter :: FIT_CORR_FILLIBEN = %s" % fortran_real(fcor))
+    out.append("")
+    out.append("    !> `pf_probit_scale` over the same population at the default `prob = 0.25`,")
+    out.append("    !! and at the 16th/84th percentile pair, whose divisor is exactly 2.")
+    out.append("    real(real64), parameter :: SCALE_P25 = %s" % fortran_real(probit_scale(xs, 0.25)))
+    out.append("    real(real64), parameter :: SCALE_P16 = %s"
+               % fortran_real(probit_scale(xs, 0.15865525393145705)))
+    out.append("")
+    out.append("    !> `pf_probit_mean` over the first `NFIX` values of `golden_probs`, unweighted")
+    out.append("    !! and under `golden_weights_mod5` -- where every fifth weight is ZERO and")
+    out.append("    !! removes its element, so the two differ by more than a reweighting.")
+    out.append("    real(real64), parameter :: PMEAN = %s" % fortran_real(probit_mean(ps)))
+    out.append("    real(real64), parameter :: PMEAN_W = %s" % fortran_real(probit_mean(ps, ws)))
     out.append("")
     out.append("end module test_probit_golden")
     return "\n".join(out) + "\n"
@@ -373,6 +507,62 @@ def self_test():
             elif abs(got - want) > 1e-9 * abs(want):
                 print("--self-test: %s(%r): oracle %.17g vs scipy %.17g (rel %.3g)"
                       % (label, z, got, want, abs(got - want) / abs(want)), file=sys.stderr)
+                fails += 1
+
+    # 2b. The fixture statistics against scipy, which is the ONE place the recipe fixture's
+    #     numbers meet an independent implementation of the same definitions.
+    #
+    #     `scipy.stats.probplot`'s plotting positions are Filliben's MEDIAN RANKS, not the
+    #     `a = 3/8` positions this library defaults to -- so the token has to be named, and the
+    #     comparison is against the filliben arm. Getting that wrong is not a rounding difference:
+    #     the two slopes disagree in the third digit on a thousand points, which is exactly the
+    #     size of error a loose tolerance would absorb without comment.
+    xs = fixture(FIT_N)
+    (osm, osr), (slope, icept, rval) = __import__("scipy.stats", fromlist=["stats"]).probplot(
+        xs, dist="norm", fit=True)
+    loc, sig, cor = probit_fit(xs, mpf(0), filliben=True)
+    for label, ours, theirs in (("probit_fit loc", loc, icept),
+                                ("probit_fit sigma", sig, slope),
+                                ("probit_fit corr", cor, rval)):
+        checks += 1
+        if abs(float(ours) - theirs) > 1e-12 * max(abs(theirs), 1.0):
+            print("--self-test: %s: oracle %.17g vs scipy.probplot %.17g"
+                  % (label, float(ours), theirs), file=sys.stderr)
+            fails += 1
+    # The blom default must NOT match scipy's probplot, or the two tokens have collapsed into one
+    # and every "each token gives its own answer" assertion downstream is vacuous.
+    checks += 1
+    if abs(float(probit_fit(xs, mpf("0.375"))[1]) - slope) < 1e-6:
+        print("--self-test: the blom and filliben slopes agree to 1e-6 over the fixture; one of "
+              "the two plotting-position rules is not being applied", file=sys.stderr)
+        fails += 1
+    ps = probs(FIT_N)
+    for label, ours, theirs in (
+            ("probit_scale p=0.25", probit_scale(xs, 0.25),
+             (__import__("numpy").percentile(xs, 75) - __import__("numpy").percentile(xs, 25))
+             / 1.3489795003921634),
+            ("probit_mean", probit_mean(ps),
+             float(norm.cdf(__import__("numpy").mean(norm.ppf(ps)))))):
+        checks += 1
+        if abs(float(ours) - theirs) > 1e-12 * max(abs(theirs), 1.0):
+            print("--self-test: %s: oracle %.17g vs scipy/numpy %.17g"
+                  % (label, float(ours), theirs), file=sys.stderr)
+            fails += 1
+    # Every plotting-position rule this library offers is SYMMETRIC about the median, which is
+    # what makes `loc` the mean rather than a regression intercept (`probit_line`,
+    # src/parquet_stats_order.f90; feature_risks.md Risk-255). Asserted here rather than assumed,
+    # because a token added later that broke it would leave `loc` quietly wrong.
+    for label, a, fil in (("blom", mpf("0.375"), False), ("weibull", mpf(0), False),
+                          ("tukey", mpf(1) / 3, False), ("hazen", mpf("0.5"), False),
+                          ("cunnane", mpf("0.4"), False), ("filliben", mpf(0), True)):
+        for m in (2, 3, 7, 40):
+            checks += 1
+            total = sum(plotting_position(r, m, a, fil) + plotting_position(m + 1 - r, m, a, fil)
+                        - 1 for r in range(1, m + 1))
+            if abs(total) > mpf("1e-40"):
+                print("--self-test: the %s positions are not symmetric at m=%d (residual %s); "
+                      "pf_probit_fit's loc is the mean only while they are"
+                      % (label, m, mp.nstr(total, 5)), file=sys.stderr)
                 fails += 1
 
     # 3. The erfinv coefficients the kernel starts from, re-derived by reversion. They decide only

@@ -1092,6 +1092,14 @@ program error_scenarios
         call scenario_stats_corr_bad_method()
     case ("stats_normal_scores_bad_method")
         call scenario_stats_normal_scores_bad_method()
+    case ("stats_probit_fit_bad_method")
+        call scenario_stats_probit_fit_bad_method()
+    case ("stats_probit_scale_bad_prob")
+        call scenario_stats_probit_scale_bad_prob()
+    case ("stats_probit_mean_bad_weight")
+        call scenario_stats_probit_mean_bad_weight()
+    case ("stats_object_probit_mean_without_retain")
+        call scenario_stats_object_probit_mean_without_retain()
     case ("stats_spearman_with_weights")
         call scenario_stats_spearman_with_weights()
     case ("stats_pair_size_mismatch")
@@ -20974,6 +20982,63 @@ contains
         call pf_normal_scores(x, s, method="rankit")    ! -> aborts (unknown token)
         print '(a,es12.5)', "unexpectedly accepted method=rankit, s(1)=", s(1)
     end subroutine scenario_stats_normal_scores_bad_method
+
+    !> `pf_probit_fit` reaches the SAME plotting-position resolver `pf_normal_scores` does, from a
+    !! different submodule. That edge is the point of this scenario: the resolver is a separate
+    !! module procedure precisely so the two cannot come to disagree about the six tokens, and a
+    !! copy made in `parquet_stats_order` would pass every in-process test while accepting -- or
+    !! refusing -- a different set here.
+    subroutine scenario_stats_probit_fit_bad_method()
+        real(real64) :: x(6) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64, 8.0_real64, &
+            13.0_real64]
+        real(real64) :: loc, sigma
+
+        call pf_probit_fit(x, loc, sigma, method="cunnane")   ! a real token: accepted
+        if (sigma <= 0.0_real64) print '(a)', "the fitted slope is not positive"
+        call pf_probit_fit(x, loc, sigma, method="rankit")    ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted method=rankit, sigma=", sigma
+    end subroutine scenario_stats_probit_fit_bad_method
+
+    !> `prob = 0.5` asks for a zero range over a zero divisor. The negative control is a legal
+    !! `prob` first, so a `pf_probit_scale` that refused every value would not pass this.
+    subroutine scenario_stats_probit_scale_bad_prob()
+        real(real64) :: x(6) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64, 8.0_real64, &
+            13.0_real64]
+        real(real64) :: sigma
+
+        call pf_probit_scale(x, sigma, prob=0.1_real64)   ! inside (0, 0.5): accepted
+        if (sigma <= 0.0_real64) print '(a)', "the implied scale is not positive"
+        call pf_probit_scale(x, sigma, prob=0.5_real64)   ! -> aborts (0/0)
+        print '(a,es12.5)', "unexpectedly accepted prob=0.5, sigma=", sigma
+    end subroutine scenario_stats_probit_scale_bad_prob
+
+    !> A negative weight is the family's standing misuse, and `pf_probit_mean` must inherit the
+    !! refusal rather than reimplement the weight rules.
+    subroutine scenario_stats_probit_mean_bad_weight()
+        real(real64) :: p(3) = [0.2_real64, 0.5_real64, 0.8_real64]
+        real(real64) :: good(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: bad(3) = [1.0_real64, -2.0_real64, 3.0_real64]
+        real(real64) :: m
+
+        call pf_probit_mean(p, m, weights=good)      ! non-negative: accepted
+        if (m <= 0.0_real64 .or. m >= 1.0_real64) print '(a)', "the probit mean left [0, 1]"
+        call pf_probit_mean(p, m, weights=bad)       ! -> aborts (negative weight)
+        print '(a,es12.5)', "unexpectedly accepted a negative weight, m=", m
+    end subroutine scenario_stats_probit_mean_bad_weight
+
+    !> `%probit_mean` needs the retained values for `%gmean`'s reason: a probit-sum is a fifth
+    !! accumulated quantity the streaming accumulator does not carry.
+    subroutine scenario_stats_object_probit_mean_without_retain()
+        type(pf_stats) :: keeper, streamer
+
+        call keeper%init(retain=.true.)
+        call keeper%update([0.2_real64, 0.5_real64, 0.8_real64])
+        if (keeper%probit_mean() /= keeper%probit_mean()) print '(a)', "the retaining form is NaN"
+        call streamer%init(retain=.false.)
+        call streamer%update([0.2_real64, 0.5_real64, 0.8_real64])
+        print '(a,es12.5)', "unexpectedly read a probit mean off a streaming pf_stats, m=", &
+            streamer%probit_mean()     ! -> aborts (retain=.false.)
+    end subroutine scenario_stats_object_probit_mean_without_retain
 
     !> A weighted midrank is a definitional choice no reference library makes, so this refuses.
     subroutine scenario_stats_spearman_with_weights()

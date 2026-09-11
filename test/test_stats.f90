@@ -36,11 +36,17 @@ module test_stats
     ! itself. `parquet_stats` imports `pf_probit` with an `only:` list and is `private` by
     ! default, so it does not re-export it and this module names it directly -- which is also the
     ! point: the expectation must not come from the same generic the library reached through.
-    use parquet_utils, only : pf_probit
+    use parquet_utils, only : pf_probit, pf_norm_cdf
     use parquet_random
     use parquet_columns
     use parquet_strings
     use test_stats_golden
+    ! The 50-digit expectations for the probit family over the recipe fixture, from
+    ! `tools/generate_probit_reference.py`. An `only:` list rather than the bare `use` that module
+    ! invites, because it is `public` throughout and carries short names (`NP`, `NZ`, `P_GRID`)
+    ! that a future test here could shadow without noticing.
+    use test_probit_golden, only : NFIX, FIT_LOC, FIT_SIGMA, FIT_CORR, FIT_LOC_FILLIBEN, &
+        FIT_SIGMA_FILLIBEN, FIT_CORR_FILLIBEN, SCALE_P25, SCALE_P16, PMEAN, PMEAN_W
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_get_flag, &
         ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_is_nan
@@ -200,6 +206,22 @@ contains
                 test_normal_scores_every_method_token), &
             new_unittest("pf_normal_scores' one-element, empty and all-tied populations", &
                 test_normal_scores_degenerate), &
+            new_unittest("the probit family matches the 50-digit oracle on the recipe fixture", &
+                test_probit_family_matches_the_oracle), &
+            new_unittest("pf_probit_fit's loc IS the mean of the survivors, for every token", &
+                test_probit_fit_loc_is_the_mean), &
+            new_unittest("pf_probit_fit recovers a Gaussian and its corr falls on a skewed " // &
+                "sample", test_probit_fit_recovers_a_gaussian), &
+            new_unittest("pf_probit_scale, pf_mad and pf_stddev agree on Gaussian data and " // &
+                "diverge on a contaminated one", test_probit_scale_estimates_the_sigma), &
+            new_unittest("pf_probit_fit's and pf_probit_scale's degenerate populations", &
+                test_probit_fit_and_scale_degenerate), &
+            new_unittest("the probit bindings answer off ONE ordering, bit for bit", &
+                test_probit_bindings_read_tier_b), &
+            new_unittest("pf_probit_mean is exactly 0 with a zero, exactly 1 with a one and " // &
+                "NaN with both", test_probit_mean_boundary_rows), &
+            new_unittest("pf_probit_mean's domain screen reads a NaN as a NaN", &
+                test_probit_mean_domain_and_weights), &
             new_unittest("pf_sigma_clipped_stats reproduces astropy", &
                 test_sigma_clip_matches_astropy), &
             new_unittest("a whole sigma-clipping run costs ONE ordering", &
@@ -3250,7 +3272,7 @@ contains
     !! is the `skipnan=.true.` half below, which must still answer a number.
     subroutine test_propagating_nan_reaches_every_tier(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
-        real(real64) :: v(9), r, ns(9)
+        real(real64) :: v(9), r, ns(9), fsig, fcor
         type(pf_stats) :: s
         integer :: k
         logical :: ok, ov(9)
@@ -3291,12 +3313,31 @@ contains
         call check(error, all(ns /= ns) .and. .not. ok, &
             "and pf_normal_scores, where EVERY score must be NaN and not just the NaN's own")
         if (allocated(error)) return
+        call pf_probit_fit(v, r, fsig, fcor, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. fsig /= fsig .and. fcor /= fcor .and. .not. ok, &
+            "and pf_probit_fit, in all THREE of its outputs")
+        if (allocated(error)) return
+        call pf_probit_scale(v, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "and pf_probit_scale")
+        if (allocated(error)) return
+        ! `pf_probit_mean` reads its population as probabilities, so the NaN travels in one.
+        call pf_probit_mean([0.2_real64, ieee_value(1.0_real64, ieee_quiet_nan), 0.7_real64], &
+            r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, &
+            "and pf_probit_mean, where the NaN must not be read as an out-of-domain value")
+        if (allocated(error)) return
 
         ! The object side takes the same route through its own guard.
         call s%compute(v, skipnan=.false.)
         call check(error, s%median() /= s%median(), "%median must propagate it")
         if (allocated(error)) return
         call check(error, s%mad() /= s%mad(), "%mad must propagate it")
+        if (allocated(error)) return
+        call s%probit_fit(r, fsig, fcor)
+        call check(error, r /= r .and. fsig /= fsig .and. fcor /= fcor, &
+            "%probit_fit must propagate it")
+        if (allocated(error)) return
+        call check(error, s%probit_scale() /= s%probit_scale(), "%probit_scale must propagate it")
         if (allocated(error)) return
 
         ! The negative control: at the default `skipnan=.true.` every one of these is a number.
@@ -3314,6 +3355,15 @@ contains
         call check(error, count(ov) == 8 .and. .not. ov(4) .and. &
             all(ns == ns .or. .not. ov), &
             "and pf_normal_scores scores the eight survivors, excluding only the NaN")
+        if (allocated(error)) return
+        call pf_probit_fit(v, r, fsig, fcor, ok=ok)
+        call check(error, r == r .and. fsig == fsig .and. fcor == fcor .and. ok, &
+            "and pf_probit_fit fits the eight survivors")
+        if (allocated(error)) return
+        call pf_probit_mean([0.2_real64, ieee_value(1.0_real64, ieee_quiet_nan), 0.7_real64], &
+            r, ok=ok)
+        call check(error, r == r .and. ok, &
+            "and pf_probit_mean averages the two survivors rather than refusing the population")
     end subroutine test_propagating_nan_reaches_every_tier
 
     !> The second sample the two-sample tests are taken against.
@@ -3823,6 +3873,505 @@ contains
         call check(error, abs(mid) < 1.0e-15_real64, &
             "and that score is the centre, because the midrank of a full tie is (m+1)/2")
     end subroutine test_normal_scores_degenerate
+
+    !> The probability fixture `pf_probit_mean`'s golden cases are taken over.
+    !!
+    !! `a(i) + 1` runs over `[1, 1000003]` and the divisor is 1000005, so every value is STRICTLY
+    !! inside `(0, 1)`: the `0` and `1` rows are the subject of their own test and are asserted
+    !! exactly, and a fixture that stumbled onto one would quietly turn this case into that one.
+    !! Both integers are exact doubles and the division is one correctly rounded operation, so
+    !! `probs()` in `tools/generate_probit_reference.py` produces the same doubles.
+    subroutine golden_probs(n, p)
+        integer(int64), intent(in) :: n                          !! how many values to build.
+        real(real64), allocatable, intent(out) :: p(:)           !! the probabilities.
+        integer(int64) :: i, a
+
+        allocate(p(n))
+        do i = 1_int64, n
+            a = mod(i * i * 7919_int64 + 12345_int64, 1000003_int64)
+            p(i) = real(a + 1_int64, real64) / 1000005.0_real64
+        end do
+    end subroutine golden_probs
+
+    !> `pf_probit_fit`, `pf_probit_scale` and `pf_probit_mean` against the 50-digit oracle.
+    !!
+    !! **The oracle shares no arithmetic with the library**: every expectation comes from `mpmath`
+    !! at 50 digits through `tools/generate_probit_reference.py`, whose `--self-test` also checks
+    !! the fit against `scipy.stats.probplot` and the scale against numpy's percentiles. What is
+    !! asserted here is that this library's double-precision route lands on the correctly rounded
+    !! answer to within the accumulated rounding of a thousand-element reduction.
+    !!
+    !! **Both `method=` arms are asserted, and they must DIFFER.** `scipy.stats.probplot`'s
+    !! plotting positions are Filliben's median ranks rather than this generic's `"blom"` default,
+    !! so the two tokens are what the two golden sets are; a token silently falling through to the
+    !! default would make one set match the other, which the third assertion is what catches.
+    subroutine test_probit_family_matches_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), parameter :: TOL = 1.0e-12_real64
+        real(real64), allocatable :: x(:), p(:), w(:)
+        real(real64) :: loc, sigma, corr, floc, fsigma, fcorr, sc, m
+        integer(int64) :: i
+
+        call golden_fixture(int(NFIX, int64), x)
+        call pf_probit_fit(x, loc, sigma, corr)
+        call check(error, abs(loc - FIT_LOC) <= TOL * abs(FIT_LOC), &
+            "pf_probit_fit's intercept must match the oracle over the recipe fixture")
+        if (allocated(error)) return
+        call check(error, abs(sigma - FIT_SIGMA) <= TOL * abs(FIT_SIGMA), &
+            "and its slope, which is the whole point of the procedure")
+        if (allocated(error)) return
+        call check(error, abs(corr - FIT_CORR) <= TOL * abs(FIT_CORR), &
+            "and the probability-plot correlation coefficient")
+        if (allocated(error)) return
+        ! 0.974 rather than 1: the fixture is a scrambled uniform, not a Gaussian. A `corr`
+        ! computed against the FITTED values rather than against the normal scores would be
+        ! exactly 1 here, which is why the oracle's value being well below 1 is load-bearing.
+        call check(error, FIT_CORR < 0.99_real64, &
+            "the control: the fixture is not Gaussian, so a corr of 1 would mean corr is " // &
+            "being computed by construction")
+        if (allocated(error)) return
+
+        call pf_probit_fit(x, floc, fsigma, fcorr, method="filliben")
+        call check(error, abs(fsigma - FIT_SIGMA_FILLIBEN) <= TOL * abs(FIT_SIGMA_FILLIBEN) .and. &
+            abs(fcorr - FIT_CORR_FILLIBEN) <= TOL * abs(FIT_CORR_FILLIBEN) .and. &
+            abs(floc - FIT_LOC_FILLIBEN) <= TOL * abs(FIT_LOC_FILLIBEN), &
+            'method="filliben" must match its own golden set, which is scipy.stats.probplot')
+        if (allocated(error)) return
+        call check(error, abs(fsigma - sigma) > 1.0e-6_real64 * abs(sigma), &
+            "the control: the two tokens must give DIFFERENT slopes, or one of them fell " // &
+            "through to the other")
+        if (allocated(error)) return
+
+        call pf_probit_scale(x, sc)
+        call check(error, abs(sc - SCALE_P25) <= TOL * abs(SCALE_P25), &
+            "pf_probit_scale at the default prob=0.25 must match the oracle")
+        if (allocated(error)) return
+        call pf_probit_scale(x, sc, prob=0.15865525393145705_real64)
+        call check(error, abs(sc - SCALE_P16) <= TOL * abs(SCALE_P16), &
+            "and at the 16th/84th percentile pair, whose divisor is exactly 2")
+        if (allocated(error)) return
+
+        call golden_probs(int(NFIX, int64), p)
+        call pf_probit_mean(p, m)
+        call check(error, abs(m - PMEAN) <= TOL * abs(PMEAN), &
+            "pf_probit_mean must match the oracle over the probability fixture")
+        if (allocated(error)) return
+        allocate(w(NFIX))
+        do i = 1_int64, int(NFIX, int64)
+            w(i) = real(mod(i, 5_int64), real64)
+        end do
+        call pf_probit_mean(p, m, weights=w)
+        call check(error, abs(m - PMEAN_W) <= TOL * abs(PMEAN_W), &
+            "and weighted, where every fifth weight is ZERO and removes its element")
+        if (allocated(error)) return
+        call check(error, abs(PMEAN_W - PMEAN) > 1.0e-6_real64, &
+            "the control: the weighted and unweighted answers must differ, or the weights are " // &
+            "not reaching the accumulation")
+    end subroutine test_probit_family_matches_the_oracle
+
+    !> `pf_probit_fit`'s `loc` is the MEAN of the survivors, under every token.
+    !!
+    !! **This is `feature_risks.md` Risk-255, and equality is the assertion rather than a
+    !! tolerance.** Every one of the six plotting-position rules is symmetric about the median, so
+    !! the normal scores sum to zero and the least-squares intercept IS the mean -- which is why
+    !! `probit_line` evaluates it as the mean. Two changes break that silently: an asymmetric
+    !! `method=` token added later, and replacing the ORDINAL ranks with `pf_normal_scores`'
+    !! midranks, which a tie makes asymmetric. The TIED population below is what sees the second.
+    !!
+    !! Exclusions are in the fixture too, because the identity is over the SURVIVORS: a `loc`
+    !! taken over the whole array would fail here and pass on an unmasked population.
+    subroutine test_probit_fit_loc_is_the_mean(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        character(len=8), parameter :: TOKENS(6) = ["blom    ", "weibull ", "tukey   ", &
+            "hazen   ", "cunnane ", "filliben"]
+        real(real64) :: tied(9), want, loc, sigma, plain
+        real(real64), allocatable :: x(:), kept(:)
+        logical, allocatable :: mask(:)
+        integer(int64) :: i, k
+        integer :: j
+
+        ! A population with ties spanning three different runs, so the ordinal-versus-midrank
+        ! choice is observable rather than a distinction without a difference.
+        tied = [3.0_real64, 1.0_real64, 3.0_real64, 7.0_real64, 1.0_real64, 9.0_real64, &
+            3.0_real64, 12.0_real64, 9.0_real64]
+        ! Small integers, so BOTH routes to the mean are exact here and `==` is available: this
+        ! population sums to 48 whatever order it is added in, and the single division that
+        ! follows rounds the same way for both. At the fixture's scale below that is no longer
+        ! true -- `pf_mean` refines its quotient and its own doc-comment says so -- which is why
+        ! the second half of this test uses an ulp bound rather than equality.
+        call pf_mean(tied, want)
+        do j = 1, 6
+            call pf_probit_fit(tied, loc, sigma, method=trim(TOKENS(j)))
+            call check(error, loc == want, &
+                "pf_probit_fit(method=" // trim(TOKENS(j)) // ")'s loc must be the mean of the " // &
+                "survivors; a midrank or an asymmetric position rule breaks it")
+            if (allocated(error)) return
+        end do
+
+        ! The same identity with a third of the population excluded. `kept` is the survivors on
+        ! their own, so `want` is a mean of the sub-population and not of the array.
+        call golden_fixture(60_int64, x)
+        allocate(mask(60), kept(40))
+        k = 0_int64
+        do i = 1_int64, 60_int64
+            mask(i) = mod(i, 3_int64) /= 0_int64
+            if (mask(i)) then
+                k = k + 1_int64
+                kept(k) = x(i)
+            end if
+        end do
+        ! **`pf_sum` rather than `pf_mean`, and equality rather than a tolerance.** Every fixture
+        ! value is an integer over 1024 with a magnitude below 512, so forty of them sum exactly
+        ! in any order -- a PAIRWISE sum and the plain sorted one inside `probit_line` reach the
+        ! same double, and the single division that follows rounds identically. `pf_mean` is a
+        ! deliberately different quantity here: it refines its quotient by `sum(x - mu)/n`, which
+        ! is the right centre for the moments and, on a population that already summed exactly,
+        ! costs about 20 ulp. Comparing against it would need a bound loose enough to hide
+        ! nothing this test is looking for, but would say the wrong thing about which value is
+        ! the accurate one.
+        call pf_sum(kept, want)
+        want = want / real(size(kept, kind=int64), real64)
+        call pf_probit_fit(x, loc, sigma, is_valid=mask)
+        call check(error, loc == want, &
+            "and over the SURVIVORS when a third of the population is excluded")
+        if (allocated(error)) return
+        ! And the sub-population computed on its own must give the same line, which is Risk-254's
+        ! shape one tier up: a denominator of `size(values)` leaves `loc` right and `sigma` wrong.
+        call pf_probit_fit(kept, plain, want)
+        call check(error, sigma == want, &
+            "pf_probit_fit's slope must denominate by the SURVIVOR count: the masked fit and " // &
+            "the sub-population fit must be bit-for-bit equal")
+    end subroutine test_probit_fit_loc_is_the_mean
+
+    !> The fit recovers a Gaussian's mean and sigma, and `corr` falls when the sample is skewed.
+    !!
+    !! **Both halves are needed and neither alone is worth much.** Without the second, a `corr`
+    !! computed as 1 by construction passes; without the first, a fit that returned the slope and
+    !! the intercept the other way round would still show a `corr` that falls. The skewed arm is
+    !! also what shows `corr` is a diagnostic rather than a formality.
+    subroutine test_probit_fit_recovers_a_gaussian(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: N = 50000_int64
+        real(real64), allocatable :: g(:), sk(:)
+        real(real64) :: loc, sigma, corr, loc2, sigma2, corr2, mu, sd
+        integer(int64) :: i
+
+        allocate(g(N), sk(N))
+        ! Counter-based at a fixed seed, so this is the same sample on every machine and thread
+        ! count: nothing about the pass condition below is statistical.
+        call pf_random_fill_normal(20260911_int64, 1_int64, g)
+        g = 12.5_real64 + 3.25_real64 * g
+        call pf_mean(g, mu)
+        call pf_stddev(g, sd)
+        call pf_probit_fit(g, loc, sigma, corr)
+        call check(error, abs(loc - mu) <= 1.0e-12_real64 * abs(mu), &
+            "the fitted intercept must be the sample mean")
+        if (allocated(error)) return
+        ! 0.5% of the sample standard deviation. The two estimate the same quantity and differ
+        ! only by their efficiency, so anything looser would also pass for a slope that had been
+        ! divided by the wrong denominator.
+        call check(error, abs(sigma - sd) <= 0.005_real64 * sd, &
+            "and the fitted slope must be the sample standard deviation, to sampling error")
+        if (allocated(error)) return
+        call check(error, corr > 0.9995_real64, &
+            "a Gaussian sample's normal-probability plot must be very nearly straight")
+        if (allocated(error)) return
+        ! Slope and intercept transposed would put the SCALE where the location is. The two are
+        ! 12.5 and 3.25 here, deliberately far apart, so the transposition cannot hide.
+        call check(error, abs(loc - sigma) > 1.0_real64, &
+            "the control: loc and sigma must be distinguishable, or a transposition passes")
+        if (allocated(error)) return
+
+        ! The skewed arm: exponentiating a Gaussian is a lognormal, whose normal-probability plot
+        ! is visibly bent. `corr` must fall, and it must fall a long way.
+        do i = 1_int64, N
+            sk(i) = exp(0.9_real64 * (g(i) - 12.5_real64) / 3.25_real64)
+        end do
+        call pf_probit_fit(sk, loc2, sigma2, corr2)
+        call check(error, corr2 < 0.96_real64, &
+            "and a lognormal sample's must not: corr is the normality diagnostic")
+        if (allocated(error)) return
+        call check(error, corr - corr2 > 0.03_real64, &
+            "the two corrs must be far apart, or corr is not discriminating between them")
+    end subroutine test_probit_fit_recovers_a_gaussian
+
+    !> `pf_probit_scale` is a robust sigma: it tracks `pf_stddev` on clean data and `pf_mad` on
+    !! contaminated data.
+    !!
+    !! Both halves, exactly as `test_mad_estimates_the_gaussian_sigma` has them: agreeing on the
+    !! clean sample is no coincidence, and disagreeing with `pf_stddev` on the contaminated one is
+    !! the entire reason to reach for either. The `pf_iqr` identity is what pins the DIVISOR --
+    !! a denominator formed as `Phi^-1(1-prob)` without the factor 2 doubles every answer, which
+    !! the sampling-error comparisons alone would not distinguish from a bad estimator.
+    subroutine test_probit_scale_estimates_the_sigma(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: N = 200000_int64
+        real(real64), allocatable :: g(:)
+        real(real64) :: sd, mad, sc, sd2, mad2, sc2, r
+        integer(int64) :: i
+
+        allocate(g(N))
+        call pf_random_fill_normal(20260829_int64, 1_int64, g)
+        call pf_stddev(g, sd)
+        call pf_mad(g, mad)
+        call pf_probit_scale(g, sc)
+        call check(error, abs(sc - sd) <= 0.01_real64 * sd, &
+            "pf_probit_scale must track pf_stddev on a clean Gaussian sample")
+        if (allocated(error)) return
+        call check(error, abs(sc - mad) <= 0.01_real64 * mad, &
+            "and pf_mad, which it generalises from the deviations to the values")
+        if (allocated(error)) return
+
+        ! The divisor, asserted as an identity rather than to a tolerance: at prob=0.25 this
+        ! procedure IS pf_iqr over 2*Phi^-1(0.75). One ulp of slack only, because both sides take
+        ! the same two quantiles off the same ordering.
+        call pf_iqr(g, r)
+        call check(error, abs(sc - r / 1.3489795003921634_real64) <= &
+            4.0_real64 * spacing(sc), &
+            "pf_probit_scale(prob=0.25) must be exactly pf_iqr over 1.3489795003921634")
+        if (allocated(error)) return
+        call check(error, abs(sc - r / 0.6744897501960817_real64) > 0.1_real64 * sc, &
+            "the control: dropping the factor 2 from the divisor must be visible")
+        if (allocated(error)) return
+
+        do i = 1000_int64, N, 1000_int64
+            g(i) = 100.0_real64
+        end do
+        call pf_stddev(g, sd2)
+        call pf_mad(g, mad2)
+        call pf_probit_scale(g, sc2)
+        call check(error, sd2 > 3.0_real64 * sd, &
+            "the control: pf_stddev must be wrecked by 0.1% contamination")
+        if (allocated(error)) return
+        call check(error, abs(sc2 - sc) <= 0.01_real64 * sc .and. &
+            abs(mad2 - mad) <= 0.01_real64 * mad, &
+            "pf_probit_scale and pf_mad must both be almost unmoved by it")
+    end subroutine test_probit_scale_estimates_the_sigma
+
+    !> The populations a line cannot be fitted to, and the ones where only `corr` is undefined.
+    subroutine test_probit_fit_and_scale_degenerate(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: empty(0), one(1), two(2), flat(5), v(9)
+        real(real64) :: loc, sigma, corr, sc
+        logical :: ok, ok2
+        integer :: k
+
+        call pf_probit_fit(empty, loc, sigma, corr, ok=ok)
+        call check(error, loc /= loc .and. sigma /= sigma .and. corr /= corr .and. .not. ok, &
+            "an empty population fits no line: three NaNs and ok=.false., never an abort")
+        if (allocated(error)) return
+        one = [4.0_real64]
+        call pf_probit_fit(one, loc, sigma, corr, ok=ok)
+        call check(error, loc /= loc .and. sigma /= sigma .and. .not. ok, &
+            "and one point fits no line either -- a line needs two")
+        if (allocated(error)) return
+        two = [1.0_real64, 5.0_real64]
+        call pf_probit_fit(two, loc, sigma, corr, ok=ok)
+        call check(error, loc == 3.0_real64 .and. sigma > 0.0_real64 .and. ok, &
+            "two points DO fit a line, and its intercept is their mean")
+        if (allocated(error)) return
+        ! Two points lie on their own line exactly, so the correlation is 1 to rounding. This is
+        ! the one population where a corr of 1 is the right answer.
+        call check(error, abs(corr - 1.0_real64) < 1.0e-12_real64, &
+            "and two points are collinear, so corr is 1")
+        if (allocated(error)) return
+
+        ! A CONSTANT population: the location and the scale are both perfectly well defined and
+        ! only the correlation is not, which is the one shape where `ok` depends on whether the
+        ! caller asked for `corr` at all.
+        flat = 7.5_real64
+        call pf_probit_fit(flat, loc, sigma, ok=ok)
+        call check(error, loc == 7.5_real64 .and. sigma == 0.0_real64 .and. ok, &
+            "a constant population has loc = that constant and sigma exactly 0, with ok=.true.")
+        if (allocated(error)) return
+        call pf_probit_fit(flat, loc, sigma, corr, ok=ok2)
+        call check(error, corr /= corr .and. .not. ok2, &
+            "but its corr is a NaN, and asking for it is what turns ok .false.")
+        if (allocated(error)) return
+        call pf_probit_scale(flat, sc, ok=ok)
+        call check(error, sc == 0.0_real64 .and. ok, &
+            "and its implied scale is exactly 0, which is an answer rather than a failure")
+        if (allocated(error)) return
+        call pf_probit_scale(empty, sc, ok=ok)
+        call check(error, sc /= sc .and. .not. ok, &
+            "an empty population's implied scale is a quiet NaN with ok=.false.")
+        if (allocated(error)) return
+
+        ! Risk-253: under skipnan=.false. the NaN sorts to one end and the line through the rest
+        ! is an entirely ordinary one, so `saw_nan` has to be tested rather than inherited.
+        do k = 1, 9
+            v(k) = real(k, real64)
+        end do
+        v(4) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_probit_fit(v, loc, sigma, corr, skipnan=.false., ok=ok)
+        call check(error, loc /= loc .and. sigma /= sigma .and. corr /= corr .and. .not. ok, &
+            "a propagating NaN must reach every one of pf_probit_fit's three outputs")
+        if (allocated(error)) return
+        call pf_probit_scale(v, sc, skipnan=.false., ok=ok)
+        call check(error, sc /= sc .and. .not. ok, "and pf_probit_scale's")
+        if (allocated(error)) return
+        ! The second half, without which a procedure returning NaN unconditionally would pass.
+        call pf_probit_fit(v, loc, sigma, corr, ok=ok)
+        call check(error, loc == loc .and. sigma == sigma .and. ok, &
+            "the control: at the default skipnan the NaN is merely excluded and the line is real")
+    end subroutine test_probit_fit_and_scale_degenerate
+
+    !> `%probit_fit`, `%probit_scale` and `%probit_mean` answer off the object, adding no ordering.
+    !!
+    !! **The bit-for-bit comparison is the assertion.** A binding that recomputed instead of
+    !! reading tier B would agree to a tolerance and differ in the last bits, and one that ordered
+    !! a second time would agree exactly -- so the sort counter and the equality are each needed
+    !! for what the other cannot see. `%probit_mean` orders NOTHING, which is the third assertion:
+    !! the counter must be unchanged by it even on an object that has never been ordered.
+    subroutine test_probit_bindings_read_tier_b(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), p(:)
+        real(real64) :: loc, sigma, corr, oloc, osigma, ocorr, sc, osc, m, om
+        type(pf_stats) :: s, ps
+        integer(int64) :: before
+
+        call golden_fixture(400_int64, x)
+        call pf_probit_fit(x, loc, sigma, corr)
+        call pf_probit_scale(x, sc)
+
+        call s%compute(x)
+        call parquet_debug_reset_stats_sorts()
+        call s%probit_fit(oloc, osigma, ocorr)
+        call check(error, oloc == loc .and. osigma == sigma .and. ocorr == corr, &
+            "%probit_fit must return bit for bit what pf_probit_fit returns")
+        if (allocated(error)) return
+        osc = s%probit_scale()
+        call check(error, osc == sc, "and %probit_scale what pf_probit_scale returns")
+        if (allocated(error)) return
+        ! A median as well, so the count is over FOUR order statistics rather than two.
+        osc = s%median()
+        osc = s%iqr()
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "a fit, a scale, a median and an IQR off one object must cost ONE ordering")
+        if (allocated(error)) return
+
+        call golden_probs(200_int64, p)
+        call pf_probit_mean(p, m)
+        call ps%compute(p)
+        call parquet_debug_reset_stats_sorts()
+        before = parquet_debug_stats_sorts()
+        om = ps%probit_mean()
+        call check(error, om == m, &
+            "%probit_mean must return bit for bit what pf_probit_mean returns")
+        if (allocated(error)) return
+        call check(error, parquet_debug_stats_sorts() == before .and. .not. ps%is_ordered(), &
+            "and it must order NOTHING: a probit mean is not an order statistic")
+    end subroutine test_probit_bindings_read_tier_b
+
+    !> The four boundary rows of `pf_probit_mean`, asserted EXACTLY.
+    !!
+    !! **`feature_risks.md` Risk-256.** `Phi^-1(0)` is `-Infinity` and `Phi^-1(1)` is `+Infinity`,
+    !! so a zero in the population drags the probit-space mean to `-Inf` and `Phi(-Inf)` is
+    !! exactly `0`; a one does the mirror; a population holding both is `-Inf + Inf` and has no
+    !! mean at all. An implementer meeting an infinity in a mean loop reaches for
+    !! `max(p, tiny)`/`min(p, 1 - eps)`, which turns all three into finite numbers near the
+    !! boundary -- plausible, in range, and wrong. Equality is therefore the assertion; a
+    !! tolerance would accept every clamped answer.
+    subroutine test_probit_mean_boundary_rows(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: withzero(4), withone(4), both(5), plain(4), flat(6), empty(0)
+        real(real64) :: m
+        logical :: ok
+
+        withzero = [0.2_real64, 0.0_real64, 0.5_real64, 0.9_real64]
+        call pf_probit_mean(withzero, m, ok=ok)
+        call check(error, m == 0.0_real64 .and. ok, &
+            "a zero in the population makes the probit mean EXACTLY 0, and that is a defined " // &
+            "answer rather than a failure")
+        if (allocated(error)) return
+        withone = [0.2_real64, 1.0_real64, 0.5_real64, 0.9_real64]
+        call pf_probit_mean(withone, m, ok=ok)
+        call check(error, m == 1.0_real64 .and. ok, "and a one makes it exactly 1")
+        if (allocated(error)) return
+        both = [0.2_real64, 1.0_real64, 0.5_real64, 0.0_real64, 0.9_real64]
+        call pf_probit_mean(both, m, ok=ok)
+        call check(error, m /= m .and. .not. ok, &
+            "a population holding BOTH is -Inf + Inf, which is a NaN and not a half")
+        if (allocated(error)) return
+        ! The control that makes the three above mean something: the same population without the
+        ! boundary values is an ordinary number strictly inside (0, 1).
+        plain = [0.2_real64, 0.4_real64, 0.5_real64, 0.9_real64]
+        call pf_probit_mean(plain, m, ok=ok)
+        call check(error, m > 0.0_real64 .and. m < 1.0_real64 .and. ok, &
+            "the control: without a boundary value the answer is strictly inside (0, 1)")
+        if (allocated(error)) return
+
+        ! A constant probability is its own probit mean, which is the round trip through both
+        ! directions of the kernel and would catch either one drifting alone.
+        flat = 0.37_real64
+        call pf_probit_mean(flat, m, ok=ok)
+        call check(error, abs(m - 0.37_real64) <= 8.0_real64 * spacing(0.37_real64) .and. ok, &
+            "a constant probability must come back as itself: Phi(Phi^-1(p)) round-trips")
+        if (allocated(error)) return
+        call pf_probit_mean(empty, m, ok=ok)
+        call check(error, m /= m .and. .not. ok, "an empty population has no probit mean")
+    end subroutine test_probit_mean_boundary_rows
+
+    !> The domain screen reads a NaN as a NaN, and the weight convention is `pf_gmean`'s.
+    !!
+    !! **The first assertion is Risk-172's shape.** `p >= 0.0 .and. p <= 1.0` is FALSE for a NaN,
+    !! so a domain screen written that way classifies a NaN as an out-of-domain VALUE -- and the
+    !! two have different answers under `skipnan`: an out-of-range value is a NaN with
+    !! `ok = .false.` whatever `skipnan` says, while a NaN is EXCLUDED at the default and
+    !! propagates only when the caller asks it to.
+    subroutine test_probit_mean_domain_and_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: high(4), low(4), withnan(4), p(4), w(4), zw(4)
+        real(real64) :: m, mkept, want
+        real(real64), allocatable :: kept(:)
+        logical :: ok
+
+        high = [0.2_real64, 1.5_real64, 0.5_real64, 0.9_real64]
+        call pf_probit_mean(high, m, ok=ok)
+        call check(error, m /= m .and. .not. ok, &
+            "a value above 1 is not a probability: NaN with ok=.false.")
+        if (allocated(error)) return
+        low = [0.2_real64, -0.25_real64, 0.5_real64, 0.9_real64]
+        call pf_probit_mean(low, m, ok=ok)
+        call check(error, m /= m .and. .not. ok, "and a value below 0")
+        if (allocated(error)) return
+        ! An out-of-range value is refused whatever `skipnan` says -- it is a value, not a NaN.
+        call pf_probit_mean(high, m, skipnan=.false., ok=ok)
+        call check(error, m /= m .and. .not. ok, &
+            "and it stays refused under skipnan=.false., where it is still a value")
+        if (allocated(error)) return
+
+        withnan = [0.2_real64, ieee_value(1.0_real64, ieee_quiet_nan), 0.5_real64, 0.9_real64]
+        call pf_probit_mean(withnan, m, ok=ok)
+        call check(error, m == m .and. ok, &
+            "a NaN is EXCLUDED at the default skipnan, so the other three still have a mean -- " // &
+            "a screen written `p >= 0 .and. p <= 1` would have refused the whole population")
+        if (allocated(error)) return
+        call pf_probit_mean([0.2_real64, 0.5_real64, 0.9_real64], want)
+        call check(error, m == want, &
+            "and that mean is bit for bit the mean of the three survivors")
+        if (allocated(error)) return
+        call pf_probit_mean(withnan, m, skipnan=.false., ok=ok)
+        call check(error, m /= m .and. .not. ok, &
+            "and only skipnan=.false. propagates it")
+        if (allocated(error)) return
+
+        ! A ZERO weight removes the element, exactly as it does everywhere else in this module --
+        ! so the weighted answer must equal the unweighted answer over the survivors alone.
+        p = [0.2_real64, 0.44_real64, 0.5_real64, 0.9_real64]
+        zw = [1.0_real64, 0.0_real64, 1.0_real64, 1.0_real64]
+        allocate(kept(3))
+        kept = [0.2_real64, 0.5_real64, 0.9_real64]
+        call pf_probit_mean(p, m, weights=zw)
+        call pf_probit_mean(kept, mkept)
+        call check(error, m == mkept, &
+            "a zero weight must REMOVE its element, not merely down-weight it")
+        if (allocated(error)) return
+        w = [1.0_real64, 3.0_real64, 1.0_real64, 1.0_real64]
+        call pf_probit_mean(p, m, weights=w)
+        call check(error, m /= mkept .and. m == m, &
+            "the control: a non-zero weight on the same element must change the answer")
+    end subroutine test_probit_mean_domain_and_weights
 
     !> `pf_zscore` standardises, reports its exclusions, and has mean 0 and stddev 1.
     subroutine test_zscore_standardises(error)

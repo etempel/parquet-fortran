@@ -359,6 +359,10 @@ exactly when the value beside it is not a NaN.
 | fewer than 3 (skewness) or 4 (kurtosis) elements, bias-corrected | that statistic is NaN |
 | contains `+Inf` (or only `-Inf`) | `sum` and `mean` are that infinity with `ok = .true.`; every central moment is NaN |
 | contains **both** `+Inf` and `-Inf` | `sum` and `mean` are NaN too |
+| fewer than 2 survivors (`pf_probit_fit`) | `loc`, `sigma` and `corr` are all NaN |
+| every value identical (`pf_probit_fit`) | `sigma` exactly `0`, `loc` that value, `corr` NaN |
+| a value outside `[0, 1]` (`pf_probit_mean`) | NaN — it is not a probability |
+| a `0`, or a `1`, in the population (`pf_probit_mean`) | exactly `0`, or exactly `1`; both together give NaN |
 
 The empty sum is `0` rather than NaN because that is the additive identity and what numpy and pandas
 both return; `n_valid` sits beside it, so nothing is hidden by it.
@@ -698,6 +702,46 @@ Both branches are taken **before** the logarithm or the reciprocal is reached, a
 correctness requirement rather than tidiness: `log(0)` and `1/0` raise IEEE exceptions, and a
 compiler that unmasks the traps would terminate the process rather than return the answer.
 
+## `pf_probit_mean` — averaging probabilities
+
+```fortran
+call pf_probit_mean(p, m)                    ! Phi(sum(w*Phi^-1(p)) / sum(w))
+```
+
+The mean of a set of **probabilities**, averaged on the probit scale: map each probability to the
+z it marks, average the z's, map back. It is to `Φ`/`Φ⁻¹` exactly what `pf_gmean` is to
+`exp`/`log`, and it takes the same arguments.
+
+**Why not `pf_mean`?** An arithmetic mean of probabilities is not wrong, but it is the wrong
+average whenever the probabilities are the output of a threshold process — a selection function, a
+completeness fraction, a detection rate. Averaging in probit space keeps the answer inside `[0, 1]`
+by construction, and makes the average of a uniformly shifted set of selection probabilities the
+shift of their average.
+
+The domain rules are `pf_gmean`'s in shape and its own in detail:
+
+| population | `m` | `ok` |
+|---|---|---|
+| empty, or every element excluded | NaN | `.false.` |
+| contains a value `< 0` or `> 1` | NaN | `.false.` |
+| contains a `0` and no `1` | exactly `0` | `.true.` |
+| contains a `1` and no `0` | exactly `1` | `.true.` |
+| contains **both** a `0` and a `1` | NaN | `.false.` |
+| contains a NaN, under `skipnan = .false.` | NaN | `.false.` |
+
+The `0` and `1` rows are the limits — `Φ⁻¹(0)` is `-∞`, one `-∞` drags the whole sum there, and
+`Φ(-∞)` is exactly `0` — and the both-of-them row is `-∞ + ∞`, which genuinely has no value. None
+of them aborts; all six are data conditions. They are branched on rather than computed, so the
+infinities are never formed: a guard that clamped `p` away from `{0, 1}` to avoid meeting one would
+silently replace three of those rows with finite numbers near the boundary.
+
+An out-of-range value and a NaN are **different** conditions with different answers, so the NaN is
+screened first and separately: `p >= 0 .and. p <= 1` is false for a NaN, and a screen written that
+way would refuse a whole population that `skipnan` was going to exclude one element from.
+
+`pf_stats` gains `%probit_mean()`, which needs the retained values for `%gmean`'s reason and orders
+nothing.
+
 ## `pf_cov` and `pf_corr` — two samples
 
 ```fortran
@@ -854,6 +898,95 @@ Five rules worth knowing:
 
 An empty population gives three NaNs with `ok = .false.` and `n_clipped = 0`; a constant one is
 reported unchanged, converged, with nothing clipped.
+
+## `pf_probit_fit` and `pf_probit_scale` — the normal-probability plot
+
+```fortran
+call pf_probit_fit(mag, loc, sigma)                 ! the least-squares line
+call pf_probit_fit(mag, loc, sigma, corr)           ! ... and how straight it is
+call pf_probit_scale(mag, sigma)                    ! IQR / 1.3489795003921634
+call pf_probit_scale(mag, sigma, prob=0.15865525393145705_real64)   ! the 16/84 pair
+```
+
+Two robust scale estimators read off the *normal-probability plot* — the plot of a sorted sample
+against the normal quantiles its ranks mark. Both cost **one ordering**, and both sit beside
+`pf_mad` in what they answer: on clean Gaussian data `pf_stddev`, `pf_mad`, `pf_probit_scale` and
+`pf_probit_fit`'s `sigma` all agree to within sampling error, and on a sample with a few wild
+points the first parts company with the other three.
+
+`pf_probit_fit` sorts the survivors, gives order statistic `r` the normal score of its plotting
+position `(r - a)/(m + 1 - 2a)`, and fits `y = loc + sigma·Φ⁻¹(pp)` by least squares:
+
+- **`loc`** is the intercept, which is the **mean** of the survivors. Every plotting position this
+  library offers is symmetric about the median, so the normal scores sum to zero and the intercept
+  is the mean — and it is evaluated as the mean rather than as a difference of two nearly-equal
+  quantities. It will not be `pf_mean`'s last bit: `pf_mean` refines its quotient, so compare the
+  two with a tolerance.
+- **`sigma`** is the slope: a scale estimate that reads the whole sample through its order
+  statistics, so a heavy tail moves it far less than it moves a standard deviation.
+- **`corr`** is optional and free once the line is fitted — the **probability-plot correlation
+  coefficient**, in `[-1, 1]` and near 1 for a Gaussian sample. It is the normality diagnostic the
+  fit already contains, and it is what says whether the reading of `sigma` is worth anything.
+
+`pf_probit_scale` answers the same question from two quantiles instead of the whole sample:
+`sigma = (Q(1-prob) - Q(prob)) / (2·Φ⁻¹(1-prob))`. The divisor is what turns a range into a
+standard deviation: for a normal population those two quantiles sit `Φ⁻¹(1-prob)` scale units
+either side of the centre. `prob` defaults to `0.25`, which makes the answer exactly `pf_iqr`
+divided by 1.3489795003921634; `prob = 0.15865525393145705` is the 16th/84th percentile pair, whose
+divisor is exactly 2. **This generalises `pf_mad(scale="normal")`** — that procedure is the
+`Φ⁻¹(3/4)` case taken about the median of the *deviations*, this one is the same consistency factor
+taken between two quantiles of the *values*.
+
+### `method=` means two different things here
+
+`pf_probit_fit`'s `method=` names a **plotting position**, from `pf_normal_scores`' six tokens.
+`pf_probit_scale`'s names a **quantile interpolation rule**, from `pf_quantile`'s six — because it
+is two `pf_quantile` probes off one ordering and offers precisely what `pf_quantile` offers. The
+two vocabularies share an argument name and nothing else; an unrecognised token aborts either way,
+listing the set it belongs to.
+
+**`method="filliben"` is what reproduces `scipy.stats.probplot`**, whose plotting positions are the
+median ranks rather than this library's `"blom"` default, and under that token `corr` is Filliben's
+statistic exactly. The two defaults differ in the third digit of `sigma` on a thousand points, so a
+comparison against scipy has to name the token.
+
+### The ranks are ordinal, not midranks
+
+`pf_normal_scores` gives tied values one shared **midrank**, because its answer is per element and
+two equal values must score alike. `pf_probit_fit` uses **ordinal** ranks over the sorted
+survivors, so a tie takes two different plotting positions at one `y`. That is what the reference
+implementation does, it is the same line either way, and it is what keeps the positions symmetric —
+which is what makes `loc` the mean.
+
+### The rules to know
+
+Ranks are taken over the **survivors**, never over `size(values)`, so excluding a quarter of the
+population gives exactly the fit the remaining three quarters give as a population of their own.
+
+Fewer than **two** survivors fits no line: three NaNs with `ok = .false.` A **constant** population
+has `sigma` exactly `0` and `loc` equal to that constant — both perfectly well defined — while
+`corr` is a NaN, since a constant has no variance to correlate. That is the one shape where `ok`
+depends on what you asked for: it stays `.true.` unless `corr` was requested.
+
+`prob` outside the open interval `(0, 0.5)` **aborts**. `prob = 0.5` asks for a zero range over a
+zero divisor and `prob = 0` asks for the whole range over an infinity; both are mistakes rather
+than preferences, which is the same reading `pf_trim_mean` gives its `prop`.
+
+`pf_probit_fit` takes **no `weights`**, for `pf_normal_scores`' reason: a weighted plotting position
+is a further definitional choice that no reference library makes, and its absence makes passing one
+a *compile* error. `pf_probit_scale` does take them, because two quantiles have a weighted meaning
+this library already defines.
+
+Both join `pf_stats`, because both read tier B and the object exists so that several order
+statistics cost one sort:
+
+```fortran
+call s%probit_fit(loc, sigma)                 ! and optionally corr, method
+sigma = s%probit_scale()                      ! and optionally prob, method
+```
+
+`%probit_fit` ignores the accumulator's weights, so that it answers what the one-shot procedure
+answers under the same name.
 
 ## `pf_cumsum`, `pf_cumprod`, `pf_cummax`, `pf_cummin` — the running folds
 
@@ -1105,10 +1238,11 @@ returns `real(real64)`. The four state predicates — `%is_computed`, `%retains`
 |---|---|
 | counts | `%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%sum_weights()` |
 | moments | `%sum()`, `%mean()`, `%variance([ddof])`, `%stddev([ddof])`, `%sem([ddof])`, `%skewness([bias])`, `%kurtosis([bias], [excess])` |
-| power means | `%gmean()`, `%hmean()` — **need `retain`**, see below |
+| transform means | `%gmean()`, `%hmean()`, `%probit_mean()` — **need `retain`**, see below |
 | extremes | `%vmin()`, `%vmax()`, `%range()` |
 | order | `%median([method])`, `%quantile(p, [method])`, `%quantiles(probs, out, [method])`, `%iqr([method])`, `%trim_mean(prop)`, `%percentile_of_score(score, [kind])` |
 | deviation | `%mad([scale], [center])` |
+| probability plot | `%probit_fit(loc, sigma, [corr], [method])`, `%probit_scale([prob], [method])` |
 | output | `%print([unit], [name])` |
 | state | `%is_computed()`, `%retains()`, `%is_ordered()`, `%has_deviation()`, `%prepare_order()`, `%release_order()`, `%clear()` |
 
@@ -1121,13 +1255,19 @@ another aborts when they disagree on any of them, naming which. A `skipnan` mism
 mistake as the other two — it decides what the population *is*, so a NaN-skipping partial merged
 into a NaN-propagating one would produce a number describing neither convention.
 
-`%gmean` and `%hmean` are the two queries that need the *retained values* rather than the
-accumulator, so they **abort on a streaming accumulator** (`retain = .false.`), exactly as the
-order statistics do — and, unlike those, they order nothing. A log-sum is a fifth quantity the four
+`%gmean`, `%hmean` and `%probit_mean` are the three queries that need the *retained values* rather
+than the accumulator, so they **abort on a streaming accumulator** (`retain = .false.`), exactly as
+the order statistics do — and, unlike those, they order nothing. A log-sum is a fifth quantity the four
 central moments do not contain, and accumulating it in the hot loop would charge a transcendental
 per element to every population that never asks for one. Both answer exactly what the one-shot
-`pf_gmean`/`pf_hmean` would over the same population, including the domain rules: NaN for a
-negative value anywhere, and exactly `0` when any value is `0`.
+`pf_gmean`/`pf_hmean`/`pf_probit_mean` would over the same population, including the domain rules:
+NaN for a negative value anywhere, and exactly `0` when any value is `0`.
+
+`%probit_fit` and `%probit_scale` are order statistics and go the other way: they build tier B on
+first use and read it thereafter, so a median followed by a fit and a scale is **one** ordering.
+`%probit_fit` ignores the accumulator's weights, because the one-shot `pf_probit_fit` has no
+`weights` argument at all and a binding that quietly answered a weighted question under the same
+name would be the one place in this module where the two disagree.
 
 A query may complete a deferred recomputation, so every query but two takes the object as
 `intent(inout)`: a `pf_stats` passed as `intent(in)` cannot be asked for a statistic. The two
@@ -1202,12 +1342,12 @@ method, kind, scale, center, out_valid, n_null, n_nan, n_outside, ok, threads
 
 Four short blocks sit either side of it and are part of the same sequence: an *output* prefix
 `n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, vmax, count, modes`, which
-`pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` and `modes` are its two);
-the object-lifecycle pair `retain, consume`, which only `pf_stats`' own `%compute`, `%init` and
-`%merge` take; the rule block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc,
-n_clipped, keep, converged, right, density`, whose entries say what the operation IS and are taken
-by `pf_sigma_clipped_stats` and the binning pair; and the `unit`/`name` pair, which only `%print`
-takes. A block used by one procedure is not a contradiction — every other procedure omits
+`pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` and `modes` are its two,
+and `pf_probit_fit`'s optional `corr` closes that block); the object-lifecycle pair
+`retain, consume`, which only `pf_stats`' own `%compute`, `%init` and `%merge` take; the rule block
+`sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep, converged, right,
+density, prob`, whose entries say what the operation IS and are taken by `pf_sigma_clipped_stats`,
+the binning pair and `pf_probit_scale`; and the `unit`/`name` pair, which only `%print` takes. A block used by one procedure is not a contradiction — every other procedure omits
 it, and omission is exactly what a subsequence permits.
 
 A procedure omits the ones it has no use for and never reorders the rest. In Fortran the order of

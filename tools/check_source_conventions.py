@@ -2098,11 +2098,27 @@ def check_stats_optional_argument_order():
     # observed. Inserting a name into this sequence is safe exactly when it leaves every existing
     # procedure's list a subsequence of it, which appending inside an unused block does. See
     # feature_pandas_S4.md's signature matrix.
+    #
+    # `corr` closes the tier-A OUTPUT prefix and `prob` closes the RULE run, and both positions
+    # are load-bearing rather than alphabetical:
+    #
+    # * `corr` is `pf_probit_fit`'s optional third output, declared -- like every output-prefix
+    #   name here -- ahead of the whole population block, so it goes at the end of that block
+    #   rather than beside the other real64 optionals further down.
+    # * `prob` is `pf_probit_scale`'s tuning, declared BEFORE `is_valid`, so it belongs at the
+    #   head of the population block and NOT next to `method`. `method` sits after `is_valid`,
+    #   `weights`, `weight_type` and `skipnan`; putting `prob` there would make
+    #   `pf_probit_scale`'s own list non-monotone and this check would fail on it. The precedent
+    #   is the sigma-clip block above: the tuning a caller reaches for comes before the
+    #   population plumbing.
+    #
+    # Neither name was taken by any existing procedure when it was inserted, so every signature
+    # that passed before still passes -- which is the condition an insertion has to meet.
     canonical = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
-                 "vsum", "vmin", "vmax", "count", "modes",
+                 "vsum", "vmin", "vmax", "count", "modes", "corr",
                  "retain", "consume",
                  "sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
-                 "n_clipped", "keep", "converged", "right", "density",
+                 "n_clipped", "keep", "converged", "right", "density", "prob",
                  "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
                  "method", "kind", "scale", "center", "out_valid", "n_null", "n_nan",
                  "n_outside", "ok", "threads",

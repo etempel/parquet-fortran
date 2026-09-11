@@ -429,6 +429,14 @@ contains
         call hmean_f64(wide, h, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure hmean_i32
 
+    module procedure probit_mean_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, &
+            threads=threads)
+    end procedure probit_mean_i32
+
     module procedure variance_i32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -535,6 +543,14 @@ contains
             ok=ok, threads=threads)
     end procedure mad_i32
 
+    module procedure probit_scale_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_scale_f64(wide, sigma, prob=prob, is_valid=is_valid, weights=weights, &
+            weight_type=weight_type, method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure probit_scale_i32
+
     module procedure describe_i32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -575,6 +591,14 @@ contains
         call normal_scores_f64(wide, s, is_valid=is_valid, method=method, out_valid=out_valid, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure normal_scores_i32
+
+    module procedure probit_fit_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_fit_f64(wide, loc, sigma, corr=corr, is_valid=is_valid, method=method, n_null=n_null, &
+            ok=ok, threads=threads)
+    end procedure probit_fit_i32
 
     module procedure sigma_clipped_stats_i32
         real(real64), allocatable :: wide(:)
@@ -664,6 +688,14 @@ contains
         wide = real(values, real64)
         call hmean_f64(wide, h, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure hmean_i64
+
+    module procedure probit_mean_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, &
+            threads=threads)
+    end procedure probit_mean_i64
 
     module procedure variance_i64
         real(real64), allocatable :: wide(:)
@@ -771,6 +803,14 @@ contains
             ok=ok, threads=threads)
     end procedure mad_i64
 
+    module procedure probit_scale_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_scale_f64(wide, sigma, prob=prob, is_valid=is_valid, weights=weights, &
+            weight_type=weight_type, method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure probit_scale_i64
+
     module procedure describe_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -811,6 +851,14 @@ contains
         call normal_scores_f64(wide, s, is_valid=is_valid, method=method, out_valid=out_valid, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure normal_scores_i64
+
+    module procedure probit_fit_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_fit_f64(wide, loc, sigma, corr=corr, is_valid=is_valid, method=method, n_null=n_null, &
+            ok=ok, threads=threads)
+    end procedure probit_fit_i64
 
     module procedure sigma_clipped_stats_i64
         real(real64), allocatable :: wide(:)
@@ -904,6 +952,14 @@ contains
         call hmean_f64(wide, h, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
             n_nan=n_nan, ok=ok, threads=threads)
     end procedure hmean_f32
+
+    module procedure probit_mean_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_mean_f64(wide, m, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure probit_mean_f32
 
     module procedure variance_f32
         real(real64), allocatable :: wide(:)
@@ -1011,6 +1067,15 @@ contains
             center=center, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure mad_f32
 
+    module procedure probit_scale_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_scale_f64(wide, sigma, prob=prob, is_valid=is_valid, weights=weights, &
+            weight_type=weight_type, skipnan=skipnan, method=method, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure probit_scale_f32
+
     module procedure describe_f32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -1052,6 +1117,14 @@ contains
         call normal_scores_f64(wide, s, is_valid=is_valid, skipnan=skipnan, method=method, &
             out_valid=out_valid, n_null=n_null, ok=ok, threads=threads)
     end procedure normal_scores_f32
+
+    module procedure probit_fit_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call probit_fit_f64(wide, loc, sigma, corr=corr, is_valid=is_valid, skipnan=skipnan, method=method, &
+            n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure probit_fit_f32
 
     module procedure sigma_clipped_stats_f32
         real(real64), allocatable :: wide(:)
@@ -1147,6 +1220,14 @@ contains
         wide = merge(1.0_real64, 0.0_real64, values)
         call hmean_f64(wide, h, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure hmean_bool
+
+    module procedure probit_mean_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call probit_mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, &
+            threads=threads)
+    end procedure probit_mean_bool
 
     module procedure variance_bool
         real(real64), allocatable :: wide(:)
@@ -1254,6 +1335,14 @@ contains
             ok=ok, threads=threads)
     end procedure mad_bool
 
+    module procedure probit_scale_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call probit_scale_f64(wide, sigma, prob=prob, is_valid=is_valid, weights=weights, &
+            weight_type=weight_type, method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure probit_scale_bool
+
     module procedure describe_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -1294,6 +1383,14 @@ contains
         call normal_scores_f64(wide, s, is_valid=is_valid, method=method, out_valid=out_valid, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure normal_scores_bool
+
+    module procedure probit_fit_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call probit_fit_f64(wide, loc, sigma, corr=corr, is_valid=is_valid, method=method, n_null=n_null, &
+            ok=ok, threads=threads)
+    end procedure probit_fit_bool
 
     module procedure sigma_clipped_stats_bool
         real(real64), allocatable :: wide(:)
@@ -1387,6 +1484,14 @@ contains
         call hmean_f64(wide, h, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
             ok=ok, threads=threads)
     end procedure hmean_col
+
+    module procedure probit_mean_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_probit_mean", is_valid, wide, mask)
+        call probit_mean_f64(wide, m, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure probit_mean_col
 
     module procedure variance_col
         real(real64), allocatable :: wide(:)
@@ -1494,6 +1599,15 @@ contains
             n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure mad_col
 
+    module procedure probit_scale_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_probit_scale", is_valid, wide, mask)
+        call probit_scale_f64(wide, sigma, prob=prob, is_valid=mask, weights=weights, &
+            weight_type=weight_type, skipnan=skipnan, method=method, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure probit_scale_col
+
     module procedure describe_col
         real(real64), allocatable :: wide(:)
         logical, allocatable :: mask(:)
@@ -1537,6 +1651,14 @@ contains
         call normal_scores_f64(wide, s, is_valid=mask, skipnan=skipnan, method=method, out_valid=out_valid, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure normal_scores_col
+
+    module procedure probit_fit_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_probit_fit", is_valid, wide, mask)
+        call probit_fit_f64(wide, loc, sigma, corr=corr, is_valid=mask, skipnan=skipnan, method=method, &
+            n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure probit_fit_col
 
     module procedure sigma_clipped_stats_col
         real(real64), allocatable :: wide(:)

@@ -27,6 +27,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `skipnan = .false.` every score is NaN. There is no `weights` argument and no `pf_stats` binding.
   See
   [pf_normal_scores](doc/pages/utilities/statistics.md#pf_normal_scores--rankits-the-x-axis-of-a-q-q-plot).
+- **The normal-probability plot in `parquet_stats`: `pf_probit_fit` and `pf_probit_scale`.**
+  `pf_probit_fit(values, loc, sigma [, corr, ...])` is the least-squares line of the sorted
+  survivors on the normal scores of their plotting positions: `loc` is the intercept, which is the
+  mean of the survivors; `sigma` is the slope, a scale estimate that reads the whole sample; and
+  the optional `corr` is the probability-plot correlation coefficient. `method=` takes
+  `pf_normal_scores`' six plotting-position tokens, and `method="filliben"` reproduces
+  `scipy.stats.probplot`. `pf_probit_scale(values, sigma [, prob, ...])` is
+  `(Q(1-prob) - Q(prob)) / (2 Phi^-1(1-prob))`, the scale a symmetric quantile pair implies for
+  Gaussian data, `prob = 0.25` by default and outside `(0, 0.5)` an abort. Both cost one ordering;
+  `pf_stats` gains `%probit_fit` and `%probit_scale`. See
+  [pf_probit_fit and pf_probit_scale](doc/pages/utilities/statistics.md#pf_probit_fit-and-pf_probit_scale--the-normal-probability-plot).
+- **Averaging probabilities on the probit scale: `pf_probit_mean(p, m [, ...])`.**
+  `Phi(sum(w*Phi^-1(p)) / sum(w))`, which is to `Phi`/`Phi^-1` what `pf_gmean` is to `exp`/`log`.
+  A value outside `[0, 1]` gives a quiet NaN with `ok = .false.`; a `0` in the population gives
+  exactly `0` and a `1` gives exactly `1`, and a population holding both gives NaN. `pf_stats`
+  gains `%probit_mean`, which needs `retain`. See
+  [pf_probit_mean](doc/pages/utilities/statistics.md#pf_probit_mean--averaging-probabilities).
 - **A cylinder along the line of sight: `pf_spatial_index%within_los` and `%pairs_within_los`.**
   `sx%pairs_within_los(b_perp, b_par, i, j)` returns every pair, once and with `i < j`, whose
   transverse separation about an observer is within `b_perp` and whose parallel separation is

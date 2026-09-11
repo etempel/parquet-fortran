@@ -323,6 +323,8 @@ something a reader is expected to have.
 | [Risk-252](#risk-252--pf_probit075-and-the-frozen-mad_normal_scale-are-two-spellings-of-one-number-and-only-a-test-compares-them) | `pf_probit(0.75)` and the frozen `MAD_NORMAL_SCALE` are two spellings of one number | 4 — covered |
 | [Risk-253](#risk-253--a-probit-based-statistic-that-tests-only-for-an-empty-population-inherits-risk-171s-defect) | A probit-based statistic that tests only for an EMPTY population inherits Risk-171's defect | 4 — covered |
 | [Risk-254](#risk-254--a-plotting-position-denominated-by-sizevalues-instead-of-the-survivor-count-is-invisible) | A plotting position denominated by `size(values)` instead of the survivor count is invisible | 4 — covered |
+| [Risk-255](#risk-255--pf_probit_fits-loc-is-the-mean-and-that-is-only-the-intercept-while-every-plotting-position-is-symmetric) | `pf_probit_fit`'s `loc` is the MEAN, and that is only the intercept while every plotting position is symmetric | 4 — covered |
+| [Risk-256](#risk-256--clamping-p-away-from-0-1-in-pf_probit_mean-silently-changes-three-documented-answers) | Clamping `p` away from `{0, 1}` in `pf_probit_mean` silently changes three documented answers | 4 — covered |
 
 ---
 
@@ -9557,13 +9559,15 @@ default `skipnan = .true.` answer except by the flag. So the rule here is strong
 **every element of `s` is NaN**, not just the NaN's own.
 
 **What it forbids.** Testing `m == 0` alone. `saw_nan` is a separate out-argument of `stats_compact`
-for exactly this reason and must be read by every procedure that calls it. The same applies to
-`pf_probit_fit`, `pf_probit_scale` and `pf_probit_mean` when they land.
+for exactly this reason and must be read by every procedure that calls it — `pf_normal_scores`,
+`pf_probit_fit`, `pf_probit_scale` and `pf_probit_mean` all do, and `pf_probit_scale` inherits it
+through `one_shot_quantiles` rather than testing it itself.
 
-**Covered by** `test_propagating_nan_reaches_every_tier` (`test/test_stats.f90`), extended to
-`pf_normal_scores` in **both halves** — the propagating half asserting `all(ns /= ns)` rather than
-merely `ns(4) /= ns(4)`, and the default-`skipnan` half asserting that the eight survivors do have
-real scores. Without the second half a procedure returning NaN unconditionally would pass.
+**Covered by** `test_propagating_nan_reaches_every_tier` (`test/test_stats.f90`), extended to all
+four in **both halves** — the propagating half asserting `all(ns /= ns)` rather than merely
+`ns(4) /= ns(4)`, and all THREE of `pf_probit_fit`'s outputs rather than only `loc`; the
+default-`skipnan` half asserting that the survivors do have real scores and a real line. Without
+the second half a procedure returning NaN unconditionally would pass.
 
 ### Risk-254 — A plotting position denominated by `size(values)` instead of the survivor count is invisible
 
@@ -9584,4 +9588,71 @@ excluded cannot distinguish the two, because `m == n` there: the test has to exc
 **Covered by** `test_normal_scores_uses_the_survivor_count` (`test/test_stats.f90`), which excludes
 every third element of a 40-element population and asserts that each survivor's score is
 **bit-for-bit** the score it would have had in the 27-element sub-population computed on its own —
-an identity that a wrong denominator breaks in the last digit as surely as in the first.
+an identity that a wrong denominator breaks in the last digit as surely as in the first. One tier
+up, `test_probit_fit_loc_is_the_mean` asserts the same identity for the FIT: the masked fit's
+`sigma` must equal, bit for bit, the sigma of the sub-population fitted on its own.
+
+### Risk-255 — `pf_probit_fit`'s `loc` is the MEAN, and that is only the intercept while every plotting position is symmetric
+
+`probit_line` (`src/parquet_stats_order.f90`) does not evaluate the least-squares intercept as
+`ybar - sigma*zbar`. It sets `loc = ybar` and forms `szz`/`szy` from the raw normal scores rather
+than from `z - zbar`, because **`zbar` is exactly zero**: every one of the six plotting-position
+rules satisfies `p(r) + p(m+1-r) = 1`, so the scores pair off into exact negations and their mean
+vanishes. That holds for the `a`-family by arithmetic and for Filliben's median rank in all three of
+its pieces, and it is what makes the better-conditioned evaluation the correct one rather than an
+approximation to it.
+
+**Two later changes break it, and both break it silently.**
+
+- **A new `method=` token whose positions are not symmetric.** `loc` then stops being the intercept
+  and becomes the mean of a line it does not lie on, `sigma` picks up a bias, and every one of them
+  stays a plausible number of the right magnitude. Nothing about the answer says which quantity it
+  is.
+- **Replacing the ORDINAL ranks with `pf_normal_scores`' midranks.** It reads like a consistency fix
+  — the two procedures share a plotting-position vocabulary, so why not a rank convention? — and it
+  is not: a tie collapses two positions onto one value, the symmetry goes with it, and the fit stops
+  being `scipy.stats.probplot`. **A tie-free population cannot see this at all**, so a test built
+  from random draws passes for ever.
+
+**What it forbids.** Adding a plotting-position token without checking that `sum(z)` vanishes for
+it, and using midranks in `probit_line`. If either is genuinely wanted, `loc` has to become
+`ybar - sigma*zbar` in the same change, and this entry's tests have to be re-derived rather than
+relaxed.
+
+**Covered by** `test_probit_fit_loc_is_the_mean` (`test/test_stats.f90`), which asserts `loc` is the
+mean of the survivors over a **tied** population under all six tokens — the tie is what makes the
+ordinal/midrank choice observable — and again over a population with a third of its elements
+excluded, where the mean is the sub-population's. The generator's own
+`tools/generate_probit_reference.py --self-test` asserts the symmetry directly, over all six tokens
+at four population sizes, and is what a token added later trips first.
+
+### Risk-256 — Clamping `p` away from `{0, 1}` in `pf_probit_mean` silently changes three documented answers
+
+`Phi^-1(0)` is `-Infinity` and `Phi^-1(1)` is `+Infinity`, and three rows of `pf_probit_mean`'s
+documented domain table are those limits: a `0` in the population gives exactly `0`, a `1` gives
+exactly `1`, and a population holding **both** gives NaN, because that sum is `-Inf + Inf`.
+
+An implementer meeting an infinity inside a mean loop reaches for `max(p, tiny)` / `min(p, 1 - eps)`.
+That turns all three into finite numbers *near* the boundary — plausible, in range, ordered
+correctly, and wrong. It is also a `min`/`max` on a possibly-NaN value, which raises `IEEE_INVALID`
+and is fatal under nagfor's default `-ieee=stop` (`.claude/rules/fortran-gotchas.md`).
+
+`probit_mean_kept` (`src/parquet_stats_core.f90`) therefore **branches on the three rows in the
+domain screen and never forms an infinity at all**, which is `pf_gmean`'s treatment of its own zero
+and is a correctness requirement rather than tidiness.
+
+The same screen carries Risk-172's shape: **the NaN test is its own statement and comes first**.
+`p >= 0.0 .and. p <= 1.0` is false for a NaN, so a screen written that way classifies a NaN as an
+out-of-domain VALUE — and the two have different answers, since an out-of-range value is refused
+whatever `skipnan` says while a NaN is excluded at the default.
+
+**What it forbids.** Any clamp, any `min`/`max` on `p`, and a domain screen that tests the range
+before the NaN.
+
+**Covered by** `test_probit_mean_boundary_rows` (`test/test_stats.f90`), which asserts
+`m == 0.0_real64`, `m == 1.0_real64` and the both-of-them NaN with **equality** rather than a
+tolerance — a clamped implementation lands near the boundary and would pass any tolerance loose
+enough to be written — plus a control showing that the same population without a boundary value is
+strictly inside `(0, 1)`. `test_probit_mean_domain_and_weights` covers the ordering of the screen:
+a NaN at the default `skipnan` must leave the other three elements with a mean, which a
+range-before-NaN screen would have refused.

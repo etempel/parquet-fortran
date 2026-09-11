@@ -2916,6 +2916,50 @@ program error_scenarios
         call scenario_logging_unset_level_empty_name()
     case ("logging_pop_name_token_mismatch")
         call scenario_logging_pop_name_token_mismatch()
+    case ("logging_template_too_long")
+        call scenario_logging_template_too_long()
+    case ("logging_template_unclosed_brace")
+        call scenario_logging_template_unclosed_brace()
+    case ("logging_template_too_many_ops")
+        call scenario_logging_template_too_many_ops()
+    case ("logging_add_console_bad_stream")
+        call scenario_logging_add_console_bad_stream()
+    case ("logging_add_unit_not_connected")
+        call scenario_logging_add_unit_not_connected()
+    case ("logging_add_unit_not_writable")
+        call scenario_logging_add_unit_not_writable()
+    case ("logging_add_unit_unformatted")
+        call scenario_logging_add_unit_unformatted()
+    case ("logging_set_level_name_too_long")
+        call scenario_logging_set_level_name_too_long()
+    case ("logging_too_many_name_rules")
+        call scenario_logging_too_many_name_rules()
+    case ("logging_unset_level_name_too_long")
+        call scenario_logging_unset_level_name_too_long()
+    case ("logging_set_color_bad_policy")
+        call scenario_logging_set_color_bad_policy()
+    case ("logging_bad_sink_id")
+        call scenario_logging_bad_sink_id()
+    case ("logging_set_name_too_long")
+        call scenario_logging_set_name_too_long()
+    case ("logging_set_rank_negative")
+        call scenario_logging_set_rank_negative()
+    case ("logging_thread_mode_bad")
+        call scenario_logging_thread_mode_bad()
+    case ("logging_thread_mode_slot_too_small")
+        call scenario_logging_thread_mode_slot_too_small()
+    case ("logging_set_context_too_long")
+        call scenario_logging_set_context_too_long()
+    case ("logging_push_name_empty")
+        call scenario_logging_push_name_empty()
+    case ("logging_push_name_too_deep")
+        call scenario_logging_push_name_too_deep()
+    case ("logging_push_name_too_long")
+        call scenario_logging_push_name_too_long()
+    case ("logging_env_bad_level")
+        call scenario_logging_env_bad_level()
+    case ("logging_implicit_print")
+        call scenario_logging_implicit_print()
     case ("logging_push_name_with_dot")
         call scenario_logging_push_name_with_dot()
     case ("logging_composed_name_too_long")
@@ -25780,6 +25824,250 @@ contains
         call pf_log_pop_name(frame)
         print '(a)', "unexpectedly accepted a name pop whose token did not match the depth"
     end subroutine scenario_logging_pop_name_token_mismatch
+    !
+    !> A layout template longer than `PF_LOG_MAX_FORMAT` is refused at configuration time, rather
+    !> than silently truncated into a template that renders something else.
+    subroutine scenario_logging_template_too_long()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_fmt_long.txt", format=repeat("x", PF_LOG_MAX_FORMAT + 1))
+        print '(a)', "unexpectedly accepted a layout template longer than PF_LOG_MAX_FORMAT"
+    end subroutine scenario_logging_template_too_long
+    !
+    !> A `{` with no closing `}` is a typo, not an empty field: rendering it as a literal would
+    !> hide the mistake in every line the sink ever writes.
+    subroutine scenario_logging_template_unclosed_brace()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_fmt_brace.txt", format="{time} {message")
+        print '(a)', "unexpectedly accepted a layout template with an unclosed brace"
+    end subroutine scenario_logging_template_unclosed_brace
+    !
+    !> More parsed steps than `PF_LOG_MAX_FORMAT_OPS` is refused. `{level}` is used rather than a
+    !> longer field name so that the template stays inside `PF_LOG_MAX_FORMAT` and this guard,
+    !> not the length guard above, is the one that fires.
+    subroutine scenario_logging_template_too_many_ops()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_fmt_ops.txt", &
+            format=repeat("{level}", PF_LOG_MAX_FORMAT_OPS + 1))
+        print '(a)', "unexpectedly accepted a layout template with too many steps"
+    end subroutine scenario_logging_template_too_many_ops
+    !
+    !> `add_console` takes one of two published stream constants; anything else is a caller error
+    !> rather than a third stream.
+    subroutine scenario_logging_add_console_bad_stream()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_console(stream=99)
+        print '(a)', "unexpectedly accepted a console stream that is neither stdout nor stderr"
+    end subroutine scenario_logging_add_console_bad_stream
+    !
+    !> `add_unit` takes a unit the CALLER owns, so it validates what it was handed: a unit nothing
+    !> has opened would otherwise fail on the first record rather than at configuration.
+    subroutine scenario_logging_add_unit_not_connected()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_unit(87)
+        print '(a)', "unexpectedly attached a unit that is not connected"
+    end subroutine scenario_logging_add_unit_not_connected
+    !
+    !> A unit opened for reading cannot take records. See `scenario_logging_add_unit_not_connected`.
+    subroutine scenario_logging_add_unit_not_writable()
+        type(pf_logger) :: lg
+        integer :: u
+
+        open (newunit=u, file="test_run/es_log_readonly.txt", action="write", status="replace")
+        write (u, '(a)') "seed"
+        close (u)
+        open (newunit=u, file="test_run/es_log_readonly.txt", action="read", status="old")
+        call lg%init(console=.false.)
+        call lg%add_unit(u)
+        print '(a)', "unexpectedly attached a read-only unit"
+    end subroutine scenario_logging_add_unit_not_writable
+    !
+    !> A record is formatted text, so an unformatted unit is refused rather than written to.
+    subroutine scenario_logging_add_unit_unformatted()
+        type(pf_logger) :: lg
+        integer :: u
+
+        open (newunit=u, file="test_run/es_log_unformatted.bin", action="write", &
+              form="unformatted", status="replace")
+        call lg%init(console=.false.)
+        call lg%add_unit(u)
+        print '(a)', "unexpectedly attached an unformatted unit"
+    end subroutine scenario_logging_add_unit_unformatted
+    !
+    !> A per-name override key longer than `PF_LOG_MAX_NAME` is refused, since a truncated key
+    !> would silently govern a different set of records from the one the caller named.
+    subroutine scenario_logging_set_level_name_too_long()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%set_level(PF_LEVEL_DEBUG, name=repeat("n", PF_LOG_MAX_NAME + 1))
+        print '(a)', "unexpectedly accepted a name= longer than PF_LOG_MAX_NAME"
+    end subroutine scenario_logging_set_level_name_too_long
+    !
+    !> More per-name overrides than one logger holds is refused rather than dropping one.
+    subroutine scenario_logging_too_many_name_rules()
+        type(pf_logger) :: lg
+        character(len=8) :: nm
+        integer :: i
+
+        call lg%init(console=.false.)
+        do i = 1, PF_LOG_MAX_NAME_RULES + 1
+            write (nm, '(a,i0)') "rule", i
+            call lg%set_level(PF_LEVEL_DEBUG, name=trim(nm))
+        end do
+        print '(a)', "unexpectedly accepted more than PF_LOG_MAX_NAME_RULES overrides"
+    end subroutine scenario_logging_too_many_name_rules
+    !
+    !> `%unset_level` validates the key's LENGTH as `%set_level` does, the companion to
+    !> `scenario_logging_unset_level_empty_name`.
+    subroutine scenario_logging_unset_level_name_too_long()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%unset_level(repeat("n", PF_LOG_MAX_NAME + 1))
+        print '(a)', "unexpectedly accepted an over-long name= in unset_level"
+    end subroutine scenario_logging_unset_level_name_too_long
+    !
+    !> The colour policy is one of three published constants.
+    subroutine scenario_logging_set_color_bad_policy()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%set_color(7)
+        print '(a)', "unexpectedly accepted a colour policy outside AUTO/NEVER/ALWAYS"
+    end subroutine scenario_logging_set_color_bad_policy
+    !
+    !> A `sink=` id no sink has is a caller error: silently configuring nothing would leave the
+    !> caller believing a sink had been changed.
+    subroutine scenario_logging_bad_sink_id()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_badsink.txt")
+        call lg%set_format("{message}", sink=9)
+        print '(a)', "unexpectedly accepted a sink id no sink has"
+    end subroutine scenario_logging_bad_sink_id
+    !
+    !> A logger name longer than `PF_LOG_MAX_NAME` is refused rather than truncated, since the
+    !> name is also what per-name overrides key on.
+    subroutine scenario_logging_set_name_too_long()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%set_name(repeat("n", PF_LOG_MAX_NAME + 1))
+        print '(a)', "unexpectedly accepted a logger name longer than PF_LOG_MAX_NAME"
+    end subroutine scenario_logging_set_name_too_long
+    !
+    !> A rank is a non-negative identity or the published "no rank" sentinel; anything else is a
+    !> mistake rather than a third meaning.
+    subroutine scenario_logging_set_rank_negative()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%set_rank(-5)
+        print '(a)', "unexpectedly accepted a negative rank that is not PF_LOG_RANK_ANY"
+    end subroutine scenario_logging_set_rank_negative
+    !
+    !> The threading mode is one of two published constants.
+    subroutine scenario_logging_thread_mode_bad()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%set_thread_mode(5)
+        print '(a)', "unexpectedly accepted a thread mode that is neither direct nor buffered"
+    end subroutine scenario_logging_thread_mode_bad
+    !
+    !> A collector slot below `PF_LOG_MIN_BUFFER_BYTES` could not hold one ordinary record, so the
+    !> floor is enforced at configuration rather than discovered at the first emission.
+    subroutine scenario_logging_thread_mode_slot_too_small()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%set_thread_mode(PF_LOG_THREAD_BUFFERED, slot_bytes=16)
+        print '(a)', "unexpectedly accepted slot_bytes below PF_LOG_MIN_BUFFER_BYTES"
+    end subroutine scenario_logging_thread_mode_slot_too_small
+    !
+    !> The shared base context is bounded like every other configured string. The per-frame
+    !> budget SATURATES instead, deliberately -- see the module header -- so only this one aborts.
+    subroutine scenario_logging_set_context_too_long()
+
+        call pf_log_set_context(repeat("c", PF_LOG_MAX_CONTEXT + 1))
+        print '(a)', "unexpectedly accepted a base context longer than PF_LOG_MAX_CONTEXT"
+    end subroutine scenario_logging_set_context_too_long
+    !
+    !> An empty name frame would compose a doubled dot and could not be told from no frame at all.
+    subroutine scenario_logging_push_name_empty()
+
+        call pf_log_clear_names()
+        call pf_log_push_name("   ")
+        print '(a)', "unexpectedly accepted an empty name frame"
+    end subroutine scenario_logging_push_name_empty
+    !
+    !> The name stack is bounded by DEPTH, and the bound aborts rather than saturating: a dropped
+    !> frame would leave the composed name naming the wrong scope.
+    subroutine scenario_logging_push_name_too_deep()
+        character(len=4) :: nm
+        integer :: i
+
+        call pf_log_clear_names()
+        do i = 1, PF_LOG_MAX_NAME_DEPTH + 1
+            write (nm, '(a,i0)') "f", i
+            call pf_log_push_name(trim(nm))
+        end do
+        print '(a)', "unexpectedly pushed more than PF_LOG_MAX_NAME_DEPTH name frames"
+    end subroutine scenario_logging_push_name_too_deep
+    !
+    !> And by the composed LENGTH, which is a separate bound reached at a shallower depth. The
+    !> frames below are twelve characters each, so the sixth crosses PF_LOG_MAX_NAME while the
+    !> depth is still well inside PF_LOG_MAX_NAME_DEPTH.
+    subroutine scenario_logging_push_name_too_long()
+        integer :: i
+
+        call pf_log_clear_names()
+        do i = 1, PF_LOG_MAX_NAME_DEPTH
+            call pf_log_push_name(repeat("f", 12))
+        end do
+        print '(a)', "unexpectedly pushed name frames longer than PF_LOG_MAX_NAME in total"
+    end subroutine scenario_logging_push_name_too_long
+    !
+    !> A `<prefix>LEVEL` that is not a level name or number aborts naming the value, rather than
+    !> falling back to a default the caller did not ask for.
+    subroutine scenario_logging_env_bad_level()
+
+        call scenario_setenv("PF_LOG_LEVEL", "verbose-ish")
+        call pf_log_configure_from_env()
+        print '(a)', "unexpectedly accepted a PF_LOG_LEVEL that names no level"
+    end subroutine scenario_logging_env_bad_level
+    !
+    !> The UNCONFIGURED default logger describes itself, answers `%enabled` from its implicit
+    !> INFO threshold, and writes blank lines to its implicit console.
+    !>
+    !> Every one of those arms exists only while `g_default` has never been configured, and the
+    !> first `pf_log_init`/`pf_log_add_*` retires them for the life of the process -- so they
+    !> cannot be reached from a test suite that configures the default logger anywhere.
+    subroutine scenario_logging_implicit_print()
+        integer :: u
+        logical :: on, off
+
+        on = pf_log_enabled(PF_LEVEL_WARNING)
+        off = pf_log_enabled(PF_LEVEL_DEBUG)
+        if (.not. on) error stop "implicit default: WARNING should be enabled"
+        if (off) error stop "implicit default: DEBUG should be disabled"
+        call pf_log_blank(2)
+        open (newunit=u, file="test_run/es_log_implicit_print.txt", action="write", status="replace")
+        call pf_log_print(unit=u)
+        close (u)
+        print '(a)', "implicit default logger described itself"
+    end subroutine scenario_logging_implicit_print
 
     !> One push, one segment: a frame carrying its own dot could not be popped off as a unit.
     subroutine scenario_logging_push_name_with_dot()

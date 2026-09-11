@@ -858,10 +858,12 @@ contains
 
         v = value
         ndig = 1
-        do while (v >= 10)
+        ! The one call site renders elapsed HOURS, so a fixture reaching a second digit would
+        ! have to run for ten hours. The loop stays general; only its body is unreachable here.
+        do while (v >= 10)                          ! GCOVR_EXCL_START
             ndig = ndig + 1
             v = v / 10
-        end do
+        end do                                      ! GCOVR_EXCL_STOP
         v = value
         do k = ndig, 1, -1
             out(k:k) = achar(48 + mod(v, 10))
@@ -942,7 +944,9 @@ contains
         else if (every > 1) then
             emit = mod(g_dedup_count(slot) - 1_int64, int(every, int64)) == 0_int64
         else
-            emit = .true.
+            ! `emit_core` calls this only when `once` is set or `every` exceeds 1, so the two
+            ! arms above cover every reachable case; this one keeps the function total.
+            emit = .true.                           ! GCOVR_EXCL_LINE
         end if
     end function dedup_admits
 
@@ -966,10 +970,15 @@ contains
         failed = .false.
         write (unit, '(a)', iostat = ios, iomsg = iom) text
         if (ios /= 0) then
-            if (is_console) then
+            ! **No portable fixture can make a CONSOLE write fail.** Closing the preconnected
+            ! unit does not do it: Fortran reconnects an unconnected unit implicitly, so gfortran
+            ! writes to `fort.6` and reports success. The file arm below is reachable and is
+            ! covered by `scenario_logging_write_to_closed_sink`; this arm, and the sink-death
+            ! handling it feeds in `emit_core`, are reached only by a real I/O failure.
+            if (is_console) then                    ! GCOVR_EXCL_START
                 failed = .true.
                 return
-            end if
+            end if                                  ! GCOVR_EXCL_STOP
             error stop "pf_logger: writing a record failed for '" // trim(path) // "': " // trim(iom)
         end if
         if (do_flush) flush (unit, iostat = ios)
@@ -984,7 +993,9 @@ contains
         integer :: t
 
         ok = .false.
-        if (.not. allocated(g_slots)) return
+        ! Buffered mode is only ever selected through `set_thread_mode`, which allocates the
+        ! collector before returning, so a buffered logger always has one.
+        if (.not. allocated(g_slots)) return        ! GCOVR_EXCL_LINE
         t = this_thread() + 1
         ! A thread outside the sized range -- a team grown after configuration, or a nested
         ! region -- falls back to direct emission rather than to a drop.
@@ -1072,7 +1083,8 @@ contains
         integer :: n, m
 
         died = .false.
-        if (sk%dead) return
+        ! Only the console-death handling in `emit_core` ever sets this flag; see `deliver`.
+        if (sk%dead) return                         ! GCOVR_EXCL_LINE
         if (rec%level < sk%level) return
         if (sk%only_rank /= PF_LOG_RANK_ANY) then
             if (rec%rank /= sk%only_rank) return
@@ -1250,21 +1262,21 @@ contains
         if (self%nsinks == 0) then
             call default_console_sink(implicit_sk)
             call emit_to_sink(implicit_sk, rec, msg, self%thread_mode, died)
-            if (died) then
+            if (died) then                          ! GCOVR_EXCL_START -- see `deliver`
                 call machinery_warning("writing to the console failed; console output is disabled " // &
                     "for the rest of this run", g_warned_console)
-            end if
+            end if                                  ! GCOVR_EXCL_STOP
             return
         end if
 
         do i = 1, self%nsinks
             call emit_to_sink(self%sink(i), rec, msg, self%thread_mode, died)
-            if (died) then
+            if (died) then                          ! GCOVR_EXCL_START -- see `deliver`
                 self%sink(i)%dead = .true.
                 call recompute_min_level(self)
                 call machinery_warning("writing to a console sink failed; that sink is dropped " // &
                     "for the rest of this run", g_warned_console)
-            end if
+            end if                                  ! GCOVR_EXCL_STOP
         end do
         end block
     end subroutine emit_core
@@ -1956,9 +1968,9 @@ contains
                 if (sk%only_rank /= PF_LOG_RANK_ANY) then
                     write (u, '(a,i0)') "    only rank : ", sk%only_rank
                 end if
-                if (sk%dead) then
+                if (sk%dead) then                   ! GCOVR_EXCL_START -- see `deliver`
                     write (u, '(a)') "    state     : DEAD (dropped after a write failure)"
-                end if
+                end if                              ! GCOVR_EXCL_STOP
             end associate
         end do
     end subroutine logger_print
@@ -2849,7 +2861,8 @@ contains
         if (rate > 0_int64) then
             seconds = real(c - g_clock0, real64) / real(rate, real64)
         else
-            seconds = 0.0_real64
+            ! `system_clock` reports a zero rate only where there is no clock at all.
+            seconds = 0.0_real64                    ! GCOVR_EXCL_LINE
         end if
         if (seconds < 0.0_real64) seconds = 0.0_real64
     end subroutine pf_log_elapsed

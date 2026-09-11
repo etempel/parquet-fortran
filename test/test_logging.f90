@@ -746,6 +746,22 @@ contains
         call check(error, trim(pf_str(3.5_real64, '(f6.2)')) == "3.50", "a format descriptor is honoured")
         if (allocated(error)) return
         call check(error, trim(pf_str(.true.)) == "T", "logical renders")
+        if (allocated(error)) return
+        ! real32 is a specific of its own, and each kind has a format-carrying arm beside the
+        ! default one. The bare-`g0` renderings are checked by prefix rather than for equality:
+        ! `G0`'s exact spelling is processor-dependent (CLAUDE.md's list-directed/G0 entry).
+        call check(error, index(trim(pf_str(2.5)), "2.5") == 1, "real32 renders")
+        if (allocated(error)) return
+        call check(error, trim(pf_str(2.5, '(f6.2)')) == "2.50", "real32 honours a format descriptor")
+        if (allocated(error)) return
+        call check(error, index(trim(pf_str(3.5_real64)), "3.5") == 1, "real64 renders without a descriptor")
+        if (allocated(error)) return
+        call check(error, trim(pf_str(12345, '(i8)')) == "12345", "int32 honours a format descriptor")
+        if (allocated(error)) return
+        call check(error, trim(pf_str(5000000000_int64, '(i12)')) == "5000000000", &
+            "int64 honours a format descriptor")
+        if (allocated(error)) return
+        call check(error, trim(pf_str(.false., '(l3)')) == "F", "logical honours a format descriptor")
     end subroutine test_pf_str
 
     !> Level names convert both ways, case-insensitively, and an unknown name is reported through
@@ -773,6 +789,39 @@ contains
         if (allocated(error)) return
         call pf_log_level_name(17, nm)
         call check(error, trim(nm) == "Level 17", "a non-standard level renders as a number")
+        if (allocated(error)) return
+        ! Every remaining name the table accepts, including the four aliases. Each is its own
+        ! `case`, so a mistyped one answers INFO -- the fall-through default -- rather than
+        ! failing, which is why each is asserted against the level it names.
+        call pf_log_level_from_name("all", lev)
+        call check(error, lev == PF_LEVEL_ALL, "all converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("trace", lev)
+        call check(error, lev == PF_LEVEL_TRACE, "trace converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("debug", lev)
+        call check(error, lev == PF_LEVEL_DEBUG, "debug converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("info", lev)
+        call check(error, lev == PF_LEVEL_INFO, "info converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("warn", lev)
+        call check(error, lev == PF_LEVEL_WARNING, "the warn alias converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("error", lev)
+        call check(error, lev == PF_LEVEL_ERROR, "error converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("fatal", lev)
+        call check(error, lev == PF_LEVEL_CRITICAL, "the fatal alias converts to CRITICAL")
+        if (allocated(error)) return
+        call pf_log_level_from_name("off", lev)
+        call check(error, lev == PF_LEVEL_OFF, "off converts")
+        if (allocated(error)) return
+        call pf_log_level_from_name("none", lev)
+        call check(error, lev == PF_LEVEL_OFF, "the none alias converts to OFF")
+        if (allocated(error)) return
+        call pf_log_level_name(PF_LEVEL_OFF, nm)
+        call check(error, trim(nm) == "OFF", "PF_LEVEL_OFF renders as its own name")
     end subroutine test_level_names
 
     !> A non-standard integer level is accepted rather than rejected, and is filtered numerically.
@@ -1027,7 +1076,7 @@ contains
         character(len=*), parameter :: path = "test_run/log_default_config.txt"
         character(len=512), allocatable :: lines(:)
         integer :: n, sk
-        logical :: before, after
+        logical :: before, after, removed
 
         call pf_log_reset_dedup()
         call pf_log_init(console = .false.)
@@ -1048,6 +1097,11 @@ contains
         ! test run -- and it is added after the blank lines above because %blank honours the rank
         ! filter but not a level, so nothing else would hold it back.
         call pf_log_add_console(only_rank = 99)
+        ! The per-name shims: an override is installed, reported through %enabled, then removed
+        ! again by the module-level unset_level, whose `found` says it was there to remove.
+        call pf_log_set_level(PF_LEVEL_TRACE, name = "shim.app.deep")
+        call pf_log_unset_level(name = "shim.app.deep", found = removed)
+        call pf_log_unset_level()
         call pf_log_set_level(PF_LEVEL_ERROR)
         after = pf_log_enabled(PF_LEVEL_INFO)
         call pf_log_info("suppressed")
@@ -1071,6 +1125,8 @@ contains
         if (allocated(error)) return
         call check(error, .not. has(lines(4), "suppressed"), &
             "the record below the raised threshold never reached the file")
+        if (allocated(error)) return
+        call check(error, removed, "pf_log_unset_level reports the override it removed")
     end subroutine test_default_logger_configuration
 
 
@@ -1327,12 +1383,13 @@ contains
         call lg%warning("cut" // esc // "[31")                                    ! 5  unterminated: tail goes
         call lg%warning("bare" // esc)                                            ! 6  a lone trailing ESC
         call lg%warning("mid" // esc // "end")                                    ! 7  a lone ESC mid-text
+        call lg%warning("bad" // esc // "[1" // achar(2) // "TAIL")               ! 8  malformed final byte
         call lg%set_color(PF_LOG_COLOR_ALWAYS, sink = sk)
-        call lg%warning("kept " // hot)                                           ! 8  ALWAYS: preserved
+        call lg%warning("kept " // hot)                                           ! 9  ALWAYS: preserved
         call lg%close()
         call read_back(path, lines, n)
 
-        call check(error, n == 8, "all eight records reached the file")
+        call check(error, n == 9, "all nine records reached the file")
         if (allocated(error)) return
         call check(error, .not. has(lines(1), esc), "a file sink under AUTO strips the caller's own codes")
         if (allocated(error)) return
@@ -1356,11 +1413,17 @@ contains
         call check(error, .not. has(lines(7), esc) .and. has(lines(7), "|midend"), &
             "a lone ESC mid-text is dropped without taking the text after it")
         if (allocated(error)) return
+        ! A CSI whose final byte is out of range is MALFORMED rather than unterminated: the scan
+        ! resumes at the offending byte instead of consuming it, so everything from there on
+        ! survives. Record 5 is the contrasting case, where the tail is taken with the sequence.
+        call check(error, .not. has(lines(8), esc) .and. has(lines(8), "TAIL"), &
+            "a CSI with a malformed final byte drops the sequence and keeps the text after it")
+        if (allocated(error)) return
 
         ! The control: the same message on the same sink, colouring, keeps every byte.
-        call check(error, has(lines(8), hot), "PF_LOG_COLOR_ALWAYS keeps the caller's own codes")
+        call check(error, has(lines(9), hot), "PF_LOG_COLOR_ALWAYS keeps the caller's own codes")
         if (allocated(error)) return
-        call check(error, has(lines(8), esc // "[" // PF_LOG_C_YELLOW // "m"), &
+        call check(error, has(lines(9), esc // "[" // PF_LOG_C_YELLOW // "m"), &
             "the level tag is still coloured on the colouring arm")
         if (allocated(error)) return
         call check(error, .not. has(lines(1), esc // "[" // PF_LOG_C_YELLOW // "m"), &
@@ -2031,9 +2094,271 @@ contains
             new_unittest("logger, sink and name rule compose with max, all three binding at once", &
                 test_threshold_composition), &
             new_unittest("pf_log_now renders the wall clock in the shape the record does", &
-                test_log_now) &
+                test_log_now), &
+            new_unittest("print describes buffered mode, frames, both consoles, a unit and a filter", &
+                test_print_config_variants), &
+            new_unittest("a sink-less logger writes no blank lines", test_blank_without_sinks), &
+            new_unittest("every = 1 emits every occurrence", test_every_one_emits_always), &
+            new_unittest("a buffered slot that fills mid-run keeps every record", &
+                test_buffered_slot_rollover), &
+            new_unittest("a full dedup table emits every time", test_dedup_table_fills_and_degrades), &
+            new_unittest("the context's byte budget saturates and keeps the depth", &
+                test_context_byte_budget_saturates) &
             ]
     end subroutine collect_tests_logging
+
+    !> A full `once=`/`every=` table degrades to "emit every time", which is the safe direction.
+    !!
+    !! The table is process-wide and fixed, so a program with more distinct deduplicated messages
+    !! than `PF_LOG_MAX_DEDUP_KEYS` runs off the end of it. Degrading the other way -- suppressing
+    !! what it cannot track -- would silently drop records a caller asked to see, so this asserts
+    !! the direction rather than merely that nothing crashed. The key stored BEFORE the table
+    !! filled is still suppressed, which is the control: the table did not simply stop working.
+    subroutine test_dedup_table_fills_and_degrades(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_dedup_full.txt"
+        integer, parameter :: nkey = PF_LOG_MAX_DEDUP_KEYS + 2
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        character(len=16) :: txt
+        integer :: n, i
+
+        call truncate_file(path)
+        call pf_log_reset_dedup()
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{message}")
+        do i = 1, nkey
+            write (txt, '(a,i0)') "k", i
+            call lg%info(trim(txt), once = .true.)
+        end do
+        ! A key the full table had no room for comes back every time...
+        write (txt, '(a,i0)') "k", nkey
+        call lg%info(trim(txt), once = .true.)
+        ! ...while one it did store is still suppressed.
+        call lg%info("k1", once = .true.)
+        call lg%flush()
+        call lg%close()
+        call pf_log_reset_dedup()
+        call read_back(path, lines, n)
+
+        call check(error, n == nkey + 1, &
+            "an untracked once= record repeats, and a tracked one does not")
+        if (allocated(error)) return
+        write (txt, '(a,i0)') "k", nkey
+        call check(error, has(lines(n), trim(txt)), &
+            "the repeat that got through is the key the full table could not store")
+    end subroutine test_dedup_table_fills_and_degrades
+
+    !> The context's BYTE budget saturates while the depth stays exact -- the other saturating
+    !! bound from the one `test_context_saturation_keeps_depth` reaches.
+    !!
+    !! That test pushes more frames than `PF_LOG_MAX_CONTEXT_DEPTH` allows, with a few bytes in
+    !! each; this one pushes frames that fit the depth exactly and overrun `PF_LOG_MAX_CONTEXT`
+    !! between them. The two bounds are separate branches, and the module header makes the
+    !! saturation deliberate for both: a dropped frame degrades a diagnostic, a shifted stack
+    !! would tag a record with another frame's context.
+    subroutine test_context_byte_budget_saturates(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_ctx_bytes.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n, i, bar
+
+        call truncate_file(path)
+        call pf_log_clear_context()
+        call pf_log_set_context("")
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{context}|{message}")
+        ! Eight frames of forty characters: the depth lands exactly on its own budget, so the
+        ! byte budget is the only one that can fire, and it does on the seventh.
+        do i = 1, PF_LOG_MAX_CONTEXT_DEPTH
+            call pf_log_push_context(repeat("c", 40))
+        end do
+        call check(error, pf_log_context_depth() == PF_LOG_MAX_CONTEXT_DEPTH, &
+            "every push is counted, including the ones whose text is dropped")
+        if (allocated(error)) return
+        call lg%info("over budget")
+        call pf_log_clear_context()
+        call lg%flush()
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 1, "the record was written")
+        if (allocated(error)) return
+        bar = index(lines(1), "|")
+        call check(error, bar > 1, "the context rendered ahead of the message")
+        if (allocated(error)) return
+        call check(error, bar - 1 <= PF_LOG_MAX_CONTEXT, &
+            "the rendered context saturated at PF_LOG_MAX_CONTEXT rather than overrunning it")
+    end subroutine test_context_byte_budget_saturates
+
+    !> `%print` describes the configurations `test_print_config` does not build: buffered thread
+    !! mode, pushed name frames, both console streams, a caller-owned unit, an explicit colour
+    !! policy and a sink's rank filter.
+    !!
+    !! Each is a separate arm of a `select case` or an `if` inside the dump, and `test_print_config`
+    !! builds a logger that takes the OTHER branch of every one of them -- a file sink, direct
+    !! mode, no frames, no rank filter. A dump that silently stopped describing any of these would
+    !! still pass there.
+    !!
+    !! The console sinks carry `only_rank = 99` against a logger with no rank, the convention
+    !! `test_default_logger_configuration` uses: the sink is real enough to be described, and
+    !! nothing it is attached to can reach the terminal during a test run.
+    subroutine test_print_config_variants(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_print_variants.txt"
+        character(len=*), parameter :: unit_file = "test_run/log_print_variants_unit.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: u, uu, n, i
+        logical :: seen_buffered, seen_frames, seen_stderr, seen_stdout, seen_unit
+        logical :: seen_always, seen_rank_filter
+
+        call lg%init(level = PF_LEVEL_INFO, console = .false., name = "app")
+        ! A rank filter needs the logger's own rank first, and rank 0 against a filter of 99 is
+        ! what keeps these console sinks off the terminal for the whole of this test.
+        call lg%set_rank(0)
+        call lg%set_thread_mode(PF_LOG_THREAD_BUFFERED)
+        call lg%add_console(stream = PF_LOG_STDERR, only_rank = 99)
+        call lg%add_console(stream = PF_LOG_STDOUT, color = PF_LOG_COLOR_ALWAYS, only_rank = 99)
+        call open_scratch(unit_file, uu)
+        call lg%add_unit(uu)
+        call pf_log_push_name("phase")
+
+        call open_scratch(path, u)
+        call lg%print(unit = u)
+        close (u)
+        call pf_log_pop_name()
+        ! Re-configuring the collector at a different slot size replaces it, and returning to
+        ! direct mode flushes whatever it still held: two more arms of set_thread_mode.
+        call lg%set_thread_mode(PF_LOG_THREAD_BUFFERED, slot_bytes = PF_LOG_MIN_BUFFER_BYTES)
+        call lg%set_thread_mode(PF_LOG_THREAD_DIRECT)
+        call lg%close()
+        close (uu)
+        call read_back(path, lines, n)
+
+        seen_buffered = .false.; seen_frames = .false.; seen_stderr = .false.
+        seen_stdout = .false.; seen_unit = .false.; seen_always = .false.
+        seen_rank_filter = .false.
+        do i = 1, n
+            if (has(lines(i), "thread mode") .and. has(lines(i), "buffered")) seen_buffered = .true.
+            if (has(lines(i), "name frames") .and. has(lines(i), "phase")) seen_frames = .true.
+            if (has(lines(i), "console (stderr)")) seen_stderr = .true.
+            if (has(lines(i), "console (stdout)")) seen_stdout = .true.
+            if (has(lines(i), "unit ")) seen_unit = .true.
+            if (has(lines(i), "color") .and. has(lines(i), "always")) seen_always = .true.
+            if (has(lines(i), "only rank") .and. has(lines(i), "99")) seen_rank_filter = .true.
+        end do
+        call check(error, seen_buffered, "%print names buffered thread mode")
+        if (allocated(error)) return
+        call check(error, seen_frames, "%print lists this thread's pushed name frames")
+        if (allocated(error)) return
+        call check(error, seen_stderr, "%print distinguishes a stderr console sink")
+        if (allocated(error)) return
+        call check(error, seen_stdout, "%print distinguishes a stdout console sink")
+        if (allocated(error)) return
+        call check(error, seen_unit, "%print names a caller-owned unit sink by its unit number")
+        if (allocated(error)) return
+        call check(error, seen_always, "%print reports an explicit always colour policy")
+        if (allocated(error)) return
+        call check(error, seen_rank_filter, "%print reports a sink's rank filter")
+    end subroutine test_print_config_variants
+
+    !> A configured logger with NO sinks swallows `%blank` instead of writing anywhere.
+    !!
+    !! The blank path has an implicit-console arm of its own for the unconfigured default logger
+    !! (`scenario_logging_implicit_blank`); this is the other side of that test, and the two are
+    !! one line apart in the source. A logger that has been `%init`ed with `console = .false.` is
+    !! configured and silent, and must stay silent.
+    subroutine test_blank_without_sinks(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_blank_no_sinks.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n, sk
+
+        call truncate_file(path)
+        call lg%init(console = .false.)
+        call lg%blank(3)
+        call lg%blank()
+        ! The negative control: with a sink attached the same calls do write.
+        call lg%add_file(path, append = .false., sink = sk)
+        call lg%blank(2)
+        call lg%flush()
+        call lg%close()
+        call read_back(path, lines, n)
+        call check(error, n == 2, &
+            "a sink-less logger wrote no blank lines, and the same calls wrote two once it had one")
+    end subroutine test_blank_without_sinks
+
+    !> `every = 1` emits every occurrence: it bypasses the deduplication table rather than
+    !! consulting it.
+    !!
+    !! `emit_core` consults the table only when `once=` is set or `every=` exceeds 1, so `every = 1`
+    !! is a documented no-op that must not cost a table slot or suppress anything. A guard that
+    !! admitted it would spend one of `PF_LOG_MAX_DEDUP_KEYS` on a record nobody asked to
+    !! deduplicate, and one that suppressed it would drop records silently.
+    subroutine test_every_one_emits_always(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_every_one.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n, i
+
+        call truncate_file(path)
+        call pf_log_reset_dedup()
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{message}")
+        do i = 1, 4
+            call lg%info("every one", every = 1)
+        end do
+        call lg%flush()
+        call lg%close()
+        call read_back(path, lines, n)
+        call check(error, n == 4, "every = 1 emits all four occurrences")
+        if (allocated(error)) return
+        call check(error, has(lines(4), "every one"), "and the last one is the record asked for")
+    end subroutine test_every_one_emits_always
+
+    !> A buffered collector slot that fills mid-run is flushed and keeps filling, in order.
+    !!
+    !! `test_buffered_mode_recovers_every_thread` never fills a slot and
+    !! `test_buffered_oversize_record` overflows one with a SINGLE record; neither reaches the
+    !! roll-over, where the slot is emptied part way through a run of ordinary records. A
+    !! roll-over that dropped what it had buffered would lose records silently, so this counts
+    !! them and checks the first and the last.
+    subroutine test_buffered_slot_rollover(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_buffered_rollover.txt"
+        ! Long records against the smallest legal slot, so the slot fills on BYTES after about
+        ! twenty of them: sixty records roll the slot over twice while staying well inside
+        ! `read_back`'s own 512-line ceiling, which a record-count-driven fixture would exceed.
+        integer, parameter :: nrec = 60
+        character(len=*), parameter :: pad = repeat("x", 190)
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        character(len=16) :: txt
+        integer :: n, i
+
+        call truncate_file(path)
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{message}")
+        call lg%set_thread_mode(PF_LOG_THREAD_BUFFERED, slot_bytes = PF_LOG_MIN_BUFFER_BYTES)
+        do i = 1, nrec
+            write (txt, '(a,i0)') "r", i
+            call lg%info(trim(txt) // "-" // pad)
+        end do
+        call lg%flush()
+        call lg%set_thread_mode(PF_LOG_THREAD_DIRECT)
+        call lg%close()
+        call read_back(path, lines, n)
+        call check(error, n == nrec, "every buffered record survives a slot roll-over")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "r1-"), "the first record is still the first line")
+        if (allocated(error)) return
+        write (txt, '(a,i0,a)') "r", nrec, "-"
+        call check(error, has(lines(n), trim(txt)), "and the last record is still the last line")
+    end subroutine test_buffered_slot_rollover
 
     !> `pf_log_now` renders `YYYY-MM-DD` and `HH:MM:SS`, with the separators in the right places
     !! and every field taken from the field it names.

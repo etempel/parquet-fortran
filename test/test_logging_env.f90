@@ -35,7 +35,9 @@ contains
         testsuite = [ &
             new_unittest("pf_log_configure_from_env applies what is set", test_configure_from_env), &
             new_unittest("the environment's COLOR reaches the file sink the environment added", &
-                         test_env_color_reaches_the_file_sink) &
+                         test_env_color_reaches_the_file_sink), &
+            new_unittest("the remaining COLOR spellings, and what TERM makes AUTO answer", &
+                         test_env_color_arms_and_auto) &
             ]
     end subroutine collect_tests_logging_env
 
@@ -188,5 +190,91 @@ contains
             end do
         end do
     end subroutine count_escapes_after_env
+
+
+    !> The `<prefix>COLOR` spellings `never` and `auto`, and the two answers `AUTO` gives a console
+    !> sink -- which `TERM` decides, and which the configuration dump reports.
+    !!
+    !! **`TERM` is why this test is in this file rather than beside the other `%print` tests.**
+    !! There is no `isatty` in Fortran, so `AUTO` on a console sink is resolved from `NO_COLOR` and
+    !! `TERM` alone; a test that merely built a console sink and read the dump would assert
+    !! whatever the environment the suite happened to run under said, passing on one machine and
+    !! failing on the next. Setting `TERM` makes both answers deterministic, and it is restored
+    !! afterwards because it belongs to the whole run rather than to this test.
+    subroutine test_env_color_arms_and_auto(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_env_color_arms.txt"
+        character(len=*), parameter :: dump = "test_run/log_env_color_dump.txt"
+        character(len=512), allocatable :: lines(:)
+        character(len=256) :: saved_term
+        integer :: n, nesc, ln, st
+        logical :: had_term, seen_on, seen_off
+
+        ! The two remaining COLOR spellings. Both leave a FILE sink uncoloured -- `never` by
+        ! policy, `auto` because AUTO colours a console only -- so the assertion is the same for
+        ! each, and what it says is that the reader accepts the spelling and applies it.
+        call count_escapes_after_env("never", path, nesc)
+        call check(error, nesc == 0, "PFLOGTEST_COLOR=never left the file sink uncoloured")
+        if (allocated(error)) return
+        call count_escapes_after_env("auto", path, nesc)
+        call check(error, nesc == 0, "PFLOGTEST_COLOR=auto left the file sink uncoloured")
+        if (allocated(error)) return
+
+        call get_environment_variable("TERM", saved_term, ln, st)
+        had_term = (st == 0)
+        call unset_env("NO_COLOR")
+
+        call auto_color_dump("dumb", dump, lines, n)
+        seen_off = any_line_has(lines, n, "auto (off)")
+        call auto_color_dump("xterm-256color", dump, lines, n)
+        seen_on = any_line_has(lines, n, "auto (on)")
+
+        if (had_term) then
+            call set_env("TERM", trim(saved_term))
+        else
+            call unset_env("TERM")
+        end if
+
+        call check(error, seen_off, "TERM=dumb turns AUTO off for a console sink")
+        if (allocated(error)) return
+        call check(error, seen_on, "an ordinary TERM leaves AUTO on for a console sink")
+    end subroutine test_env_color_arms_and_auto
+
+    !> Builds a logger with one AUTO console sink under `term`, and reads its dump back.
+    !!
+    !! The sink carries a rank filter no record can match, the convention
+    !! `test_default_logger_configuration` uses: the sink is real enough to be described and
+    !! nothing can reach the terminal through it. `%print` writes to the scratch unit regardless.
+    subroutine auto_color_dump(term, dump, lines, n)
+        character(len=*), intent(in) :: term                     !! Value for `TERM`.
+        character(len=*), intent(in) :: dump                     !! Scratch path for the dump.
+        character(len=512), allocatable, intent(out) :: lines(:) !! Receives the dump.
+        integer, intent(out) :: n                                !! Lines read.
+        type(pf_logger) :: lg
+        integer :: u
+
+        call set_env("TERM", term)
+        call lg%init(console = .false.)
+        call lg%set_rank(0)
+        call lg%add_console(only_rank = 99)
+        open (newunit = u, file = dump, action = "write", form = "formatted", status = "replace")
+        call lg%print(unit = u)
+        close (u)
+        call lg%close()
+        call read_back(dump, lines, n)
+    end subroutine auto_color_dump
+
+    !> Whether any of the first `n` lines contains `needle`.
+    logical function any_line_has(lines, n, needle) result(found)
+        character(len=*), intent(in) :: lines(:)  !! The lines to search.
+        integer, intent(in) :: n                  !! How many are valid.
+        character(len=*), intent(in) :: needle    !! The text to look for.
+        integer :: i
+
+        found = .false.
+        do i = 1, n
+            if (has(lines(i), needle)) found = .true.
+        end do
+    end function any_line_has
 
 end module test_logging_env

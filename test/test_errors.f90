@@ -84,7 +84,7 @@ contains
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
-                                            p22(:), p23(:)
+                                            p22(:), p23(:), p24(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2848,8 +2848,57 @@ contains
             new_unittest("a string bulk lookup on an integer multimap aborts", &
                 test_multimap_string_bulk_on_integer_aborts) &
             ]
+        ! p24: the remaining parquet_logging refusals -- the configuration bounds and the
+        ! unconfigured default logger's own arms. A new part rather than more entries in p9, for
+        ! the continuation-line reason stated above it.
+        p24 = [ &
+            new_unittest("a layout template over PF_LOG_MAX_FORMAT is refused", &
+                test_logging_template_too_long_aborts), &
+            new_unittest("a layout template with an unclosed brace is refused", &
+                test_logging_template_unclosed_brace_aborts), &
+            new_unittest("a layout template with too many steps is refused", &
+                test_logging_template_too_many_ops_aborts), &
+            new_unittest("add_console refuses a stream that is neither console", &
+                test_logging_add_console_bad_stream_aborts), &
+            new_unittest("add_unit refuses a unit nothing has opened", &
+                test_logging_add_unit_not_connected_aborts), &
+            new_unittest("add_unit refuses a read-only unit", &
+                test_logging_add_unit_not_writable_aborts), &
+            new_unittest("add_unit refuses an unformatted unit", &
+                test_logging_add_unit_unformatted_aborts), &
+            new_unittest("set_level refuses an over-long name=", &
+                test_logging_set_level_name_too_long_aborts), &
+            new_unittest("a logger refuses more overrides than it holds", &
+                test_logging_too_many_name_rules_aborts), &
+            new_unittest("unset_level refuses an over-long name=", &
+                test_logging_unset_level_name_too_long_aborts), &
+            new_unittest("set_color refuses a policy outside the three constants", &
+                test_logging_set_color_bad_policy_aborts), &
+            new_unittest("a sink= id no sink has is refused", &
+                test_logging_bad_sink_id_aborts), &
+            new_unittest("set_name refuses a name over PF_LOG_MAX_NAME", &
+                test_logging_set_name_too_long_aborts), &
+            new_unittest("set_rank refuses a negative rank that is not the sentinel", &
+                test_logging_set_rank_negative_aborts), &
+            new_unittest("set_thread_mode refuses an unknown mode", &
+                test_logging_thread_mode_bad_aborts), &
+            new_unittest("set_thread_mode refuses slot_bytes below the floor", &
+                test_logging_thread_mode_slot_too_small_aborts), &
+            new_unittest("the base context is bounded and aborts, unlike a frame", &
+                test_logging_set_context_too_long_aborts), &
+            new_unittest("an empty name frame is refused", &
+                test_logging_push_name_empty_aborts), &
+            new_unittest("the name stack's depth bound aborts, not saturates", &
+                test_logging_push_name_too_deep_aborts), &
+            new_unittest("the name stack's length bound is separate from its depth", &
+                test_logging_push_name_too_long_aborts), &
+            new_unittest("an environment level naming no level aborts", &
+                test_logging_env_bad_level_aborts), &
+            new_unittest("the unconfigured default logger describes itself", &
+                test_logging_implicit_print) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23]
+            p19, p21, p23, p24]
     end subroutine collect_tests_parquet_errors
 
 
@@ -6867,6 +6916,205 @@ contains
             failure_message="a name pop with a stale frame token was expected to abort", &
             required_stderr="unbalanced")
     end subroutine test_logging_pop_name_token_mismatch
+
+    !> See `scenario_logging_template_too_long` (test/error_scenarios.f90).
+    subroutine test_logging_template_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_template_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long layout template was expected to abort", &
+            required_stderr="longer than PF_LOG_MAX_FORMAT")
+    end subroutine test_logging_template_too_long_aborts
+
+    !> See `scenario_logging_template_unclosed_brace` (test/error_scenarios.f90).
+    subroutine test_logging_template_unclosed_brace_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_template_unclosed_brace", &
+            expect_abort=.true., &
+            failure_message="a template with an unclosed brace was expected to abort", &
+            required_stderr="unclosed '{'")
+    end subroutine test_logging_template_unclosed_brace_aborts
+
+    !> See `scenario_logging_template_too_many_ops` (test/error_scenarios.f90).
+    subroutine test_logging_template_too_many_ops_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_template_too_many_ops", &
+            expect_abort=.true., &
+            failure_message="a template over PF_LOG_MAX_FORMAT_OPS was expected to abort", &
+            required_stderr="PF_LOG_MAX_FORMAT_OPS")
+    end subroutine test_logging_template_too_many_ops_aborts
+
+    !> See `scenario_logging_add_console_bad_stream` (test/error_scenarios.f90).
+    subroutine test_logging_add_console_bad_stream_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_add_console_bad_stream", &
+            expect_abort=.true., &
+            failure_message="an unknown console stream was expected to abort", &
+            required_stderr="must be PF_LOG_STDOUT or PF_LOG_STDERR")
+    end subroutine test_logging_add_console_bad_stream_aborts
+
+    !> See `scenario_logging_add_unit_not_connected` (test/error_scenarios.f90).
+    subroutine test_logging_add_unit_not_connected_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_add_unit_not_connected", &
+            expect_abort=.true., &
+            failure_message="an unconnected unit was expected to abort", &
+            required_stderr="is not connected")
+    end subroutine test_logging_add_unit_not_connected_aborts
+
+    !> See `scenario_logging_add_unit_not_writable` (test/error_scenarios.f90).
+    subroutine test_logging_add_unit_not_writable_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_add_unit_not_writable", &
+            expect_abort=.true., &
+            failure_message="a read-only unit was expected to abort", &
+            required_stderr="is not writable")
+    end subroutine test_logging_add_unit_not_writable_aborts
+
+    !> See `scenario_logging_add_unit_unformatted` (test/error_scenarios.f90).
+    subroutine test_logging_add_unit_unformatted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_add_unit_unformatted", &
+            expect_abort=.true., &
+            failure_message="an unformatted unit was expected to abort", &
+            required_stderr="is not a formatted unit")
+    end subroutine test_logging_add_unit_unformatted_aborts
+
+    !> See `scenario_logging_set_level_name_too_long` (test/error_scenarios.f90).
+    subroutine test_logging_set_level_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_set_level_name_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long override key was expected to abort", &
+            required_stderr="name= is longer than PF_LOG_MAX_NAME")
+    end subroutine test_logging_set_level_name_too_long_aborts
+
+    !> See `scenario_logging_too_many_name_rules` (test/error_scenarios.f90).
+    subroutine test_logging_too_many_name_rules_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_too_many_name_rules", &
+            expect_abort=.true., &
+            failure_message="more than PF_LOG_MAX_NAME_RULES overrides was expected to abort", &
+            required_stderr="PF_LOG_MAX_NAME_RULES")
+    end subroutine test_logging_too_many_name_rules_aborts
+
+    !> See `scenario_logging_unset_level_name_too_long` (test/error_scenarios.f90).
+    subroutine test_logging_unset_level_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_unset_level_name_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long name= in unset_level was expected to abort", &
+            required_stderr="name= is longer than PF_LOG_MAX_NAME")
+    end subroutine test_logging_unset_level_name_too_long_aborts
+
+    !> See `scenario_logging_set_color_bad_policy` (test/error_scenarios.f90).
+    subroutine test_logging_set_color_bad_policy_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_set_color_bad_policy", &
+            expect_abort=.true., &
+            failure_message="an unknown colour policy was expected to abort", &
+            required_stderr="PF_LOG_COLOR_AUTO/_NEVER/_ALWAYS")
+    end subroutine test_logging_set_color_bad_policy_aborts
+
+    !> See `scenario_logging_bad_sink_id` (test/error_scenarios.f90).
+    subroutine test_logging_bad_sink_id_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_bad_sink_id", &
+            expect_abort=.true., &
+            failure_message="an unknown sink id was expected to abort", &
+            required_stderr="no sink with id")
+    end subroutine test_logging_bad_sink_id_aborts
+
+    !> See `scenario_logging_set_name_too_long` (test/error_scenarios.f90).
+    subroutine test_logging_set_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_set_name_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long logger name was expected to abort", &
+            required_stderr="name is longer than PF_LOG_MAX_NAME")
+    end subroutine test_logging_set_name_too_long_aborts
+
+    !> See `scenario_logging_set_rank_negative` (test/error_scenarios.f90).
+    subroutine test_logging_set_rank_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_set_rank_negative", &
+            expect_abort=.true., &
+            failure_message="a negative rank was expected to abort", &
+            required_stderr="must be non-negative")
+    end subroutine test_logging_set_rank_negative_aborts
+
+    !> See `scenario_logging_thread_mode_bad` (test/error_scenarios.f90).
+    subroutine test_logging_thread_mode_bad_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_thread_mode_bad", &
+            expect_abort=.true., &
+            failure_message="an unknown thread mode was expected to abort", &
+            required_stderr="PF_LOG_THREAD_DIRECT or PF_LOG_THREAD_BUFFERED")
+    end subroutine test_logging_thread_mode_bad_aborts
+
+    !> See `scenario_logging_thread_mode_slot_too_small` (test/error_scenarios.f90).
+    subroutine test_logging_thread_mode_slot_too_small_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_thread_mode_slot_too_small", &
+            expect_abort=.true., &
+            failure_message="slot_bytes below PF_LOG_MIN_BUFFER_BYTES was expected to abort", &
+            required_stderr="below PF_LOG_MIN_BUFFER_BYTES")
+    end subroutine test_logging_thread_mode_slot_too_small_aborts
+
+    !> See `scenario_logging_set_context_too_long` (test/error_scenarios.f90).
+    subroutine test_logging_set_context_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_set_context_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long base context was expected to abort", &
+            required_stderr="longer than PF_LOG_MAX_CONTEXT")
+    end subroutine test_logging_set_context_too_long_aborts
+
+    !> See `scenario_logging_push_name_empty` (test/error_scenarios.f90).
+    subroutine test_logging_push_name_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_push_name_empty", &
+            expect_abort=.true., &
+            failure_message="an empty name frame was expected to abort", &
+            required_stderr="text is empty")
+    end subroutine test_logging_push_name_empty_aborts
+
+    !> See `scenario_logging_push_name_too_deep` (test/error_scenarios.f90).
+    subroutine test_logging_push_name_too_deep_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_push_name_too_deep", &
+            expect_abort=.true., &
+            failure_message="more than PF_LOG_MAX_NAME_DEPTH frames was expected to abort", &
+            required_stderr="PF_LOG_MAX_NAME_DEPTH")
+    end subroutine test_logging_push_name_too_deep_aborts
+
+    !> See `scenario_logging_push_name_too_long` (test/error_scenarios.f90).
+    subroutine test_logging_push_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_push_name_too_long", &
+            expect_abort=.true., &
+            failure_message="name frames over PF_LOG_MAX_NAME was expected to abort", &
+            required_stderr="longer than PF_LOG_MAX_NAME characters")
+    end subroutine test_logging_push_name_too_long_aborts
+
+    !> See `scenario_logging_env_bad_level` (test/error_scenarios.f90).
+    subroutine test_logging_env_bad_level_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_env_bad_level", &
+            expect_abort=.true., &
+            failure_message="an unparseable PF_LOG_LEVEL was expected to abort", &
+            required_stderr="is not a level")
+    end subroutine test_logging_env_bad_level_aborts
+
+    !> See `scenario_logging_implicit_print` (test/error_scenarios.f90). The scenario asserts the
+    !> implicit threshold itself and exits 0; a regression there shows up as a nonzero exit.
+    subroutine test_logging_implicit_print(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_implicit_print", &
+            expect_abort=.false., &
+            failure_message="the unconfigured default logger was expected to describe itself", &
+            required_stderr="")
+    end subroutine test_logging_implicit_print
 
     !> push_name takes one segment: a dotted frame could not be popped off as a unit.
     subroutine test_logging_push_name_with_dot(error)

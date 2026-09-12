@@ -20,7 +20,8 @@
 !!
 !! **The covariance is computed by `stats_pair_moments`, in `parquet_stats_core`, and not here.**
 !! That is what makes `pf_cov(x, x)` exactly `pf_variance(x)`: both reach the same block tree, the
-!! same `pair_reduce` and the same re-centring correction. A local accumulation loop would agree
+!! same `pair_reduce` and the same re-centring correction, and an `x == y` pair reaches the very
+!! kernel the variance reduces rather than a mirror of it. A local accumulation loop would agree
 !! to fifteen digits and differ in the sixteenth, and the identity is the more valuable of the two.
 !!
 !! **The cumulative family's null rule is NOT the reduction family's, and `cum_scan` is where it

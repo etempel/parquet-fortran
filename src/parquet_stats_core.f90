@@ -2245,9 +2245,11 @@ contains
 
     !> One block of the two-sample pass two: the three centred cross sums about `(mux, muy)`.
     !!
-    !! The single-sample twin of this is `stats_block_moments`, and the two are deliberately
-    !! adjacent: `sxy` accumulates `w*dx*dy` in exactly the order that one accumulates `w*d*d`,
-    !! which is what makes the diagonal case bit-identical rather than merely close.
+    !! **This kernel never sees the diagonal.** `pf_cov(x, x)` is documented as `pf_variance(x)`
+    !! bit for bit, and two separate loops cannot be relied on to round alike however similar
+    !! their source is -- see the fork in `stats_pair_moments`, which routes an `x == y` pair
+    !! through the single-sample `stats_block_moments` instead. Nothing below has to agree with
+    !! that kernel, and no future edit here can restore the identity or break it.
     pure subroutine stats_pair_block(kx, ky, kw, mux, muy, j, m, o1x, o1y, oxx, oxy, oyy)
         real(real64), intent(in) :: kx(:)     !! the surviving first-sample values.
         real(real64), intent(in) :: ky(:)     !! the surviving second-sample values, paired.
@@ -2304,9 +2306,9 @@ contains
     module procedure stats_pair_moments
         real(real64), allocatable :: px(:), py(:), pw(:)
         real(real64), allocatable :: q1x(:), q1y(:), qxx(:), qxy(:), qyy(:)
-        real(real64) :: sx, sy, sw, mux, muy, dx, dy
+        real(real64) :: sx, sy, sw, mux, muy, dx, dy, m3_drop, m4_drop
         integer(int64) :: i, c, nb
-        logical :: weighted, xpinf, xninf, ypinf, yninf
+        logical :: weighted, xpinf, xninf, ypinf, yninf, diagonal
 
         weighted = allocated(kw)
         xpinf = .false.
@@ -2441,13 +2443,60 @@ contains
             return
         end if
 
+        ! ---- Is this the diagonal? ----
+        !
+        ! **`pf_cov(x, x)` is documented as `pf_variance(x)` bit for bit, and two separate loops
+        ! cannot deliver that.** Writing the pair kernel's body to mirror `stats_block_moments`
+        ! statement for statement was tried first and is not enough, in two independent ways, both
+        ! measured here against gfortran 15.2 on arm64:
+        !
+        ! * `stats_block_moments` closes `s2 = s2 + dd` where `dd = d*d` also feeds `s3` and `s4`
+        !   as a MULTIPLICAND, so that product has a use no compiler may fuse and the addition
+        !   stays `fmul` + `fadd`. `stats_pair_block`'s `sxy = sxy + dx*dy` has a single use and
+        !   gfortran contracts it into an FMA from `-O1` upwards. The two roundings differ on 24%
+        !   of random populations under `--profile release`, and on none under `-ffp-contract=off`.
+        !   It is not fixable by rewriting either body, because `dd`'s second use is forced by the
+        !   third and fourth moments, which the single-sample kernel computes in the same loop.
+        ! * The weighted arms group differently -- `w*(d*d)` against `(w*dx)*dy` -- which needs no
+        !   FMA to diverge and did so at every optimisation level, on 20% of random populations.
+        !
+        ! So the diagonal does not go through the pair kernel at all, and the identity holds by
+        ! construction: every compiler, every optimisation level, both weight conventions, any
+        ! `ddof`. The scan costs one comparison for a genuinely two-sample call, which leaves on
+        ! its first element, and one compare-only traversal for the diagonal. Neither array can
+        ! hold a NaN here (the pair compaction in parquet_stats_relate.f90 drops any pair holding
+        ! one) and an infinity has already returned above, so `/=` is an ordinary comparison.
+        diagonal = .true.
+        do i = 1_int64, m
+            if (kx(i) /= ky(i)) then
+                diagonal = .false.
+                exit
+            end if
+        end do
+
         ! ---- Pass two: the three centred sums, then the same re-centring correction.
         !
         allocate(q1x(nb), q1y(nb), qxx(nb), qxy(nb), qyy(nb))
-        do i = 1_int64, nb
-            call stats_pair_block(kx, ky, mux=mux, muy=muy, j=i, m=m, kw=kw, o1x=q1x(i), &
-                o1y=q1y(i), oxx=qxx(i), oxy=qxy(i), oyy=qyy(i))
-        end do
+        if (diagonal) then
+            ! `muy` is `mux` to the bit -- pass one accumulated `py` from the same values, in the
+            ! same order, by the same statements -- so one centre serves both samples, and `o2`
+            ! below is the block sum `pf_variance` reduces. `m3_drop`/`m4_drop` take the third and
+            ! fourth central moments, which no two-sample statistic reads; they are computed
+            ! because that kernel keeps ONE loop body for every level, which is exactly what makes
+            ! its `o2` the bits `pf_variance` gets rather than bits of its own.
+            do i = 1_int64, nb
+                call stats_block_moments(kx, kw, mu=mux, j=i, m=m, o1=q1x(i), o2=qxx(i), &
+                    o3=m3_drop, o4=m4_drop)
+            end do
+            q1y(1:nb) = q1x(1:nb)
+            qxy(1:nb) = qxx(1:nb)
+            qyy(1:nb) = qxx(1:nb)
+        else
+            do i = 1_int64, nb
+                call stats_pair_block(kx, ky, mux=mux, muy=muy, j=i, m=m, kw=kw, o1x=q1x(i), &
+                    o1y=q1y(i), oxx=qxx(i), oxy=qxy(i), oyy=qyy(i))
+            end do
+        end if
         call pair_reduce(q1x, nb)
         call pair_reduce(q1y, nb)
         call pair_reduce(qxx, nb)

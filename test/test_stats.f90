@@ -278,6 +278,8 @@ contains
             new_unittest("modes= returns every tied value, as pandas does", test_all_modes), &
             new_unittest("pf_cov(x,x) is pf_variance(x) under BOTH weight conventions", &
                 test_cov_weight_type), &
+            new_unittest("and still is when the centring does not come out exact", &
+                test_cov_identity_survives_inexact_centring), &
             new_unittest("the streaming accuracy loss is bounded, and the two-pass route is exact", &
                 test_streaming_accuracy_bound), &
             new_unittest("an infinity in either variable leaves pf_cov and pf_corr NaN, never aborting", &
@@ -6768,15 +6770,6 @@ contains
             trim(mss(1)) == ms, "the string-column modes, ascending and untruncated")
     end subroutine modes_other_kinds
 
-    !> `pf_cov(x, x)` is `pf_variance(x)` under BOTH weight conventions.
-    !!
-    !! The identity is the reason `pf_cov` accumulates through the same block tree the variance
-    !! does. It held only for the reliability convention until `pf_cov` gained `weight_type=`:
-    !! a caller asking `pf_variance` for frequency weights and `pf_cov` for the same population
-    !! got two different denominators from the same `ddof`, silently.
-    !!
-    !! `==` rather than a tolerance, deliberately -- the two reach the same arithmetic, so
-    !! anything short of equality is a defect rather than rounding.
     !> An infinity in EITHER variable of a pair leaves every paired statistic undefined -- and,
     !! like everything else in this module, reports that rather than aborting.
     !!
@@ -6845,6 +6838,17 @@ contains
             "a finite pair must still answer correctly after an infinite one")
     end subroutine test_pair_non_finite
 
+    !> `pf_cov(x, x)` is `pf_variance(x)` under BOTH weight conventions.
+    !!
+    !! The identity is the reason `pf_cov` accumulates through the same block tree the variance
+    !! does. It held only for the reliability convention until `pf_cov` gained `weight_type=`:
+    !! a caller asking `pf_variance` for frequency weights and `pf_cov` for the same population
+    !! got two different denominators from the same `ddof`, silently.
+    !!
+    !! `==` rather than a tolerance, deliberately -- the two reach the same kernel, so anything
+    !! short of equality is a defect rather than rounding. This fixture's centring is EXACT, which
+    !! is what keeps it readable and also what keeps it blind to the rounding half of the same
+    !! identity; `test_cov_identity_survives_inexact_centring` is the fixture for that.
     subroutine test_cov_weight_type(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64) :: x(3), w(3), c, v
@@ -6884,6 +6888,71 @@ contains
         call pf_cov(x, x, v, weight_type="frequency")
         call check(error, c == v, "without weights the two conventions are the same number")
     end subroutine test_cov_weight_type
+
+    !> The same identity over populations whose centring does NOT come out exact.
+    !!
+    !! **Every other fixture for `pf_cov(x, x) == pf_variance(x)` in this suite has an exactly
+    !! representable mean**, and such a population cannot see the defect this test exists for: two
+    !! loops written to mirror each other statement for statement still round differently, and the
+    !! identity is a documented EXACT one. Both mechanisms were measured against gfortran 15.2 on
+    !! arm64 before `stats_pair_moments` grew its diagonal fork -- FMA contraction that reaches the
+    !! pair kernel's single-use product and not the single-sample kernel's multi-use one (24% of
+    !! random unweighted populations, at `--profile release` only), and a different operand
+    !! grouping in the two weighted arms (20%, at every optimisation level). The fork's own comment
+    !! carries the detail; this is the fixture that would have refused to pass either of them.
+    !!
+    !! So the population is built to round rather than to read well: values with no exact binary
+    !! form, weights that are not powers of two, and every size from 3 to 200, which crosses
+    !! `STATS_BLOCK` and leaves a partial last block at every offset. `==` throughout -- the
+    !! identity is exact or it is broken -- and the two weight conventions are asserted to DIFFER
+    !! here, or the weighted half would hold just as well against a `pf_cov` ignoring the token.
+    subroutine test_cov_identity_survives_inexact_centring(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: c, v
+        character(len=160) :: msg
+        integer :: n, i, d
+
+        do n = 3, 200
+            allocate(x(n), w(n))
+            do i = 1, n
+                x(i) = sqrt(real(i, real64)) * 1.7_real64 - 0.3_real64
+                w(i) = 0.25_real64 + real(mod(i * 29, 13), real64) / 3.0_real64
+            end do
+
+            do d = 0, 1
+                call pf_cov(x, x, c, ddof=d)
+                call pf_variance(x, v, ddof=d)
+                write(msg, '(a,i0,a,i0)') "pf_cov(x,x) /= pf_variance(x) unweighted at n = ", n, &
+                    ", ddof = ", d
+                call check(error, c == v, trim(msg))
+                if (allocated(error)) return
+
+                call pf_cov(x, x, c, weights=w, ddof=d)
+                call pf_variance(x, v, weights=w, ddof=d)
+                write(msg, '(a,i0,a,i0)') "pf_cov(x,x) /= pf_variance(x) reliability-weighted " // &
+                    "at n = ", n, ", ddof = ", d
+                call check(error, c == v, trim(msg))
+                if (allocated(error)) return
+
+                call pf_cov(x, x, c, weights=w, weight_type="frequency", ddof=d)
+                call pf_variance(x, v, weights=w, weight_type="frequency", ddof=d)
+                write(msg, '(a,i0,a,i0)') "pf_cov(x,x) /= pf_variance(x) frequency-weighted " // &
+                    "at n = ", n, ", ddof = ", d
+                call check(error, c == v, trim(msg))
+                if (allocated(error)) return
+            end do
+
+            ! The fixture has to be one the weighted assertions can actually fail on.
+            call pf_cov(x, x, c, weights=w)
+            call pf_cov(x, x, v, weights=w, weight_type="frequency")
+            write(msg, '(a,i0)') "the two weight conventions must differ at n = ", n
+            call check(error, c /= v, trim(msg))
+            if (allocated(error)) return
+
+            deallocate(x, w)
+        end do
+    end subroutine test_cov_identity_survives_inexact_centring
 
     !> The streaming accuracy loss is bounded, and the two-pass route is exact.
     !!

@@ -137,6 +137,17 @@ done | sort | uniq -c | sort -rn
   point, a tolerance reference or a golden input that way; use an exact literal, a generated
   table, or `scale(1.0_real64, -k)` where a power of two will do (exact, F2018 16.9.171;
   `test_probit_round_trips`). A LITERAL exponent is folded correctly and is not in this class.
+- **Two loops written to mirror each other do not round alike, so a bit-exact identity between two
+  procedures is delivered by CALLING ONE of them**, never by writing the two bodies the same way.
+  Whether `acc = acc + a*b` contracts into an FMA depends on how many uses `a*b` has — gfortran
+  fuses a single-use product from `-O1` upwards and refuses one whose value also feeds a multiply —
+  so a kernel accumulating `s2 = s2 + dd` beside `s3 = s3 + dd*d` rounds differently from its twin
+  accumulating only `sxy = sxy + dx*dy`, on a target that has an FMA. Operand grouping diverges the
+  same way with no FMA anywhere: `w*(d*d)` is not `(w*d)*d`. Both are silent, both give a plausible
+  number one ulp out, and `-ffp-contract=off` is the diagnosis rather than the fix. A fixture whose
+  centring is EXACT proves nothing about such an identity, which is how a suite stays green over
+  one (`stats_pair_moments`' `diagonal` fork, `src/parquet_stats_core.f90`; `feature_risks.md`
+  Risk-259).
 - **An OpenMP `reduction(+:...)` over reals is not bit-reproducible** across calls or thread counts;
   measure the tolerance floor by calling twice, or use an ordered/compensated sum.
 - **Nested OpenMP needs both `omp_set_nested(.true.)` and `omp_set_max_active_levels(2)`**

@@ -383,6 +383,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - With `parquet_set_statistics_prescreen(.false.)`, a filter scoped to a row-group range — the
   engine behind `parquet_open_table(..., bounded=.true.)` — held a row mask covering the whole file
   and read the row groups outside its scope.
+- `pf_cov(x, x)` differed from `pf_variance(x)` by a rounding step instead of being equal to it
+  bit for bit, as documented: for weights at every optimisation level, and unweighted in an
+  optimised build on a target with a fused multiply-add.
 - A `string` column whose total byte payload exceeds 2 GiB (Arrow's `utf8` offset limit) could
   not be read: every whole-column read of it, `parquet_table%materialize_all` included, aborted the
   process with `offset overflow while concatenating arrays`. Such a column is widened to 64-bit

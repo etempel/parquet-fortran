@@ -327,6 +327,7 @@ something a reader is expected to have.
 | [Risk-256](#risk-256--clamping-p-away-from-0-1-in-pf_probit_mean-silently-changes-three-documented-answers) | Clamping `p` away from `{0, 1}` in `pf_probit_mean` silently changes three documented answers | 4 — covered |
 | [Risk-257](#risk-257--the-ceiling-an-int32-answer-can-overflow-is-not-always-the-row-count) | The ceiling an `int32` answer can overflow is not always the row count | 4 — covered |
 | [Risk-258](#risk-258--an-int32-bulk-form-is-a-second-route-through-the-same-walk) | An `int32` bulk form is a second route through the same walk | 4 — covered |
+| [Risk-259](#risk-259--two-loops-written-to-mirror-each-other-do-not-round-alike-and-pf_covx-x--pf_variancex-is-exact) | Two loops written to mirror each other do not round alike | 4 — covered |
 
 ---
 
@@ -9732,3 +9733,35 @@ the same for `%keys`, `%used_indexes` and `%csr`.
 `check_spatial_kind_specifics_forward_every_argument` (`tools/check_source_conventions.py`) is the
 static half: it reads each specific's own argument list out of the source and requires every one of
 them to be used, which is what a dropped `combine=` fails.
+
+### Risk-259 — Two loops written to mirror each other do not round alike, and `pf_cov(x, x) == pf_variance(x)` is EXACT
+
+`pf_cov(x, x)` is `pf_variance(x)` **bit for bit**, at any `ddof` and under either `weight_type`
+(doc/pages/utilities/statistics.md, "Two identities hold exactly"). It was delivered by writing
+`stats_pair_block` to mirror `stats_block_moments` statement for statement, and that is not enough:
+the single-sample kernel closes `s2 = s2 + dd` where `dd = d*d` also feeds `s3` and `s4` as a
+MULTIPLICAND, so no compiler may fuse that addition, while the pair kernel's `sxy = sxy + dx*dy`
+has a single use and gfortran contracts it into an FMA from `-O1` upwards. The weighted arms
+diverged a second, independent way, by grouping `w*(d*d)` against `(w*dx)*dy`.
+
+Both are silent: a one-ulp covariance is a plausible number, `ok` stays `.true.`, and the suite saw
+nothing because every fixture it had was exactly centred. Measured on machine A (gfortran 15.2,
+arm64) over 2000 random populations: 479 unweighted mismatches at `--profile release` and none at
+`-ffp-contract=off`, 494 and 491 weighted ones at **every** optimisation level.
+
+`stats_pair_moments` (`src/parquet_stats_core.f90`) therefore scans its compacted pair for
+`kx == ky` and runs pass two through `stats_block_moments` itself when it holds. The identity is
+then a property of calling one kernel, not of two kernels agreeing.
+
+**What it forbids.** Removing the `diagonal` fork, or restoring the identity by making the two
+kernel bodies look alike again — `dd`'s second use is forced by the third and fourth moments, so no
+rewriting of either body can make the two contract alike on every compiler. Also forbids citing an
+exactly centred fixture as evidence for this identity, or asserting it only unweighted.
+
+**Covered by** `test_cov_identity_survives_inexact_centring` (`test/test_stats.f90`), which asserts
+the identity with `==` over every population size from 3 to 200 — crossing `STATS_BLOCK` and
+leaving a partial last block at every offset — unweighted and under both weight conventions at
+`ddof` 0 and 1, on values with no exact binary form. Confirmed by mutation: forcing `diagonal` to
+`.false.` fails it at the first population. `test_cov_weight_type` and the identity assertions in
+`test_pairwise_columns_intersect_their_masks` and `test_pairwise_infinities_both_signs` remain, and
+are exactly centred, which is why they did not see it.

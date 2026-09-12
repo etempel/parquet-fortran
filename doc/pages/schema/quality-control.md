@@ -51,7 +51,7 @@ entry and differ only in how the parsed column name comes back. (In the call for
 this page, an argument in square brackets is optional; the brackets are notation, never something
 you type.)
 
-- **`call schema%add_col_qc(qc_input [, col_name])`** — the parsed name is returned in the optional
+- **`call schema%add_col_qc(qc_input, [col_name])`** — the parsed name is returned in the optional
   `col_name` argument (`character(len=:), allocatable, intent(out)`) when present; omit it to just
   add the entry.
 - **`call schema%set_col_qc(col)`** — in-place: `col` is `intent(inout)` and must already be
@@ -253,7 +253,7 @@ lets a `float64` column declare `min: 1.5`.
 
 ## Read-side enforcement
 
-`parquet_open_reader(reader, filename [, schema] [, qc] [, qc_soft])` checks column values against
+`parquet_open_reader(reader, filename, [schema], [qc], [qc_soft])` checks column values against
 `qc: min:`/`max:`/`miss:` bounds declared in a MAML file — mirroring the write-side `qc:` check
 above, but on the read side. By default a violation is a **hard error** (`qc_soft=.false.`): the
 process aborts with a diagnostic on stderr, the same class of clean, deliberate abort as the

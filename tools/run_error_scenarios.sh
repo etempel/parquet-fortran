@@ -188,6 +188,7 @@ scenarios=(
     "set_nullable_on_protected_column:1"
     "set_protected_on_nullable_column:1"
     "set_protected_unprotect_warns:0"
+    "set_nullable_undeclare_is_silent:0"
     "write_values_not_divisible_by_col_size:1"
     "write_int64_to_int32_overflow:1"
     "write_float_to_int32_non_integral:1"

@@ -3562,9 +3562,9 @@ def check_maml_keys_case_insensitive():
     Every MAML key is case-insensitive -- `parquet_find_maml_section` lowercases both sides, so
     `Extra:` validates exactly like `extra:`. The block LOCATORS did not: they compared
     `trim(adjustl(line)) == "extra:"` against a lowercase literal, so a MAML spelling its section
-    `Extra:` passed validation while its `protected_cols:`, `col_map:`, `remap:`, `filter:` and
-    `sort:` were silently never found -- no warning, and a file that looks right. The sharpest
-    case is `protected_cols:`, where the Null protection a user asked for simply disappears.
+    `Extra:` passed validation while its `protected_cols:`, `nullable_cols:`, `col_map:`, `remap:`,
+    `filter:` and `sort:` were silently never found -- no warning, and a file that looks right. The
+    sharpest case is `protected_cols:`, where the Null protection a user asked for simply disappears.
 
     So a header is matched with `parquet_maml_key_matches` (parquet_core's subtree) or
     `maml_key_matches` (parquet_tables_maml.f90's own twin -- that file deliberately carries its

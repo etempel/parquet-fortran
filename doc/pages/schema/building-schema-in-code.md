@@ -135,7 +135,7 @@ width that is the same in every row — its rows carry their own lengths — so:
 
 Each refusal names the column and the kind, so a `list` column's message differs from a `map`'s.
 
-### Checking, resetting and reading back a schema
+## Checking, resetting and reading back a schema
 
 - **`schema%is_init()`** — returns `.true.` once this schema is ready to use: either
   `schema%init`/`parquet_schema(...)` has completed (the in-code builder path), or
@@ -166,61 +166,6 @@ Each refusal names the column and the kind, so a `list` column's message differs
   expression instead of
   declaring the variable and calling `%init` separately. There is no `force=` and no "already
   initialized" abort — the result is always a fresh schema, so there is never anything to reset.
-- **`call schema%set_protected(name, [protected])`** — marks a column Null-protected, the
-  code-level equivalent of listing it under a MAML's `extra: protected_cols:`; `protected` defaults
-  to `.true.`, and `.false.` lifts protection. A protected column may hold no Null at all:
-  `parquet_write_column` fails with `error stop` on an `is_valid` mask with any `.false.` entry, on
-  a null `date`/`time`/`timestamp` element, and on an `%append_null()` in a `parquet_string_column`
-  — and the column's Arrow field is written non-nullable, which is also the only way to declare a
-  *streamed* temporal or `parquet_string_column` column null-free (see [Null
-  values](../types/supported-data-types.html#null-values)). **On a container column the rule has
-  two levels**: neither a null row nor a null element, map value or struct field may be written,
-  and the abort says which level failed. Call it before `parquet_open_writer`,
-  since the writer takes its own copy of the schema at open time. Unprotecting a column that is
-  currently protected is allowed but prints a `WARNING` naming the column — never an abort — since it
-  overrides a declaration someone made deliberately. Where the protection came from makes no
-  difference: a MAML's `extra: protected_cols:` and an earlier `%set_protected` call in code both
-  warn on the way back out. `error stop`s if `name` isn't a declared field.
-- **`call schema%set_nullable(name, [nullable])`** — declares a column nullable, the code-level
-  equivalent of listing it under a MAML's `extra: nullable_cols:`; `nullable` defaults to `.true.`,
-  and `.false.` takes the declaration off again. The column's Arrow field is then written nullable
-  whatever the values handed over contain, so one schema produces one file layout on both write
-  paths instead of letting a null-free batch decide (see [Null
-  values](../types/supported-data-types.html#null-values)). Nothing is checked and nothing is
-  refused — this is a declaration the writer obeys, where `%set_protected` is a promise the library
-  enforces — and undeclaring is silent, since it relaxes nothing a caller could have relied on. The
-  two are opposites and a column may carry at most one: declaring a protected column nullable, or
-  protecting one already declared nullable, `error stop`s naming both, rather than resolving a
-  precedence. Call it before `parquet_open_writer`. `error stop`s if `name` isn't a declared field.
-- **`call schema%get_field(name, [data_type], [unit], [info], [ucd], [array_size], [col_size], [qc_min],
-  [qc_max], [qc_miss])`** / **`call schema%get_field(index, name, [...])`** — reads back an
-  already-parsed field's full definition, the same shape of values `%add_field` accepts; every
-  output beyond the
-  lookup key is optional, so a caller can request only what it needs. The by-`index` form (1-based
-  MAML source order, same order `get_num_fields`/`get_field_name` count) additionally returns the
-  field's own `name`, since the caller doesn't already know it. `qc_min`/`qc_max` come back as a
-  single operator-prefixed string (e.g. `">= 0"`), re-feedable straight into `%add_field`'s own
-  `qc_min`/`qc_max` arguments — always with an explicit operator, even if the original call left it
-  implicit, which is semantically identical but not necessarily byte-identical to the original
-  input. `qc_miss` comes back as `"Null"` whenever the field allows Nulls — which covers both a
-  declared `Null`/`NA` (the alias distinction isn't preserved in storage) *and* a field that declared
-  no `qc: miss:` at all, since those mean the same thing — and as `""` only for the explicit empty
-  `qc: miss:` that asks for Null validation. Feeding either straight back into `%add_field` therefore
-  reproduces the same behaviour. `error stop`s if the field isn't found (by name) or
-  the index is out of range; requires `schema%cinfo` to already be populated, which means
-  `parquet_parse_maml` for a schema loaded from a file and at least one `%add_field` for one built
-  in code.
-- **`call schema%add_field_from(source_schema, name)`** — copies `name`'s full field definition from
-  `source_schema` (via `%get_field`) and appends an equivalent field here via `%add_field`, so two
-  schemas can share a column definition (e.g. a handful of "identity" columns — `obj_id`, `ra`,
-  `dec`, ... — common to several output tables) without re-typing its type/unit/info/qc by hand and
-  risking drift between the copies. `source_schema` must already be parsed (same precondition as
-  `%get_field`); `this` must already have `%init` called, exactly like a direct `%add_field` call
-  requires. Subject to the same qc_min/qc_max/qc_miss round-trip caveats as `%get_field`: the copy
-  is semantically equivalent to the source field, not necessarily a byte-identical re-declaration.
-  Concretely, the copy's own MAML text always spells out `array_size:` and `col_size:` even where the
-  source declared neither, and a qc bound comes back operator-prefixed; an unresolved `auto` width
-  copies as `auto`, and the source's Null policy is preserved exactly.
 - **`schema%get_num_fields()`**, **`call schema%get_field_name(index, name)`** and
   **`schema%get_column_index(name)`** — the three small queries for walking a schema whose column
   names you don't already know: how many fields are declared, the name at a 1-based MAML source
@@ -251,6 +196,74 @@ requirement as `%init` (and no `force=` option): loading a `.maml` file into a `
 already initialized — via `%init` or an earlier parse — fails with `error stop`, rather than
 silently discarding whatever `schema` held before. Call `schema%clear()` first to reuse the same
 variable for a different file.
+
+### schema%set_protected — forbidding Nulls in a column
+
+**`call schema%set_protected(name, [protected])`** — marks a column Null-protected, the
+code-level equivalent of listing it under a MAML's `extra: protected_cols:`; `protected` defaults
+to `.true.`, and `.false.` lifts protection. **`name` is the column's internal name, the one under
+`fields:`** — where a [`col_map:`](maml-format.html#renaming-columns-for-output-with-col_map)
+entry renames a field the MAML key matches the *output* name and this argument does not, so the
+two spellings differ. A protected column may hold no Null at all: `parquet_write_column` fails
+with `error stop` on an `is_valid` mask with any `.false.` entry, on a null
+`date`/`time`/`timestamp` element, and on an `%append_null()` in a `parquet_string_column` — and
+the column's Arrow field is written non-nullable, which is also the only way to declare a
+*streamed* temporal or `parquet_string_column` column null-free (see [Null
+values](../types/supported-data-types.html#null-values)). **On a container column the rule has two
+levels**: neither a null row nor a null element, map value or struct field may be written, and the
+abort says which level failed. Call it before `parquet_open_writer`, since the writer takes its
+own copy of the schema at open time. Unprotecting a column that is currently protected is allowed
+but prints a `WARNING` naming the column — never an abort — since it
+overrides a declaration someone made deliberately. Where the protection came from makes no
+difference: a MAML's `extra: protected_cols:` and an earlier `%set_protected` call in code both
+warn on the way back out. `error stop`s if `name` isn't a declared field.
+### schema%set_nullable — declaring that a column may hold one
+
+**`call schema%set_nullable(name, [nullable])`** — declares a column nullable, the code-level
+equivalent of listing it under a MAML's `extra: nullable_cols:` and taking the same internal
+`name` `%set_protected` does; `nullable` defaults to `.true.`, and `.false.` takes the
+declaration off again. The column's Arrow field is then written nullable whatever the values
+handed over contain, so one schema produces one file layout on both write paths instead of
+letting a null-free batch decide (see [Null
+values](../types/supported-data-types.html#null-values)). Nothing is checked and nothing is
+refused — this is a declaration the writer obeys, where `%set_protected` is a promise the library
+enforces — and undeclaring is silent, since it relaxes nothing a caller could have relied on. The
+two are opposites and a column may carry at most one: declaring a protected column nullable, or
+protecting one already declared nullable, `error stop`s naming both, rather than resolving a
+precedence. Call it before `parquet_open_writer`. `error stop`s if `name` isn't a declared field.
+### schema%get_field — reading a field back
+
+**`call schema%get_field(name, [data_type], [unit], [info], [ucd], [array_size], [col_size], [qc_min],
+[qc_max], [qc_miss])`** / **`call schema%get_field(index, name, [...])`** — reads back an
+already-parsed field's full definition, the same shape of values `%add_field` accepts; every
+output beyond the
+lookup key is optional, so a caller can request only what it needs. The by-`index` form (1-based
+MAML source order, same order `get_num_fields`/`get_field_name` count) additionally returns the
+field's own `name`, since the caller doesn't already know it. `qc_min`/`qc_max` come back as a
+single operator-prefixed string (e.g. `">= 0"`), re-feedable straight into `%add_field`'s own
+`qc_min`/`qc_max` arguments — always with an explicit operator, even if the original call left it
+implicit, which is semantically identical but not necessarily byte-identical to the original
+input. `qc_miss` comes back as `"Null"` whenever the field allows Nulls — which covers both a
+declared `Null`/`NA` (the alias distinction isn't preserved in storage) *and* a field that declared
+no `qc: miss:` at all, since those mean the same thing — and as `""` only for the explicit empty
+`qc: miss:` that asks for Null validation. Feeding either straight back into `%add_field` therefore
+reproduces the same behaviour. `error stop`s if the field isn't found (by name) or
+the index is out of range; requires `schema%cinfo` to already be populated, which means
+`parquet_parse_maml` for a schema loaded from a file and at least one `%add_field` for one built
+in code.
+### schema%add_field_from — copying a field from another schema
+
+**`call schema%add_field_from(source_schema, name)`** — copies `name`'s full field definition from
+`source_schema` (via `%get_field`) and appends an equivalent field here via `%add_field`, so two
+schemas can share a column definition (e.g. a handful of "identity" columns — `obj_id`, `ra`,
+`dec`, ... — common to several output tables) without re-typing its type/unit/info/qc by hand and
+risking drift between the copies. `source_schema` must already be parsed (same precondition as
+`%get_field`); `this` must already have `%init` called, exactly like a direct `%add_field` call
+requires. Subject to the same qc_min/qc_max/qc_miss round-trip caveats as `%get_field`: the copy
+is semantically equivalent to the source field, not necessarily a byte-identical re-declaration.
+Concretely, the copy's own MAML text always spells out `array_size:` and `col_size:` even where the
+source declared neither, and a qc bound comes back operator-prefixed; an unresolved `auto` width
+copies as `auto`, and the source's Null policy is preserved exactly.
 
 ## Choosing which columns a schema writes
 

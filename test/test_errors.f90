@@ -1118,6 +1118,8 @@ contains
         ! (CLAUDE.md's source conventions: close the part and open a new one rather than growing
         ! this one). Nothing else distinguishes the two halves.
         p20 = [ &
+            new_unittest("undeclaring a nullable column is silent, where unprotecting warns", &
+                test_set_nullable_undeclare_is_silent), &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
             new_unittest("qc: max value that does not parse as a number aborts", &
@@ -14560,6 +14562,39 @@ contains
         call check(error, .not. blamed_maml, &
             "the warning must not blame a MAML's extra: protected_cols: -- this schema has no MAML file")
     end subroutine test_set_protected_unprotect_warns
+
+    !> The mirror of the test above on the opposite declaration, and the half that had no test:
+    !! `set_nullable(name, .false.)` must print NOTHING, where `set_protected(name, .false.)` on a
+    !! protected column warns. `doc/pages/schema/building-schema-in-code.md` states the contrast
+    !! explicitly, so the two bullets disagree with the library the moment either side moves.
+    !!
+    !! **Both halves are read from ONE captured run, which is what makes the absence assertion
+    !! mean anything.** "Nothing mentions column 'a'" is satisfied for free by a broken capture, a
+    !! renamed binary, or a scenario that died before either call; column 'p' having warned in the
+    !! same output rules all three out. A guard that warned on every relaxation, rather than only
+    !! on one that gives something up, is what the assertion itself catches.
+    subroutine test_set_nullable_undeclare_is_silent(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_a, warned_p
+
+        call run_error_scenario("set_nullable_undeclare_is_silent", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "undeclaring a nullable column should be silent, not abort")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'p' is currently protected", warned_p)
+        call check(error, warned_p, &
+            "positive control: unprotecting 'p' must still warn, or this run says nothing about silence")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'a'", warned_a)
+        call check(error, .not. warned_a, &
+            "set_nullable(a, .false.) must print nothing -- undeclaring relaxes nothing a caller relied on")
+    end subroutine test_set_nullable_undeclare_is_silent
 
     subroutine test_validate_qc_min_not_numeric_aborts(error)
         type(error_type), allocatable, intent(out) :: error

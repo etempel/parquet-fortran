@@ -36,7 +36,7 @@ exactly what their lowercase spellings mean. **A value drawn from a fixed vocabu
 case-insensitive too** — a `data_type:` token (`INT32`, `List[Int32]` and `STRUCT` all parse), the
 `auto` width placeholder, `unit: unitless`, `qc: miss:`'s `Null`/`NA`, and `sort:`'s
 `asc`/`desc`/`nulls_first`/`nulls_last`. **A value that is *data* is not**: a column name in
-`col_map:`, `remap:` or `protected_cols:` must match the column exactly.
+`col_map:`, `remap:`, `protected_cols:` or `nullable_cols:` must match the column exactly.
 
 To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which
 accepts arbitrary structure unvalidated (see [Renaming columns for output with
@@ -138,9 +138,9 @@ Notes on the `fields:` entries:
   `parquet_write_column`, which is data the caller already holds. `col_size:` does not apply —
   `auto` and any value above 1 are rejected, since a struct row is one instance rather than a row
   of values — and neither does `array_size:`, on the same terms as a list's: `auto` rejected, a
-  positive value accepted and never consulted. So is
-  `qc: min:`/`max:` rejected — quality-control ranges are scalar-leaf only. `qc: miss:` **is**
-  supported and applies to row nullness (an absent struct instance).
+  positive value accepted and never consulted. So is `qc: min:`/`max:` rejected — quality-control
+  ranges are scalar-leaf only. `qc: miss:` **is** supported and applies to row nullness (an absent
+  struct instance).
 - `map[<valuetype>]` declares a **map** column, whose every row holds its own set of
   `key -> value` entries — read and written through a
   [`parquet_map_column`](../types/map-columns.html). `<valuetype>` is one of the same nine kinds
@@ -155,8 +155,9 @@ Notes on the `fields:` entries:
   `data_type`, and a map whose values are containers can be read from a file but not written.
   `col_size:` does not apply — `auto` and any value above 1 are rejected, since a map row's entry
   count comes from the data — and neither does `array_size:`, on the same terms as a list's:
-  `auto` rejected, a positive value accepted and never consulted. `qc: min:`/`max:` is rejected on the same scalar-leaf-only terms as above; `qc: miss:`
-  **is** supported and applies to row nullness (an absent map).
+  `auto` rejected, a positive value accepted and never consulted. `qc: min:`/`max:` is rejected on
+  the same scalar-leaf-only terms as above; `qc: miss:` **is** supported and applies to row
+  nullness (an absent map).
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   Writing a longer value through an ordinary `character` array is an error. A
   [`parquet_string_column`](../types/string-columns.html) write is the one exception: it stores each
@@ -197,10 +198,12 @@ Notes on the `fields:` entries:
   writer: a missing or empty `table:`, no `fields:` entries at all, a duplicate or empty field name,
   an unrecognized `data_type`, a `col_size:`/`array_size:` that is neither a positive integer nor
   `auto`, `array_size: auto` on a column that is not `string`, a `col_size:` of `auto` or above 1 on
-  a container column, a `qc: min:`/`max:` on a container column, a `qc:` block on a
-  `date`/`time`/`timestamp` column, a reversed qc operator (`min:` with `<`, or `max:` with `>`), a
-  qc bound that will not convert to the column's own numeric type, an `extra: protected_cols:` name
-  that is not a declared column, and any unknown top-level section or field sub-key. It accepts
+  a container column, a `qc: min:`/`max:` on a container column, a `qc: min:`/`max:` on a
+  `date`/`time`/`timestamp` column (a `qc: miss:` on either is supported and is not refused), a
+  reversed qc operator (`min:` with `<`, or `max:` with `>`), a qc bound that will not convert to
+  the column's own numeric type, an `extra: protected_cols:` or `extra: nullable_cols:` name that is
+  not a declared column, one column named under both of those keys at once, and any unknown
+  top-level section or field sub-key. It accepts
   either a `parquet_maml_file` (e.g. from `parquet_load_maml_file`, or built in memory) or a
   filename directly (`call parquet_validate_maml("schemas/maml_example2.maml")`, loading it from
   disk internally). One `error stop` reports every problem it found, not just the first — except
@@ -237,8 +240,8 @@ check whether a column is still unresolved.
   array) write, and `array_size` to the caller's own declared Fortran character length
   (`len(values(1,1))` for a matrix write, `len(values)` for a flat 1-D one). Both are taken from
   that call's own data shape, not its content. Once resolved (either way), every later write to that
-  column is checked against the resolved value exactly like an explicitly-declared
-  `col_size`/`array_size` always was.
+  column is checked against the resolved value exactly like an explicitly declared
+  `col_size`/`array_size` is.
 
 The two differ in which write shapes can resolve them. `array_size` is resolved by a 1-D string
 write as readily as by a matrix one, so a scalar `string` column declared `array_size: auto` needs
@@ -298,9 +301,9 @@ fields:
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for
   inspection.
 - Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its
-  own (nor do `protected_cols:` and `nullable_cols:`, `extra:`'s other write-side specifically-parsed
-  keys — see [Null values](../types/supported-data-types.html#null-values)); anything else nested
-  inside `extra:` is accepted unvalidated and otherwise unused.
+  own (nor do `protected_cols:` and `nullable_cols:`, `extra:`'s other write-side
+  specifically-parsed keys — see [Null values](../types/supported-data-types.html#null-values));
+  anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
 
 ## Renaming columns for reading with `extra: remap:`
 

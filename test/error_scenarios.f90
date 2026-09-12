@@ -1568,6 +1568,8 @@ program error_scenarios
         call scenario_set_protected_on_nullable_column()
     case ("set_protected_unprotect_warns")
         call scenario_set_protected_unprotect_warns()
+    case ("set_nullable_undeclare_is_silent")
+        call scenario_set_nullable_undeclare_is_silent()
     case ("validate_qc_min_not_numeric")
         call scenario_validate_qc_min_not_numeric()
     case ("validate_qc_max_not_numeric")
@@ -13315,6 +13317,29 @@ contains
         call schema%set_protected("p")           ! protect in code (no MAML involved at all)
         call schema%set_protected("p", .false.)  ! -> the one WARNING this scenario expects
     end subroutine scenario_set_protected_unprotect_warns
+
+    !> The mirror of the scenario above, on the opposite declaration: relaxing a NULLABLE
+    !! declaration is silent. Undeclaring relaxes nothing a caller could have relied on -- the
+    !! column simply goes back to the default, where the values decide -- so unlike unprotecting
+    !! there is nothing to report. Documented in doc/pages/schema/building-schema-in-code.md
+    !! ("undeclaring is silent") and in set_nullable's own doc-comment in parquet_core.f90.
+    !!
+    !! **A claimed ABSENCE needs a positive control in the same run, and "p" is it**: a build whose
+    !! output capture is broken, or a scenario that aborted before reaching either call, would
+    !! satisfy "nothing mentions column 'a'" trivially. So this scenario relaxes BOTH kinds of
+    !! declaration and the wrapper reads one line present and the other absent from one capture.
+    subroutine scenario_set_nullable_undeclare_is_silent()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="nullable_table")
+        call schema%add_field("a", "int32")
+        call schema%add_field("p", "int32")
+
+        call schema%set_nullable("a")            ! declare, then take it off again -> must be silent
+        call schema%set_nullable("a", .false.)
+        call schema%set_protected("p")           ! positive control: this relaxation DOES warn
+        call schema%set_protected("p", .false.)
+    end subroutine scenario_set_nullable_undeclare_is_silent
 
     !> **The negative control for scenario_qc_miss_default_active_numeric_warns, and the test that
     !! pins the rule rather than one side of it.** Identical in every respect except that qc_miss is

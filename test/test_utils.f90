@@ -54,6 +54,16 @@ module test_utils
     !> How far the real32 arm may sit from the real64 kernel at the SAME input, in real32 ulp.
     !! Measured worst case is 1 under gfortran and flang, 2 under nagfor.
     real(real32), parameter :: PROBIT32_ULP_BUDGET = 8.0_real32
+    !> Constant term of the forward three's real32 budget against the real64 kernel, in ulp.
+    !!
+    !! **The budget is `NORM32_ULP_BASE + z*z`, and the `z*z` is not slack.** The real32 specifics
+    !! compute in real32 throughout, so the argument handed to `erfc` is `z * INV_SQRT2_R32`
+    !! ROUNDED to real32 -- a relative perturbation of about `epsilon(1.0_real32)` in `z`. In the
+    !! tail `d(ln Phi(-z))/dz` is about `-z`, so that perturbation comes out of `Phi` amplified by
+    !! `z`, i.e. `z*z` ulp of the answer. Any fixed budget therefore either fails in the tail or is
+    !! vacuous at the centre. Measured worst ratio of gap to budget over `Z_GRID` is 0.32 for
+    !! `pf_norm_cdf`/`pf_norm_sf` and 0.12 for `pf_norm_pdf` under gfortran.
+    real(real32), parameter :: NORM32_ULP_BASE = 8.0_real32
     !> How far `pf_probit` may step BACKWARDS at a branch seam, in ulp. Measured worst case is 1.
     !! Two branches meet at their own accuracy, not at the last bit; see the test for why this is
     !! a property of the shape rather than slack.
@@ -366,7 +376,8 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         real(real64) :: nan64
         real(real32) :: nan32
-        logical :: saved, supported, v(17)
+        real(real32) :: p32
+        logical :: saved, supported, v(24)
 
         ! Built with ieee_value, never as 0/0, which traps under nagfor before it can be stored.
         nan64 = ieee_value(1.0_real64, ieee_quiet_nan)
@@ -405,6 +416,23 @@ contains
         v(15) = ieee_is_nan(pf_probit(nan32))
         v(16) = ieee_is_nan(pf_probit(2.0_real32))
         v(17) = pf_probit(0.5_real32) == 0.0_real32
+        ! The real32 forward three carry their own NaN screens, for the same reason and against
+        ! the same compiler: nagfor's real32 `erfc` is no more willing to propagate a NaN than its
+        ! real64 one, so a screen dropped here is a probability of exactly zero for an unknown
+        ! quantile, in real32 this time.
+        v(18) = ieee_is_nan(pf_norm_cdf(nan32))
+        v(19) = ieee_is_nan(pf_norm_sf(nan32))
+        v(20) = ieee_is_nan(pf_norm_pdf(nan32))
+        v(21) = pf_norm_cdf(0.0_real32) == 0.5_real32 .and. pf_norm_sf(0.0_real32) == 0.5_real32
+        ! The real32 probit's ENDS, which are its own branches and not reached by the two NaN
+        ! cases above: `p == 0` and `p == 1` take the infinity arms, `p < 0` the NaN arm beside
+        ! the zero test. `is_neg_inf`/`is_pos_inf` are real64 predicates, so the same three
+        ! NaN-quiet inquiries are written out here for the narrow kind.
+        p32 = pf_probit(0.0_real32)
+        v(22) = .not. ieee_is_finite(p32) .and. .not. ieee_is_nan(p32) .and. ieee_is_negative(p32)
+        p32 = pf_probit(1.0_real32)
+        v(23) = .not. ieee_is_finite(p32) .and. .not. ieee_is_nan(p32) .and. .not. ieee_is_negative(p32)
+        v(24) = ieee_is_nan(pf_probit(-0.25_real32))
 
         if (supported) call ieee_set_flag(ieee_underflow, saved)
 
@@ -440,6 +468,18 @@ contains
             "the real32 pf_probit must give a quiet NaN for a NaN and for p outside [0,1]")
         if (allocated(error)) return
         call check(error, v(17), "the real32 pf_probit(0.5) must be exactly zero too")
+        if (allocated(error)) return
+        call check(error, v(18) .and. v(19) .and. v(20), &
+            "the real32 forward three must pass a NaN through as a quiet NaN")
+        if (allocated(error)) return
+        call check(error, v(21), &
+            "the real32 pf_norm_cdf(0) and pf_norm_sf(0) must both be exactly one half")
+        if (allocated(error)) return
+        call check(error, v(22), "the real32 pf_probit(0) must be -Infinity")
+        if (allocated(error)) return
+        call check(error, v(23), "the real32 pf_probit(1) must be +Infinity")
+        if (allocated(error)) return
+        call check(error, v(24), "the real32 pf_probit below 0 must be a quiet NaN, not an abort")
     end subroutine test_probit_ends_and_nan
 
     !> `pf_probit` answers a real number for a subnormal probability, rather than `-Infinity`.
@@ -593,7 +633,8 @@ contains
             "pf_norm_cdf(pf_probit(p)) must return p down the whole tail")
     end subroutine test_probit_round_trips
 
-    !> The real32 arm resolves to `real32`, tracks the `real64` kernel, and is not that kernel.
+    !> The real32 arm resolves to `real32`, tracks the `real64` kernel, and is not that kernel --
+    !> for `pf_probit` and for the forward three, which additionally have to mirror each other.
     !!
     !! **The last clause is the one that needs explaining.** A `real32` specific implemented as
     !! `real(pf_probit(real(p, real64)), real32)` would be the correctly rounded `real32` of the
@@ -610,8 +651,10 @@ contains
     subroutine test_normal_family_real32(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         integer :: k, nbad, ndiff, n
-        logical :: saved, supported
+        integer :: fbad(3), fdiff(3)
+        logical :: saved, supported, mirrored
         real(real32) :: p4, got, ref
+        real(real32) :: z4, budget
 
         call check(error, kind(pf_probit(0.3_real32)) == real32, &
             "pf_probit of a real32 must resolve to the real32 specific")
@@ -646,6 +689,28 @@ contains
                 nbad = nbad + 1
             end if
         end do
+
+        ! The forward three, on the quantile grid and under the same rules. `kind()` above is an
+        ! INQUIRY, so it never evaluated any of them; these are the calls.
+        fbad = 0
+        fdiff = 0
+        mirrored = .true.
+        do k = 1, NZ
+            z4 = real(Z_GRID(k), real32)
+            budget = NORM32_ULP_BASE + z4 * z4
+            call grade32(pf_norm_cdf(z4), real(pf_norm_cdf(real(z4, real64)), real32), &
+                budget, fbad(1), fdiff(1))
+            call grade32(pf_norm_sf(z4), real(pf_norm_sf(real(z4, real64)), real32), &
+                budget, fbad(2), fdiff(2))
+            call grade32(pf_norm_pdf(z4), real(pf_norm_pdf(real(z4, real64)), real32), &
+                budget, fbad(3), fdiff(3))
+            ! `Phi(-z)` and `1 - Phi(z)` are the SAME expression once the sign is folded into the
+            ! argument, so the two bodies must agree to the last bit and not merely to a budget.
+            ! A sign dropped or doubled in either one is invisible to every assertion above --
+            ! both would still track a real64 kernel, just the wrong one.
+            if (pf_norm_cdf(-z4) /= pf_norm_sf(z4)) mirrored = .false.
+        end do
+
         if (supported) call ieee_set_flag(ieee_underflow, saved)
 
         call check(error, nbad, 0, &
@@ -657,7 +722,55 @@ contains
         if (allocated(error)) return
         call check(error, n > 50, &
             "fewer real32 grid points survived than this test needs to mean anything")
+        if (allocated(error)) return
+
+        call check(error, fbad(1), 0, &
+            "the real32 pf_norm_cdf is outside NORM32_ULP_BASE + z*z ulp of the real64 kernel")
+        if (allocated(error)) return
+        call check(error, fbad(2), 0, &
+            "the real32 pf_norm_sf is outside NORM32_ULP_BASE + z*z ulp of the real64 kernel")
+        if (allocated(error)) return
+        call check(error, fbad(3), 0, &
+            "the real32 pf_norm_pdf is outside NORM32_ULP_BASE + z*z ulp of the real64 kernel")
+        if (allocated(error)) return
+        call check(error, mirrored, &
+            "the real32 pf_norm_cdf(-z) and pf_norm_sf(z) must be bit-identical, as they are the " // &
+            "same erfc call with the same argument")
+        if (allocated(error)) return
+        ! The same not-widened argument the probit clause above makes, for the forward three
+        ! together: a specific spelled `real(pf_norm_cdf(real(z, real64)), real32)` would match the
+        ! reference at EVERY point, because it would BE the reference. Measured counts on Z_GRID
+        ! are 12, 12 and 8 of 43 under gfortran.
+        call check(error, sum(fdiff) > 0, &
+            "the real32 forward three matched the narrowed real64 answer at EVERY point, which is " // &
+            "what specifics that widen to real64 and narrow back would do")
     end subroutine test_normal_family_real32
+
+    !> Grades one real32 answer against its real64-kernel reference at the same input.
+    !!
+    !! `nbad` counts points outside `budget` ulp, `ndiff` points where the two are not the same
+    !! bits -- the second is the evidence that the specific computes in real32 rather than
+    !! widening. Both are accumulated across a grid, so they are `intent(inout)` counters rather
+    !! than results; see its one caller for what the budget means.
+    subroutine grade32(got, ref, budget, nbad, ndiff)
+        real(real32), intent(in) :: got    !! the real32 specific's answer.
+        real(real32), intent(in) :: ref    !! the real64 kernel's answer at the same real32 input.
+        real(real32), intent(in) :: budget !! how far apart they may be, in ulp of `ref`.
+        integer, intent(inout) :: nbad     !! incremented when they are further apart than that.
+        integer, intent(inout) :: ndiff    !! incremented when they are not the same bits.
+        real(real32) :: sp
+
+        if (got /= ref) ndiff = ndiff + 1
+        if (ref /= 0.0_real32) then
+            ! `spacing` may return an exact zero near the bottom of the exponent range under
+            ! nagfor, which F2018 16.9.180 forbids; floored so the gap cannot become Infinity.
+            sp = spacing(ref)
+            if (sp <= 0.0_real32) sp = tiny(1.0_real32)
+            if (abs(got - ref) / sp > budget) nbad = nbad + 1
+        else if (got /= 0.0_real32) then
+            nbad = nbad + 1
+        end if
+    end subroutine grade32
 
     !> `1/pf_probit(0.75)` is the scale `pf_mad(scale="normal")` multiplies by.
     !!
@@ -777,6 +890,11 @@ contains
         res4 = pf_safe_div(1.0_real32, zero4)
         call check(error, res4 > 0.0_real32 .and. .not. ieee_is_finite(res4), &
             "the real32 form must give +Infinity too")
+        if (allocated(error)) return
+        ! The sign arm, which is its own branch rather than a negation of the one above.
+        res4 = pf_safe_div(-1.0_real32, zero4)
+        call check(error, res4 < 0.0_real32 .and. .not. ieee_is_finite(res4), &
+            "the real32 form must give -Infinity for a negative numerator too")
         if (allocated(error)) return
         res4 = pf_safe_div(zero4, zero4)
         call check(error, ieee_is_nan(res4), "the real32 form must give NaN for 0/0 too")
@@ -1377,6 +1495,16 @@ contains
 
         call pf_to_str(.true., got, fmt='(nonsense)')
         call check(error, verify(got, "*") == 0, "a rejected fmt must yield asterisks for a logical too")
+        if (allocated(error)) return
+
+        ! The other two numeric specifics. Each renders through its own buffer and its own
+        ! `rendered_ok` test, so neither is vouched for by the int32 and real64 calls above -- and
+        ! the narrower kind is where a partial rendering under flang differs in length.
+        call pf_to_str(1_int64, got, fmt='(nonsense)')
+        call check(error, verify(got, "*") == 0, "a rejected fmt must yield asterisks for an int64 too")
+        if (allocated(error)) return
+        call pf_to_str(1.0_real32, got, fmt='(nonsense)')
+        call check(error, verify(got, "*") == 0, "a rejected fmt must yield asterisks for a real32 too")
         if (allocated(error)) return
 
         ! The negative control: the same call with a good format must NOT be asterisks, or the

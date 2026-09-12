@@ -243,13 +243,14 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_temporal
 
-    !> Reading the two row groups separately must reproduce the whole column exactly. The fixture
-    !> puts the null row in group 1 and the empty row in group 2, so a chunked read that got the
-    !> row-level validity wrong in only one half would still produce the right entry counts.
+    !> Reading the two row groups separately must reproduce the whole column exactly, through
+    !> both row_group kind-specifics. The fixture puts the null row in group 1 and the empty row
+    !> in group 2, so a chunked read that got the row-level validity wrong in only one half would
+    !> still produce the right entry counts.
     subroutine test_chunked(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: reader
-        type(parquet_map_column), target :: whole, rg1, rg2
+        type(parquet_map_column), target :: whole, rg1, rg2, c32a, c32b
         type(parquet_map_row) :: row
         integer(int32) :: v
 
@@ -281,6 +282,25 @@ contains
         row = rg1%view(1_int64)
         call row%get("beta", v)
         call check(error, v == 1_int32, "a chunked read's values match the whole-column read")
+        if (allocated(error)) return
+
+        ! The same two row groups named with a default INTEGER -- the map form's other row_group
+        ! kind-specific, which converts to int64 and forwards. Comparing its answers against the
+        ! int64 ones above is what catches a wrong conversion; group 2 is the arm that would still
+        ! look right if the conversion collapsed every row group onto the first.
+        call parquet_open_reader(reader, FIX)
+        call parquet_read_column_chunk(reader, "m_int32", 1, c32a)
+        call parquet_read_column_chunk(reader, "m_int32", 2, c32b)
+        call parquet_close_reader(reader)
+        call check(error, c32a%size() == rg1%size() .and. c32b%size() == rg2%size(), &
+            "an int32 row_group must yield the same row counts as an int64 one")
+        if (allocated(error)) return
+        call check(error, c32a%is_null(2_int64) .and. c32b%is_empty(1_int64), &
+            "and the same per-row nullness -- group 1's null row and group 2's empty one")
+        if (allocated(error)) return
+        call check(error, c32a%length(1_int64) == rg1%length(1_int64) .and. &
+            c32b%length(2_int64) == rg2%length(2_int64), &
+            "and the same entry counts")
     end subroutine test_chunked
 
     !> A row filter composes with a map read exactly as with any other column: the map column

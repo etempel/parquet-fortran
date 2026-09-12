@@ -250,6 +250,8 @@ contains
                 test_partial_argsort_threads_tail), &
             new_unittest("selection: the threaded extraction agrees with the serial one", &
                 test_selection_threads_extraction), &
+            new_unittest("engine: the serial entry point answers what the threaded one answers " // &
+                "at one thread", test_engine_serial_entry_point), &
             new_unittest("engine: the Fortran engine threads without changing its answer", &
                 test_fortran_engine_threading), &
             new_unittest("engine: the radix path really runs, and only above its floor", &
@@ -6728,6 +6730,75 @@ contains
     !! comparator's index tiebreaker destroys. A fixture of distinct values passes just as happily
     !! against an implementation that reached for the wrong comparator, so it would test nothing
     !! about the decision this stage's engine procedures actually have to make.
+    !> The engine's SERIAL entry point answers what the threaded one answers at one thread.
+    !!
+    !! **`sort_build_permutation` has no caller inside the library.** Every driver goes through
+    !! `sort_build_permutation_threaded`, deliberately -- calling the serial one from a grouped
+    !! driver is what once made `threads=` a no-op across that whole family. Both are public from
+    !! `parquet_argsort`, both are documented to answer identically, and the only thing holding
+    !! them to that is that one forwards onto the other's body. This is the assertion that the
+    !! forwarding is real.
+    !!
+    !! **A permutation compared against its twin is not enough on its own.** A forwarder that
+    !! ignored `keys` and returned the identity would agree with nothing, but one that passed a
+    !! wrong thread count or dropped `descending` could still hand back a valid-looking
+    !! permutation, so the expected order is written out by hand as well. Nulls go LAST in both
+    !! directions and ties keep file order, which is what the two hand-written permutations
+    !! encode -- and the descending one is where a tier test applied after the direction negation
+    !! rather than before would show up.
+    subroutine test_engine_serial_entry_point(error)
+        use iso_c_binding, only : c_int8_t
+        use parquet_argsort, only : sort_key_buf, SK_INT, &
+            sort_build_permutation, sort_build_permutation_threaded
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(sort_key_buf) :: up(1), down(1)
+        integer(int64) :: perm(8), twin(8)
+        integer(int64), parameter :: N = 8_int64
+        !> Repeats at 1 and 5 so stability is observable, a null in the middle so its placement is
+        !! not the same answer as "left where it was", and no value in file order.
+        integer(int64), parameter :: V(8) = [5_int64, 1_int64, 5_int64, 3_int64, 9_int64, 1_int64, &
+            7_int64, 2_int64]
+        !> Row 4 is the null. Its VALUE slot still holds 3 -- a tier rule that leaked into the
+        !! value comparison would sort it among the values and this test would say so.
+        integer(c_int8_t), parameter :: OK(8) = [1_c_int8_t, 1_c_int8_t, 1_c_int8_t, 0_c_int8_t, &
+            1_c_int8_t, 1_c_int8_t, 1_c_int8_t, 1_c_int8_t]
+        !> 1, 1, 2, 5, 5, 7, 9, then the null; each repeated pair in file order.
+        integer(int64), parameter :: WANT_UP(8) = [2_int64, 6_int64, 8_int64, 1_int64, 3_int64, &
+            7_int64, 5_int64, 4_int64]
+        !> 9, 7, 5, 5, 2, 1, 1, then the null -- which does NOT move to the front.
+        integer(int64), parameter :: WANT_DOWN(8) = [5_int64, 7_int64, 1_int64, 3_int64, 8_int64, &
+            2_int64, 6_int64, 4_int64]
+
+        up(1)%family = SK_INT
+        up(1)%descending = .false.
+        up(1)%nulls_first = .false.
+        up(1)%ints = V
+        up(1)%valid = OK
+        down = up
+        down(1)%descending = .true.
+
+        perm = 0_int64
+        twin = 0_int64
+        call sort_build_permutation(up, N, perm)
+        call sort_build_permutation_threaded(up, N, 1_int64, twin)
+        call check(error, all(perm == WANT_UP), &
+            "the serial entry point must order an ascending integer key with the null last")
+        if (allocated(error)) return
+        call check(error, all(perm == twin), &
+            "the serial entry point and the threaded one at one thread must agree bit for bit")
+        if (allocated(error)) return
+
+        perm = 0_int64
+        twin = 0_int64
+        call sort_build_permutation(down, N, perm)
+        call sort_build_permutation_threaded(down, N, 1_int64, twin)
+        call check(error, all(perm == WANT_DOWN), &
+            "a descending key must reverse the values and still leave the null last")
+        if (allocated(error)) return
+        call check(error, all(perm == twin), &
+            "the two entry points must agree on a descending key too")
+    end subroutine test_engine_serial_entry_point
+    !
     !> Stage 4: the Fortran engine's threaded permutation equals its serial one and the C++ one.
     !>
     !> **The equality assertions are the whole correctness gate, and they are strong for a reason

@@ -69,13 +69,18 @@ an artifact without the evidence (a covered surrounding body).
 
 ## Fortran gcov attribution artifacts
 
-Three confirmed shapes where gcov marks an excluded, dead line as hit:
+Confirmed shapes where gcov attributes a line to the wrong place -- marking an excluded, dead line
+as hit, or a line that demonstrably ran as unhit:
 
 - a guard-clause `if (cond) then` inside a `GCOVR_EXCL` block (the condition is evaluated on every
   call; the body shows 0);
 - a bare `return` after an `errmsg = ...` in a never-taken branch (the sibling line shows 0);
 - CI-only 0% on the first executable statement of an abbreviated `module procedure` body, 100%
-  locally, reproducible across ≥2 CI runs (`parquet_load_maml_file`).
+  locally, reproducible across ≥2 CI runs (`parquet_load_maml_file`);
+- 0% on an `allocate` of a pointer to a type with allocatable or default-initialised components,
+  while the procedure header and every later line show the same positive count and no branch
+  separates them (`new_impl`, `src/parquet_toml.f90`); an `allocate` whose target has no such
+  components is attributed normally on the next line.
 
 Also: six `impure elemental` headers in `src/parquet_temporal.f90` never register as hit while
 every body line does; excluded with a comment, and a new header with the same "0% but body covered"

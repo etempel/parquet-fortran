@@ -2278,11 +2278,20 @@ contains
     end subroutine load_impl
 
     !> Builds an empty document. See `pf_toml_new`.
+    !!
+    !! (Coverage note: the `allocate` below never registers as "hit" in gcov even though the
+    !! procedure header and every executable line after it do -- measured 4 runs on lines 2281,
+    !! 2286 and 2291-2294 against `#####` on this one, with no branch between the header and it,
+    !! so it cannot have been skipped. `allocate` of a pointer to a type carrying allocatable and
+    !! default-initialised components emits an out-of-line initialisation block that gcov
+    !! attributes elsewhere; the neighbouring `allocate(doc%doc%root)`, whose target has no such
+    !! components, is attributed normally. Excluded as an artifact, not as a gap;
+    !! `.claude/rules/coverage.md` carries the shape.)
     subroutine new_impl(doc, name)
         type(pf_toml), intent(inout) :: doc      !! Receives the document handle.
         character(len=*), intent(in) :: name     !! Display name; may be blank.
 
-        allocate(doc%doc)
+        allocate(doc%doc) ! GCOVR_EXCL_LINE -- gcov attribution artifact
         if (len_trim(name) > 0) then
             doc%doc%file = trim(name)
         else

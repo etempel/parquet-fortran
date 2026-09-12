@@ -82,7 +82,8 @@ contains
                 test_container_ensure_validity), &
             new_unittest("%print_stat reports row-length extremes and stays lazy", &
                 test_container_print_stat), &
-            new_unittest("pf_permute reorders a container column", test_container_permute), &
+            new_unittest("pf_permute reorders a container column, reached by both accessors", &
+                         test_container_permute), &
             new_unittest("a table round-trips its container columns through a file", &
                 test_container_write_round_trip), &
             new_unittest("a container payload's temporal resolution survives a table write", &
@@ -833,13 +834,21 @@ contains
     !! column specific takes a `parquet_column`, and a table hands out the concrete container
     !! (`%col`) rather than the column wrapping it. The table's own reordering is covered by
     !! `test_container_row_alignment`, which goes through `%sort_by` and its siblings.
+    !!
+    !! The standalone column is also where the two routes to the embedded container meet --
+    !! `parquet_column_container` and the `%container_ptr` binding that forwards onto it -- so
+    !! their aliasing is asserted here rather than in a fixture of its own.
     subroutine test_container_permute(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
-        type(parquet_column) :: col
+        ! `target` because both routes below hand back a pointer INTO this variable: F2018
+        ! 15.5.2.4 leaves such a pointer undefined on return when the actual has no `target`,
+        ! whatever a given compiler happens to do with it.
+        type(parquet_column), target :: col
         type(parquet_list_column) :: lc
         class(parquet_container_column), allocatable :: box
-        class(parquet_container_column), pointer :: back
+        class(parquet_container_column), pointer :: back, bound
         integer(int64) :: perm(4)
+        logical :: same_row_count
         !
         ! Four rows of distinct lengths, so a permutation is fully observable -- a fixture whose
         ! rows were the same length could not tell a correct reorder from none at all.
@@ -855,6 +864,21 @@ contains
         perm = [4_int64, 3_int64, 2_int64, 1_int64]
         call pf_permute(col, perm)
         call parquet_column_container(col, back)
+        ! The type-bound spelling is a one-line forwarder onto the free procedure, so the two must
+        ! alias the SAME storage rather than merely agree about it -- a forwarder that built a copy
+        ! would answer every question below identically and still be wrong.
+        call col%container_ptr(bound)
+        call check(error, associated(bound, back), &
+            "%container_ptr must alias exactly what parquet_column_container hands back")
+        if (allocated(error)) return
+        select type (bound)
+        type is (parquet_list_column)
+            same_row_count = bound%nrows() == 4_int64
+        class default
+            same_row_count = .false.
+        end select
+        call check(error, same_row_count, "and it is still the list column, through that route too")
+        if (allocated(error)) return
         select type (back)
         type is (parquet_list_column)
             call check(error, back%nrows() == 4_int64, "pf_permute kept the row count")

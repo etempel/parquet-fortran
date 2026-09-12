@@ -82,6 +82,9 @@ contains
             new_unittest("a retired key that is absent is silent", test_retire_absent), &
             new_unittest("log levels are read by name", test_get_level), &
             new_unittest("has, has_section, keys, path and filename", test_presence_helpers), &
+            new_unittest("an unopened handle and a not-found section answer rather than abort", &
+                test_empty_handle_queries), &
+            new_unittest("the read accumulator grows past its first block", test_mark_accumulator_grows), &
             new_unittest("the escape hatches hand back the raw toml-f objects", test_escape_hatches), &
             new_unittest("loading a file that is not there is soft with status=", test_load_status_open), &
             new_unittest("text that is not TOML is soft with status=", test_load_status_parse), &
@@ -109,6 +112,8 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! Receives the suite's tests.
 
         testsuite = [ &
+            new_unittest("check_all names every shape of unread thing", &
+                test_check_all_names_every_unread_shape), &
             new_unittest("a warning sweep reaches the log", test_warn_reaches_the_log), &
             new_unittest("report logs a caller's complaint against a key's line", &
                 test_report_reaches_the_log) &
@@ -946,6 +951,8 @@ contains
         type(pf_toml) :: conf, gen
         character(len=:), allocatable :: text
         integer(int32) :: i32(3)
+        integer(int64) :: i64(2)
+        real(real32) :: r32(2)
         real(real64) :: r64(2)
         logical :: flags(2)
         character(len=8) :: names(3)
@@ -956,6 +963,16 @@ contains
 
         call pf_toml_get(gen, "no_such_list", i32, default = [7, 8, 9])
         call check(error, all(i32 == [7, 8, 9]), "an absent list must take the rank-1 default")
+        if (allocated(error)) return
+        ! The other two numeric kinds. Each array getter carries its own default arm and its own
+        ! length check, so neither is vouched for by the int32 and real64 calls beside it.
+        call pf_toml_get(gen, "no_such_list", i64, default = [70_int64, 80_int64])
+        call check(error, all(i64 == [70_int64, 80_int64]), &
+            "an absent int64 list must take the rank-1 default")
+        if (allocated(error)) return
+        call pf_toml_get(gen, "no_such_list", r32, default = [0.5_real32, 1.5_real32])
+        call check(error, all(abs(r32 - [0.5_real32, 1.5_real32]) < 1.0e-6_real32), &
+            "an absent real32 list must take the rank-1 default")
         if (allocated(error)) return
         call pf_toml_get(gen, "no_such_list", r64, default = [1.25_real64, 2.75_real64])
         call check(error, all(abs(r64 - [1.25_real64, 2.75_real64]) < 1.0e-12_real64), &
@@ -1362,26 +1379,162 @@ contains
         call pf_toml_close(conf)
     end subroutine test_presence_helpers
 
-    !> The raw-object hatches hand back something usable, and `pf_toml_mark` keeps the sweep honest.
-    subroutine test_escape_hatches(error)
+    !> The two answers a handle gives when there is nothing behind it: `<closed>` for a file name,
+    !> and an empty list for the keys.
+    !!
+    !! **A handle with no table is not the same thing as a handle with no document.** An optional
+    !! section the file does not carry leaves the first but not the second, deliberately -- the
+    !! handle still knows its display path and its file, so a read from it can name both. Every
+    !! query therefore has to cope with it, and answering rather than aborting is what lets a
+    !! program probe for an optional section and move on.
+    subroutine test_empty_handle_queries(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, missing, never_opened
+        character(len=:), allocatable :: text, name
+        character(len=PF_TOML_MAX_KEY), allocatable :: keys(:)
+        logical :: found
+
+        call pf_toml_filename(never_opened, name)
+        call check(error, name == "<closed>", &
+            "a handle no open ever filled must report its file name as <closed>")
+        if (allocated(error)) return
+
+        text = '[general]' // new_line("a") // 'b = 2' // new_line("a")
+        call pf_toml_loads(conf, text, name = "empty-handle-test")
+        call pf_toml_section(conf, "nowhere", missing, required = .false., found = found)
+        call check(error, .not. found, "the fixture must not carry the section this test asks for")
+        if (allocated(error)) then
+            call pf_toml_close(conf)
+            return
+        end if
+        call pf_toml_keys(missing, keys)
+        call check(error, allocated(keys), "keys must come back allocated even for a section that is not there")
+        if (allocated(error)) then
+            call pf_toml_close(conf)
+            return
+        end if
+        call check(error, size(keys) == 0, "and empty rather than holding the parent's keys")
+        if (allocated(error)) then
+            call pf_toml_close(conf)
+            return
+        end if
+        ! The negative control on both halves: the same two queries against a section that IS
+        ! there must answer from the file rather than with the empty answers above.
+        call pf_toml_filename(missing, name)
+        call check(error, name == "empty-handle-test", &
+            "a not-found section still knows the file it was looked for in")
+        call pf_toml_close(conf)
+    end subroutine test_empty_handle_queries
+    !
+    !> A document with more distinct paths than the accumulator's first block still reports
+    !> nothing unread.
+    !!
+    !! **The accumulator starts at 32 entries and doubles.** Growing it is the one operation here
+    !! whose failure is silent in the direction that matters: a mark lost past the 32nd entry
+    !! turns a key the program DID read into an "unknown key" the sweep reports, or -- if the
+    !! copy is short -- loses an earlier one. Reading more than 32 keys and then asking for a
+    !! clean sweep is what says the doubling copied everything across.
+    subroutine test_mark_accumulator_grows(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
         type(pf_toml) :: conf, gen
+        character(len=PF_TOML_MAX_KEY), allocatable :: keys(:)
+        character(len=:), allocatable :: text
+        character(len=8) :: key
+        character(len=16) :: num
+        integer(int32) :: got
+        integer :: i, nbad
+        !> Comfortably past 32 and past 64, so the doubling has to happen twice.
+        integer, parameter :: NKEYS = 80
+
+        text = '[general]' // new_line("a")
+        do i = 1, NKEYS
+            write (key, '(a,i0)') "k", i
+            write (num, '(i0)') i
+            text = text // trim(key) // ' = ' // trim(num) // new_line("a")
+        end do
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        nbad = 0
+        do i = 1, NKEYS
+            write (key, '(a,i0)') "k", i
+            call pf_toml_get(gen, trim(key), got)
+            if (got /= int(i, int32)) nbad = nbad + 1
+        end do
+        call check(error, nbad, 0, "every one of the keys must read back as its own value")
+        if (allocated(error)) then
+            call pf_toml_close(conf)
+            return
+        end if
+        ! The assertion the growth is actually about: a lost mark makes a key the program read
+        ! look unread, so a FATAL sweep is the strong form -- it aborts rather than returning if
+        ! any of the 80 marks went missing, and reaching the line below is the verdict.
+        call pf_toml_check_all(conf)
+        call pf_toml_keys(gen, keys)
+        call check(error, size(keys) == NKEYS, &
+            "the section must still carry every key the fatal sweep just accepted as read")
+        call pf_toml_close(conf)
+    end subroutine test_mark_accumulator_grows
+    !
+    !> The raw-object hatches hand back something usable, and `pf_toml_mark` keeps the sweep honest.
+    !!
+    !! **The `use tomlf` below is the subject, not an accident.** Receiving either hatch needs a
+    !! toml-f type to declare, and naming that import is exactly the act of stepping outside the
+    !! wrapper that `pf_toml_table`'s own documentation describes. It is confined to this one
+    !! procedure so the rest of the suite still says nothing about toml-f's namespace.
+    subroutine test_escape_hatches(error)
+        use tomlf, only: toml_table, toml_context, get_value
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, never_opened
+        type(toml_table), pointer :: tbl, none_tbl
+        type(toml_context), pointer :: ctx, none_ctx
         character(len=:), allocatable :: text
         integer(int32) :: b
+        integer :: raw
+        logical :: v(6)
 
         text = '[general]' // new_line("a") // 'b = 2' // new_line("a") // 'raw = 5' // new_line("a")
         call pf_toml_loads(conf, text)
         call pf_toml_section(conf, "general", gen)
         call pf_toml_get(gen, "b", b)
-        ! The hatch itself needs a toml-f type to receive, which this suite deliberately does not
-        ! import -- naming `use tomlf` is the act of stepping outside the wrapper, and asserting it
-        ! here would make this file depend on toml-f's namespace. What IS asserted is the half that
-        ! matters to the module: a key read some other way and declared with pf_toml_mark keeps the
-        ! sweep accurate, which is what makes the hatches usable at all.
+        ! The table hatch hands back the SECTION's table, not the document root: `raw` is readable
+        ! through it with toml-f's own accessor, which is the whole point of the hatch -- a
+        ! construct this wrapper does not cover is reached from here. A hatch that handed back the
+        ! root would fail this, since `raw` is not a key of the root.
+        call pf_toml_table(gen, tbl)
+        ! The context belongs to the DOCUMENT, so a section handle reaches it through the document
+        ! it borrows rather than holding one of its own.
+        call pf_toml_context(gen, ctx)
+        raw = 0
+        if (associated(tbl)) call get_value(tbl, "raw", raw)
+        ! Both hatches on a handle no load ever filled: null rather than a stale pointer or an
+        ! abort, so a caller may ask before deciding whether there is anything to read.
+        call pf_toml_table(never_opened, none_tbl)
+        call pf_toml_context(never_opened, none_ctx)
+        ! A key read some other way and declared with pf_toml_mark keeps the sweep accurate, which
+        ! is what makes the hatches usable at all.
         call pf_toml_mark(gen, "raw")
         call pf_toml_check(gen)
-        call check(error, b == 2_int32, "a hatch-read key declared with mark must pass the sweep")
+        ! Every verdict is taken before the first assertion, so the document is closed on the one
+        ! path out of here rather than leaked by whichever check fires first.
+        v(1) = associated(tbl)
+        v(2) = associated(ctx)
+        v(3) = raw == 5
+        v(4) = b == 2_int32
+        v(5) = .not. associated(none_tbl)
+        v(6) = .not. associated(none_ctx)
         call pf_toml_close(conf)
+
+        call check(error, v(1), "the table hatch must hand back the section's table")
+        if (allocated(error)) return
+        call check(error, v(2), "the context hatch must hand back the document's context")
+        if (allocated(error)) return
+        call check(error, v(3), "a key read through the table hatch must give its file value")
+        if (allocated(error)) return
+        call check(error, v(4), "a hatch-read key declared with mark must pass the sweep")
+        if (allocated(error)) return
+        call check(error, v(5), "the table hatch on an unopened handle must come back null")
+        if (allocated(error)) return
+        call check(error, v(6), "the context hatch on an unopened handle must come back null")
     end subroutine test_escape_hatches
 
     ! ================================================================================
@@ -1951,6 +2104,95 @@ contains
     ! Logging integration (serial suite)
     ! ================================================================================
 
+    !> `pf_toml_check_all`'s sweep names every shape of unread thing, each in its own words.
+    !!
+    !! **Only the warning severity can be asserted from inside the process.** The fatal spelling
+    !! is what the `toml_unknown_key`/`toml_unknown_section` scenarios drive, and it aborts before
+    !! any of these lines can be read back -- so the five arms below have no in-process witness
+    !! other than this test. They are genuinely five, not one message with five call sites: a
+    !! plain key, a plain array, an array-of-tables nobody opened, one ENTRY of an
+    !! array-of-tables whose siblings were opened, and a path too long to name at all.
+    !!
+    !! **The entry arm is the one worth spelling out.** Opening `[[region]]` entry 1 marks the
+    !! array, so the sweep descends into it and has to notice entry 2 separately; a sweep that
+    !! stopped at the array would report nothing here and every other assertion would still pass.
+    !!
+    !! Like its neighbour it reconfigures the process-global default logger, which is why it is in
+    !! the serial suite.
+    subroutine test_check_all_names_every_unread_shape(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, ent
+        character(len=*), parameter :: log_file = "test_run/toml_sweep_all.log"
+        character(len=:), allocatable :: text, longkey
+        character(len=512) :: line
+        integer(int32) :: b, id
+        integer :: unit, ios
+        logical :: saw(6)
+        !> Past PF_TOML_MAX_PATH, so the sweep cannot even form this key's path. At the ROOT,
+        !! where the path is empty, so the length is the key's alone and the arm is unambiguous.
+        integer, parameter :: LONG = PF_TOML_MAX_PATH + 40
+
+        allocate(character(len=LONG) :: longkey)
+        longkey = repeat("z", LONG)
+
+        ! The long key goes FIRST, before any header: in TOML every key after a header belongs to
+        ! that table, and the sweep does not descend into a section nobody opened -- so a long key
+        ! written last would sit inside `[[untouched]]` and never be visited at all.
+        text = longkey // ' = 1' // new_line("a") // &
+               '[general]' // new_line("a") // 'b = 2' // new_line("a") // &
+               'stray_scalar = 5' // new_line("a") // &
+               'stray_list = [1, 2, 3]' // new_line("a") // &
+               '[[region]]' // new_line("a") // 'id = 1' // new_line("a") // &
+               '[[region]]' // new_line("a") // 'id = 2' // new_line("a") // &
+               '[[untouched]]' // new_line("a") // 'id = 3' // new_line("a")
+
+        call pf_log_init(level = PF_LEVEL_INFO, name = "toml-sweep-test", console = .false.)
+        call pf_log_add_file(log_file, level = PF_LEVEL_INFO, append = .false.)
+
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "b", b)
+        ! ONE of the two [[region]] entries, so the other is unread while the array is not.
+        call pf_toml_section(conf, "region", 1, ent)
+        call pf_toml_get(ent, "id", id)
+        call pf_toml_check_all(conf, severity = PF_TOML_WARN)
+        call pf_toml_close(conf)
+
+        call pf_log_flush()
+        call pf_log_close()
+
+        saw = .false.
+        open(newunit=unit, file=log_file, status="old", action="read", iostat=ios)
+        call check(error, ios == 0, "the log file must have been created")
+        if (allocated(error)) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, "stray_scalar") > 0) saw(1) = .true.
+            if (index(line, "stray_list") > 0) saw(2) = .true.
+            if (index(line, "[[untouched]]") > 0) saw(3) = .true.
+            if (index(line, "[[region[2]]]") > 0) saw(4) = .true.
+            if (index(line, "Path too long") > 0) saw(5) = .true.
+            ! The negative controls, both of which must stay absent.
+            if (index(line, "[general] b") > 0) saw(6) = .true.
+            if (index(line, "region[1]") > 0 .and. index(line, "never read") > 0) saw(6) = .true.
+        end do
+        close(unit)
+
+        call check(error, saw(1), "an unread scalar key must be reported as an unknown key")
+        if (allocated(error)) return
+        call check(error, saw(2), "an unread plain list must be reported as an unknown key too")
+        if (allocated(error)) return
+        call check(error, saw(3), "an array-of-tables nobody opened must be reported whole")
+        if (allocated(error)) return
+        call check(error, saw(4), "an unread ENTRY of an opened array-of-tables must be reported on its own")
+        if (allocated(error)) return
+        call check(error, saw(5), "a key whose path is too long to form must be reported as such")
+        if (allocated(error)) return
+        call check(error, .not. saw(6), &
+            "the sweep must report neither the key nor the entry the program actually read")
+    end subroutine test_check_all_names_every_unread_shape
+    !
     !> A `PF_TOML_WARN` sweep really reaches the log, which is the only proof it emits at all.
     !!
     !! Everything else in this suite asserts that the module does NOT abort; this is the one test

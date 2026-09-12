@@ -2999,19 +2999,19 @@ contains
             "not (x is_finite) and x is_not_finite must select the same rows")
     end subroutine test_not_of_is_finite_keeps_nulls_out
     !
-    !> A set clause on a FLOAT32 column, through both spellings. The column is read as `real64` for
-    !> the lookup, so the widening has to be exact for a value the narrow type can hold -- 2.5 and
-    !> -4.0 are, 0.1 is not, which is the same limitation `x == 0.1` has on such a column and why
-    !> the fixture uses values that are exactly representable in both.
+    !> A set clause on a FLOAT32 column, through every spelling: a literal list, a real64 set, a
+    !> real32 set through %add_in and the same through %bind plus rule text. The column is read as
+    !> `real64` for the lookup, so the widening has to be exact for a value the narrow type can
+    !> hold -- 2.5 and -4.0 are, 0.1 is not, which is the same limitation `x == 0.1` has on such a
+    !> column and why the fixture uses values that are exactly representable in both.
     !>
-    !> Neither spelling was covered on this column type: %bind accepts a real set against float32
-    !> and nothing exercised it.
+    !> The four must select the same rows, and a member the column cannot hold must select none.
     subroutine test_set_on_float32_column(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
-        type(parquet_filter) :: filt
-        integer(int32), allocatable :: from_list(:), from_bind(:)
+        type(parquet_filter) :: filt, f32_in, f32_bind, f32_miss
+        integer(int32), allocatable :: from_list(:), from_bind(:), from_r32(:), from_r32_bind(:)
         real(real32) :: y(6) = [1.0_real32, 2.5_real32, -4.0_real32, 8.0_real32, 2.5_real32, 0.0_real32]
         integer(int32) :: u(6) = [1, 2, 3, 4, 5, 6]
         integer(int64) :: nrows
@@ -3041,18 +3041,62 @@ contains
         if (allocated(error)) return
         call check(error, all(from_bind == from_list), &
             "a bound set and a literal list on a float32 column disagree")
+        if (allocated(error)) return
+
+        ! The set written in the COLUMN's own kind. %bind and %add_in each carry a real32
+        ! specific, which widens the members to real64 before keying them -- the same widening
+        ! the reader applies to the column, so the two meet exactly for a value real32 can hold.
+        ! Both spellings are asserted: %add_in is sugar over %bind, but it is its own specific and
+        ! a real32 set reaching the real64 one instead would answer the same here only by luck.
+        call f32_in%add_in("y", [2.5_real32, -4.0_real32])
+        call parquet_open_reader(reader, file, filter=f32_in)
+        call parquet_get_nrows(reader, nrows)
+        allocate(from_r32(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", from_r32)
+        call parquet_close_reader(reader)
+        call check(error, size(from_r32) == size(from_list), &
+            "a real32 set through %add_in must keep the rows the real64 set and the literal keep")
+        if (allocated(error)) return
+        call check(error, all(from_r32 == from_list), &
+            "a real32 set through %add_in disagrees with the literal list")
+        if (allocated(error)) return
+
+        call f32_bind%bind("wanted32", [2.5_real32, -4.0_real32])
+        call f32_bind%add("y in @wanted32")
+        call parquet_open_reader(reader, file, filter=f32_bind)
+        call parquet_get_nrows(reader, nrows)
+        allocate(from_r32_bind(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", from_r32_bind)
+        call parquet_close_reader(reader)
+        call check(error, size(from_r32_bind) == size(from_list), &
+            "a real32 set through %bind plus rule text must keep the same rows")
+        if (allocated(error)) return
+        call check(error, all(from_r32_bind == from_list), &
+            "a real32 set through %bind plus rule text disagrees with the literal list")
+        if (allocated(error)) return
+
+        ! The negative control for the widening: 0.1 is NOT exactly representable, so a member the
+        ! column cannot hold selects nothing rather than rounding onto a neighbouring row. Row 1
+        ! holds 1.0, which is the row this would wrongly select if the set keyed loosely.
+        call f32_miss%add_in("y", [0.1_real32])
+        call parquet_open_reader(reader, file, filter=f32_miss)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 0, &
+            "a real32 member no row holds must select nothing rather than rounding onto one")
     end subroutine test_set_on_float32_column
 
     ! ---- Temporal sets (S7 answer F4) --------------------------------------------------------
     !
-    !> A date set through %add_in and a time set through %bind plus rule text keep exactly their
-    !> members' rows; `not_in` complements; a repeat in the set collapses; a NULL member is
-    !> simply not in the set. The fixture is write_temporal_fixture's: d = 2024-01-01 .. 06,
-    !> t = 12:00:00 .. 12:00:05 at [us], one per row.
+    !> A date set through %add_in and a time set through both spellings -- %bind plus rule text,
+    !> and %add_in's own time specific -- keep exactly their members' rows; `not_in` complements
+    !> on either type; a repeat in the set collapses; a NULL member is simply not in the set.
+    !> The fixture is write_temporal_fixture's: d = 2024-01-01 .. 06, t = 12:00:00 .. 12:00:05
+    !> at [us], one per row.
     subroutine test_in_temporal_sets(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
-        type(parquet_filter) :: f_date, f_time, f_not, f_null
+        type(parquet_filter) :: f_date, f_time, f_time_in, f_time_not, f_not, f_null
         type(parquet_date) :: dset(2), dnull(2)
         type(parquet_time) :: tset(3)
         type(parquet_date), allocatable :: got_d(:)
@@ -3089,6 +3133,24 @@ contains
         call parquet_get_nrows(reader, nrows)
         call parquet_close_reader(reader)
         call check(error, nrows == 2, "a time set bound under a name keeps rows 12:00:00 and 12:00:04")
+        if (allocated(error)) return
+
+        ! The same set through %add_in's own time specific -- the sugar, which generates the set
+        ! name and the clause rather than taking them from the caller. It has to agree with the
+        ! two-step spelling above on the same members, repeat and all.
+        call f_time_in%add_in("t", tset)
+        call parquet_open_reader(reader, file, filter=f_time_in)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, &
+            "a time set through %add_in keeps the rows %bind plus rule text keeps")
+        if (allocated(error)) return
+        ! negate= reaches the same specific and must complement that selection exactly.
+        call f_time_not%add_in("t", tset, negate=.true.)
+        call parquet_open_reader(reader, file, filter=f_time_not)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4, "not_in on a time set keeps the other four rows")
         if (allocated(error)) return
 
         call f_not%add_in("d", dset, negate=.true.)

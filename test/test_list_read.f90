@@ -657,13 +657,15 @@ contains
         call parquet_close_reader(r)
     end subroutine test_empty_read_for_every_payload_kind
 
-    !> The same for a chunked read of a row group the filter emptied.
+    !> The same for a chunked read of a row group the filter emptied, through both row_group
+    !> kind-specifics.
     subroutine test_chunk_matching_nothing(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error.
         type(parquet_reader) :: r
         type(parquet_filter) :: f
-        type(parquet_list_column), target :: lc
+        type(parquet_list_column), target :: lc, lc32
         logical :: ok
+        integer(int64) :: i
 
         ! scalar is row-1 (0-based), so scalar >= 8 empties row groups 1 and 2 entirely.
         call f%add("scalar >= 8")
@@ -677,6 +679,23 @@ contains
         ! The negative control: a row group the filter did NOT empty still yields its rows.
         call parquet_read_column_chunk(r, "ragged", 3_int64, lc)
         call check(error, lc%size() == 4_int64, "a surviving row group still yields its four rows")
+        if (allocated(error)) return
+        ! The same two row groups named with a default INTEGER, which is the other row_group
+        ! kind-specific of the list form. It converts and forwards, so a truncation or an
+        ! off-by-one in that conversion is what the comparison against the int64 answers catches.
+        call parquet_read_column_chunk(r, "ragged", 1, lc32)
+        call check(error, lc32%size() == 0_int64, &
+            "an int32 row_group must empty the same row group the int64 one empties")
+        if (allocated(error)) return
+        call parquet_read_column_chunk(r, "ragged", 3, lc32)
+        call check(error, lc32%size() == lc%size(), &
+            "and must yield the same rows for the row group the filter left alone")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1_int64, lc%size()
+            if (lc32%length(i) /= lc%length(i)) ok = .false.
+        end do
+        call check(error, ok, "the two row_group spellings disagree on the row lengths")
         call parquet_close_reader(r)
     end subroutine test_chunk_matching_nothing
 

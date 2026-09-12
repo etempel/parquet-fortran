@@ -106,6 +106,11 @@ void *malloc(size_t n) {
   adding a comparison. A guide page may not state an exit status either.
 - Reserve exact-equality assertions for values that are stored, never re-derived through a
   transcendental (`fortran-gotchas.md`, ifx).
+- **An assertion whose whole subject is an INQUIRY does not call the procedure it names.**
+  `kind(f(x))`, `len(g(s))`, `size(h(v))` and their kin are resolved from the interface, so a
+  generic-resolution test written that way passes without the specific ever running and reports
+  as covered nothing. Assert a VALUE from the specific as well; `tools/coverage.sh`'s
+  entirely-unreached-procedure list is what finds the ones already written.
 - A settings knob test asserts default, round trip and an observed effect with a negative control
   (`api-conventions.md`).
 - A test asserting a REFUSAL on cost grounds says in its own doc-comment what to assert when the

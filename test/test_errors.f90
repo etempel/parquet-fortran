@@ -84,7 +84,7 @@ contains
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
-                                            p22(:), p23(:), p24(:), p25(:)
+                                            p22(:), p23(:), p24(:), p25(:), p26(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -2938,8 +2938,74 @@ contains
             new_unittest("%print with no unit= resolves the message stream", &
                 test_stats_print_default_stream) &
             ]
+        p26 = [ &
+            new_unittest("a sky query on an unbuilt index aborts", &
+                test_spatial_sky_query_before_build_aborts), &
+            new_unittest("a NaN angular search radius aborts", &
+                test_spatial_sky_radius_nan_aborts), &
+            new_unittest("a NaN inner angular radius aborts", &
+                test_spatial_sky_inner_radius_nan_aborts), &
+            new_unittest("a NaN in an angular radius list aborts", &
+                test_spatial_sky_radii_vector_nan_aborts), &
+            new_unittest("nearest_sky on an unbuilt index aborts", &
+                test_spatial_nearest_sky_before_build_aborts), &
+            new_unittest("a NaN query radius aborts", &
+                test_spatial_query_radius_nan_aborts), &
+            new_unittest("a periodic query radius above half the box aborts", &
+                test_spatial_query_radius_half_box_aborts), &
+            new_unittest("build_sky with ra and dec of different lengths aborts", &
+                test_spatial_build_sky_length_mismatch_aborts), &
+            new_unittest("build_sky with an empty radius_deg list aborts", &
+                test_spatial_build_sky_no_radius_aborts), &
+            new_unittest("build_sky with a radius_deg of zero aborts", &
+                test_spatial_build_sky_radius_not_positive_aborts), &
+            new_unittest("rebuild on an unbuilt index aborts", &
+                test_spatial_rebuild_before_build_aborts), &
+            new_unittest("rebuild dropping z aborts", &
+                test_spatial_rebuild_z_rank_aborts), &
+            new_unittest("rebuild with x and y of different lengths aborts", &
+                test_spatial_rebuild_length_mismatch_aborts), &
+            new_unittest("rebuild moving a point onto the observer aborts", &
+                test_spatial_rebuild_at_observer_aborts), &
+            new_unittest("rebuild_for on an unbuilt index aborts", &
+                test_spatial_rebuild_for_before_build_aborts), &
+            new_unittest("rebuild_for above half a periodic box aborts", &
+                test_spatial_rebuild_for_half_box_aborts), &
+            new_unittest("a box with fewer entries than coordinates aborts", &
+                test_spatial_build_box_rank_aborts), &
+            new_unittest("a box with zero extent on an axis aborts", &
+                test_spatial_build_box_not_strict_aborts), &
+            new_unittest("copy=.false. with a strided z aborts", &
+                test_spatial_copy_false_z_strided_aborts), &
+            new_unittest("a bulk sweep on an unbuilt index aborts", &
+                test_spatial_bulk_before_build_aborts), &
+            new_unittest("a line-of-sight sweep on an unbuilt index aborts", &
+                test_spatial_los_before_build_aborts), &
+            new_unittest("a negative transverse length aborts", &
+                test_spatial_los_bperp_negative_aborts), &
+            new_unittest("kth_distance on an unbuilt index aborts", &
+                test_spatial_kth_before_build_aborts), &
+            new_unittest("int32 component endpoints of different lengths abort", &
+                test_spatial_components_i32_length_aborts), &
+            new_unittest("more vertices than an int32 component answer can name aborts", &
+                test_spatial_components_nvert_int32_aborts), &
+            new_unittest("an int32 within buffer over the row ceiling aborts", &
+                test_spatial_within_int32_ceiling_aborts), &
+            new_unittest("an int32 axis buffer over the row ceiling aborts", &
+                test_spatial_axis_int32_ceiling_aborts), &
+            new_unittest("an int32 nearest buffer over the row ceiling aborts", &
+                test_spatial_nearest_int32_ceiling_aborts), &
+            new_unittest("a cell count over the int32 ceiling aborts", &
+                test_spatial_grid_int32_ceiling_aborts), &
+            new_unittest("the work hook with no radius aborts", &
+                test_spatial_debug_work_no_radius_aborts), &
+            new_unittest("a coarsened nside= warns and carries on", &
+                test_spatial_nside_coarsened_warns), &
+            new_unittest("a sky index re-tuned by a distant radius warns in degrees", &
+                test_spatial_sky_rebuild_warns) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25]
+            p19, p21, p23, p24, p25, p26]
     end subroutine collect_tests_parquet_errors
 
 
@@ -6585,6 +6651,230 @@ contains
             failure_message="a negative vertex count was expected to abort", &
             required_stderr="nvert must be >= 0")
     end subroutine test_spatial_components_nvert_aborts
+
+    subroutine test_spatial_sky_query_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_query_before_build", expect_abort=.true., &
+            failure_message="a sky query on an unbuilt index was expected to abort", &
+            required_stderr="this index has not been built; call %build_sky first")
+    end subroutine test_spatial_sky_query_before_build_aborts
+
+    subroutine test_spatial_sky_radius_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_radius_nan", expect_abort=.true., &
+            failure_message="a NaN angular radius was expected to abort", &
+            required_stderr="the angular radius must be >= 0 and not NaN")
+    end subroutine test_spatial_sky_radius_nan_aborts
+
+    subroutine test_spatial_sky_inner_radius_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_inner_radius_nan", expect_abort=.true., &
+            failure_message="a NaN inner angular radius was expected to abort", &
+            required_stderr="the inner angular radius must be >= 0 and not NaN")
+    end subroutine test_spatial_sky_inner_radius_nan_aborts
+
+    subroutine test_spatial_sky_radii_vector_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_radii_vector_nan", expect_abort=.true., &
+            failure_message="a NaN in an angular radius list was expected to abort", &
+            required_stderr="every angular radius must be >= 0 and not NaN")
+    end subroutine test_spatial_sky_radii_vector_nan_aborts
+
+    subroutine test_spatial_nearest_sky_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nearest_sky_before_build", expect_abort=.true., &
+            failure_message="nearest_sky on an unbuilt index was expected to abort", &
+            required_stderr="this index has not been built; call %build_sky first")
+    end subroutine test_spatial_nearest_sky_before_build_aborts
+
+    subroutine test_spatial_query_radius_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_query_radius_nan", expect_abort=.true., &
+            failure_message="a NaN query radius was expected to abort", &
+            required_stderr="the search radius must be >= 0 and not NaN")
+    end subroutine test_spatial_query_radius_nan_aborts
+
+    subroutine test_spatial_query_radius_half_box_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_query_radius_half_box", expect_abort=.true., &
+            failure_message="a periodic query radius above half the box was expected to abort", &
+            required_stderr="a periodic search radius must not exceed half the box")
+    end subroutine test_spatial_query_radius_half_box_aborts
+
+    subroutine test_spatial_build_sky_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_sky_length_mismatch", expect_abort=.true., &
+            failure_message="ra and dec of different lengths were expected to abort", &
+            required_stderr="ra and dec must be the same length")
+    end subroutine test_spatial_build_sky_length_mismatch_aborts
+
+    subroutine test_spatial_build_sky_no_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_sky_no_radius", expect_abort=.true., &
+            failure_message="an empty radius_deg= list was expected to abort", &
+            required_stderr="radius_deg= must name at least one radius")
+    end subroutine test_spatial_build_sky_no_radius_aborts
+
+    subroutine test_spatial_build_sky_radius_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_sky_radius_not_positive", expect_abort=.true., &
+            failure_message="a radius_deg= of zero was expected to abort", &
+            required_stderr="every radius_deg= must be > 0")
+    end subroutine test_spatial_build_sky_radius_not_positive_aborts
+
+    subroutine test_spatial_rebuild_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_before_build", expect_abort=.true., &
+            failure_message="rebuild on an unbuilt index was expected to abort", &
+            required_stderr="pf_spatial_index%rebuild: this index has not been built; call %build first")
+    end subroutine test_spatial_rebuild_before_build_aborts
+
+    subroutine test_spatial_rebuild_z_rank_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_z_rank", expect_abort=.true., &
+            failure_message="rebuild without z was expected to abort", &
+            required_stderr="z must be supplied exactly as it was to %build")
+    end subroutine test_spatial_rebuild_z_rank_aborts
+
+    subroutine test_spatial_rebuild_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_length_mismatch", expect_abort=.true., &
+            failure_message="rebuild from x and y of different lengths was expected to abort", &
+            required_stderr="pf_spatial_index%rebuild: x and y must be the same length")
+    end subroutine test_spatial_rebuild_length_mismatch_aborts
+
+    subroutine test_spatial_rebuild_at_observer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_at_observer", expect_abort=.true., &
+            failure_message="a point rebuilt onto the observer was expected to abort", &
+            required_stderr="a point coincides with the observer")
+    end subroutine test_spatial_rebuild_at_observer_aborts
+
+    subroutine test_spatial_rebuild_for_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_for_before_build", expect_abort=.true., &
+            failure_message="rebuild_for on an unbuilt index was expected to abort", &
+            required_stderr="pf_spatial_index%rebuild_for: this index has not been built; call %build first")
+    end subroutine test_spatial_rebuild_for_before_build_aborts
+
+    subroutine test_spatial_rebuild_for_half_box_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_for_half_box", expect_abort=.true., &
+            failure_message="rebuild_for above half a periodic box was expected to abort", &
+            required_stderr="a periodic search radius must not exceed half the box")
+    end subroutine test_spatial_rebuild_for_half_box_aborts
+
+    subroutine test_spatial_build_box_rank_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_box_rank", expect_abort=.true., &
+            failure_message="a box with too few entries was expected to abort", &
+            required_stderr="box_lo=/box_hi= must have one entry per coordinate")
+    end subroutine test_spatial_build_box_rank_aborts
+
+    subroutine test_spatial_build_box_not_strict_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_box_not_strict", expect_abort=.true., &
+            failure_message="a box with zero extent was expected to abort", &
+            required_stderr="box_hi= must be strictly above box_lo= on every axis")
+    end subroutine test_spatial_build_box_not_strict_aborts
+
+    subroutine test_spatial_copy_false_z_strided_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_copy_false_z_strided", expect_abort=.true., &
+            failure_message="a strided z with copy=.false. was expected to abort", &
+            required_stderr="copy=.false. needs a contiguous z")
+    end subroutine test_spatial_copy_false_z_strided_aborts
+
+    subroutine test_spatial_bulk_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_bulk_before_build", expect_abort=.true., &
+            failure_message="a bulk sweep on an unbuilt index was expected to abort", &
+            required_stderr="this index has not been built; call %build first")
+    end subroutine test_spatial_bulk_before_build_aborts
+
+    subroutine test_spatial_los_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_before_build", expect_abort=.true., &
+            failure_message="a line-of-sight sweep on an unbuilt index was expected to abort", &
+            required_stderr="this index has not been built; call %build first")
+    end subroutine test_spatial_los_before_build_aborts
+
+    subroutine test_spatial_los_bperp_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_los_bperp_negative", expect_abort=.true., &
+            failure_message="a negative transverse length was expected to abort", &
+            required_stderr="every b_perp and b_par must be >= 0 and not NaN")
+    end subroutine test_spatial_los_bperp_negative_aborts
+
+    subroutine test_spatial_kth_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_kth_before_build", expect_abort=.true., &
+            failure_message="kth_distance on an unbuilt index was expected to abort", &
+            required_stderr="pf_spatial_index%kth_distance: this index has not been built; call %build first")
+    end subroutine test_spatial_kth_before_build_aborts
+
+    subroutine test_spatial_components_i32_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_components_i32_length", expect_abort=.true., &
+            failure_message="int32 endpoint arrays of different lengths were expected to abort", &
+            required_stderr="the two endpoint arrays must be the same length")
+    end subroutine test_spatial_components_i32_length_aborts
+
+    subroutine test_spatial_components_nvert_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_components_nvert_int32", expect_abort=.true., &
+            failure_message="an int32 answer over too many vertices was expected to abort", &
+            required_stderr="nvert is larger than an int32 answer can name")
+    end subroutine test_spatial_components_nvert_int32_aborts
+
+    subroutine test_spatial_within_int32_ceiling_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_within_int32_ceiling", expect_abort=.true., &
+            failure_message="an int32 within buffer over the ceiling was expected to abort", &
+            required_stderr="this index holds more rows than an int32 buffer can name")
+    end subroutine test_spatial_within_int32_ceiling_aborts
+
+    subroutine test_spatial_axis_int32_ceiling_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_axis_int32_ceiling", expect_abort=.true., &
+            failure_message="an int32 axis buffer over the ceiling was expected to abort", &
+            required_stderr="this index holds more rows than an int32 buffer can name")
+    end subroutine test_spatial_axis_int32_ceiling_aborts
+
+    subroutine test_spatial_nearest_int32_ceiling_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nearest_int32_ceiling", expect_abort=.true., &
+            failure_message="an int32 nearest buffer over the ceiling was expected to abort", &
+            required_stderr="this index holds more rows than an int32 buffer can name")
+    end subroutine test_spatial_nearest_int32_ceiling_aborts
+
+    subroutine test_spatial_grid_int32_ceiling_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_grid_int32_ceiling", expect_abort=.true., &
+            failure_message="a cell count over the int32 ceiling was expected to abort", &
+            required_stderr="above the largest int32 answer")
+    end subroutine test_spatial_grid_int32_ceiling_aborts
+
+    subroutine test_spatial_sky_rebuild_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_rebuild_warns", expect_abort=.false., &
+            failure_message="a sky index re-tuned by a distant radius was expected to warn", &
+            required_stderr="rebuilt for a query radius far from the one it was built for")
+    end subroutine test_spatial_sky_rebuild_warns
+
+    subroutine test_spatial_nside_coarsened_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nside_coarsened_warns", expect_abort=.false., &
+            failure_message="a coarsened nside= was expected to warn and carry on", &
+            required_stderr="nside= was coarsened from")
+    end subroutine test_spatial_nside_coarsened_warns
+
+    subroutine test_spatial_debug_work_no_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_debug_work_no_radius", expect_abort=.true., &
+            failure_message="the work hook with no radius was expected to abort", &
+            required_stderr="parquet_debug_spatial_work: name at least one radius")
+    end subroutine test_spatial_debug_work_no_radius_aborts
 
     subroutine test_spatial_rebuild_needs_copy_aborts(error)
         type(error_type), allocatable, intent(out) :: error

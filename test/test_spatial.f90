@@ -199,6 +199,34 @@ contains
             new_unittest("a periodic grid tiles the box exactly, whatever cell was asked for", &
                 test_periodic_cells_tile_the_box), &
             new_unittest("the probe runs, and a forced cell stops it", test_probe_runs_and_can_be_stopped), &
+            new_unittest("every single-point query answers the same in int32 as in int64", &
+                         test_single_query_int32_buffers_match), &
+            new_unittest("kth_distance_sky answers the same under an int64 k", &
+                         test_kth_sky_k64_matches_k32), &
+            new_unittest("rebuild folds a radius, as a scalar and as a list", &
+                         test_rebuild_folds_a_radius), &
+            new_unittest("the work hook counts cells and points for the h it is given", &
+                         test_debug_work_counts_both_halves), &
+            new_unittest("an index over no points builds and answers every query", &
+                         test_empty_index_answers_everything), &
+            new_unittest("a periodic copy=.false. index answers as a copying one", &
+                         test_periodic_copy_false_matches), &
+            new_unittest("r_inner takes one value or one per point", &
+                         test_per_point_inner_radii), &
+            new_unittest("an empty graph answers in int32 as in int64", &
+                         test_components_empty_graph_int32), &
+            new_unittest("rebuild_for re-tunes through every forced and degenerate arm", &
+                         test_retune_honours_every_arm), &
+            new_unittest("copy=.false. reaches every bound and combine= accept", &
+                         test_copy_false_reaches_every_accept), &
+            new_unittest("a periodic copy=.false. index ranks a per-point radius", &
+                         test_periodic_per_point_radius), &
+            new_unittest("the remaining single-route branches", &
+                         test_remaining_single_routes), &
+            new_unittest("the bound and the los accept run in every loop", &
+                         test_bound_and_los_accept_in_every_loop), &
+            new_unittest("the chosen ball and cylinder routes on a copy=.false. index", &
+                         test_los_chosen_walks_on_a_no_copy_index), &
             new_unittest("the same points give the same cell twice", test_probe_is_deterministic), &
             new_unittest("every cell size gives the same answers", test_answers_survive_any_cell), &
             new_unittest("an explicit cell is honoured", test_explicit_cell_is_honoured), &
@@ -3338,14 +3366,26 @@ contains
         call parquet_debug_reset_spatial_counters()
     end subroutine test_auto_rebuild
 
-    !> A no-copy index answers exactly as a copying one.
+    !> A no-copy index answers exactly as a copying one, in every query family.
+    !>
+    !> **`copy=.false.` is a second walk, not a flag.** Every loop over a cell's rows is written
+    !> twice -- once reading the index's own reordered arrays and once indirecting through
+    !> `self%idx` into the caller's -- so a defect in the indirect half is invisible to every test
+    !> that builds the ordinary way. `%within` alone does not reach it: the ball walk, the axis
+    !> walk, the expanding ball and the four bulk sweeps each carry their own copy of the pair.
     subroutine test_copy_false_matches(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable, target :: x(:), y(:), z(:)
-        integer(int64), allocatable :: got(:), want(:)
-        type(pf_spatial_index) :: a, b
-        integer(int64) :: n, ma, mb, q
+        real(real64), allocatable, target :: x(:), y(:), z(:), los(:), wx(:), wy(:), wz(:)
+        real(real64), allocatable :: ra(:), dec(:), d(:)
+        integer(int64), allocatable :: got(:), want(:), oa(:), na(:), ob(:), nb(:), fa(:), fb(:)
+        integer(int64), allocatable :: ia(:), ja(:), ib(:), jb(:)
+        integer(int64), allocatable :: ca(:), cb(:)
+        real(real64), allocatable :: da(:), db(:)
+        type(pf_spatial_index) :: a, b, la, lb
+        integer(int64) :: n, nw, ma, mb, q
         real(real64) :: p(3)
+        real(real64), parameter :: e1(3) = [0.2_real64, 0.2_real64, 0.2_real64]
+        real(real64), parameter :: e2(3) = [0.8_real64, 0.8_real64, 0.8_real64]
 
         n = 600_int64
         call make_cloud(n, 1.0_real64, .false., x, y, z)
@@ -3362,6 +3402,65 @@ contains
                 "a copy=.false. index must return exactly the rows a copying one does")
             if (allocated(error)) return
         end do
+        ! The AXIS walk, in all three of its shapes.
+        ma = a%within_segment(e1, e2, 0.15_real64, want)
+        mb = b%within_segment(e1, e2, 0.15_real64, got)
+        call check(error, ma > 0_int64 .and. same_rows(got, mb, want, ma), &
+            "a copy=.false. index must answer within_segment as a copying one does")
+        if (allocated(error)) return
+        ma = a%within_cylinder(e1, e2, 0.15_real64, want)
+        mb = b%within_cylinder(e1, e2, 0.15_real64, got)
+        call check(error, ma > 0_int64 .and. same_rows(got, mb, want, ma), &
+            "a copy=.false. index must answer within_cylinder as a copying one does")
+        if (allocated(error)) return
+        ma = a%within_cone(e1, e2, 0.05_real64, 0.25_real64, want)
+        mb = b%within_cone(e1, e2, 0.05_real64, 0.25_real64, got)
+        call check(error, ma > 0_int64 .and. same_rows(got, mb, want, ma), &
+            "a copy=.false. index must answer within_cone as a copying one does")
+        if (allocated(error)) return
+        ! The expanding ball, which orders its answer, so the rows must match position by position.
+        ma = a%nearest(e1, 12_int64, want)
+        mb = b%nearest(e1, 12_int64, got)
+        call check(error, ma == 12_int64 .and. mb == ma .and. all(got(1:ma) == want(1:ma)), &
+            "a copy=.false. index must answer nearest in the same order")
+        if (allocated(error)) return
+        ! The four bulk sweeps, each of which walks the cells itself.
+        call a%all_within(0.15_real64, oa, na)
+        call b%all_within(0.15_real64, ob, nb)
+        call check(error, size(na, kind=int64) > 0_int64 .and. all(oa == ob) .and. all(na == nb), &
+            "a copy=.false. index must answer the same CSR")
+        if (allocated(error)) return
+        call a%count_all_within(0.15_real64, ca)
+        call b%count_all_within(0.15_real64, cb)
+        call check(error, all(ca == cb), "a copy=.false. index must answer the same counts")
+        if (allocated(error)) return
+        call a%pairs_within(0.15_real64, ia, ja)
+        call b%pairs_within(0.15_real64, ib, jb)
+        call check(error, size(ia, kind=int64) > 0_int64 .and. all(ia == ib) .and. all(ja == jb), &
+            "a copy=.false. index must answer the same pair list")
+        if (allocated(error)) return
+        call a%kth_distance(4_int64, da)
+        call b%kth_distance(4_int64, db)
+        call check(error, all(da == db), "a copy=.false. index must answer the same kth distances")
+        if (allocated(error)) return
+        ! The line-of-sight cylinder, whose sweep indirects into `self%los_s` as well. The wedge
+        ! is the fixture the other line-of-sight tests use: `los` is the distance itself, so the
+        ! slope is well behaved and nothing here is testing a warning.
+        call make_wedge(150_int64, 40_int64, 500.0_real64, 1500.0_real64, 5_int64, ra, dec, d, wx, wy, wz)
+        nw = size(wx, kind=int64)
+        allocate (los(nw), fa(nw), fb(nw))
+        los = d
+        call la%build(wx, wy, wz, radius=35.0_real64, los=los)
+        call lb%build(wx, wy, wz, radius=35.0_real64, los=los, copy=.false.)
+        call la%pairs_within_los(35.0_real64, 90.0_real64, ia, ja)
+        call lb%pairs_within_los(35.0_real64, 90.0_real64, ib, jb)
+        call check(error, size(ia, kind=int64) > 0_int64 .and. all(ia == ib) .and. all(ja == jb), &
+            "a copy=.false. index must answer the same line-of-sight pairs")
+        if (allocated(error)) return
+        ma = la%within_los([wx(1), wy(1), wz(1)], 35.0_real64, 90.0_real64, fa, los_p=los(1))
+        mb = lb%within_los([wx(1), wy(1), wz(1)], 35.0_real64, 90.0_real64, fb, los_p=los(1))
+        call check(error, ma > 0_int64 .and. ma == mb .and. same_rows(fb, mb, fa, ma), &
+            "a copy=.false. index must answer the same line-of-sight cylinder")
     end subroutine test_copy_false_matches
 
     !> The metadata queries report what was built.
@@ -5352,9 +5451,9 @@ contains
     !> `%pairs_within_sky` and `%pairs_within_los` answer the same in `int32` as in `int64`.
     subroutine test_pairs_sky_and_los_int32_match(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), los(:), bp(:), bl(:)
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), los(:), bp(:), bl(:), rd(:)
         integer(int32), allocatable :: i32(:), j32(:)
-        integer(int64), allocatable :: i64(:), j64(:)
+        integer(int64), allocatable :: i64(:), j64(:), ri(:), rj(:)
         integer(int64) :: a, n
         type(pf_spatial_index) :: sk, sx
 
@@ -5366,6 +5465,24 @@ contains
         if (allocated(error)) return
         call check(error, pairs_same_kinds(i32, j32, i64, j64), &
             "pairs_within_sky must answer the same in int32 as in int64")
+        if (allocated(error)) return
+        ! The per-point sky radius is a separate specific in each kind, and the annulus is another
+        ! arm again. Both must run against the SKY arrays, before the wedge below reassigns them.
+        allocate (rd(size(ra, kind=int64)))
+        rd = 4.0_real64
+        call sk%pairs_within_sky(rd, ri, rj)
+        call sk%pairs_within_sky(rd, i32, j32)
+        call check(error, size(ri, kind=int64) > 0_int64, "the per-point sky pair fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, pairs_same_kinds(i32, j32, ri, rj), &
+            "a per-point sky radius must answer the same pairs in int32 as in int64")
+        if (allocated(error)) return
+        call check(error, size(ri, kind=int64) == size(i64, kind=int64) .and. all(ri == i64), &
+            "a uniform per-point sky radius must give the scalar form's pair list")
+        if (allocated(error)) return
+        call sk%pairs_within_sky(4.0_real64, ri, rj, r_inner_deg=2.0_real64)
+        call check(error, size(ri, kind=int64) > 0_int64 .and. size(ri, kind=int64) < size(i64, kind=int64), &
+            "a sky annulus must drop the pairs closer than its inner radius")
         if (allocated(error)) return
         ! The line-of-sight sweep reaches `spatial_scan_axis` as well as `spatial_scan`, so an
         ! `out32` forwarded to only one of the two walks would show here and nowhere else.
@@ -5384,12 +5501,26 @@ contains
         if (allocated(error)) return
         call check(error, pairs_same_kinds(i32, j32, i64, j64), &
             "pairs_within_los must answer the same in int32 as in int64")
+        if (allocated(error)) return
+        ! One transverse and one parallel length is a separate specific from the per-point pair,
+        ! in each kind -- the scalar form takes no `combine=` because with equal lengths every
+        ! rule coincides, so it cannot be reached by adding an argument to the call above.
+        call sx%pairs_within_los(35.0_real64, 90.0_real64, ri, rj)
+        call sx%pairs_within_los(35.0_real64, 90.0_real64, i32, j32)
+        call check(error, size(ri, kind=int64) > 0_int64, "the scalar los fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, pairs_same_kinds(i32, j32, ri, rj), &
+            "scalar los lengths must answer the same in int32 as in int64")
+        if (allocated(error)) return
+        call check(error, size(ri, kind=int64) == size(i64, kind=int64) .and. all(ri == i64) .and. all(rj == j64), &
+            "uniform length vectors under PF_LINK_MEAN must give the scalar form's pair list")
+        if (allocated(error)) return
     end subroutine test_pairs_sky_and_los_int32_match
 
     !> `%all_within` and `%all_within_sky` answer the same CSR in `int32` as in `int64`.
     subroutine test_all_within_int32_matches(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable :: x(:), y(:), z(:), rr(:), ra(:), dec(:)
+        real(real64), allocatable :: x(:), y(:), z(:), rr(:), rd(:), ra(:), dec(:)
         integer(int32), allocatable :: o32(:), n32(:)
         integer(int64), allocatable :: o64(:), n64(:)
         type(pf_spatial_index) :: sx, sk
@@ -5412,6 +5543,15 @@ contains
         call check(error, csr_same_kinds(o32, n32, o64, n64), &
             "all_within must answer the same sorted CSR in both kinds")
         if (allocated(error)) return
+        ! `r_inner=` is its own arm in every one of these specifics rather than a flag inside one
+        ! body, so an annulus reaches code the plain form never touches -- in both kinds.
+        call sx%all_within(0.12_real64, o64, n64, r_inner=0.06_real64)
+        call sx%all_within(0.12_real64, o32, n32, r_inner=0.06_real64)
+        call check(error, size(n64, kind=int64) > 0_int64, "the annulus fixture must find some neighbours")
+        if (allocated(error)) return
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "all_within must answer the same annulus CSR in both kinds")
+        if (allocated(error)) return
         call make_sky(400_int64, ra, dec)
         call sk%build_sky(ra, dec, radius_deg=4.0_real64)
         call sk%all_within_sky(4.0_real64, o64, n64)
@@ -5420,14 +5560,38 @@ contains
         if (allocated(error)) return
         call check(error, csr_same_kinds(o32, n32, o64, n64), &
             "all_within_sky must answer the same CSR in both kinds")
+        if (allocated(error)) return
+        call sk%all_within_sky(4.0_real64, o64, n64, r_inner_deg=2.0_real64)
+        call sk%all_within_sky(4.0_real64, o32, n32, r_inner_deg=2.0_real64)
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "all_within_sky must answer the same annulus CSR in both kinds")
+        if (allocated(error)) return
+        ! The per-point-radius sky form is a SEPARATE specific from the scalar one, with its own
+        ! degrees-to-chords conversion of the whole vector; a uniform vector is what pins the two
+        ! against each other, exactly as the Euclidean pair test does.
+        allocate (rd(size(ra, kind=int64)))
+        rd = 4.0_real64
+        call sk%all_within_sky(rd, o64, n64)
+        call sk%all_within_sky(rd, o32, n32)
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "a per-point sky radius must answer the same CSR in both kinds")
+        if (allocated(error)) return
+        call sk%all_within_sky(4.0_real64, o64, n64)
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "a uniform per-point sky radius must give the scalar form's CSR")
+        if (allocated(error)) return
+        call sk%all_within_sky(rd, o64, n64, r_inner_deg=[2.0_real64])
+        call sk%all_within_sky(rd, o32, n32, r_inner_deg=[2.0_real64])
+        call check(error, csr_same_kinds(o32, n32, o64, n64), &
+            "a per-point sky annulus must answer the same CSR in both kinds")
     end subroutine test_all_within_int32_matches
 
     !> `%count_all_within` and `%count_all_within_sky` answer the same counts in both kinds.
     subroutine test_count_all_int32_matches(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:)
+        real(real64), allocatable :: x(:), y(:), z(:), rr(:), rd(:), ra(:), dec(:)
         integer(int32), allocatable :: c32(:)
-        integer(int64), allocatable :: c64(:)
+        integer(int64), allocatable :: c64(:), ref(:)
         type(pf_spatial_index) :: sx, sk
 
         call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
@@ -5442,12 +5606,52 @@ contains
         call check(error, all(int(c32, kind=int64) == c64), &
             "count_all_within must answer the same counts in both kinds")
         if (allocated(error)) return
+        ref = c64
+        ! The per-point-radius form is a separate specific in each kind; a uniform vector is what
+        ! pins it against the scalar one, and the annulus is a third arm again.
+        allocate (rr(size(x, kind=int64)))
+        rr = 0.12_real64
+        call sx%count_all_within(rr, c64)
+        call sx%count_all_within(rr, c32)
+        call check(error, all(c64 == ref), "a uniform radius vector must give the scalar form's counts")
+        if (allocated(error)) return
+        call check(error, all(int(c32, kind=int64) == c64), &
+            "a per-point radius must answer the same counts in both kinds")
+        if (allocated(error)) return
+        call sx%count_all_within(0.12_real64, c64, r_inner=0.06_real64)
+        call sx%count_all_within(0.12_real64, c32, r_inner=0.06_real64)
+        call check(error, all(int(c32, kind=int64) == c64) .and. sum(c64) > 0_int64, &
+            "count_all_within must answer the same annulus counts in both kinds")
+        if (allocated(error)) return
+        call check(error, all(c64 <= ref) .and. any(c64 < ref), &
+            "an annulus must drop the points inside the inner radius and nothing else")
+        if (allocated(error)) return
         call make_sky(400_int64, ra, dec)
         call sk%build_sky(ra, dec, radius_deg=4.0_real64)
         call sk%count_all_within_sky(4.0_real64, c64)
         call sk%count_all_within_sky(4.0_real64, c32)
         call check(error, all(int(c32, kind=int64) == c64) .and. sum(c64) > 0_int64, &
             "count_all_within_sky must answer the same counts in both kinds")
+        if (allocated(error)) return
+        ref = c64
+        allocate (rd(size(ra, kind=int64)))
+        rd = 4.0_real64
+        call sk%count_all_within_sky(rd, c64)
+        call sk%count_all_within_sky(rd, c32)
+        call check(error, all(c64 == ref), "a uniform sky radius vector must give the scalar form's counts")
+        if (allocated(error)) return
+        call check(error, all(int(c32, kind=int64) == c64), &
+            "a per-point sky radius must answer the same counts in both kinds")
+        if (allocated(error)) return
+        call sk%count_all_within_sky(4.0_real64, c64, r_inner_deg=2.0_real64)
+        call sk%count_all_within_sky(4.0_real64, c32, r_inner_deg=2.0_real64)
+        call check(error, all(int(c32, kind=int64) == c64) .and. sum(c64) > 0_int64, &
+            "count_all_within_sky must answer the same annulus counts in both kinds")
+        if (allocated(error)) return
+        call sk%count_all_within_sky(rd, c64, r_inner_deg=[2.0_real64])
+        call sk%count_all_within_sky(rd, c32, r_inner_deg=[2.0_real64])
+        call check(error, all(int(c32, kind=int64) == c64), &
+            "a per-point sky annulus must answer the same counts in both kinds")
     end subroutine test_count_all_int32_matches
 
     !> The whole Friends-of-Friends chain in `int32` gives the `int64` chain's answer.
@@ -5540,6 +5744,824 @@ contains
     end subroutine test_grid_int32_and_ceiling_hook
 
     !> Whether two pair lists agree element for element across the two kinds.
+    !> Every single-point query family answers the same into an `int32` buffer as into an `int64` one.
+    !>
+    !> Each kind is a SEPARATE specific that forwards to the same walk, so a specific wired to the
+    !> wrong output argument -- or to the wrong walk -- produces a wrong answer rather than a build
+    !> error. `%within_segment` and `%within_cone` reach `spatial_scan_axis` while the others reach
+    !> `spatial_scan`, which is why both walks appear here.
+    subroutine test_single_query_int32_buffers_match(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:)
+        integer(int32) :: g32(64)
+        integer(int64) :: g64(64), m32, m64
+        real(real64) :: d32(64), d64(64)
+        type(pf_spatial_index) :: sx, sk
+        real(real64), parameter :: p1(3) = [0.2_real64, 0.2_real64, 0.2_real64]
+        real(real64), parameter :: p2(3) = [0.8_real64, 0.8_real64, 0.8_real64]
+
+        call make_cloud(300_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.15_real64)
+        m64 = sx%within_segment(p1, p2, 0.15_real64, g64, dist=d64)
+        m32 = sx%within_segment(p1, p2, 0.15_real64, g32, dist=d32)
+        call check(error, m64 > 0_int64, "the segment fixture must find some points")
+        if (allocated(error)) return
+        call check(error, m32 == m64 .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)) &
+            .and. all(d32(1:m64) == d64(1:m64)), &
+            "within_segment must answer the same rows and distances in both kinds")
+        if (allocated(error)) return
+        m64 = sx%within_cone(p1, p2, 0.05_real64, 0.20_real64, g64, dist=d64)
+        m32 = sx%within_cone(p1, p2, 0.05_real64, 0.20_real64, g32, dist=d32)
+        call check(error, m64 > 0_int64, "the cone fixture must find some points")
+        if (allocated(error)) return
+        call check(error, m32 == m64 .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)) &
+            .and. all(d32(1:m64) == d64(1:m64)), &
+            "within_cone must answer the same rows and distances in both kinds")
+        if (allocated(error)) return
+        ! `%nearest` orders its answer, so an int32 specific that lost the ordering shows here.
+        m64 = sx%nearest(p1, 8_int32, g64, dist=d64)
+        m32 = sx%nearest(p1, 8_int32, g32, dist=d32)
+        call check(error, m64 == 8_int64 .and. m32 == m64 &
+            .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)), &
+            "nearest must answer the same rows in both kinds under an int32 k")
+        if (allocated(error)) return
+        m32 = sx%nearest(p1, 8_int64, g32, dist=d32)
+        call check(error, m32 == m64 .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)), &
+            "an int64 k into an int32 buffer must answer as an int32 k into an int64 one")
+        if (allocated(error)) return
+
+        call make_sky(300_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=5.0_real64)
+        ! At the north pole, where `make_sky` piles a quarter of the catalogue within 3 degrees --
+        ! an annulus away from the cap finds nothing on this fixture.
+        m64 = sk%within_sky(0.0_real64, 90.0_real64, 3.0_real64, g64, dist_deg=d64, r_inner_deg=1.0_real64)
+        m32 = sk%within_sky(0.0_real64, 90.0_real64, 3.0_real64, g32, dist_deg=d32, r_inner_deg=1.0_real64)
+        call check(error, m64 > 0_int64, "the sky annulus fixture must find some points")
+        if (allocated(error)) return
+        call check(error, m32 == m64 .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)) &
+            .and. all(d32(1:m64) == d64(1:m64)), &
+            "within_sky must answer the same annulus in both kinds")
+        if (allocated(error)) return
+        ! All four (k kind, buffer kind) combinations of the sky nearest, against one reference.
+        m64 = sk%nearest_sky(0.0_real64, 90.0_real64, 6_int32, g64, dist_deg=d64)
+        call check(error, m64 == 6_int64, "the sky nearest fixture must return k rows")
+        if (allocated(error)) return
+        m32 = sk%nearest_sky(0.0_real64, 90.0_real64, 6_int32, g32, dist_deg=d32)
+        call check(error, m32 == m64 .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)) &
+            .and. all(d32(1:m64) == d64(1:m64)), &
+            "nearest_sky must answer the same rows in int32 as in int64 under an int32 k")
+        if (allocated(error)) return
+        m32 = sk%nearest_sky(0.0_real64, 90.0_real64, 6_int64, g32, dist_deg=d32)
+        call check(error, m32 == m64 .and. all(int(g32(1:m64), kind=int64) == g64(1:m64)), &
+            "an int64 k into an int32 sky buffer must answer the same rows")
+        if (allocated(error)) return
+        g64 = 0_int64
+        m32 = sk%nearest_sky(0.0_real64, 90.0_real64, 6_int64, g64, dist_deg=d32)
+        call check(error, m32 == m64 .and. all(d32(1:m64) == d64(1:m64)), &
+            "an int64 k into an int64 sky buffer must answer the same separations")
+    end subroutine test_single_query_int32_buffers_match
+
+    !> `%kth_distance_sky` answers the same under an `int64` k as under an `int32` one.
+    subroutine test_kth_sky_k64_matches_k32(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), a(:), b(:)
+        type(pf_spatial_index) :: sk
+
+        call make_sky(300_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=5.0_real64)
+        call sk%kth_distance_sky(3_int32, a)
+        call sk%kth_distance_sky(3_int64, b)
+        call check(error, size(a, kind=int64) == size(ra, kind=int64), &
+            "kth_distance_sky must answer one distance per point")
+        if (allocated(error)) return
+        call check(error, all(a > 0.0_real64), "the sky fixture must have no coincident points")
+        if (allocated(error)) return
+        call check(error, all(a == b), "an int64 k must give the int32 k's distances exactly")
+    end subroutine test_kth_sky_k64_matches_k32
+
+    !> `%rebuild` folds a `radius=` into the record, in both its scalar and its list form.
+    !>
+    !> The two shapes are separate specifics, and the scalar one wraps its argument into a
+    !> one-element list before handing it on. On UNCHANGED data `%rebuild` folds the radius and
+    !> returns without re-tuning, so the cell is not the observable -- the record is, and what
+    !> reads the record is the next bulk query's decision whether to re-tune itself. A specific
+    !> that dropped its radius would rebuild correctly and simply keep re-tuning later, which no
+    !> answer-comparing test can see.
+    subroutine test_rebuild_folds_a_radius(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:), rv(:), counts(:)
+        integer(int64), allocatable :: cnt(:)
+        type(pf_spatial_index) :: sx, sk, sxy
+        integer(int64) :: base, scalar_folded, list_folded
+        real(real64) :: deg0, deg1
+        logical :: rebuilt
+
+        call make_cloud(2000_int64, 1.0_real64, .false., x, y, z)
+        ! The control: built for a small radius, a sweep at a far larger one re-tunes the index.
+        call parquet_debug_reset_spatial_counters()
+        call sx%build(x, y, z, radius=0.02_real64)
+        call sx%count_all_within(0.40_real64, cnt)
+        base = parquet_debug_spatial_rebuilds()
+        call check(error, base > 0_int64, &
+            "a sweep far from the built radius must re-tune the index, or this test asserts nothing")
+        if (allocated(error)) return
+
+        call parquet_debug_reset_spatial_counters()
+        call sx%build(x, y, z, radius=0.02_real64)
+        call sx%rebuild(x, y, z, radius=0.40_real64, rebuilt=rebuilt)
+        call check(error, .not. rebuilt, "unchanged coordinates must not report a rebuild")
+        if (allocated(error)) return
+        call sx%count_all_within(0.40_real64, cnt)
+        scalar_folded = parquet_debug_spatial_rebuilds()
+        call check(error, scalar_folded == 0_int64, &
+            "a scalar radius= folded in by %rebuild must spare the next sweep its re-tune")
+        if (allocated(error)) return
+
+        call parquet_debug_reset_spatial_counters()
+        call sx%build(x, y, z, radius=0.02_real64)
+        allocate (rv(2))
+        rv = [0.40_real64, 0.40_real64]
+        call sx%rebuild(x, y, z, radius=rv)
+        call sx%count_all_within(0.40_real64, cnt)
+        list_folded = parquet_debug_spatial_rebuilds()
+        call check(error, list_folded == 0_int64, &
+            "a radius list folded in by %rebuild must spare the next sweep its re-tune")
+        if (allocated(error)) return
+
+        ! `%rebuild_for` on a SKY index takes DEGREES and converts the whole list to chords; it
+        ! re-tunes outright, so there the cell is the observable.
+        call make_sky(1000_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=0.2_real64)
+        deg0 = sk%cell_size()
+        call sk%rebuild_for([6.0_real64])
+        deg1 = sk%cell_size()
+        call check(error, deg1 /= deg0, "rebuild_for with a degree list must re-tune a sky index")
+        if (allocated(error)) return
+        ! A change in Z ALONE must be noticed: the scan compares x, then y, then z, and stops at
+        ! the first difference, so a z comparison that was never written would leave the index
+        ! silently stale for any move along that axis.
+        call sx%build(x, y, z, radius=0.05_real64)
+        z(7) = z(7) + 0.3_real64
+        call sx%rebuild(x, y, z, rebuilt=rebuilt)
+        call check(error, rebuilt, "a change in z alone must be seen as a change")
+        if (allocated(error)) return
+        ! And a 2D index rebuilds with no z to copy, which is its own arm again.
+        call sxy%build(x, y, radius=0.05_real64)
+        x(3) = x(3) + 0.2_real64
+        call sxy%rebuild(x, y, rebuilt=rebuilt)
+        call check(error, rebuilt .and. sxy%ndim() == 2, &
+            "a 2D index must rebuild without a z and stay 2D")
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_rebuild_folds_a_radius
+
+    !> `parquet_debug_spatial_work` reports the two counts the probe ranks by.
+    !>
+    !> The hook exists for `bench/benchmark_spatial.sh --mode=ab` to re-fit `A/B` on another
+    !> machine, so what it must get right is the TRADE-OFF the fit is over: a larger cell visits
+    !> fewer cells and distance-tests more points. Asserting only "it returns something" would
+    !> pass against a hook that reported the same pair for every cell size, which is exactly the
+    !> failure that would make a re-fit meaningless.
+    subroutine test_debug_work_counts_both_halves(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        type(pf_spatial_index) :: sx, unbuilt
+        integer(int64) :: c_fine, p_fine, c_coarse, p_coarse
+
+        call parquet_debug_reset_spatial_counters()
+        ! An unbuilt index has no points to probe, and the hook answers that rather than walking
+        ! an unallocated grid.
+        c_fine = 7_int64
+        p_fine = 7_int64
+        call parquet_debug_spatial_work(unbuilt, 0.1_real64, [0.05_real64], c_fine, p_fine)
+        call check(error, c_fine == 0_int64 .and. p_fine == 0_int64, &
+            "an unbuilt index must report no cells and no points")
+        if (allocated(error)) return
+
+        call make_cloud(3000_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.05_real64)
+        call parquet_debug_spatial_work(sx, 0.02_real64, [0.05_real64], c_fine, p_fine)
+        call check(error, c_fine > 0_int64 .and. p_fine > 0_int64, &
+            "a built index must report a positive count of both cells and points")
+        if (allocated(error)) return
+
+        call parquet_debug_spatial_work(sx, 0.40_real64, [0.05_real64], c_coarse, p_coarse)
+        call check(error, c_coarse < c_fine, "a larger cell must make the walk visit fewer cells")
+        if (allocated(error)) return
+        call check(error, p_coarse > p_fine, "a larger cell must make the walk distance-test more points")
+        if (allocated(error)) return
+        ! A re-fit ranks candidates by re-running this, so the counts must be reproducible: the
+        ! probe draws its query points by a fixed stride over stored rows and times nothing.
+        call parquet_debug_spatial_work(sx, 0.02_real64, [0.05_real64], c_coarse, p_coarse)
+        call check(error, c_coarse == c_fine .and. p_coarse == p_fine, &
+            "the same index and h must give the same counts twice")
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_debug_work_counts_both_halves
+
+    !> An index over NO points builds and answers every query family with an empty answer.
+    !>
+    !> Each bulk sweep carries its own `n == 0` arm that emits the empty structure and returns
+    !> before the walk, and the tuner has its own: a density it cannot measure must not become a
+    !> division by zero. An empty catalogue is a legitimate input -- a cut that happened to select
+    !> nothing -- so this is an answer, not a refusal.
+    subroutine test_empty_index_answers_everything(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:)
+        integer(int64), allocatable :: offs(:), nbrs(:), pi(:), pj(:), cnt(:), got(:)
+        integer(int32), allocatable :: o32(:), n32(:)
+        type(pf_spatial_index) :: sx, sk
+        integer(int64) :: m
+
+        ! `%kth_distance` is deliberately absent: it refuses k above %size()-1, which no k can
+        ! satisfy here, so an empty index has no k-th neighbour to report rather than an empty one.
+        allocate (x(0), y(0), z(0), got(4))
+        call sx%build(x, y, z, radius=0.2_real64)
+        call check(error, sx%is_built() .and. sx%size() == 0_int64, &
+            "an empty cloud must build into an index holding no points")
+        if (allocated(error)) return
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)
+        call check(error, m == 0_int64, "a query on an empty index must find nothing")
+        if (allocated(error)) return
+        call sx%all_within(0.2_real64, offs, nbrs)
+        call check(error, size(offs, kind=int64) == 1_int64 .and. offs(1) == 1_int64 &
+            .and. size(nbrs, kind=int64) == 0_int64, &
+            "all_within on an empty index must give the empty CSR")
+        if (allocated(error)) return
+        call sx%all_within(0.2_real64, o32, n32)
+        call check(error, size(o32, kind=int64) == 1_int64 .and. size(n32, kind=int64) == 0_int64, &
+            "the int32 CSR of an empty index must be empty too")
+        if (allocated(error)) return
+        call sx%count_all_within(0.2_real64, cnt)
+        call check(error, size(cnt, kind=int64) == 0_int64, &
+            "count_all_within on an empty index must give no counts")
+        if (allocated(error)) return
+        call sx%pairs_within(0.2_real64, pi, pj)
+        call check(error, size(pi, kind=int64) == 0_int64 .and. size(pj, kind=int64) == 0_int64, &
+            "pairs_within on an empty index must give no pairs")
+        if (allocated(error)) return
+        allocate (ra(0), dec(0))
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64)
+        call sk%all_within_sky(1.0_real64, offs, nbrs)
+        call check(error, size(nbrs, kind=int64) == 0_int64, &
+            "an empty sky index must give the empty CSR too")
+        if (allocated(error)) return
+        call sk%count_all_within_sky(1.0_real64, cnt)
+        call check(error, size(cnt, kind=int64) == 0_int64, &
+            "an empty sky index must give no counts")
+        if (allocated(error)) return
+        ! `%rebuild_for` re-tunes, so it reaches the tuner's own empty arm a second time.
+        call sx%rebuild_for([0.5_real64])
+        call check(error, sx%size() == 0_int64, "re-tuning an empty index must leave it empty")
+    end subroutine test_empty_index_answers_everything
+
+    !> A PERIODIC index answers the same with `copy=.false.` as with `copy=.true.`.
+    !>
+    !> The minimum-image walk is written twice for the reason the free one is -- see
+    !> `test_copy_false_matches` -- and the two halves are different code: the periodic pair
+    !> carries the wrap correction, so covering the free pair says nothing about it.
+    subroutine test_periodic_copy_false_matches(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+        integer(int64), allocatable :: got(:), want(:), ia(:), ja(:), ib(:), jb(:), ca(:), cb(:)
+        type(pf_spatial_index) :: a, b
+        integer(int64) :: n, ma, mb, q
+        real(real64) :: p(3)
+        real(real64), parameter :: lo(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: hi(3) = [1.0_real64, 1.0_real64, 1.0_real64]
+
+        n = 600_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call a%build(x, y, z, radius=0.15_real64, box_lo=lo, box_hi=hi)
+        call b%build(x, y, z, radius=0.15_real64, box_lo=lo, box_hi=hi, copy=.false.)
+        call check(error, b%is_periodic(), "the fixture must actually be periodic")
+        if (allocated(error)) return
+        allocate (got(n), want(n))
+        do q = 1_int64, 20_int64
+            ! Query points on the faces, where the wrap correction is what decides the answer.
+            p(1) = 0.02_real64 + 0.96_real64 * real(mod(q, 2_int64), kind=real64)
+            p(2) = pf_random_at(fixture_seed + 57_int64, q, 2_int64)
+            p(3) = 0.01_real64
+            ma = a%within(p, 0.15_real64, want)
+            mb = b%within(p, 0.15_real64, got)
+            call check(error, same_rows(got, mb, want, ma), &
+                "a periodic copy=.false. index must return exactly the rows a copying one does")
+            if (allocated(error)) return
+        end do
+        call check(error, ma > 0_int64, "the periodic fixture must find some points")
+        if (allocated(error)) return
+        call a%pairs_within(0.15_real64, ia, ja)
+        call b%pairs_within(0.15_real64, ib, jb)
+        call check(error, size(ia, kind=int64) > 0_int64 .and. all(ia == ib) .and. all(ja == jb), &
+            "a periodic copy=.false. index must answer the same pair list")
+        if (allocated(error)) return
+        call a%count_all_within(0.15_real64, ca)
+        call b%count_all_within(0.15_real64, cb)
+        call check(error, all(ca == cb), "a periodic copy=.false. index must answer the same counts")
+    end subroutine test_periodic_copy_false_matches
+
+    !> `r_inner=` takes one value or ONE PER POINT, and the per-point form is its own arm.
+    !>
+    !> A single inner radius is read from element 1 for every row; a full-length vector is indexed
+    !> per row. An implementation that read element 1 either way answers correctly for every
+    !> uniform vector ever tested, so the fixture here deliberately varies the inner radius.
+    subroutine test_per_point_inner_radii(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rr(:), rin(:), ra(:), dec(:), rd(:), din(:)
+        integer(int64), allocatable :: c_uniform(:), c_varied(:), offs(:), nbrs(:)
+        type(pf_spatial_index) :: sx, sk
+        integer(int64) :: n
+
+        n = 500_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.20_real64)
+        allocate (rr(n), rin(n))
+        rr = 0.20_real64
+        rin = 0.10_real64
+        call sx%count_all_within(rr, c_uniform, r_inner=rin)
+        ! Half the rows keep the inner radius and half drop it to zero, so a per-point read and a
+        ! read of element 1 cannot agree.
+        rin(1:n / 2_int64) = 0.0_real64
+        call sx%count_all_within(rr, c_varied, r_inner=rin)
+        call check(error, sum(c_uniform) > 0_int64, "the annulus fixture must find some neighbours")
+        if (allocated(error)) return
+        call check(error, all(c_varied >= c_uniform), &
+            "dropping a row's inner radius can only add neighbours to that row")
+        if (allocated(error)) return
+        call check(error, any(c_varied(1:n / 2_int64) > c_uniform(1:n / 2_int64)), &
+            "a per-point inner radius must be read per point, not from element 1")
+        if (allocated(error)) return
+        call check(error, all(c_varied(n / 2_int64 + 1_int64:) == c_uniform(n / 2_int64 + 1_int64:)), &
+            "the rows that kept their inner radius must be unchanged")
+        if (allocated(error)) return
+        call sx%all_within(rr, offs, nbrs, r_inner=rin)
+        call check(error, size(nbrs, kind=int64) == sum(c_varied), &
+            "the CSR must hold exactly the neighbours the counts promised")
+        if (allocated(error)) return
+        ! The sky side converts the whole inner list from degrees, which is its own loop again.
+        call make_sky(400_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=4.0_real64)
+        allocate (rd(400), din(400))
+        rd = 4.0_real64
+        din = 2.0_real64
+        call sk%count_all_within_sky(rd, c_uniform, r_inner_deg=din)
+        din(1:200) = 0.0_real64
+        call sk%count_all_within_sky(rd, c_varied, r_inner_deg=din)
+        call check(error, sum(c_uniform) > 0_int64, "the sky annulus fixture must find some neighbours")
+        if (allocated(error)) return
+        call check(error, any(c_varied(1:200) > c_uniform(1:200)) &
+            .and. all(c_varied(201:) == c_uniform(201:)), &
+            "a per-point inner angular radius must be read per point")
+    end subroutine test_per_point_inner_radii
+
+    !> `pf_connected_components` answers an empty graph in the `int32` arm as in the `int64` one.
+    subroutine test_components_empty_graph_int32(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        integer(int32), allocatable :: lab32(:), sz32(:)
+        integer(int32) :: nc32
+        integer(int32) :: none_i(0), none_j(0)
+
+        call pf_connected_components(none_i, none_j, 0_int64, lab32, ncomp=nc32, sizes=sz32)
+        call check(error, size(lab32) == 0 .and. nc32 == 0_int32 .and. size(sz32) == 0, &
+            "an empty graph must have no vertices, no components and no sizes in int32 too")
+        if (allocated(error)) return
+        ! The optional outputs are their own arm again: absent, the labels must still come back
+        ! allocated and empty rather than unallocated.
+        deallocate (lab32)
+        call pf_connected_components(none_i, none_j, 0_int32, lab32)
+        call check(error, allocated(lab32) .and. size(lab32) == 0, &
+            "an empty graph must allocate an empty label array even with no optional outputs")
+    end subroutine test_components_empty_graph_int32
+
+    !> `%rebuild_for` re-tunes through every arm the debug hooks and an empty catalogue select.
+    !>
+    !> Re-tuning has four routes on each backend -- a forced resolution or cell, a measured one,
+    !> and the degenerate empty case -- and `%build` reaches only the measured one. A forced value
+    !> that `%build` honours but `%rebuild_for` quietly re-measured would show up as a test using
+    !> the hook getting a different cell after an unrelated re-tune, which is the kind of defect
+    !> that surfaces in a neighbouring test rather than its own.
+    subroutine test_retune_honours_every_arm(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:), ra0(:), dec0(:)
+        real(real64), allocatable :: ex(:), ey(:), ez(:)
+        type(pf_spatial_index) :: sx, sh, empty_grid, empty_sky
+        real(real64) :: h
+
+        call parquet_debug_reset_spatial_counters()
+        ! A forced CELL must survive a re-tune, and must stop the probe on that route too.
+        call make_cloud(2000_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.05_real64)
+        ! 0.25 over a unit box is 64 cells, well inside the 0.3-per-point ceiling that 2000
+        ! points allow -- a finer forced cell would be coarsened and this would assert the clamp.
+        call parquet_debug_set_spatial_cell(0.25_real64)
+        call sx%rebuild_for([0.30_real64])
+        h = sx%cell_size()
+        call check(error, abs(h - 0.25_real64) <= 1.0e-12_real64, &
+            "a forced debug cell must be the cell a re-tune uses")
+        if (allocated(error)) return
+        call check(error, parquet_debug_spatial_probe_count() == 0_int64, &
+            "a forced debug cell must stop the probe on the re-tune route too")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_cell(-1.0_real64)
+
+        ! The HEALPix counterpart: a forced RESOLUTION must survive a re-pixelation.
+        call make_sky(6000_int64, ra, dec)
+        call sh%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX)
+        call parquet_debug_set_spatial_nside(4_int64)
+        call sh%rebuild_for([2.0_real64])
+        call check(error, sh%nside() == 4_int64, &
+            "a forced debug nside must be the resolution a re-pixelation uses")
+        if (allocated(error)) return
+        call check(error, parquet_debug_spatial_probe_count() == 0_int64, &
+            "a forced debug nside must stop the resolution probe on the re-tune route")
+        if (allocated(error)) return
+        call parquet_debug_set_spatial_nside(0_int64)
+
+        ! The degenerate arm on both backends: nothing to measure a density from.
+        allocate (ex(0), ey(0), ez(0), ra0(0), dec0(0))
+        call empty_grid%build(ex, ey, ez, radius=0.2_real64)
+        call empty_grid%rebuild_for([0.5_real64])
+        call check(error, empty_grid%cell_size() > 0.0_real64, &
+            "re-tuning an empty grid index must still leave it a positive cell")
+        if (allocated(error)) return
+        call empty_sky%build_sky(ra0, dec0, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX)
+        call empty_sky%rebuild_for([2.0_real64])
+        call check(error, empty_sky%nside() >= 1_int64, &
+            "re-pixelating an empty sky index must still leave it a resolution")
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_retune_honours_every_arm
+
+    !> The remaining `copy=.false.` routes: a per-point radius, a 2D build, and the ball-walk
+    !> line-of-sight accept under every `combine=` rule.
+    !>
+    !> `test_copy_false_matches` reaches the indirect loops with a SCALAR radius and the default
+    !> rule, which leaves three whole blocks of each loop untouched: the per-candidate bound a
+    !> per-point radius switches on, the `select case (lrule)` accept, and -- because the
+    !> line-of-sight sweep prefers the cylinder walk -- everything the ball walk would have done
+    !> instead. The walk override is what makes the last of those reachable at all.
+    subroutine test_copy_false_reaches_every_accept(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable, target :: x(:), y(:), z(:), wx(:), wy(:), wz(:), los(:)
+        real(real64), allocatable :: ra(:), dec(:), d(:), rv(:), bp(:), bl(:)
+        integer(int64), allocatable :: ia(:), ja(:), ib(:), jb(:), oa(:), na(:), ob(:), nb(:)
+        type(pf_spatial_index) :: a, b, la, lb, f2, g2
+        integer(int64) :: n, nw, k
+        integer, parameter :: rules(4) = [PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_SUM]
+
+        n = 500_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do k = 1_int64, n
+            rv(k) = 0.08_real64 + 0.10_real64 * pf_random_at(fixture_seed + 71_int64, k, 5_int64)
+        end do
+        ! A PER-POINT radius switches on the per-candidate bound, which is its own block in every
+        ! one of the four inner loops -- free and periodic, direct and indirect.
+        call a%build(x, y, z, radius=0.18_real64)
+        call b%build(x, y, z, radius=0.18_real64, copy=.false.)
+        call a%pairs_within(rv, ia, ja)
+        call b%pairs_within(rv, ib, jb)
+        call check(error, size(ia, kind=int64) > 0_int64 .and. all(ia == ib) .and. all(ja == jb), &
+            "a copy=.false. index must rank a per-point radius as a copying one does")
+        if (allocated(error)) return
+        call a%all_within(rv, oa, na, sorted=.true.)
+        call b%all_within(rv, ob, nb, sorted=.true.)
+        call check(error, all(oa == ob) .and. all(na == nb), &
+            "a copy=.false. index must sort a per-point CSR as a copying one does")
+        if (allocated(error)) return
+        ! A 2D index with copy=.false. has no z to point at and must make its own.
+        call f2%build(x, y, radius=0.18_real64)
+        call g2%build(x, y, radius=0.18_real64, copy=.false.)
+        call check(error, g2%ndim() == 2, "the fixture must build a 2D index")
+        if (allocated(error)) return
+        call f2%pairs_within(0.18_real64, ia, ja)
+        call g2%pairs_within(0.18_real64, ib, jb)
+        call check(error, size(ia, kind=int64) > 0_int64 .and. all(ia == ib) .and. all(ja == jb), &
+            "a 2D copy=.false. index must answer as a copying one does")
+        if (allocated(error)) return
+
+        ! The line-of-sight accept, forced onto the BALL walk so it runs inside `spatial_scan`
+        ! rather than the cylinder walk, under each rule in turn.
+        call make_wedge(120_int64, 30_int64, 500.0_real64, 1500.0_real64, 7_int64, ra, dec, d, wx, wy, wz)
+        nw = size(wx, kind=int64)
+        allocate (los(nw), bp(nw), bl(nw))
+        los = d
+        do k = 1_int64, nw
+            bp(k) = 20.0_real64 + 20.0_real64 * pf_random_at(fixture_seed + 73_int64, k, 6_int64)
+            bl(k) = 60.0_real64 + 40.0_real64 * pf_random_at(fixture_seed + 73_int64, k, 7_int64)
+        end do
+        call la%build(wx, wy, wz, radius=40.0_real64, los=los)
+        call lb%build(wx, wy, wz, radius=40.0_real64, los=los, copy=.false.)
+        call parquet_debug_set_spatial_los_walk(walk_ball)
+        do k = 1_int64, 4_int64
+            call la%pairs_within_los(bp, bl, ia, ja, combine=rules(k))
+            call lb%pairs_within_los(bp, bl, ib, jb, combine=rules(k))
+            call check(error, size(ia, kind=int64) > 0_int64, &
+                "each combine= rule must find some pairs on the ball walk")
+            if (allocated(error)) exit
+            call check(error, all(ia == ib) .and. all(ja == jb), &
+                "a copy=.false. index must apply every combine= rule as a copying one does")
+            if (allocated(error)) exit
+        end do
+        call parquet_debug_set_spatial_los_walk(walk_auto)
+        if (allocated(error)) return
+        ! `%within_los` takes the lrule == 0 arm of the same accept, on the ball walk too.
+        call parquet_debug_set_spatial_los_walk(walk_ball)
+        block
+            integer(int64) :: fa(2000), fb(2000), ma, mb
+            ma = la%within_los([wx(1), wy(1), wz(1)], bp(1), bl(1), fa, los_p=los(1))
+            mb = lb%within_los([wx(1), wy(1), wz(1)], bp(1), bl(1), fb, los_p=los(1))
+            call check(error, ma > 0_int64 .and. ma == mb .and. same_rows(fb, mb, fa, ma), &
+                "a copy=.false. index must answer within_los on the ball walk as a copying one does")
+        end block
+        call parquet_debug_set_spatial_los_walk(walk_auto)
+    end subroutine test_copy_false_reaches_every_accept
+
+    !> A PERIODIC index ranks a per-point radius the same with `copy=.false.` as without.
+    subroutine test_periodic_per_point_radius(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+        real(real64), allocatable :: rv(:)
+        integer(int64), allocatable :: ia(:), ja(:), ib(:), jb(:)
+        type(pf_spatial_index) :: a, b
+        integer(int64) :: n, k
+        real(real64), parameter :: lo(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: hi(3) = [1.0_real64, 1.0_real64, 1.0_real64]
+
+        n = 500_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do k = 1_int64, n
+            rv(k) = 0.06_real64 + 0.08_real64 * pf_random_at(fixture_seed + 79_int64, k, 8_int64)
+        end do
+        call a%build(x, y, z, radius=0.14_real64, box_lo=lo, box_hi=hi)
+        call b%build(x, y, z, radius=0.14_real64, box_lo=lo, box_hi=hi, copy=.false.)
+        call a%pairs_within(rv, ia, ja)
+        call b%pairs_within(rv, ib, jb)
+        call check(error, size(ia, kind=int64) > 0_int64, "the periodic per-point fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, all(ia == ib) .and. all(ja == jb), &
+            "a periodic copy=.false. index must rank a per-point radius as a copying one does")
+    end subroutine test_periodic_per_point_radius
+
+    !> The last few single-route branches: a 2D nearest, a sorted int32 tie, a sorted axis query,
+    !> an annulus whose inner radii are per point against ONE outer radius, and an empty
+    !> line-of-sight sweep.
+    subroutine test_remaining_single_routes(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rin(:), ra(:), dec(:), rd(:), din(:)
+        real(real64), allocatable :: ex(:), ey(:), ez(:), elos(:)
+        integer(int64), allocatable :: c1(:), c2(:), pi(:), pj(:), g64(:)
+        integer(int32), allocatable :: t32(:)
+        real(real64), allocatable :: dd(:)
+        type(pf_spatial_index) :: sx, flat, sk, empty
+        integer(int64) :: n, m, k
+
+        n = 400_int64
+        call make_cloud(n, 1.0_real64, .true., x, y, z)
+        ! The expanding ball scales its first radius by the DIMENSION of the cloud, and a flat
+        ! one takes the disc constant rather than the sphere's.
+        call flat%build(x, y, radius=0.10_real64)
+        allocate (g64(n), dd(n))
+        m = flat%nearest([0.5_real64, 0.5_real64], 10_int64, g64, dist=dd)
+        call check(error, m == 10_int64, "a 2D nearest must return k rows")
+        if (allocated(error)) return
+        do k = 2_int64, m
+            call check(error, dd(k) >= dd(k - 1_int64), "a 2D nearest must come back ordered")
+            if (allocated(error)) return
+        end do
+        ! An exact tie broken by row index, reported into an INT32 buffer: the tie-break reads the
+        ! rows back out of whichever buffer is in use, and the int32 read is its own line.
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        x(1:4) = 0.25_real64
+        y(1:4) = 0.25_real64
+        z(1:4) = 0.25_real64
+        call sx%build(x, y, z, radius=0.20_real64)
+        allocate (t32(n))
+        m = sx%within([0.25_real64, 0.25_real64, 0.25_real64], 0.20_real64, t32, dist=dd, sorted=.true.)
+        call check(error, m >= 4_int64, "the tie fixture must find its four coincident points")
+        if (allocated(error)) return
+        call check(error, all(t32(1:4) == [1_int32, 2_int32, 3_int32, 4_int32]), &
+            "an exact tie in an int32 buffer must come back in ascending row order")
+        if (allocated(error)) return
+        ! A sorted AXIS query, which orders through the same machinery from a different caller.
+        m = sx%within_segment([0.2_real64, 0.2_real64, 0.2_real64], [0.8_real64, 0.8_real64, 0.8_real64], &
+            0.15_real64, g64, dist=dd, sorted=.true.)
+        call check(error, m > 1_int64, "the sorted axis fixture must find several points")
+        if (allocated(error)) return
+        do k = 2_int64, m
+            call check(error, dd(k) >= dd(k - 1_int64), "a sorted axis query must come back ordered")
+            if (allocated(error)) return
+        end do
+        ! ONE outer radius against a per-point inner list: the admission check compares the whole
+        ! inner list against that single outer value, which is its own arm.
+        allocate (rin(n))
+        rin = 0.05_real64
+        rin(1:n / 2_int64) = 0.0_real64
+        call sx%count_all_within(0.20_real64, c1)
+        ! ONE outer radius as a one-element list, against a full inner list: the admission check
+        ! compares `maxval(inner)` against `radii(1)` there, which no other shape reaches.
+        call sx%count_all_within([0.20_real64], c2, r_inner=rin)
+        call check(error, sum(c1) > 0_int64 .and. all(c2 <= c1) .and. any(c2 < c1), &
+            "a per-point inner list against one outer radius must narrow some rows")
+        if (allocated(error)) return
+        ! A per-point sky radius WITH a per-point inner list, the one sky specific left.
+        call make_sky(400_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=4.0_real64)
+        allocate (rd(400), din(400))
+        rd = 4.0_real64
+        din = 1.5_real64
+        call sk%pairs_within_sky(4.0_real64, pi, pj, r_inner_deg=1.5_real64)
+        call check(error, size(pi, kind=int64) > 0_int64, "the sky annulus pair fixture must find some pairs")
+        if (allocated(error)) return
+        ! The per-point-radius sky pair form has its own annulus arm, which converts the inner
+        ! radius separately from the outer list.
+        call sk%pairs_within_sky(rd, c1, c2, r_inner_deg=1.5_real64)
+        call check(error, size(c1, kind=int64) == size(pi, kind=int64) .and. all(c1 == pi), &
+            "a uniform per-point sky radius must give the scalar form's annulus pairs")
+        if (allocated(error)) return
+        ! A sorted query with NO dist= buffer orders through the work array instead, which is a
+        ! second route into the ordering and the only one a caller asking for rows alone takes.
+        m = sx%within_segment([0.2_real64, 0.2_real64, 0.2_real64], [0.8_real64, 0.8_real64, 0.8_real64], &
+            0.15_real64, g64, sorted=.true.)
+        call check(error, m > 1_int64, "the work-ordered axis fixture must find several points")
+        if (allocated(error)) return
+        m = sx%within([0.25_real64, 0.25_real64, 0.25_real64], 0.20_real64, g64, sorted=.true.)
+        call check(error, m >= 4_int64 .and. all(g64(1:4) == [1_int64, 2_int64, 3_int64, 4_int64]), &
+            "a work-ordered ball query must still break its ties by row index")
+        if (allocated(error)) return
+        ! A line-of-sight sweep over NO points, which has its own empty arm.
+        allocate (ex(0), ey(0), ez(0), elos(0))
+        call empty%build(ex, ey, ez, radius=10.0_real64, los=elos)
+        call empty%pairs_within_los(5.0_real64, 10.0_real64, pi, pj)
+        call check(error, size(pi, kind=int64) == 0_int64 .and. size(pj, kind=int64) == 0_int64, &
+            "a line-of-sight sweep over no points must give no pairs")
+    end subroutine test_remaining_single_routes
+
+    !> The per-candidate BOUND and the line-of-sight accept, in the loops only a `copy=.false.` or
+    !> periodic index reaches.
+    !>
+    !> Two mechanisms are each armed by something narrower than "a per-point radius":
+    !>
+    !> * the bound is built only for `PF_LINK_MEAN` and `PF_LINK_SUM` -- `PF_LINK_MAX` and
+    !>   `PF_LINK_MIN` need no per-candidate term, because the ranking already puts the endpoint
+    !>   holding the deciding radius in the searcher's seat -- so the default rule never reaches
+    !>   it however the radii vary;
+    !> * the union's emit-once tiebreak is armed by the line-of-sight sweep's own second pass, so
+    !>   it needs `%pairs_within_los` rather than any single query.
+    !>
+    !> Each has four copies (free and periodic, direct and indirect) and the ordinary tests reach
+    !> one of the four.
+    subroutine test_bound_and_los_accept_in_every_loop(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable, target :: x(:), y(:), z(:), wx(:), wy(:), wz(:), los(:)
+        real(real64), allocatable :: ra(:), dec(:), d(:), rv(:), bp(:), bl(:)
+        integer(int64), allocatable :: ia(:), ja(:), ib(:), jb(:)
+        type(pf_spatial_index) :: f, fc, pa, pc, la, lb
+        integer(int64) :: n, nw, k, w
+        integer, parameter :: rules(4) = [PF_LINK_MAX, PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_SUM]
+        integer, parameter :: walks(2) = [walk_ball, walk_cyl]
+        real(real64), parameter :: lo(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: hi(3) = [1.0_real64, 1.0_real64, 1.0_real64]
+
+        n = 500_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do k = 1_int64, n
+            rv(k) = 0.05_real64 + 0.09_real64 * pf_random_at(fixture_seed + 83_int64, k, 9_int64)
+        end do
+        ! PF_LINK_MEAN is what builds the bound. Free, indirect.
+        call f%build(x, y, z, radius=0.15_real64)
+        call fc%build(x, y, z, radius=0.15_real64, copy=.false.)
+        call f%pairs_within(rv, ia, ja, combine=PF_LINK_MEAN)
+        call fc%pairs_within(rv, ib, jb, combine=PF_LINK_MEAN)
+        call check(error, size(ia, kind=int64) > 0_int64, "the mean-rule fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, all(ia == ib) .and. all(ja == jb), &
+            "a copy=.false. index must apply the per-candidate bound as a copying one does")
+        if (allocated(error)) return
+        ! Periodic, direct and indirect.
+        call pa%build(x, y, z, radius=0.15_real64, box_lo=lo, box_hi=hi)
+        call pc%build(x, y, z, radius=0.15_real64, box_lo=lo, box_hi=hi, copy=.false.)
+        call pa%pairs_within(rv, ia, ja, combine=PF_LINK_MEAN)
+        call pc%pairs_within(rv, ib, jb, combine=PF_LINK_MEAN)
+        call check(error, size(ia, kind=int64) > 0_int64, "the periodic mean-rule fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, all(ia == ib) .and. all(ja == jb), &
+            "a periodic copy=.false. index must apply the bound as a copying one does")
+        if (allocated(error)) return
+        call pa%pairs_within(rv, ia, ja, combine=PF_LINK_SUM)
+        call pc%pairs_within(rv, ib, jb, combine=PF_LINK_SUM)
+        call check(error, all(ia == ib) .and. all(ja == jb), &
+            "the sum rule must agree across copy= on a periodic index too")
+        if (allocated(error)) return
+
+        ! The line-of-sight accept and the union tiebreak, on BOTH walks and every rule, against a
+        ! copy=.false. index. The cylinder walk is what the sweep chooses on its own; forcing the
+        ! ball as well covers the second copy of the same accept.
+        call make_wedge(120_int64, 30_int64, 500.0_real64, 1500.0_real64, 11_int64, ra, dec, d, wx, wy, wz)
+        nw = size(wx, kind=int64)
+        allocate (los(nw), bp(nw), bl(nw))
+        los = d
+        do k = 1_int64, nw
+            bp(k) = 20.0_real64 + 25.0_real64 * pf_random_at(fixture_seed + 89_int64, k, 3_int64)
+            bl(k) = 50.0_real64 + 50.0_real64 * pf_random_at(fixture_seed + 89_int64, k, 4_int64)
+        end do
+        call la%build(wx, wy, wz, radius=45.0_real64, los=los)
+        call lb%build(wx, wy, wz, radius=45.0_real64, los=los, copy=.false.)
+        do w = 1_int64, 2_int64
+            call parquet_debug_set_spatial_los_walk(walks(w))
+            do k = 1_int64, 4_int64
+                call la%pairs_within_los(bp, bl, ia, ja, combine=rules(k))
+                call lb%pairs_within_los(bp, bl, ib, jb, combine=rules(k))
+                call check(error, size(ia, kind=int64) > 0_int64, &
+                    "each rule must find some pairs on each walk")
+                if (allocated(error)) exit
+                call check(error, all(ia == ib) .and. all(ja == jb), &
+                    "a copy=.false. index must apply every rule on both walks as a copying one does")
+                if (allocated(error)) exit
+            end do
+            if (allocated(error)) exit
+        end do
+        call parquet_debug_set_spatial_los_walk(walk_auto)
+        if (allocated(error)) return
+        ! The separations come back through the same accept, and their normalisation is its own
+        ! line in each loop: `dist` under a line-of-sight query is the larger of the two ratios.
+        block
+            real(real64), allocatable :: dn(:), dp(:), dl(:)
+            integer(int64), allocatable :: fa(:), fb(:)
+            integer(int64) :: ma, mb
+            allocate (dn(nw), dp(nw), dl(nw), fa(nw), fb(nw))
+            call parquet_debug_set_spatial_los_walk(walk_ball)
+            ma = la%within_los([wx(1), wy(1), wz(1)], bp(1), bl(1), fa, los_p=los(1), &
+                dist=dn, dperp=dp, dpar=dl, sorted=.true.)
+            mb = lb%within_los([wx(1), wy(1), wz(1)], bp(1), bl(1), fb, los_p=los(1), &
+                dist=dn, dperp=dp, dpar=dl, sorted=.true.)
+            call check(error, ma > 0_int64 .and. ma == mb .and. all(fa(1:ma) == fb(1:ma)), &
+                "a copy=.false. index must order a line-of-sight query as a copying one does")
+            call parquet_debug_set_spatial_los_walk(walk_auto)
+        end block
+    end subroutine test_bound_and_los_accept_in_every_loop
+
+    !> The two line-of-sight routes a `copy=.false.` index reaches only by the walk CHOOSING them.
+    !>
+    !> Forcing the ball with the debug hook takes a different branch from the one the automatic
+    !> choice takes: the forced route sweeps one ball for everything and passes no tiebreak, while
+    !> the chosen route passes `los_tiebreak` so the union emits each pair once. So the tiebreak
+    !> arm of the ball walk is reachable only through a fixture whose cell genuinely swallows the
+    !> covering ball -- and the cylinder's own distance block only through a query that asks for
+    !> `dist` on the cylinder route.
+    subroutine test_los_chosen_walks_on_a_no_copy_index(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), tra(:), tdec(:), td(:), bp(:), bl(:)
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+        real(real64), allocatable :: dn(:), dp(:), dl(:)
+        integer(int64), allocatable :: ia(:), ja(:), ib(:), jb(:), fa(:), fb(:)
+        type(pf_spatial_index) :: a, b
+        integer(int64) :: n, k, ma, mb
+        real(real64) :: bp0, bl0, diam
+
+        bp0 = 12.0_real64
+        bl0 = 20.0_real64
+        diam = 2.0_real64 * sqrt(bp0 * bp0 + bl0 * bl0)
+        call make_wedge(200_int64, 20_int64, 500.0_real64, 1500.0_real64, 26_int64, ra, dec, d, x, y, z)
+        allocate (tra(6), tdec(6), td(6))
+        do k = 1_int64, 6_int64
+            tra(k) = 0.01_real64
+            tdec(k) = 0.02_real64
+            td(k) = 1.0_real64 + 0.5_real64 * real(k - 1_int64, kind=real64)
+        end do
+        ra = [ra, tra]
+        dec = [dec, tdec]
+        d = [d, td]
+        n = size(ra, kind=int64)
+        x = d * cos(dec) * cos(ra)
+        y = d * cos(dec) * sin(ra)
+        z = d * sin(dec)
+        allocate (bp(n), bl(n), fa(n), fb(n), dn(n), dp(n), dl(n))
+        bp = bp0
+        bl = bl0
+        call parquet_debug_reset_spatial_counters()
+        call a%build(x, y, z, radius=bp0, los=d)
+        call b%build(x, y, z, radius=bp0, los=d, copy=.false.)
+        call check(error, a%cell_size() > diam, &
+            "precondition: the cell must exceed the covering ball, or the walk takes the cylinder")
+        if (allocated(error)) return
+        ! Left on walk_auto deliberately: the point is the route the walk CHOOSES.
+        call a%pairs_within_los(bp, bl, ia, ja, combine=PF_LINK_MAX)
+        call b%pairs_within_los(bp, bl, ib, jb, combine=PF_LINK_MAX)
+        call check(error, size(ia, kind=int64) > 0_int64, "the chosen-ball fixture must find some pairs")
+        if (allocated(error)) return
+        call check(error, all(ia == ib) .and. all(ja == jb), &
+            "a copy=.false. index must break the union tie on the chosen ball as a copying one does")
+        if (allocated(error)) return
+        ! The cylinder route with `dist=`, whose separation block is its own code again.
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
+        ma = a%within_los([x(1), y(1), z(1)], bp0, bl0, fa, los_p=d(1), dist=dn, dperp=dp, dpar=dl, sorted=.true.)
+        mb = b%within_los([x(1), y(1), z(1)], bp0, bl0, fb, los_p=d(1), dist=dn, dperp=dp, dpar=dl, sorted=.true.)
+        call parquet_debug_set_spatial_los_walk(walk_auto)
+        call check(error, ma > 0_int64 .and. ma == mb .and. all(fa(1:ma) == fb(1:ma)), &
+            "a copy=.false. index must answer the cylinder route with distances as a copying one does")
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_los_chosen_walks_on_a_no_copy_index
+
     logical function pairs_same_kinds(i32, j32, i64, j64) result(same)
         integer(int32), intent(in) :: i32(:) !! lower rows, int32 answer.
         integer(int32), intent(in) :: j32(:) !! higher rows, int32 answer.

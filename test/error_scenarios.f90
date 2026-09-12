@@ -2928,6 +2928,70 @@ program error_scenarios
         call scenario_spatial_rebuild_warning(warn=.true.)
     case ("spatial_rebuild_warning_off")
         call scenario_spatial_rebuild_warning(warn=.false.)
+    case ("spatial_sky_query_before_build")
+        call scenario_spatial_sky_query_before_build()
+    case ("spatial_sky_radius_nan")
+        call scenario_spatial_sky_radius_nan()
+    case ("spatial_sky_inner_radius_nan")
+        call scenario_spatial_sky_inner_radius_nan()
+    case ("spatial_sky_radii_vector_nan")
+        call scenario_spatial_sky_radii_vector_nan()
+    case ("spatial_nearest_sky_before_build")
+        call scenario_spatial_nearest_sky_before_build()
+    case ("spatial_query_radius_nan")
+        call scenario_spatial_query_radius_nan()
+    case ("spatial_query_radius_half_box")
+        call scenario_spatial_query_radius_half_box()
+    case ("spatial_build_sky_length_mismatch")
+        call scenario_spatial_build_sky_length_mismatch()
+    case ("spatial_build_sky_no_radius")
+        call scenario_spatial_build_sky_no_radius()
+    case ("spatial_build_sky_radius_not_positive")
+        call scenario_spatial_build_sky_radius_not_positive()
+    case ("spatial_rebuild_before_build")
+        call scenario_spatial_rebuild_before_build()
+    case ("spatial_rebuild_z_rank")
+        call scenario_spatial_rebuild_z_rank()
+    case ("spatial_rebuild_length_mismatch")
+        call scenario_spatial_rebuild_length_mismatch()
+    case ("spatial_rebuild_at_observer")
+        call scenario_spatial_rebuild_at_observer()
+    case ("spatial_rebuild_for_before_build")
+        call scenario_spatial_rebuild_for_before_build()
+    case ("spatial_rebuild_for_half_box")
+        call scenario_spatial_rebuild_for_half_box()
+    case ("spatial_build_box_rank")
+        call scenario_spatial_build_box_rank()
+    case ("spatial_build_box_not_strict")
+        call scenario_spatial_build_box_not_strict()
+    case ("spatial_copy_false_z_strided")
+        call scenario_spatial_copy_false_z_strided()
+    case ("spatial_bulk_before_build")
+        call scenario_spatial_bulk_before_build()
+    case ("spatial_los_before_build")
+        call scenario_spatial_los_before_build()
+    case ("spatial_los_bperp_negative")
+        call scenario_spatial_los_bperp_negative()
+    case ("spatial_kth_before_build")
+        call scenario_spatial_kth_before_build()
+    case ("spatial_components_i32_length")
+        call scenario_spatial_components_i32_length()
+    case ("spatial_components_nvert_int32")
+        call scenario_spatial_components_nvert_int32()
+    case ("spatial_within_int32_ceiling")
+        call scenario_spatial_within_int32_ceiling()
+    case ("spatial_axis_int32_ceiling")
+        call scenario_spatial_axis_int32_ceiling()
+    case ("spatial_nearest_int32_ceiling")
+        call scenario_spatial_nearest_int32_ceiling()
+    case ("spatial_grid_int32_ceiling")
+        call scenario_spatial_grid_int32_ceiling()
+    case ("spatial_debug_work_no_radius")
+        call scenario_spatial_debug_work_no_radius()
+    case ("spatial_nside_coarsened_warns")
+        call scenario_spatial_nside_coarsened_warns()
+    case ("spatial_sky_rebuild_warns")
+        call scenario_spatial_sky_rebuild_warns()
     case ("logging_unknown_layout_field")
         call scenario_logging_unknown_layout_field()
     case ("logging_second_console_sink")
@@ -23879,6 +23943,404 @@ contains
         call sx%count_all_within(0.5_real64, counts)
         print '(a,i0)', "rebuilds=", parquet_debug_spatial_rebuilds()
     end subroutine scenario_spatial_rebuild_warning
+
+    !
+    ! ---- Abort paths reached only through a second entry point ----
+    !
+    ! Each of these guards sits behind a binding whose SIBLING already has a scenario above: the
+    ! sky single-point walk beside the Euclidean one, `%rebuild`'s shape checks beside `%build`'s,
+    ! the transverse line-of-sight length beside the parallel one. A guard written twice is two
+    ! guards, and only the one with a scenario is known to fire.
+    !
+
+    !> A sky query on an index that has never been built.
+    subroutine scenario_spatial_sky_query_before_build()
+        type(pf_spatial_index) :: sx
+        integer(int64) :: got(4), m
+
+        m = sx%within_sky(10.0_real64, 20.0_real64, 1.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran a sky query on an unbuilt index, m=", m
+    end subroutine scenario_spatial_sky_query_before_build
+
+    !> A NaN angular search radius.
+    subroutine scenario_spatial_sky_radius_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64) :: got(8), m
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64)
+        m = sk%within_sky(10.0_real64, 20.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN angular radius, m=", m
+    end subroutine scenario_spatial_sky_radius_nan
+
+    !> A NaN inner angular radius.
+    subroutine scenario_spatial_sky_inner_radius_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64) :: got(8), m
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64)
+        m = sk%within_sky(10.0_real64, 20.0_real64, 2.0_real64, got, &
+            r_inner_deg=ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN inner angular radius, m=", m
+    end subroutine scenario_spatial_sky_inner_radius_nan
+
+    !> A NaN entry in a per-point angular radius LIST, which is screened element by element.
+    subroutine scenario_spatial_sky_radii_vector_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:), rd(:)
+        integer(int64), allocatable :: offs(:), nbrs(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64)
+        allocate (rd(64))
+        rd = 1.0_real64
+        rd(7) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call sk%all_within_sky(rd, offs, nbrs)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN in an angular radius list, n=", size(nbrs)
+    end subroutine scenario_spatial_sky_radii_vector_nan
+
+    !> `%nearest_sky` on an index that has never been built.
+    subroutine scenario_spatial_nearest_sky_before_build()
+        type(pf_spatial_index) :: sx
+        integer(int64) :: got(4), m
+
+        m = sx%nearest_sky(10.0_real64, 20.0_real64, 2_int64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran a sky nearest query on an unbuilt index, m=", m
+    end subroutine scenario_spatial_nearest_sky_before_build
+
+    !> A NaN query radius on the ball walk, which screens the radius its own callers do not.
+    subroutine scenario_spatial_query_radius_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], &
+            ieee_value(1.0_real64, ieee_quiet_nan), got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN query radius, m=", m
+    end subroutine scenario_spatial_query_radius_nan
+
+    !> A periodic query radius above half the box, refused by the WALK rather than by %build.
+    subroutine scenario_spatial_query_radius_half_box()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(64), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64, 1.0_real64])
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.75_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a periodic query radius above half the box, m=", m
+    end subroutine scenario_spatial_query_radius_half_box
+
+    !> `%build_sky` with ra and dec of different lengths.
+    subroutine scenario_spatial_build_sky_length_mismatch()
+        type(pf_spatial_index) :: sk
+        real(real64) :: ra(10), dec(9)
+
+        ra = 0.0_real64
+        dec = 0.0_real64
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64)   ! -> aborts
+        print '(a)', "unexpectedly accepted ra and dec of different lengths"
+    end subroutine scenario_spatial_build_sky_length_mismatch
+
+    !> `%build_sky` with an empty `radius_deg=` list.
+    subroutine scenario_spatial_build_sky_no_radius()
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+        real(real64) :: none(0)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=none)   ! -> aborts
+        print '(a)', "unexpectedly accepted an empty radius_deg= list"
+    end subroutine scenario_spatial_build_sky_no_radius
+
+    !> `%build_sky` with a radius that is not positive.
+    subroutine scenario_spatial_build_sky_radius_not_positive()
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=[1.0_real64, 0.0_real64])   ! -> aborts
+        print '(a)', "unexpectedly accepted a radius_deg= of zero"
+    end subroutine scenario_spatial_build_sky_radius_not_positive
+
+    !> `%rebuild` on an index that has never been built.
+    subroutine scenario_spatial_rebuild_before_build()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%rebuild(x, y, z)   ! -> aborts
+        print '(a)', "unexpectedly rebuilt an index that was never built"
+    end subroutine scenario_spatial_rebuild_before_build
+
+    !> `%rebuild` dropping the `z` the index was built with.
+    subroutine scenario_spatial_rebuild_z_rank()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%rebuild(x, y)   ! -> aborts
+        print '(a)', "unexpectedly rebuilt a 3D index without z"
+    end subroutine scenario_spatial_rebuild_z_rank
+
+    !> `%rebuild` with x and y of different lengths.
+    subroutine scenario_spatial_rebuild_length_mismatch()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%rebuild(x, y(1:63), z)   ! -> aborts
+        print '(a)', "unexpectedly rebuilt from x and y of different lengths"
+    end subroutine scenario_spatial_rebuild_length_mismatch
+
+    !> `%rebuild` moving a point onto the observer, which leaves it no line of sight.
+    subroutine scenario_spatial_rebuild_at_observer()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        call sx%build(x, y, z, radius=20.0_real64, los=d)
+        x(3) = 0.0_real64
+        y(3) = 0.0_real64
+        z(3) = 0.0_real64
+        call sx%rebuild(x, y, z, los=d)   ! -> aborts
+        print '(a)', "unexpectedly rebuilt with a point at the observer"
+    end subroutine scenario_spatial_rebuild_at_observer
+
+    !> `%rebuild_for` on an index that has never been built.
+    subroutine scenario_spatial_rebuild_for_before_build()
+        type(pf_spatial_index) :: sx
+
+        call sx%rebuild_for([0.2_real64])   ! -> aborts
+        print '(a)', "unexpectedly re-tuned an index that was never built"
+    end subroutine scenario_spatial_rebuild_for_before_build
+
+    !> `%rebuild_for` asking a PERIODIC index for a radius above half its box.
+    subroutine scenario_spatial_rebuild_for_half_box()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64, 1.0_real64])
+        call sx%rebuild_for([0.9_real64])   ! -> aborts
+        print '(a)', "unexpectedly re-tuned a periodic index for a radius above half the box"
+    end subroutine scenario_spatial_rebuild_for_half_box
+
+    !> `%build` with `box_lo=`/`box_hi=` of the wrong rank for the coordinates.
+    subroutine scenario_spatial_build_box_rank()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64])   ! -> aborts
+        print '(a)', "unexpectedly accepted a box with fewer entries than coordinates"
+    end subroutine scenario_spatial_build_box_rank
+
+    !> `%build` with a box whose upper corner is not strictly above its lower one.
+    subroutine scenario_spatial_build_box_not_strict()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 0.0_real64, 1.0_real64])   ! -> aborts
+        print '(a)', "unexpectedly accepted a box with zero extent on an axis"
+    end subroutine scenario_spatial_build_box_not_strict
+
+    !> `copy=.false.` with a strided `z`, which is screened separately from `x` and `y`.
+    subroutine scenario_spatial_copy_false_z_strided()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x(1:32), y(1:32), z(1:63:2), radius=0.2_real64, copy=.false.)   ! -> aborts
+        print '(a)', "unexpectedly accepted a strided z with copy=.false."
+    end subroutine scenario_spatial_copy_false_z_strided
+
+    !> A bulk sweep on an index that has never been built.
+    subroutine scenario_spatial_bulk_before_build()
+        type(pf_spatial_index) :: sx
+        integer(int64), allocatable :: counts(:)
+
+        call sx%count_all_within(0.2_real64, counts)   ! -> aborts
+        print '(a)', "unexpectedly swept an index that was never built"
+    end subroutine scenario_spatial_bulk_before_build
+
+    !> A line-of-sight sweep on an index that has never been built.
+    subroutine scenario_spatial_los_before_build()
+        type(pf_spatial_index) :: sx
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call sx%pairs_within_los(10.0_real64, 30.0_real64, pi, pj)   ! -> aborts
+        print '(a)', "unexpectedly ran a line-of-sight sweep on an unbuilt index"
+    end subroutine scenario_spatial_los_before_build
+
+    !> A negative TRANSVERSE length, screened separately from the parallel one.
+    subroutine scenario_spatial_los_bperp_negative()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+
+        call spatial_los_cloud(64, x, y, z, d)
+        allocate (bp(64), bl(64))
+        bp = 10.0_real64
+        bl = 30.0_real64
+        bp(5) = -1.0_real64
+        call sx%build(x, y, z, radius=20.0_real64)
+        call sx%pairs_within_los(bp, bl, pi, pj)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative transverse length, pairs=", size(pi)
+    end subroutine scenario_spatial_los_bperp_negative
+
+    !> `%kth_distance` on an index that has never been built.
+    subroutine scenario_spatial_kth_before_build()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: dist(:)
+
+        call sx%kth_distance(1_int32, dist)   ! -> aborts
+        print '(a)', "unexpectedly ran kth_distance on an unbuilt index"
+    end subroutine scenario_spatial_kth_before_build
+
+    !> `pf_connected_components` with int32 endpoint arrays of different lengths.
+    subroutine scenario_spatial_components_i32_length()
+        integer(int32), allocatable :: labels(:)
+
+        call pf_connected_components([1_int32, 2_int32], [2_int32], 4_int64, labels)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted int32 endpoint arrays of different lengths, n=", size(labels)
+    end subroutine scenario_spatial_components_i32_length
+
+    !> `pf_connected_components` asked for an int32 answer over more vertices than it can name.
+    subroutine scenario_spatial_components_nvert_int32()
+        integer(int32), allocatable :: labels(:)
+
+        call parquet_debug_set_spatial_int32_ceiling(8_int64)
+        call pf_connected_components([1_int32, 2_int32], [2_int32, 3_int32], 40_int64, labels)   ! -> aborts
+        print '(a,i0)', "unexpectedly named 40 vertices in an int32 answer, n=", size(labels)
+    end subroutine scenario_spatial_components_nvert_int32
+
+    !> `%within` into an int32 buffer on an index holding more rows than int32 can name.
+    subroutine scenario_spatial_within_int32_ceiling()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int32) :: got(8)
+        integer(int64) :: m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        ! The negative control: the same call under the shipped ceiling must answer rather than
+        ! abort, so the abort below is the hook's doing and not the query's.
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)
+        print '(a,i0)', "under the shipped ceiling the int32 query answered, m=", m
+        call parquet_debug_set_spatial_int32_ceiling(8_int64)
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled an int32 buffer over the ceiling, m=", m
+    end subroutine scenario_spatial_within_int32_ceiling
+
+    !> `%within_segment` into an int32 buffer over the same ceiling, on the AXIS walk.
+    subroutine scenario_spatial_axis_int32_ceiling()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int32) :: got(8)
+        integer(int64) :: m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%within_segment([0.2_real64, 0.2_real64, 0.2_real64], &
+            [0.8_real64, 0.8_real64, 0.8_real64], 0.2_real64, got)
+        print '(a,i0)', "under the shipped ceiling the int32 axis query answered, m=", m
+        call parquet_debug_set_spatial_int32_ceiling(8_int64)
+        m = sx%within_segment([0.2_real64, 0.2_real64, 0.2_real64], &
+            [0.8_real64, 0.8_real64, 0.8_real64], 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled an int32 axis buffer over the ceiling, m=", m
+    end subroutine scenario_spatial_axis_int32_ceiling
+
+    !> `%nearest` into an int32 buffer over the same ceiling.
+    subroutine scenario_spatial_nearest_int32_ceiling()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int32) :: got(4)
+        integer(int64) :: m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%nearest([0.5_real64, 0.5_real64, 0.5_real64], 4_int32, got)
+        print '(a,i0)', "under the shipped ceiling the int32 nearest query answered, m=", m
+        call parquet_debug_set_spatial_int32_ceiling(8_int64)
+        m = sx%nearest([0.5_real64, 0.5_real64, 0.5_real64], 4_int32, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled an int32 nearest buffer over the ceiling, m=", m
+    end subroutine scenario_spatial_nearest_int32_ceiling
+
+    !> `%grid` narrowed to int32 when a cell count does not fit.
+    subroutine scenario_spatial_grid_int32_ceiling()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int32) :: nx, ny, nz
+
+        ! Large enough that the cells-per-point ceiling leaves a grid of more than four cells on
+        ! an axis: with 64 points the grid is clamped to two and the narrowing below succeeds.
+        call spatial_cloud(4000, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, cell=0.05_real64)
+        call sx%grid(nx, ny, nz)
+        print '(a,i0)', "under the shipped ceiling the int32 grid answered, nx=", nx
+        call parquet_debug_set_spatial_int32_ceiling(4_int64)
+        call sx%grid(nx, ny, nz)   ! -> aborts
+        print '(a,i0)', "unexpectedly narrowed a cell count over the ceiling, nx=", nx
+    end subroutine scenario_spatial_grid_int32_ceiling
+
+    !> The work hook with an empty radius list.
+    subroutine scenario_spatial_debug_work_no_radius()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: none(0)
+        integer(int64) :: cells, points
+
+        call spatial_cloud(200, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call parquet_debug_spatial_work(sx, 0.2_real64, none, cells, points)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an empty radius list, cells=", cells
+    end subroutine scenario_spatial_debug_work_no_radius
+
+    !> An explicit `nside=` coarsened by the buckets-per-point ceiling, which says so.
+    !>
+    !> Exits 0: the resolution is a tuning choice and the answer stays exact, so the caller is
+    !> told rather than refused.
+    subroutine scenario_spatial_nside_coarsened_warns()
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        ! 64 points allow 19 pixels; nside 8 asks for 768, so the build coarsens it and warns.
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX, nside=8_int64)
+        print '(a,i0)', "nside after coarsening=", sk%nside()
+    end subroutine scenario_spatial_nside_coarsened_warns
+
+    !> A SKY index re-tuned by a bulk query far from its built radius. Exits 0.
+    !>
+    !> The message must be in DEGREES: the index accumulates chords, and a caller who asked in
+    !> degrees would otherwise be told about a radius in units they never used.
+    subroutine scenario_spatial_sky_rebuild_warns()
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_sky_cloud(400, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=0.05_real64)
+        call sk%count_all_within_sky(8.0_real64, counts)
+        print '(a,i0)', "rebuilds=", parquet_debug_spatial_rebuilds()
+    end subroutine scenario_spatial_sky_rebuild_warns
 
     !> ==== Variable-length LIST reads ====
     !

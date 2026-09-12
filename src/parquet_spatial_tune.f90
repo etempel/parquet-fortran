@@ -67,10 +67,15 @@ contains
         ext = self%hi - self%lo
         ndim = count(ext > 0.0_real64)
         rho = 0.0_real64
+        ! Defensive: both callers of `spatial_choose_cell` -- `spatial_build_worker` and
+        ! `spatial_retune` -- take their other arm when the index holds no points, so an empty
+        ! cloud never reaches the density estimate at all.
+        ! GCOVR_EXCL_START -- see above
         if (self%npts <= 0_int64) then
             ndim = max(ndim, 1)
             return
         end if
+        ! GCOVR_EXCL_STOP
         if (ndim == 0) then
             ! Every point coincident: any cell size answers, and the grid is 1x1x1 whatever this
             ! returns. Report a 3D density so the model stays on its ordinary branch.
@@ -88,17 +93,27 @@ contains
         ! not, which is why the guard is here and explicit.
         h0 = (vol / real(self%npts, kind=real64)) ** (1.0_real64 / real(ndim, kind=real64))
         h0 = h0 * 4.0_real64
+        ! Defensive: `vol` is a product of extents each checked positive and `npts` is positive
+        ! here, so `h0` can only fail this by underflowing to exactly zero -- which no fixture
+        ! this side of a denormal extent can build. The fallback is kept because it is the one
+        ! step that is not self-correcting; see the note above.
+        ! GCOVR_EXCL_START -- see above
         if (.not. (h0 > 0.0_real64)) then
             rho = real(self%npts, kind=real64) / max(vol, tiny(1.0_real64))
             return
         end if
+        ! GCOVR_EXCL_STOP
         call spatial_bucket_counts(self, h0, h_eff, nc, inv, cnt)
         ncells = size(cnt, kind=int64)
         nocc = count(cnt > 0_int64, kind=int64)
+        ! Defensive, as above: the bucketing pass clamps every point into a cell, so a positive
+        ! point count leaves at least one cell occupied.
+        ! GCOVR_EXCL_START -- see above
         if (nocc <= 0_int64) then
             rho = real(self%npts, kind=real64) / max(vol, tiny(1.0_real64))
             return
         end if
+        ! GCOVR_EXCL_STOP
         allocate (occ(nocc))
         c = 0_int64
         do i = 1_int64, ncells

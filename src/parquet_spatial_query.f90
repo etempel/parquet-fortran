@@ -208,6 +208,14 @@ contains
                         end if
                     end if
                 end do
+            ! **Unreachable as the API stands, and kept in step with the direct loop above.** This
+            ! is the `copy=.false.` half of the pair every walk carries, but a HEALPix index is
+            ! always a SKY index -- `%build` does not offer `backend=` -- and `%build_sky` computes
+            ! the unit vectors itself and so never passes `copy` on, leaving `owns` true. `direct`
+            ! is therefore always true here. Kept because the pair is one mechanism: were
+            ! `%build_sky` ever to take a caller's own unit vectors, this is the half that would
+            ! run, and a missing half is a wrong answer rather than a build error.
+            ! GCOVR_EXCL_START -- see above
             else
                 do t = s0, e0
                     row = self%idx(t)
@@ -234,6 +242,7 @@ contains
                     end if
                 end do
             end if
+            ! GCOVR_EXCL_STOP
         end do
     end subroutine scan_healpix
 
@@ -253,8 +262,11 @@ contains
         integer :: d, nrun, ir, lrule
 
         m = 0_int64
-        if (.not. self%built_ok) error stop &
-            "pf_spatial_index: this index has not been built; call %build first"
+        ! Defensive: every route in screens this first -- the single-point bindings through
+        ! `query_point`, the sky ones in `sky_scan`, the bulk ones in `spatial_bulk_setup` and
+        ! `spatial_los_prepare` -- so no fixture can reach an unbuilt index here.
+        if (.not. self%built_ok) error stop & ! GCOVR_EXCL_LINE
+            "pf_spatial_index: this index has not been built; call %build first" ! GCOVR_EXCL_LINE
         if (.not. (r >= 0.0_real64)) error stop &
             "pf_spatial_index: the search radius must be >= 0 and not NaN"
         ! The radius was already screened; the POINT was not, and it reaches the same arithmetic.
@@ -583,11 +595,18 @@ contains
                 run_lo(2) = 0_int64
                 run_hi(2) = ihi - nc(1)
             end if
+        ! Unreachable: this is the periodic section, and an index is periodic only when %build
+        ! was given a box, which it refuses unless `box_hi` is strictly above `box_lo` on every
+        ! axis -- so `wrap(1)` is positive whenever this runs. Kept as the free-axis half of the
+        ! seam split; `spatial_scan_work`'s copy of the same shape IS reached, because that one
+        ! counts on a free index too.
+        ! GCOVR_EXCL_START -- see above
         else
             nrun = 1
             run_lo(1) = a(1)
             run_hi(1) = a(1) + cnt(1) - 1_int64
         end if
+        ! GCOVR_EXCL_STOP
         w1 = self%wrap(1)
         w2 = self%wrap(2)
         w3 = self%wrap(3)
@@ -712,8 +731,10 @@ contains
         integer :: k, da, nd, lrule
 
         m = 0_int64
-        if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
-            ": this index has not been built; call %build first"
+        ! Defensive, exactly as `spatial_scan`'s: the three axis bindings screen through
+        ! `query_point` and both line-of-sight workers through `spatial_los_prepare`.
+        if (.not. self%built_ok) error stop "pf_spatial_index%" // what // & ! GCOVR_EXCL_LINE
+            ": this index has not been built; call %build first" ! GCOVR_EXCL_LINE
         ! Refused rather than approximated. Under the minimum image an axis longer than the box
         ! wraps onto itself, so a point can be near the shape through more than one image and the
         ! ball search's `r <= L/2` guard has no equivalent here. See the guide page.
@@ -940,9 +961,18 @@ contains
                                         oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
                                         if (want_tie) then
                                             ok = own .and. (.not. oth .or. keys(t) > minkey)
+                                        ! Unreachable HERE, unlike the ball walk's copy of this
+                                        ! block: every caller reaching the AXIS walk with a
+                                        ! `los_rule` passes `los_tiebreak` and a `min_key` with
+                                        ! it, so `want_tie` holds whenever `lrule` is
+                                        ! `PF_LINK_MAX`. The ball walk has one caller -- the
+                                        ! forced-ball sweep -- that passes neither, which is why
+                                        ! its `else` runs and this one cannot.
+                                        ! GCOVR_EXCL_START -- see above
                                         else
                                             ok = own .or. oth
                                         end if
+                                        ! GCOVR_EXCL_STOP
                                     case (PF_LINK_MIN)
                                         ok = dpv <= bpself .and. dlv <= blself .and. &
                                              dpv <= los_bps(t) .and. dlv <= los_bls(t)
@@ -1021,9 +1051,18 @@ contains
                                         oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
                                         if (want_tie) then
                                             ok = own .and. (.not. oth .or. keys(t) > minkey)
+                                        ! Unreachable HERE, unlike the ball walk's copy of this
+                                        ! block: every caller reaching the AXIS walk with a
+                                        ! `los_rule` passes `los_tiebreak` and a `min_key` with
+                                        ! it, so `want_tie` holds whenever `lrule` is
+                                        ! `PF_LINK_MAX`. The ball walk has one caller -- the
+                                        ! forced-ball sweep -- that passes neither, which is why
+                                        ! its `else` runs and this one cannot.
+                                        ! GCOVR_EXCL_START -- see above
                                         else
                                             ok = own .or. oth
                                         end if
+                                        ! GCOVR_EXCL_STOP
                                     case (PF_LINK_MIN)
                                         ok = dpv <= bpself .and. dlv <= blself .and. &
                                              dpv <= los_bps(t) .and. dlv <= los_bls(t)
@@ -1241,7 +1280,9 @@ contains
         real(real64) :: r, rcap, cd, grow, ext, ss
         integer :: dm, ax
 
-        if (kk < 1_int64) error stop "pf_spatial_index%" // what // ": k must be >= 1"
+        ! Defensive: `near_scan` screens `k < 1` and returns before calling when `min(k, npts)`
+        ! is zero, and `spatial_kth_worker` screens `k` then passes `k + 1`.
+        if (kk < 1_int64) error stop "pf_spatial_index%" // what // ": k must be >= 1" ! GCOVR_EXCL_LINE
         dm = max(self%dims_eff, 1)
 
         ! How far the ball may ever grow, and the three metrics answer it differently. A periodic

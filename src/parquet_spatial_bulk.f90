@@ -51,8 +51,10 @@ contains
     module procedure spatial_maybe_rebuild
         real(real64) :: r_cur, r_new, h_cur, h_new, s2, s3
 
-        if (.not. self%built_ok) error stop &
-            "pf_spatial_index: this index has not been built; call %build first"
+        ! Defensive: the one caller is `spatial_bulk_setup`, whose own first statement is this
+        ! same check, so an unbuilt index has already aborted by the time this runs.
+        if (.not. self%built_ok) error stop & ! GCOVR_EXCL_LINE
+            "pf_spatial_index: this index has not been built; call %build first" ! GCOVR_EXCL_LINE
         if (self%npts < 2_int64) return
         if (self%r2sum <= 0.0_real64) return
         if (dbg_cell > 0.0_real64) return

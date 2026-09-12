@@ -128,7 +128,10 @@ Notes:
 - To write genuine Parquet Nulls, pass `parquet_write_column(writer, name, values, is_valid=mask)`
   — a `logical` mask shaped like `values`, `.false.` wherever a Null should be written. See [Null
   values](../types/supported-data-types.html#null-values) for what the mask means on both the read
-  and write sides, and for `protected_cols:`, which forbids Nulls in named columns.
+  and write sides, and for the two schema keys that declare a column's nullness up front:
+  `extra: protected_cols:`, which forbids Nulls in the named columns, and its counterpart
+  `extra: nullable_cols:`, which declares that the named columns may hold one, so their fields are
+  written nullable whatever the values turn out to contain.
 - A `parquet_date`/`parquet_time`/`parquet_timestamp` array writes a `DATE`/`TIME`/`TIMESTAMP`
   column — see [Date, time and timestamp columns](../types/date-time.html); there is no
   `is_valid=` argument for these three, since validity lives in the elements themselves.
@@ -233,8 +236,8 @@ call parquet_open_writer(writer, "data.parquet", compression="zstd", compression
   internal name of every field the writer's schema declares, in schema order, disabled fields
   included (`names` comes back allocated to the count, blank-padded to the longest name, as the
   reader form does); `parquet_is_column_enabled(writer, name)` is `.false.` for a field disabled
-  with `set_column_unavailable`, for a base field a user MAML excluded, and for a name the schema
-  does not declare. Together they let code
+  with `set_column_unavailable`, for a base field a user MAML excluded, and — on a schema-enforced
+  writer — for a name the schema does not declare. Together they let code
   that holds only the writer follow its column selection — a loop writing one row group per batch,
   say — without carrying the schema object. A writer opened without a schema answers zero names
   and disables nothing: its columns are whatever the writes define.

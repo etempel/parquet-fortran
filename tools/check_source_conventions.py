@@ -954,6 +954,109 @@ def check_print_stat_columns_documented():
     return problems
 
 
+#: Arrow type IDs that `arrow_leaf_family` maps but `doc/pages/io/reading.md`'s physical-type table
+#: deliberately leaves out, each with the reason the page gives instead of a row.
+#:
+#: STRING_VIEW is the only member and is expected to stay the only one. It is absent from
+#: `arrow_leaf_family` on purpose -- the query answers "unknown" for it -- while every read path
+#: DOES read such a column, so the page documents it in prose ("One readable type answers
+#: `"unknown"` here") rather than as a mapping row. A row would be wrong; silence would be worse.
+#: `scenario_string_view_roundtrip` (test/error_scenarios.f90) asserts that answer from the other
+#: side. CLAUDE.md's "a static check that enumerates names goes stale silently" applies to this
+#: tuple: a second exemption is added here and to the page's prose, or to neither.
+COLUMN_TYPE_TABLE_EXEMPT = ("STRING_VIEW",)
+
+#: The mirror image: rows the page carries that `arrow_leaf_family` does not map, because the
+#: behaviour they describe is produced earlier in the read path.
+#:
+#: The two dictionary rows are the members. `decode_dictionary_chunks` (parquet_wrapper.cpp) unwraps
+#: a DICTIONARY column to its value type at `combine_column_chunks`, so `arrow_leaf_family` is only
+#: ever handed the value type and has no DICTIONARY arm to find -- while a caller very much needs
+#: the page to say what a pandas `category` reports. Same standing rule as the tuple above: a third
+#: row is added here with its reason, or the table gains no row at all.
+COLUMN_TYPE_TABLE_EXTRA_ROWS = ("DICTIONARY<STRING>", "DICTIONARY<LARGE_STRING>")
+
+
+def check_column_type_mapping_documented():
+    """`parquet_get_column_type`'s physical-type mapping and its documentation must agree.
+
+    `arrow_leaf_family` (src/parquet_wrapper.cpp) is the single source of truth for what Fortran
+    kind a column reads into, and `doc/pages/io/reading.md` reproduces its whole switch as a
+    "stored physical type -> reported as" table. That table is a hand-written enumeration of a
+    machine-readable list, which is exactly the shape `.claude/rules/documentation.md` says needs a
+    check rather than careful review -- and the page next door already has one
+    (`check_print_stat_columns_documented`, above), for the same reason.
+
+    Compares the two SETS of Arrow type IDs. The Fortran-side family names are not compared: the
+    page spells them as the tokens `parquet_get_column_type` prints (`int32`, `boolean`, ...) while
+    the C++ spells them `kElemFamilyInt32`, and mapping one to the other here would mean a second
+    copy of the vocabulary -- the thing this check exists to prevent. What it catches is a physical
+    type gained or lost, which is the drift that actually happens when Arrow adds a type.
+
+    An intentional omission goes in COLUMN_TYPE_TABLE_EXEMPT above, never by deleting a row here.
+    """
+    problems = []
+    cpp = SRC / "parquet_wrapper.cpp"
+    doc = REPO_ROOT / "doc" / "pages" / "io" / "reading.md"
+    text = cpp.read_text()
+    body = cpp_function_body(text, "arrow_leaf_family")
+    if body is None:
+        return ["%s: could not find arrow_leaf_family's body -- this check needs updating"
+                % cpp.relative_to(REPO_ROOT)]
+    code_types = set(re.findall(r"case\s+arrow::Type::(\w+)\s*:", body))
+    if not code_types:
+        return ["%s: arrow_leaf_family matched no `case arrow::Type::X:` arms at all -- the switch "
+                "was rewritten and this check has gone blind" % cpp.relative_to(REPO_ROOT)]
+
+    # The documented set: the first cell of every row of the page's physical-type table, anchored on
+    # its own `| stored physical type | reported as |` header (the same anchoring lesson as
+    # check_print_stat_columns_documented: the row shape alone is not distinctive on this page).
+    # A cell lists one or more backticked type names, comma-separated, and may carry a trailing
+    # em-dash aside; the final `anything else` row carries no backticks and is skipped by that.
+    lines = doc.read_text().split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*\|\s*stored physical type\s*\|\s*reported as\s*\|\s*$", line):
+            start = i + 1
+            break
+    if start is None:
+        return ["doc/pages/io/reading.md: could not find the `| stored physical type | reported as |` "
+                "table header -- the documentation moved and this check has gone blind on it"]
+    documented = set()
+    for line in lines[start:]:
+        if not line.strip().startswith("|"):
+            break
+        cell = line.split("|")
+        if len(cell) > 1:
+            # Only the type names, which lead the cell as a comma-separated backticked list. An
+            # em-dash aside may follow them ("-- what pandas writes for a `category`"), and its own
+            # backticked words are prose, not rows: reading them made this check report `category`
+            # as a stale row the first time it ran.
+            names = cell[1].split("\u2014")[0]
+            documented.update(name.upper() for name in re.findall(r"`([A-Za-z0-9_<>]+)`", names))
+
+    exempt = set(COLUMN_TYPE_TABLE_EXEMPT)
+    extra_rows = set(COLUMN_TYPE_TABLE_EXTRA_ROWS)
+    for type_id in sorted(code_types - documented - exempt):
+        problems.append(
+            "doc/pages/io/reading.md: arrow_leaf_family maps `arrow::Type::%s` but the physical-type "
+            "table has no row for it -- add one, or exempt it in COLUMN_TYPE_TABLE_EXEMPT with the "
+            "reason the page gives instead" % type_id)
+    for type_id in sorted(documented - code_types - exempt - extra_rows):
+        problems.append(
+            "doc/pages/io/reading.md: the physical-type table has a row for `%s`, which "
+            "arrow_leaf_family does not map -- it was renamed or removed" % type_id.lower())
+    for type_id in sorted(exempt & code_types):
+        problems.append(
+            "tools/check_source_conventions.py: `arrow::Type::%s` is in COLUMN_TYPE_TABLE_EXEMPT but "
+            "arrow_leaf_family now maps it -- give it a table row and drop the exemption" % type_id)
+    for type_id in sorted(extra_rows - documented):
+        problems.append(
+            "tools/check_source_conventions.py: `%s` is in COLUMN_TYPE_TABLE_EXTRA_ROWS but the "
+            "physical-type table no longer has a row for it -- drop the entry" % type_id.lower())
+    return problems
+
+
 def check_print_settings_documented():
     """`parquet_print_settings`'s output and `doc/pages/operating/settings.md` must name the same things.
 
@@ -5810,6 +5913,7 @@ CHECKS = (
     ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),
+    ("the column-type mapping matches its documentation", check_column_type_mapping_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

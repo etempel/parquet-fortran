@@ -57,7 +57,7 @@ parentheses:
 | **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). The four value-class operators take no value, and `in`/`not_in` take a **set** rather than a single literal — either the name of one attached with `%bind` (`ID in @wanted`) or a list written out in the rule (`ID in (3, 5, 9)`); see [Membership in a set](#membership-in-a-set-in-and-not_in) below. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. **Trailing spaces in a quoted value are not preserved**: `name == "ab "` asks what `name == "ab"` asks, because a rule's values reach the evaluators in fixed-width slots and are right-trimmed there. A trailing space in the stored *data* is significant as ever — it is only the rule's own literal that cannot carry one. |
 | **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
 | **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. So a filter written as one clause per call means the conjunction of its clauses; write `or` inside a single rule when you want alternatives. |
-| **Limits** | 32 levels of nesting, 1024 expression terms per filter, 64 bound sets per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first three are published constants you can check a rule against beforehand; see [Read-only limits](../operating/settings.html#read-only-limits). |
+| **Limits** | 32 levels of nesting, 1024 expression terms per filter, 64 bound sets per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first four are published constants you can check a rule against beforehand; the two per-clause lengths are not. See [Read-only limits](../operating/settings.html#read-only-limits). |
 
 `between` and wildcard/`like` matching are not supported: the first is shorthand for what the
 grammar already expresses (`x between 1 and 9` is `x >= 1 and x <= 9`), and glob or regular-expression
@@ -80,9 +80,11 @@ call filt%add_in("ID", ids)                  ! keep rows whose ID is one of thes
 call parquet_open_reader(reader, "survey.parquet", filter=filt)
 ```
 
-`%add_in(column, values, [is_valid], [negate])` is the one-set-one-column form. The general form
-attaches the array under a **name** and refers to it from ordinary rule text with a leading `@`,
-which is what lets a set combine with `or`, `not` and parentheses like any other clause:
+`%add_in(column, values, [is_valid], [negate])` is the one-set-one-column form. (In the call forms
+written out on this page, an argument in square brackets is optional; the brackets are notation,
+never something you type.) The general form attaches the array under a **name** and refers to it
+from ordinary rule text with a leading `@`, which is what lets a set combine with `or`, `not` and
+parentheses like any other clause:
 
 ```fortran
 call filt%bind("wanted", ids)                ! attach the array under a name
@@ -178,10 +180,9 @@ being read.
 
 **What it costs.** The distinct keys, once per copy of the filter (about 8 bytes each for a numeric,
 date or time set, 16 for a timestamp set, a string set's own bytes for a string set), plus one byte
-per row of the file per `in` clause while
-the filter is being installed — the
-same shape and size as the mask `sample_fraction=` already builds. Under `bounded=.true.` that array
-is, like the filter's own row mask, one of the things that still scale with the file's row count.
+per row of the file per `in` clause while the filter is being installed — the same shape and size as
+the mask `sample_fraction=` already builds. Under `bounded=.true.` that array is, like the filter's
+own row mask, one of the things that still scale with the file's row count.
 `bench/benchmark_filter_set.sh` measures the evaluation against the row-group decode it precedes.
 
 **This is the one filter clause a `bounded=.true.` read can use to restrict a second file by a first
@@ -229,7 +230,10 @@ A few practical notes:
 - **Only a `string` column.** A numeric, boolean or temporal column is rejected naming the operator
   and the column's type, since none of them holds text to match against. A `date` column stores an
   integer, not the text you would write it as, so `day starts_with "2024"` is refused rather than
-  matched against a rendering.
+  matched against a rendering. All three string layouts count as a string column here — the two
+  offset forms and Arrow's `string_view`, which
+  [`parquet_get_column_type`](reading.html#what-a-column-is-read-as) reports as `"unknown"` while
+  every read and match path accepts it.
 - **Several prefixes** are an `or`, the way pandas' `str.startswith(("A", "B"))` is:
   `filt%add('s starts_with "A" or s starts_with "B"')`.
 - **The three combine like any other clause** — with `and`, `or`, `not`, parentheses, a bound set,

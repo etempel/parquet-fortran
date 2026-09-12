@@ -181,7 +181,7 @@ row, out of a column that may be far larger. (In the call forms written out belo
 square brackets is optional; brackets are notation for this page, never something you type.)
 
 - **Row mode** —
-  `parquet_read_array_row_mode(reader, name, values, row_index [, null_value] [, is_valid])` reads
+  `parquet_read_array_row_mode(reader, name, values, row_index, [null_value], [is_valid])` reads
   one row's entire element vector. `values` is a 1D array of length `col_size`; `row_index` is
   1-based (`integer(int32)` or `integer(int64)` — the latter only needed for a file with more rows
   than `huge(1_int32)`).
@@ -196,7 +196,7 @@ call parquet_close_reader(reader)
 ```
 
 - **Element mode** —
-  `parquet_read_array_element_mode(reader, name, values, elem_index [, null_value] [, is_valid])`
+  `parquet_read_array_element_mode(reader, name, values, elem_index, [null_value], [is_valid])`
   reads the same element position from **every** row instead. `values` is a 1D array of length
   `nrows` (the table's whole row count, not `col_size`); `elem_index` is 1-based, in
   `[1, col_size]`.
@@ -396,6 +396,18 @@ What these two queries report is the kind to declare if you want the file's valu
 | `timestamp` | `timestamp` |
 | anything else | `unknown` |
 
+**One readable type answers `"unknown"` here: a `string_view` column.** Arrow's view
+representation of a string reaches this library from a file whose stored Arrow schema declares it,
+and every read path accepts it — `parquet_read_column` into a `character(len=...)` array, the
+compact [`parquet_string_column`](../types/string-columns.html#reading-and-writing-compact-string-columns)
+read, `parquet_get_string_length`, and the
+[`starts_with`/`ends_with`/`contains`](filter-sort-sample.html#matching-part-of-a-string-starts_with-ends_with-and-contains)
+matchers. This query reports the two offset-string types it was built for and leaves the view type
+outside the mapping, so `"unknown"` here does not mean the column cannot be read. Its shape query
+answers `"scalar"`, and
+[`parquet_get_column_arrow_type`](#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type)
+names it outright.
+
 The two lossy rows return the conventional target rather than `unknown` on purpose: no Fortran kind
 covers `uint64`'s full range or a decimal's exact value, but reporting them as unreadable would be
 less useful than naming the kind the library will actually use. A `uint64` value above
@@ -544,22 +556,29 @@ Keys are always strings, so there is no query for their type. See
 
 A Parquet file written by `DataFrame.to_parquet` is an ordinary Arrow-written file, and this
 library reads it with no special handling and no conversion step. Five of its habits are worth
-knowing about anyway: one used to need a workaround before opening the file, one puts a column in
-the file that you did not, and the rest are things you would otherwise go looking for.
+knowing about anyway: one stores a column in a form nothing else here produces, one puts a column
+in the file that you did not, and the rest are things you would otherwise go looking for. The first
+has a section to itself; the other four are below it.
 
-- **A `category` column arrives as plain strings.** pandas writes a `Categorical` as an Arrow
-  *dictionary* — the distinct values once, plus a narrow index per row — and this library decodes
-  it as it reads, so the column behaves in every way like an ordinary string column:
-  `parquet_get_column_type` answers `"string"`, and `parquet_read_column`, the compact
-  `parquet_string_column` read, `filter=`, `sort_by=`, `qc:` and `parquet_table` all accept it.
-  `.astype(str)` before `to_parquet` is no longer needed. What is *not* carried across is the
-  encoding itself: the category codes, their order, and pandas' `ordered` flag have no Fortran
-  counterpart and are dropped. If you need the codes, factorise the strings you read back —
-  `pf_index_map`'s `%get_or_add_many`, or `pf_rank(method="dense")`. If you only want to *see* the
-  encoding, [`parquet_get_column_arrow_type`](#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type)
-  reports it verbatim. An *integer* categorical never reaches this path at all: Arrow restores a
-  stored dictionary only for string and binary values, so pandas' `Categorical([1, 2, 1])` arrives
-  as a dense `int64` column.
+### A `category` column arrives as plain strings
+
+pandas writes a `Categorical` as an Arrow *dictionary* — the distinct values once, plus a narrow
+index per row — and this library decodes it as it reads, so the column behaves in every way like an
+ordinary string column: `parquet_get_column_type` answers `"string"`, and `parquet_read_column`, the
+compact `parquet_string_column` read, `filter=`, `sort_by=`, `qc:` and `parquet_table` all accept
+it. Nothing has to be done on the pandas side to prepare it.
+
+**What is not carried across is the encoding itself.** The category codes, their order, and pandas'
+`ordered` flag have no Fortran counterpart and are dropped. If you need the codes, factorise the
+strings you read back — `pf_index_map`'s `%get_or_add_many`, or `pf_rank(method="dense")`. If you
+only want to *see* the encoding,
+[`parquet_get_column_arrow_type`](#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type)
+reports it verbatim.
+
+**An *integer* categorical never reaches this path at all.** Arrow restores a stored dictionary only
+for string and binary values, so pandas' `Categorical([1, 2, 1])` arrives as a dense `int64` column.
+
+### The other four habits
 
 - **A non-default index becomes a real column called `__index_level_0__`.** A default `RangeIndex`
   writes no column and is recorded in metadata only; any other index is written as ordinary data,
@@ -602,15 +621,15 @@ program look_at_a_pandas_file
                                                         ! columns" hint -- nothing is read yet
     call t%drop_columns("__index_level_0__", ignore_missing=.true.)
     call t%print_rows(columns="obj_id,cls,flux")        ! reads those three, shows 5 + 5 rows
-    call t%filter_rows('cls == "galaxy"')               ! cls is a string column now
+    call t%filter_rows('cls == "galaxy"')               ! cls reads as a string column
     call t%build_index("obj_id", ix)
     call ix%find_all(10999997_int64, rows)
     call t%print_rows(rows=parquet_slice_list(rows))    ! exactly the rows the lookup returned
 end program look_at_a_pandas_file
 ```
 
-Before the category column was decoded, the second `%print_rows` and the `%filter_rows` would both
-have failed on `cls`. See [Showing the rows: `%print_rows`](../tables/table.html#showing-the-rows-print_rows)
+The second `%print_rows` and the `%filter_rows` both reach `cls` as an ordinary string column,
+which is what the decode buys. See [Showing the rows: `%print_rows`](../tables/table.html#showing-the-rows-print_rows)
 for what the display prints, and
 [Reading dictionary columns from other tools](../types/supported-data-types.html#reading-dictionary-columns-from-other-tools)
 for the encoding itself, including what a dictionary over a type this library cannot read does.
@@ -780,7 +799,7 @@ hard-aborts on a violation (`qc_soft=.true.` instead warns and continues).
 
 ## Reading table metadata with `parquet_get_metadata`
 
-`parquet_get_metadata(reader, key, value [, default] [, warn])` reads one table-level metadata
+`parquet_get_metadata(reader, key, value, [default], [warn])` reads one table-level metadata
 entry back out of a file — the read-side counterpart to the writer's `schema%add_metadata` (see
 [Runtime table metadata](../schema/building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata)).
 It is generic: the declared type/kind of `value` (a scalar or 1D array of any

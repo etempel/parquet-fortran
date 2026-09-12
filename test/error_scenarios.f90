@@ -6144,6 +6144,7 @@ contains
         logical :: is_valid(5)
         integer :: strlen_max
         integer(int64) :: nrows
+        character(len=:), allocatable :: type_name, shape_name, arrow_type
 
         ! Five fixed rows deliberately cover StringView's inlined-vs-out-of-line boundary -- see
         ! parquet_debug_write_string_view_fixture's own comment in parquet_wrapper.cpp: a short
@@ -6153,9 +6154,30 @@ contains
             "test_run/error_scenario_string_view.parquet"//char(0), "sv"//char(0))
 
         call parquet_open_reader(reader, out_file)
+        ! STRING_VIEW is deliberately absent from arrow_leaf_family, so parquet_get_column_type
+        ! answers "unknown" for a column every read path below reads perfectly well. That pairing is
+        ! what doc/pages/io/reading.md's "One readable type answers "unknown" here" paragraph
+        ! documents, and it is asserted here so the deliberate answer cannot be changed silently --
+        ! in either direction. The shape query and the arrow-type query are the two that DO describe
+        ! the column, and they are pinned beside it for the same reason.
+        call parquet_get_column_type(reader, "sv", type_name)
+        call parquet_get_column_shape(reader, "sv", shape_name)
+        call parquet_get_column_arrow_type(reader, "sv", arrow_type)
         call parquet_read_column(reader, "sv", s_back, is_valid=is_valid)
         call parquet_get_string_length(reader, "sv", strlen_max)
         call parquet_close_reader(reader, print_stat=.true.)
+
+        if (type_name /= "unknown") then
+            error stop "parquet_get_column_type no longer answers 'unknown' for a STRING_VIEW " // &
+                "column -- doc/pages/io/reading.md's mapping table and its string_view paragraph " // &
+                "both describe that answer, and got: " // type_name
+        end if
+        if (shape_name /= "scalar") then
+            error stop "parquet_get_column_shape must call a STRING_VIEW column a scalar, got: " // shape_name
+        end if
+        if (arrow_type /= "string_view") then
+            error stop "parquet_get_column_arrow_type is the query that names a view column, got: " // arrow_type
+        end if
 
         if (.not. all(s_back == s_expect)) then
             error stop "STRING_VIEW column did not round-trip correctly through parquet_read_column"

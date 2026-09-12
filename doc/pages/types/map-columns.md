@@ -200,7 +200,9 @@ outstanding handle's index stays correct; only entry positions move, and the cos
 the entry columns rather than O(1). This is what Parquet requires: a map whose null slot still
 spans entries is refused when the column is written. The nulled row reports `%size() == 0` and
 finds no key. `%clear_null(i)` puts the row back **empty** — it clears one bit, and the entries are
-already gone.
+already gone. **A `parquet_map_row%nested` range taken earlier does not survive it**, for the same
+reason: `lo`/`hi` are read from the offsets at the call, and nulling an earlier row moves them, so
+the pair then names the wrong entries rather than failing. Re-take the handle after a `%set_null`.
 
 `%validate([message])` checks the class invariants — offsets monotonic, `offsets(1) == 0`, keys and
 values holding the same entry count, the row bitmap allocated whenever the column claims a null —

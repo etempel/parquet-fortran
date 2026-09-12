@@ -65,7 +65,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 36 pages, in reading order. (This list, each group's own page list and the
+All 37 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -78,6 +78,7 @@ All 36 pages, in reading order. (This list, each group's own page list and the
 **Data types**
 
 - [Supported data types](types/supported-data-types.html)
+- [Column storage with `parquet_column`](types/column-storage.html)
 - [Date, time and timestamp columns](types/date-time.html)
 - [Compact string columns with `parquet_string_column`](types/string-columns.html)
 - [Variable-length list columns with `parquet_list_column`](types/list-columns.html)

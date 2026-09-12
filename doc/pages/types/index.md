@@ -1,6 +1,7 @@
 ---
 title: Data types
 ordered_subpage: supported-data-types.md
+ordered_subpage: column-storage.md
 ordered_subpage: date-time.md
 ordered_subpage: string-columns.md
 ordered_subpage: list-columns.md
@@ -9,12 +10,17 @@ ordered_subpage: map-columns.md
 ---
 
 What a column can hold: the supported Parquet/Arrow types and their Fortran counterparts, the
-three temporal element types, the compact variable-length string container, and the three
-container columns.
+type-erased column container they are stored in, the three temporal element types, the compact
+variable-length string container, and the three container columns.
 
 - [Supported data types](supported-data-types.html) — the Fortran-kind-to-MAML type table, how
   nulls work and how a column is declared null-free, reading a column into a different numeric
   kind, the size limits, and what another producer's file can contain.
+- [Column storage with `parquet_column`](column-storage.html) — one column whose type is not known
+  at compile time: the nine element kinds and their fixed-width vector forms, filling one by
+  adopting an array, per-element nulls and their row and element forms, geometric growth, assembling
+  a column from pieces with `%append` and `%paste`, the row-set rebuilds including `%gather_from`,
+  taking ownership of a container or a string store, and the zero-copy pointers into its storage.
 - [Date, time and timestamp columns](date-time.html) — `parquet_date`/`parquet_time`/
   `parquet_timestamp`: building a value from civil fields, ISO-8601 parsing and formatting,
   comparison and difference/offset arithmetic, Unix-time and MJD/JD interop, declared units, and

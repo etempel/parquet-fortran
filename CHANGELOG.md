@@ -240,7 +240,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   asks for one, and `%gather` takes the same `valid=` and `threads=`.
   `parquet_string_column` gains `%gather_from` with the same shape, plus `%set_validity` and
   `%set_where`: null every element a mask marks, or write one value into every element it marks,
-  in one rebuild of the column instead of one payload shift per element. See
+  in one rebuild of the column instead of one payload shift per element, and `%argminmax` for the
+  indices of its lexicographically smallest and largest elements in one allocation-free pass. See
+  [Row-set rebuilds](doc/pages/types/column-storage.md#row-set-rebuilds) and
   [Bulk row-set operations](doc/pages/types/string-columns.md#bulk-row-set-operations).
 - **A dictionary-encoded column reads as an ordinary column of its values** — what pandas writes
   for a `Categorical`. Such a column is decoded as it is read, so `parquet_get_column_type` reports

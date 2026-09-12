@@ -328,7 +328,7 @@ supported, comparing against a double-quoted ISO-8601 literal — see
 
 ### Querying a column's stored unit and timezone
 
-`parquet_get_column_time_info(reader, name [, unit] [, timezone])` reads back a `time`/
+`parquet_get_column_time_info(reader, name, [unit], [timezone])` reads back a `time`/
 `timestamp` column's stored unit (as a `parquet_unit_*` selector) and, for a timestamp, its
 timezone string (empty for a timezone-naive column). Square brackets mark optional arguments:
 

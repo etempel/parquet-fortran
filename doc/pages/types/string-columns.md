@@ -359,6 +359,19 @@ fetches every element through `%get` pays one heap round-trip per row; tracking 
 null is zero-width, so it compares as an empty string and sorts first. Test `%is_null` yourself if
 you need them ordered otherwise, exactly as you would around `%get`.
 
+**`%argminmax(imin, imax)` is that scan, packaged** — the indices of the lexicographically smallest
+and largest elements, in one pass, allocating nothing:
+
+```fortran
+integer(int64) :: imin, imax
+call col%argminmax(imin, imax)
+```
+
+Unlike `%compare`, it **skips nulls**: both indices come back `0` for a column holding no non-null
+element at all, so test for that before using either. Ties go to the earliest index. It is the
+string column's counterpart of [`pf_argminmax`](../utilities/sorting.html#extremes) over a plain
+array, and the values themselves are then two `%get` calls rather than `nrows` of them.
+
 ## Modifying a column
 
 ```fortran
@@ -600,8 +613,8 @@ lazily, most column operations do **not** invalidate outstanding handles:
 ## Threading inside one column
 
 The bulk operations split their work across threads when the column is large enough to be worth
-it — `%reindex`, `%gather`, `%delete_by_mask`, `%set_validity`, `%set_where`, `%build_from`,
-`%strip_all`/`%trim_all`, `%to_character` and `%statistics`. Nothing needs to be asked for. `parquet_string_threads()` reports the ceiling
+it — `%reindex`, `%gather`, `%gather_from`, `%delete_by_mask`, `%set_validity`, `%set_where`,
+`%build_from`, `%strip_all`/`%trim_all`, `%to_character` and `%statistics`. Nothing needs to be asked for. `parquet_string_threads()` reports the ceiling
 your machine and settings allow — not what a given call will use, since an individual operation
 narrows that further by the rules below — and `parquet_set_string_threads(n)` caps it (see
 [Settings](../operating/settings.html#threads-inside-one-string-column)).

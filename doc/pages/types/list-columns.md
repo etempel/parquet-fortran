@@ -68,6 +68,9 @@ offsets array, whatever its rows look like.
 
 ## The payload kind is fixed at `%init`
 
+Signatures on this page are written with **optional arguments in square brackets**; the brackets
+are notation, not Fortran, and never appear in code you write.
+
 `%init(payload_kind, [nrows], [unit])` requires the payload kind and it cannot change afterwards.
 Appending values of any other type aborts, naming both kinds.
 
@@ -131,6 +134,12 @@ written.
 
 `%clear_null(i)` makes the row present again and **empty**: it clears one bit, and the elements are
 already gone. Only `%append_row` gives a row elements.
+
+**A `%nested` range taken earlier does not survive it.** `%nested` reads `lo`/`hi` out of the
+offsets when you call it, and nulling any *earlier* row moves every later offset down — so a pair
+held across a `%set_null` names the wrong elements, silently and plausibly, rather than failing.
+Re-take the handle after a `%set_null`. A `parquet_list_row` handle itself is unaffected: it
+resolves its offsets on each use.
 
 ## The row handle
 

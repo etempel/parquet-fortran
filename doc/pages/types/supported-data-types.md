@@ -441,11 +441,15 @@ column is also exempt from that rule — a mask cannot say anything its protecti
 settled. Keep the form uniform anyway; nothing enforces it there.
 
 **You can protect a column from code as well as from a MAML**, with
-`call schema%set_protected(name [, protected])` — `protected` defaults to `.true.`, and `.false.`
+`call schema%set_protected(name, [protected])` (an argument in square brackets is optional; the
+brackets are notation, never something you type) — `protected` defaults to `.true.`, and `.false.`
 lifts protection. Call it before `parquet_open_writer`, since the writer takes its own copy of the
-schema at open time. Unprotecting a column the MAML itself declared protected is allowed but prints
-a warning naming it: someone wrote that declaration down deliberately, and overriding it in code
-should be visible in the program's output. See
+schema at open time. **`name` here is the column's internal name, as the schema declares it** —
+the opposite of the MAML key above, which matches the output name; where a `col_map:` entry renames
+a field the two spellings differ, and the code form wants the one in `fields:`. Unprotecting a
+column the MAML itself declared protected is allowed but prints a warning naming it: someone wrote
+that declaration down deliberately, and overriding it in code should be visible in the program's
+output. See
 [Building a schema in code](../schema/building-schema-in-code.html).
 
 ### Declaring that a column MAY hold a Null: `extra: nullable_cols:`
@@ -476,11 +480,11 @@ passes a mask for every column it can, so those fields are nullable already — 
 what carries the intent into the sidecar MAML and into the next program that reads it.
 
 Nothing is checked and nothing is refused: a declared column may hold Nulls or not, as the data
-turns out. **From code** it is `call schema%set_nullable(name [, nullable])`, with `nullable`
+turns out. **From code** it is `call schema%set_nullable(name, [nullable])`, with `nullable`
 defaulting to `.true.` and `.false.` taking the declaration back off; call it before
-`parquet_open_writer`, as with every schema change. Undeclaring is silent, where *unprotecting*
-warns — an undeclared column simply goes back to letting the values decide, and relaxes nothing
-anyone relied on.
+`parquet_open_writer`, as with every schema change, and with the same internal-vs-output name rule
+`set_protected` follows above. Undeclaring is silent, where *unprotecting* warns — an undeclared
+column simply goes back to letting the values decide, and relaxes nothing anyone relied on.
 
 ## Reading a nested struct field
 

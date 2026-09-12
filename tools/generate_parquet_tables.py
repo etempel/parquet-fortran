@@ -889,7 +889,7 @@ def gen_table_type():
         procedure :: set_user_populated => table_set_user_populated !! Claim a column's values as the caller's own, or unclaim.
         procedure :: is_user_populated => table_is_user_populated !! Whether a column is claimed as holding the caller's values.
         procedure :: validate_qc => table_validate_qc !! Check every qc-declaring column, holding none.
-        procedure :: print_stat => table_print_stat  !! Print what the table holds, to stdout.
+        procedure :: print_stat => table_print_stat  !! Print what the table holds; unit= or stdout.
         procedure, private :: print_rows_all    !! %print_rows specific with no column list.
         procedure, private :: print_rows_string !! %print_rows specific taking a separated name string.
         procedure, private :: print_rows_array  !! %print_rows specific taking an array of names.
@@ -4265,10 +4265,15 @@ def gen_spec_interfaces():
         !! byte-identical whatever the team was. `stats=.false.` skips the scan altogether and
         !! lists the columns with their kind and width only -- the form to reach for on a large
         !! table when the question is what is resident, not what it holds.
-        module subroutine table_print_stat(self, all, stats)
+        !!
+        !! `unit=` names where to write; absent, the listing goes to standard output. It does NOT
+        !! consult `message_stream`, which %print_rows does -- so a program that routed messages to
+        !! standard error passes the unit here explicitly.
+        module subroutine table_print_stat(self, all, stats, unit)
             class(parquet_table), intent(in) :: self !! the table.
             logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
             logical, intent(in), optional :: stats   !! .false.: no null count, min or max (default .true.).
+            integer, intent(in), optional :: unit    !! where to write; absent is standard output.
         end subroutine table_print_stat
         !> Prints the table's rows -- the first `first` and the last `last` of them, aligned in
         !! columns, with the column names and their kinds above. Where %print_stat DESCRIBES what

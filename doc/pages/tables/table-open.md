@@ -477,7 +477,7 @@ It answers for every regime, and each is a different question:
 The last two are the reason it exists: which rows survived and what order they ended up in lives
 inside the reader and is not otherwise visible.
 
-Five things to know:
+Six things to know:
 
 - **It is virtual until you ask for it.** It costs 8 bytes a row — 8 GB at a billion rows — so it
   is not built at open. `%has_column(PARQUET_ROW_INDEX)` answers `.true.` before the first use,

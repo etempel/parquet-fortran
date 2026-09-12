@@ -3717,6 +3717,104 @@ def check_no_indented_code_fence():
     return problems
 
 
+#: Number words a guide page may open a counted list with, and what each counts. Deliberately
+#: stops at twelve: past that a page should be using a table, and a longer word list would start
+#: matching prose that merely begins with a number ("Twenty-four bits of ...").
+COUNTED_LIST_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+#: A counted list's lead-in: a line that IS a sentence opening with one of the words above and
+#: ending in a colon, optionally opened with `**`. The colon and the bullet that must follow are
+#: what keep this off ordinary prose.
+COUNTED_LIST_LEAD = re.compile(
+    r"^(?:\*\*)?(%s)\b.*:\s*$" % "|".join(COUNTED_LIST_WORDS), re.IGNORECASE)
+
+
+def check_counted_lists_match_their_bullets():
+    """A guide page that says "Four things follow:" must have four bullets under it.
+
+    `.claude/rules/documentation.md`: "A count written beside the list it counts, or a list the
+    code also owns, needs a check, not careful review". This is the first half of that rule -- the
+    page owns BOTH halves, so unlike its sibling checks this one reads no source and cannot go
+    stale against a moving target.
+
+    Why it is worth a check rather than a careful read: drift here does not leave the page vague,
+    it leaves it stating something false. "Four things follow" above five bullets tells a reader
+    there are four and invites them to stop after the fourth. It had already drifted in three
+    places when this was written -- `tables/table.md` ("Four things follow from strings having no
+    fixed-width storage" above five), `tables/table-open.md` ("Five things to know" above six) and
+    `utilities/statistics.md` ("Three things worth knowing" above four) -- none of them recent, and
+    all three had survived every previous read of those pages.
+
+    **What counts as a counted list.** A line that is a whole sentence, opens with a number word,
+    and ends in a colon, whose next non-blank line starts a top-level `- ` bullet. That shape is
+    unambiguous; two nearby shapes are deliberately NOT matched, because counting them needs
+    per-site judgement and both are correct today:
+
+      * a count above a TABLE ("Four calls control it explicitly"), whose rows are the list;
+      * a count above prose ("Three name-taking calls are deliberately outside this"), where the
+        items are named in the sentence itself.
+
+    **A counted list is not necessarily one `<ul>`.** A fenced example between two bullets sits at
+    column 0 -- `check_no_indented_code_fence` above requires exactly that -- which closes the list
+    and opens a new one in the rendered HTML. `tables/table.md`'s five-bullet list renders as two
+    `<ul>` blocks for this reason. So the scan continues across fences and indented continuations
+    and stops only at a line that is neither, which is what makes the count match what a reader
+    sees rather than what the HTML happens to nest.
+
+    The scan is by shape rather than by a page list, and an empty scan FAILS (CLAUDE.md, "A static
+    check that enumerates names goes stale silently").
+    """
+    problems = []
+    pages = sorted((REPO_ROOT / "doc" / "pages").glob("**/*.md"))
+    if not pages:
+        return ["doc/pages/: no .md pages found -- this check has gone blind on the guide"]
+    checked = 0
+    for page in pages:
+        rel = page.relative_to(REPO_ROOT)
+        lines = page.read_text().split("\n")
+        in_fence = False
+        for i, line in enumerate(lines):
+            if line.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            m = COUNTED_LIST_LEAD.match(line.strip())
+            if not m:
+                continue
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j >= len(lines) or not lines[j].startswith("- "):
+                continue      # a count above a table, a code block or prose: not this shape
+            checked += 1
+            said = COUNTED_LIST_WORDS[m.group(1).lower()]
+            got, k, fenced = 0, j, False
+            while k < len(lines):
+                s = lines[k]
+                if s.startswith("```"):
+                    fenced = not fenced
+                elif fenced or s.strip() == "" or s.startswith((" ", "\t")):
+                    pass      # a fenced example, a blank line or a bullet's continuation
+                elif s.startswith("- "):
+                    got += 1
+                else:
+                    break     # ordinary prose at column 0: the list has ended
+                k += 1
+            if said != got:
+                problems.append(
+                    "%s:%d: says %d but %d bullets follow -- fix whichever is wrong, and note "
+                    "that a bullet added at the end of a list is the usual cause:\n    %s"
+                    % (rel, i + 1, said, got, line.strip())
+                )
+    if not checked:
+        return ["doc/pages/: no counted lists found -- this check has gone blind on the guide"]
+    return problems
+
+
 def check_maml_keys_case_insensitive():
     """A MAML block header must never be recognized by a literal case-SENSITIVE comparison.
 
@@ -6077,6 +6175,8 @@ CHECKS = (
     ("the column-type mapping matches its documentation", check_column_type_mapping_documented),
     ("sorting.md's threads= inventory matches the generics",
      check_sorting_threads_inventory_documented),
+    ("a guide page's counted list has that many bullets",
+     check_counted_lists_match_their_bullets),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

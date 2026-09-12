@@ -69,7 +69,9 @@ contains
             new_unittest("the permitted edge of every argument bound", test_print_rows_argument_edges), &
             new_unittest("a real outside the fixed range prints in exponent form", &
                 test_print_rows_scientific_reals), &
-            new_unittest("a struct cell prints its field count", test_print_rows_struct_cell) &
+            new_unittest("a struct cell prints its field count", test_print_rows_struct_cell), &
+            new_unittest("%print_stat(unit=) writes the listing to the given unit", &
+                test_print_stat_unit) &
             ]
     end subroutine collect_tests_table_display
 
@@ -862,6 +864,65 @@ contains
         end do
         call parquet_close_writer(w)
     end subroutine write_many_column_fixture
+
+    !> **`%print_stat(unit=)` writes the listing to the unit it is given.**
+    !!
+    !! The other printer on `doc/pages/tables/table.md`, and the only way to tell "wrote to the
+    !! unit" from "wrote somewhere and returned" is to read the unit back -- which is this suite's
+    !! method, and why the test lives here rather than beside the other `%print_stat` tests in
+    !! `test/test_table.f90`, which assert behaviour rather than text.
+    !!
+    !! Two shapes are captured, not one. A `%print_stat` that ignored `unit=` entirely would leave
+    !! the file empty and fail the first assertion -- but one that wrote a fixed header to the unit
+    !! and the real listing elsewhere would pass it, so the second capture asserts that `stats=`
+    !! changes what the unit receives. That is what makes the unit the actual destination rather
+    !! than somewhere a first line happened to land.
+    !!
+    !! **Deliberately not asserted: that `message_stream` moves it.** `%print_stat` shipped writing
+    !! to standard output and does not consult that setting; `%print_rows` does, and
+    !! `scenario_print_rows_follows_message_stream` is where that is pinned. A test written here
+    !! against the setting would be asserting a behaviour this procedure does not have.
+    subroutine test_print_stat_unit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(parquet_table) :: t
+        character(len=*), parameter :: out = "test_run/table_display_print_stat_unit.txt"
+        character(len=LINEW), allocatable :: lines(:)
+        integer :: n, u, with_stats
+
+        call parquet_new_table(t)
+        call t%add_column("mag", [1.0_real64, 2.0_real64, 3.0_real64], unit="mag")
+        call t%add_column("id", [1_int32, 2_int32, 3_int32])
+
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_stat(unit=u)
+        close(u)
+        call read_lines(out, lines, n)
+        call check(error, n > 0, "%print_stat(unit=) must write to the unit it was given")
+        if (allocated(error)) return
+        call check(error, find_token(lines, n, "parquet_table:") > 0, &
+            "and the unit must receive the header line")
+        if (allocated(error)) return
+        call check(error, find_token(lines, n, "mag") > 0 .and. find_token(lines, n, "id") > 0, &
+            "and the column rows, not just the header")
+        if (allocated(error)) return
+        ! The statistics header is what `stats=.false.` drops, so it is the token that has to be
+        ! present here for its absence below to mean anything.
+        with_stats = find_token(lines, n, "nulls")
+        call check(error, with_stats > 0, &
+            "the default listing must carry the statistics columns")
+        if (allocated(error)) return
+
+        ! The same table, same unit, one argument different: what the unit receives must follow it.
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_stat(unit=u, stats=.false.)
+        close(u)
+        call read_lines(out, lines, n)
+        call check(error, n > 0 .and. find_token(lines, n, "mag") > 0, &
+            "stats=.false. must still list the columns on the given unit")
+        if (allocated(error)) return
+        call check(error, find_token(lines, n, "nulls") == 0, &
+            "and stats=.false. must drop the statistics columns from what the unit receives")
+    end subroutine test_print_stat_unit
 
     ! ---- reading the printed text back ----
 

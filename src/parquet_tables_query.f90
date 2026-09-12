@@ -14,6 +14,7 @@
 !! * **`found=` decides whether a miss is fatal.** Absent, a missing column is a hard
 !!   `error stop`; present, the miss is reported through it and the call returns quietly.
 submodule (parquet_tables) parquet_tables_query
+    use, intrinsic :: iso_fortran_env, only : output_unit
     implicit none
     !
     !> One column's statistics as text, gathered by `table_print_stat` before it prints anything:
@@ -1003,6 +1004,7 @@ contains
     module procedure table_print_stat
         logical :: want_all, want_stats, any_edited
         integer :: i, j, nshown, nscan, wname, wkind, nt
+        integer :: u
         integer, allocatable, dimension(:) :: slots, cell_of
         type(stat_cell), allocatable, dimension(:) :: cells
         character(len=:), allocatable :: kname, unit_s, fname, tail
@@ -1013,6 +1015,11 @@ contains
         ! stays ABOVE it, so a print_stat on an unopened table still reports that mistake rather
         ! than silently doing nothing for the wrong reason.
         if (parquet_output_is_suppressed()) return
+        ! Standard output unless the caller names a unit. Deliberately NOT message_stream: this
+        ! printer shipped writing to stdout, and reading the setting here would move a released
+        ! procedure's output. %print_rows, which is new, does consult it.
+        u = output_unit
+        if (present(unit)) u = unit
         want_all = .false.
         if (present(all)) want_all = all
         want_stats = .true.
@@ -1045,16 +1052,16 @@ contains
         call self%filename(fname)
         write(rows_s, "(I0)") self%row_count
         if (len_trim(fname) > 0) then
-            print "(a)", "parquet_table: " // trim(fname)
+            write(u, "(a)") "parquet_table: " // trim(fname)
         else
-            print "(a)", "parquet_table: (built in memory)"
+            write(u, "(a)") "parquet_table: (built in memory)"
         end if
         write(nulls_s, "(I0)") self%cache%ncols
         write(wdt_s, "(I0)") count_resident(self%cache)
-        print "(a)", "  rows: " // trim(rows_s) // "   columns: " // trim(nulls_s) // &
+        write(u, "(a)") "  rows: " // trim(rows_s) // "   columns: " // trim(nulls_s) // &
             " (" // trim(wdt_s) // " materialized)"
         if (nshown == 0) then
-            print "(a)", "  (no materialized columns; pass all=.true. to list every column)"
+            write(u, "(a)") "  (no materialized columns; pass all=.true. to list every column)"
             return
         end if
         ! The statistics pass, done BEFORE anything below the header is printed: every resident
@@ -1092,10 +1099,10 @@ contains
             end if
         end if
         if (want_stats) then
-            print "(a)", "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  " // &
+            write(u, "(a)") "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  " // &
                 pad("width", 6) // "  " // pad("nulls", 10) // "  " // pad("min", 22) // "  max"
         else
-            print "(a)", "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  width"
+            write(u, "(a)") "  " // pad("column", wname) // "  " // pad("kind", wkind) // "  width"
         end if
         do i = 1, self%cache%ncols
             if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
@@ -1103,11 +1110,11 @@ contains
             ! its width would read the data, and a report must not change what it reports on.
             if (self%cache%cols(i)%width_pending) then
                 if (want_stats) then
-                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    write(u, "(a)") "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                         pad("pending", wkind) // "  " // pad("-", 6) // "  " // pad("-", 10) // &
                         "  " // pad("-", 22) // "  -"
                 else
-                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    write(u, "(a)") "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                         pad("pending", wkind) // "  -"
                 end if
                 cycle
@@ -1116,11 +1123,11 @@ contains
             write(wdt_s, "(I0)") self%cache%cols(i)%width
             if (self%cache%cols(i)%residency /= RES_FULL) then
                 if (want_stats) then
-                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    write(u, "(a)") "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                         pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // pad("-", 10) // &
                         "  " // pad("-", 22) // "  -"
                 else
-                    print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                    write(u, "(a)") "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                         pad(kname, wkind) // "  " // trim(wdt_s)
                 end if
                 cycle
@@ -1139,17 +1146,17 @@ contains
             if (self%cache%cols(i)%user_populated) tail = " *"
             if (want_stats) then
                 j = cell_of(i)
-                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                write(u, "(a)") "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                     pad(kname, wkind) // "  " // pad(trim(wdt_s), 6) // "  " // &
                     pad(cells(j)%nulls, 10) // "  " // pad(cells(j)%mn, 22) // "  " // &
                     cells(j)%mx // tail
             else
-                print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
+                write(u, "(a)") "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                     pad(kname, wkind) // "  " // trim(wdt_s) // tail
             end if
         end do
         if (any_edited) then
-            print "(a)", "  * values written into the table, not the file's own -- %evict_column " // &
+            write(u, "(a)") "  * values written into the table, not the file's own -- %evict_column " // &
                 "and %reload need force=."
         end if
     end procedure table_print_stat

@@ -395,7 +395,7 @@ With no `threads=`, the count comes from the same rule the sorting family uses â
 and **1 inside a caller's own parallel region**, so a per-group loop that is already parallel does not nest teams.
 There is deliberately no separate statistics thread setting; one question has one answer.
 
-Three things worth knowing before reaching for `threads=`:
+Four things worth knowing before reaching for `threads=`:
 
 - **A small population is reduced serially whatever you ask for.** Opening a team costs more than
   it returns below a measured work floor of a few thousand elements per thread â€” at a few hundred

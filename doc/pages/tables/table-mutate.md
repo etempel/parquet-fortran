@@ -169,21 +169,22 @@ a row, reach the container itself through `%col`.
 ## Changing a table
 
 Mutation falls into three classes, and the difference between them matters more than any
-individual procedure:
+individual procedure. The table adds the **read** verbs that sit beside them — they change nothing
+and are here so that every verb on this page has a row:
 
 | class | what it does | detaches? |
 |---|---|---|
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
-| **column** — `%add_column`, `%drop_column`, `%drop_columns`, `%keep_columns`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **cell** — `%fillna`, `%ffill`, `%bfill` | writes over the nulls of whole columns, in place | no |
 | **cell** — `%set_matrix` | writes several whole columns from one `(column, row)` array, in place | no |
+| **column** — `%add_column`, `%drop_column`, `%drop_columns`, `%keep_columns`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **column** — `%parse_column`, `%format_column` | replaces a string column's values with numbers, or a column's values with text | no |
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna`, `%explode`, `%drop_duplicates`, `%sort_by_values` | changes which rows exist | **yes, when it changes one** |
+| **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 | **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
 | **read** — `%duplicated`, `%argsort_by_values` | reports which rows repeat, or what order values imply, changing nothing | no |
 | **read** — `%value_counts` | summarises one column as a NEW two-column table, changing nothing | no |
 | **read** — `%get_matrix` | copies several whole columns out as one `(column, row)` array | no |
-| **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 
 ```fortran
 call t%materialize("mass,age,zphot")     ! read what you want to keep, first
@@ -280,7 +281,7 @@ further. What it loses is the file behind it.
 **A call that changes no row does not detach.** Detaching costs you every column you have not read
 yet, permanently, so it is only paid for when the row set actually moved — a row mutation that
 turns out to have nothing to do returns without touching a column, without invalidating a `%col`
-pointer, and with the file still attached. Five of the seven are decided by the arguments you
+pointer, and with the file still attached. Five of the eight are decided by the arguments you
 passed:
 
 | call | changes nothing when |

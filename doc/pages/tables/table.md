@@ -94,7 +94,7 @@ call t%col("flux", p)
 p = p * 2.0_real64           ! modifies the column in place
 ```
 
-Four things to know about `%col`:
+Two things to know about `%col`:
 
 - **The pointer kind must match the stored kind exactly.** There is no widening on this path — it
   aliases raw storage, so there is nothing to convert through. Ask `%kind` first if you do not
@@ -289,20 +289,20 @@ column is numeric at all.
 | `t%nrows_unfiltered()` | rows before `filter=`/`sample_fraction=` — the slice's length, or the file's; 0 for a table built in memory |
 | `t%row_group_extent()` | rows in the row groups this table covers, i.e. what reading it decodes; 0 for a table built in memory |
 | `t%ncols([resident_only])` | number of columns; `resident_only=.true.` counts only the ones already read |
-| `call t%column_names(names [, resident_only])` | every column name, in file order; `resident_only=.true.` lists only the ones already read |
+| `call t%column_names(names, [resident_only])` | every column name, in file order; `resident_only=.true.` lists only the ones already read |
 | `t%has_column(name)` | whether a column of that name exists |
 | `call t%require_columns(names)` | aborts unless the table has every one of these — naming every missing one, not just the first |
 | `call t%missing_columns(names, absent)` | which of these the table does **not** have, as a packed array; zero-size when it has them all |
-| `t%column_index(name [, found])` | its 1-based position among the table's columns, or 0 when absent |
-| `call t%column_name(j, nm [, found])` | the name of the column at 1-based position `j` |
+| `t%column_index(name, [found])` | its 1-based position among the table's columns, or 0 when absent |
+| `call t%column_name(j, nm, [found])` | the name of the column at 1-based position `j` |
 | `t%kind(name)` | its `PK_*` kind (`PK_NONE` if unreadable) |
 | `t%width(name)` | values per row: 1 for a scalar column, the element count for a vector one |
 | `call t%unit(name, u)` | a column's unit, from the read-in MAML's `unit:` key |
 | `t%residency(name)` | `RES_FULL` once read, `RES_EMPTY` before that (and for an unreadable column) |
 | `t%is_supported(name)` | whether its physical type is one this library can read (see the note below for plain `LIST` columns) |
-| `t%is_null(name, i [, e])` | whether row `i` of that column is null, or element `e` of it |
-| `t%has_nulls(name [, found])` | whether the column holds any null — from the file's footer if it has not been read |
-| `call t%get_valid_mask(name, mask [, found])` | its validity as a `logical` array, `.true.` where a value is present — rank-1 for one entry per row, rank-2 for the `(width, nrows)` per-element state |
+| `t%is_null(name, i, [e])` | whether row `i` of that column is null, or element `e` of it |
+| `t%has_nulls(name, [found])` | whether the column holds any null — from the file's footer if it has not been read |
+| `call t%get_valid_mask(name, mask, [found])` | its validity as a `logical` array, `.true.` where a value is present — rank-1 for one entry per row, rank-2 for the `(width, nrows)` per-element state |
 | `t%generation()` | a counter bumped by every structural change (see [pointers](#two-ways-to-reach-a-column)) |
 | `t%is_detached()` | whether a row-changing operation has cut the table loose from its file |
 | `call t%filename(f)` | the file this table was opened from, or `""` for one built in memory |
@@ -516,7 +516,7 @@ p = corrected
 call t%set_user_populated("flux", .true.)   ! now %evict_column and %reload protect it too
 ```
 
-`call t%set_user_populated(name, flag [, found])` claims a column's values as yours (`.true.`) or
+`call t%set_user_populated(name, flag, [found])` claims a column's values as yours (`.true.`) or
 releases the claim (`.false.`), and the column handle carries the same pair —
 `call c%set_user_populated(flag)` and `c%is_user_populated()` — which is usually the more
 convenient spelling, since `%ref` is a handle method to begin with. Claiming a column that holds no
@@ -582,7 +582,7 @@ What a row handle can do:
 | `call r%set(name, value)` | writes that value into the table — a handle is a view of it, not a copy |
 | `call r%get(c, value)` / `call r%set(c, value)` | the same, with the column named by a [column handle](#a-column-handle) instead of a string — no name lookup |
 | `call r%ref(name, p)` | a pointer to this row's storage: zero copy, writable, exact kind |
-| `r%is_null(name [, e])` | whether this row of that column is null, or element `e` of it |
+| `r%is_null(name, [e])` | whether this row of that column is null, or element `e` of it |
 | `r%index()` | which row this is, in the table's own numbering |
 | `r%is_valid()` | whether the handle is still usable — see below |
 
@@ -661,9 +661,9 @@ What a column handle can do — brackets mark optional arguments:
 | `call c%get(i, value)` | row `i`'s value, widening exactly as `%get_element` does |
 | `call c%set(i, value)` | writes it; exact kind, and the write clears that row's null |
 | `call c%get(i, e, value)` / `call c%set(i, e, value)` | **one element** of row `i` of a vector column, with no array allocated |
-| `c%is_null(i [, e])` | whether that row — or element `e` of it — is null |
-| `call c%set_null(i [, e])` / `call c%clear_null(i [, e])` | mark or unmark it |
-| `call c%ref(p [, is_valid])` | the same pointer `%col` gives, without the lookup |
+| `c%is_null(i, [e])` | whether that row — or element `e` of it — is null |
+| `call c%set_null(i, [e])` / `call c%clear_null(i, [e])` | mark or unmark it |
+| `call c%ref(p, [is_valid])` | the same pointer `%col` gives, without the lookup |
 | `c%index()`, `c%kind()`, `c%width()`, `c%residency()` | this column's position, kind, values per row, residency |
 | `call c%name(nm)`, `call c%unit(u)` | its name and unit string |
 | `c%is_valid()` | whether the handle is still usable |
@@ -769,7 +769,7 @@ call t%get("name", names)      ! a null row comes back blank -- gate on %is_null
 call t%get("name", packed)     ! keeps each value's own length, and its nulls with it
 ```
 
-Four things follow from strings having no fixed-width storage:
+Five things follow from strings having no fixed-width storage:
 
 - **`%col` gives a pointer to the packed store, not to an array.** `call t%col("name", sp)` with
   `type(parquet_string_column), pointer :: sp` aliases a `PK_STRING` column's own store: reading
@@ -1038,7 +1038,7 @@ Every argument is optional and every one is a display choice:
 | `columns` | show these columns, in the order named, **reading any that is not resident yet**. Either a `"ra;dec, mag"` string or an array of names, the same two spellings [`%prefetch`](#laziness-and-what-it-costs) takes. Naming `parquet_row_index` here creates it, exactly as reading it any other way does. |
 | `first`, `last` | rows from the top and from the bottom. Default 5 and 5; naming **either one sets the other to 0**, so `first=20` is `head(20)` and `last=3` is `tail(3)`. Both clamp to the table, and a table the two ends cover prints once, with no `...` row. |
 | `rows` | show exactly the rows this `parquet_slice` names, in the slice's own order — repeats and all. The form for "show me the rows that lookup returned" (`parquet_slice_list(ix%find_all(...))`). Cannot be combined with `first=`/`last=`. |
-| `unit` | the unit number to write to. Absent, the `message_stream` setting decides between standard output and standard error, exactly as every other printer here does. |
+| `unit` | the unit number to write to. Absent, the `message_stream` setting decides between standard output and standard error. `%print_stat` below takes a `unit` too, but does **not** consult `message_stream` — absent, it writes to standard output — so routing messages to standard error moves this printer and not that one. |
 | `digits` | significant digits in a real cell, 1..17. Default 6. |
 | `max_width` | longest cell text before it is cut to `max_width - 3` characters plus `...`. At least 8, default 32. A column NAME is never cut — a truncated heading would leave you guessing which column you are reading. |
 | `max_columns` | most columns to show. At least 1, default 20; the heading says `... (+N more)` for the rest. |
@@ -1060,9 +1060,11 @@ Four rules worth knowing:
 - **A null prints as `<null>`, on every kind.** No string value can be mistaken for it: a string
   column holding the text `null` prints that text, without the brackets. A **`NaN` is a value, not
   a null**, and prints as one — the same line the filter draws, kept on the display side.
-- **A container cell reports its row's size** — `[3 items]` for a list, `{2 pairs}` for a map. A
-  container's payload is reachable only through its own handle (see [Container columns in a
-  table](#container-columns-in-a-table)), and one row of it can be arbitrarily long.
+- **A container cell reports a count rather than a payload** — `[3 items]` for a list row and
+  `{2 pairs}` for a map row, while a struct shows `{4 fields}`, which is the type's field count and
+  so the same on every row. A container's payload is reachable only through its own handle (see
+  [Container columns in a table](#container-columns-in-a-table)), and one row of it can be
+  arbitrarily long.
 - **`verbosity = "silent"` prints nothing**, as it does for every other solicited printer here.
   The argument and column-name checks still run, so a wrong call is still reported.
 
@@ -1072,9 +1074,9 @@ below shows a double, so one value looks the same in both.
 
 ### Describing the columns: `%print_stat`
 
-`call t%print_stat([all], [stats])` prints one line per **materialized** column to standard
-output — its kind and unit, width, null count and min/max — under a header saying how many of
-the table's columns those are:
+`call t%print_stat([all], [stats], [unit])` prints one line per **materialized** column — its kind
+and unit, width, null count and min/max — under a header saying how many of the table's columns
+those are:
 
 ```
 parquet_table: catalogue.parquet
@@ -1094,6 +1096,9 @@ Worth knowing:
 - **Printing never reads anything.** A deferred plain-`LIST` column prints as `pending` rather
   than being measured — a diagnostic that changes what it is diagnosing is worse than one that
   admits it does not know.
+- **`unit=` names where the listing goes**, and without one it goes to standard output. Unlike
+  `%print_rows` this printer does not consult `message_stream`, so a program that routed the
+  library's messages to standard error passes the unit here itself.
 - **A column this layer cannot read shows its stored Arrow type in the `kind` cell**, instead of
   the `PK_NONE` that is every such column's kind and so tells them all apart from nothing. The
   kind column widens to fit it, so the listing stays aligned.

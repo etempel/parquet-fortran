@@ -126,8 +126,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `YYYY-MM-DD` and `HH:MM:SS`, in the shape the `{date}` and `{time}` record placeholders render,
   for a program stamping its own output rather than a log record. See
   [Logging](doc/pages/utilities/logging.md#the-wall-clock-for-your-own-output).
-- **`parquet_table%print_stat` takes `stats=.false.`**, which lists the columns with their kind
-  and width only, skipping the null count and min/max. See
+- **`parquet_table%print_stat` takes `stats=.false.` and `unit=`.** `stats=.false.` lists the
+  columns with their kind and width only, skipping the null count and min/max; `unit=` writes the
+  listing to a unit of your choosing instead of standard output. See
   [Describing the columns](doc/pages/tables/table.md#describing-the-columns-print_stat).
 - **Row filters accept a bound set: `in` and `not_in`.** `filt%add_in("ID", ids)` keeps the rows
   whose value appears in an array you attach, and `filt%bind("wanted", ids)` plus

@@ -3514,6 +3514,167 @@ def check_prose_footprint_counts():
     return problems
 
 
+#: The three searches `doc/pages/utilities/sorting.md` names COLLECTIVELY rather than by name, in
+#: its "take no `threads=` at all" sentence: "`pf_permute`, `pf_is_sorted`, the three searches,
+#: `pf_minmax`, `pf_argminmax` and `pf_merge`". They are written out here rather than dropped from
+#: the comparison, so that a FOURTH search arriving fails this check instead of disappearing behind
+#: the phrase. If the page ever names them individually this constant becomes redundant, not wrong.
+SORTING_THREADS_PROSE_SEARCHES = ("pf_lower_bound", "pf_upper_bound", "pf_equal_range")
+
+#: Number words the "Those <n> are the whole list" sentence may spell its count with. The sentence
+#: has always used a word rather than a digit; digits are accepted too so that changing the style
+#: does not silently blind the check.
+SORTING_THREADS_NUMBER_WORDS = {
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20, "twenty-one": 21, "twenty-two": 22,
+}
+
+
+def check_sorting_threads_inventory_documented():
+    """`sorting.md`'s two `threads=` lists must partition `parquet_sorting`'s generics exactly.
+
+    The page tells a reader which operations parallelise, and it does so as a closed inventory --
+    fourteen generics take `threads=`, eight take none, and "**passing one is a compile error
+    rather than a silently ignored argument**". That last clause is why this list is worth a check
+    where a merely incomplete one would not be: a new `pf_*` generic gaining `threads=` does not
+    leave the page vague, it leaves the page stating something false about code a reader is about
+    to write. `pf_value_counts` and `pf_remap` were added to `parquet_sorting` in one release and
+    the sentence's count went from twelve to fourteen by hand; nothing would have reported it had
+    it not.
+
+    **What is compared.** Every `interface pf_<name>` block in `src/parquet_sorting.f90` and
+    `src/parquet_argsort.f90` is resolved to its `module procedure` specifics, each specific's
+    interface body is found, and its dummy list is tested for a `threads` argument. That partitions
+    the generics into three sets, and all three are load-bearing:
+
+      * **takes** -- every specific has it. Must equal the names the page lists before its
+        "Those <n> are the whole list" sentence, and `<n>` must be how many there are.
+      * **none** -- no specific has it. Must equal the names in the sentence after it, plus
+        `SORTING_THREADS_PROSE_SEARCHES` above.
+      * **mixed** -- some specifics have it and some do not. **Must be empty**, and this is the
+        direction a two-way check would miss. The page's claim is about a GENERIC; a generic whose
+        specifics disagree makes "the whole list" meaningless in both directions at once, because
+        the same call spelling would accept `threads=` for one element type and reject it for
+        another. No such generic exists today and none should.
+
+    `pf_argsort` is the reason two files are read: its intrinsic-type specifics live in the
+    `parquet_argsort` tier and its five extension types in `parquet_sorting`, so a one-file scan
+    would report the generic on half its specifics and could call a genuinely mixed one clean.
+
+    **Why the page is parsed by REGION rather than by sentence.** The paragraph naming the
+    fourteen is interrupted by a sentence about run detection that re-mentions five of them, and
+    the four selection operations are named in a separate sentence after that. Any per-sentence
+    rule would have to know which sentences count. The regions are delimited by three literal
+    anchors, each asserted present -- losing one blinds the check, so each is reported by name
+    rather than quietly yielding an empty scan.
+
+    **What it does not do.** It says nothing about whether an operation SHOULD thread, nor about
+    `threads=`'s meaning, nor about the two non-`pf_` entries the same paragraph names
+    (`parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`) -- those are not generics in
+    these files and are outside what this can see. A name in a region that is not a known generic
+    is ignored rather than reported, so ordinary prose may mention anything it likes.
+    """
+    problems = []
+    sources = ["src/parquet_sorting.f90", "src/parquet_argsort.f90"]
+    generics, dummies = {}, {}
+    for rel in sources:
+        path = REPO_ROOT / rel
+        if not path.exists():
+            return ["%s: not found -- this check has gone blind" % rel]
+        text = path.read_text()
+        for block in re.finditer(r'^\s*interface (pf_\w+)\s*\n(.*?)^\s*end interface',
+                                 text, re.S | re.M):
+            generics.setdefault(block.group(1), set()).update(
+                re.findall(r'module procedure (\w+)', block.group(2)))
+        # Continuations folded first: an interface body's dummy list routinely spans several lines.
+        folded = re.sub(r'&\s*\n\s*', ' ', text)
+        for body in re.finditer(r'module\s+(?:subroutine|function)\s+(\w+)\s*\(([^)]*)\)', folded):
+            dummies[body.group(1)] = {a.strip().lower() for a in body.group(2).split(",")}
+    if not generics:
+        return ["src/parquet_sorting.f90: found no `interface pf_*` blocks -- this check has "
+                "gone blind"]
+
+    takes, takes_none, mixed = set(), set(), set()
+    for name, specs in sorted(generics.items()):
+        missing = sorted(s for s in specs if s not in dummies)
+        if missing:
+            problems.append(
+                "src/parquet_sorting.f90: `%s` names specific(s) %s whose interface body this "
+                "check could not find, so its `threads=` status is unknown. The interface-body "
+                "shape this parses has changed, and the check needs updating rather than the page."
+                % (name, ", ".join(missing[:3])))
+            continue
+        flags = {"threads" in dummies[s] for s in specs}
+        (takes if flags == {True} else takes_none if flags == {False} else mixed).add(name)
+    for name in sorted(mixed):
+        with_it = sorted(s for s in generics[name] if "threads" in dummies[s])
+        without = sorted(s for s in generics[name] if "threads" not in dummies[s])
+        # The minority is named, whichever side it is on: that is the specific to look at.
+        odd = without if len(without) <= len(with_it) else with_it
+        problems.append(
+            "src/parquet_sorting.f90: `%s` has specifics that disagree about `threads=` -- %d of "
+            "%d take it, and the odd one(s) out are %s. doc/pages/utilities/sorting.md states the "
+            "argument per GENERIC, so one call spelling would accept it for one element type and "
+            "reject it for another. Give it to every specific or to none."
+            % (name, len(with_it), len(generics[name]), ", ".join(odd[:3])))
+
+    page_rel = "doc/pages/utilities/sorting.md"
+    page_path = REPO_ROOT / page_rel
+    if not page_path.exists():
+        return problems + ["%s: not found -- this check has gone blind" % page_rel]
+    page = page_path.read_text()
+    opening = "**Sorting is parallel by default.**"
+    closing = "take no `threads=` at all"
+    total = re.search(r'Those ([\w-]+) are the whole list\.', page)
+    for label, found in (("the `%s` paragraph opening" % opening, opening in page),
+                         ('the "Those <n> are the whole list." sentence', total is not None),
+                         ('the "%s" sentence' % closing, closing in page)):
+        if not found:
+            problems.append("%s: %s is gone, so this check can no longer locate the two lists it "
+                            "compares. Re-anchor it on the new wording." % (page_rel, label))
+    if problems:
+        return problems
+
+    listed = page[page.index(opening):total.start()]
+    unlisted = page[total.end():page.index(closing)]
+
+    def named(region):
+        return {n for n in re.findall(r'pf_[a-z_]+', region) if n in generics}
+
+    page_takes = named(listed)
+    page_none = named(unlisted) | set(SORTING_THREADS_PROSE_SEARCHES)
+
+    stated = SORTING_THREADS_NUMBER_WORDS.get(total.group(1).lower())
+    if stated is None and total.group(1).isdigit():
+        stated = int(total.group(1))
+    if stated is None:
+        problems.append("%s: \"Those %s are the whole list\" -- this check does not recognise that "
+                        "count. Add it to SORTING_THREADS_NUMBER_WORDS."
+                        % (page_rel, total.group(1)))
+    elif stated != len(takes):
+        problems.append(
+            "%s: \"Those %s are the whole list\" claims %d operations take `threads=`; "
+            "%d generics in src/ actually do. Correct the count together with the list."
+            % (page_rel, total.group(1), stated, len(takes)))
+
+    for name in sorted(takes - page_takes):
+        problems.append("%s: `%s` takes `threads=` on every specific but is not named among the "
+                        "operations that use the machine automatically -- and the page says "
+                        "passing `threads=` to anything outside that list is a compile error."
+                        % (page_rel, name))
+    for name in sorted(page_takes - takes):
+        problems.append("%s: `%s` is named as taking `threads=`, but no specific of it does."
+                        % (page_rel, name))
+    for name in sorted(takes_none - page_none):
+        problems.append("%s: `%s` takes no `threads=` on any specific and is not named in the "
+                        "\"%s\" sentence." % (page_rel, name, closing))
+    for name in sorted(page_none - takes_none):
+        problems.append("%s: `%s` is named as taking no `threads=`, but its specifics do take it."
+                        % (page_rel, name))
+    return problems
+
+
 def check_no_indented_code_fence():
     """A fenced code block in doc/pages/ must start at column 0 or it is not rendered as code.
 
@@ -5914,6 +6075,8 @@ CHECKS = (
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),
     ("the column-type mapping matches its documentation", check_column_type_mapping_documented),
+    ("sorting.md's threads= inventory matches the generics",
+     check_sorting_threads_inventory_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

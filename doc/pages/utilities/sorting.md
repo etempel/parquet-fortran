@@ -63,7 +63,7 @@ page. They are optional at the call site, not part of the syntax, so they never 
 runnable example.
 
 **Every index-valued result above is generic over both integer kinds.** `perm`, `ranks`, `index`,
-`pos`, `first`/`last`, `count` and `imin`/`imax` may each be declared `integer(int32)` or
+`pos`, `first`/`last`, `count`/`counts` and `imin`/`imax` may each be declared `integer(int32)` or
 `integer(int64)`, and the answers are identical either way — declare whichever suits the code around
 the call. The one case where it matters is scale: an array of more than `huge(int32)` elements
 cannot be addressed by an `int32` result, and asking for one aborts rather than wrapping to a

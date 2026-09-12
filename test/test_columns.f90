@@ -3893,6 +3893,7 @@ contains
         integer, parameter :: TEMPORAL_KINDS(6) = [PK_DATE, PK_TIME, PK_TIMESTAMP, &
             PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC]
         logical, allocatable :: rowv(:), elemv(:, :)
+        logical :: ranged(4)
         integer(int64) :: i, e, w
         integer :: ki
         character(len=:), allocatable :: kn
@@ -3939,6 +3940,24 @@ contains
                     kn // ": nulling one element must leave the row's other element valid in the element mask")
                 if (allocated(error)) return
             end if
+            !
+            ! The RANGED form is a third set of six arms, not a slice of the two above: it fills a
+            ! caller's mask in place rather than allocating one, and walks the bitmap by word. Its
+            ! oracle is `row_validity`, which has just been checked against `%is_null`. A sub-range
+            ! is asked for as well as the whole column, because an arm indexing from 1 instead of
+            ! `first` agrees with the whole-column call and with nothing else.
+            call c%row_validity_range(1_int64, 4_int64, ranged)
+            call check(error, all(ranged(1:4) .eqv. rowv(1:4)), &
+                kn // ": row_validity_range over the whole column must agree with row_validity")
+            if (allocated(error)) return
+            ranged = .true.
+            call c%row_validity_range(3_int64, 4_int64, ranged)
+            call check(error, ranged(1) .eqv. rowv(3), &
+                kn // ": a sub-range must report its FIRST row at entry 1, not the column's first row")
+            if (allocated(error)) return
+            call check(error, ranged(2) .eqv. rowv(4), &
+                kn // ": and its second row at entry 2")
+            if (allocated(error)) return
         end do
         call check(error, .true., "every temporal kind builds both bulk validity masks consistently with is_null")
     end subroutine test_temporal_bulk_validity_every_kind

@@ -127,7 +127,9 @@ contains
         ! -- so the trimmed slices below are never empty in practice; the guard is what keeps a
         ! malformed file from reaching %adopt_fields' own refusal with a confusing shape.
         if (nfields < 1_c_int32_t) then
-            error stop trim(context)//": struct column '"//trim(name)//"' declares no fields"
+            ! The `if` stays OUTSIDE the exclusion: its condition is evaluated on every read, so
+            ! excluding it would report as a stale exclusion rather than as dead code.
+            error stop trim(context)//": struct column '"//trim(name)//"' declares no fields" ! GCOVR_EXCL_LINE
         end if
         call parquet_struct_column_build(values, fnames(1:int(nfields)), fields, row_valid=row_present)
     end subroutine read_struct_impl

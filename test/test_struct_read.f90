@@ -23,6 +23,9 @@
 module test_struct_read
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet
+    ! The struct comparison oracle lives with the write tests, which need it most; importing it is
+    ! what keeps this file from carrying a second copy of the same per-field-kind dispatch.
+    use test_struct_write, only : structs_equal
     use iso_fortran_env, only : int32, int64, real32, real64
     implicit none
     private
@@ -260,12 +263,17 @@ contains
     subroutine test_chunked_agrees(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
-        type(parquet_struct_column), target :: whole, chunk
+        type(parquet_struct_column), target :: whole, chunk, joined
         type(parquet_struct_row) :: hw, hc
-        integer :: ng, g
+        integer :: ng, g, ci
         integer(int64) :: pos, i
         integer(int32) :: vw, vc
-        logical :: okw, okc
+        logical :: okw, okc, same
+        character(len=:), allocatable :: why
+        !> One column per payload kind the struct reader supports, each a single field `v`.
+        character(len=11), parameter :: PAYLOAD_COLS(9) = [character(len=11) :: &
+            "s_int32", "s_int64", "s_float32", "s_float64", "s_bool", "s_string", &
+            "s_date", "s_time", "s_timestamp"]
         call parquet_open_reader(r, PAYLOADS)
         call parquet_read_column(r, "s_int32", whole)
         call parquet_get_num_row_groups(r, ng)
@@ -288,6 +296,31 @@ contains
             end do
         end do
         call check(error, pos == whole%size(), "the row groups account for every row of the column")
+        if (allocated(error)) then
+            call parquet_close_reader(r)
+            return
+        end if
+        !
+        ! EVERY payload kind, not just int32. `read_struct_field` reads a field's payload with a
+        ! separate call per kind and a separate arm for the chunked form, so the eight other kinds
+        ! reach code the int32 sweep above never touches -- and a chunked arm reading the wrong
+        ! row group, or slicing wrongly, produces a column that still has the right shape.
+        !
+        ! Reassembling the chunks and comparing against the whole-column read is the oracle: it
+        ! checks every field value and both null levels through `structs_equal`, rather than only
+        ! the counts a size comparison would.
+        do ci = 1, size(PAYLOAD_COLS)
+            call parquet_read_column_chunk(r, trim(PAYLOAD_COLS(ci)), 1, joined)
+            do g = 2, ng
+                call parquet_read_column_chunk(r, trim(PAYLOAD_COLS(ci)), g, chunk)
+                call joined%append_from(chunk)
+            end do
+            call parquet_read_column(r, trim(PAYLOAD_COLS(ci)), whole)
+            call structs_equal(whole, joined, same, why)
+            call check(error, same, trim(PAYLOAD_COLS(ci)) // &
+                ": the row groups must reassemble into the whole-column read -- " // why)
+            if (allocated(error)) exit
+        end do
         call parquet_close_reader(r)
     end subroutine test_chunked_agrees
 

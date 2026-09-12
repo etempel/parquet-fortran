@@ -158,6 +158,8 @@ contains
             new_unittest("in: date and time sets, bound from elements", test_in_temporal_sets), &
             new_unittest("in: a timestamp set matches a timestamp[ms] column by instant", &
                 test_in_timestamp_set_across_units), &
+            new_unittest("row_mask: null rows and the float32/time set leaves agree with the reader", &
+                test_row_mask_nulls_and_set_leaves), &
             new_unittest("in: row_mask agrees with the reader on temporal sets", &
                 test_in_temporal_row_mask_agrees), &
             new_unittest("the two real-key helpers split on NaN and nowhere else", &
@@ -3238,6 +3240,113 @@ contains
         if (allocated(error)) return
         call check(error, all(mine == phys), "and the same rows")
     end subroutine test_in_temporal_row_mask_agrees
+    !
+    !> The IN-MEMORY evaluator's own null handling and its own set-leaf arms, against the reader.
+    !>
+    !> **These are a second engine, not a second call into the first.** `%row_mask` answers a
+    !> filter over a materialized table through `parquet_eval_filter_leaf`, which walks the
+    !> resident column itself -- so a null row reaching a string comparison, a string matcher or a
+    !> temporal comparison is decided by code the reader's pre-evaluated path never runs, and each
+    !> of those three has its own `KL_UNKNOWN` arm. The set-leaf lookup likewise keys a float32
+    !> column and a time column through arms of their own.
+    !>
+    !> The oracle is the reader answering the same rule on the same file: SQL's WHERE drops an
+    !> unknown, so a null row must be absent from both. An arm that returned KL_TRUE for a null
+    !> would select a row whose value was never written -- plausible, and silently wrong.
+    subroutine test_row_mask_nulls_and_set_leaves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_table) :: t
+        type(parquet_filter) :: f_eq, f_sw, f_day, f_f32, f_tm
+        type(parquet_date) :: d(6)
+        type(parquet_time) :: tm(6), tset(2)
+        character(len=4) :: s(6)
+        real(real32) :: y(6)
+        integer(int32) :: u(6)
+        logical :: ok_s(6)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_rowmask_nulls.parquet"
+
+        u = [1, 2, 3, 4, 5, 6]
+        s = [character(len=4) :: "aa", "bb", "cc", "bb", "dd", "bx"]
+        y = [1.0_real32, 2.5_real32, -4.0_real32, 8.0_real32, 2.5_real32, 0.0_real32]
+        do i = 1, 6
+            call d(i)%set(2024, 1, i)
+            call tm(i)%set(12, 0, i - 1)
+        end do
+        ! Row 3 is null in all three nullable columns, so one row exercises every KL_UNKNOWN arm.
+        ! A temporal element carries its own nullness rather than taking an `is_valid=` mask --
+        ! `clear_null` on one is refused for exactly that reason -- so it is nulled in place.
+        ok_s = .true.; ok_s(3) = .false.
+        call d(3)%set_null()
+        call tm(3)%set_null()
+
+        ! No schema: a declared `string` field carries a fixed array_size the fixture's values
+        ! would have to be sized against, and nothing here is about schema enforcement.
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "u", u)
+        call parquet_write_column(writer, "s", s, is_valid=ok_s)
+        call parquet_write_column(writer, "y", y)
+        call parquet_write_column(writer, "d", d)
+        call parquet_write_column(writer, "tm", tm)
+        call parquet_close_writer(writer)
+
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+
+        ! A string comparison over a column with a null row.
+        call f_eq%add('s == "bb"')
+        call mask_agrees_with_reader(t, f_eq, file, "a string comparison", error)
+        if (allocated(error)) return
+        ! A string MATCHER, which is a different leaf evaluator with its own null arm.
+        call f_sw%add('s starts_with "b"')
+        call mask_agrees_with_reader(t, f_sw, file, "a starts_with matcher", error)
+        if (allocated(error)) return
+        ! A temporal comparison over a column with a null row.
+        call f_day%add('d >= "2024-01-03"')
+        call mask_agrees_with_reader(t, f_day, file, "a date comparison", error)
+        if (allocated(error)) return
+        ! A set clause keyed from a FLOAT32 column: its own arm, which widens before keying.
+        call f_f32%add_in("y", [2.5_real64, -4.0_real64])
+        call mask_agrees_with_reader(t, f_f32, file, "a float32 set clause", error)
+        if (allocated(error)) return
+        ! A set clause keyed from a TIME column: its own arm, and the only other one that passes
+        ! a validity mask to the lookup so that a null row cannot key as 0 and match.
+        call tset(1)%set(12, 0, 1)
+        call tset(2)%set(12, 0, 4)
+        call f_tm%add_in("tm", tset)
+        call mask_agrees_with_reader(t, f_tm, file, "a time set clause", error)
+    end subroutine test_row_mask_nulls_and_set_leaves
+    !
+    !> Asserts that `%row_mask` over `t` selects exactly the rows the reader selects for `filt`.
+    !!
+    !! Also refuses a vacuous comparison: a rule that selected every row, or none, would make the
+    !! agreement hold for a reason that has nothing to do with the arm under test.
+    subroutine mask_agrees_with_reader(t, filt, file, what, error)
+        type(parquet_table), intent(inout) :: t             !! materialized table.
+        type(parquet_filter), intent(inout) :: filt         !! the rule, already built.
+        character(len=*), intent(in) :: file                !! the same rows on disk.
+        character(len=*), intent(in) :: what                !! names the arm, for the message.
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_reader) :: reader
+        integer(int64), allocatable :: phys(:), mine(:)
+        logical, allocatable :: keep(:)
+        integer(int64) :: i
+
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_physical_row_indices(reader, phys)
+        call parquet_close_reader(reader)
+        allocate(keep(t%nrows()))
+        call t%row_mask(filt, keep)
+        mine = pack([(i, i = 1_int64, t%nrows())], keep)
+        call check(error, size(phys) > 0 .and. size(phys) < int(t%nrows()), &
+            what // ": the rule must select some rows but not all (vacuity guard)")
+        if (allocated(error)) return
+        call check(error, size(mine) == size(phys), &
+            what // ": row_mask selects a different number of rows than the reader")
+        if (allocated(error)) return
+        call check(error, all(mine == phys), what // ": row_mask and the reader disagree on WHICH rows")
+    end subroutine mask_agrees_with_reader
     !
     !> parquet_filter_real_key (the filter's) and parquet_index_real_key (the index's) agree on
     !> every value but NaN, where the filter keeps the bit pattern -- it never keys a NaN, so any

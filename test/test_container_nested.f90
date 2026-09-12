@@ -743,6 +743,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
         type(parquet_list_column) :: whole, chunk
+        type(parquet_struct_column) :: swhole, schunk
         character(len=:), allocatable :: kw, kc
         call parquet_open_reader(r, NEST)
         call parquet_read_column(r, "list_of_struct", whole)
@@ -756,6 +757,33 @@ contains
         if (allocated(error)) then; call parquet_close_reader(r); return; end if
         call check(error, chunk%length(3_int64) == whole%length(3_int64), &
             "and on row 3's length")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        !
+        ! The OTHER direction of nesting: a container held as a STRUCT FIELD. Reading one reaches
+        ! `read_struct_container_field`, which has a chunked arm per container kind beside its
+        ! whole-column arm -- a pair the list-of-struct comparison above never touches, because
+        ! there the struct is inside the list rather than the other way round.
+        call parquet_read_column(r, "struct_of_list", swhole)
+        call parquet_read_column_chunk(r, "struct_of_list", 1_int64, schunk)
+        call swhole%kind_text(kw)
+        call schunk%kind_text(kc)
+        call check(error, kw == kc, "struct_of_list: the two reads agree on the nested spelling: "//kw//" vs "//kc)
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, schunk%size() == swhole%size(), &
+            "struct_of_list: and on the row count")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, schunk%is_null(2_int64) .eqv. swhole%is_null(2_int64), &
+            "struct_of_list: and on row 2's nullness")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        !
+        call parquet_read_column(r, "struct_of_map", swhole)
+        call parquet_read_column_chunk(r, "struct_of_map", 1_int64, schunk)
+        call swhole%kind_text(kw)
+        call schunk%kind_text(kc)
+        call check(error, kw == kc, "struct_of_map: the two reads agree on the nested spelling: "//kw//" vs "//kc)
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, schunk%size() == swhole%size(), &
+            "struct_of_map: and on the row count")
         call parquet_close_reader(r)
     end subroutine test_nested_chunk_matches_whole
 

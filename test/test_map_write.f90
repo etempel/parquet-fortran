@@ -452,25 +452,40 @@ contains
         type(parquet_map_column), target :: back
         character(len=*), parameter :: path = "test_run/map_write_empty.parquet"
         character(len=:), allocatable :: saved
+        !> The nine value tokens `parquet_parse_map_type` reports, and the kind each must resolve
+        !! to. The close-time path maps token back to kind through a `select case` with one arm
+        !! per token, and a wrong arm still produces a file that opens and reads back as an empty
+        !! map -- of the wrong value type. Kept in step by position.
+        character(len=9), parameter :: TOKENS(9) = [character(len=9) :: "int32", "int64", &
+            "float32", "float64", "boolean", "string", "date", "time", "timestamp"]
+        integer, parameter :: KINDS(9) = [PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, &
+            PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP]
+        integer :: k
 
         ! "errors_only", not "silent": close warns that no column was written, and only
         ! errors_only silences a WARNING (silent covers informational and solicited output).
         call parquet_get_verbosity(saved)
         call parquet_set_verbosity("errors_only")
         call sch%init("maps")
-        call sch%add_field("m", "map[float64]")
+        do k = 1, size(TOKENS)
+            call sch%add_field("m_"//trim(TOKENS(k)), "map["//trim(TOKENS(k))//"]")
+        end do
         call parquet_parse_maml(sch)
         call parquet_open_writer(w, path, sch)
         call parquet_close_writer(w)
         call parquet_set_verbosity(saved)
 
         call parquet_open_reader(r, path)
-        call parquet_read_column(r, "m", back)
+        do k = 1, size(TOKENS)
+            call parquet_read_column(r, "m_"//trim(TOKENS(k)), back)
+            call check(error, back%size() == 0_int64, &
+                "the unwritten map["//trim(TOKENS(k))//"] column has no rows")
+            if (allocated(error)) exit
+            call check(error, back%element_kind() == KINDS(k), &
+                "and kept the declared value kind, which is what the token had to carry")
+            if (allocated(error)) exit
+        end do
         call parquet_close_reader(r)
-        call check(error, back%size() == 0_int64, "the unwritten column has no rows")
-        if (allocated(error)) return
-        call check(error, back%element_kind() == PK_FLOAT64, &
-            "and kept the declared value kind, which is what the token had to carry")
     end subroutine test_empty_at_close
 
 end module test_map_write

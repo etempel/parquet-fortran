@@ -315,9 +315,14 @@ contains
             select case (int(node_kind(k)))
             case (ND_LEAF)
                 li = int(node_leaf(k))
+                ! Unreachable, and its twin is already excluded: the node list comes from the
+                ! library's own parser, which emits each leaf before the node referring to it, so
+                ! `li` is always in range. `table_build_row_mask` (src/parquet_tables_filter.f90)
+                ! carries the same reasoning over the `error stop` it raises when this reports.
+                ! Kept because the alternative is indexing `verdicts` out of bounds.
                 if (li < 1 .or. li > size(verdicts, 2)) then
-                    errmsg = "malformed expression"
-                    return
+                    errmsg = "malformed expression" ! GCOVR_EXCL_LINE -- unreachable: see above
+                    return                          ! GCOVR_EXCL_LINE -- unreachable: see above
                 end if
                 top = top + 1
                 stack(1:nrows, top) = verdicts(1:nrows, li)
@@ -338,9 +343,12 @@ contains
                 top = top - 1
             end select
         end do
+        ! Unreachable for the same reason as the leaf-index guard above: the parser leaves exactly
+        ! one result on the stack. Kept because a mask built from an unwalked expression is a
+        ! plausible wrong row set rather than an error.
         if (top /= 1) then
-            errmsg = "malformed expression"
-            return
+            errmsg = "malformed expression" ! GCOVR_EXCL_LINE -- unreachable: see the guard above
+            return                          ! GCOVR_EXCL_LINE -- unreachable: see the guard above
         end if
         ! The single collapse, at the very end: an unknown row is dropped. This is what makes the
         ! whole expression agree with SQL's WHERE, and it happens exactly once -- collapsing inside

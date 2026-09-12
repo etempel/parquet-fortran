@@ -2392,7 +2392,7 @@ contains
             end select
             if (.not. is_array_of_tables(arr)) then
                 call fail_not_entries(parent, name)
-                return
+                return ! GCOVR_EXCL_LINE -- unreachable: `fail_not_entries` never returns
             end if
             ! Gated on `need` exactly as the absent-name case above is, so that the indexed form
             ! and the named form answer `required = .false.` the same way: absence -- of the name,
@@ -2410,7 +2410,7 @@ contains
                 tptr => vptr
             class default
                 call fail_not_a_section(parent, name)
-                return
+                return ! GCOVR_EXCL_LINE -- unreachable: `fail_not_a_section` never returns
             end select
         end if
 
@@ -2450,7 +2450,7 @@ contains
             arr => vptr
             if (.not. is_array_of_tables(arr)) then
                 call fail_not_entries(parent, name)
-                return
+                return ! GCOVR_EXCL_LINE -- unreachable: `fail_not_entries` never returns
             end if
             n = toml_len(arr)
         class default
@@ -2809,7 +2809,7 @@ contains
                 tptr => vptr
             class default
                 call fail_not_a_section(parent, name)
-                return
+                return ! GCOVR_EXCL_LINE -- unreachable: `fail_not_a_section` never returns
             end select
         else
             call get_value(parent%tbl, name, tptr)
@@ -2852,11 +2852,11 @@ contains
                 ! be rejected by the code that created it.
                 if (toml_len(arr) > 0 .and. .not. is_array_of_tables(arr)) then
                     call fail_not_entries(parent, name)
-                    return
+                    return ! GCOVR_EXCL_LINE -- unreachable: `fail_not_entries` never returns
                 end if
             class default
                 call fail_not_entries(parent, name)
-                return
+                return ! GCOVR_EXCL_LINE -- unreachable: `fail_not_entries` never returns
             end select
         else
             call get_value(parent%tbl, name, arr)
@@ -3360,9 +3360,13 @@ contains
         integer :: cap
 
         if (path_seen_doc(doc, path)) return
+        ! The body below is unreachable: `finish_open` allocates `seen(32)` as part of every open,
+        ! and every caller of this procedure sits downstream of a `require_open` that aborts on a
+        ! handle no open filled. Kept as the accumulator's own precondition rather than a shared
+        ! assumption about the order two procedures run in.
         if (.not. allocated(doc%seen)) then
-            allocate(doc%seen(32))
-            doc%nseen = 0
+            allocate(doc%seen(32)) ! GCOVR_EXCL_LINE -- unreachable: finish_open allocates it
+            doc%nseen = 0          ! GCOVR_EXCL_LINE -- unreachable: finish_open allocates it
         end if
         cap = size(doc%seen)
         if (doc%nseen >= cap) then
@@ -3381,7 +3385,9 @@ contains
         integer :: i
 
         yes = .false.
-        if (.not. allocated(doc%seen)) return
+        ! Unreachable: `finish_open` allocates `seen` on every open, and every route here runs
+        ! `require_open` first. See `mark_path` for the same reasoning.
+        if (.not. allocated(doc%seen)) return ! GCOVR_EXCL_LINE -- unreachable: finish_open allocates it
         do i = 1, doc%nseen
             if (doc%seen(i) == path) then
                 yes = .true.
@@ -3402,7 +3408,10 @@ contains
         type(toml_array), pointer, intent(out) :: arr     !! Receives the new array, or null.
 
         nullify(arr)
-        if (.not. associated(sect%shadow)) return
+        ! Unreachable: a handle only reaches here past `require_open`, which aborts unless `tbl`
+        ! is associated, and `finish_open`/`section_impl` give every handle that HAS a table a
+        ! shadow. The null case is the not-found optional section, which `require_open` refuses.
+        if (.not. associated(sect%shadow)) return ! GCOVR_EXCL_LINE -- unreachable: see above
         call sect%shadow%delete(key)
         call add_array(sect%shadow, key, arr)
     end subroutine shadow_new_array
@@ -3414,7 +3423,10 @@ contains
         type(toml_array), pointer, intent(out) :: arr     !! Receives the new array.
 
         nullify(arr)
-        if (.not. associated(tbl)) return
+        ! Unreachable: the only actual is `sect%tbl` of a handle `begin_write` has just put
+        ! through `require_open`, which aborts unless that pointer is associated. Kept because
+        ! the alternative is `tbl%delete` on a null pointer.
+        if (.not. associated(tbl)) return ! GCOVR_EXCL_LINE -- unreachable: require_open guarantees it
         call tbl%delete(key)
         call add_array(tbl, key, arr)
     end subroutine new_array_in

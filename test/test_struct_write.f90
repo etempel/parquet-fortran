@@ -38,6 +38,10 @@ module test_struct_write
     private
 
     public :: collect_tests_parquet_struct_write
+    !> The struct oracle, shared with `test_struct_read`'s chunked-read test rather than
+    !! duplicated there: comparing two struct columns needs a dispatch over every field kind,
+    !! and two copies of that dispatch would drift apart one kind at a time.
+    public :: structs_equal
 
     !> The Arrow-authored fixture the re-write test uses as its oracle. Never written to.
     character(len=*), parameter :: PAYLOADS = "test/fixtures/struct_payloads.parquet"

@@ -1128,6 +1128,7 @@ contains
         type(parquet_table) :: t
         type(parquet_table_col) :: c
         type(parquet_list_column) :: lc
+        type(parquet_list_column), pointer :: lp
         logical, allocatable :: m2(:,:)
         !
         call lc%init(PK_FLOAT64)
@@ -1166,6 +1167,25 @@ contains
         if (allocated(error)) return
         call c%clear_null(2_int64, 1_int64)
         call check(error, .not. t%is_null("spec", 2_int64), "and its %clear_null clears it")
+        if (allocated(error)) return
+        ! The WHOLE-ROW spellings, which take a different path from the element ones above:
+        ! `parquet_column_clear_null_row` has its own container arm, and a container is the one
+        ! kind that can be made present again without writing a value -- the row comes back with
+        ! whatever elements its offsets still describe. A temporal column refuses the same call.
+        call c%set_null(2_int64)
+        call check(error, t%is_null("spec", 2_int64), "the handle's whole-row %set_null nulls the row")
+        if (allocated(error)) return
+        call c%clear_null(2_int64)
+        call check(error, .not. t%is_null("spec", 2_int64), &
+            "and the whole-row %clear_null makes a container row present again")
+        if (allocated(error)) return
+        ! And it comes back EMPTY, which is the half of the contract worth pinning: %set_null
+        ! dropped the row's elements to keep a null row zero-length, so %clear_null is not an undo
+        ! -- it clears one bit, and the row's offsets now describe nothing. Only %append_row gives
+        ! a row elements again. Row 2 held one element before it was nulled.
+        call t%col("spec", lp)
+        call check(error, lp%length(2_int64) == 0_int64, &
+            "a container row made present again comes back empty, not with its old elements")
         if (allocated(error)) return
         !
         ! The rank-2 mask forms, on both halves: the setter used to be a no-op and the getter used

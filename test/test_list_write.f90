@@ -58,6 +58,8 @@ contains
                 test_rewrite_fixture), &
             new_unittest("the chunked form produces the same file as the whole-column form", &
                 test_chunked_agrees), &
+            new_unittest("every payload kind survives a chunked write", &
+                test_chunked_every_payload_kind), &
             new_unittest("a row mask drops whole rows and compacts their elements", test_row_mask), &
             new_unittest("a zero-row list column writes and reads back empty", test_zero_rows), &
             new_unittest("a column whose every row is null or empty writes", test_no_elements), &
@@ -616,10 +618,11 @@ contains
     !> zero-length, which is the case a bulk buffer path most easily gets wrong.
     subroutine test_no_elements(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error.
-        type(parquet_list_column), target :: lc, back
+        type(parquet_list_column), target :: lc, sc, back
         type(parquet_writer) :: w
         type(parquet_reader) :: r
         character(len=*), parameter :: FILE = "test_run/test_list_write_noelems.parquet"
+        character(len=*), parameter :: FILE_STR = "test_run/test_list_write_noelems_str.parquet"
 
         call lc%init(PK_FLOAT64)
         call lc%append_null_row()
@@ -642,7 +645,92 @@ contains
         call check(error, .not. back%is_null(2_int64), "row 2 must stay present and empty")
         if (allocated(error)) return
         call check(error, back%is_null(3_int64), "row 3 must stay null")
+        if (allocated(error)) return
+
+        ! The STRING payload of the same shape, which is its own path: a string list hands the
+        ! writer the element store's raw offset and data pointers, and an empty store has neither
+        ! -- so both are replaced by a one-element scratch buffer rather than passed as null. A
+        ! numeric payload has no such indirection, which is why float64 above cannot reach it.
+        call sc%init(PK_STRING)
+        call sc%append_null_row()
+        call sc%append_row([character(len=0) ::])
+        call sc%append_null_row()
+
+        call parquet_open_writer(w, FILE_STR)
+        call parquet_write_column(w, "lst", sc)
+        call parquet_close_writer(w)
+        call parquet_open_reader(r, FILE_STR)
+        call parquet_read_column(r, "lst", back)
+        call parquet_close_reader(r)
+
+        call check(error, back%size() == 3_int64, "three string-list rows must come back")
+        if (allocated(error)) return
+        call check(error, back%total_elements() == 0_int64, "no string element may be invented")
+        if (allocated(error)) return
+        call check(error, back%is_null(1_int64) .and. .not. back%is_null(2_int64) .and. &
+            back%is_null(3_int64), "the string list must keep null, empty, null in that order")
     end subroutine test_no_elements
+    !
+    !> Every payload kind written ONE ROW GROUP AT A TIME reproduces the whole-column write.
+    !>
+    !> `send_list_payload` has a separate `_chunk` binding per element kind beside its
+    !> whole-column one, and `test_chunked_agrees` reaches only the int32 pair. The others are
+    !> reached by writing the Arrow-written fixture's columns back out in two row groups: a
+    !> chunked arm that named the wrong binding, or passed the wrong element count, still
+    !> produces a file that opens and still reports shape `list`.
+    subroutine test_chunked_every_payload_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error.
+        type(parquet_reader) :: r
+        type(parquet_writer) :: w
+        type(parquet_list_column), target :: first(9), part, again
+        character(len=:), allocatable :: why
+        logical :: same
+        integer :: k
+        integer(int64) :: nrows, half, g, lo, hi, i
+        integer(int64), allocatable :: idx(:)
+        character(len=*), parameter :: FILE = "test_run/test_list_write_chunk_kinds.parquet"
+        !> One fixture column per payload kind; `mixed` and the width-widening columns are left to
+        !! `test_rewrite_fixture`, which is about the whole-column path.
+        character(len=10), parameter :: COLS(9) = [character(len=10) :: &
+            "i32", "i64", "f32", "f64", "flag", "text", "day", "clock", "stamp"]
+
+        call parquet_open_reader(r, PAYLOADS)
+        do k = 1, size(COLS)
+            call parquet_read_column(r, trim(COLS(k)), first(k))
+        end do
+        call parquet_close_reader(r)
+
+        nrows = first(1)%size()
+        half = nrows/2_int64
+        call check(error, half >= 1_int64 .and. nrows - half >= 1_int64, &
+            "the fixture must have enough rows to split into two non-empty row groups")
+        if (allocated(error)) return
+
+        call parquet_open_writer(w, FILE)
+        do g = 1_int64, 2_int64
+            lo = merge(1_int64, half + 1_int64, g == 1_int64)
+            hi = merge(half, nrows, g == 1_int64)
+            idx = [(i, i = lo, hi)]
+            call parquet_new_row_group(w, hi - lo + 1_int64)
+            do k = 1, size(COLS)
+                call first(k)%deep_copy(part)
+                call part%gather_rows(idx)
+                call parquet_write_column_chunk(w, trim(COLS(k)), part)
+            end do
+            call parquet_finish_row_group(w)
+        end do
+        call parquet_close_writer(w)
+
+        call parquet_open_reader(r, FILE)
+        do k = 1, size(COLS)
+            call parquet_read_column(r, trim(COLS(k)), again)
+            same = lists_equal(first(k), again, why)
+            call check(error, same, &
+                "column "//trim(COLS(k))//" must survive a chunked write: "//why)
+            if (allocated(error)) exit
+        end do
+        call parquet_close_reader(r)
+    end subroutine test_chunked_every_payload_kind
 
     !> A schema-enforced writer, with the column declared `list[int32]` in an in-code schema.
     subroutine test_schema_enforced(error)
@@ -674,6 +762,11 @@ contains
     !> A declared list column that is never written must still appear in the file, with zero rows
     !> and its declared element kind -- the close-time empty-column path, which for a list column
     !> has to build the column rather than pass a zero-sized array.
+    !>
+    !> **Every element token, not just one.** That path maps the element BASE token back to a
+    !> `PK_*` kind through a `select case` of its own, one arm per token, and an arm that named
+    !> the wrong kind would produce a file that still opens and still reads back as an empty list
+    !> -- just of the wrong element type. Only asking each token for its own kind can tell.
     subroutine test_declared_but_unwritten(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error.
         type(parquet_schema) :: schema
@@ -682,24 +775,39 @@ contains
         type(parquet_reader) :: r
         character(len=:), allocatable :: shape
         character(len=*), parameter :: FILE = "test_run/test_list_write_unwritten.parquet"
+        !> The nine element tokens `parquet_parse_list_type` reports, and the kind each must
+        !! resolve to. Kept in step by position; a token added to the library without a row here
+        !! leaves its arm unexercised, which is exactly what this test exists to notice.
+        character(len=9), parameter :: TOKENS(9) = [character(len=9) :: "int32", "int64", &
+            "float32", "float64", "boolean", "string", "date", "time", "timestamp"]
+        integer, parameter :: KINDS(9) = [PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, &
+            PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP]
+        integer :: k
 
         call schema%init(table="list_write_unwritten")
-        call schema%add_field("lst", "list[float64]")
+        do k = 1, size(TOKENS)
+            call schema%add_field("lst_"//trim(TOKENS(k)), "list["//trim(TOKENS(k))//"]")
+        end do
         call parquet_parse_maml(schema)
 
         call parquet_open_writer(w, FILE, schema)
         call parquet_close_writer(w)
 
         call parquet_open_reader(r, FILE)
-        call parquet_get_column_shape(r, "lst", shape)
-        call parquet_read_column(r, "lst", back)
+        do k = 1, size(TOKENS)
+            call parquet_get_column_shape(r, "lst_"//trim(TOKENS(k)), shape)
+            call check(error, shape == "list", &
+                "an unwritten declared list["//trim(TOKENS(k))//"] column must still be a list")
+            if (allocated(error)) exit
+            call parquet_read_column(r, "lst_"//trim(TOKENS(k)), back)
+            call check(error, back%size() == 0_int64, &
+                "the unwritten list["//trim(TOKENS(k))//"] column must have no rows")
+            if (allocated(error)) exit
+            call check(error, back%element_kind() == KINDS(k), &
+                "the unwritten list["//trim(TOKENS(k))//"] column must keep its declared element kind")
+            if (allocated(error)) exit
+        end do
         call parquet_close_reader(r)
-
-        call check(error, shape == "list", "an unwritten declared list column must still be a list")
-        if (allocated(error)) return
-        call check(error, back%size() == 0_int64, "it must have no rows")
-        if (allocated(error)) return
-        call check(error, back%element_kind() == PK_FLOAT64, "it must keep its declared element kind")
     end subroutine test_declared_but_unwritten
 
     !> `list[timestamp[ms,utc]]` declares the element's unit and UTC flag in the same fields a

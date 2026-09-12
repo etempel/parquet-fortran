@@ -1226,7 +1226,7 @@ contains
             ! system failure feature_risks.md R-b describes, whose symptom is a plausible wrong
             ! row set rather than an error.
             error stop trim(context) // ": internal error -- the row groups of '" // trim(column) // &
-                "' do not sum to the file's row count while evaluating a set-valued filter clause"
+                "' do not sum to the file's row count while evaluating a set-valued filter clause" ! GCOVR_EXCL_LINE
         end if
     end subroutine parquet_evaluate_set_leaf
 

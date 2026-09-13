@@ -71,10 +71,11 @@ Working rules:
 - **A count written beside the list it counts, or a list the code also owns, needs a check**, not
   careful review; point at the source instead of copying it.
 - **Optional arguments in square brackets, comma OUTSIDE the bracket**: `%f(a, [b])`, never
-  `%f(a [, b])`. The first bracketed signature on a page carries a one-line note on the brackets.
-  Retrofit a page when it is touched for another reason; `grep -rn ' \[, ' doc/pages/` lists the old
-  spelling. A signature-only block may keep its `fortran` fence tag; a runnable example never
-  contains a bracket.
+  `%f(a [, b])` and never `%f(a, [b=,] [c=])`. The first bracketed signature on a page carries a
+  one-line note on the brackets. Enforced across `doc/pages/` and README.md by
+  `check_bracket_convention`, which bans both wrong spellings — do not audit this by grepping for
+  one of them. `CHANGELOG.md` is outside the check. A signature-only block may keep its `fortran`
+  fence tag; a runnable example never contains a bracket.
 - **A reference bullet carrying more than about three claims becomes its own `###` subsection**,
   opening with the call form in the bullet's bold style; re-run `tools/check_doc_anchors.py`.
 - **A fenced code block is NEVER indented** — python-markdown emits an indented fence literally and

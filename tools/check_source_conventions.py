@@ -2159,6 +2159,34 @@ def check_parquet_stats_stays_arrow_free():
         "Summarising an array a caller already has must not require the Arrow stack.")
 
 
+#: The canonical order of `parquet_stats`' optional arguments, in the five blocks
+#: `doc/pages/utilities/statistics.md` describes under "Optional arguments are in one fixed order".
+#: TWO checks read this one copy (.claude/rules/testing.md, "Two checks needing the same list
+#: derive it from one place"): `check_stats_optional_argument_order` enforces it against the
+#: source, and `check_stats_optional_order_documented` compares it with the guide page that
+#: publishes it. Keep the block boundaries -- the page names them, and the second check reads them.
+STATS_OPTIONAL_ORDER = (
+    # the OUTPUT prefix, declared before the inputs by pf_moments, pf_mode and pf_probit_fit
+    ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
+     "vsum", "vmin", "vmax", "count", "modes", "corr"]
+    # the object-lifecycle pair, taken only by pf_stats' %compute, %init and %merge
+    + ["retain", "consume"]
+    # the RULE block: entries that say what the operation IS
+    + ["sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
+       "n_clipped", "keep", "converged", "right", "density", "prob"]
+    # the MAIN sequence, which is what most procedures draw from
+    + ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
+       "method", "kind", "scale", "center", "out_valid", "n_null", "n_nan",
+       "n_outside", "ok", "threads"]
+    # the %print pair
+    + ["unit", "name"]
+)
+
+#: Where each block of STATS_OPTIONAL_ORDER starts, by name, so the documentation check can slice
+#: it without repeating the names. Derived positions, never hardcoded indices.
+STATS_OPTIONAL_BLOCKS = ("n_valid", "retain", "sigma", "is_valid", "unit")
+
+
 def check_stats_optional_argument_order():
     """Every `parquet_stats` procedure declares its optionals in one canonical order.
 
@@ -2217,15 +2245,7 @@ def check_stats_optional_argument_order():
     #
     # Neither name was taken by any existing procedure when it was inserted, so every signature
     # that passed before still passes -- which is the condition an insertion has to meet.
-    canonical = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
-                 "vsum", "vmin", "vmax", "count", "modes", "corr",
-                 "retain", "consume",
-                 "sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
-                 "n_clipped", "keep", "converged", "right", "density", "prob",
-                 "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
-                 "method", "kind", "scale", "center", "out_valid", "n_null", "n_nan",
-                 "n_outside", "ok", "threads",
-                 "unit", "name"]
+    canonical = STATS_OPTIONAL_ORDER
     rank = {name: i for i, name in enumerate(canonical)}
     path = SRC / "parquet_stats.f90"
     if not path.exists():
@@ -2283,6 +2303,121 @@ def check_stats_optional_argument_order():
                    "was recognised -- this check has gone blind and is passing vacuously")
     return bad
 
+
+
+#: How `doc/pages/utilities/statistics.md` introduces each block of `STATS_OPTIONAL_ORDER`:
+#: (block's first name, the pattern that finds the block's own name list on the page, a name the
+#: prose appends to that list rather than listing inline). The fenced main sequence has no prose
+#: anchor and is found by the code fence itself.
+STATS_DOC_BLOCKS = (
+    ("n_valid", r"\*output\* prefix\s*`([^`]+)`", "corr"),
+    ("retain", r"object-lifecycle pair\s*`([^`]+)`", None),
+    ("sigma", r"the rule block\s*`([^`]+)`", None),
+    ("is_valid", None, None),
+    ("unit", r"the `(unit)`/`(name)` pair", None),
+)
+
+
+def _stats_optional_blocks():
+    """`STATS_OPTIONAL_ORDER` cut into its five blocks, keyed by each block's first name."""
+    starts = [STATS_OPTIONAL_ORDER.index(n) for n in STATS_OPTIONAL_BLOCKS]
+    bounds = list(zip(starts, starts[1:] + [len(STATS_OPTIONAL_ORDER)]))
+    return {STATS_OPTIONAL_BLOCKS[i]: STATS_OPTIONAL_ORDER[a:b]
+            for i, (a, b) in enumerate(bounds)}
+
+
+def check_stats_optional_order_documented():
+    """The guide's canonical optional-argument sequence must match the one the checker enforces.
+
+    `doc/pages/utilities/statistics.md`, under "Optional arguments are in one fixed order", writes
+    out all **46** of `parquet_stats`' optional arguments in order -- a fenced main sequence plus
+    four blocks named in the prose around it. `STATS_OPTIONAL_ORDER` is the same sequence, and
+    `check_stats_optional_argument_order` enforces it against `src/parquet_stats.f90`. Nothing
+    compared the two, so the page could drift from the rule it publishes.
+
+    **Why this is worth a check.** The page says why itself: "In Fortran the order of optional
+    arguments is part of the public contract -- a caller may pass them positionally -- so this is a
+    compatibility promise, not a style preference." A reader who orders a positional call by a
+    stale page writes a call that compiles and means something else. That is `feature_doc.md`
+    section 8's FALSE-making class rather than U3's merely-incomplete one.
+
+    **Order, not membership.** Unlike `check_agg_vocabulary_matches_its_documentation`, whose token
+    vocabularies are sets, this list IS its order: it is compared block by block, element by
+    element, and a reordering inside any block is a finding. Set equality over all 46 is checked
+    too, so a name added to one side and not the other is caught even if it lands at a block edge.
+
+    The scan refuses to pass when a block's anchor stops matching, when a block comes back empty,
+    or when the page is missing: all three mean it has gone blind rather than that the page is
+    clean (CLAUDE.md, "A static check that enumerates names goes stale silently").
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "statistics.md"
+    if not page.is_file():
+        return ["check_stats_optional_order_documented: %s is missing -- this check has gone blind"
+                % page.name]
+    text = page.read_text()
+    head = "## Optional arguments are in one fixed order"
+    if head not in text:
+        return ["doc/pages/utilities/statistics.md: the heading %r is gone, so this check can no "
+                "longer find the sequence it compares. Restore it or update this check." % head]
+    start = text.index(head)
+    rest = text.find("\n## ", start + 1)
+    section = text[start:rest if rest != -1 else len(text)]
+
+    # The fenced block is the MAIN sequence; everything else is prose around it.
+    fence = re.search(r"```\n(.*?)```", section, re.S)
+    if fence is None:
+        return ["doc/pages/utilities/statistics.md: the fenced canonical sequence under %r is "
+                "gone -- this check has gone blind on the main block" % head]
+    fenced_names = re.findall(r"[a-z_0-9]+", fence.group(1))
+    prose = re.sub(r"\s+", " ", section[:fence.start()] + section[fence.end():])
+
+    want = _stats_optional_blocks()
+    problems, got = [], {}
+    for first, pattern, tail in STATS_DOC_BLOCKS:
+        if pattern is None:                       # the fenced main sequence
+            got[first] = fenced_names
+            continue
+        m = re.search(pattern, prose)
+        if m is None:
+            problems.append(
+                "doc/pages/utilities/statistics.md: the %r block's anchor no longer matches, so "
+                "this check can no longer see it. Either restore the wording or update "
+                "STATS_DOC_BLOCKS; do not leave it unmatched." % first)
+            continue
+        names = [n for g in m.groups() for n in re.findall(r"[a-z_0-9]+", g)]
+        if tail is not None:
+            if re.search(r"`%s` closes that block" % tail, prose) is None:
+                problems.append(
+                    "doc/pages/utilities/statistics.md: the %r block no longer says that `%s` "
+                    "closes it, so this check cannot place `%s`." % (first, tail, tail))
+            else:
+                names = names + [tail]
+        got[first] = names
+    if problems:
+        return problems
+
+    for first in want:
+        if not got.get(first):
+            problems.append("doc/pages/utilities/statistics.md: the %r block came back empty -- "
+                            "this check has gone blind on it" % first)
+        elif got[first] != want[first]:
+            problems.append(
+                "doc/pages/utilities/statistics.md: the %r block disagrees with "
+                "STATS_OPTIONAL_ORDER (order matters -- a caller may pass these positionally).\n"
+                "    page: %s\n    src : %s"
+                % (first, ", ".join(got[first]), ", ".join(want[first])))
+    if problems:
+        return problems
+
+    flat = [n for first in STATS_OPTIONAL_BLOCKS for n in got[first]]
+    if set(flat) != set(STATS_OPTIONAL_ORDER):
+        only_page = sorted(set(flat) - set(STATS_OPTIONAL_ORDER))
+        only_src = sorted(set(STATS_OPTIONAL_ORDER) - set(flat))
+        problems.append(
+            "doc/pages/utilities/statistics.md: the documented sequence and STATS_OPTIONAL_ORDER "
+            "do not name the same arguments.\n    only on the page: %s\n    only in the source: %s"
+            % (", ".join(only_page) or "-", ", ".join(only_src) or "-"))
+    return problems
 
 def check_facade_inventory_matches_its_use_lines():
     """`src/parquet.f90`'s doc-comment inventory must name every module it bare-`use`s.
@@ -3674,6 +3809,69 @@ def check_sorting_threads_inventory_documented():
                         % (page_rel, name))
     return problems
 
+
+
+#: The two ways a guide page can spell an optional argument WRONGLY, as (pattern, what it looks
+#: like, why it is banned). `.claude/rules/documentation.md` fixes one spelling, `%f(a, [b])`.
+#: Both patterns are safe to ban outright: neither can occur in a Fortran array constructor
+#: (`[1_int32, 2_int32]`), an interval (`[0, 1)`, `[lo, hi]`, `[first, last]`) or an Arrow type
+#: string (`timestamp[ns,utc]`), which is what every other bracket on these pages is.
+BRACKET_SPELLINGS = (
+    (" [, ", "%f(a [, b])", "the comma belongs outside the bracket, as `%f(a, [b])`"),
+    (",]", "%f(a, [b=,] [c=])", "the comma is INSIDE the bracket; write `%f(a, [b=], [c=])`"),
+)
+
+
+def check_bracket_convention():
+    """A guide page writes an optional argument as `%f(a, [b])` and no other way.
+
+    `.claude/rules/documentation.md` fixes one spelling for an optional argument in a written-out
+    call form, with **the comma outside the bracket**. This check enforces it across the guide and
+    README.md.
+
+    **Why a check rather than the grep the rule used to name.** That grep was
+    `grep -rn ' \\[, ' doc/pages/`, and it matches exactly one of the two ways to get this wrong.
+    `doc/pages/utilities/spatial.md` carried thirteen occurrences of the other -- the comma inside
+    the bracket, `[cell=,]` -- and declared the variant in its own bracket note, so it was
+    internally consistent and invisible to the audit. The campaign read that grep's "0" as proof
+    the convention was complete and recorded it as finished; it was not. A partial audit that
+    reports success is worse than no audit, which is this repository's own rule about a static
+    check that enumerates names.
+
+    **This is a consistency rule, not a correctness one**, and it was proposed on that footing
+    (`feature_doc_U9.md`, Q1): a mis-spelled bracket makes a page inconsistent rather than false,
+    which is the class `feature_doc.md` section 8 otherwise declines. What carries it is that the
+    convention consumed hand work in four consecutive review units and its documented audit was
+    demonstrably partial.
+
+    **Deliberately NOT scanned: `CHANGELOG.md`.** Its `[Unreleased]` section carries six
+    occurrences of the old spelling. They are left alone because a changelog entry is governed by
+    its own rules and `/review-doc` B8 allows only a factual correction there -- a notation change
+    is not one. Widening this check to that file is a separate decision, recorded in
+    `feature_doc_U9.md` rather than taken here.
+    """
+    problems = []
+    pages = sorted((REPO_ROOT / "doc" / "pages").rglob("*.md"))
+    # Guard on the GUIDE specifically, not on the combined list. Appending README.md first and
+    # then testing `if not targets` looks equivalent and is not: with doc/pages/ gone the list is
+    # still non-empty, so the check would scan one file and report [ok] on a guide it can no
+    # longer see. Found by mutation, which is the only way this shape is ever found.
+    if not pages:
+        return ["check_bracket_convention: no pages under doc/pages/ -- this check has gone blind "
+                "on the guide; it scans doc/pages/**/*.md and README.md"]
+    targets = pages
+    readme = REPO_ROOT / "README.md"
+    if readme.is_file():
+        targets = targets + [readme]
+    for path in targets:
+        rel = path.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(path.read_text().split("\n"), start=1):
+            for pattern, looks_like, why in BRACKET_SPELLINGS:
+                if pattern in line:
+                    problems.append(
+                        "%s:%d: optional argument spelled `%s` -- %s\n    %s"
+                        % (rel, lineno, looks_like, why, line.strip()[:100]))
+    return problems
 
 def check_no_indented_code_fence():
     """A fenced code block in doc/pages/ must start at column 0 or it is not rendered as code.
@@ -6443,6 +6641,8 @@ CHECKS = (
      check_documented_signatures_match_source),
     ("%agg's exact family and option refusals match the source",
      check_agg_vocabulary_matches_its_documentation),
+    ("the guide's canonical optional-argument order matches the checker's",
+     check_stats_optional_order_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),
@@ -6495,6 +6695,7 @@ CHECKS = (
      check_module_tables_match_the_measured_footprints),
     ("prose footprint counts match the measured footprints", check_prose_footprint_counts),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
+    ("a guide page spells an optional argument one way", check_bracket_convention),
     ("no multi-line doc block opens with a FORD metadata key",
      check_no_doc_block_opens_with_a_ford_metadata_key),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),

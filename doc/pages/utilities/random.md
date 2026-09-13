@@ -75,8 +75,8 @@ deliberately not a speed pitch.
 
 ## Addressing: seed, stream, draw
 
-Every draw is `(seed, i [, draw])`. Square brackets mark an optional argument throughout this page;
-they are not Fortran syntax and never appear in runnable code.
+Every draw is `(seed, i, [draw])`. Square brackets mark an optional argument throughout this page,
+with the comma outside the bracket; they are not Fortran syntax and never appear in runnable code.
 
 - **`seed`** — `integer(int64)`, the family of streams. Any value, including 0 and negatives.
 - **`i`** — the stream index, `integer(int32)` or `integer(int64)`. Any value; an `int32` index
@@ -121,13 +121,13 @@ collision-free.
 
 ## What you can draw
 
-- **`pf_random_at(seed, i [, draw])`** — `real(real64)` in `[0, 1)`.
-- **`pf_random32_at(seed, i [, draw])`** — `real(real32)` in `[0, 1)`.
-- **`pf_random_bits_at(seed, i [, draw])`** — `integer(int64)`, 64 raw bits, every pattern possible.
-- **`pf_random_int_at(seed, i, lo, hi [, draw])`** — a uniform integer in `[lo, hi]`.
-- **`pf_random_fill_draws(seed, i, v [, draw])`** — fills a rank-1 `real64` or `real32` array with
+- **`pf_random_at(seed, i, [draw])`** — `real(real64)` in `[0, 1)`.
+- **`pf_random32_at(seed, i, [draw])`** — `real(real32)` in `[0, 1)`.
+- **`pf_random_bits_at(seed, i, [draw])`** — `integer(int64)`, 64 raw bits, every pattern possible.
+- **`pf_random_int_at(seed, i, lo, hi, [draw])`** — a uniform integer in `[lo, hi]`.
+- **`pf_random_fill_draws(seed, i, v, [draw])`** — fills a rank-1 `real64` or `real32` array with
   consecutive draws of **one** stream.
-- **`pf_random_fill_streams(seed, i0, v [, draw])`** — fills a rank-1 `real64` or `real32` array
+- **`pf_random_fill_streams(seed, i0, v, [draw])`** — fills a rank-1 `real64` or `real32` array
   with **one** draw of each of consecutive streams.
 - **`pf_random_seed()`** — a fresh, nondeterministic seed.
 
@@ -265,7 +265,7 @@ The producers, with what each costs in words (positions are counted in 32-bit wo
 
 | call | gives | words |
 |---|---|---|
-| `call rng%seed(seed [, stream])` | reseeds to position 1, in O(1); `stream` defaults to **0** | — |
+| `call rng%seed(seed, [stream])` | reseeds to position 1, in O(1); `stream` defaults to **0** | — |
 | `call rng%uniform(x)` | `real64` in `[0, 1)` | 2 |
 | `call rng%uniform32(x)` | `real32` in `[0, 1)` | 1 |
 | `call rng%bits(b)` | 64 raw bits | 2 |
@@ -357,8 +357,8 @@ for `k = 1 .. n`. Three properties follow for free rather than by construction:
 ### The bulk forms
 
 ```fortran
-call pf_random_permutation(perm, seed [, threads])   ! perm(k) = pf_random_perm_at(seed, size(perm), k)
-call pf_random_subset(idx, m, seed [, threads])      ! the first size(idx) of that same permutation
+call pf_random_permutation(perm, seed, [threads])   ! perm(k) = pf_random_perm_at(seed, size(perm), k)
+call pf_random_subset(idx, m, seed, [threads])      ! the first size(idx) of that same permutation
 ```
 
 (Square brackets mark an optional argument; they are not part of the call.)
@@ -396,7 +396,7 @@ cap, the work floor and the measured scaling.
 The third member of the family, and the one whose construction is not a construction at all:
 
 ```fortran
-call pf_random_resample(idx, m, seed [, stream [, threads]])   ! draws from 1..m, with replacement
+call pf_random_resample(idx, m, seed, [stream], [threads])   ! draws from 1..m, with replacement
 ```
 
 Drawing with replacement means `size(idx)` independent uniform integers in `[1, m]` — no dedup, no
@@ -793,8 +793,7 @@ call rng%normal_truncated(lo, hi, x)                       ! standard normal, re
 call rng%normal_truncated(lo, hi, x, mu=m, sigma=s)        ! N(m, s**2), restricted to [lo, hi]
 ```
 
-Optional arguments appear in square brackets, with the comma outside the bracket:
-`%normal_truncated(lo, hi, x, [mu], [sigma])`.
+The full call form is `%normal_truncated(lo, hi, x, [mu], [sigma])`.
 
 **`lo`, `hi`, `mu`, `sigma` and the result all live on one scale**, which is the thing to get right
 here. `mu` defaults to 0 and `sigma` to 1, so the two-bound call is the standard normal on
@@ -910,8 +909,8 @@ do
 end do
 ```
 
-`%init(weights, seed [, stream])` prepares the sampler; `%remaining()` reports how many items are
-left, `%reset()` restarts the same sequence, and `%reseed(seed [, stream])` starts a different one
+`%init(weights, seed, [stream])` prepares the sampler; `%remaining()` reports how many items are
+left, `%reset()` restarts the same sequence, and `%reseed(seed, [stream])` starts a different one
 over the same weights. In signatures written out in prose here, square brackets mark an optional
 argument. **`stream` is optional on both `%init` and `%reseed`, takes either integer kind, and
 defaults to 0** — it names which sequence of that seed you want, so `%init(w, s, 3_int64)` and
@@ -948,8 +947,8 @@ There are two constructions, and which one you want depends on how you consume t
 a bulk form:
 
 ```fortran
-call pf_weighted_subset(idx, weights, seed [, stream])                ! the first size(idx) drawn
-call pf_weighted_permutation(perm, weights, seed [, stream] [, threads])   ! the whole shuffle
+call pf_weighted_subset(idx, weights, seed, [stream])                ! the first size(idx) drawn
+call pf_weighted_permutation(perm, weights, seed, [stream], [threads])   ! the whole shuffle
 ```
 
 `idx` and `perm` are rank-1 `integer(int32)` or `integer(int64)` arrays; `weights` is

@@ -65,7 +65,7 @@
 !!
 !! **The normal family is TOTAL like everything else here: `pf_probit` answers `-Infinity` at 0,
 !! `+Infinity` at 1 and a quiet NaN outside `[0, 1]`**, rather than validating its argument. It is
-!! accurate to about 2 ulp over the whole range, including into the subnormal tail, and
+!! accurate to about 3 ulp over the whole range, including into the subnormal tail, and
 !! `tools/generate_probit_reference.py` is the 50-digit oracle that says so rather than a claim in
 !! this comment. See `pf_probit`'s own doc-comment for how it is computed and why the two branches
 !! are written on `erf` and on `log(Phi)` rather than both on `Phi`.
@@ -235,7 +235,7 @@ module parquet_utils
     !! a branch reached with the wrong argument -- is not one ulp but millions, which is what the
     !! test's bound separates.
     !!
-    !! **Accurate to about 2 ulp over the whole range**, including into the subnormal tail, where
+    !! **Accurate to about 3 ulp over the whole range**, including into the subnormal tail, where
     !! `p = 5e-324` still gives roughly `-38.5` rather than `-Infinity`. The expectations come from
     !! a 50-digit `mpmath` oracle (`tools/generate_probit_reference.py`), never from another
     !! library's double-precision answer.

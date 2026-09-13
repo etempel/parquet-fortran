@@ -14,9 +14,9 @@ every import of this package still compiles the C++ wrapper and still links `-la
 [Choosing a module](../operating/choosing-a-module.html) for the per-module file counts and what the
 guarantee does and does not cover.
 
-Signatures below are written with optional arguments in **square brackets** —
-`%build(x, y, [z,] radius=, [cell=])` means `z` and `cell=` may be omitted. Runnable examples never
-use brackets.
+Signatures below are written with optional arguments in **square brackets**, with the comma outside
+the bracket — `%build(x, y, [z], radius=, [cell=])` means `z` and `cell=` may be omitted. Runnable
+examples never use brackets.
 
 ## Building an index
 
@@ -334,9 +334,9 @@ call sx%pairs_within_los(b_perp, b_par, i, j, combine=PF_LINK_MEAN, dperp=dperp,
 m = sx%within_los(p, b_perp, b_par, found, los_p=z_p, dist=dn, sorted=.true.)
 ```
 
-The full signatures are `%build(x, y, z, radius=, [cell=,] [box_lo=,] [box_hi=,] [copy=,]
-[observer=,] [los=])`, `%pairs_within_los(b_perp, b_par, i, j, [combine=,] [threads=,] [dperp=,]
-[dpar=])` and `%within_los(p, b_perp, b_par, found, [los_p=,] [dist=,] [dperp=,] [dpar=,]
+The full signatures are `%build(x, y, z, radius=, [cell=], [box_lo=], [box_hi=], [copy=],
+[observer=], [los=])`, `%pairs_within_los(b_perp, b_par, i, j, [combine=], [threads=], [dperp=],
+[dpar=])` and `%within_los(p, b_perp, b_par, found, [los_p=], [dist=], [dperp=], [dpar=],
 [sorted=])`.
 
 With `D` the distance from the observer and `n` the unit vector towards a point, a pair `i, j`

@@ -110,7 +110,8 @@ the `print_stat` report — because everything the Fortran half prints reads the
 `target_row_group_bytes`, `statistics_prescreen` and `file_date` it is the whole story, since all
 three act only inside C++.
 
-The two sort knobs have a C++ mirror too and are deliberately **not** in that list: the sort engine
+`sort_counting_path` and `sort_counting_bucket_limit` have a C++ mirror too and are deliberately
+**not** in that list: the sort engine
 is Fortran and reads them on every sort, so they take effect immediately (see [Tuning the
 sort](#tuning-the-sort)). Their mirror serves only the second, C++ implementation that the test
 suite checks the Fortran one against.
@@ -231,7 +232,7 @@ independently of every other, so the work divides cleanly across the columns, on
 **gather** — `%top_n`, and a `%join`'s rewrite of its own rows and of every column it carries in —
 can also divide one column's rows across the team, and does so whenever there are fewer columns
 than threads: the columns are then rewritten one after another, each on the whole team. So a wide
-table gains on either level, and a join carrying a single column no longer rewrites it serially. A
+table gains on either level, and a join carrying a single column is not left to one thread. A
 sort's replay and a filter's compaction divide across columns only, so for them a two-column table
 gains almost nothing.
 
@@ -239,6 +240,12 @@ Like the other two it is a cap rather than a request, read per call, with `0` me
 `1` makes the rewrite serial, which is also what happens on its own inside your own OpenMP parallel
 region, on a table too small to be worth a thread team, and — for the operations that divide across
 columns only — on a table with fewer than two rewritable columns.
+
+**It is also the cap a grouping's per-group loop answers to.** `parquet_grouping%agg` without a
+`threads=` runs its loop over the groups on the automatic team this setting bounds, and serially
+inside your own parallel region; `%apply` stays serial unless you name a count, because the
+procedure it calls is yours. An explicit `threads=` on either is honoured, as elsewhere. See
+[Grouping rows and aggregating per group](../tables/table-group.html).
 
 **This is also the memory control, and it is the one thing to know before leaving it automatic.**
 A thread rewriting a column holds a transient second copy of that column, so `n` threads rewriting
@@ -585,9 +592,9 @@ merely *uncertain*; it cannot detect statistics that are confidently wrong.
 ## Reproducible output: pinning the file date
 
 Every file this library writes carries a creation timestamp, and it is **the only thing that
-differs between two writes of the same data**. Write one file twice and the two differ in nine
-bytes, every one of them a digit of that timestamp; write it twice inside the same wall-clock
-second and the two are bit-identical.
+differs between two writes of the same data**. Write one file twice and the two differ only in the
+digits of that timestamp; write it twice inside the same wall-clock second and the two are
+bit-identical.
 
 `parquet_set_file_date(text)` pins that timestamp to a value you choose, which makes the whole file
 reproducible byte for byte:

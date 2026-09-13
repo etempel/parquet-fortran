@@ -1057,6 +1057,25 @@ def check_column_type_mapping_documented():
     return problems
 
 
+def _printed_settings_rows():
+    """Every row name `parquet_print_settings` emits, in printed order; `[]` if the shape moved.
+
+    Matched by SHAPE (`call print_<anything>(u, "name"`), not against a list of helper names. An
+    earlier version named them, and silently went blind twice: once when print_text arrived for the
+    non-integer rows, and again when print_big arrived for the int64 ones -- on that occasion it
+    reported two of five new rows as undocumented and passed the other three, which is worse than
+    failing outright. A new row helper is picked up with no edit here.
+
+    One home for the list, because two checks need it (`.claude/rules/testing.md`, "Two checks
+    needing the same list derive it from one place"): `check_print_settings_documented` compares it
+    with the sample dump, and `check_module_settings_reexports_documented` uses the knob half of it
+    to resolve "all of them" on the entry-module settings table. Callers that want knobs only drop
+    the `parquet_max_*` rows, which are the read-only limits rather than settings.
+    """
+    return re.findall(r'call\s+print_\w+\s*\(\s*u\s*,\s*"([^"]+)"',
+                      (SRC / "parquet_settings.f90").read_text())
+
+
 def check_print_settings_documented():
     """`parquet_print_settings`'s output and `doc/pages/operating/settings.md` must name the same things.
 
@@ -1075,12 +1094,7 @@ def check_print_settings_documented():
     problems = []
     src = SRC / "parquet_settings.f90"
     doc = REPO_ROOT / "doc" / "pages" / "operating" / "settings.md"
-    # Matched by SHAPE (`call print_<anything>(u, "name"`), not against a list of helper names. An
-    # earlier version named them, and silently went blind twice: once when print_text arrived for
-    # the non-integer rows, and again when print_big arrived for the int64 ones -- on that occasion
-    # it reported two of five new rows as undocumented and passed the other three, which is worse
-    # than failing outright. A new row helper is now picked up with no edit here.
-    printed = re.findall(r'call\s+print_\w+\s*\(\s*u\s*,\s*"([^"]+)"', src.read_text())
+    printed = _printed_settings_rows()
     if not printed:
         return ["%s: could not find any `call print_*(u, \"name\"` row -- either the helpers were "
                 "renamed to a different shape, or parquet_print_settings no longer prints rows this "
@@ -1370,6 +1384,15 @@ def check_affinity_areas_documented():
     Matching by SHAPE rather than from a list here, so a subsystem added later is picked up with no
     edit to this check. An empty match is a failure, not a pass: it means the call shape moved and
     this check has gone blind.
+
+    **Both directions.** The reverse half was added after a review found there was only one: a
+    subsystem DELETED from the source would have sat on the page forever, promising a reader a
+    warning that can no longer fire -- the same silent staleness the forward half exists to stop,
+    pointing the other way. It is anchored on the page's ENUMERATION SENTENCE rather than on any
+    backticked word, because the page names `sorting` and `index` in ordinary prose several times
+    over and a whole-page reverse scan would report every one of those. A sentence that no longer
+    matches is a FAILURE, not a pass: this check has then gone half blind and must be re-anchored
+    deliberately.
     """
     problems = []
     areas = set()
@@ -1388,6 +1411,261 @@ def check_affinity_areas_documented():
                 "`%s`, but the page never names it -- a reader who sees that warning has no way to "
                 "tell which subsystem noticed. Add it to the list of area names (re-derive the set "
                 "with `grep -rn parquet_clamp_to_affinity src/`)." % area)
+    listed = re.search(r"The first word names whichever subsystem noticed[^.]*\.", text, re.S)
+    if listed is None:
+        return problems + [
+            "doc/pages/operating/performance.md: could not find the sentence beginning \"The first "
+            "word names whichever subsystem noticed\", which is where the area names are "
+            "enumerated -- the reverse half of this check cannot tell that list from the page's "
+            "ordinary prose any more; re-anchor it deliberately"]
+    for name in sorted(set(re.findall(r"`([a-z][a-z ]*)`", listed.group(0)))):
+        if name not in areas:
+            problems.append(
+                "doc/pages/operating/performance.md: the area list names `%s`, which no "
+                "parquet_clamp_to_affinity/parquet_auto_thread_count call passes -- the subsystem "
+                "was renamed or removed, so the page promises a warning that cannot fire." % name)
+    return problems
+
+
+def check_set_threads_fanout_documented():
+    """`parquet_set_threads`' fan-out and the count on the settings page must agree.
+
+    `parquet_set_threads(n)` is the "give this library N threads and no more" convenience: its body
+    calls `parquet_set_arrow_threads` and every per-area setter in turn. Its own doc-comment refuses
+    to write the number down -- "It NAMES them rather than counting them, so the next one needs one
+    line here and nowhere else" -- and then names the one place that does carry a count:
+
+        The environment table on the settings guide page does carry a count, and that one has to
+        move.
+
+    Nothing made it move. The `PARQUET_FORTRAN_THREADS` row reads "sets the nine below at once", and
+    a tenth cap would leave the sentence explaining one environment variable stating a wrong number
+    about code a reader is about to write. That is the FALSE-making class, and it is the shape
+    CLAUDE.md's "A static check that enumerates names goes stale silently" warns about with the
+    roles reversed: here the source knew, said so beside the code, and nothing enforced it.
+
+    Three quantities must agree, all three derived rather than stored:
+
+      1. the `call parquet_set_*` count inside `parquet_set_threads`' body;
+      2. the number spelled out in the `PARQUET_FORTRAN_THREADS` row of the guide's table;
+      3. that each of those setters has its own row BELOW that one, which is what "below" means --
+         the mapping being mechanical (`parquet_set_sort_threads` -> `PARQUET_FORTRAN_SORT_THREADS`).
+
+    Clause 3 overlaps `check_env_covers_every_setting`, deliberately: a cap added to the body and
+    nowhere else should fail with the fan-out in the message, not with a printed-row mismatch two
+    checks away.
+
+    **Clause 3 does not count rows by suffix, and a first version that did was wrong on the shipped
+    tree**: `PARQUET_FORTRAN_DEFAULT_USE_THREADS` ends in `_THREADS` and is not a thread cap, so a
+    generic `PARQUET_FORTRAN_*_THREADS` tally reads 10 against a fan-out of 9. The variables are
+    derived from the setters instead, which is the only spelling of "the nine below" that means what
+    the sentence means.
+
+    **What it deliberately does NOT check**, so a later reviewer does not read the absence as an
+    oversight: the page's three PROSE enumerations of the same body ("sorting, the table prefetch,
+    the table rewrite, one string column's bulk work, ..."). Those are English phrases, not setter
+    names, and a phrase-to-name table is the brittle shape that gets a check deleted rather than
+    fixed. They stay a hand count.
+    """
+    problems = []
+    src = SRC / "parquet_settings.f90"
+    body = re.search(r"\n    subroutine parquet_set_threads\(n\)\n(.*?)\n    end subroutine "
+                     r"parquet_set_threads\b", src.read_text(), re.S)
+    if body is None:
+        return ["src/parquet_settings.f90: could not find parquet_set_threads' body -- it was "
+                "renamed or its layout changed, and this check has gone blind"]
+    setters = re.findall(r"call\s+(parquet_set_\w+)\s*\(", body.group(1))
+    if not setters:
+        return ["src/parquet_settings.f90: parquet_set_threads calls no parquet_set_* setter -- "
+                "the call shape moved and this check has gone blind"]
+    doc = REPO_ROOT / "doc" / "pages" / "operating" / "settings.md"
+    text = doc.read_text()
+    row = re.search(r"\|\s*`PARQUET_FORTRAN_THREADS`\s*\|([^|]*)\|", text)
+    if row is None:
+        return ["doc/pages/operating/settings.md: no `PARQUET_FORTRAN_THREADS` table row found -- "
+                "the environment table moved or its shape changed, and this check needs updating"]
+    # Spelled out rather than digits, which is the guide's house style for a small count in prose.
+    # The map stops at twenty: a library with twenty-one per-area thread caps has a bigger problem
+    # than this check, and an unspellable number fails loudly below rather than passing.
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+             "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+             "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+             "nineteen": 19, "twenty": 20}
+    spelled = re.search(r"sets the (\w+) below at once", row.group(1))
+    if spelled is None or spelled.group(1) not in words:
+        return ["doc/pages/operating/settings.md: the `PARQUET_FORTRAN_THREADS` row no longer says "
+                "\"sets the <number> below at once\" with the number spelled out (it reads `%s`) -- "
+                "either reword it back or re-anchor this check deliberately; it cannot see the "
+                "count any more" % row.group(1).strip()]
+    stated = words[spelled.group(1)]
+    below = re.findall(r"\|\s*`(PARQUET_FORTRAN_\w+)`\s*\|", text[row.end():])
+    if stated != len(setters):
+        problems.append(
+            "doc/pages/operating/settings.md: the `PARQUET_FORTRAN_THREADS` row says it sets the "
+            "%s below at once, but parquet_set_threads calls %d setters (%s). Correct the row -- "
+            "its own doc-comment says this count has to move when a cap is added."
+            % (spelled.group(1), len(setters), ", ".join(setters)))
+    if not below:
+        return problems + [
+            "doc/pages/operating/settings.md: no `PARQUET_FORTRAN_*` row follows the "
+            "`PARQUET_FORTRAN_THREADS` row -- the table was reordered and this check can no longer "
+            "tell what \"below\" means; re-anchor it deliberately"]
+    for setter in setters:
+        var = "PARQUET_FORTRAN_" + setter[len("parquet_set_"):].upper()
+        if var not in below:
+            problems.append(
+                "doc/pages/operating/settings.md: parquet_set_threads calls `%s`, so `%s` should be "
+                "one of the rows below `PARQUET_FORTRAN_THREADS`, and it is not." % (setter, var))
+    return problems
+
+
+def check_module_settings_reexports_documented():
+    """`choosing-a-module.md`'s "Settings it re-exports" table must match what each module exports.
+
+    `.claude/rules/module-structure.md`: "A module re-exports, getter and setter, every settings
+    knob its own code reads (including `verbosity`/`message_stream` when it can emit)". The guide
+    turns that rule into a per-module table, so a program that imports one module for one capability
+    can see, without reading source, whether it can configure that capability from the same import.
+    `test/test_module_surface.f90` pins the SOURCE side of the rule. Nothing looked at the table.
+
+    **Class, stated because the two halves differ** (the U3/U4 distinction): the rows reading
+    "none -- it reads none" are FALSE-making -- a module that gains a knob makes that row a lie
+    about code a reader is about to write. The rows that list knobs are only incomplete-making,
+    which is the class this repository has declined before. Both are checked, because the derivation
+    is identical and a one-directional check here is exactly the blind spot that was just fixed in
+    `check_affinity_areas_documented`.
+
+    **Nothing is spelled out here.** The knob vocabulary is `parquet_print_settings`' own rows
+    (`_printed_settings_rows`), and each module's re-export set is its `public ::` lines. The two
+    ENGLISH phrases the table uses are expanded from source as well, not from a literal list:
+
+      * "the four sorting knobs" -> what `parquet_argsort` re-exports, less the output pair; the
+        spelled count is checked against it, so a fifth sorting knob fails here too;
+      * "the same six as `parquet_argsort`" -> that module's whole set, count likewise checked.
+
+    A cell that matches none of the recognised shapes, or that names a backticked token which is not
+    a knob, FAILS rather than being skipped: a silently unparsed row is a row nobody is checking.
+    """
+    problems = []
+    knobs = set(k for k in _printed_settings_rows() if not k.startswith("parquet_max_"))
+    if not knobs:
+        return ["src/parquet_settings.f90: no printed settings rows found -- this check cannot "
+                "build the knob vocabulary and has gone blind"]
+
+    def reexports(module):
+        path = SRC / (module + ".f90")
+        if not path.is_file():
+            return None
+        names = set()
+        for line in path.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("public ::"):
+                continue
+            for name in stripped[len("public ::"):].split(","):
+                match = re.match(r"parquet_(?:set|get)_(\w+)$", name.strip())
+                if match and match.group(1) in knobs:
+                    names.add(match.group(1))
+        return names
+
+    page = REPO_ROOT / "doc" / "pages" / "operating" / "choosing-a-module.md"
+    text = page.read_text()
+    table = re.search(r"\| Import \| Settings it re-exports \|\n\|[-| ]+\|\n((?:\|.*\n)+)", text)
+    if table is None:
+        return ["doc/pages/operating/choosing-a-module.md: could not find the \"Settings it "
+                "re-exports\" table -- it moved or its header changed, and this check has gone blind"]
+    output_pair = {"verbosity", "message_stream"}
+    argsort = reexports("parquet_argsort")
+    if not argsort:
+        return ["src/parquet_argsort.f90: no settings re-exports found -- the two English phrases "
+                "on the page are expanded from this module, so this check has gone blind"]
+    sorting_knobs = argsort - output_pair
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+             "eight": 8, "nine": 9, "ten": 10}
+    rows = 0
+    for line in table.group(1).splitlines():
+        cell = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cell) != 2:
+            continue
+        module = re.fullmatch(r"`(parquet\w*)`", cell[0])
+        if module is None:
+            # The combined row names four modules at once ("`parquet_settings`, and so ...").
+            # It is checked against parquet_settings, the module that owns them.
+            if "parquet_settings" not in cell[0]:
+                problems.append(
+                    "doc/pages/operating/choosing-a-module.md: settings table row `%s` names no "
+                    "single module and is not the combined `parquet_settings` row -- this check "
+                    "cannot tell what to compare it against; re-anchor it deliberately" % cell[0])
+                continue
+            module_name = "parquet_settings"
+        else:
+            module_name = module.group(1)
+        rows += 1
+        have = reexports(module_name)
+        if have is None:
+            problems.append(
+                "doc/pages/operating/choosing-a-module.md: the settings table has a row for `%s`, "
+                "but src/%s.f90 does not exist" % (module_name, module_name))
+            continue
+        body = re.sub(r"\([^)]*\)", "", cell[1].split("—")[0])
+        low = body.strip().lower()
+        if "all of them" in low:
+            want = set(knobs)
+        elif low.startswith("none"):
+            want = set()
+        else:
+            want = set()
+            phrase = re.search(r"the (\w+) sorting knobs", body)
+            if phrase:
+                if words.get(phrase.group(1)) != len(sorting_knobs):
+                    problems.append(
+                        "doc/pages/operating/choosing-a-module.md: `%s`'s row says \"the %s sorting "
+                        "knobs\"; `parquet_argsort` re-exports %d of them (%s)."
+                        % (module_name, phrase.group(1), len(sorting_knobs),
+                           ", ".join(sorted(sorting_knobs))))
+                want |= sorting_knobs
+                body = body[:phrase.start()] + body[phrase.end():]
+            phrase = re.search(r"the same (\w+) as `(parquet\w*)`", body)
+            if phrase:
+                other = reexports(phrase.group(2))
+                if not other:
+                    problems.append(
+                        "doc/pages/operating/choosing-a-module.md: `%s`'s row refers to `%s`, which "
+                        "re-exports no knob this check can find"
+                        % (module_name, phrase.group(2)))
+                    continue
+                if words.get(phrase.group(1)) != len(other):
+                    problems.append(
+                        "doc/pages/operating/choosing-a-module.md: `%s`'s row says \"the same %s as "
+                        "`%s`\"; that module re-exports %d (%s)."
+                        % (module_name, phrase.group(1), phrase.group(2), len(other),
+                           ", ".join(sorted(other))))
+                want |= other
+                body = body[:phrase.start()] + body[phrase.end():]
+            named = re.findall(r"`([a-z][a-z0-9_]*)`", body)
+            stray = [n for n in named if n not in knobs]
+            if stray:
+                problems.append(
+                    "doc/pages/operating/choosing-a-module.md: `%s`'s settings cell names `%s`, "
+                    "which is not a row parquet_print_settings prints -- either the cell gained a "
+                    "shape this check cannot read, or the knob was renamed. A cell it cannot parse "
+                    "is a cell nobody is checking, so this fails rather than skipping."
+                    % (module_name, "`, `".join(stray)))
+                continue
+            want |= set(named)
+        for knob in sorted(want - have):
+            problems.append(
+                "doc/pages/operating/choosing-a-module.md: the table says `%s` re-exports `%s`, but "
+                "src/%s.f90 has no `public :: parquet_set_%s`/`parquet_get_%s` pair."
+                % (module_name, knob, module_name, knob, knob))
+        for knob in sorted(have - want):
+            problems.append(
+                "doc/pages/operating/choosing-a-module.md: src/%s.f90 re-exports `%s`, which the "
+                "table's row for that module does not mention -- a reader taking that import "
+                "cannot discover a knob the module offers." % (module_name, knob))
+    if rows < 2:
+        return problems + [
+            "doc/pages/operating/choosing-a-module.md: parsed %d row(s) from the \"Settings it "
+            "re-exports\" table -- its shape changed and this check has gone blind" % rows]
     return problems
 
 
@@ -6705,6 +6983,9 @@ CHECKS = (
     ("CONTRIBUTING.md names each tool once, in its index", check_contributing_is_an_index),
     ("no statement exceeds 255 continuation lines", check_statement_continuation_lines),
     ("the affinity clamp's area names are documented", check_affinity_areas_documented),
+    ("parquet_set_threads' fan-out count is documented", check_set_threads_fanout_documented),
+    ("the entry-module settings table matches the re-exports",
+     check_module_settings_reexports_documented),
     ("every %view call site declares its column target",
      check_view_call_sites_declare_target),
     ("every %join specific forwards every argument it takes",

@@ -224,6 +224,10 @@ with itself:
   chosen build `radius=`, and the rebuild that a bulk query can trigger silently.
 - **[HEALPix](../utilities/healpix.html)** — the bulk forms, the team a bulk call opens and why it is
   derived from the work rather than from the machine.
+- **[Key-to-index lookup](../utilities/index-maps.html)** — what each backend costs, the team a build
+  or a bulk lookup opens, and why a composite lookup costs about what a scalar one does.
+- **[Random numbers](../utilities/random.html)** — why no scalar figure is quoted against the
+  intrinsic, and what reproducibility under a changed schedule is bought with.
 - **[String columns](../types/string-columns.html)** and
   **[Settings](settings.html#threads-inside-one-string-column)** — one column's bulk rebuilds, which
   are the one thread cap that lowers a deliberately conservative default rather than the machine's.

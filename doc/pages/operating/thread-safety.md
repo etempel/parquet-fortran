@@ -21,6 +21,11 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
   the type is finalizable (so not a `private()` copy) and has allocatable components (so not a
   block-local under ifx). See [Growing one table from several
   threads](#growing-one-table-from-several-threads) for the ownership test it shares.
+- A `parquet_grouping` only ever **reads**: `%agg`, `%apply`, `%gather` and `%count` read the
+  table, and the staleness check reads its generation counter — so a grouping over resident
+  columns may be queried from many threads. The procedure you hand `%apply` must not be the first
+  to touch a column; see [Grouping rows and aggregating per
+  group](../tables/table-group.html).
 - A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
   See [Logging from several threads](#logging-from-several-threads) below.
 - The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, index maps, TOML — have
@@ -46,6 +51,8 @@ reallocating the storage you are reading. Everything else is arranged around not
 | Metadata: `%nrows`, `%ncols`, `%column_names`, `%kind`, `%width`, `%unit`, `%residency`, `%has_nulls` | **yes** | — |
 | Query a `parquet_table_index` you already built: `%find`, `%find_all`, `%find_many`, `%count` | **yes**, unrestricted — lock-free, like the engine's own lookups; `%find_many` also threads internally | — |
 | `%build_index` on a table whose key column is resident | **yes** — a read; each thread builds its own index object | — |
+| `%group_by`, and a grouping's `%agg`, `%apply`, `%gather` and `%count`, over **resident** columns | **yes** — reads; the staleness check only reads the table's generation counter | — |
+| Any of those reaching a column **not** yet resident, on a table another thread opened | no | hard error naming `%prefetch`, as any other first touch does |
 | First read of a column not yet resident, on a table **another** thread opened | no | hard error; `%prefetch` before the region |
 | First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
 | `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |
@@ -77,10 +84,11 @@ Three things the library cannot see, which stay your responsibility:
 **Appended row order is not deterministic** — it depends on which thread got the lock first. Sort in
 memory afterwards (`%sort_by`) if you need a reproducible result.
 
-**Three groups of operations thread internally, and all of them stand down inside your own parallel
+**Four groups of operations thread internally, and all of them stand down inside your own parallel
 region.** `%prefetch`/`%materialize_all` read several columns at once, each on its own reader;
-`%sort_by`, `%filter_rows`, `%top_n`, `%delete_rows` and `%truncate` rewrite several columns at
-once; and `%clone` copies several columns at once. You do not ask for any of them and cannot get
+`%sort_by`, `%filter_rows`, `%top_n`, `%delete_rows`, `%truncate` and `%join` rewrite several
+columns at once; `%clone` copies several columns at once; and `%print_stat` scans several columns
+at once for its statistics pass. You do not ask for any of them and cannot get
 them wrong — but four consequences are worth knowing:
 
 - **A small table is rewritten serially, and that is not a failure.** The rewrite group has a work

@@ -80,16 +80,15 @@ container, the sorting engine and the statistics tier (`parquet_grouping%agg` is
 vocabulary called once per group), which between them are almost the whole library; what it
 leaves behind is the two facades themselves and the utility tiers nothing in the table layer
 reaches — `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_logging`,
-`parquet_utils` and `parquet_version`.
+`parquet_toml` and `parquet_version`.
 
 **`parquet_io` is the one real saving on the Arrow side** — see the table above for the two
-counts: it drops the entire table layer, the outer facade, and every utility tier — the six
-modules listed just above, and the statistics tier with them. Reach for it when your program opens files, moves columns in and out,
+counts: it drops the entire table layer, the outer facade, the statistics tier and the six
+utility modules listed just above. Reach for it when your program opens files, moves columns in and out,
 and never builds a `parquet_table`.
 
-It does **not** drop `parquet_random`, and the three files it keeps that belong to none of the
-reader/writer machinery are that generator's: `parquet_open_reader(..., sample_fraction=)` picks its
-rows with this library's own generator, so the reader genuinely depends on it. The three are a
+It does **not** drop `parquet_random`: `parquet_open_reader(..., sample_fraction=)` picks its rows
+with this library's own generator, so the reader genuinely depends on it. Those three files are a
 closed set — `parquet_random` and the two leaves it reads, `parquet_expkey` and `parquet_ziggurat`,
 which import nothing but `iso_fortran_env` — so the graph cannot grow further through them.
 
@@ -109,9 +108,9 @@ eight submodules come as a set.
 
 That is also why the argsort tier exists at all. `parquet_sampling` needs exactly one sorting
 specific — `pf_argsort` over a `real64` array, for `pf_weighted_permutation` — and taking it from
-`parquet_sorting` cost the whole sorting graph, Arrow included. Splitting the intrinsic-type
-`pf_argsort` and its engine into `parquet_argsort` took `use parquet_sampling` from 24 files to 8
-and off the C++ boundary entirely.
+`parquet_sorting` would cost that import the whole 22-file sorting graph for one procedure. The
+intrinsic-type `pf_argsort` and its engine live in `parquet_argsort` instead, which is what keeps
+`use parquet_sampling` at 8 files.
 
 The practical consequence for your own code: **one added `use` line can multiply what a consumer
 compiles.** If you contribute to this library, `tools/check_module_footprints.sh` is what notices.

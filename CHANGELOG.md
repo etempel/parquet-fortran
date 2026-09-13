@@ -30,18 +30,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `1 - pf_norm_cdf(z)`, which has no significant digits left past about `z = 8`. Nothing in that
   family validates or aborts.
 
-  On top of it, four `parquet_stats` generics. `pf_normal_scores(values, s [, ...])` replaces each
+  On top of it, four `parquet_stats` generics. `pf_normal_scores(values, s, [...])` replaces each
   value by the normal quantile its midrank marks — rankits, the van der Waerden transform, the
   x-axis of a Q-Q plot — with `s` in the caller's original order, ties sharing one score, ranks
   taken over the surviving elements, and `method=` choosing the plotting position: `"blom"` (the
   default), `"weibull"`, `"tukey"`, `"hazen"`, `"cunnane"` or `"filliben"`, the median rank.
-  `pf_probit_fit(values, loc, sigma [, corr, ...])` is the least-squares line of the sorted
+  `pf_probit_fit(values, loc, sigma, [corr], [...])` is the least-squares line of the sorted
   survivors on the normal scores of their plotting positions: `loc` is the intercept, which is the
   mean of the survivors, `sigma` is the slope, and the optional `corr` is the probability-plot
   correlation coefficient; `method="filliben"` reproduces `scipy.stats.probplot`.
-  `pf_probit_scale(values, sigma [, prob, ...])` is `(Q(1-prob) - Q(prob)) / (2 Phi^-1(1-prob))`,
+  `pf_probit_scale(values, sigma, [prob], [...])` is `(Q(1-prob) - Q(prob)) / (2 Phi^-1(1-prob))`,
   the scale a symmetric quantile pair implies for Gaussian data, `prob = 0.25` by default and
-  outside `(0, 0.5)` an abort. `pf_probit_mean(values, m [, ...])` averages probabilities on the
+  outside `(0, 0.5)` an abort. `pf_probit_mean(values, m, [...])` averages probabilities on the
   probit scale and maps the result back: a value outside `[0, 1]` gives a quiet NaN with
   `ok = .false.`, a `0` in the population gives exactly `0` and a `1` gives exactly `1`, and a
   population holding both gives NaN.
@@ -72,7 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   does. `bench/benchmark_spatial.sh` gains `MODE=los`, with `WALK=`, `SPREAD=` and
   `CELLS_PER_POINT=` arms. See
   [Cylinders along the line of sight](doc/pages/utilities/spatial.md#cylinders-along-the-line-of-sight).
-- **Truncated normal draws: `rng%normal_truncated(lo, hi, x [, mu, sigma])`.** Draws a normal
+- **Truncated normal draws: `rng%normal_truncated(lo, hi, x, [mu], [sigma])`.** Draws a normal
   restricted to an interval, with the bounds, the location, the scale and the result all on one
   scale, and the result guaranteed inside `[lo, hi]`. One-sided truncation is a `huge()` or
   infinite bound. The draw costs between one and about two proposals for any interval, however far
@@ -122,7 +122,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   convert between the two units, and `pf_cross_product` is the cross product of two 3-vectors. See
   [Text and path helpers](doc/pages/utilities/utils.md). The module now imports `ieee_arithmetic`
   alongside `iso_fortran_env`; both are intrinsic, so it remains a leaf compiling one file.
-- **`pf_log_now(date, time [, millis])`** returns the current local date and time as
+- **`pf_log_now(date, time, [millis])`** returns the current local date and time as
   `YYYY-MM-DD` and `HH:MM:SS`, in the shape the `{date}` and `{time}` record placeholders render,
   for a program stamping its own output rather than a log record. See
   [Logging](doc/pages/utilities/logging.md#the-wall-clock-for-your-own-output).
@@ -328,6 +328,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`pf_mad(scale="normal")` and `pf_sigma_clipped_stats(stdfunc="mad_std")` scale by the
   correctly rounded `1/Phi^-1(3/4)`.** The constant was `1.482602218505602`, one ulp above the
   nearest double; it is now `1.4826022185056018`. Results move by at most 1.5e-16 relative.
+- **`parquet_table%cast` refuses a predefined column without `force=.true.`** —
+  `call t%cast(name, to_kind, [exact], [found], [force])`. A column a generated table type's
+  `%init` bound to its schema is refused in place; `%copy_column` and a cast to the kind the column
+  already holds are not. See
+  [Changing a column's type](doc/pages/tables/table.md#changing-a-columns-type).
 - **`parquet_table%append`** treats a column the appended table has but has not read as absent on
   both forms (null-filled, as `%append(row)` already did; the table form aborted), and drops an
   appended table's `parquet_row_index` when this table has none instead of refusing it.

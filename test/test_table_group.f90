@@ -109,6 +109,8 @@ contains
                 test_grouping_is_a_read), &
             new_unittest("is_current: a value write keeps it, a row change stales it", &
                 test_stale_and_current), &
+            new_unittest("the five questions about the object itself answer on a STALE grouping", &
+                test_stale_object_questions_answer), &
             new_unittest("a string key partitions exactly as the integer codes of the same rows", &
                 test_string_key_equals_integer_codes), &
             new_unittest("an empty table gives zero groups and allocated outputs", test_empty_table), &
@@ -718,6 +720,66 @@ contains
         call check(error, associated(p) .and. p(1) == 1.0_real64 .and. p(9) == 9.0_real64, &
             "a %col pointer taken before the grouping still points at the same values")
     end subroutine test_grouping_is_a_read
+
+    !> **A claimed ABSENCE**: `doc/pages/tables/table-group.md` ("When a grouping goes stale") says
+    !! the five questions about the object itself -- `%ngroups`, `%nrows`, `%max_size`, `%nkeys`
+    !! and `%key_names` -- "answer without the check", i.e. on a grouping the table has outrun.
+    !! Nothing pinned that: `test_rebuild_clear_and_threads` covers four of the five after a
+    !! `%clear()`, which is the NEVER-BUILT half, and `%max_size` was in no test at all. Adding a
+    !! `grp_resolve` call to any of the five would turn a documented non-abort into an abort and
+    !! break no other test in the suite.
+    !!
+    !! The values asserted are the ones the grouping held BEFORE the table changed, which is the
+    !! second half of the claim: a stale grouping answers about the partition it built, not about
+    !! the table as it now stands. Reading them first, on the current grouping, is the negative
+    !! control -- without it the test would pass against five queries that all returned zero.
+    subroutine test_stale_object_questions_answer(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        character(len=:), allocatable :: names0(:), names1(:)
+        integer(int64) :: ng0, nr0, mx0, nk0
+        logical :: keep(9)
+        !
+        call build_basic(t)                       ! keys 7,3,7,3,9,7,3,9,7 -- groups of 4, 3 and 2
+        call t%group_by(["key"], grp)
+        ! The negative control: the same five on a CURRENT grouping, with their values named.
+        ng0 = grp%ngroups()
+        nr0 = grp%nrows()
+        mx0 = grp%max_size()
+        nk0 = grp%nkeys()
+        call grp%key_names(names0)
+        call check(error, ng0 == 3_int64 .and. nr0 == 9_int64 .and. mx0 == 4_int64 .and. nk0 == 1_int64, &
+            "the five answer on a current grouping: 3 groups, 9 rows, largest 4, one key")
+        if (allocated(error)) return
+        call check(error, size(names0) == 1 .and. trim(names0(1)) == "key", "and name the key column")
+        if (allocated(error)) return
+        !
+        ! Stale it the way test_stale_and_current does: a row-structural change.
+        keep = .true.
+        keep(2) = .false.
+        call t%filter_rows(keep)
+        call check(error, .not. grp%is_current(), "the grouping is stale")
+        if (allocated(error)) return
+        !
+        ! The claim: all five still answer, with the values they held. No abort, no rebuild.
+        call check(error, grp%ngroups() == ng0, "%ngroups answers on a stale grouping")
+        if (allocated(error)) return
+        call check(error, grp%nrows() == nr0, "%nrows answers on a stale grouping")
+        if (allocated(error)) return
+        call check(error, grp%max_size() == mx0, "%max_size answers on a stale grouping")
+        if (allocated(error)) return
+        call check(error, grp%nkeys() == nk0, "%nkeys answers on a stale grouping")
+        if (allocated(error)) return
+        call grp%key_names(names1)
+        call check(error, size(names1) == size(names0), "%key_names answers on a stale grouping")
+        if (allocated(error)) return
+        call check(error, trim(names1(1)) == trim(names0(1)), "and names the same key column")
+        if (allocated(error)) return
+        ! The table really did move underneath it: the grouping's 9 rows are no longer the table's.
+        call check(error, t%nrows() == 8_int64 .and. grp%nrows() == 9_int64, &
+            "a stale grouping answers about the partition it built, not about the table now")
+    end subroutine test_stale_object_questions_answer
 
     !> The staleness stamp: a value write (`%set_element`, `%fillna`) leaves the grouping usable
     !! and answering; a row-structural change stales it -- `%is_current()` answers .false., and

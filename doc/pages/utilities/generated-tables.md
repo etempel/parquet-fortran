@@ -235,13 +235,12 @@ which is the whole reason it takes a `force=` at all, since a projection drops a
 naming it rather than by naming it. `%rename_column` refuses one outright, with no override, because
 an accessor is bound to the name.
 
-**It guards a change of *kind* too, on the two verbs that can make one.** An accessor's type is
-fixed when the module is generated, so `%parse_column` and `%format_column` refuse a predefined
-column **in place** without `force=.true.` — pass `to_name=` to write the result into a new column
-beside it, which is never refused. **`%cast` is the exception and carries no such guard**: it
-converts a predefined column in place, after which the accessor aborts on its next call with a kind
-mismatch rather than returning anything wrong — a clean failure, but at a site other than the one
-that caused it.
+**It guards a change of *kind* too, on all three verbs that can make one.** An accessor's type is
+fixed when the module is generated, so `%parse_column`, `%format_column` and `%cast` refuse a
+predefined column **in place** without `force=.true.`. Each names the way to have the converted
+values without touching the column: `to_name=` for the first two, `%copy_column` for `%cast`, and
+neither is ever refused. A `%cast` to the kind the column already holds changes nothing and is
+allowed — it is the same no-op it is anywhere else.
 
 A write schema does not help here: restricting the write to omit one column omits every column you
 did not declare, and `%init` then fails on the first *missing* one instead.

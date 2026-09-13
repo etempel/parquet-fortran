@@ -934,6 +934,15 @@ columns included — and with one, converts by `%cast`'s rules. It differs in on
 `exact` defaults to `.true.` here, because a copy is usually taken in order to keep something, so a
 value that would not survive the round trip is refused rather than truncated.
 
+**A PREDEFINED column — one a generated table type's `%init` bound to a schema — is refused
+without `force=.true.`**: that type's accessor has the column's kind compiled into it, so casting
+the column would leave the accessor aborting on its next call, at a site other than the one that
+caused it. `%copy_column` is never refused, since it leaves the predefined column exactly as it
+was, and a cast to the kind the column already holds is the same no-op it is anywhere else. The
+call form is `%cast(name, to_kind, [exact], [found], [force])`; the same guard is on
+`%parse_column`, `%format_column`, `%drop_column` and `%keep_columns` — see [Generated table
+types](../utilities/generated-tables.html#writing-one-out).
+
 ### Text to numbers and back: `%parse_column` and `%format_column`
 
 `%cast` refuses string ↔ numeric on purpose, and that is not the same as it being unavailable.
@@ -999,7 +1008,8 @@ it: converting the column would leave the accessor aborting on its next call, at
 the one that caused it. `to_name=` is never refused, since it leaves the predefined column exactly
 as it was, and it is usually what you want here. The guard is `%drop_column`'s and `%keep_columns`'
 one step further along — see [Generated table
-types](../utilities/generated-tables.html#writing-one-out). `%cast` carries no such guard.
+types](../utilities/generated-tables.html#writing-one-out). `%cast` carries the same guard, with
+`%copy_column` in `to_name=`'s place.
 
 ## Seeing what a table holds
 

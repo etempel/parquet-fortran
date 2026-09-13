@@ -1,5 +1,5 @@
 ---
-title: Text and path helpers with parquet_utils
+title: Numeric, text and path helpers with parquet_utils
 ---
 
 `parquet_utils` is a small module of things a program built on this library keeps needing and

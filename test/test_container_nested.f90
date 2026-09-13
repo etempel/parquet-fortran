@@ -50,6 +50,8 @@ contains
         testsuite = [ &
             new_unittest("a list may adopt a struct payload", test_list_of_struct_build), &
             new_unittest("nested on a null, empty and non-container row", test_nested_empty_cases), &
+            new_unittest("a nested range held across a set_null names the wrong elements", &
+                test_nested_range_stales_on_set_null), &
             new_unittest("a list may adopt a list payload", test_list_of_list_build), &
             new_unittest("a map may adopt a struct value", test_map_of_struct_build), &
             new_unittest("a struct may adopt a list field", test_struct_of_list_build), &
@@ -118,6 +120,105 @@ contains
             call r%get_field("id", value)
         end select
     end subroutine element_id
+
+    !> The half-open range `%nested` reports for outer row `i`, through the public route.
+    subroutine row_range(lc, i, lo, hi)
+        type(parquet_list_column), intent(in), target :: lc  !! the outer list.
+        integer(int64), intent(in) :: i                      !! outer row index.
+        integer(int64), intent(out) :: lo, hi                !! the inner rows belonging to it.
+        class(parquet_container_column), pointer :: inner
+        type(parquet_list_row) :: h
+        h = lc%view(i)
+        call h%nested(inner, lo, hi)
+    end subroutine row_range
+
+    !> The `id` field of ABSOLUTE inner row `k` of the flattened payload. `via` names an outer row
+    !! to take the payload pointer from; every row of a genuinely nested column hands back the
+    !! same container, so the choice only has to avoid a row whose payload kind is not a struct.
+    subroutine inner_id(lc, via, k, value)
+        type(parquet_list_column), intent(in), target :: lc  !! the outer list.
+        integer(int64), intent(in) :: via                    !! any outer row, for the pointer.
+        integer(int64), intent(in) :: k                      !! absolute inner row index.
+        integer(int32), intent(out) :: value                 !! the field value, or -1.
+        class(parquet_container_column), pointer :: inner
+        type(parquet_list_row) :: h
+        type(parquet_struct_row) :: r
+        integer(int64) :: lo, hi
+        value = -1_int32
+        h = lc%view(via)
+        call h%nested(inner, lo, hi)
+        if (.not. associated(inner)) return
+        select type (inner)
+        type is (parquet_struct_column)
+            r = inner%view(k)
+            call r%get_field("id", value)
+        end select
+    end subroutine inner_id
+
+    !> **A `%nested` range does not survive a `%set_null` on an EARLIER row**, which
+    !! `doc/pages/types/list-columns.md` states and nothing pinned until this test.
+    !!
+    !! `%set_null(i)` drops row `i`'s payload elements and shifts every later offset down, so a
+    !! `lo`/`hi` pair taken before the call names different inner rows afterwards -- and names them
+    !! **silently and plausibly**, which is the whole hazard: the stale pair is still inside the
+    !! payload, so nothing is out of bounds and nothing aborts. The fixture is sized for exactly
+    !! that: rows of 1, 2 and 2 elements, so nulling row 1 moves row 3's range down by ONE and the
+    !! held lower bound lands on row 3's SECOND element rather than off the end.
+    !!
+    !! The negative control is the other direction, and it is what stops this passing for the
+    !! wrong reason: a `%set_null` on a LATER row must leave an earlier row's held range exactly as
+    !! it was. Without it a `%nested` that returned a fresh wrong answer every call, or a
+    !! `%set_null` that rebuilt every offset, would satisfy the assertions above.
+    subroutine test_nested_range_stales_on_set_null(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_struct_column) :: sc
+        type(parquet_list_column) :: lc
+        type(parquet_column) :: pay
+        integer(int64), allocatable :: offs(:)
+        integer(int64) :: lo_held, hi_held, lo_now, hi_now
+        integer(int32) :: v
+        !
+        ! ids 101..105 over three outer rows: row 1 = {101}, row 2 = {102, 103}, row 3 = {104, 105}.
+        call make_struct(5, sc)
+        call wrap(sc, pay)
+        offs = [0_int64, 1_int64, 3_int64, 5_int64]
+        call lc%adopt_rows(offs, pay)
+        call row_range(lc, 3_int64, lo_held, hi_held)
+        call check(error, lo_held == 4_int64 .and. hi_held == 5_int64, "row 3 starts as inner rows 4..5")
+        if (allocated(error)) return
+        call inner_id(lc, 3_int64, lo_held, v)
+        call check(error, v == 104_int32, "and the first of them carries id 104")
+        if (allocated(error)) return
+        !
+        ! Null the FIRST row: one element goes, so every later offset moves down by one.
+        call lc%set_null(1_int64)
+        call check(error, lc%length(3_int64) == 2_int64, "row 3 still holds its two elements")
+        if (allocated(error)) return
+        call row_range(lc, 3_int64, lo_now, hi_now)
+        call check(error, lo_now == 3_int64 .and. hi_now == 4_int64, "but they are now inner rows 3..4")
+        if (allocated(error)) return
+        call check(error, lo_now /= lo_held, "so the range held across the %set_null is stale")
+        if (allocated(error)) return
+        call inner_id(lc, 3_int64, lo_now, v)
+        call check(error, v == 104_int32, "the values are intact -- only their positions moved")
+        if (allocated(error)) return
+        ! The hazard itself, in one assertion: the HELD lower bound is still a legal inner row and
+        ! now reads row 3's second element. A caller reusing the pair gets 105 where it asked for
+        ! 104, with no abort and no diagnostic.
+        call inner_id(lc, 3_int64, lo_held, v)
+        call check(error, v == 105_int32, "and the stale lower bound now reads the NEXT element")
+        if (allocated(error)) return
+        !
+        ! Negative control: nulling a LATER row moves nothing below it.
+        call row_range(lc, 2_int64, lo_held, hi_held)
+        call lc%set_null(3_int64)
+        call row_range(lc, 2_int64, lo_now, hi_now)
+        call check(error, lo_now == lo_held .and. hi_now == hi_held, &
+            "a %set_null on a later row leaves an earlier row's range alone")
+        if (allocated(error)) return
+        call inner_id(lc, 2_int64, lo_now, v)
+        call check(error, v == 102_int32, "and that range still reads the same element")
+    end subroutine test_nested_range_stales_on_set_null
 
     !> What `%nested` reports for the three rows that yield nothing, and how they differ.
     !!

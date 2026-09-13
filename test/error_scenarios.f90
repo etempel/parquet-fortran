@@ -812,6 +812,10 @@ program error_scenarios
         call scenario_format_column_predefined(.false.)
     case ("format_column_predefined_false")
         call scenario_format_column_predefined(.true.)
+    case ("cast_predefined")
+        call scenario_cast_predefined(.false.)
+    case ("cast_predefined_false")
+        call scenario_cast_predefined(.true.)
     case ("convert_control")
         call scenario_convert_control()
     case ("explode_wrong_length")
@@ -10000,6 +10004,22 @@ contains
         end if
         print '(a,i0)', "unexpectedly rendered a predefined column, kind is now ", t%kind("uberid")
     end subroutine scenario_format_column_predefined
+
+    !> `%cast` reaches the same hazard by a third route, and carries the same guard. `spelled_out`
+    !> chooses between an absent `force=` and an explicit `force=.false.`, for the reason given
+    !> above: the two must behave identically, and a guard keyed on `present(force)` would not.
+    subroutine scenario_cast_predefined(spelled_out)
+        logical, intent(in) :: spelled_out
+        type(parquet_table_test) :: t
+
+        call t%init_empty(2_int32)
+        if (spelled_out) then
+            call t%cast("uberid", PK_FLOAT64, force=.false.)
+        else
+            call t%cast("uberid", PK_FLOAT64)
+        end if
+        print '(a,i0)', "unexpectedly cast a predefined column, kind is now ", t%kind("uberid")
+    end subroutine scenario_cast_predefined
 
     !> The negative control for every conversion scenario above: the same fixture, taken through
     !> both verbs, both policies, both `to_name` forms and a `fmt`. Without it a guard that

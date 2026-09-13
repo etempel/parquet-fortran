@@ -179,7 +179,10 @@ as caught). Rules for reading a result:
   (`parquet_print_settings`' rows).
 - A documentation table mirroring a source-owned list is compared against the source in both
   directions (`check_env_table_matches_the_source`); read the table's rows, not the page.
-- A count in prose cannot be checked: avoid writing one where the list is the point; where a count
+- A count in prose is checkable only where the words can be expanded from the source they mirror
+  (`check_set_threads_fanout_documented` spells the number out and derives the names from the
+  setters; `check_module_settings_reexports_documented` expands an English phrase the same way).
+  The general case is a hand count: avoid writing one where the list is the point; where a count
   must exist, have the two places carrying it name each other.
 - A one-off audit regex is untested code: run it against a known instance you did not use to write
   it, and prefer turning the audit into a check. Scan an argument list with a paren counter, never

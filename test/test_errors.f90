@@ -806,6 +806,10 @@ contains
                 test_format_column_predefined_aborts), &
             new_unittest("format_column force=.false. on a predefined column aborts too", &
                 test_format_column_predefined_false_aborts), &
+            new_unittest("cast in place on a predefined column aborts", &
+                test_cast_predefined_aborts), &
+            new_unittest("cast force=.false. on a predefined column aborts too", &
+                test_cast_predefined_false_aborts), &
             new_unittest("parse_column/format_column: every well-formed call runs", &
                 test_convert_control_succeeds), &
             new_unittest("explode with a count list of the wrong length aborts", &
@@ -12462,6 +12466,26 @@ contains
                 "expected to abort, exactly as an absent force= does", &
             required_stderr="format_column: this is a predefined column")
     end subroutine test_format_column_predefined_false_aborts
+
+    !> `%cast` carries the same guard as the two conversion verbs above, and the same pair of
+    !> scenarios for the same reason.
+    subroutine test_cast_predefined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "cast_predefined", expect_abort=.true., &
+            failure_message="%cast on a predefined column without force= was expected to abort", &
+            required_stderr="cast: this is a predefined column")
+    end subroutine test_cast_predefined_aborts
+
+    subroutine test_cast_predefined_false_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "cast_predefined_false", &
+            expect_abort=.true., &
+            failure_message="%cast with force=.false. on a predefined column was expected to " // &
+                "abort, exactly as an absent force= does", &
+            required_stderr="cast: this is a predefined column")
+    end subroutine test_cast_predefined_false_aborts
 
     subroutine test_convert_control_succeeds(error)
         type(error_type), allocatable, intent(out) :: error

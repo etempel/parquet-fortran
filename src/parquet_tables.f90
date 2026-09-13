@@ -7082,12 +7082,21 @@ module parquet_tables
         !!
         !! **This invalidates any pointer previously taken from `%col`** for this column, which
         !! Fortran cannot detect -- take the pointer again afterwards.
-        module subroutine table_cast(self, name, to_kind, exact, found)
+        !!
+        !! **Casting a PREDEFINED column needs `force=.true.`**, the same guard `%parse_column`,
+        !! `%format_column`, `%drop_column` and `%keep_columns` carry and for the same reason: a
+        !! generated table type's accessor has the column's kind compiled into it, so changing
+        !! that kind leaves the accessor aborting on its next call, at a site other than the one
+        !! that caused it. `%copy_column` is never refused -- it leaves the predefined column
+        !! untouched. A cast to the kind the column already has changes nothing and is allowed.
+        module subroutine table_cast(self, name, to_kind, exact, found, force)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the column to convert.
             integer, intent(in) :: to_kind              !! target PK_* kind.
             logical, intent(in), optional :: exact      !! .true. to refuse any precision loss.
             logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+            !> .true. to cast a predefined column anyway; default .false.
+            logical, intent(in), optional :: force
         end subroutine table_cast
     end interface
     !

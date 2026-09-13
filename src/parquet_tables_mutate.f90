@@ -461,7 +461,8 @@ contains
     !
     module procedure table_cast
         integer :: idx
-        logical :: strict, deferred
+        logical :: strict, deferred, forced
+        character(len=:), allocatable :: sfx
         !
         call table_check_not_shared(self, "cast")
         strict = .false.
@@ -480,6 +481,25 @@ contains
             call table_resolve_width(self%cache, table_scope_of(self), idx, .false., "cast")
         end if
         if (self%cache%cols(idx)%declared_kind == to_kind) return
+        ! The same hazard drop_column and rename_column guard above, reached by a third route: a
+        ! generated table type's accessor has this column's kind compiled in, so converting the
+        ! column in place leaves that accessor aborting on its next call -- at a site other than
+        ! the one that caused it, which is the diagnostic problem those two guards exist to
+        ! prevent. Deliberately AFTER the no-op return above: a cast to the kind the column already
+        ! has changes nothing and breaks no accessor. %copy_column is the way to have the converted
+        ! values without touching the predefined column.
+        if (self%cache%cols(idx)%predefined) then
+            forced = .false.
+            if (present(force)) forced = force
+            if (.not. forced) then
+                call table_context_suffix(self%cache, name, sfx)
+                error stop EP // "cast: this is a predefined column, whose generated accessor " // &
+                    "has its kind compiled in, so converting it in place would leave that " // &
+                    "accessor aborting on its next call; use copy_column to write the result " // &
+                    "into a new column beside it, or force=.true. if you really mean to " // &
+                    "convert this one" // sfx
+            end if
+        end if
         call cast_check_pair(self%cache, name, "cast", self%cache%cols(idx)%declared_kind, to_kind)
         !
         ! %cast is deliberately unaware of `user_populated`, in BOTH directions: it never sets it

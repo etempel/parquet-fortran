@@ -328,6 +328,7 @@ something a reader is expected to have.
 | [Risk-257](#risk-257--the-ceiling-an-int32-answer-can-overflow-is-not-always-the-row-count) | The ceiling an `int32` answer can overflow is not always the row count | 4 — covered |
 | [Risk-258](#risk-258--an-int32-bulk-form-is-a-second-route-through-the-same-walk) | An `int32` bulk form is a second route through the same walk | 4 — covered |
 | [Risk-259](#risk-259--two-loops-written-to-mirror-each-other-do-not-round-alike-and-pf_covx-x--pf_variancex-is-exact) | Two loops written to mirror each other do not round alike | 4 — covered |
+| [Risk-260](#risk-260--a-nested-range-taken-from-a-container-payload-goes-stale-on-a-set_null-of-an-earlier-row) | A `%nested` range goes stale on a `%set_null` of an EARLIER row | 4 — covered |
 
 ---
 
@@ -9765,3 +9766,32 @@ leaving a partial last block at every offset — unweighted and under both weigh
 `.false.` fails it at the first population. `test_cov_weight_type` and the identity assertions in
 `test_pairwise_columns_intersect_their_masks` and `test_pairwise_infinities_both_signs` remain, and
 are exactly centred, which is why they did not see it.
+
+### Risk-260 — A `%nested` range taken from a container payload goes stale on a `%set_null` of an earlier row
+
+`parquet_list_row%nested(inner, lo, hi)` hands back a borrowed pointer to the flattened payload
+container **and a half-open range of its rows**, both read out of `offsets` at the moment of the
+call. `%set_null(i)` on the outer list removes row `i`'s payload elements and shifts every later
+offset down (`drop_row_elements`, `src/parquet_list.f90`) — which the format requires, since Arrow
+refuses to write a null list slot that spans elements.
+
+**So a `lo`/`hi` pair held across a `%set_null` of an EARLIER row names different inner rows, and
+names them silently.** The pointer stays valid, the indices stay inside the payload, nothing
+aborts and nothing is out of bounds: the caller reads a neighbouring element's values and gets a
+plausible wrong answer. The same holds for `parquet_map_row%nested`, which reads `lo`/`hi` from the
+offsets the same way (`src/parquet_map.f90`).
+
+**What a future change must keep.** Either the shift (it is not optional — the alternative is a
+column that can be built and never written), or, if a future version caches the range on the
+handle, an invalidation stamp the handle checks. What it forbids is treating the pair as stable
+across any mutation of the outer column, and documenting it as such: the guide says "Re-take the
+handle after a `%set_null`" (`doc/pages/types/list-columns.md`, `doc/pages/types/map-columns.md`),
+and that sentence is the contract.
+
+**Covered by** `test_nested_range_stales_on_set_null` (`test/test_container_nested.f90`), which
+holds a range over a `list<struct<id:int32>>`, nulls an earlier row, and asserts three things: the
+re-taken range has moved, the values are intact at the new range, and the held lower bound now
+reads the NEXT element — the wrong-but-plausible answer itself. Its negative control nulls a LATER
+row and asserts the held range is unchanged. Confirmed by mutation: making `%set_null` keep the
+row's elements — the behaviour the `### Changed` entry replaced — fails it on the moved-range
+assertion.

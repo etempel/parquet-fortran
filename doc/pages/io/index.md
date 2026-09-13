@@ -21,8 +21,8 @@ full under [Important behavior](../../index.html#important-behavior) in the READ
   printing a reader-activity summary on close, chunked reads, and what to expect from files
   written by pandas.
 - [Filtering, sorting and sampling rows](filter-sort-sample.html) — `filter=`, `sort_by=` and
-  `sample_fraction=`: the rule grammar, three-valued Null logic, row-group pruning, and how the
-  three compose.
+  `sample_fraction=`: the rule grammar — comparisons, membership in a bound set, substring matching
+  and the finiteness tests — three-valued Null logic, row-group pruning, and how the three compose.
 - [Writing parquet files from your Fortran code](writing.html) — open a writer, write columns,
   declare the file's contents with a MAML schema and save that schema beside the output, writing a
   large scalar string column, writing a list, map or struct column, writer options and compression,

@@ -80,7 +80,9 @@ contains
                 test_round_trip_keeps_resolution), &
             new_unittest("both verbs handle a column with no rows at all", test_convert_zero_rows), &
             new_unittest("to_name= and force= both convert a predefined column; bare does not", &
-                test_convert_predefined_control) &
+                test_convert_predefined_control), &
+            new_unittest("copy_column, force= and a no-op cast all reach a predefined column", &
+                test_cast_predefined_control) &
             ]
     end subroutine collect_tests_table_convert
 
@@ -766,6 +768,37 @@ contains
         call t%parse_column("plain", PK_INT64)
         call check(error, t%kind("plain") == PK_INT64, "a non-predefined column converts with no force=")
     end subroutine test_convert_predefined_control
+
+    !> The same negative control for `%cast`, which reaches the predefined-column hazard by a
+    !> third route and carries the same guard. Four things must still work, and a guard that
+    !> refused every cast on a generated table would pass the two `cast_predefined*` scenarios
+    !> while breaking all four: `%copy_column` (the alternative the message names), `force=.true.`,
+    !> a cast to the kind the column ALREADY has (a documented no-op, so no accessor can break),
+    !> and a cast of a column the table added itself.
+    subroutine test_cast_predefined_control(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        type(parquet_table_test) :: t
+        !
+        call t%init_empty(2_int32)
+        ! %copy_column writes the converted values beside the predefined column, untouched.
+        call t%copy_column("uberid", "uberid_f", PK_FLOAT64)
+        call check(error, t%kind("uberid") == PK_INT64, "copy_column leaves the predefined column's kind alone")
+        if (allocated(error)) return
+        call check(error, t%kind("uberid_f") == PK_FLOAT64, "and the new column holds the converted kind")
+        if (allocated(error)) return
+        ! A cast to the kind it already has changes nothing, so it is allowed without force=.
+        call t%cast("ra", PK_FLOAT64)
+        call check(error, t%kind("ra") == PK_FLOAT64, "a no-op cast of a predefined column is not refused")
+        if (allocated(error)) return
+        ! force= casts the predefined column itself.
+        call t%cast("uberid", PK_FLOAT64, force=.true.)
+        call check(error, t%kind("uberid") == PK_FLOAT64, "force=.true. casts a predefined column in place")
+        if (allocated(error)) return
+        ! A column this table added itself is not predefined, so the guard has nothing to say.
+        call t%add_column("plain", [1_int32, 2_int32])
+        call t%cast("plain", PK_INT64)
+        call check(error, t%kind("plain") == PK_INT64, "a non-predefined column casts with no force=")
+    end subroutine test_cast_predefined_control
 
     ! ---- shared plumbing --------------------------------------------------------------------------
 

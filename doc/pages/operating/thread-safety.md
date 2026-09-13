@@ -366,11 +366,14 @@ said about it.
   payload, so a write can move the whole thing — the same rule the table above states for a string
   column, and it applies to a bare `parquet_string_column` too. Reading a column nobody is writing
   is unrestricted, and its bulk rebuilds thread internally.
-- **`pf_index_map`/`pf_index_pool`: mutations serialise, lookups do not.** Any number of threads
-  may `%get`, `%contains` or `%get_many` one map at once, taking no lock; a `%get_many` over a
-  large key array also threads internally, and stands down to serial inside your own parallel
-  region, like the sorts. Every `%insert`/`%remove`/`%get_or_add` is serialised by the library on
-  a single lock per type — so several threads streaming keys through one map's `%get_or_add` is a
+- **`pf_index_map`/`pf_index_pool`: mutations serialise, and a map's lookups do not.** Any number
+  of threads may `%get`, `%contains` or `%get_many` one map at once, taking no lock; a `%get_many`
+  over a large key array also threads internally, and stands down to serial inside your own
+  parallel region, like the sorts. **A pool is the exception to the second half**: every public
+  entry of `pf_index_pool` takes its lock, the queries included, because `%is_used` and the
+  counters read what a concurrent mutation is writing — so a pool query in a hot loop is not the
+  free thing a map lookup is. Every `%insert`/`%remove`/`%get_or_add` is serialised by the library
+  on a single lock per type — so several threads streaming keys through one map's `%get_or_add` is a
   supported pattern, and each thread's returned index is unique and stable — and a `%build` takes
   that lock only to swap its finished result in, so builds of different maps on different threads
   run side by side. A `%build` and a `%get_or_add_many` over a large enough key array each open a

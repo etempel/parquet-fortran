@@ -18,8 +18,8 @@ arrays and this library's own column types, statistical reductions over those sa
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
 fast key-to-index lookup and a recycling allocator for index values,
-leveled logging for your own program, TOML configuration files, small text and path helpers, and
-the two generators meant to be copied into your own project.
+leveled logging for your own program, TOML configuration files, small numeric, text and path
+helpers, and the two generators meant to be copied into your own project.
 
 - [Sorting, ranking and selection](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
@@ -29,16 +29,21 @@ the two generators meant to be copied into your own project.
   threading does and does not change. Also `parquet_argsort`, the smaller import for `pf_argsort`
   over the intrinsic types alone.
 - [Array statistics with the `pf_` reduction family](statistics.html) — reductions over plain
-  Fortran arrays: what counts as the population (a null, a NaN and a zero weight all leave it, in
-  that order), what aborts and what quietly returns nothing, and the fixed optional-argument
-  order every procedure in the family shares.
+  Fortran arrays: counts and moments, order statistics and quantiles, the median absolute deviation
+  and the mode, two-sample covariance and correlation, the normal-probability family (rankits, the
+  probit mean, the straight-line fit), the sigma clip, the running folds and bins, and `pf_stats`,
+  which answers many of them off one pass. Then the rules they all share: what counts as the
+  population (a null, a NaN and a zero weight all leave it, in that order), what aborts and what
+  quietly returns nothing, and the fixed optional-argument order every procedure in the family
+  shares.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;
-  `pf_random_stream` for when you cannot say up front how many you need; four distributions
-  (exponential, normal, Gamma, Poisson); then permutations, subsets and resampling, and weighted
-  draws without replacement. Those last live in `parquet_sampling`, the sibling module for drawing
-  from a *population* rather than drawing a number.
+  `pf_random_stream` for when you cannot say up front how many you need; five distributions
+  (exponential, normal, normal truncated to an interval, Gamma, Poisson); then permutations,
+  subsets and resampling, and weighted draws without replacement. Those last live in
+  `parquet_sampling`, the sibling module for drawing from a *population* rather than drawing a
+  number.
 - [Spatial neighbour search with `pf_spatial_index`](spatial.html) — a uniform-grid index over
   plain coordinate arrays: ball and annulus search into a buffer you own, the self-join as CSR or
   as an edge list, the `k` nearest neighbours, segment, cylinder and cone shapes around an axis,
@@ -53,13 +58,14 @@ the two generators meant to be copied into your own project.
   program running under `-ffpe-trap` needs no guard around a disc query.
 - [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key, a tuple of them when no one column
-  is unique, or a string. Three storage backends behind one API — an array indexed by the key, an open-addressing
-  hash table, and sorted keys plus a binary search — the first two chosen from the keys themselves,
-  the third opt-in. `pf_index_multimap` is the same over a key that repeats: every row holding it,
-  as a range, and every match for a whole probe array at once as a CSR pair. Then `pf_index_pool`,
-  which hands out and recycles unique index values so a program managing slots in its own arrays
-  need not track which are free. All three are safe to mutate from several threads at once, and
-  the lookups are lock-free.
+  is unique, or a string. Three storage backends behind one API — an array indexed by the key, an
+  open-addressing hash table, and sorted keys plus a binary search — the first two chosen from the
+  keys themselves, the third opt-in. `pf_index_multimap` is the same over a key that repeats: every
+  row holding it, as a range, and every match for a whole probe array at once as a CSR pair. Then
+  `pf_index_pool`, which hands out and recycles unique index values so a program managing slots in
+  its own arrays need not track which are free. All three are safe to mutate from several threads
+  at once; a map's and a multimap's lookups take no lock at all, while a pool guards its queries as
+  well as its mutations.
 - [Logging with `parquet_logging`](logging.html) — leveled logging for your own program:
   several destinations at once each with its own threshold and layout, ISO timestamps, colour,
   a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered
@@ -71,9 +77,11 @@ the two generators meant to be copied into your own project.
   including string lists, diagnostics that point at the offending line, and a report for every key
   or section your program never read. Safe to call from inside an OpenMP parallel region, and it
   writes the effective configuration back out.
-- [Text and path helpers with `parquet_utils`](utils.html) — ASCII case folding, turning a value
-  into text with a minimum width or a format of your choosing and strictly reading one back, and
-  joining and taking apart POSIX paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,
+- [Numeric, text and path helpers with `parquet_utils`](utils.html) — division that does not raise
+  a flag, the standard normal distribution and its quantile function, angle wrapping and
+  conversion, the cross product, ASCII case folding, turning a value into text with a minimum width
+  or a format of your choosing and strictly reading one back, and joining and taking apart POSIX
+  paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,
   aborts or prints, and every result comes back allocated.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one

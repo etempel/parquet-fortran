@@ -813,6 +813,8 @@ scenarios=(
     "parse_column_predefined:1"
     "format_column_predefined:1"
     "format_column_predefined_false:1"
+    "cast_predefined:1"
+    "cast_predefined_false:1"
     "convert_control:0"
     "explode_wrong_length:1"
     "explode_negative_count:1"

@@ -17,8 +17,8 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the list/struct/map container columns, the date/time/timestamp types, sorting,
 array statistics, random numbers and sampling, spatial neighbour search, key-to-index lookup,
-sphere pixelisation, logging for your own program, TOML configuration files, text and path
-helpers, and the process-global settings. Every page below assumes that single import.
+sphere pixelisation, logging for your own program, TOML configuration files, numeric, text and
+path helpers, and the process-global settings. Every page below assumes that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
@@ -45,19 +45,20 @@ point in the library.
 
 - [Reading and writing files](io/index.html) — read columns into arrays, write arrays out, and
   choose which rows a read returns and in what order (filter, sort, random sample).
-- [Data types](types/index.html) — what a column can hold: the supported types, date/time/timestamp
-  elements, compact string columns, and the list, struct and map container columns.
+- [Data types](types/index.html) — what a column can hold: the supported types, the type-erased
+  `parquet_column` storage they are kept in, date/time/timestamp elements, compact string columns,
+  and the list, struct and map container columns.
 - [Schemas, metadata and quality control](schema/index.html) — declare a file's contents in MAML
   or in code, with qc bounds; and declare how a file is *read* — which columns are renamed, which
   rows are kept and in what order they come back. Ends on two worked examples.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
   file as one object, columns by name as ordinary arrays or zero-copy pointers, read only when
-  touched — or built in memory and written out; then changed in place, and joined against another
-  table on one or more key columns.
+  touched — or built in memory and written out; then changed in place, joined against another table
+  on one or more key columns, and grouped by key columns for one answer per group.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
   statistics, reproducible random numbers and the sampling built on them, spatial neighbour search,
   sphere pixelisation, key-to-index lookup, logging for your own program, TOML configuration files,
-  text and path helpers, generated table types, and embedding your own MAML schemas.
+  numeric, text and path helpers, generated table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an abort means, why a build
   or read fails, what may run concurrently, what memory and speed to expect, and the process-global
@@ -111,7 +112,7 @@ All 37 pages, in reading order. (This list, each group's own page list and the
 - [Key-to-index lookup with `parquet_index`](utilities/index-maps.html)
 - [Logging with `parquet_logging`](utilities/logging.html)
 - [Configuration files with `parquet_toml`](utilities/configuration-files.html)
-- [Text and path helpers with `parquet_utils`](utilities/utils.html)
+- [Numeric, text and path helpers with `parquet_utils`](utilities/utils.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
 

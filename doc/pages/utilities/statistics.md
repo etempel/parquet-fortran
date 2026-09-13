@@ -8,8 +8,9 @@ it, without compiling the C++ wrapper's dependencies into its build. `use parque
 so nothing here needs a second import.
 
 The family is broad: counts and moments, order statistics and quantiles, the median absolute
-deviation and the mode, two-sample covariance and correlation, the sigma clip, the running folds,
-and bins. `pf_stats` is the object that answers many of them off one pass and one ordering.
+deviation and the mode, two-sample covariance and correlation, the normal-probability family
+(rankits, the probit mean, the straight-line fit), the sigma clip, the running folds, and bins.
+`pf_stats` is the object that answers many of them off one pass and one ordering.
 
 Every procedure here accepts the same six inputs — see
 [What `values` may be](#what-values-may-be) — so the kind of array you happen to have is not a

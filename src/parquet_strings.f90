@@ -19,7 +19,7 @@
 !! reverse). See `raw_buffers`/`append_buffers` for the buffer-level interop hooks the future
 !! Parquet read/write path consumes.
 module parquet_strings
-    use, intrinsic :: iso_fortran_env, only : int8, int32, int64, output_unit
+    use, intrinsic :: iso_fortran_env, only : int8, int32, int64
     ! The ONLY reason this otherwise self-contained module imports anything of the
     ! library's: its two print procedures are solicited output, and verbosity="silent"
     ! governs those exactly as it governs %print_stat -- and, since threading arrived, the

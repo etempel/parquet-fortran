@@ -1084,7 +1084,13 @@ Four rules worth knowing:
   [Container columns in a table](#container-columns-in-a-table)), and one row of it can be
   arbitrarily long.
 - **`verbosity = "silent"` prints nothing**, as it does for every other solicited printer here.
-  The argument and column-name checks still run, so a wrong call is still reported.
+  The argument and column-name checks still run, so a wrong call is still reported — but a silenced
+  `columns=` call **reads nothing either, so it leaves residency unchanged**. The name check is
+  above the suppression test and the read is below it, so `t%print_rows("ra,dec")` materializes
+  those columns at `"normal"` and does not at `"silent"`. That is the one place a verbosity level
+  changes something other than output, and it is the right way round: reading a whole column in
+  order not to print it would be the worse surprise. Ask for the columns with `%materialize` or
+  `%prefetch` when you want them resident.
 
 A real is rendered the way C's `%g` renders one — six significant digits by default, no trailing
 zeros, and exponential notation only below 1e-4 or above 1e6 — which is also how `%print_stat`

@@ -14,7 +14,6 @@
 !! * **`found=` decides whether a miss is fatal.** Absent, a missing column is a hard
 !!   `error stop`; present, the miss is reported through it and the call returns quietly.
 submodule (parquet_tables) parquet_tables_query
-    use, intrinsic :: iso_fortran_env, only : output_unit
     implicit none
     !
     !> One column's statistics as text, gathered by `table_print_stat` before it prints anything:

@@ -333,6 +333,12 @@ something a reader is expected to have.
 | [Risk-262](#risk-262--a-per-group-column-must-land-on-a-table-with-one-row-per-group-and-the-source-table-is-the-one-target-that-fails-silently) | A per-group column must land on a table with one row per group, and the SOURCE table fails silently | 4 — covered |
 | [Risk-263](#risk-263--the-nan-to-null-and-unit-rules-of-a-table-target-binding-live-in-one-helper-and-a-second-add_column-route-bypasses-both) | The NaN-to-Null and unit rules of a table-target binding live in ONE helper | 4 — covered |
 | [Risk-264](#risk-264--an-int32-grouping-form-is-a-second-route-onto-the-same-walk-and-a-dropped-optional-is-silent) | An `int32` grouping form is a second route onto the same walk, and a dropped optional is silent | 4 — covered |
+| [Risk-265](#risk-265--a-printer-that-resolves-its-own-destination-instead-of-calling-the-shared-resolver-ignores-message_stream-and-nothing-fails) | A printer that resolves its own destination ignores `message_stream` | 1 — new |
+| [Risk-266](#risk-266--an-entry-point-that-calls-into-c-without-pushing-first-reads-a-stale-mirror-and-only-a-setting-changed-after-the-open-can-tell) | An entry point that calls into C++ without pushing first reads a stale mirror | 1 — new |
+| [Risk-267](#risk-267--a-message-sent-through-the-wrong-channel-is-silenced-at-the-wrong-level-and-its-text-is-correct-either-way) | A message sent through the wrong channel is silenced at the wrong level | 1 — new |
+| [Risk-268](#risk-268--a-harness-that-captures-only-stdout-records-an-abort-with-no-context-and-the-capture-looks-like-a-library-that-explained-nothing) | A harness capturing only stdout records an abort with no context | 1 — new |
+| [Risk-269](#risk-269--a-warning-raised-from-a-read-write-or-schema-path-without-its-context-suffix-names-no-file-and-the-run-still-succeeds) | A warning with no context suffix names no file, and the run still succeeds | 1 — new |
+| [Risk-270](#risk-270--a-message-that-lost-its-own-knob-is-silenceable-only-by-silencing-its-whole-class) | A message that lost its own knob is silenceable only by class | 1 — new |
 
 ---
 
@@ -396,6 +402,142 @@ a type needs its own query with a length-then-allocate pair of bindings (the sha
 **Test:** not testable from the Fortran side — a truncation is indistinguishable from a short
 answer, and no input can produce one while the C++ side keeps its contract. Held by construction and
 by this entry.
+
+### Risk-265 — A printer that resolves its own destination instead of calling the shared resolver ignores `message_stream`, and nothing fails
+
+`parquet_message_unit()` (`src/parquet_settings_base.f90`) is the library's one answer to "where does
+a line go". Every emit channel and every solicited printer takes its destination from it, which is
+what makes `message_stream` mean one thing across warnings, advice, remarks, context lines and every
+`%print*` procedure alike.
+
+**A second copy of those four lines is invisible.** A printer written as `u = output_unit` still
+prints, still prints the right text, and still passes every test that captures its output — because
+the suite runs at the factory default, where `output_unit` and the resolver agree. It is wrong only
+for a user who set `message_stream="stderr"`, and only in that one printer, which reads as "that
+setting does not work properly" rather than as a bug with a location. This is `Risk-41`'s shape
+arriving through a destination rather than through a value, and `Risk-40`'s one-reader-per-knob rule
+restated for the one knob whose readers are spread across nine modules.
+
+**Rule:** a procedure that needs a default destination calls `parquet_message_unit()`. A procedure
+that is GIVEN a unit writes to it and resolves nothing.
+
+**Test:** held by `check_no_direct_printing` (`tools/check_source_conventions.py`), which flags any
+`print`, any `write` naming a stream, any `write` to an integer local, and any other mention of
+`output_unit`/`error_unit` outside its allow-list — and asserts every allow-list entry still matches
+something, so the list cannot quietly grow to cover a new offender. The out-of-process scenarios
+`*_follows_message_stream` (`test/error_scenarios.f90`) are the behavioural half: neither stream is
+capturable in process, so a destination can only be asserted from outside.
+
+### Risk-266 — An entry point that calls into C++ without pushing first reads a stale mirror, and only a setting changed after the open can tell
+
+`verbosity` and `message_stream` are mirrored into `parquet_wrapper.cpp` by
+`parquet_push_settings_to_cpp`, called when a reader, a writer or a sort opens. Anything the C++ side
+prints between one push and the next uses the values from that push.
+
+**A call that prints from C++ without a push in front of it reads whatever the last push left.** The
+symptom appears only for a program that changes a setting *after* opening — the documented advice is
+to set everything at startup, so nothing in ordinary use and nothing in a suite that follows the
+documentation will ever see it. `parquet_close_reader(print_stat=.true.)` was exactly this: it
+printed the report through the C++ side, and a `verbosity="silent"` set after the open did not reach
+it.
+
+**Rule:** every entry point that reaches a C++ printer refreshes the mirror first, with the GROUPED
+`parquet_push_settings_to_cpp` rather than one half of it — `Risk-42`'s "one push per group, never
+one per knob".
+
+**Test:** `settings: silent turns parquet_close_reader(print_stat=) into a no-op`
+(`test/test_errors.f90`) drives the one instance, with its control. The general property — "every C++
+call site that consults a mirrored knob is downstream of a push" — is not checkable today: nothing
+relates a `bind(C)` call to the mirror it depends on, and enumerating the call sites here would be
+the kind of list that goes stale silently. Recorded so that a new such entry point is written with
+the push rather than debugged into it.
+
+### Risk-267 — A message sent through the wrong channel is silenced at the wrong level, and its text is correct either way
+
+Four channels carry four classes: `parquet_emit_info` (`INFO: `) and `parquet_emit_advice`
+(`NOTE: `) go quiet at `verbosity="silent"`, `parquet_emit_warning` (`WARNING: `) survives to
+`"errors_only"`, and `parquet_emit_error_context` is never suppressed. The channel is the only thing
+that decides the level; no call site tests a threshold of its own.
+
+**So a misclassification is silent in both directions.** Advice sent through `parquet_emit_warning`
+survives a `"silent"` run that asked to be spared it; a genuine finding about the caller's data sent
+through `parquet_emit_advice` disappears at `"silent"` from a run that still wanted its warnings. In
+both cases the text is right, the destination is right, and the only thing wrong is a level nobody
+asserts — no test on a message's content can see it, and the default verbosity shows both classes.
+
+**Rule:** the class is a property of the message, not of its wording. Advice is about the caller's
+code or environment and nothing is wrong; a warning is a finding about their data. When the two are
+hard to tell apart, ask whether a `"silent"` run would want it: that is the question the levels
+encode.
+
+**Test:** `settings: silent takes the advice and leaves the warning` (`test/test_errors.f90`) drives
+`settings_advice_normal`/`_silent`, which raise one message of each class **in the same process** —
+the control without which a suppressed message and a broken channel look identical. It pins the two
+classes that share a level boundary; a third class added later needs its own pair.
+
+### Risk-268 — A harness that captures only stdout records an abort with no context, and the capture looks like a library that explained nothing
+
+`parquet_emit_error_context` carries what an `error stop` deliberately leaves out — the output
+filename, the schema name — and it follows `message_stream` like everything else. Under the factory
+default `"stdout"` those lines and the abort text land on different streams; under `"stderr"` they
+land together, which is the arrangement a program that set `"stderr"` was asking for.
+
+**A harness that redirects only standard output into its log now records the abort and not its
+context.** Nothing fails, no line is lost from the terminal, and the surviving evidence is an
+`error stop` naming a procedure and no file. The failure looks like a library that reported nothing
+rather than like a capture that took half the report, which is the wrong place to start looking.
+
+**Rule:** capture both streams, or leave `message_stream` at its default. The library cannot detect
+a partial capture and will not try.
+
+**Test:** `error_context_follows_message_stream` (`test/error_scenarios.f90`) asserts the lines move
+with the setting, and `settings: an abort still reports itself when everything is silenced` asserts
+no verbosity level removes them. Neither can observe a caller's redirection, which is what this entry
+is for.
+
+### Risk-269 — A warning raised from a read, write or schema path without its context suffix names no file, and the run still succeeds
+
+`.claude/rules/api-conventions.md` requires an `error stop` in one of those paths to append the file
+and schema it concerns, through `writer_context_suffix`, `reader_filename_suffix`, `maml_name_suffix`
+or `table_context_suffix`. A warning from the same path says the same thing about the same data and
+appends the same suffix.
+
+**A missing suffix is correct text that cannot be attributed.** The warning is not wrong — the column
+is named, the violation is described — it simply does not say which file it is about. On a single
+file nobody notices, because there is only one. On a run over two hundred files it emits two hundred
+lines that cannot be told apart, while a *hard* violation on identical data names the file; and that
+asymmetry is what makes it look like a library that reports inconsistently rather than like a missing
+suffix.
+
+**Rule:** a warning raised where a file or schema is in scope ends with that path's own suffix,
+through the same helper its aborts use. Where nothing is in scope — advice, a container column with
+no file behind it — the exemption is named and carries its reason.
+
+**Test:** held by `check_warnings_carry_their_context` (`tools/check_source_conventions.py`): a file
+that calls any of the four helpers must append one at every `parquet_emit_warning` in it, with a
+liveness assertion over its exemption list. A check rather than a test, for the reason
+`check_no_direct_printing` gives: the property is "no site omits it", which no test can express. This
+entry is also what stops the check being deleted as pedantic once someone meets a site it flags.
+
+### Risk-270 — A message that lost its own knob is silenceable only by silencing its whole class
+
+`spatial_rebuild_warning` was the library's last per-message setting: a full public knob — setter,
+getter, environment variable, printed row, guide row — that governed exactly one line of output. It
+was removed because one behaviour per message is the thing the messaging rules exist to prevent, and
+because the class-wide control is the right granularity for advice.
+
+**The cost is real and is recorded here rather than left to be re-derived.** A program that wanted
+every warning *except* the rebuild notice can no longer say so: `verbosity="silent"` takes that line
+and every other piece of advice with it, and `"errors_only"` takes the warnings too. Nothing fails
+quietly — this is the one entry in this document describing a deliberate reduction in what a caller
+can express, not a way to be wrong.
+
+**Rule:** a new message does not get a knob of its own. If one is genuinely needed, the question to
+answer first is which CLASS it belongs to, and whether the class boundary is in the wrong place.
+
+**Test:** none, and none is wanted. `settings: the automatic-rebuild advice is said, and can be
+silenced` (`test/test_errors.f90`) pins what replaced it: both runs still rebuild, so silencing the
+message is shown not to silence the thing it describes.
 
 ## 2. Risks with a proposed testing scenario
 
@@ -3885,8 +4027,15 @@ one of the seven cases.
 assertion passes against a C++ half that ignores the mirror completely. Any new C++-side print needs
 either the shared `emit_warning_cpp` helper (for a warning) or the `output_is_suppressed()` query
 (for solicited output), and a scenario that provokes it — a print site added straight to
-`std::fprintf` is invisible to both this test and the `no direct printing` lint check, which can only
-see Fortran.
+`std::fprintf` is invisible to this test.
+
+**The lint half of that last clause stopped being true.** `check_no_direct_printing` still sees only
+Fortran, but it now has a sibling: `no direct printing in the C++ half either`
+(`tools/check_source_conventions.py`) scans `src/parquet_wrapper.cpp` for every `std::fprintf`,
+`std::printf`, `std::cout` and `std::cerr` outside a four-name allow-list, with the same
+every-entry-must-still-match liveness rule the Fortran arm carries. A print site added straight to
+`std::fprintf` now fails the check. A scenario is still wanted — the check says the site is routed,
+never that it is routed to the right place.
 
 
 ### Risk-43 — A second copy of the row-group sizing arithmetic ignores `target_row_group_bytes`

@@ -1194,68 +1194,259 @@ def check_settings_are_read():
     return problems
 
 
-#: Procedures allowed to write to a unit directly: the emit channels themselves, and the solicited
-#: printers, which format many lines to a caller-chosen unit and ask parquet_output_is_suppressed
-#: rather than routing through a channel. Every other write in src/ has to go through a channel, or
-#: the two output settings silently do not apply to it.
+#: Fortran procedures allowed to decide for themselves where a line goes. Re-derived from the
+#: source each time this list is edited -- and asserted live below, so an entry that stops matching
+#: anything is a failure rather than a silent widening of the rule.
+#:
+#: The four emit channels and `parquet_message_unit` are the mechanism itself. The solicited
+#: printers resolve through `parquet_message_unit` and then write many lines to a caller-chosen
+#: unit, asking `parquet_output_is_suppressed` rather than routing each line through a channel.
+#: `parquet_logging` is a separate system with a separate audience: it carries the USER's program's
+#: output, not the library's, so it must NOT route through the emit channels -- `verbosity` and
+#: `message_stream` govern what this library says, not what its caller says. src/parquet_toml.f90
+#: emits through THAT system rather than through the channels, deliberately: configuration
+#: diagnostics are read by the operator of the calling program, in that program's log. It needs no
+#: entry here because it names no unit -- every line it produces goes through
+#: pf_log_error/pf_log_warning/pf_log_fatal.
 DIRECT_PRINT_ALLOWED = {
+    # ---- The mechanism: the four channels, and the one resolver they and every printer share ----
     "parquet_emit_info", "parquet_emit_advice", "parquet_emit_warning",
-    "parquet_emit_error_context",
-    # parquet_logging is a separate system with a separate audience: it carries the USER's
-    # program's output, not the library's, so it must NOT route through the emit channels --
-    # `verbosity` and `message_stream` govern what this library says, not what its caller says.
-    # src/parquet_toml.f90 is the one module in src/ that emits through THAT system rather than
-    # through the channels, and it is a deliberate exception rather than an oversight:
-    # configuration diagnostics are read by the operator of the calling program, in that program's
-    # log, beside its own startup messages. It needs no entry in this list because it writes to no
-    # unit by name -- every line it produces goes through pf_log_error/pf_log_warning/pf_log_fatal.
-    # `machinery_warning` is the one place it writes to a unit by name (every sink write goes to a
-    # unit held in a variable), and it reports a failure of the logging machinery itself, which is
-    # why it deliberately bypasses sinks, layout and the output critical section alike.
-    "machinery_warning",
-    "parquet_print_settings", "print_one", "print_text",
-    "table_print_stat", "schema_print_schema_info", "col_print", "psv_print",
+    "parquet_emit_error_context", "parquet_message_unit",
+    # ---- The solicited printers, one entry per procedure that actually writes ----
+    # `display_rows` (%print_rows) was invisible to the pre-S6 pattern, which matched only a
+    # literal `output_unit`/`error_unit`/`*` unit: it takes its unit from `resolve_unit`, so no
+    # stream is named anywhere in it.
+    "parquet_print_settings", "print_one", "print_text", "print_big",
+    "table_print_stat", "display_rows", "schema_print_schema_info", "col_print", "psv_print",
+    "obj_print",
+    # ---- parquet_logging: the separate system described above ----
+    # `machinery_warning` reports a failure of the logging machinery ITSELF, which is why it
+    # bypasses sinks, layout and the output critical section alike and writes straight to
+    # error_unit. The rest are the console sink: it is defined by the two standard streams, so
+    # naming them is what the code is for.
+    "machinery_warning", "default_console_sink", "is_console_unit", "logger_add_console",
+    "logger_print", "pf_log_print", "deliver",
+}
+
+#: C++ functions in src/parquet_wrapper.cpp allowed to write to a stream directly. Same rule, same
+#: liveness assertion, the other side of the `bind(C)` boundary -- feature_risks.md Risk-42 states
+#: the requirement in prose ("Any new C++-side print needs either the shared `emit_warning_cpp`
+#: helper or the `output_is_suppressed()` query"), and this is what enforces it.
+#:
+#: `parquet_reader_print_stat` is on the list even though it resolves through `message_stream_file`,
+#: for the same reason the Fortran printers are: resolving the STREAM correctly is not the same as
+#: honouring `verbosity`, and a function that writes its own lines has to ask about that itself.
+CPP_DIRECT_PRINT_ALLOWED = {
+    "emit_warning_cpp",           # the one place a C++-side warning is printed
+    "report_fatal_error",         # the abort path, always stderr, by design
+    "ConcurrencyGuard",           # its constructor's message, on the same always-stderr path
+    "parquet_reader_print_stat",  # the solicited reader report
 }
 
 
-def check_no_direct_printing():
-    """A warning printed directly ignores both output settings, and nothing else would notice.
+#: Opens a Fortran procedure. Shared by the printing and context checks, and deliberately NOT the
+#: pattern this file used before S6: that one's third alternative was anchored on `::`, so it read
+#: a `character(len=12), parameter :: x(9) =` DECLARATION as a procedure opening -- and matched no
+#: typed function at all, since a function statement carries no `::`. Both errors misattribute
+#: every site below them to a name that is not a procedure, which is how an allow-list acquires
+#: entries nobody can find again.
+FORTRAN_PROC_START = re.compile(
+    r"^\s*(?:module\s+procedure\s+(\w+)"
+    r"|(?:(?:recursive|pure|impure|elemental|module)\s+)*"
+    r"(?:(?:integer|logical|real|character|type|class)\s*(?:\([^)]*\))?\s+)?"
+    r"(?:subroutine|function)\s+(\w+))")
 
-    After S3 every message the library emits goes through one of three channels in
-    parquet_settings, which is what makes `verbosity` and `message_stream` apply everywhere without
-    each call site testing them. A new warning written the old way -- `print '(a)', "WARNING: ..."`
-    -- still appears at default settings, so the test suite stays green; it is only wrong for the
-    users who changed a setting, and only in a way nobody runs into until they do.
+
+def _fortran_procedures(path):
+    """Yield (proc_name, [(lineno, code), ...]) for `path`, comments already stripped."""
+    out, current, body = [], "", []
+    for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+        m = FORTRAN_PROC_START.match(raw)
+        if m and any(m.groups()):
+            out.append((current, body))
+            current, body = next(g for g in m.groups() if g), []
+        body.append((lineno, strip_comment(raw)))
+    out.append((current, body))
+    return out
+
+
+#: A `print` in any of its forms: `print '(a)'`, `print *,`, `print fmt,`, `print "(a)"`.
+_PRINT_STMT = re.compile(r"^\s*print\s*(?:[\'\"(*]|\w)")
+#: `write(*, ...)` and `write(unit=*, ...)` -- the process's standard output, whatever is set.
+_WRITE_STAR = re.compile(r"^\s*write\s*\(\s*(?:unit\s*=\s*)?\*\s*[,)]", re.I)
+#: A `write` whose unit is a stream named outright, or the shared resolver called inline.
+_WRITE_RESOLVED = re.compile(
+    r"^\s*write\s*\(\s*(?:unit\s*=\s*)?(?:output_unit|error_unit|parquet_message_unit\s*\()", re.I)
+#: A `write` to a variable. Whether that is a unit or a character buffer is decided per procedure.
+_WRITE_VAR = re.compile(r"^\s*write\s*\(\s*(?:unit\s*=\s*)?([A-Za-z]\w*)\s*[,)]", re.I)
+#: `integer[(kind)][, attrs] :: a, b(3), c = 0` -- the names, whatever follows them.
+_INTEGER_DECL = re.compile(r"^\s*integer\b[^:]*::\s*(.+)$", re.I)
+#: A unit this procedure opened itself: a FILE, not one of the two streams.
+_OPEN_NEWUNIT = re.compile(r"^\s*open\s*\([^)]*\bnewunit\s*=\s*(\w+)", re.I)
+#: A local taking its value from a stream or from the shared resolver.
+_UNIT_ASSIGN = re.compile(
+    r"^\s*(\w+)\s*=\s*(?:output_unit|error_unit|parquet_message_unit\s*\()", re.I)
+#: Any other mention of a stream by name: `u = output_unit`, `unit == error_unit`, a default. A
+#: `use` line is not one -- importing the name decides nothing about where a line goes.
+_NAMES_STREAM = re.compile(r"\b(?:output_unit|error_unit)\b", re.I)
+_USE_STMT = re.compile(r"^\s*use\b", re.I)
+
+
+def _declared_integers(body):
+    """The names declared `integer` anywhere in one procedure body."""
+    names = set()
+    for _, code in body:
+        m = _INTEGER_DECL.match(code)
+        if not m:
+            continue
+        for token in m.group(1).split(","):
+            token = token.split("(")[0].split("=")[0].strip()
+            if re.fullmatch(r"\w+", token):
+                names.add(token)
+    return names
+
+
+def _fortran_direct_print_sites():
+    """Every site in src/ that decides for itself where a line goes, as (path, lineno, proc, code).
+
+    Five shapes, and each is a way of resolving a destination rather than being handed one:
+
+    * any `print` statement -- always the process's standard output;
+    * `write(*, ...)` -- the same;
+    * a `write` naming `output_unit`/`error_unit`, or calling `parquet_message_unit` inline;
+    * a `write` to a local declared `integer` -- the printers' own shape, `u = <resolver>` followed
+      by many `write (u, ...)` lines. A unit the procedure opened itself with `newunit=` does not
+      count, unless the same variable ALSO takes a stream somewhere (schema_print_schema_info, which
+      writes either to a file it opened or to the message unit, through one variable);
+    * any other mention of a stream by name -- `u = output_unit`, `unit == error_unit`, a sink's
+      default. This is the one that catches "resolved its own destination and then wrote through a
+      helper", which no pattern over `write` statements can see.
+
+    A `write` to a unit the procedure was GIVEN is deliberately not a shape here: whoever passed it
+    resolved it, and that caller is checked. The unit of enforcement is the resolution, not the I/O.
+    """
+    sites = []
+    for path in sorted(SRC.glob("*.f90")):
+        for proc, body in _fortran_procedures(path):
+            ints = _declared_integers(body)
+            opened, from_stream = set(), set()
+            for _, code in body:
+                m = _OPEN_NEWUNIT.match(code)
+                if m:
+                    opened.add(m.group(1))
+                m = _UNIT_ASSIGN.match(code)
+                if m:
+                    from_stream.add(m.group(1))
+            for lineno, code in body:
+                if _PRINT_STMT.match(code) or _WRITE_STAR.match(code) or _WRITE_RESOLVED.match(code):
+                    sites.append((path, lineno, proc, code))
+                    continue
+                m = _WRITE_VAR.match(code)
+                if m and m.group(1) in ints and (m.group(1) not in opened
+                                                 or m.group(1) in from_stream):
+                    sites.append((path, lineno, proc, code))
+                    continue
+                if _NAMES_STREAM.search(code) and not _USE_STMT.match(code):
+                    sites.append((path, lineno, proc, code))
+    return sites
+
+
+def check_no_direct_printing():
+    """A message printed directly ignores both output settings, and nothing else would notice.
+
+    Every message the library emits goes through one of the four channels in parquet_settings_base,
+    and every solicited printer resolves its destination through `parquet_message_unit`. That is
+    what makes `verbosity` and `message_stream` apply everywhere without each call site testing
+    them. A new warning written the old way -- `print '(a)', "WARNING: ..."` -- still appears at
+    default settings, so the test suite stays green; it is only wrong for the users who changed a
+    setting, and only in a way nobody runs into until they do.
 
     That makes it a static-check problem rather than a test problem: the property is "no site does
     this", which a test cannot express.
 
-    The allow-list is the solicited printers plus the channels themselves. It is small and changes
-    about as often as the library gains a printer; adding to it should be a deliberate act, which is
-    why it lives here next to the reason rather than as a marker comment at the site.
+    **The allow-list is asserted live.** Every name in it must still match a flagged site, or this
+    reports the stale entry. Without that, the list only ever grows: it reached nine names of which
+    SEVEN had stopped matching anything, which meant seven procedures could have started printing
+    directly with nothing to say so. That is the failure this half exists to prevent, and it is the
+    same mechanism `CONTEXT_SUFFIX_EXEMPT` uses one check along.
     """
-    problems = []
-    pattern = re.compile(r"^\s*(?:print\s*[\'\"(]|write\s*\(\s*(?:\*|output_unit|error_unit)\s*,)")
-    proc_start = re.compile(
-        r"^\s*(?:module\s+procedure\s+(\w+)|(?:recursive\s+|pure\s+|impure\s+|elemental\s+)*"
-        r"(?:module\s+)?(?:subroutine|function)\s+(\w+)"
-        r"|(?:integer|logical|real|character)[^:]*::\s*(\w+)\s*\()")
-    for path in sorted(SRC.glob("*.f90")):
-        current = ""
-        for lineno, line in enumerate(path.read_text().split("\n"), start=1):
-            m = proc_start.match(line)
-            if m:
-                current = next(g for g in m.groups() if g) if any(m.groups()) else current
-            code = strip_comment(line)
-            if not pattern.match(code):
-                continue
-            if current in DIRECT_PRINT_ALLOWED:
-                continue
-            problems.append(
-                "%s:%d: writes to a unit directly inside `%s` -- route it through "
-                "parquet_emit_warning/_info/_error_context, or both output settings silently will "
-                "not apply to it:\n    %s"
-                % (path.relative_to(REPO_ROOT), lineno, current or "<file scope>", line.strip()))
+    problems, matched = [], set()
+    for path, lineno, proc, code in _fortran_direct_print_sites():
+        if proc in DIRECT_PRINT_ALLOWED:
+            matched.add(proc)
+            continue
+        problems.append(
+            "%s:%d: `%s` decides for itself where a line goes -- route it through "
+            "parquet_emit_info/_advice/_warning/_error_context, or take the destination from "
+            "parquet_message_unit(), or neither output setting will apply to it:\n    %s"
+            % (path.relative_to(REPO_ROOT), lineno, proc or "<file scope>", code.strip()))
+    if not matched:
+        return ["src/: this check flagged nothing at all -- the emit channels and the printers "
+                "should every one of them match, so the patterns have gone blind"]
+    for stale in sorted(DIRECT_PRINT_ALLOWED - matched):
+        problems.append(
+            "tools/check_source_conventions.py: DIRECT_PRINT_ALLOWED names `%s`, which no longer "
+            "matches a site this check would flag -- the procedure was renamed, removed, or has "
+            "since been routed through a channel. Delete the entry: an allow-list nobody "
+            "re-derives is how this check went half blind before (feature_message_stream.md C6)."
+            % stale)
+    return problems
+
+
+#: Opens a C++ function definition. Anchored at one tab of indentation at most, so a call
+#: continued over several lines -- `describe_parquet_type(field),` inside an argument list -- is
+#: not read as a definition and does not misattribute every site below it.
+CPP_FUNC_START = re.compile(
+    r"^(?P<indent>\t{0,1})(?:\[\[noreturn\]\]\s*)?"
+    r"(?:(?:static|inline|constexpr|extern\s+\"C\"|virtual)\s+)*"
+    r"(?:[A-Za-z_][\w:<>,*&\s]*?[\s*&]+)?(?P<name>[A-Za-z_]\w*)\s*\([^;]*$")
+#: Writing to a stream. `snprintf` writes to a buffer and is not one, which is why every pattern
+#: here is anchored on a word boundary.
+CPP_PRINTS = re.compile(
+    r"\bstd::(?:fprintf|printf|puts|fputs|cout|cerr|clog)\b"
+    r"|(?<!\w)(?<!s)(?:fprintf|printf|puts|fputs)\s*\(")
+_CPP_KEYWORDS = frozenset(("if", "for", "while", "switch", "return", "catch", "else", "do",
+                           "sizeof", "throw"))
+
+
+def check_no_direct_printing_cpp():
+    """The same rule on the other side of the `bind(C)` boundary, which the Fortran arm cannot see.
+
+    src/parquet_wrapper.cpp prints in its own right -- three warnings, the fatal-error report, the
+    concurrency guard's message and the whole reader report -- and every one of those has to honour
+    the two settings mirrored across the boundary. feature_risks.md Risk-42 states the requirement
+    in prose; before this check nothing enforced it, and the file had accumulated ten
+    `std::fprintf(stdout, ...)` calls in one function that ignored `message_stream` completely.
+
+    Same liveness rule as the Fortran arm: an allow-list entry that stops matching is a failure.
+    """
+    path = SRC / "parquet_wrapper.cpp"
+    if not path.exists():
+        return ["src/parquet_wrapper.cpp is missing -- this check needs updating"]
+    problems, matched, current = [], set(), ""
+    for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+        code = raw.split("//")[0]
+        m = CPP_FUNC_START.match(code)
+        if m and m.group("name") not in _CPP_KEYWORDS:
+            current = m.group("name")
+        if not CPP_PRINTS.search(code):
+            continue
+        if current in CPP_DIRECT_PRINT_ALLOWED:
+            matched.add(current)
+            continue
+        problems.append(
+            "src/parquet_wrapper.cpp:%d: `%s` writes to a stream directly -- route it through "
+            "emit_warning_cpp, or take the stream from message_stream_file() and ask "
+            "output_is_suppressed(), or neither mirrored output setting will apply to it:\n    %s"
+            % (lineno, current or "<file scope>", code.strip()))
+    if not matched:
+        return ["src/parquet_wrapper.cpp: this check flagged nothing at all -- emit_warning_cpp "
+                "and report_fatal_error should both match, so the patterns have gone blind"]
+    for stale in sorted(CPP_DIRECT_PRINT_ALLOWED - matched):
+        problems.append(
+            "tools/check_source_conventions.py: CPP_DIRECT_PRINT_ALLOWED names `%s`, which no "
+            "longer matches a site this check would flag -- the function was renamed, removed, or "
+            "has since been routed through emit_warning_cpp. Delete the entry." % stale)
     return problems
 
 
@@ -6620,16 +6811,6 @@ def check_warnings_carry_their_context():
                 "src/ -- they were renamed or removed and this check is now enforcing a rule "
                 "against a helper that no longer exists" % ", ".join(sorted(missing))]
 
-    # Deliberately NOT check_no_direct_printing's copy of this pattern: that one's third
-    # alternative is anchored on `::`, so it matches a `character(len=12), parameter :: x(9) =`
-    # DECLARATION as if it opened a procedure (and matches no typed function at all, since a
-    # function statement carries no `::`). Attributing a warning to the last parameter declared
-    # above it would put a meaningless name in every message below, and in the exemption list.
-    proc_start = re.compile(
-        r"^\s*(?:module\s+procedure\s+(\w+)"
-        r"|(?:(?:recursive|pure|impure|elemental|module)\s+)*"
-        r"(?:(?:integer|logical|real|character|type|class)\s*(?:\([^)]*\))?\s+)?"
-        r"(?:subroutine|function)\s+(\w+))")
     helper_call = re.compile(r"\bcall\s+(?:%s)\s*\(" % "|".join(CONTEXT_SUFFIX_HELPERS))
     used_exemptions = set()
     checked = 0
@@ -6639,7 +6820,7 @@ def check_warnings_carry_their_context():
             continue
         suffix_vars, emits, current = set(), [], ""
         for lineno, stmt in _joined_statements(path):
-            m = proc_start.match(stmt)
+            m = FORTRAN_PROC_START.match(stmt)
             if m and any(m.groups()):
                 current = next(g for g in m.groups() if g)
             if helper_call.search(stmt):
@@ -7047,6 +7228,7 @@ CHECKS = (
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),
+    ("no direct printing in the C++ half either", check_no_direct_printing_cpp),
     ("every warning carries the context its path's aborts carry",
      check_warnings_carry_their_context),
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),

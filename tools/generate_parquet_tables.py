@@ -4581,6 +4581,14 @@ def gen_spec_interfaces():
         !! **`verbosity = "silent"` prints nothing**, as it does for every other solicited printer
         !! here; the argument and column-name checks below still run, so a wrong call is still
         !! reported.
+        !!
+        !! **A silenced `columns=` call also reads nothing, so it leaves residency unchanged.** The
+        !! name check is above the suppression test and the read is below it, which means
+        !! `t%print_rows("ra,dec")` materializes those columns at `"normal"` and does not at
+        !! `"silent"` -- the one place a verbosity level changes something other than output. It is
+        !! the right way round: reading a whole column in order not to print it would be a worse
+        !! surprise than not reading it. A program that wants the columns resident asks for them
+        !! with %materialize or %prefetch, which say so.
         module subroutine print_rows_all(self, first, last, rows, unit, digits, max_width, max_columns)
             class(parquet_table), intent(in) :: self !! the table.
             integer, intent(in), optional :: first   !! rows to show from the top; default 5, and 0 when only `last` is given.

@@ -4,7 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [2.4.0] - 2026-09-14
+
+**Toolchain floor:** unchanged from 2.3.0 — gfortran >= 13 (13 on CI; 15.2.0 the primary
+development target), and, confirmed by hand rather than by CI, Intel Fortran (ifx)
+2026.1.0/2026.1.1, NAG Fortran 7.2 and LLVM flang 22.1.8. Also fpm >= 0.13.0, a C++20-capable C++
+compiler, and Arrow/Parquet C++ >= 24.0.0. See [Prerequisites](README.md#prerequisites).
+
+**SemVer scope:** unchanged from 2.0.0 — the whole `use parquet` surface, and each advertised entry
+module in its own right. `parquet_spatial` loses two public procedures in this release (see
+Compatibility), which is a removal from that surface; it is released as a MINOR bump deliberately,
+because the pair governed one line of output and the behaviour they controlled is still reachable
+through `verbosity`.
+
+**Compatibility:** parquet files written by any earlier 2.x are read unchanged, and no file format,
+schema or MAML behaviour moves. What changes is what the library **says** and **where it says it**,
+in four ways, plus four behaviour changes listed under Changed.
+
+*Where messages go.* Every message and every `%print*` procedure with no `unit=` now follows
+`message_stream`; previously `%print_stat`, both `parquet_strings` printers, `parquet_print_settings`
+and the reader's close-time report went to standard output whatever that setting said. Under the
+factory default (`"stdout"`) nothing moves. A program that set `message_stream="stderr"` will see
+those listings move to standard error, which is what it was asking for; a harness that captures only
+standard output should capture both streams.
+
+*What messages say.* Every message now opens with its class marker — `WARNING: `, `NOTE: `, `INFO: `
+— names the procedure it came from, and, where it was raised from a read, write or schema path,
+ends with the file it concerns. A program matching this library's output by exact text will need
+updating; one matching a substring of the message body will not. The qc violation warnings are the
+ones most likely to be matched: they keep their wording and gain a ` (file: …)` suffix.
+
+*What `verbosity` silences.* Advice about how the library is being used — the affinity clamp's
+message and the five a `pf_spatial_index` raises — is now its own class, marked `NOTE: ` and
+silenced at `"silent"` rather than at `"errors_only"`. A program running at `"errors_only"` sees no
+change; one at `"normal"` sees the same messages with a new prefix; one at `"silent"` loses six
+messages it used to receive.
+
+*One setting removed.* `parquet_set_spatial_rebuild_warning` and
+`parquet_get_spatial_rebuild_warning` are gone, with the `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING`
+variable and the `spatial_rebuild_warning` row of `parquet_print_settings`. A program calling either
+will not compile; the message they governed is advice, so `parquet_set_verbosity("silent")` silences
+it, and nothing silences the rebuild itself.
 
 ### Added
 
@@ -802,5 +842,6 @@ compatible with.
   size (`parquet_set_max_threads`).
 - Support for embedding your own MAML schemas into a downstream project.
 
+[2.4.0]: https://github.com/etempel/parquet-fortran/releases/tag/v2.4.0
 [2.0.0]: https://github.com/etempel/parquet-fortran/releases/tag/v2.0.0
 [1.0.0]: https://github.com/etempel/parquet-fortran/releases/tag/v1.0.0

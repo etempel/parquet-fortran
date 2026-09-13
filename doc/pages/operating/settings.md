@@ -670,6 +670,12 @@ control means, and it is a debugging trap worth naming — add a print, see noth
 not at fault. `parquet_print_settings` is the one exemption: it prints at every level, so a silenced
 program can always be asked why it is silent.
 
+**And one place where `"silent"` changes more than output:** `t%print_rows(columns=)` normally reads
+the columns it names, and a silenced call does not — the name check runs, so a wrong name is still
+reported, but nothing is read and residency is unchanged. Reading a whole column in order not to
+print it would be the worse surprise. Use `%materialize` or `%prefetch` when you want the columns
+resident (see [Showing the rows](../tables/table.html#showing-the-rows-print_rows)).
+
 `parquet_set_message_stream(stream)` takes `"stdout"` (default) or `"stderr"` and decides where the
 library's own output goes. The reason to change it is a program that pipes its own standard output
 to a data consumer and does not want the library's text mixed into that stream.

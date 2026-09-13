@@ -142,6 +142,8 @@ contains
                 test_verbosity_silences_print_schema_info), &
             new_unittest("verbosity=silent makes %print_rows a no-op", &
                 test_verbosity_silences_print_rows), &
+            new_unittest("a silenced %print_rows(columns=) leaves residency unchanged", &
+                test_verbosity_silences_print_rows_read), &
             new_unittest("both integer kinds reach the same setting", test_both_integer_kinds), &
             new_unittest("every environment variable reaches its own knob", test_env_every_variable), &
             new_unittest("an absent variable leaves its knob alone", test_env_absent_leaves_knob), &
@@ -2341,6 +2343,61 @@ contains
         ! survivable half: the table is untouched and still printable.
         call check(error, t%nrows() == 4_int64, "and the table must be unchanged either way")
     end subroutine test_verbosity_silences_print_rows
+
+    !> The one place a verbosity level changes something other than output: a silenced
+    !! `%print_rows(columns=)` does not read the columns it names, so residency is unchanged.
+    !!
+    !! `%require_columns` sits ABOVE the suppression test and `table_resolve` below it, so a wrong
+    !! name is still reported at `"silent"` while a right one is not read. That ordering is
+    !! deliberate -- reading a whole column in order not to print it would be the worse surprise --
+    !! and it is documented in `%print_rows`' own doc-comment and on the table page, so it is a
+    !! promise rather than an accident, and this is what holds it.
+    !!
+    !! **The negative control is the same call at `"normal"`**, which must read: without it this
+    !! passes against a `%print_rows(columns=)` that never reads at all, which would be a different
+    !! bug with the same symptom here.
+    subroutine test_verbosity_silences_print_rows_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        integer(int32) :: id(4)
+        character(len=*), parameter :: fixture = "test_run/settings_silent_print_rows_read.parquet"
+        character(len=*), parameter :: out = "test_run/settings_silent_print_rows_read.txt"
+        integer :: u, i, quiet_lines
+
+        call parquet_reset_settings()
+        do i = 1, 4
+            id(i) = int(i, int32)
+        end do
+        call parquet_open_writer(w, fixture)
+        call parquet_write_column(w, "id", id)
+        call parquet_close_writer(w)
+
+        ! Opened lazily and left that way: nothing is resident until something reads it.
+        call parquet_open_table(t, fixture)
+        call check(error, t%residency("id") == RES_EMPTY, "a freshly opened table holds nothing")
+        if (allocated(error)) return
+
+        call parquet_set_verbosity("silent")
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_rows("id", unit=u)
+        close(u)
+        call count_file_lines(out, quiet_lines)
+        call parquet_set_verbosity("normal")
+
+        call check(error, quiet_lines == 0, "the silenced call must write nothing")
+        if (allocated(error)) return
+        call check(error, t%residency("id") == RES_EMPTY, &
+            "and it must not have read the column it was asked to show")
+        if (allocated(error)) return
+
+        open(newunit=u, file=out, status="replace", action="write")
+        call t%print_rows("id", unit=u)
+        close(u)
+        call parquet_reset_settings()
+        call check(error, t%residency("id") == RES_FULL, &
+            "the same call at verbosity=normal must read the column it names")
+    end subroutine test_verbosity_silences_print_rows_read
 
     !> Counts the lines in `path`, or reports 0 when it does not exist.
     subroutine count_file_lines(path, nlines)

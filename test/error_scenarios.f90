@@ -3434,6 +3434,20 @@ program error_scenarios
         call scenario_table_group_size_name_clash()
     case ("table_group_key_table_reserve_negative")
         call scenario_table_group_key_table_reserve_negative()
+    case ("table_group_add_agg_target_is_source")
+        call scenario_table_group_add_agg_target_is_source()
+    case ("table_group_add_agg_rows_mismatch")
+        call scenario_table_group_add_agg_rows_mismatch()
+    case ("table_group_add_agg_as_two_names")
+        call scenario_table_group_add_agg_as_two_names()
+    case ("table_group_add_agg_nan_to_null_exact")
+        call scenario_table_group_add_agg_nan_to_null_exact()
+    case ("table_group_stale_add_agg")
+        call scenario_table_group_stale_add_agg()
+    case ("table_group_add_agg_unknown_token")
+        call scenario_table_group_add_agg_unknown_token()
+    case ("table_group_add_size_name_taken")
+        call scenario_table_group_add_size_name_taken()
     case ("table_group_stale_apply")
         call scenario_table_group_stale_apply()
     case ("table_group_stale_apply_object")
@@ -29923,6 +29937,119 @@ contains
         call grp%key_table(kt, reserve=-1)
         print '(a,i0)', "unexpectedly accepted a negative reserve, spare=", kt%column_capacity(free=.true.)
     end subroutine scenario_table_group_key_table_reserve_negative
+    !
+    !> A per-group column belongs on a table with one row per group, and the grouping's OWN table
+    !! is the one target that would otherwise fail silently: `%add_column` on it would relocate
+    !! the slots the grouping points into, inside the same call, and the column would be
+    !! `%ngroups()` values spread over `%nrows()` rows. Refused before anything is computed; the
+    !! key table is the control (feature_risks.md Risk-262).
+    subroutine scenario_table_group_add_agg_target_is_source()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("x", "mean", kt, "m")
+        print '(a,i0)', "add_agg onto the key table ran, cols=", kt%ncols()
+        call grp%add_agg("x", "mean", t, "m")
+        print '(a,i0)', "unexpectedly wrote a per-group column onto the source table, cols=", t%ncols()
+    end subroutine scenario_table_group_add_agg_target_is_source
+    !
+    !> A target of the wrong LENGTH is the quiet half of the same rule: the column is well formed
+    !! and every value is about a different group. Here the target is another grouping's key
+    !! table, which has one row per group of ITS partition; the right one is the control.
+    subroutine scenario_table_group_add_agg_rows_mismatch()
+        type(parquet_table) :: t, kt, other
+        type(parquet_grouping) :: grp, grp2
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("x", "mean", kt, "m")
+        print '(a,i0)', "add_agg onto its own key table ran, rows=", kt%nrows()
+        call t%group_by("s", grp2)
+        call grp2%key_table(other)
+        print '(a,i0,a,i0)', "the other grouping has groups=", grp2%ngroups(), ", this one=", grp%ngroups()
+        call grp%add_agg("x", "mean", other, "m")
+        print '(a,i0)', "unexpectedly wrote onto a target of the wrong length, cols=", other%ncols()
+    end subroutine scenario_table_group_add_agg_rows_mismatch
+    !
+    !> `as=` on `%add_agg` names the ONE column the call adds, so a list is a mistake rather than
+    !! a request for several: `%add_apply` is the form that takes a list. One name is the control.
+    subroutine scenario_table_group_add_agg_as_two_names()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("x", "mean", kt, "m")
+        print '(a,i0)', "add_agg with one name ran, cols=", kt%ncols()
+        call grp%add_agg("x", "mean", kt, "m2,m3")
+        print '(a,i0)', "unexpectedly accepted two names in as=, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_agg_as_two_names
+    !
+    !> `nan_to_null=` decides what happens to a NaN answer, and the exact `int64` family never
+    !! answers NaN -- it aborts where no exact answer exists. Giving both is a misunderstanding
+    !! the library refuses rather than ignores. `exact=` alone is the control.
+    subroutine scenario_table_group_add_agg_nan_to_null_exact()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("key", "sum", kt, "s", exact=.true.)
+        print '(a,i0)', "add_agg exact= ran, cols=", kt%ncols()
+        call grp%add_agg("key", "sum", kt, "s2", exact=.true., nan_to_null=.true.)
+        print '(a,i0)', "unexpectedly accepted nan_to_null= with exact=, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_agg_nan_to_null_exact
+    !
+    !> `%add_agg` is a per-group query, so it runs the generation check every other one runs: a
+    !! stale grouping would put in-range row numbers' answers onto a summary whose key column
+    !! names the wrong groups, and nothing downstream could question the column. An add before
+    !! the row change is the control.
+    subroutine scenario_table_group_stale_add_agg()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("x", "mean", kt, "m")
+        print '(a,i0)', "add_agg ran before the change, cols=", kt%ncols()
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%add_agg("x", "mean", kt, "m2")
+        print '(a,i0)', "a stale grouping answered add_agg, cols=", kt%ncols()
+    end subroutine scenario_table_group_stale_add_agg
+    !
+    !> Every refusal `%agg` raises is raised by `%add_agg` too, and names the binding the caller
+    !! actually wrote rather than `agg` -- the reason the shared bodies take the calling binding's
+    !! name as an argument. An unknown token is the example; the same call with a real token is
+    !! the control.
+    subroutine scenario_table_group_add_agg_unknown_token()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("x", "mean", kt, "m")
+        print '(a,i0)', "add_agg mean ran, cols=", kt%ncols()
+        call grp%add_agg("x", "medain", kt, "m2")
+        print '(a,i0)', "unexpectedly accepted an unknown token, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_agg_unknown_token
+    !
+    !> A name the target already carries is refused rather than replaced, so a summary cannot
+    !! lose a column to a second call that meant a new one; `force=.true.` is how a replacement
+    !! is asked for. Here the key table already has its count column from `size_name=`, and
+    !! `%add_size` under a free name is the control.
+    subroutine scenario_table_group_add_size_name_taken()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt, size_name="n")
+        call grp%add_size(kt, "n2")
+        print '(a,i0)', "add_size under a free name ran, cols=", kt%ncols()
+        call grp%add_size(kt, "n")
+        print '(a,i0)', "unexpectedly replaced a column without force=, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_size_name_taken
     !
     !> `%apply` on a stale grouping, in its procedure form: the generation check runs before the
     !! callback is called even once, so no procedure of the caller's computes anything from rows

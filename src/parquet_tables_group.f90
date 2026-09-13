@@ -1528,6 +1528,263 @@ contains
         end if
     end subroutine agg_func_impl
     !
+    ! ---- %add_agg and %add_size: the per-group answer as a COLUMN ------------------------------
+    !
+    ! The wrappers here compute NOTHING. Each runs the same body the two-step form runs -- the
+    ! `*_impl` workers above, with this binding's own name for every refusal -- and then puts the
+    ! answer on the target through the one helper below, which is the `%add_column` (plus
+    ! `%set_null`) a caller writes by hand today. So a column added here equals the column a
+    ! caller would build from `%agg`'s array bit for bit, and every rule of %agg (nulls, NaN,
+    ! weights, options, threading, the exact family's aborts) holds here unchanged rather than
+    ! being re-earned.
+    !
+    !> The two refusals every table-target binding runs BEFORE it computes anything: the target
+    !! may not be the table this grouping was built from, and a target that already has columns
+    !! must have one row per group (feature_risks.md Risk-262).
+    !!
+    !! The first is also the aliasing guard. `self` holds a pointer into its table's column
+    !! store, so an `%add_column` on that table could relocate the slots underneath a grouping
+    !! that is an argument of the same call; and a per-group column on the source table would be
+    !! `%ngroups()` values spread over `%nrows()` rows, which is not an answer. The second
+    !! catches the quiet case: a table of the right KIND and the wrong length, or the right
+    !! length from ANOTHER grouping, gives a well-formed column about the wrong groups.
+    !!
+    !! A target with no columns yet is accepted at any length: its row count becomes
+    !! `%ngroups()` at the first add, exactly as `%add_column` fixes a new table's row count.
+    !! A closed table is refused by `%ncols()` here, under `parquet_table`'s own name, which is
+    !! where every other table-side refusal of the target comes from too.
+    subroutine grp_check_target(self, table, proc)
+        class(parquet_grouping), intent(in) :: self !! the grouping.
+        type(parquet_table), intent(in) :: table    !! the target.
+        character(len=*), intent(in) :: proc        !! calling binding, for the message.
+        character(len=:), allocatable :: sfx
+        character(len=32) :: r, g
+        !
+        if (associated(table%cache, self%cache)) then
+            call table_context_suffix(self%cache, "", sfx)
+            error stop GP // trim(proc) // ": the target table is the one this grouping was built " // &
+                "from; a per-group column has one row per group and belongs on the key table " // &
+                "(%key_table)" // sfx
+        end if
+        if (table%ncols() > 0) then
+            if (table%nrows() /= self%ngrp) then
+                write(r, "(I0)") table%nrows()
+                write(g, "(I0)") self%ngrp
+                call table_context_suffix(table%cache, "", sfx)
+                error stop GP // trim(proc) // ": the target table has " // trim(r) // " rows and " // &
+                    "this grouping has " // trim(g) // " groups; a per-group column goes on this " // &
+                    "grouping's %key_table" // sfx
+            end if
+        end if
+    end subroutine grp_check_target
+    !
+    !> Tokenises `as` through the library's one name-list tokenizer and refuses anything but
+    !! exactly one name, for the bindings that add exactly one column. A caller who wrote a list
+    !! wanted `%add_apply`, and a caller whose `as` tokenises to nothing wrote a separator.
+    subroutine grp_one_name(as, proc, nm)
+        character(len=*), intent(in) :: as               !! the caller's `as`.
+        character(len=*), intent(in) :: proc             !! calling binding, for the message.
+        character(len=:), allocatable, intent(out) :: nm !! the one name, trimmed.
+        character(len=:), allocatable :: names(:), shown
+        character(len=32) :: n
+        !
+        call parquet_split_name_list(as, names)
+        if (size(names) == 1) then
+            nm = trim(names(1))
+            return
+        end if
+        write(n, "(I0)") size(names)
+        shown = trim(as)
+        if (len(shown) > 100) shown = shown(1:100) // "..."
+        error stop GP // trim(proc) // ": as= must name exactly one column, got " // trim(n) // &
+            " names in """ // shown // """"
+    end subroutine grp_one_name
+    !
+    !> Refuses a name the target already carries unless `force=.true.` was given. Called for
+    !! EVERY name a binding is about to add before the FIRST column is written, so a refused
+    !! call leaves the target exactly as it was.
+    subroutine grp_check_free_name(table, nm, proc, force)
+        type(parquet_table), intent(in) :: table    !! the target.
+        character(len=*), intent(in) :: nm          !! the name about to be added.
+        character(len=*), intent(in) :: proc        !! calling binding, for the message.
+        logical, intent(in), optional :: force      !! .true. replaces instead of refusing.
+        character(len=:), allocatable :: sfx
+        !
+        if (present(force)) then
+            if (force) return
+        end if
+        if (.not. table%has_column(nm)) return
+        call table_context_suffix(table%cache, nm, sfx)
+        error stop GP // trim(proc) // ": """ // nm // """ is already a column of the target " // &
+            "table; pass force=.true. to replace it" // sfx
+    end subroutine grp_check_free_name
+    !
+    !> The unit the new column is to carry, resolved by the CALLER of the helper so that the
+    !! helper has one rule and no policy: `unit=` given wins (`""` for none); absent, the SOURCE
+    !! column's unit for the statistics that keep the column's dimension, and none for the ones
+    !! that do not -- `"size"`, `"count"` and `"nunique"` are counts, and `"var"` is a squared
+    !! quantity, which a free-text unit string cannot spell. `table_slot_unit` is the one unit
+    !! resolution every query shares, so an in-memory column's `%add_column(unit=)` is seen too.
+    subroutine agg_unit(self, idx, code, unit, u)
+        class(parquet_grouping), intent(in) :: self      !! the grouping.
+        integer, intent(in) :: idx                       !! the source column's validated slot.
+        integer, intent(in) :: code                      !! the AG_* code of the statistic.
+        character(len=*), intent(in), optional :: unit    !! the caller's unit, if any.
+        character(len=:), allocatable, intent(out) :: u   !! the unit to store, "" for none.
+        !
+        if (present(unit)) then
+            u = unit
+            return
+        end if
+        u = ""
+        select case (code)
+        case (AG_SIZE, AG_COUNT, AG_NUNIQUE, AG_VAR)
+            return
+        end select
+        call table_slot_unit(self%cache, idx, u)
+    end subroutine agg_unit
+    !
+    !> The ONE route by which a table-target binding's column reaches the target, real64 half:
+    !! the unit (already resolved by the caller) and the NaN-to-Null rule live here and nowhere
+    !! else, so a future binding that called `%add_column` itself would silently apply neither
+    !! (feature_risks.md Risk-263). These are exactly the two calls a caller makes by hand after
+    !! `%agg`, which is why this is the two-step form and not a new route.
+    !!
+    !! `%set_null` only ever ADDS nulls and is a VALUE mutation, so it neither resurrects a value
+    !! nor advances the target's `%generation()`; the add under a new name within the target's
+    !! spare capacity does not either, which is what `%key_table(reserve=)` buys.
+    subroutine grp_put_column_f64(table, nm, vals, u, nan_to_null, force)
+        type(parquet_table), intent(inout) :: table  !! the target.
+        character(len=*), intent(in) :: nm           !! the new column's name.
+        real(real64), intent(in) :: vals(:)          !! one value per group, in group order.
+        character(len=*), intent(in) :: u            !! the unit to store, "" for none.
+        logical, intent(in) :: nan_to_null           !! .true. marks a NaN answer's row null.
+        logical, intent(in), optional :: force       !! .true. replaces an existing column.
+        logical, allocatable :: valid(:)
+        integer(int64) :: i
+        !
+        if (nan_to_null) then
+            allocate(valid(size(vals, kind=int64)))
+            do i = 1_int64, size(vals, kind=int64)
+                ! `x == x` rather than ieee_is_nan: this is a per-element path, where the
+                ! intrinsic is a runtime call under two of the supported compilers
+                ! (.claude/rules/fortran-gotchas.md). Both spellings are quiet on a quiet NaN.
+                valid(i) = (vals(i) == vals(i))
+            end do
+        end if
+        call table%add_column(nm, vals, unit=u, force=force)
+        if (nan_to_null) call table%set_null(nm, valid)
+    end subroutine grp_put_column_f64
+    !
+    !> The helper's `int64` half: no NaN rule -- an exact answer is never NaN, and a count never
+    !! is either -- and the same one `%add_column`. `%add_size` and `%add_agg(exact=.true.)` come
+    !! through here, so that every column a table-target binding adds has one route.
+    subroutine grp_put_column_i64(table, nm, vals, u, force)
+        type(parquet_table), intent(inout) :: table  !! the target.
+        character(len=*), intent(in) :: nm           !! the new column's name.
+        integer(int64), intent(in) :: vals(:)        !! one value per group, in group order.
+        character(len=*), intent(in) :: u            !! the unit to store, "" for none.
+        logical, intent(in), optional :: force       !! .true. replaces an existing column.
+        !
+        call table%add_column(nm, vals, unit=u, force=force)
+    end subroutine grp_put_column_i64
+    !
+    module procedure grp_add_agg_stat
+        character(len=*), parameter :: PROC = "add_agg"
+        real(real64), allocatable :: vals(:)
+        integer(int64), allocatable :: ivals(:)
+        character(len=:), allocatable :: nm, u
+        integer :: code, idx, kind
+        logical :: ex, tonull
+        !
+        ex = .false.
+        if (present(exact)) ex = exact
+        tonull = .true.
+        if (present(nan_to_null)) tonull = nan_to_null
+        call grp_resolve(self, PROC)
+        call grp_check_target(self, table, PROC)
+        call grp_one_name(as, PROC, nm)
+        if (ex) then
+            ! An option the form cannot honour is refused, not ignored: the exact family takes
+            ! none of them, so %agg's own int64 specific does not even have the arguments.
+            if (present(nan_to_null)) then
+                error stop GP // PROC // ": nan_to_null= has no meaning with exact=.true.; the exact " // &
+                    "family never answers NaN (it aborts where no exact answer exists)"
+            end if
+            if (present(weights) .or. present(weight_column)) then
+                error stop GP // PROC // ": weights= and weight_column= have no meaning with " // &
+                    "exact=.true.; the exact int64 family is unweighted by definition"
+            end if
+        end if
+        call grp_check_free_name(table, nm, PROC, force)
+        ! The token's code and the source column's slot: the worker validates both again, and the
+        ! second run is a lookup (cache_find plus a residency check) on a column this one has
+        ! already touched. They are resolved here because the unit rule needs both, and running
+        ! them in this order leaves each refusal the worker's own text under this binding's name.
+        call agg_parse_stat(stat, ex, PROC, code)
+        call agg_value_column(self, name, PROC, ex, idx, kind)
+        if (ex) call agg_check_options(code, PROC, q, ddof, method, scale, .false.)
+        call agg_unit(self, idx, code, unit, u)
+        if (ex) then
+            call agg_stat_int_impl(self, name, stat, ivals, PROC, threads)
+            call grp_put_column_i64(table, nm, ivals, u, force)
+        else
+            call agg_stat_real_impl(self, name, stat, vals, PROC, weights, weight_column, q, ddof, &
+                method, scale, threads)
+            call grp_put_column_f64(table, nm, vals, u, tonull, force)
+        end if
+    end procedure grp_add_agg_stat
+    !
+    !> %add_agg specific, the caller's per-column procedure onto a table; the contract is on the
+    !! interface in the module spec. Restated in full for the reason the two procedure-form
+    !! `%apply` bodies are (the gfortran implicit-interface trap).
+    module subroutine grp_add_agg_func(self, name, func, table, as, weights, weight_column, unit, &
+            nan_to_null, force, threads)
+        class(parquet_grouping), intent(in) :: self             !! the grouping.
+        character(len=*), intent(in) :: name                    !! the column; read if not resident.
+        procedure(parquet_group_column_reduce_i) :: func        !! called once per group; see the interface.
+        type(parquet_table), intent(inout) :: table             !! the target: one row per group.
+        character(len=*), intent(in) :: as                      !! the new column's name; exactly one name.
+        real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
+        character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+        character(len=*), intent(in), optional :: unit          !! the new column's unit; absent means none.
+        logical, intent(in), optional :: nan_to_null            !! .false. keeps a NaN answer a value; default .true.
+        logical, intent(in), optional :: force                  !! .true. replaces an existing column of that name.
+        integer, intent(in), optional :: threads                !! the team; absent = serial.
+        character(len=*), parameter :: PROC = "add_agg"
+        real(real64), allocatable :: vals(:)
+        character(len=:), allocatable :: nm, u
+        logical :: tonull
+        !
+        tonull = .true.
+        if (present(nan_to_null)) tonull = nan_to_null
+        ! No unit is inherited here: the library cannot know a callback's dimension, so only
+        ! `unit=` gives the column one (3.2 of the design note; the token form is the exception).
+        u = ""
+        if (present(unit)) u = unit
+        call grp_resolve(self, PROC)
+        call grp_check_target(self, table, PROC)
+        call grp_one_name(as, PROC, nm)
+        call grp_check_free_name(table, nm, PROC, force)
+        call agg_func_impl(self, name, func, vals, PROC, weights, weight_column, threads)
+        call grp_put_column_f64(table, nm, vals, u, tonull, force)
+    end subroutine grp_add_agg_func
+    !
+    module procedure grp_add_size
+        character(len=*), parameter :: PROC = "add_size"
+        integer(int64), allocatable :: counts(:)
+        character(len=:), allocatable :: nm
+        !
+        call grp_resolve(self, PROC)
+        call grp_check_target(self, table, PROC)
+        call grp_one_name(as, PROC, nm)
+        call grp_check_free_name(table, nm, PROC, force)
+        ! %size's own answer, so the column is bit for bit %key_table(size_name=)'s. No unit: a
+        ! count has none, and there is no NaN rule to apply to one.
+        call grp_size_i64(self, counts)
+        call grp_put_column_i64(table, nm, counts, "", force)
+    end procedure grp_add_size
+    !
     !
     ! ---- %broadcast and %gather: the two ends of the hot loop ----------------------------------
     !

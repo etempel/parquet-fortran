@@ -1809,7 +1809,9 @@ module parquet_tables
     !! of a group (`%rows`, `%csr`), one row per group (`%first_rows`, `%last_rows`), the group
     !! each table row belongs to (`%group_ids`), the counts (`%size`, `%count`, `%nunique`), the
     !! key values as a table of their own (`%key_table`), one statistic of one column per group
-    !! (`%agg`, the `parquet_stats` vocabulary), one answer per group from a procedure or an
+    !! (`%agg`, the `parquet_stats` vocabulary), the same statistic straight onto a table with one
+    !! row per group as a named column (`%add_agg`, with `%add_size` for the group size), one
+    !! answer per group from a procedure or an
     !! object of the caller's own (`%apply`), a per-group array back onto the rows (`%broadcast`)
     !! and one group's values into a buffer of the caller's (`%gather`). The table is NOT
     !! reordered: this is
@@ -1857,6 +1859,15 @@ module parquet_tables
     !! `integer(int64)` `out` selects the EXACT family (`"sum"`, `"min"`, `"max"`, `"first"`,
     !! `"last"`, the counts), which never goes through a real64 buffer. Its loop is automatic
     !! threading (library code, re-entrant by construction), unlike `%apply`'s.
+    !!
+    !! **`%add_agg` and `%add_size` are the same answers as a COLUMN**, on a table with one row
+    !! per group -- `%key_table`'s -- instead of an array of the caller's: `%add_agg` runs the
+    !! `%agg` body the two-step form runs and puts the result on the target under `as`, so the
+    !! column is bit for bit what `%add_column` of `%agg`'s array would hold, with the source
+    !! column's unit where the statistic keeps its dimension and a group whose answer is NaN
+    !! marked Null. The target is READ only for its row count and WRITTEN only by that one
+    !! `%add_column`: the grouping's own table is refused as a target, and so is a table whose
+    !! row count is not `%ngroups()`.
     !!
     !! **`%broadcast` and `%gather` are the two ends of the hot loop**, and neither allocates per
     !! group: `%broadcast` carries one value per group back onto every row of the group (pandas'
@@ -1922,9 +1933,13 @@ module parquet_tables
         procedure :: clear => grp_clear           !! Back to the never-built state.
         !> One row per group, in group order: the key columns, whatever their kinds, plus an
         !! `int64` count column when `size_name=` is given and `reserve=` spare column slots
-        !! beyond them. The summary pattern: `%key_table`, then `%add_column` the per-group
-        !! answers onto it.
+        !! beyond them. The summary pattern: `%key_table`, then `%add_agg` -- or `%add_column`
+        !! of an array `%agg` filled -- the per-group answers onto it, and `%add_size` the count.
         procedure :: key_table => grp_key_table
+        !> The group size onto a table that already has one row per group: the same `int64`
+        !! column `%key_table(size_name=)` creates, bit for bit, added when the summary is built
+        !! or at any time after. No unit, and no `nan_to_null` -- a count is never NaN.
+        procedure :: add_size => grp_add_size
         procedure, private :: grp_count_i32       !! %count specific, int32 counts.
         procedure, private :: grp_count_i64       !! %count specific, int64 counts.
         !> Non-null rows of a column per group, for a column of any kind.
@@ -1946,6 +1961,24 @@ module parquet_tables
         !! the statistics that take them. `threads=` absent is automatic on the token forms and
         !! serial on the procedure form.
         generic :: agg => grp_agg_stat_real, grp_agg_stat_int, grp_agg_func
+        procedure, private :: grp_add_agg_stat     !! %add_agg specific: a statistic token onto a table.
+        procedure, private :: grp_add_agg_func     !! %add_agg specific: a per-column procedure of the caller's.
+        !> One statistic of one column per group written straight onto a table with one row per
+        !! group -- normally this grouping's `%key_table` -- as a named column, which is `%agg`
+        !! followed by `%add_column` in one call: `%add_agg(name, stat, table, as)` with `stat` a
+        !! token of the `parquet_stats` vocabulary, or `%add_agg(name, func, table, as)` with a
+        !! procedure of your own over one group's widened values (pass it by NAME). The column
+        !! holds what `%agg` writes into an array, bit for bit, and `as` names it.
+        !! `exact=.true.` selects the exact `int64` family and an `integer(int64)` column;
+        !! `weights=`, `weight_column=`, `q=`, `ddof=`, `method=`, `scale=` and `threads=` are
+        !! `%agg`'s own, forwarded unchanged. `unit=` is the new column's unit; absent, the token
+        !! form carries the SOURCE column's unit for the statistics that keep its dimension and
+        !! none for `"size"`, `"count"`, `"nunique"` and `"var"`, and the procedure form carries
+        !! none. `nan_to_null=` (default `.true.`) marks a group whose answer is NaN Null instead
+        !! of storing the NaN as a value; it has no meaning with `exact=.true.` and is refused
+        !! there. `force=.true.` replaces an existing column of that name. The target must have
+        !! one row per group and may not be the table this grouping was built from.
+        generic :: add_agg => grp_add_agg_stat, grp_add_agg_func
         procedure, private :: grp_apply_proc_scalar !! %apply specific: a function, one value per group.
         procedure, private :: grp_apply_proc_matrix !! %apply specific: a subroutine, nout values per group.
         procedure, private :: grp_apply_obj_scalar  !! %apply specific: a reducer object, one value per group.
@@ -10242,8 +10275,8 @@ module parquet_tables
         !! which is what lets one binding answer for every column kind. `size_name=` adds an
         !! `int64` column of rows per group, refused when a key column already has that name.
         !! The gathers are of deep COPIES, and the source table is untouched (feature_risks.md
-        !! Risk-208). An ordinary table: sort it, filter it, `%add_column` the aggregates onto
-        !! it, write it.
+        !! Risk-208). An ordinary table: sort it, filter it, `%add_agg` or `%add_column` the
+        !! aggregates onto it, write it.
         !!
         !! `reserve=` is how many SPARE column slots the result is to carry beyond the columns
         !! this call creates (the keys, plus one when `size_name=` is given) -- an INCREMENT,
@@ -10259,6 +10292,22 @@ module parquet_tables
             character(len=*), intent(in), optional :: size_name !! name for a rows-per-group column; absent adds none.
             integer, intent(in), optional :: reserve            !! spare column slots beyond those created here; default 0.
         end subroutine grp_key_table
+        !> The group size onto a table that already has one row per group, as an
+        !! `integer(int64)` column named `as`: the same column `%key_table(size_name=)` creates,
+        !! bit for bit, so a summary gains its count when it is built or at any time after, in
+        !! one line either way. No unit, and no `nan_to_null` -- a count is never NaN.
+        !!
+        !! The target may not be the table this grouping was built from, must have `%ngroups()`
+        !! rows unless it has no columns yet, and must not already carry a column called `as`
+        !! unless `force=.true.` is given; `as` names exactly one column. What `%add_column`
+        !! itself refuses on the target -- a closed table, a table shared across a team -- it
+        !! reports under its own name.
+        module subroutine grp_add_size(self, table, as, force)
+            class(parquet_grouping), intent(in) :: self  !! the grouping.
+            type(parquet_table), intent(inout) :: table  !! the target: one row per group, normally %key_table's.
+            character(len=*), intent(in) :: as           !! the new column's name; exactly one name.
+            logical, intent(in), optional :: force       !! .true. replaces an existing column of that name.
+        end subroutine grp_add_size
         !> %count specific, int32 counts; see the generic.
         module subroutine grp_count_i32(self, name, out)
             class(parquet_grouping), intent(in) :: self        !! the grouping.
@@ -10394,6 +10443,81 @@ module parquet_tables
             character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
             integer, intent(in), optional :: threads                !! the team; absent = serial.
         end subroutine grp_agg_func
+        !> %add_agg specific, a statistic token onto a table: `%agg(name, stat, out, ...)`
+        !! followed by `table%add_column(as, out, ...)`, in one call and with one rule for the
+        !! unit and the nulls. The column holds what `%agg` writes into an array, bit for bit,
+        !! and every refusal of `%agg` -- an unknown token, an option the token does not take,
+        !! bad weights, a column kind with no statistics -- is raised here under this binding's
+        !! name.
+        !!
+        !! `exact=.true.` selects the exact `int64` family (`"size"`, `"count"`, `"nunique"`,
+        !! `"sum"`, `"min"`, `"max"`, `"first"`, `"last"` on an integer or logical column) and
+        !! gives an `integer(int64)` column; absent or `.false.` gives a `real(real64)` one. The
+        !! exact family is unweighted and takes no options, so `weights=`, `weight_column=`,
+        !! `q=`, `ddof=`, `method=`, `scale=` and `nan_to_null=` are refused with it rather than
+        !! ignored.
+        !!
+        !! **The unit**: `unit=` given wins (`""` for none). Absent, the SOURCE column's unit is
+        !! carried for the statistics that keep the column's dimension -- `"sum"`, `"mean"`,
+        !! `"min"`, `"max"`, `"range"`, `"median"`, `"quantile"`, `"iqr"`, `"mad"`, `"std"`,
+        !! `"sem"`, `"first"`, `"last"` -- and none for `"size"`, `"count"`, `"nunique"` and
+        !! `"var"`, a squared unit having no spelling in a free-text unit string.
+        !!
+        !! **A group without an answer is a Null row** under `nan_to_null=.true.`, the default:
+        !! every NaN in the per-group answer marks its row null in the new column, since a NaN
+        !! here can only mean "no answer" (an undefined statistic, an all-null group). The value
+        !! under a null row is not a contract; read the column with `%get(as, v, is_valid=ok)`
+        !! or gate on `%is_null`. `nan_to_null=.false.` leaves the NaN a value, which is what
+        !! the two-step form gives.
+        !!
+        !! The target may not be the table this grouping was built from -- a per-group column has
+        !! one row per group, and an `%add_column` on the source would relocate the slots this
+        !! grouping points into -- must have `%ngroups()` rows unless it has no columns yet, and
+        !! must not already carry a column called `as` unless `force=.true.` is given, which
+        !! replaces it in place and advances the TARGET's `%generation()`. `as` names exactly one
+        !! column. `threads=` is `%agg`'s: absent is automatic here, as on `%agg`'s token forms.
+        module subroutine grp_add_agg_stat(self, name, stat, table, as, exact, weights, weight_column, q, ddof, &
+                method, scale, unit, nan_to_null, force, threads)
+            class(parquet_grouping), intent(in) :: self             !! the grouping.
+            character(len=*), intent(in) :: name                    !! the column the statistic is over; read if not resident.
+            character(len=*), intent(in) :: stat                    !! the statistic's token, case-insensitive.
+            type(parquet_table), intent(inout) :: table             !! the target: one row per group, normally %key_table's.
+            character(len=*), intent(in) :: as                      !! the new column's name; exactly one name.
+            logical, intent(in), optional :: exact                  !! .true. selects the exact int64 family; default .false.
+            real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
+            character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+            real(real64), intent(in), optional :: q                 !! the probability, 0 to 1, for "quantile".
+            integer, intent(in), optional :: ddof                   !! degrees of freedom charged; default 1.
+            character(len=*), intent(in), optional :: method        !! the quantile method, as pf_quantile's.
+            character(len=*), intent(in), optional :: scale         !! "raw" for an unscaled "mad", as pf_mad's.
+            character(len=*), intent(in), optional :: unit          !! the new column's unit; absent inherits (see above).
+            logical, intent(in), optional :: nan_to_null            !! .false. keeps a NaN answer a value; default .true.
+            logical, intent(in), optional :: force                  !! .true. replaces an existing column of that name.
+            integer, intent(in), optional :: threads                !! the team; absent = automatic.
+        end subroutine grp_add_agg_stat
+        !> %add_agg specific, the caller's per-column procedure onto a table: `%agg(name, func,
+        !! out, ...)` followed by `table%add_column(as, out, ...)`, with the NaN rule of the
+        !! token form. `func` sees one group's values of `name` widened to real64, exactly as on
+        !! `%agg`, and must be passed by NAME rather than through a procedure pointer (a pointer
+        !! resolves to the token specific under one supported compiler). No unit is carried
+        !! unless `unit=` is given: the library cannot know a callback's dimension. `threads=`
+        !! absent is SERIAL, as on `%agg`'s procedure form -- giving it is your statement that
+        !! `func` may be called from several threads at once. The target rules are the token
+        !! form's.
+        module subroutine grp_add_agg_func(self, name, func, table, as, weights, weight_column, unit, &
+                nan_to_null, force, threads)
+            class(parquet_grouping), intent(in) :: self             !! the grouping.
+            character(len=*), intent(in) :: name                    !! the column; read if not resident.
+            procedure(parquet_group_column_reduce_i) :: func        !! called once per group; see the interface.
+            type(parquet_table), intent(inout) :: table             !! the target: one row per group, normally %key_table's.
+            character(len=*), intent(in) :: as                      !! the new column's name; exactly one name.
+            real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
+            character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+            character(len=*), intent(in), optional :: unit          !! the new column's unit; absent means none.
+            logical, intent(in), optional :: nan_to_null            !! .false. keeps a NaN answer a value; default .true.
+            logical, intent(in), optional :: force                  !! .true. replaces an existing column of that name.
+            integer, intent(in), optional :: threads                !! the team; absent = serial.
+        end subroutine grp_add_agg_func
         !> %broadcast specific, real64 values; see the generic. `fill` absent is a quiet NaN.
         module subroutine grp_broadcast_f64(self, per_group, per_row, fill, threads)
             class(parquet_grouping), intent(in) :: self          !! the grouping.

@@ -209,8 +209,8 @@ done | sort | uniq -c | sort -rn
   explicit `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop.
 - **A procedure POINTER passed to a generic whose specifics differ by a dummy procedure against a
   `character` dummy resolves to the CHARACTER specific under gfortran 15**, which then reads an
-  empty string (`parquet_grouping%agg`: `grp%agg(name, colf, out)` with `colf` a procedure
-  pointer reaches the token form); nagfor and flang resolve it to the procedure specific. Pass the
+  empty string (`parquet_grouping%agg` and `%add_agg`: `grp%agg(name, colf, out)` with `colf` a
+  procedure pointer reaches the token form); nagfor and flang resolve it to the procedure specific. Pass the
   procedure itself; a generic with no `character` competitor (`%apply`) resolves a pointer fine.
 - **A dummy PROCEDURE argument in an abbreviated `module procedure` body has an IMPLICIT interface
   under gfortran 15** (`-Werror=implicit-interface` at every call of it), although the spec

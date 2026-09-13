@@ -66,9 +66,10 @@ module test_table_group
     logical :: order_ok = .true.                    !! ... every call so far came in group order.
     logical :: rows_ok = .true.                     !! ... every call so far had ascending, non-empty rows.
     integer :: calls_seen = 0                       !! test_apply_empty_grouping: calls made.
-    integer :: col_calls = 0                        !! test_agg_callback_presence: calls made.
+    integer :: col_calls = 0                        !! test_agg_callback_presence ALONE: calls made.
     integer :: col_valid_present = 0                !! ... calls that saw is_valid present.
     integer :: col_weights_present = 0              !! ... calls that saw weights present.
+    integer :: empty_col_calls = 0                  !! test_add_forms_on_empty_grouping: calls made.
 
     !> A reducer holding a `%col` pointer and a tunable, for the object form's tests: `out(1)`
     !! is `scale * sum(p(rows))`; `out(2)`, when there is room, the group's size; `out(3)` the
@@ -152,6 +153,20 @@ contains
                 test_nunique_equals_pf_unique_count), &
             new_unittest("agg and nunique over an empty grouping allocate zero-length outputs", &
                 test_agg_empty_grouping), &
+            new_unittest("add_agg equals agg plus add_column, with the unit and NaN rules on top", &
+                test_add_agg_equals_agg_and_add_column), &
+            new_unittest("add_agg exact= gives an int64 column equal to the exact family's array", &
+                test_add_agg_exact_family), &
+            new_unittest("add_agg's procedure form equals agg's, and a NaN it returns is Null", &
+                test_add_agg_procedure_form), &
+            new_unittest("the table-target forms are reads of the source: order, generation, pointer", &
+                test_add_forms_are_reads_of_the_source), &
+            new_unittest("add_agg force= replaces values and kind and moves the target's generation", &
+                test_add_agg_force_replaces), &
+            new_unittest("an empty grouping gives zero-row columns; a column-less target takes the count", &
+                test_add_forms_on_empty_grouping), &
+            new_unittest("add_size equals size and key_table(size_name=), bit for bit", &
+                test_add_size_equals_size_and_size_name), &
             new_unittest("broadcast equals the lookup through group_ids; a dropped row takes fill, in both kinds", &
                 test_broadcast_equals_group_ids), &
             new_unittest("gather equals get_slice over the group's rows for five kinds, widening as get does", &
@@ -263,7 +278,9 @@ contains
     !! (int32, null at row 3), `big` (int64, values above 2**53 whose group sums are exact only
     !! in int64; null at row 7), `f` (real32, null at row 9), `b` (logical, null at row 5), `w`
     !! (real64 weights, a zero at row 3 and a null at row 10), `z` (real64, null throughout
-    !! groups 3 and 4) and `s` (string, null at row 12).
+    !! groups 3 and 4) and `s` (string, null at row 12). `x` carries the unit `"mag"` and `big`
+    !! the unit `"ct"`, which is what `%add_agg`'s unit rule inherits from (nothing else here
+    !! reads a unit).
     subroutine build_agg(t)
         type(parquet_table), intent(out) :: t !! the table.
         integer(int32) :: k(12), i(12)
@@ -291,9 +308,9 @@ contains
         s = ["a", "b", "a", "c", "b", "a", "c", "a", "d", "a", "e", "c"]
         call parquet_new_table(t)
         call t%add_column("k", k)
-        call t%add_column("x", x)
+        call t%add_column("x", x, unit="mag")
         call t%add_column("i", i)
-        call t%add_column("big", big)
+        call t%add_column("big", big, unit="ct")
         call t%add_column("f", f)
         call t%add_column("b", b)
         call t%add_column("w", w)
@@ -1781,12 +1798,414 @@ contains
         call t%group_by("k", grp)
         call grp%agg("v", "mean", gr)
         call grp%agg("v", "sum", gi)
-        call grp%agg("v", cb_col_median, gf)
+        call grp%agg("v", cb_col_plain_median, gf)
         call grp%nunique("v", nu)
         call check(error, allocated(gr) .and. allocated(gi) .and. allocated(gf) .and. allocated(nu) .and. &
             size(gr) == 0 .and. size(gi) == 0 .and. size(gf) == 0 .and. size(nu) == 0, &
             "every output is allocated at zero length")
     end subroutine test_agg_empty_grouping
+
+    ! ---- %add_agg and %add_size ------------------------------------------------------------------
+
+    !> **The wrapper computes nothing**: every real64 token, with the options it takes, written
+    !! onto the key table by `%add_agg` must equal the array `%agg` fills, bit for bit, with the
+    !! NaN rows marked Null instead. The oracle is `%agg` itself, which is the composition this
+    !! call replaces; `%is_null` and `%get(..., is_valid=)` must agree with each other and with
+    !! where `%agg`'s array is NaN, the kind must be `PK_FLOAT64`, and the unit must be the source
+    !! column's for the statistics that keep its dimension and absent for the counts and `"var"`,
+    !! with `unit=` overriding either way (feature_risks.md Risk-263).
+    subroutine test_add_agg_equals_agg_and_add_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=8), parameter :: tokens(15) = [character(len=8) :: "size", "count", "nunique", "sum", &
+            "mean", "var", "std", "sem", "min", "max", "range", "median", "quantile", "iqr", "mad"]
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: want(:), got(:), w(:)
+        logical, allocatable :: ok(:)
+        character(len=:), allocatable :: u
+        character(len=8) :: nm, tok
+        integer(int64) :: g
+        integer :: k
+        logical :: keeps, agree
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%key_table(kt, reserve=20)
+        do k = 1, size(tokens)
+            tok = tokens(k)
+            write(nm, "(a,i0)") "c", k
+            select case (trim(tok))
+            case ("quantile")
+                call grp%agg("x", trim(tok), want, q=0.3_real64)
+                call grp%add_agg("x", trim(tok), kt, trim(nm), q=0.3_real64)
+            case ("var", "std", "sem")
+                call grp%agg("x", trim(tok), want, ddof=2)
+                call grp%add_agg("x", trim(tok), kt, trim(nm), ddof=2)
+            case ("median", "iqr")
+                call grp%agg("x", trim(tok), want, method="lower")
+                call grp%add_agg("x", trim(tok), kt, trim(nm), method="lower")
+            case ("mad")
+                call grp%agg("x", trim(tok), want, scale="raw")
+                call grp%add_agg("x", trim(tok), kt, trim(nm), scale="raw")
+            case default
+                call grp%agg("x", trim(tok), want)
+                call grp%add_agg("x", trim(tok), kt, trim(nm))
+            end select
+            call kt%get(trim(nm), got, is_valid=ok)
+            if (size(got) /= size(want)) then
+                call check(error, .false., "one row per group for " // trim(tok))
+                return
+            end if
+            agree = .true.
+            do g = 1_int64, size(want, kind=int64)
+                if (.not. same_answer(got(g), want(g))) agree = .false.
+                if (ok(g) .neqv. .not. ieee_is_nan(want(g))) agree = .false.
+                if (kt%is_null(trim(nm), g) .neqv. ieee_is_nan(want(g))) agree = .false.
+            end do
+            if (.not. agree) then
+                call check(error, .false., trim(tok) // ": the column differs from %agg's array, or its nulls do")
+                return
+            end if
+            if (kt%kind(trim(nm)) /= PK_FLOAT64) then
+                call check(error, .false., trim(tok) // " gives a real64 column")
+                return
+            end if
+            ! The dimension rule: a count and a squared quantity carry no unit, everything else
+            ! carries the source column's.
+            keeps = .not. (trim(tok) == "size" .or. trim(tok) == "count" .or. trim(tok) == "nunique" &
+                .or. trim(tok) == "var")
+            call kt%unit(trim(nm), u)
+            if (keeps .neqv. (u == "mag")) then
+                call check(error, .false., trim(tok) // ": the unit is inherited exactly when the " // &
+                    "statistic keeps the column's dimension")
+                return
+            end if
+        end do
+        ! unit= wins over both halves of that rule.
+        call grp%add_agg("x", "mean", kt, "u1", unit="Jy")
+        call kt%unit("u1", u)
+        call check(error, u == "Jy", "unit= overrides the inherited unit")
+        if (allocated(error)) return
+        call grp%add_agg("x", "count", kt, "u2", unit="Jy")
+        call kt%unit("u2", u)
+        call check(error, u == "Jy", "...and gives one to a statistic that would carry none")
+        if (allocated(error)) return
+        call grp%add_agg("x", "mean", kt, "u3", unit="")
+        call kt%unit("u3", u)
+        call check(error, u == "", "unit="""" is how a caller asks for no unit at all")
+        if (allocated(error)) return
+        ! The weighted route, forwarded verbatim: still %agg's array.
+        call t%get("w", w)
+        call grp%agg("x", "mean", want, weights=w)
+        call grp%add_agg("x", "mean", kt, "wm", weights=w)
+        call kt%get("wm", got)
+        agree = .true.
+        do g = 1_int64, size(want, kind=int64)
+            if (.not. same_answer(got(g), want(g))) agree = .false.
+        end do
+        call check(error, agree, "weights= reaches the statistic unchanged")
+        if (allocated(error)) return
+        call grp%agg("x", "mean", want, weight_column="w")
+        call grp%add_agg("x", "mean", kt, "wc", weight_column="w")
+        call kt%get("wc", got)
+        agree = .true.
+        do g = 1_int64, size(want, kind=int64)
+            if (.not. same_answer(got(g), want(g))) agree = .false.
+        end do
+        call check(error, agree, "and so does weight_column=")
+        if (allocated(error)) return
+        ! nan_to_null=.false. is the negative control of the default: the NaN stays a value,
+        ! which is exactly what %add_column of %agg's array leaves.
+        call grp%agg("x", "std", want)
+        call grp%add_agg("x", "std", kt, "raw", nan_to_null=.false.)
+        call kt%get("raw", got, is_valid=ok)
+        call check(error, ieee_is_nan(want(4)), "group 4 has one row, so its std is NaN")
+        if (allocated(error)) return
+        call check(error, all(ok), "with nan_to_null=.false. no row is Null")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(got(4)), "...and the NaN is stored as a value")
+    end subroutine test_add_agg_equals_agg_and_add_column
+
+    !> `exact=.true.` gives an `integer(int64)` column equal to what the exact family writes into
+    !! an array, on the fixture whose group-1 values straddle 2**53 -- the real64 column of the
+    !! same statistic is shown to differ, which is what the argument is for. The unit rule is the
+    !! token form's; `nan_to_null=`, `weights=` and the options are refused rather than ignored,
+    !! out of process (`table_group_add_agg_nan_to_null_exact`).
+    subroutine test_add_agg_exact_family(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=8), parameter :: toks(8) = [character(len=8) :: "size", "count", "nunique", "sum", &
+            "min", "max", "first", "last"]
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: want(:), got(:)
+        real(real64), allocatable :: approx(:)
+        character(len=:), allocatable :: u
+        character(len=8) :: nm, tok
+        integer :: k
+        logical :: keeps
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%key_table(kt, reserve=12)
+        do k = 1, size(toks)
+            tok = toks(k)
+            write(nm, "(a,i0)") "e", k
+            call grp%agg("big", trim(tok), want)
+            call grp%add_agg("big", trim(tok), kt, trim(nm), exact=.true.)
+            if (kt%kind(trim(nm)) /= PK_INT64) then
+                call check(error, .false., "exact " // trim(tok) // " gives an int64 column")
+                return
+            end if
+            call kt%get(trim(nm), got)
+            if (.not. all(got == want)) then
+                call check(error, .false., "exact " // trim(tok) // " differs from %agg's int64 array")
+                return
+            end if
+            keeps = .not. (trim(tok) == "size" .or. trim(tok) == "count" .or. trim(tok) == "nunique")
+            call kt%unit(trim(nm), u)
+            if (keeps .neqv. (u == "ct")) then
+                call check(error, .false., "exact " // trim(tok) // ": the unit rule is the token form's")
+                return
+            end if
+        end do
+        call kt%get("e4", got)
+        call grp%agg("big", "sum", approx)
+        call check(error, got(1) == 2_int64**54 + 11_int64, "the exact sum of group 1 is the fixture's")
+        if (allocated(error)) return
+        call check(error, nint(approx(1), int64) /= got(1), &
+            "and it is not the real64 sum: exact= is what keeps it exact")
+        if (allocated(error)) return
+        ! No null anywhere: the exact family aborts rather than answering NaN, so no row can be
+        ! the "no answer" one, and the int64 half of the helper applies no NaN rule.
+        call check(error, .not. kt%has_nulls("e4"), "an exact column carries no Null row")
+    end subroutine test_add_agg_exact_family
+
+    !> The procedure form onto a table equals `%agg(name, func, out)` bit for bit, carries no
+    !! unit unless `unit=` is given, and marks Null the groups whose answer the procedure could
+    !! not compute -- `nan_to_null=.false.` keeping the NaN a value is the negative control.
+    subroutine test_add_agg_procedure_form(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: want(:), got(:)
+        logical, allocatable :: ok(:)
+        character(len=:), allocatable :: u
+        integer(int64) :: g
+        logical :: agree
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%key_table(kt, reserve=6)
+        call grp%agg("x", cb_col_plain_median, want)
+        call grp%add_agg("x", cb_col_plain_median, kt, "med")
+        call kt%get("med", got)
+        agree = .true.
+        do g = 1_int64, size(want, kind=int64)
+            if (.not. same_answer(got(g), want(g))) agree = .false.
+        end do
+        call check(error, agree, "the procedure form's column is %agg's array")
+        if (allocated(error)) return
+        call kt%unit("med", u)
+        call check(error, u == "", "and carries no unit: the library cannot know a callback's dimension")
+        if (allocated(error)) return
+        call grp%add_agg("x", cb_col_plain_median, kt, "med_u", unit="mag")
+        call kt%unit("med_u", u)
+        call check(error, u == "mag", "unit= is how a callback's column gets one")
+        if (allocated(error)) return
+        ! cb_col_sum_or_nan answers NaN for a group of fewer than two valid values: group 4 has
+        ! one row, so its answer is "could not compute" and its row is Null.
+        call grp%add_agg("x", cb_col_sum_or_nan, kt, "s")
+        call kt%get("s", got, is_valid=ok)
+        call check(error, .not. ok(4), "a NaN the procedure returned marks its group Null")
+        if (allocated(error)) return
+        call check(error, all(ok(1:3)), "...and only that group")
+        if (allocated(error)) return
+        call grp%add_agg("x", cb_col_sum_or_nan, kt, "s_raw", nan_to_null=.false.)
+        call kt%get("s_raw", got, is_valid=ok)
+        call check(error, all(ok), "nan_to_null=.false. leaves the NaN a value")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(got(4)), "...stored as it came back")
+    end subroutine test_add_agg_procedure_form
+
+    !> Every table-target binding is a READ of the SOURCE table: `%generation()`, the row order
+    !! and a `%col` pointer taken before the calls all survive `%add_agg` in both forms and
+    !! `%add_size`. The target is the only thing that changes (feature_risks.md Risk-235).
+    subroutine test_add_forms_are_reads_of_the_source(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        real(real64), pointer :: p(:)
+        real(real64), allocatable :: payload(:)
+        integer(int32), allocatable :: key(:)
+        integer(int64) :: gen0
+        !
+        call build_basic(t)
+        gen0 = t%generation()
+        call t%col("payload", p)
+        call t%group_by(["key"], grp)
+        call grp%key_table(kt, reserve=8)
+        call grp%add_agg("payload", "mean", kt, "m")
+        call grp%add_agg("key", "sum", kt, "s", exact=.true.)
+        call grp%add_agg("payload", cb_col_plain_median, kt, "cm")
+        call grp%add_size(kt, "n")
+        call check(error, kt%ncols() == 5, "the target gained four columns")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen0, "and the source table's generation did not move")
+        if (allocated(error)) return
+        call check(error, grp%is_current(), "so the grouping is still current")
+        if (allocated(error)) return
+        call check(error, .not. t%is_detached(), "nothing detached the source")
+        if (allocated(error)) return
+        call check(error, t%nrows() == 9_int64, "every source row is still there")
+        if (allocated(error)) return
+        call t%get("key", key)
+        call check(error, all(key == [7, 3, 7, 3, 9, 7, 3, 9, 7]), "the key column is in its original order")
+        if (allocated(error)) return
+        call t%get("payload", payload)
+        call check(error, all(payload == [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, &
+            6.0_real64, 7.0_real64, 8.0_real64, 9.0_real64]), "and so is the payload")
+        if (allocated(error)) return
+        call check(error, associated(p), "a %col pointer into the source taken before the adds is still valid")
+        if (allocated(error)) return
+        call check(error, p(1) == 1.0_real64, "...reading its own first value")
+        if (allocated(error)) return
+        call check(error, p(9) == 9.0_real64, "...and its own last")
+    end subroutine test_add_forms_are_reads_of_the_source
+
+    !> `force=.true.` replaces an existing column's values AND its kind, advancing the TARGET's
+    !! `%generation()` as `%add_column(force=.true.)` documents; an add under a NEW name inside
+    !! the reserved capacity does not. Without `force` a taken name aborts, out of process
+    !! (`table_group_add_size_name_taken`).
+    subroutine test_add_agg_force_replaces(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        real(real64), allocatable :: got(:), want(:)
+        integer(int64), allocatable :: igot(:)
+        integer(int64) :: gen0
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        call grp%key_table(kt, reserve=6)
+        call grp%add_agg("x", "min", kt, "v")
+        gen0 = kt%generation()
+        call grp%add_agg("x", "max", kt, "w")
+        call check(error, kt%generation() == gen0, "a new name inside the reserved capacity moves no slot")
+        if (allocated(error)) return
+        call grp%add_agg("x", "max", kt, "v", force=.true.)
+        call grp%agg("x", "max", want)
+        call kt%get("v", got)
+        call check(error, all(got == want), "force= replaced the column's values")
+        if (allocated(error)) return
+        call check(error, kt%generation() /= gen0, "...and replacing a column advances the target's generation")
+        if (allocated(error)) return
+        call grp%add_agg("big", "sum", kt, "v", exact=.true., force=.true.)
+        call check(error, kt%kind("v") == PK_INT64, "force= replaces the kind too")
+        if (allocated(error)) return
+        call kt%get("v", igot)
+        call check(error, igot(1) == 2_int64**54 + 11_int64, "...with the new statistic's values")
+        if (allocated(error)) return
+        call grp%add_size(kt, "v", force=.true.)
+        call kt%get("v", igot)
+        call check(error, all(igot == [5_int64, 3_int64, 3_int64, 1_int64]), "%add_size forwards force= too")
+    end subroutine test_add_agg_force_replaces
+
+    !> Zero groups: every form adds a zero-row column, on a target that has no columns yet and on
+    !! an empty key table, and the callback form never calls the procedure. Then the other half of
+    !! the column-less rule, which an empty grouping cannot see because 0 rows and 0 groups agree
+    !! whatever the check is: a fresh `parquet_new_table` under a grouping of FOUR groups takes
+    !! `%ngroups()` rows from the first add (feature_risks.md Risk-262).
+    subroutine test_add_forms_on_empty_grouping(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt, bare, u, fresh
+        type(parquet_grouping) :: grp, g4
+        integer(int64), allocatable :: none(:), counts(:)
+        real(real64), allocatable :: got(:)
+        !
+        allocate(none(0))
+        call parquet_new_table(t)
+        call t%add_column("k", none)
+        call t%add_column("v", none)
+        call t%group_by("k", grp)
+        call grp%key_table(kt)
+        empty_col_calls = 0
+        call grp%add_agg("v", "mean", kt, "m")
+        call grp%add_agg("v", "sum", kt, "s", exact=.true.)
+        call grp%add_agg("v", cb_col_count_empty, kt, "cm")
+        call grp%add_size(kt, "n")
+        call check(error, kt%ncols() == 5, "four columns went onto the empty key table")
+        if (allocated(error)) return
+        call check(error, kt%nrows() == 0_int64, "...each of zero rows")
+        if (allocated(error)) return
+        call kt%get("m", got)
+        call check(error, size(got) == 0, "and reading one back gives a zero-length array")
+        if (allocated(error)) return
+        call check(error, empty_col_calls == 0, "the callback was never called: there is no group to call it for")
+        if (allocated(error)) return
+        ! A target with no columns at all takes its row count from the first add, exactly as
+        ! %add_column fixes a new table's.
+        call parquet_new_table(bare)
+        call grp%add_size(bare, "n")
+        call check(error, bare%ncols() == 1, "a column-less target is accepted")
+        if (allocated(error)) return
+        call check(error, bare%nrows() == 0_int64, "...and its row count becomes %ngroups()")
+        if (allocated(error)) return
+        ! The same rule where the two counts can disagree: a fresh table has 0 rows and this
+        ! grouping has 4 groups, so a row-count check that did not ask "has it any columns yet?"
+        ! would refuse it.
+        call build_agg(u)
+        call u%group_by("k", g4)
+        call parquet_new_table(fresh)
+        call g4%add_size(fresh, "n")
+        call check(error, fresh%nrows() == g4%ngroups(), &
+            "a column-less target under a NON-empty grouping takes the group count as its row count")
+        if (allocated(error)) return
+        call fresh%get("n", counts)
+        call check(error, all(counts == [5_int64, 3_int64, 3_int64, 1_int64]), "...carrying the group sizes")
+        if (allocated(error)) return
+        call g4%add_agg("x", "mean", fresh, "m")
+        call check(error, fresh%ncols() == 2, "and a second add goes on beside it")
+    end subroutine test_add_forms_on_empty_grouping
+
+    !> `%add_size(kt, as)` is `%key_table(size_name=)`'s column, bit for bit, added later: the
+    !! same values as `%size`'s `int64` answer, kind `PK_INT64`, no unit, on a fixture with groups
+    !! of four different sizes. So a summary gains its count when it is built or at any time
+    !! after, and the two spellings cannot disagree.
+    subroutine test_add_size_equals_size_and_size_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt, kt2
+        type(parquet_grouping) :: grp
+        integer(int64), allocatable :: counts(:), got(:), at_build(:)
+        character(len=:), allocatable :: u
+        integer(int64) :: gen0
+        !
+        call build_agg(t)
+        gen0 = t%generation()
+        call t%group_by("k", grp)
+        call grp%size(counts)
+        call grp%key_table(kt, reserve=2)
+        call grp%add_size(kt, "n")
+        call kt%get("n", got)
+        call check(error, size(got) == size(counts), "one count per group")
+        if (allocated(error)) return
+        call check(error, all(got == counts), "and each is %size's own answer")
+        if (allocated(error)) return
+        call check(error, all(got == [5_int64, 3_int64, 3_int64, 1_int64]), "...the fixture's unequal groups")
+        if (allocated(error)) return
+        call check(error, kt%kind("n") == PK_INT64, "the column is int64")
+        if (allocated(error)) return
+        call kt%unit("n", u)
+        call check(error, u == "", "and carries no unit: a count has none")
+        if (allocated(error)) return
+        call check(error, .not. kt%has_nulls("n"), "no row is Null: a count is never NaN")
+        if (allocated(error)) return
+        ! The column %key_table(size_name=) creates, built the other way round.
+        call grp%key_table(kt2, size_name="n")
+        call kt2%get("n", at_build)
+        call check(error, all(got == at_build), "%add_size later is %key_table(size_name=) at build")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen0, "and the source table is untouched")
+    end subroutine test_add_size_equals_size_and_size_name
 
     ! ---- %broadcast and %gather ------------------------------------------------------------------
 
@@ -1972,6 +2391,17 @@ contains
         call pf_median(values, r, is_valid=is_valid, weights=weights)
     end function cb_col_median
 
+    !> `pf_median` over the group, recording nothing: the callback every test that wants only the
+    !! VALUES passes, so that `cb_col_median`'s three counters belong to `test_agg_callback_presence`
+    !! alone -- the suite dispatches its tests concurrently (see the header).
+    function cb_col_plain_median(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the median.
+        call pf_median(values, r, is_valid=is_valid, weights=weights)
+    end function cb_col_plain_median
+
     !> The weighted sum of the valid values, by plain arithmetic.
     function cb_col_weighted_sum(values, is_valid, weights) result(r)
         real(real64), intent(in) :: values(:)            !! the group's values.
@@ -1988,6 +2418,45 @@ contains
         r = sum(values * w, mask=w > 0.0_real64)
     end function cb_col_weighted_sum
 
+
+    !> Counts its calls in `empty_col_calls`, the counter `test_add_forms_on_empty_grouping` owns
+    !! (one module variable per test, see the header); answers 0.
+    function cb_col_count_empty(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! 0.
+        empty_col_calls = empty_col_calls + 1
+        r = 0.0_real64
+        if (size(values) < 0) r = -huge(r)
+        if (present(is_valid) .or. present(weights)) r = 0.0_real64
+    end function cb_col_count_empty
+
+    !> The sum of the group's usable values -- non-null, non-NaN, positively weighted -- or a
+    !! NaN when there are fewer than two of those: the
+    !! "could not compute" answer `%add_agg`'s `nan_to_null` rule turns into a Null row. A NaN of
+    !! the procedure's own choosing is what the callback contract asks for, never an abort.
+    function cb_col_sum_or_nan(values, is_valid, weights) result(r)
+        real(real64), intent(in) :: values(:)            !! the group's values.
+        logical, intent(in), optional :: is_valid(:)     !! present for a group holding a null.
+        real(real64), intent(in), optional :: weights(:) !! present when weights were given.
+        real(real64) :: r                                !! the sum, or a NaN.
+        logical, allocatable :: m(:)
+        allocate(m(size(values)))
+        m = .true.
+        if (present(is_valid)) m = is_valid
+        if (present(weights)) then
+            where (weights <= 0.0_real64) m = .false.
+        end if
+        ! Per element over a values array: `x /= x` rather than ieee_is_nan, the hot-path
+        ! spelling (.claude/rules/fortran-gotchas.md); both are quiet on a quiet NaN.
+        where (values /= values) m = .false.
+        if (count(m) < 2) then
+            r = ieee_value(0.0_real64, ieee_quiet_nan)
+            return
+        end if
+        r = sum(values, mask=m)
+    end function cb_col_sum_or_nan
 
     !> `scaled_sum_reducer%reduce`; see the type.
     subroutine scaled_sum_reduce(self, g, rows, out)

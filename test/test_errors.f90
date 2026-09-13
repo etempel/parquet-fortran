@@ -2851,7 +2851,20 @@ contains
             new_unittest("agg with a NaN weight aborts", test_table_group_agg_nan_weight_aborts), &
             new_unittest("agg with an infinite weight aborts", test_table_group_agg_infinite_weight_aborts), &
             new_unittest("key_table with a negative reserve aborts", &
-                test_table_group_key_table_reserve_negative_aborts) &
+                test_table_group_key_table_reserve_negative_aborts), &
+            new_unittest("add_agg onto the grouping's own table aborts", &
+                test_table_group_add_agg_target_is_source_aborts), &
+            new_unittest("add_agg onto a target whose row count is not the group count aborts", &
+                test_table_group_add_agg_rows_mismatch_aborts), &
+            new_unittest("add_agg with two names in as= aborts", &
+                test_table_group_add_agg_as_two_names_aborts), &
+            new_unittest("add_agg with nan_to_null= and exact= together aborts", &
+                test_table_group_add_agg_nan_to_null_exact_aborts), &
+            new_unittest("add_agg on a stale grouping aborts", test_table_group_stale_add_agg_aborts), &
+            new_unittest("add_agg with an unknown statistic token aborts, naming add_agg", &
+                test_table_group_add_agg_unknown_token_aborts), &
+            new_unittest("add_size under a name the target already carries aborts", &
+                test_table_group_add_size_name_taken_aborts) &
             ]
         ! The `int32` and string-keyed refusals of `parquet_index`: each repeats its `int64`
         ! sibling's guard rather than delegating to it, so each copy needs a scenario of its own.
@@ -17861,6 +17874,68 @@ contains
             failure_message="key_table with a negative reserve was expected to abort", &
             required_stderr="parquet_grouping: key_table: reserve= must be at least 0, got -1")
     end subroutine test_table_group_key_table_reserve_negative_aborts
+    !
+    !> See `scenario_table_group_add_agg_target_is_source` (test/error_scenarios.f90).
+    subroutine test_table_group_add_agg_target_is_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_agg_target_is_source", &
+            expect_abort=.true., &
+            failure_message="add_agg onto the grouping's own table was expected to abort", &
+            required_stderr="parquet_grouping: add_agg: the target table is the one this grouping was built from")
+    end subroutine test_table_group_add_agg_target_is_source_aborts
+    !
+    !> See `scenario_table_group_add_agg_rows_mismatch` (test/error_scenarios.f90).
+    subroutine test_table_group_add_agg_rows_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_agg_rows_mismatch", &
+            expect_abort=.true., &
+            failure_message="add_agg onto a target of the wrong length was expected to abort", &
+            required_stderr="parquet_grouping: add_agg: the target table has 5 rows and this grouping has 3 groups")
+    end subroutine test_table_group_add_agg_rows_mismatch_aborts
+    !
+    !> See `scenario_table_group_add_agg_as_two_names` (test/error_scenarios.f90).
+    subroutine test_table_group_add_agg_as_two_names_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_agg_as_two_names", &
+            expect_abort=.true., &
+            failure_message="add_agg with two names in as= was expected to abort", &
+            required_stderr="parquet_grouping: add_agg: as= must name exactly one column, got 2 names")
+    end subroutine test_table_group_add_agg_as_two_names_aborts
+    !
+    !> See `scenario_table_group_add_agg_nan_to_null_exact` (test/error_scenarios.f90).
+    subroutine test_table_group_add_agg_nan_to_null_exact_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_agg_nan_to_null_exact", &
+            expect_abort=.true., &
+            failure_message="add_agg with nan_to_null= and exact= together was expected to abort", &
+            required_stderr="parquet_grouping: add_agg: nan_to_null= has no meaning with exact=.true.")
+    end subroutine test_table_group_add_agg_nan_to_null_exact_aborts
+    !
+    !> See `scenario_table_group_stale_add_agg` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_add_agg_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_add_agg", expect_abort=.true., &
+            failure_message="add_agg on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: add_agg: this table has changed structurally")
+    end subroutine test_table_group_stale_add_agg_aborts
+    !
+    !> See `scenario_table_group_add_agg_unknown_token` (test/error_scenarios.f90).
+    subroutine test_table_group_add_agg_unknown_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_agg_unknown_token", &
+            expect_abort=.true., &
+            failure_message="add_agg with an unknown statistic token was expected to abort", &
+            required_stderr="parquet_grouping: add_agg: unknown statistic 'medain'")
+    end subroutine test_table_group_add_agg_unknown_token_aborts
+    !
+    !> See `scenario_table_group_add_size_name_taken` (test/error_scenarios.f90).
+    subroutine test_table_group_add_size_name_taken_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_size_name_taken", &
+            expect_abort=.true., &
+            failure_message="add_size under a name the target already carries was expected to abort", &
+            required_stderr="""n"" is already a column of the target table; pass force=.true. to replace it")
+    end subroutine test_table_group_add_size_name_taken_aborts
     !
     !> See `scenario_table_group_stale_apply` (test/error_scenarios.f90).
     subroutine test_table_group_stale_apply_aborts(error)

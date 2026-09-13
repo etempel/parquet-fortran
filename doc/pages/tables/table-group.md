@@ -5,7 +5,8 @@ title: Grouping rows and aggregating per group
 `%group_by` partitions a table's rows by the values of one or more key columns and keeps the
 partition as a `parquet_grouping`: an object that answers per group — the rows of a group, one row
 per group, the counts, the key values as a table of their own, one statistic of one column through
-`%agg` — and calls a procedure of yours once per group through `%apply`. The table itself is not
+`%agg` or straight onto a summary table through `%add_agg` — and calls a procedure of yours once per
+group through `%apply`. The table itself is not
 reordered, keeps its file attached and reads a column only if nothing has read it yet. It is the
 per-field summary of a survey catalogue, the properties of every galaxy group in a group catalogue,
 one output per observing frame.
@@ -13,22 +14,18 @@ one output per observing frame.
 ```fortran
 type(parquet_table) :: t, summary
 type(parquet_grouping) :: grp
-integer(int64), allocatable :: n(:)
-real(real64), allocatable :: med_mag(:), blue(:), snr_p90(:)
 
 call parquet_open_table(t, "sources.parquet")
 call t%group_by("field_id,class", grp)             ! one sort of the key columns; t is left as it is
-call grp%size(n)                                   ! rows per group, in group order
-call grp%agg("mag_g", "median", med_mag)           ! one statistic of one column per group
-call grp%agg("is_blue", "mean", blue)              ! the fraction: the mean of a logical column
-call grp%agg("snr", "quantile", snr_p90, q=0.9_real64)
-call grp%key_table(summary)                        ! one row per group: the field_id and class columns
-call summary%add_column("n_sources", n)
-call summary%add_column("median_mag_g", med_mag)
-call summary%add_column("blue_fraction", blue)
-call summary%add_column("snr_p90", snr_p90)
+call grp%key_table(summary, size_name="n_sources", reserve=3)   ! one row per group, with room
+call grp%add_agg("mag_g", "median", summary, "median_mag_g")    ! one statistic of one column per group
+call grp%add_agg("is_blue", "mean", summary, "blue_fraction")   ! the fraction: the mean of a logical column
+call grp%add_agg("snr", "quantile", summary, "snr_p90", q=0.9_real64)
 call parquet_write_table(summary, "field_summary.parquet")
 ```
+
+Each `%add_agg` is one `%agg` and one `%add_column`: ask for the array instead
+(`call grp%agg("mag_g", "median", med_mag)`) whenever you want the numbers rather than a column.
 
 Every procedure on this page is a **read** of the table: none reorders it, touches a row, detaches
 it from its file or advances `%generation()`.
@@ -103,8 +100,9 @@ call grp%count(name, out)                        ! non-null rows of `name` per g
 gathered **copy**, so the source table is untouched — and, with `size_name=`, an `int64` column of
 rows per group; a `size_name=` that repeats a key column's name is refused rather than producing a
 table with two columns of that name. It is an ordinary table: sort it, filter it, write it, and
-above all `%add_column` the per-group answers onto it, which is the summary pattern the opening
-example shows. The per-group answers come from `%size`, `%count` and `%apply` below.
+above all put the per-group answers onto it, which is the summary pattern the opening example
+shows: `%add_agg` writes one straight on, and `%add_column` takes the array `%agg`, `%size`,
+`%count` or `%apply` filled.
 
 `reserve=` is how many **spare column slots** the key table is to carry beyond the columns the
 call itself creates — the keys, plus one when `size_name=` is given. It is an **increment**, not a
@@ -123,6 +121,15 @@ call grp%key_table(summary, size_name="n_sources", reserve=4)
 call grp%agg("mag_g", "median", med_mag)
 call summary%add_column("median_mag_g", med_mag)
 ```
+
+```fortran
+call grp%add_size(table, as, [force])   ! the group size onto a table that already exists
+```
+
+`%add_size` is the column `size_name=` creates, added later: the same `int64` counts, bit for bit,
+so a summary gains its count when it is built or at any time after. `as` names it, `force=.true.`
+replaces a column of that name, and there is no unit and no null — a count has neither. Its target
+rules are `%add_agg`'s below.
 
 `%count` counts a column's non-null rows per group, for a column of any kind, and reads the
 column from the file if nothing has yet.
@@ -237,6 +244,76 @@ A procedure that needs the exact integer values, a string, or several columns at
 `%apply` below and reads the columns through its own pointers. The threading contract is
 `%apply`'s: `threads=` absent means serial, and giving it is your statement that the procedure may
 be called from several threads at once.
+
+Every form on this page hands back an array. `%add_agg` below is the same statistic written
+straight onto a summary table as a named column instead, for either form.
+
+## Straight onto the key table: `%add_agg`
+
+`%add_agg` is `%agg` followed by `%add_column`, in one call: the same statistic, over the same
+groups, written onto a table with one row per group as a named column.
+
+```fortran
+call grp%add_agg(name, stat, table, as, [exact], [weights], [weight_column], [q], [ddof], &
+    [method], [scale], [unit], [nan_to_null], [force], [threads])
+call grp%add_agg(name, func, table, as, [weights], [weight_column], [unit], [nan_to_null], &
+    [force], [threads])
+```
+
+`table` is the target — normally this grouping's `%key_table`, which is why `%key_table(reserve=)`
+exists — and `as` is the new column's name. The column holds exactly what `%agg` writes into an
+array, bit for bit, so every rule of `%agg` above holds unchanged: the vocabulary and its options,
+the null and NaN rules, the weights, the threading, the refusals. `name`, `stat` and `func` mean
+what they do on `%agg`, and `func` must be passed by **name** rather than through a procedure
+pointer.
+
+- **The kind** is `real(real64)`, or `integer(int64)` with `exact=.true.`, which selects the exact
+  family described above. The exact family is unweighted and takes no options, so `weights=`,
+  `weight_column=`, `q=`, `ddof=`, `method=`, `scale=` and `nan_to_null=` are refused with it
+  rather than ignored.
+- **A group without an answer becomes a Null row.** Under `nan_to_null=.true.`, the default, every
+  NaN in the per-group answer marks its row null in the new column — a NaN here can only mean "no
+  answer": an undefined statistic (the `"std"` of a group of one, the `"mean"` of an all-null
+  group), or a value your own procedure could not compute. Read the column back with
+  `call summary%get(as, v, is_valid=ok)`, or gate on `summary%is_null(as, g)`; the bytes under a
+  null row are not a contract. `nan_to_null=.false.` leaves the NaN a value, which is what
+  `%add_column` of `%agg`'s array gives you.
+- **The unit**: `unit=` given wins, and `unit=""` asks for none. Absent, the token form carries the
+  **source column's** unit for the statistics that keep its dimension — `"sum"`, `"mean"`, `"min"`,
+  `"max"`, `"range"`, `"median"`, `"quantile"`, `"iqr"`, `"mad"`, `"std"`, `"sem"`, `"first"`,
+  `"last"` — and none for `"size"`, `"count"`, `"nunique"` and `"var"`, since a count has no unit
+  and a squared one cannot be spelled in a free-text unit string. The procedure form carries none
+  unless `unit=` is given: the library cannot know a callback's dimension.
+- **`force=.true.`** replaces an existing column of that name, exactly as `%add_column`'s does,
+  which advances the **target's** `%generation()`. Without it a name the target already carries is
+  refused before anything is written.
+- **`threads=`** is forwarded unchanged, so the token form is automatic when absent and the
+  procedure form is serial when absent, each as on `%agg`.
+- **The order lines up because both are group order**: the key table's rows and the per-group
+  answers are in the same order by contract, which is what makes the column meaningful beside the
+  keys.
+
+**The target must have one row per group.** Two targets are refused, each naming the count it
+found: the table this grouping was built from — a per-group column does not belong on the rows, and
+an `%add_column` there could relocate the slots the grouping points into — and any table whose
+`%nrows()` is not `%ngroups()`, which would otherwise give a well-formed column about the wrong
+groups. A target with **no columns yet** is accepted: its row count becomes `%ngroups()` at the
+first add, as it would for `%add_column`. What `%add_column` itself refuses about the target — a
+closed table, a table shared across a team — it reports under its own name.
+
+A summary of several statistics is then one line each, and `reserve=` is what keeps the adds from
+relocating anything:
+
+```fortran
+call grp%key_table(summary, size_name="n", reserve=4)
+call grp%add_agg("mag_g", "median", summary, "median_mag_g")
+call grp%add_agg("mag_g", "mad", summary, "scatter_mag_g")
+call grp%add_agg("object_id", "nunique", summary, "n_objects", exact=.true.)
+call grp%add_agg("mag_g", robust_mad, summary, "robust_scatter", unit="mag")
+```
+
+`%add_size` (above) is the same thing for the group size, and a per-group answer you compute
+yourself still goes on with `%add_column`, which is what `%add_agg` does for you.
 
 ## One answer per group: `%apply`
 
@@ -488,7 +565,9 @@ built and compares it on every per-group query, so after any row-structural chan
 `%drop_duplicates`, a `%join` that rebuilds the rows — a query **aborts**, naming the table and
 both generations, instead of handing out in-range row numbers that name the wrong rows (and,
 through `%apply`, a plausible mass from the wrong galaxies).
-`%is_current()` is the question without the abort; `%group_by` again is the remedy.
+`%is_current()` is the question without the abort; `%group_by` again is the remedy. `%add_agg` and
+`%add_size` are per-group queries like the rest and run the same check before they touch the
+target, so a stale grouping cannot leave a half-built summary behind.
 
 What leaves a grouping usable is a change to **values** alone: `%set`, `%set_null`, `%fillna`, and
 an `%add_column` of a new name that fits inside the room `%reserve_columns` made. **A change to the
@@ -511,7 +590,10 @@ each key column whether the group's representative row is null. Each per-group q
 over the partition, and `%key_table` one gather per key column. Each `%agg` statistic costs one
 pass over the column into a per-thread buffer the size of the largest group, allocated once, and
 one call of the statistic per group; `%nunique` costs one more sort. `%apply` costs whatever your
-procedure costs, times the number of groups, divided by the team you asked for. `%broadcast` costs
+procedure costs, times the number of groups, divided by the team you asked for. `%add_agg` and
+`%add_size` cost their statistic plus one copy of the per-group answer into the target's column,
+and one pass over the answers under `nan_to_null`; `%key_table(reserve=)` is what keeps those adds
+from relocating the target's column slots. `%broadcast` costs
 one pass over the rows and `%gather` one copy of the group's rows into your buffer; neither
 allocates per group. The object holds two `int64` arrays the length of the grouped rows and the
 group count — nothing per group, and nothing of the table's columns.

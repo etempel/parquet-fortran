@@ -330,6 +330,8 @@ something a reader is expected to have.
 | [Risk-259](#risk-259--two-loops-written-to-mirror-each-other-do-not-round-alike-and-pf_covx-x--pf_variancex-is-exact) | Two loops written to mirror each other do not round alike | 4 — covered |
 | [Risk-260](#risk-260--a-nested-range-taken-from-a-container-payload-goes-stale-on-a-set_null-of-an-earlier-row) | A `%nested` range goes stale on a `%set_null` of an EARLIER row | 4 — covered |
 | [Risk-261](#risk-261--key_tablereserve-reserves-a-total-computed-from-what-the-call-creates-and-a-short-reservation-fails-only-on-the-last-add) | `%key_table(reserve=)` reserves a TOTAL, and a short reservation fails only on the last add | 4 — covered |
+| [Risk-262](#risk-262--a-per-group-column-must-land-on-a-table-with-one-row-per-group-and-the-source-table-is-the-one-target-that-fails-silently) | A per-group column must land on a table with one row per group, and the SOURCE table fails silently | 4 — covered |
+| [Risk-263](#risk-263--the-nan-to-null-and-unit-rules-of-a-table-target-binding-live-in-one-helper-and-a-second-add_column-route-bypasses-both) | The NaN-to-Null and unit rules of a table-target binding live in ONE helper | 4 — covered |
 
 ---
 
@@ -9831,3 +9833,54 @@ comment at the call: the table is created inside `%key_table`, so no caller can 
 across those adds and no assertion outside can tell the two orders apart. Mutation confirms it
 (moving the reservation below the key adds leaves `test_key_table_reserve` green); do not add a
 test claiming otherwise.
+
+### Risk-262 — A per-group column must land on a table with one row per group, and the SOURCE table is the one target that fails silently
+
+`%add_agg` and `%add_size` (`src/parquet_tables_group.f90`) take the target as
+`type(parquet_table), intent(inout)` while the grouping holds a POINTER into its own table's
+column store. Two wrong targets are reachable, and neither is loud on its own:
+
+- **the grouping's own table.** `%add_column` on it can grow the slot array and relocate the very
+  slots `self%cache` points into, inside the same call — and the column would be `%ngroups()`
+  values spread over `%nrows()` rows, which answers nothing.
+- **a table of the right LENGTH from ANOTHER grouping.** Every value is well formed, the column
+  lands, and every entry is about a different group. Nothing downstream can question it: the key
+  columns beside it name the other partition's groups.
+
+**Rule.** Every table-target binding refuses `associated(table%cache, self%cache)`, and — for a
+target that already has columns — `table%nrows() /= self%ngrp`, BEFORE it computes anything. A
+target with no columns yet is accepted at any length: its row count becomes `%ngroups()` at the
+first add, as `%add_column` fixes a new table's. `grp_check_target` is the one place both live;
+a new table-target binding calls it rather than repeating either test.
+
+**Covered by** the scenarios `table_group_add_agg_target_is_source` (the source table as the
+target) and `table_group_add_agg_rows_mismatch` (another grouping's key table, 5 rows against 3
+groups), each with the same call onto the right key table as its control, and by
+`test_add_forms_on_empty_grouping` (`test/test_table_group.f90`) for the column-less target that
+must still be accepted. Confirmed by mutation: dropping either check makes its scenario exit 0.
+
+### Risk-263 — The NaN-to-Null and unit rules of a table-target binding live in ONE helper, and a second `%add_column` route bypasses both
+
+A per-group column carries two POLICIES that no value assertion can see: a group with no answer is
+a Null row rather than a stored NaN, and the column carries the source column's unit where the
+statistic keeps its dimension. A binding that called `table%add_column` itself would apply
+neither, and the column would still hold the right numbers in the right order — a summary whose
+undefined rows read as NaN values instead of Nulls, or whose magnitudes have lost their unit on the
+way to a schema-less write.
+
+**Rule.** Every per-group column reaches its target through `grp_put_column_f64` or
+`grp_put_column_i64` (`src/parquet_tables_group.f90`); no table-target binding calls
+`%add_column` itself. The real64 half owns the NaN rule (`valid(i) = (vals(i) == vals(i))`, then
+`%set_null`, which only ever ADDS nulls and never advances the target's `%generation()`); the
+`int64` half deliberately has none, because neither an exact statistic nor a count can be NaN.
+The unit is resolved by the CALLER and passed in as a string, so the helper has one rule and the
+dimension table stays in `agg_unit` alone.
+
+**Covered by** `test_add_agg_equals_agg_and_add_column` (`test/test_table_group.f90`), which
+asserts `%is_null` and `%get(..., is_valid=)` exactly where `%agg`'s array is NaN and the unit
+inherited exactly for the statistics that keep the dimension, for all fifteen real64 tokens, with
+`unit=` overriding in both directions; `test_add_agg_exact_family` for the `int64` half (no Null
+row, the same unit rule); and `test_add_agg_procedure_form` for the callback route, where a NaN the
+caller's procedure returns becomes a Null and `nan_to_null=.false.` is the negative control.
+Confirmed by mutation: skipping the `%set_null` call, and inheriting the unit for `"var"`, each
+fail those assertions.

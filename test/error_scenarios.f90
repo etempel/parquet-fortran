@@ -3448,6 +3448,18 @@ program error_scenarios
         call scenario_table_group_add_agg_unknown_token()
     case ("table_group_add_size_name_taken")
         call scenario_table_group_add_size_name_taken()
+    case ("table_group_add_apply_target_is_source")
+        call scenario_table_group_add_apply_target_is_source()
+    case ("table_group_add_apply_no_name")
+        call scenario_table_group_add_apply_no_name()
+    case ("table_group_add_apply_duplicate_name")
+        call scenario_table_group_add_apply_duplicate_name()
+    case ("table_group_add_apply_name_taken")
+        call scenario_table_group_add_apply_name_taken()
+    case ("table_group_stale_add_apply")
+        call scenario_table_group_stale_add_apply()
+    case ("table_group_add_apply_threads_zero")
+        call scenario_table_group_add_apply_threads_zero()
     case ("table_group_stale_apply")
         call scenario_table_group_stale_apply()
     case ("table_group_stale_apply_object")
@@ -30050,6 +30062,101 @@ contains
         call grp%add_size(kt, "n")
         print '(a,i0)', "unexpectedly replaced a column without force=, cols=", kt%ncols()
     end subroutine scenario_table_group_add_size_name_taken
+    !
+    !> `%add_apply` runs the same target check `%add_agg` does, at its own site and under its own
+    !! name: the grouping's own table is refused before the callback is called even once. The key
+    !! table is the control (feature_risks.md Risk-262).
+    subroutine scenario_table_group_add_apply_target_is_source()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_apply(scenario_group_two, kt, "a,b")
+        print '(a,i0)', "add_apply onto the key table ran, cols=", kt%ncols()
+        call grp%add_apply(scenario_group_two, t, "a,b")
+        print '(a,i0)', "unexpectedly wrote per-group columns onto the source table, cols=", t%ncols()
+    end subroutine scenario_table_group_add_apply_target_is_source
+    !
+    !> `as=` on `%add_apply` is the list of names the call adds, and its length is how many
+    !! results per group the callback is asked for -- so a list that names nothing is a request
+    !! for no columns from no results, refused rather than quietly doing nothing. Two names are
+    !! the control.
+    subroutine scenario_table_group_add_apply_no_name()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_apply(scenario_group_two, kt, "a,b")
+        print '(a,i0)', "add_apply with two names ran, cols=", kt%ncols()
+        call grp%add_apply(scenario_group_two, kt, " , ")
+        print '(a,i0)', "unexpectedly accepted an as= that names nothing, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_apply_no_name
+    !
+    !> A name repeated in `as=` would ask one table for two columns of one name: the second add
+    !! would replace the first and the caller would read one result twice. Refused before
+    !! anything is written; two distinct names are the control.
+    subroutine scenario_table_group_add_apply_duplicate_name()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_apply(scenario_group_two, kt, "a,b")
+        print '(a,i0)', "add_apply with two distinct names ran, cols=", kt%ncols()
+        call grp%add_apply(scenario_group_two, kt, "m,m")
+        print '(a,i0)', "unexpectedly accepted one name twice in as=, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_apply_duplicate_name
+    !
+    !> Every name is checked against the target BEFORE the first column is written, so a call
+    !! refused on its LAST name leaves the target exactly as it was: the count printed just
+    !! before the abort is the count the control left, and no `new` column was written on the way
+    !! to discovering that `n` is taken. The object form is the control.
+    subroutine scenario_table_group_add_apply_name_taken()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        type(scenario_group_reducer) :: red
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt, size_name="n")
+        call grp%add_apply(red, kt, "a,b")
+        print '(a,i0)', "add_apply under free names ran, cols=", kt%ncols()
+        print '(a,i0)', "the target carries before the refused call, cols=", kt%ncols()
+        call grp%add_apply(scenario_group_two, kt, "new,n")
+        print '(a,i0)', "unexpectedly wrote a column before the last name was checked, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_apply_name_taken
+    !
+    !> `%add_apply` is a per-group query, so it runs the generation check every other one runs,
+    !! before the callback is called and before the target is touched. An add before the row
+    !! change is the control.
+    subroutine scenario_table_group_stale_add_apply()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_apply(scenario_group_two, kt, "a,b")
+        print '(a,i0)', "add_apply ran before the change, cols=", kt%ncols()
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%add_apply(scenario_group_two, kt, "c,d")
+        print '(a,i0)', "a stale grouping answered add_apply, cols=", kt%ncols()
+    end subroutine scenario_table_group_stale_add_apply
+    !
+    !> `threads=` below 1 is refused at the forwarding site too, naming `add_apply` rather than
+    !! the `apply` loop it forwards to: the argument is the caller's re-entrancy declaration, and
+    !! a team of none declares nothing. `threads=1` is the control.
+    subroutine scenario_table_group_add_apply_threads_zero()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_apply(scenario_group_two, kt, "a,b", threads=1)
+        print '(a,i0)', "add_apply with threads=1 ran, cols=", kt%ncols()
+        call grp%add_apply(scenario_group_two, kt, "c,d", threads=0)
+        print '(a,i0)', "unexpectedly accepted threads=0, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_apply_threads_zero
     !
     !> `%apply` on a stale grouping, in its procedure form: the generation check runs before the
     !! callback is called even once, so no procedure of the caller's computes anything from rows

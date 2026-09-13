@@ -167,10 +167,12 @@ module test_table_parallel
         end subroutine parquet_debug_set_colread_min_elements
     end interface
     !
-    !> Context for `%apply`'s procedure-form callbacks in `test_apply_group_team`: a module
+    !> Context for `%apply`'s and `%add_apply`'s procedure-form callbacks in
+    !! `test_apply_group_team` and `test_add_apply_group_team`: a module
     !! variable, because a callback must be a module procedure (an internal one crashes under
     !! one supported compiler; .claude/rules/fortran-gotchas.md, flang). Read on every thread of
-    !! the team, which is what an explicit threads= declares safe.
+    !! the team, which is what an explicit threads= declares safe. This suite runs its tests
+    !! SEQUENTIALLY (see the header), so the two tests cannot be in it at once.
     real(real64), pointer :: par_apply_p(:) => null() !! the fixture's payload column.
     !
     !> The object form's context, in a component: `out(1)` is the payload's sum over the group,
@@ -246,6 +248,8 @@ contains
                 test_apply_group_team), &
             new_unittest("a grouping's agg threads automatically, honours the cap and the request, and agrees", &
                 test_agg_group_team), &
+            new_unittest("a grouping's add_apply forwards threads= to the same loop and agrees with serial", &
+                test_add_apply_group_team), &
             new_unittest("a grouping's broadcast threads automatically, honours the cap and the request, and agrees", &
                 test_broadcast_group_team), &
             new_unittest("a gather's team goes inside the column when the columns are fewer than the threads", &
@@ -2900,6 +2904,98 @@ contains
         end do
         call check(error, .true., "every token agreed at both thread counts")
     end subroutine test_agg_group_team
+    !
+    !> `%add_apply`'s team, and the A/B on it. The binding forwards `threads=` to the same
+    !! `%apply` loop and nothing else, so the contract is `%apply`'s: absent is a DECISION for
+    !! serial and records 1, `threads=1` records 1, and `threads=nt` records nt on the procedure
+    !! and the object form alike -- while `%add_agg`'s token form, which forwards to `%agg`'s
+    !! loop, resolves automatically when absent. Then every column written on the team equals the
+    !! one written serially, bit for bit: the fixture's groups are unequal and its payload
+    !! row-distinct, so a result stored at the wrong group is a wrong VALUE (a defect of that
+    !! kind shows intermittently, so this test's power against it is statistical). The target is
+    !! the grouping's own key table, reserved wide enough that no add relocates a slot.
+    subroutine test_add_apply_group_team(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 20000 !! rows; about five hundred groups of unequal size.
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        type(par_sum_reducer) :: red
+        integer(int32) :: k(N)
+        real(real64) :: v(N)
+        real(real64), allocatable :: a1(:), a2(:), b1(:), b2(:)
+        integer(int64) :: r_abs, r_one, r_team, r_obj, r_agg
+        integer :: nt, i
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: no explicit threads= can open a team, so every record " // &
+            "would read 1 and the A/B would compare serial against serial")
+        return
+#else
+        nt = min(4, omp_get_num_procs())
+        if (nt < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is clamped " // &
+                "to omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+#endif
+        do i = 1, N
+            k(i) = int(sqrt(real(mod(i * 7919, 250000), real64)), int32)
+            v(i) = real(i, real64)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("v", v)
+        call t%col("v", par_apply_p)
+        call t%col("v", red%p)
+        call t%group_by("k", grp)
+        call grp%key_table(kt, reserve=16)
+        ! ---- the records: cleared to a value no loop writes, then one arm each.
+        call parquet_debug_set_group_threads_used(-1_c_int64_t)
+        call grp%add_apply(par_cb_two, kt, "s1,s2")
+        r_abs = parquet_debug_get_group_threads_used()
+        call grp%add_apply(par_cb_two, kt, "o1,o2", threads=1)
+        r_one = parquet_debug_get_group_threads_used()
+        call grp%add_apply(par_cb_two, kt, "t1,t2", threads=nt)
+        r_team = parquet_debug_get_group_threads_used()
+        call grp%add_apply(red, kt, "r1,r2")
+        call grp%add_apply(red, kt, "p1,p2", threads=nt)
+        r_obj = parquet_debug_get_group_threads_used()
+        call grp%add_agg("v", "mean", kt, "am")
+        r_agg = parquet_debug_get_group_threads_used()
+        call check(error, grp%ngroups() > 100_int64, "the fixture has a few hundred groups")
+        if (allocated(error)) return
+        call check(error, r_abs == 1_int64, "absent threads= runs serially and says so")
+        if (allocated(error)) return
+        call check(error, r_one == 1_int64, "threads=1 runs serially and says so")
+        if (allocated(error)) return
+        call check(error, r_team == int(nt, int64), "threads=nt opens a team of nt on the procedure form")
+        if (allocated(error)) return
+        call check(error, r_obj == int(nt, int64), "threads=nt opens a team of nt on the object form")
+        if (allocated(error)) return
+        call check(error, r_agg >= 1_int64, "%add_agg's token form resolves automatically when threads= is absent")
+        if (allocated(error)) return
+        ! ---- the A/B, read back from the target: every column the team wrote equals the serial one.
+        call kt%get("s1", a1)
+        call kt%get("s2", a2)
+        call kt%get("t1", b1)
+        call kt%get("t2", b2)
+        call check(error, all(b1 == a1) .and. all(b2 == a2), &
+            "the procedure form on a team writes the serial columns, bit for bit")
+        if (allocated(error)) return
+        call kt%get("o1", b1)
+        call kt%get("o2", b2)
+        call check(error, all(b1 == a1) .and. all(b2 == a2), "and so does threads=1")
+        if (allocated(error)) return
+        call kt%get("r1", b1)
+        call kt%get("r2", b2)
+        call check(error, all(b1 == a1) .and. all(b2 == a2), "the object form serially: the same columns again")
+        if (allocated(error)) return
+        call kt%get("p1", b1)
+        call kt%get("p2", b2)
+        call check(error, all(b1 == a1) .and. all(b2 == a2), "...and on the team")
+        if (allocated(error)) return
+        call check(error, kt%nrows() == grp%ngroups(), "every column landed on the key table's one row per group")
+    end subroutine test_add_apply_group_team
 
     !> `%broadcast`'s team, and the A/B on it: absent `threads=` is automatic (the record reads
     !! at least 1, and 1 under `parquet_set_table_threads(1)`), `threads=1` records 1 and

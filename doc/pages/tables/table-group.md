@@ -6,7 +6,7 @@ title: Grouping rows and aggregating per group
 partition as a `parquet_grouping`: an object that answers per group — the rows of a group, one row
 per group, the counts, the key values as a table of their own, one statistic of one column through
 `%agg` or straight onto a summary table through `%add_agg` — and calls a procedure of yours once per
-group through `%apply`. The table itself is not
+group through `%apply`, or onto that same summary table through `%add_apply`. The table itself is not
 reordered, keeps its file attached and reads a column only if nothing has read it yet. It is the
 per-field summary of a survey catalogue, the properties of every galaxy group in a group catalogue,
 one output per observing frame.
@@ -101,8 +101,8 @@ gathered **copy**, so the source table is untouched — and, with `size_name=`, 
 rows per group; a `size_name=` that repeats a key column's name is refused rather than producing a
 table with two columns of that name. It is an ordinary table: sort it, filter it, write it, and
 above all put the per-group answers onto it, which is the summary pattern the opening example
-shows: `%add_agg` writes one straight on, and `%add_column` takes the array `%agg`, `%size`,
-`%count` or `%apply` filled.
+shows: `%add_agg` and `%add_apply` write them straight on, and `%add_column` takes the array
+`%agg`, `%size`, `%count` or `%apply` filled.
 
 `reserve=` is how many **spare column slots** the key table is to carry beyond the columns the
 call itself creates — the keys, plus one when `size_name=` is given. It is an **increment**, not a
@@ -248,7 +248,7 @@ be called from several threads at once.
 Every form on this page hands back an array. `%add_agg` below is the same statistic written
 straight onto a summary table as a named column instead, for either form.
 
-## Straight onto the key table: `%add_agg`
+## Straight onto the key table: `%add_agg` and `%add_apply`
 
 `%add_agg` is `%agg` followed by `%add_column`, in one call: the same statistic, over the same
 groups, written onto a table with one row per group as a named column.
@@ -312,8 +312,55 @@ call grp%add_agg("object_id", "nunique", summary, "n_objects", exact=.true.)
 call grp%add_agg("mag_g", robust_mad, summary, "robust_scatter", unit="mag")
 ```
 
-`%add_size` (above) is the same thing for the group size, and a per-group answer you compute
-yourself still goes on with `%add_column`, which is what `%add_agg` does for you.
+`%add_size` (above) is the same thing for the group size, and an answer you compute yourself goes
+on through `%add_apply` below — or with `%add_column`, when you already hold the array.
+
+### Several results per group: `%add_apply`
+
+`%add_apply` is `%apply` followed by one `%add_column` per result: your callback runs once per
+group, and each of its results becomes a named column of the target.
+
+```fortran
+call grp%add_apply(func, table, as, [unit], [nan_to_null], [force], [threads])
+call grp%add_apply(reducer, table, as, [unit], [nan_to_null], [force], [threads])
+```
+
+- **`as` is a list of names**, separated by commas and/or semicolons with blanks trimmed —
+  `"mass,mass_err"` — read by the same tokenizer as `%group_by`'s keys. **Its length is the number
+  of results per group**: `func` is called with `size(out)` equal to it, and column k holds
+  `out(k, :)` of the matrix `%apply` would give, bit for bit. There is no `nout`, so the names and
+  the results cannot disagree.
+- **One name is the one-result case**: `as="mass"` calls the subroutine with a one-entry `out`.
+- **The object form** takes anything extending `parquet_group_reducer` in place of `func`, with
+  the same `as` and the same rules. A procedure is passed by **name**, as on `%add_agg`.
+- **`unit=` is the unit of every column named** — the common several-result case is a value and its
+  error, which share one — and absent means none: the library cannot know a callback's dimension.
+  A mixed set of units is two calls.
+- **A result the callback could not compute is a Null row** in that result's column and no other,
+  under the default `nan_to_null=.true.`: a NaN from a callback means "no answer" by the
+  interface's own contract. `nan_to_null=.false.` stores it as a value.
+- **`force=`, `threads=` and the target rules are `%add_agg`'s**, except that `threads=` absent is
+  **serial**, as on `%apply`. An `as` that names nothing, and one that names a column twice, are
+  refused; **every name is checked against the target before the first column is written**, so a
+  call refused on its last name leaves the target exactly as it was.
+
+```fortran
+subroutine mass_and_error(g, rows, out)      ! parquet_group_apply_i
+    integer(int64), intent(in) :: g
+    integer(int64), intent(in) :: rows(:)
+    real(real64), intent(out) :: out(:)      ! size(out) == 2: the two names in as=
+    out(1) = sum(lum(rows)) * mass_to_light
+    out(2) = out(1) / sqrt(real(size(rows), real64))
+end subroutine mass_and_error
+
+call grp%key_table(summary, size_name="n_members", reserve=2)
+call grp%add_apply(mass_and_error, summary, "mass,mass_err", unit="Msun")
+```
+
+**The one-value FUNCTION form of `%apply` is not offered here.** A function and a subroutine dummy
+cannot be told apart in one generic, and there is no `out` whose rank would separate them, so the
+one-result case is a `parquet_group_apply_i` subroutine writing `out(1)` under a single name in
+`as` — which is also how a reducer object already serves both shapes.
 
 ## One answer per group: `%apply`
 
@@ -347,6 +394,8 @@ call grp%apply(reducer, nout, out, [threads]) ! extending parquet_group_reducer 
   the order is unspecified and each result lands at its own `g`, so the answer does not depend
   on the schedule.
 - `nout` below 1 is refused; so is `threads` below 1.
+- `%add_apply` (above) writes those same results straight onto a table with one row per group
+  instead, one named column per result, for both the procedure and the object form.
 
 ### The procedure form
 
@@ -565,9 +614,9 @@ built and compares it on every per-group query, so after any row-structural chan
 `%drop_duplicates`, a `%join` that rebuilds the rows — a query **aborts**, naming the table and
 both generations, instead of handing out in-range row numbers that name the wrong rows (and,
 through `%apply`, a plausible mass from the wrong galaxies).
-`%is_current()` is the question without the abort; `%group_by` again is the remedy. `%add_agg` and
-`%add_size` are per-group queries like the rest and run the same check before they touch the
-target, so a stale grouping cannot leave a half-built summary behind.
+`%is_current()` is the question without the abort; `%group_by` again is the remedy. `%add_agg`,
+`%add_apply` and `%add_size` are per-group queries like the rest and run the same check before they
+touch the target, so a stale grouping cannot leave a half-built summary behind.
 
 What leaves a grouping usable is a change to **values** alone: `%set`, `%set_null`, `%fillna`, and
 an `%add_column` of a new name that fits inside the room `%reserve_columns` made. **A change to the
@@ -590,10 +639,10 @@ each key column whether the group's representative row is null. Each per-group q
 over the partition, and `%key_table` one gather per key column. Each `%agg` statistic costs one
 pass over the column into a per-thread buffer the size of the largest group, allocated once, and
 one call of the statistic per group; `%nunique` costs one more sort. `%apply` costs whatever your
-procedure costs, times the number of groups, divided by the team you asked for. `%add_agg` and
-`%add_size` cost their statistic plus one copy of the per-group answer into the target's column,
-and one pass over the answers under `nan_to_null`; `%key_table(reserve=)` is what keeps those adds
-from relocating the target's column slots. `%broadcast` costs
+procedure costs, times the number of groups, divided by the team you asked for. `%add_agg`,
+`%add_apply` and `%add_size` cost their statistic or callback plus one copy of each per-group
+answer into the target's column, and one pass over the answers under `nan_to_null`;
+`%key_table(reserve=)` is what keeps those adds from relocating the target's column slots. `%broadcast` costs
 one pass over the rows and `%gather` one copy of the group's rows into your buffer; neither
 allocates per group. The object holds two `int64` arrays the length of the grouped rows and the
 group count — nothing per group, and nothing of the table's columns.

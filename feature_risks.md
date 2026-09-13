@@ -9836,7 +9836,7 @@ test claiming otherwise.
 
 ### Risk-262 — A per-group column must land on a table with one row per group, and the SOURCE table is the one target that fails silently
 
-`%add_agg` and `%add_size` (`src/parquet_tables_group.f90`) take the target as
+`%add_agg`, `%add_apply` and `%add_size` (`src/parquet_tables_group.f90`) take the target as
 `type(parquet_table), intent(inout)` while the grouping holds a POINTER into its own table's
 column store. Two wrong targets are reachable, and neither is loud on its own:
 
@@ -9854,10 +9854,14 @@ first add, as `%add_column` fixes a new table's. `grp_check_target` is the one p
 a new table-target binding calls it rather than repeating either test.
 
 **Covered by** the scenarios `table_group_add_agg_target_is_source` (the source table as the
-target) and `table_group_add_agg_rows_mismatch` (another grouping's key table, 5 rows against 3
+target), `table_group_add_apply_target_is_source` (the same at `%add_apply`'s own site) and
+`table_group_add_agg_rows_mismatch` (another grouping's key table, 5 rows against 3
 groups), each with the same call onto the right key table as its control, and by
 `test_add_forms_on_empty_grouping` (`test/test_table_group.f90`) for the column-less target that
-must still be accepted. Confirmed by mutation: dropping either check makes its scenario exit 0.
+must still be accepted. Confirmed by mutation: dropping either check leaves the scenario exiting
+1 -- the sibling check aborts instead -- so each was verified through the wrapper in
+`test/test_errors.f90`, which asserts the library's own text, and not from the scenario's exit
+status.
 
 ### Risk-263 — The NaN-to-Null and unit rules of a table-target binding live in ONE helper, and a second `%add_column` route bypasses both
 
@@ -9881,6 +9885,8 @@ asserts `%is_null` and `%get(..., is_valid=)` exactly where `%agg`'s array is Na
 inherited exactly for the statistics that keep the dimension, for all fifteen real64 tokens, with
 `unit=` overriding in both directions; `test_add_agg_exact_family` for the `int64` half (no Null
 row, the same unit rule); and `test_add_agg_procedure_form` for the callback route, where a NaN the
-caller's procedure returns becomes a Null and `nan_to_null=.false.` is the negative control.
-Confirmed by mutation: skipping the `%set_null` call, and inheriting the unit for `"var"`, each
-fail those assertions.
+caller's procedure returns becomes a Null and `nan_to_null=.false.` is the negative control. The
+two `%add_apply` forms are covered by `test_add_apply_names_and_forms`, where a result the callback
+could not compute is a Null in ITS column and no other, `nan_to_null=.false.` is again the control,
+and `unit=` is asserted on every column named. Confirmed by mutation: skipping the `%set_null`
+call, and inheriting the unit for `"var"`, each fail those assertions.

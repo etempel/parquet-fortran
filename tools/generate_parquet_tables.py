@@ -1746,8 +1746,8 @@ def gen_grouping_type():
     !! key values as a table of their own (`%key_table`), one statistic of one column per group
     !! (`%agg`, the `parquet_stats` vocabulary), the same statistic straight onto a table with one
     !! row per group as a named column (`%add_agg`, with `%add_size` for the group size), one
-    !! answer per group from a procedure or an
-    !! object of the caller's own (`%apply`), a per-group array back onto the rows (`%broadcast`)
+    !! answer per group from a procedure or an object of the caller's own (`%apply`, or
+    !! `%add_apply` onto that same table), a per-group array back onto the rows (`%broadcast`)
     !! and one group's values into a buffer of the caller's (`%gather`). The table is NOT
     !! reordered: this is
     !! `%argsort_by(keys, perm, group_offsets=)` (doc/pages/tables/table-mutate.md) kept as an
@@ -1795,14 +1795,17 @@ def gen_grouping_type():
     !! `"last"`, the counts), which never goes through a real64 buffer. Its loop is automatic
     !! threading (library code, re-entrant by construction), unlike `%apply`'s.
     !!
-    !! **`%add_agg` and `%add_size` are the same answers as a COLUMN**, on a table with one row
-    !! per group -- `%key_table`'s -- instead of an array of the caller's: `%add_agg` runs the
-    !! `%agg` body the two-step form runs and puts the result on the target under `as`, so the
-    !! column is bit for bit what `%add_column` of `%agg`'s array would hold, with the source
-    !! column's unit where the statistic keeps its dimension and a group whose answer is NaN
-    !! marked Null. The target is READ only for its row count and WRITTEN only by that one
-    !! `%add_column`: the grouping's own table is refused as a target, and so is a table whose
-    !! row count is not `%ngroups()`.
+    !! **`%add_agg`, `%add_apply` and `%add_size` are the same answers as a COLUMN**, on a table
+    !! with one row per group -- `%key_table`'s -- instead of an array of the caller's:
+    !! `%add_agg` runs the `%agg` body the two-step form runs and puts the result on the target
+    !! under `as`, so the column is bit for bit what `%add_column` of `%agg`'s array would hold,
+    !! with the source column's unit where the statistic keeps its dimension and a group whose
+    !! answer is NaN marked Null. `%add_apply` does the same over `%apply`'s matrix body with one
+    !! column per name in `as` (`"mass,mass_err"`), so a callback's several results per group
+    !! become several columns in one call, each carrying `unit=` if it was given and none if it
+    !! was not. The target is READ only for its row count and WRITTEN only by one `%add_column`
+    !! per column: the grouping's own table is refused as a target, and so is a table whose row
+    !! count is not `%ngroups()`.
     !!
     !! **`%broadcast` and `%gather` are the two ends of the hot loop**, and neither allocates per
     !! group: `%broadcast` carries one value per group back onto every row of the group (pandas'
@@ -1868,8 +1871,9 @@ def gen_grouping_type():
         procedure :: clear => grp_clear           !! Back to the never-built state.
         !> One row per group, in group order: the key columns, whatever their kinds, plus an
         !! `int64` count column when `size_name=` is given and `reserve=` spare column slots
-        !! beyond them. The summary pattern: `%key_table`, then `%add_agg` -- or `%add_column`
-        !! of an array `%agg` filled -- the per-group answers onto it, and `%add_size` the count.
+        !! beyond them. The summary pattern: `%key_table`, then `%add_agg` and `%add_apply` --
+        !! or `%add_column` of an array `%agg` or `%apply` filled -- the per-group answers onto
+        !! it, and `%add_size` the count.
         procedure :: key_table => grp_key_table
         !> The group size onto a table that already has one row per group: the same `int64`
         !! column `%key_table(size_name=)` creates, bit for bit, added when the summary is built
@@ -1927,6 +1931,25 @@ def gen_grouping_type():
         !! your statement that the procedure may be called from several threads at once.
         generic :: apply => grp_apply_proc_scalar, grp_apply_proc_matrix, grp_apply_obj_scalar, &
             grp_apply_obj_matrix
+        procedure, private :: grp_add_apply_proc    !! %add_apply specific: a per-group procedure of the caller's.
+        procedure, private :: grp_add_apply_obj     !! %add_apply specific: a reducer object of the caller's.
+        !> One or more answers per group from a procedure of your own, or from an object of yours
+        !! extending `parquet_group_reducer`, written straight onto a table with one row per
+        !! group -- normally this grouping's `%key_table` -- as one named column per result,
+        !! which is `%apply` followed by one `%add_column` per result in one call:
+        !! `%add_apply(func, table, as)` with a `parquet_group_apply_i` subroutine of your own
+        !! (pass it by NAME), or `%add_apply(reducer, table, as)` with an object of yours. `as`
+        !! is a comma- or semicolon-separated LIST of names, `"mass,mass_err"`, and its length
+        !! IS the number of results per group -- there is no `nout` to disagree with it -- so
+        !! `out(k, :)` of the matrix `%apply` becomes the column named k-th, bit for bit. A name
+        !! repeated in `as`, or an `as` naming nothing, is refused, and every name is checked
+        !! against the target before the first column is written. `unit=` is the unit of EVERY
+        !! column named; absent, a callback's column carries none, the library having no way to
+        !! know its dimension. `nan_to_null=` (default `.true.`) marks a group whose result is
+        !! NaN Null in that result's column. `force=.true.` replaces existing columns of those
+        !! names. `threads=` absent is SERIAL, as on `%apply`. The target must have one row per
+        !! group and may not be the table this grouping was built from.
+        generic :: add_apply => grp_add_apply_proc, grp_add_apply_obj
         procedure, private :: grp_broadcast_f64 !! %broadcast specific: real64 per-group values.
         procedure, private :: grp_broadcast_i64 !! %broadcast specific: int64 per-group values.
         !> A per-group array back onto the rows (pandas' `transform`): `per_row(r) = per_group(g)`
@@ -2602,6 +2625,52 @@ def group_interfaces():
             real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
             integer, intent(in), optional :: threads            !! the team; absent = serial.
         end subroutine grp_apply_obj_matrix
+        !> %add_apply specific, the caller's per-group procedure onto a table: `%apply(func,
+        !! nout, out, ...)` with `nout` the number of names in `as`, followed by one
+        !! `table%add_column` per result -- in one call, and with one rule for the unit and the
+        !! nulls. Column k holds `out(k, :)` of that matrix, bit for bit, under the k-th name in
+        !! `as`, and every refusal of `%apply` is raised here under this binding's name.
+        !!
+        !! **`as` is a LIST**: names separated by commas and/or semicolons, blanks trimmed and
+        !! empty tokens dropped, exactly as `%group_by`'s key list is read. Its length is the
+        !! number of results per group, so `func` sees `size(out) == ` that many on every call and
+        !! no `nout` can disagree with it. An `as` that names nothing is refused, as is one that
+        !! names a column twice; every name is checked against the target BEFORE the first column
+        !! is written, so a refused call leaves the target exactly as it was.
+        !!
+        !! `unit=` is the unit of EVERY column named -- the several-result case is normally a
+        !! value and its error, which share one -- and absent means none: the library cannot know
+        !! a callback's dimension. A mixed set of units is two calls. `nan_to_null=.true.`, the
+        !! default, marks a group whose result is NaN Null in that result's column, a NaN from a
+        !! callback meaning "could not compute" by the interface's own contract;
+        !! `nan_to_null=.false.` stores it as a value. `force=.true.` replaces existing columns
+        !! of those names, advancing the target's `%generation()`. `threads=` absent is SERIAL,
+        !! as on `%apply` -- giving it is your statement that `func` may be called from several
+        !! threads at once. The target rules are `%add_agg`'s.
+        module subroutine grp_add_apply_proc(self, func, table, as, unit, nan_to_null, force, threads)
+            class(parquet_grouping), intent(in) :: self    !! the grouping.
+            procedure(parquet_group_apply_i) :: func       !! called once per group; see the interface.
+            type(parquet_table), intent(inout) :: table    !! the target: one row per group, normally %key_table's.
+            character(len=*), intent(in) :: as             !! the new columns' names, one per result, comma-separated.
+            character(len=*), intent(in), optional :: unit !! the unit of every column named; absent means none.
+            logical, intent(in), optional :: nan_to_null   !! .false. keeps a NaN result a value; default .true.
+            logical, intent(in), optional :: force         !! .true. replaces existing columns of those names.
+            integer, intent(in), optional :: threads       !! the team; absent = serial.
+        end subroutine grp_add_apply_proc
+        !> %add_apply specific, a reducer object of the caller's onto a table: the procedure
+        !! form's twin, with `reducer%reduce` called once per group with `out(:)` of `size(as)`
+        !! entries. Everything else -- the `as` list, the unit, the nulls, `force=`, `threads=`
+        !! and the target rules -- is the procedure form's.
+        module subroutine grp_add_apply_obj(self, reducer, table, as, unit, nan_to_null, force, threads)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            class(parquet_group_reducer), intent(in) :: reducer !! the caller's extension; its %reduce is called once per group.
+            type(parquet_table), intent(inout) :: table         !! the target: one row per group, normally %key_table's.
+            character(len=*), intent(in) :: as                  !! the new columns' names, one per result, comma-separated.
+            character(len=*), intent(in), optional :: unit      !! the unit of every column named; absent means none.
+            logical, intent(in), optional :: nan_to_null        !! .false. keeps a NaN result a value; default .true.
+            logical, intent(in), optional :: force              !! .true. replaces existing columns of those names.
+            integer, intent(in), optional :: threads            !! the team; absent = serial.
+        end subroutine grp_add_apply_obj
         !> %nunique specific, int32 counts; see the generic.
         module subroutine grp_nunique_i32(self, name, out, dropna)
             class(parquet_grouping), intent(in) :: self        !! the grouping.

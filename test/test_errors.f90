@@ -2864,7 +2864,18 @@ contains
             new_unittest("add_agg with an unknown statistic token aborts, naming add_agg", &
                 test_table_group_add_agg_unknown_token_aborts), &
             new_unittest("add_size under a name the target already carries aborts", &
-                test_table_group_add_size_name_taken_aborts) &
+                test_table_group_add_size_name_taken_aborts), &
+            new_unittest("add_apply onto the grouping's own table aborts", &
+                test_table_group_add_apply_target_is_source_aborts), &
+            new_unittest("add_apply with an as= that names nothing aborts", &
+                test_table_group_add_apply_no_name_aborts), &
+            new_unittest("add_apply naming one column twice in as= aborts", &
+                test_table_group_add_apply_duplicate_name_aborts), &
+            new_unittest("add_apply whose last name the target already carries aborts", &
+                test_table_group_add_apply_name_taken_aborts), &
+            new_unittest("add_apply on a stale grouping aborts", test_table_group_stale_add_apply_aborts), &
+            new_unittest("add_apply with threads=0 aborts, naming add_apply", &
+                test_table_group_add_apply_threads_zero_aborts) &
             ]
         ! The `int32` and string-keyed refusals of `parquet_index`: each repeats its `int64`
         ! sibling's guard rather than delegating to it, so each copy needs a scenario of its own.
@@ -17936,6 +17947,59 @@ contains
             failure_message="add_size under a name the target already carries was expected to abort", &
             required_stderr="""n"" is already a column of the target table; pass force=.true. to replace it")
     end subroutine test_table_group_add_size_name_taken_aborts
+    !
+    !> See `scenario_table_group_add_apply_target_is_source` (test/error_scenarios.f90).
+    subroutine test_table_group_add_apply_target_is_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_apply_target_is_source", &
+            expect_abort=.true., &
+            failure_message="add_apply onto the grouping's own table was expected to abort", &
+            required_stderr="parquet_grouping: add_apply: the target table is the one this grouping was built from")
+    end subroutine test_table_group_add_apply_target_is_source_aborts
+    !
+    !> See `scenario_table_group_add_apply_no_name` (test/error_scenarios.f90).
+    subroutine test_table_group_add_apply_no_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_apply_no_name", &
+            expect_abort=.true., &
+            failure_message="add_apply with an as= that names nothing was expected to abort", &
+            required_stderr="parquet_grouping: add_apply: as= names no column; give one name per result")
+    end subroutine test_table_group_add_apply_no_name_aborts
+    !
+    !> See `scenario_table_group_add_apply_duplicate_name` (test/error_scenarios.f90).
+    subroutine test_table_group_add_apply_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_apply_duplicate_name", &
+            expect_abort=.true., &
+            failure_message="add_apply naming one column twice in as= was expected to abort", &
+            required_stderr="parquet_grouping: add_apply: as= names ""m"" twice")
+    end subroutine test_table_group_add_apply_duplicate_name_aborts
+    !
+    !> See `scenario_table_group_add_apply_name_taken` (test/error_scenarios.f90).
+    subroutine test_table_group_add_apply_name_taken_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_apply_name_taken", &
+            expect_abort=.true., &
+            failure_message="add_apply whose last name the target already carries was expected to abort", &
+            required_stderr="parquet_grouping: add_apply: ""n"" is already a column of the target table")
+    end subroutine test_table_group_add_apply_name_taken_aborts
+    !
+    !> See `scenario_table_group_stale_add_apply` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_add_apply_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_add_apply", expect_abort=.true., &
+            failure_message="add_apply on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: add_apply: this table has changed structurally")
+    end subroutine test_table_group_stale_add_apply_aborts
+    !
+    !> See `scenario_table_group_add_apply_threads_zero` (test/error_scenarios.f90).
+    subroutine test_table_group_add_apply_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_apply_threads_zero", &
+            expect_abort=.true., &
+            failure_message="add_apply with threads=0 was expected to abort", &
+            required_stderr="parquet_grouping: add_apply: threads= must be at least 1, got 0")
+    end subroutine test_table_group_add_apply_threads_zero_aborts
     !
     !> See `scenario_table_group_stale_apply` (test/error_scenarios.f90).
     subroutine test_table_group_stale_apply_aborts(error)

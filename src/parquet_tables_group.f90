@@ -1528,15 +1528,15 @@ contains
         end if
     end subroutine agg_func_impl
     !
-    ! ---- %add_agg and %add_size: the per-group answer as a COLUMN ------------------------------
+    ! ---- %add_agg, %add_apply and %add_size: the per-group answer as a COLUMN -------------------
     !
     ! The wrappers here compute NOTHING. Each runs the same body the two-step form runs -- the
     ! `*_impl` workers above, with this binding's own name for every refusal -- and then puts the
     ! answer on the target through the one helper below, which is the `%add_column` (plus
     ! `%set_null`) a caller writes by hand today. So a column added here equals the column a
-    ! caller would build from `%agg`'s array bit for bit, and every rule of %agg (nulls, NaN,
-    ! weights, options, threading, the exact family's aborts) holds here unchanged rather than
-    ! being re-earned.
+    ! caller would build from `%agg`'s or `%apply`'s array bit for bit, and every rule of those
+    ! two (nulls, NaN, weights, options, threading, the exact family's aborts) holds here
+    ! unchanged rather than being re-earned.
     !
     !> The two refusals every table-target binding runs BEFORE it computes anything: the target
     !! may not be the table this grouping was built from, and a target that already has columns
@@ -1600,6 +1600,32 @@ contains
             " names in """ // shown // """"
     end subroutine grp_one_name
     !
+    !> Tokenises `as` into the names a `%add_apply` call is to add, through the same tokenizer
+    !! `%group_by`'s key list goes through, and refuses the two lists that cannot become columns:
+    !! one that names nothing at all (a caller who wrote only separators), and one that names a
+    !! column twice, which a table cannot carry. Its length is what the call passes as `nout`, so
+    !! the number of names and the number of results per group cannot disagree.
+    subroutine grp_name_list(as, proc, names)
+        character(len=*), intent(in) :: as                     !! the caller's `as`, one name per result.
+        character(len=*), intent(in) :: proc                   !! calling binding, for the message.
+        character(len=:), allocatable, intent(out) :: names(:)  !! one entry per name, blank-padded.
+        integer :: i, j
+        !
+        call parquet_split_name_list(as, names)
+        if (size(names) == 0) then
+            error stop GP // trim(proc) // ": as= names no column; give one name per result, " // &
+                "comma-separated"
+        end if
+        do i = 1, size(names) - 1
+            do j = i + 1, size(names)
+                if (names(i) == names(j)) then
+                    error stop GP // trim(proc) // ": as= names """ // trim(names(i)) // &
+                        """ twice; a table cannot carry two columns of one name"
+                end if
+            end do
+        end do
+    end subroutine grp_name_list
+    !
     !> Refuses a name the target already carries unless `force=.true.` was given. Called for
     !! EVERY name a binding is about to add before the FIRST column is written, so a refused
     !! call leaves the target exactly as it was.
@@ -1618,6 +1644,21 @@ contains
         error stop GP // trim(proc) // ": """ // nm // """ is already a column of the target " // &
             "table; pass force=.true. to replace it" // sfx
     end subroutine grp_check_free_name
+    !
+    !> The plural of the check above, for the bindings that add several columns in one call: EVERY
+    !! name is checked before the first column is written, so a call refused on its last name
+    !! leaves the target exactly as it was.
+    subroutine grp_check_free_names(table, names, proc, force)
+        type(parquet_table), intent(in) :: table     !! the target.
+        character(len=*), intent(in) :: names(:)     !! the names about to be added.
+        character(len=*), intent(in) :: proc         !! calling binding, for the message.
+        logical, intent(in), optional :: force       !! .true. replaces instead of refusing.
+        integer :: k
+        !
+        do k = 1, size(names)
+            call grp_check_free_name(table, trim(names(k)), proc, force)
+        end do
+    end subroutine grp_check_free_names
     !
     !> The unit the new column is to carry, resolved by the CALLER of the helper so that the
     !! helper has one rule and no policy: `unit=` given wins (`""` for none); absent, the SOURCE
@@ -1784,6 +1825,65 @@ contains
         call grp_size_i64(self, counts)
         call grp_put_column_i64(table, nm, counts, "", force)
     end procedure grp_add_size
+    !
+    !> %add_apply specific, the caller's per-group procedure onto a table; the contract is on the
+    !! interface in the module spec. Restated in full for the reason the two procedure-form
+    !! `%apply` bodies are (the gfortran implicit-interface trap).
+    module subroutine grp_add_apply_proc(self, func, table, as, unit, nan_to_null, force, threads)
+        class(parquet_grouping), intent(in) :: self    !! the grouping.
+        procedure(parquet_group_apply_i) :: func       !! called once per group; see the interface.
+        type(parquet_table), intent(inout) :: table    !! the target: one row per group.
+        character(len=*), intent(in) :: as             !! the new columns' names, one per result.
+        character(len=*), intent(in), optional :: unit !! the unit of every column named; absent means none.
+        logical, intent(in), optional :: nan_to_null   !! .false. keeps a NaN result a value; default .true.
+        logical, intent(in), optional :: force         !! .true. replaces existing columns of those names.
+        integer, intent(in), optional :: threads       !! the team; absent = serial.
+        character(len=*), parameter :: PROC = "add_apply"
+        real(real64), allocatable :: out(:, :), vals(:)
+        character(len=:), allocatable :: names(:), u
+        logical :: tonull
+        integer :: k
+        !
+        tonull = .true.
+        if (present(nan_to_null)) tonull = nan_to_null
+        ! One unit for every column named, and none unless it was given: the several-result case
+        ! is normally a value and its error, and the library cannot know a callback's dimension.
+        u = ""
+        if (present(unit)) u = unit
+        call grp_resolve(self, PROC)
+        call grp_check_target(self, table, PROC)
+        call grp_name_list(as, PROC, names)
+        call grp_check_free_names(table, names, PROC, force)
+        call apply_proc_matrix_impl(self, func, size(names), out, PROC, threads)
+        do k = 1, size(names)
+            ! out(k, :) is a strided section of a column-major matrix, copied into a contiguous
+            ! local once per NAME and never per cell; the k-th name takes the k-th result.
+            vals = out(k, :)
+            call grp_put_column_f64(table, trim(names(k)), vals, u, tonull, force)
+        end do
+    end subroutine grp_add_apply_proc
+    !
+    module procedure grp_add_apply_obj
+        character(len=*), parameter :: PROC = "add_apply"
+        real(real64), allocatable :: out(:, :), vals(:)
+        character(len=:), allocatable :: names(:), u
+        logical :: tonull
+        integer :: k
+        !
+        tonull = .true.
+        if (present(nan_to_null)) tonull = nan_to_null
+        u = ""
+        if (present(unit)) u = unit
+        call grp_resolve(self, PROC)
+        call grp_check_target(self, table, PROC)
+        call grp_name_list(as, PROC, names)
+        call grp_check_free_names(table, names, PROC, force)
+        call apply_obj_matrix_impl(self, reducer, size(names), out, PROC, threads)
+        do k = 1, size(names)
+            vals = out(k, :)
+            call grp_put_column_f64(table, trim(names(k)), vals, u, tonull, force)
+        end do
+    end procedure grp_add_apply_obj
     !
     !
     ! ---- %broadcast and %gather: the two ends of the hot loop ----------------------------------

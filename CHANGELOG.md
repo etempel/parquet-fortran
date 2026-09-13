@@ -96,7 +96,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `exact=.true.` for the exact family and a procedure of yours in place of `stat`;
   `%add_size(table, as)` puts the group size onto a table that already exists. `%apply` calls a
   procedure or an object extending `parquet_group_reducer` once per group with the group's rows,
-  serially unless you give `threads=`. `%broadcast` carries a per-group
+  serially unless you give `threads=`, and `%add_apply(func, table, as)` writes its results onto
+  such a table as well, one named column per result — `as="mass,mass_err"` names them and is what
+  tells the callback how many results per group to write. `%broadcast` carries a per-group
   array back onto the rows and `%gather` copies one group's values into a buffer you own. Groups
   come in ascending key order, rows within a group in ascending row order, a Null key drops its row
   unless `dropna=.false.`, and a query on a grouping whose table has changed structurally aborts

@@ -70,6 +70,7 @@ module test_table_group
     integer :: col_valid_present = 0                !! ... calls that saw is_valid present.
     integer :: col_weights_present = 0              !! ... calls that saw weights present.
     integer :: empty_col_calls = 0                  !! test_add_forms_on_empty_grouping: calls made.
+    real(real64), pointer :: ctx_add_p(:) => null() !! test_add_apply_names_and_forms' payload.
 
     !> A reducer holding a `%col` pointer and a tunable, for the object form's tests: `out(1)`
     !! is `scale * sum(p(rows))`; `out(2)`, when there is room, the group's size; `out(3)` the
@@ -81,6 +82,16 @@ module test_table_group
     contains
         procedure :: reduce => scaled_sum_reduce !! See the type.
     end type scaled_sum_reducer
+
+    !> `test_add_apply_names_and_forms`' second reducer, the object twin of `cb_add_nan_small`:
+    !! `out(1)` is the payload's sum over the group and `out(2)` a NaN for a group of fewer than
+    !! three rows -- the "could not compute" answer, so that the Null rule is asserted on the
+    !! OBJECT form as well as the procedure one (feature_risks.md Risk-263).
+    type, extends(parquet_group_reducer) :: nan_small_reducer
+        real(real64), pointer :: p(:) => null() !! the payload column.
+    contains
+        procedure :: reduce => nan_small_reduce !! See the type.
+    end type nan_small_reducer
 
 contains
 
@@ -167,6 +178,10 @@ contains
                 test_add_forms_on_empty_grouping), &
             new_unittest("add_size equals size and key_table(size_name=), bit for bit", &
                 test_add_size_equals_size_and_size_name), &
+            new_unittest("add_apply gives one column per name in as=, in both forms", &
+                test_add_apply_names_and_forms), &
+            new_unittest("add_apply adds exactly as many columns as as= names", &
+                test_add_apply_validates_before_writing), &
             new_unittest("broadcast equals the lookup through group_ids; a dropped row takes fill, in both kinds", &
                 test_broadcast_equals_group_ids), &
             new_unittest("gather equals get_slice over the group's rows for five kinds, widening as get does", &
@@ -2207,6 +2222,169 @@ contains
         call check(error, t%generation() == gen0, "and the source table is untouched")
     end subroutine test_add_size_equals_size_and_size_name
 
+    !> **The wrapper computes nothing, and the k-th name takes the k-th result.** `%add_apply`
+    !! with `as="m,e"` must give two columns equal to `out(1, :)` and `out(2, :)` of
+    !! `%apply(func, 2, out)`, bit for bit; one name is the one-result case and equals the
+    !! arithmetic over `%csr`; the reducer object form equals the procedure form; `unit=` reaches
+    !! every column named; a result the callback could not compute is a Null row in ITS column
+    !! only (feature_risks.md Risk-263); and `as` is read by the tokenizer `%group_by`'s keys go
+    !! through, so blanks around a comma and a `;` separator name the same two columns.
+    subroutine test_add_apply_names_and_forms(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        type(scaled_sum_reducer) :: red
+        type(nan_small_reducer) :: nred
+        real(real64), allocatable :: want(:, :), got1(:), got2(:), payload(:)
+        integer(int64), allocatable :: offsets(:), rows(:)
+        logical, allocatable :: ok(:)
+        character(len=:), allocatable :: u
+        real(real64) :: csr_sum(3)
+        integer(int64) :: g
+        integer :: nadded
+        !
+        call build_basic(t)
+        call t%col("payload", ctx_add_p)
+        call t%group_by(["key"], grp)
+        call grp%key_table(kt, reserve=20)
+        nadded = kt%ncols()
+        ! The oracle: the matrix %apply this call runs for itself.
+        call grp%apply(cb_add_sum_and_size, 2, want)
+        call grp%add_apply(cb_add_sum_and_size, kt, "m,e")
+        call check(error, kt%ncols() == nadded + 2, "two names added two columns")
+        if (allocated(error)) return
+        call kt%get("m", got1)
+        call kt%get("e", got2)
+        call check(error, size(got1) == 3 .and. size(got2) == 3, "one row per group in each")
+        if (allocated(error)) return
+        call check(error, all(got1 == want(1, :)) .and. all(got2 == want(2, :)), &
+            "the k-th name holds the k-th result of %apply's matrix, bit for bit")
+        if (allocated(error)) return
+        call check(error, all(got1 == [13.0_real64, 19.0_real64, 13.0_real64]) .and. &
+            all(got2 == [3.0_real64, 4.0_real64, 2.0_real64]), &
+            "...which are the fixture's sums and sizes, in that order and not the other")
+        if (allocated(error)) return
+        call check(error, kt%kind("m") == PK_FLOAT64 .and. kt%kind("e") == PK_FLOAT64, &
+            "both columns are real64")
+        if (allocated(error)) return
+        call kt%unit("m", u)
+        call check(error, u == "", "and carry no unit: the library cannot know a callback's dimension")
+        if (allocated(error)) return
+        ! One name is the one-result case: nout comes from the names, and the answer is the
+        ! arithmetic a caller would write over %csr.
+        call grp%add_apply(cb_add_sum_and_size, kt, "one")
+        call check(error, kt%ncols() == nadded + 3, "one name added one column")
+        if (allocated(error)) return
+        call t%get("payload", payload)
+        call grp%csr(offsets, rows)
+        do g = 1_int64, 3_int64
+            csr_sum(g) = sum(payload(rows(offsets(g) : offsets(g + 1_int64) - 1_int64)))
+        end do
+        call kt%get("one", got1)
+        call check(error, all(got1 == csr_sum), "the one-name column is the sum over the group's own rows")
+        if (allocated(error)) return
+        ! The object form: the same context in components rather than module variables.
+        call t%col("payload", red%p)
+        red%scale = 1.0_real64
+        call grp%add_apply(red, kt, "om,oe")
+        call kt%get("om", got1)
+        call kt%get("oe", got2)
+        call check(error, all(got1 == want(1, :)) .and. all(got2 == want(2, :)), &
+            "the reducer object form gives the procedure form's columns")
+        if (allocated(error)) return
+        ! The `as` list is read by the library's one tokenizer: blanks are trimmed and a
+        ! semicolon separates, as they do in %group_by's key list.
+        call grp%add_apply(cb_add_sum_and_size, kt, " s1 ; s2 ")
+        call grp%add_apply(cb_add_sum_and_size, kt, "q1 , q2")
+        call check(error, kt%has_column("s1") .and. kt%has_column("s2") .and. &
+            kt%has_column("q1") .and. kt%has_column("q2"), "blanks and a semicolon name the same two columns")
+        if (allocated(error)) return
+        call kt%get("s2", got1)
+        call kt%get("q2", got2)
+        call check(error, all(got1 == want(2, :)) .and. all(got2 == want(2, :)), &
+            "...with the second result in each")
+        if (allocated(error)) return
+        ! unit= applies to every column named: the several-result case is a value and its error.
+        call grp%add_apply(cb_add_sum_and_size, kt, "u1,u2", unit="Jy")
+        call kt%unit("u1", u)
+        call check(error, u == "Jy", "unit= reaches the first column named")
+        if (allocated(error)) return
+        call kt%unit("u2", u)
+        call check(error, u == "Jy", "...and every other one")
+        if (allocated(error)) return
+        ! A result the callback could not compute is a NaN by the interface's contract, and the
+        ! Null lands in ITS column and its group alone.
+        call grp%add_apply(cb_add_nan_small, kt, "n1,n2")
+        call kt%get("n2", got2, is_valid=ok)
+        call check(error, .not. ok(3), "a NaN result marks its own group Null")
+        if (allocated(error)) return
+        call check(error, all(ok(1:2)), "...and only that group")
+        if (allocated(error)) return
+        call check(error, .not. kt%has_nulls("n1"), "the sibling column, whose results are all numbers, has no Null")
+        if (allocated(error)) return
+        call grp%add_apply(cb_add_nan_small, kt, "r1,r2", nan_to_null=.false.)
+        call kt%get("r2", got2, is_valid=ok)
+        call check(error, all(ok), "nan_to_null=.false. leaves the NaN a value")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(got2(3)), "...stored as the callback returned it")
+        if (allocated(error)) return
+        ! The object form goes through the same helper, so both rules hold there too.
+        call t%col("payload", nred%p)
+        call grp%add_apply(nred, kt, "x1,x2", unit="Jy")
+        call kt%get("x2", got2, is_valid=ok)
+        call check(error, .not. ok(3) .and. all(ok(1:2)), "the object form marks the same group Null")
+        if (allocated(error)) return
+        call kt%unit("x2", u)
+        call check(error, u == "Jy", "...and unit= reaches its columns too")
+        if (allocated(error)) return
+        call grp%add_apply(nred, kt, "y1,y2", nan_to_null=.false.)
+        call kt%get("y2", got2, is_valid=ok)
+        call check(error, all(ok), "the object form's nan_to_null=.false. is the same negative control")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(got2(3)), "...with the NaN stored as the reducer returned it")
+    end subroutine test_add_apply_names_and_forms
+
+    !> **Every name is checked before the first column is written.** In process that is visible
+    !! as a count: a successful call adds exactly as many columns as `as` names, never one per
+    !! name plus something else, and `force=.true.` over a mix of a taken name and a free one
+    !! replaces the first in place and adds only the second. The refusal half -- a later name the
+    !! target already carries, where the count printed before the abort proves nothing was
+    !! written -- is out of process (`table_group_add_apply_name_taken`).
+    subroutine test_add_apply_validates_before_writing(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        type(scaled_sum_reducer) :: red
+        real(real64), allocatable :: got(:), sums(:)
+        integer :: base
+        !
+        call build_basic(t)
+        call t%col("payload", red%p)
+        red%scale = 1.0_real64
+        call t%group_by(["key"], grp)
+        call grp%key_table(kt, reserve=10)
+        base = kt%ncols()
+        call grp%add_apply(red, kt, "a,b")
+        call check(error, kt%ncols() == base + 2, "two names added exactly two columns")
+        if (allocated(error)) return
+        call grp%add_apply(red, kt, "c")
+        call check(error, kt%ncols() == base + 3, "...and one name exactly one")
+        if (allocated(error)) return
+        call kt%get("a", sums)
+        call check(error, all(sums == [13.0_real64, 19.0_real64, 13.0_real64]), "the first result is the group's sum")
+        if (allocated(error)) return
+        ! A mix under force=: the taken name is replaced in place and only the free one is added.
+        red%scale = 3.0_real64
+        call grp%add_apply(red, kt, "a,d", force=.true.)
+        call check(error, kt%ncols() == base + 4, "force= over one taken name and one free one added exactly one column")
+        if (allocated(error)) return
+        call kt%get("a", got)
+        call check(error, all(got == 3.0_real64 * sums), "the taken column holds the new call's values")
+        if (allocated(error)) return
+        call kt%get("d", got)
+        call check(error, all(got == [3.0_real64, 4.0_real64, 2.0_real64]), "and the new one holds the second result")
+    end subroutine test_add_apply_validates_before_writing
+
     ! ---- %broadcast and %gather ------------------------------------------------------------------
 
     !> `%broadcast` against `%group_ids`: `per_row(i)` is `per_group(codes(i))` where `codes(i)`
@@ -2469,6 +2647,18 @@ contains
         if (size(out) > 2) out(3) = real(g, real64)
     end subroutine scaled_sum_reduce
 
+    !> `nan_small_reducer%reduce`; see the type.
+    subroutine nan_small_reduce(self, g, rows, out)
+        class(nan_small_reducer), intent(in) :: self !! the reducer.
+        integer(int64), intent(in) :: g              !! the group number.
+        integer(int64), intent(in) :: rows(:)        !! the group's rows.
+        real(real64), intent(out) :: out(:)          !! receives the two values.
+        out(1) = sum(self%p(rows))
+        out(2) = real(size(rows), real64)
+        if (size(rows) < 3) out(2) = ieee_value(0.0_real64, ieee_quiet_nan)
+        if (g < 1_int64) out(1) = -huge(out(1))
+    end subroutine nan_small_reduce
+
     !> The payload's sum over the group, through `ctx_sum_p`.
     function cb_sum_ctx(g, rows) result(r)
         integer(int64), intent(in) :: g       !! the group number.
@@ -2523,6 +2713,32 @@ contains
         out(2) = real(size(rows), real64)
         out(3) = real(g, real64) * 1000.0_real64 + real(minval(rows), real64)
     end subroutine cb_three
+
+    !> `test_add_apply_names_and_forms`' matrix callback, and the procedure twin of a
+    !! `scaled_sum_reducer` at scale 1: the payload's sum over the group through `ctx_add_p`,
+    !! and, when there is room for a second result, the group's size. Guarded on `size(out)`, so
+    !! one name and two names both reach it.
+    subroutine cb_add_sum_and_size(g, rows, out)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64), intent(out) :: out(:)   !! receives the one or two values.
+        out(1) = sum(ctx_add_p(rows))
+        if (size(out) > 1) out(2) = real(size(rows), real64)
+        if (g < 1_int64) out(1) = -huge(out(1))
+    end subroutine cb_add_sum_and_size
+
+    !> The same two results, except that a group of fewer than three rows has no second result to
+    !! give: a NaN of the callback's own choosing, which is the "could not compute" answer the
+    !! `nan_to_null` rule turns into a Null row -- in that result's column and no other.
+    subroutine cb_add_nan_small(g, rows, out)
+        integer(int64), intent(in) :: g       !! the group number.
+        integer(int64), intent(in) :: rows(:) !! the group's rows.
+        real(real64), intent(out) :: out(:)   !! receives the two values.
+        out(1) = sum(ctx_add_p(rows))
+        out(2) = real(size(rows), real64)
+        if (size(rows) < 3) out(2) = ieee_value(0.0_real64, ieee_quiet_nan)
+        if (g < 1_int64) out(1) = -huge(out(1))
+    end subroutine cb_add_nan_small
 
     !> Records the call: how often group `g` was seen, whether the calls came in group order,
     !! and whether `rows` was non-empty and ascending; answers `g`.

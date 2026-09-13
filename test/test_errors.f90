@@ -2875,7 +2875,11 @@ contains
                 test_table_group_add_apply_name_taken_aborts), &
             new_unittest("add_apply on a stale grouping aborts", test_table_group_stale_add_apply_aborts), &
             new_unittest("add_apply with threads=0 aborts, naming add_apply", &
-                test_table_group_add_apply_threads_zero_aborts) &
+                test_table_group_add_apply_threads_zero_aborts), &
+            new_unittest("an int32 group number past the last group aborts", &
+                test_table_group_rows_g32_out_of_range_aborts), &
+            new_unittest("a short gather buffer reached through an int32 g aborts", &
+                test_table_group_gather_g32_short_buffer_aborts) &
             ]
         ! The `int32` and string-keyed refusals of `parquet_index`: each repeats its `int64`
         ! sibling's guard rather than delegating to it, so each copy needs a scenario of its own.
@@ -18000,6 +18004,24 @@ contains
             failure_message="add_apply with threads=0 was expected to abort", &
             required_stderr="parquet_grouping: add_apply: threads= must be at least 1, got 0")
     end subroutine test_table_group_add_apply_threads_zero_aborts
+    !
+    !> See `scenario_table_group_rows_g32_out_of_range` (test/error_scenarios.f90).
+    subroutine test_table_group_rows_g32_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_rows_g32_out_of_range", &
+            expect_abort=.true., &
+            failure_message="an int32 group number past the last group was expected to abort", &
+            required_stderr="parquet_grouping: rows: group 7 is out of range; this grouping has 3 groups")
+    end subroutine test_table_group_rows_g32_out_of_range_aborts
+    !
+    !> See `scenario_table_group_gather_g32_short_buffer` (test/error_scenarios.f90).
+    subroutine test_table_group_gather_g32_short_buffer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_gather_g32_short_buffer", &
+            expect_abort=.true., &
+            failure_message="a short buffer reached through an int32 g was expected to abort, not truncate", &
+            required_stderr="buf is 1 long and group 1 has 2 rows")
+    end subroutine test_table_group_gather_g32_short_buffer_aborts
     !
     !> See `scenario_table_group_stale_apply` (test/error_scenarios.f90).
     subroutine test_table_group_stale_apply_aborts(error)

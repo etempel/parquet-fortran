@@ -3460,6 +3460,10 @@ program error_scenarios
         call scenario_table_group_stale_add_apply()
     case ("table_group_add_apply_threads_zero")
         call scenario_table_group_add_apply_threads_zero()
+    case ("table_group_rows_g32_out_of_range")
+        call scenario_table_group_rows_g32_out_of_range()
+    case ("table_group_gather_g32_short_buffer")
+        call scenario_table_group_gather_g32_short_buffer()
     case ("table_group_stale_apply")
         call scenario_table_group_stale_apply()
     case ("table_group_stale_apply_object")
@@ -30157,6 +30161,38 @@ contains
         call grp%add_apply(scenario_group_two, kt, "c,d", threads=0)
         print '(a,i0)', "unexpectedly accepted threads=0, cols=", kt%ncols()
     end subroutine scenario_table_group_add_apply_threads_zero
+    !
+    !> The `int32` `%rows` forwards onto the same range check, so a group past the last is
+    !! refused with the same text -- `g` is widened BEFORE the check, which is why the message
+    !! names the number the caller wrote rather than a converted one. The last group is the
+    !! control.
+    subroutine scenario_table_group_rows_g32_out_of_range()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer(int32), allocatable :: rows(:)
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%rows(3_int32, rows)
+        print '(a,i0)', "the last group answered through an int32 g, n=", size(rows)
+        call grp%rows(7_int32, rows)
+        print '(a,i0)', "unexpectedly answered a group past the last through an int32 g, n=", size(rows)
+    end subroutine scenario_table_group_rows_g32_out_of_range
+    !
+    !> The `int32` `%gather` forwards onto the same buffer check: a buffer shorter than the group
+    !! aborts rather than truncating, whichever kind `g` was written in. A buffer the size of the
+    !! largest group is the control.
+    subroutine scenario_table_group_gather_g32_short_buffer()
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        real(real64) :: buf2(2), buf1(1)
+        integer(int32) :: n
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%gather("x", 1_int32, buf2, n)
+        print '(a,i0)', "a buffer the size of the largest group answered through an int32 g, n=", n
+        call grp%gather("x", 1_int32, buf1, n)
+        print '(a,i0)', "unexpectedly truncated a two-row group into a one-entry buffer, n=", n
+    end subroutine scenario_table_group_gather_g32_short_buffer
     !
     !> `%apply` on a stale grouping, in its procedure form: the generation check runs before the
     !! callback is called even once, so no procedure of the caller's computes anything from rows

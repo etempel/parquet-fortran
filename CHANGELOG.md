@@ -99,8 +99,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   serially unless you give `threads=`, and `%add_apply(func, table, as)` writes its results onto
   such a table as well, one named column per result — `as="mass,mass_err"` names them and is what
   tells the callback how many results per group to write. `%broadcast` carries a per-group
-  array back onto the rows and `%gather` copies one group's values into a buffer you own. Groups
-  come in ascending key order, rows within a group in ascending row order, a Null key drops its row
+  array back onto the rows and `%gather` copies one group's values into a buffer you own. `%rows`
+  and `%gather` take the group number in `int32` or `int64`, `%gather` returns `n` in that kind,
+  and `%csr` and `%broadcast` answer in either kind, one kind per call. Groups come in ascending
+  key order, rows within a group in ascending row order, a Null key drops its row
   unless `dropna=.false.`, and a query on a grouping whose table has changed structurally aborts
   instead of answering about the wrong rows. `use parquet_tables` now also compiles the statistics
   tier. See [Grouping rows and aggregating per

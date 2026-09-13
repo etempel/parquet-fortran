@@ -1878,6 +1878,16 @@ module parquet_tables
     !! column into a buffer the caller sized once by `%max_size()`, widening as `%get` does, and
     !! aborts rather than truncates when the buffer is shorter than the group.
     !!
+    !! **Kinds, one per call.** Every count or index that can exceed `int32` is offered in both
+    !! kinds: `%size`, `%count`, `%nunique`, `%first_rows`, `%last_rows` and `%group_ids` answer
+    !! in either; `%rows` and `%gather` take the group number `g` in either and `%gather` hands
+    !! `n` back in `g`'s own kind; `%csr` and `%broadcast` answer in either, their arrays sharing
+    !! one kind because they index each other. Every `int32` form is a forward onto the `int64`
+    !! one -- nothing is walked twice -- and an answer that does not fit aborts naming the value
+    !! rather than wrapping. The callback interfaces are `int64` throughout, and `%ngroups()`,
+    !! `%nrows()` and `%max_size()` are `int64` function results; `%nkeys()` alone is a default
+    !! `integer`, a key count being a column count.
+    !!
     !! No finalizer: nothing it owns needs one, and a finalizable type may not be OpenMP-private
     !! (.claude/rules/fortran-gotchas.md). It has allocatable components, so under ifx it must
     !! not be declared block-local inside a parallel region; give each thread a slot of a shared
@@ -1907,16 +1917,22 @@ module parquet_tables
         procedure, private :: grp_size_i64        !! %size specific, int64 counts.
         !> Rows per group, one entry per group in group order, into an array allocated here.
         generic :: size => grp_size_i32, grp_size_i64
-        procedure, private :: grp_rows_i32        !! %rows specific, int32 rows.
-        procedure, private :: grp_rows_i64        !! %rows specific, int64 rows.
-        !> The rows of group `g` (an `int64` group number), ascending, into an array allocated
-        !! here: the readable form for a few groups, where `%csr` is the one-copy form for a
-        !! loop over all of them.
-        generic :: rows => grp_rows_i32, grp_rows_i64
+        procedure, private :: grp_rows_i32        !! %rows specific, int64 g, int32 rows.
+        procedure, private :: grp_rows_i64        !! %rows specific, int64 g, int64 rows.
+        procedure, private :: grp_rows_g32_i32    !! %rows specific, int32 g, int32 rows.
+        procedure, private :: grp_rows_g32_i64    !! %rows specific, int32 g, int64 rows.
+        !> The rows of group `g`, ascending, into an array allocated here: the readable form for
+        !! a few groups, where `%csr` is the one-copy form for a loop over all of them. `g` is
+        !! `int32` or `int64` -- so an `int32` loop counter needs no conversion -- and `rows`
+        !! comes back in whichever kind you declared it, the two choices independent.
+        generic :: rows => grp_rows_i32, grp_rows_i64, grp_rows_g32_i32, grp_rows_g32_i64
+        procedure, private :: grp_csr             !! %csr specific, int64 offsets and rows.
+        procedure, private :: grp_csr_i32         !! %csr specific, int32 offsets and rows.
         !> The whole partition copied out: group g is `rows(offsets(g) : offsets(g+1) - 1)`, with
         !! `offsets` 1-based and `ngroups + 1` long, its last entry `nrows + 1` -- `[1]` for an
-        !! empty grouping, so a loop over the groups runs zero times.
-        procedure :: csr => grp_csr
+        !! empty grouping, so a loop over the groups runs zero times. Both arrays come back in
+        !! `int32` or in `int64`, one kind per call: they index each other.
+        generic :: csr => grp_csr, grp_csr_i32
         procedure, private :: grp_first_rows_i32  !! %first_rows specific, int32 rows.
         procedure, private :: grp_first_rows_i64  !! %first_rows specific, int64 rows.
         !> One row per group: its LOWEST row index, computed, never read off the permutation's
@@ -2017,27 +2033,38 @@ module parquet_tables
         generic :: add_apply => grp_add_apply_proc, grp_add_apply_obj
         procedure, private :: grp_broadcast_f64 !! %broadcast specific: real64 per-group values.
         procedure, private :: grp_broadcast_i64 !! %broadcast specific: int64 per-group values.
+        procedure, private :: grp_broadcast_i32 !! %broadcast specific: int32 per-group values.
         !> A per-group array back onto the rows (pandas' `transform`): `per_row(r) = per_group(g)`
         !! for every row `r` of group `g`, and `fill` -- absent: a quiet NaN for real64, 0 for
         !! int64 -- on a row that belongs to no group. `per_row(t%nrows())` is allocated here;
         !! `per_group` holds exactly one value per group, in group order (what `%size`, `%agg`
         !! and `%apply` give), and any other length is refused naming both counts. `threads=`
         !! absent is automatic, as on `%agg`'s token forms; every grouped row is written once, by
-        !! its own group, so the answer is the same at every thread count.
-        generic :: broadcast => grp_broadcast_f64, grp_broadcast_i64
-        procedure, private :: grp_gather_i32  !! %gather specific: an integer(int32) buffer.
-        procedure, private :: grp_gather_i64  !! %gather specific: an integer(int64) buffer.
-        procedure, private :: grp_gather_f32  !! %gather specific: a real(real32) buffer.
-        procedure, private :: grp_gather_f64  !! %gather specific: a real(real64) buffer.
-        procedure, private :: grp_gather_bool !! %gather specific: a logical buffer.
+        !! its own group, so the answer is the same at every thread count. `per_group` and
+        !! `per_row` are `real64`, `int64` or `int32` -- one kind per call, `fill` in that kind
+        !! too -- so an `int32` `%size` or `%count` answer reaches the rows without a conversion.
+        generic :: broadcast => grp_broadcast_f64, grp_broadcast_i64, grp_broadcast_i32
+        procedure, private :: grp_gather_i32      !! %gather specific: an integer(int32) buffer, int64 g and n.
+        procedure, private :: grp_gather_i32_g32  !! %gather specific: an integer(int32) buffer, int32 g and n.
+        procedure, private :: grp_gather_i64      !! %gather specific: an integer(int64) buffer, int64 g and n.
+        procedure, private :: grp_gather_i64_g32  !! %gather specific: an integer(int64) buffer, int32 g and n.
+        procedure, private :: grp_gather_f32      !! %gather specific: a real(real32) buffer, int64 g and n.
+        procedure, private :: grp_gather_f32_g32  !! %gather specific: a real(real32) buffer, int32 g and n.
+        procedure, private :: grp_gather_f64      !! %gather specific: a real(real64) buffer, int64 g and n.
+        procedure, private :: grp_gather_f64_g32  !! %gather specific: a real(real64) buffer, int32 g and n.
+        procedure, private :: grp_gather_bool     !! %gather specific: a logical buffer, int64 g and n.
+        procedure, private :: grp_gather_bool_g32 !! %gather specific: a logical buffer, int32 g and n.
         !> One group's values of a column into a buffer of YOURS: `buf(1:n)`, in row order,
         !! widening exactly as `%get` does (an int32 column into an int64 buffer, a float32 column
         !! into a real64 one) and nothing else, for a buffer of int32, int64, real32, real64 or
         !! logical; `is_valid(1:n)`, when given, whether each value is non-null. Nothing is
         !! allocated: `%max_size()` sizes the buffers once, the entries past `n` are left as they
         !! were, and a buffer shorter than the group aborts naming both sizes rather than
-        !! truncating. The values form of the `%csr` loop.
-        generic :: gather => grp_gather_i32, grp_gather_i64, grp_gather_f32, grp_gather_f64, grp_gather_bool
+        !! truncating. `g` is `int32` or `int64` and `n` comes back in `g`'s own kind, so an
+        !! `int32` loop counter needs no conversion at either end. The values form of the `%csr`
+        !! loop.
+        generic :: gather => grp_gather_i32, grp_gather_i64, grp_gather_f32, grp_gather_f64, grp_gather_bool, &
+            grp_gather_i32_g32, grp_gather_i64_g32, grp_gather_f32_g32, grp_gather_f64_g32, grp_gather_bool_g32
         ! NO `final` -- see the type's doc-comment.
     end type parquet_grouping
     !
@@ -10243,12 +10270,34 @@ module parquet_tables
             integer(int64), intent(in) :: g                     !! the group number, 1 to %ngroups().
             integer(int64), allocatable, intent(out) :: rows(:) !! the group's rows, ascending.
         end subroutine grp_rows_i64
-        !> The whole partition, copied out; see the binding.
+        !> %rows specific, int32 group number, int32 rows; see the generic. A forward onto the
+        !! `int64` form: `g` is widened before the range check, so the refusal names the number
+        !! written, and nothing is walked twice.
+        module subroutine grp_rows_g32_i32(self, g, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int32), intent(in) :: g                     !! the group number, 1 to %ngroups().
+            integer(int32), allocatable, intent(out) :: rows(:) !! the group's rows, ascending.
+        end subroutine grp_rows_g32_i32
+        !> %rows specific, int32 group number, int64 rows; see the generic. A forward, as above.
+        module subroutine grp_rows_g32_i64(self, g, rows)
+            class(parquet_grouping), intent(in) :: self         !! the grouping.
+            integer(int32), intent(in) :: g                     !! the group number, 1 to %ngroups().
+            integer(int64), allocatable, intent(out) :: rows(:) !! the group's rows, ascending.
+        end subroutine grp_rows_g32_i64
+        !> %csr specific, int64 offsets and rows; see the binding.
         module subroutine grp_csr(self, offsets, rows)
             class(parquet_grouping), intent(in) :: self            !! the grouping.
             integer(int64), allocatable, intent(out) :: offsets(:) !! ngroups + 1 long; group g is rows(offsets(g):offsets(g+1)-1).
             integer(int64), allocatable, intent(out) :: rows(:)    !! every grouped row, group by group, ascending within a group.
         end subroutine grp_csr
+        !> %csr specific, int32 offsets and rows; see the binding. A forward onto the `int64`
+        !! form, each array narrowed by the one narrowing helper, which aborts naming the value
+        !! rather than wrapping. The two arrays index each other, so they share a kind.
+        module subroutine grp_csr_i32(self, offsets, rows)
+            class(parquet_grouping), intent(in) :: self            !! the grouping.
+            integer(int32), allocatable, intent(out) :: offsets(:) !! ngroups + 1 long; group g is rows(offsets(g):offsets(g+1)-1).
+            integer(int32), allocatable, intent(out) :: rows(:)    !! every grouped row, group by group, ascending within a group.
+        end subroutine grp_csr_i32
         !> %first_rows specific, int32 rows; see the generic.
         module subroutine grp_first_rows_i32(self, rows)
             class(parquet_grouping), intent(in) :: self         !! the grouping.
@@ -10603,6 +10652,16 @@ module parquet_tables
             integer(int64), intent(in), optional :: fill            !! the value of a row in no group; default 0.
             integer, intent(in), optional :: threads                !! the team; absent = automatic.
         end subroutine grp_broadcast_i64
+        !> %broadcast specific, int32 values; see the generic. `fill` absent is 0. A forward onto
+        !! the `int64` form -- one `int64` temporary per group and one per row, so the `int64`
+        !! form is the cheaper one for a large table -- and nothing is walked twice.
+        module subroutine grp_broadcast_i32(self, per_group, per_row, fill, threads)
+            class(parquet_grouping), intent(in) :: self             !! the grouping.
+            integer(int32), intent(in) :: per_group(:)              !! one value per group, in group order.
+            integer(int32), allocatable, intent(out) :: per_row(:)  !! one value per TABLE row: its group's, or fill.
+            integer(int32), intent(in), optional :: fill            !! the value of a row in no group; default 0.
+            integer, intent(in), optional :: threads                !! the team; absent = automatic.
+        end subroutine grp_broadcast_i32
         !> %gather specific, an integer(int32) buffer; see the generic.
         !! The column must be of this kind: nothing widens into this buffer, as through `%get`.
         module subroutine grp_gather_i32(self, name, g, buf, n, is_valid)
@@ -10613,6 +10672,18 @@ module parquet_tables
             integer(int64), intent(out) :: n                !! the group's row count.
             logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
         end subroutine grp_gather_i32
+        !> %gather specific, an integer(int32) buffer with an int32 group number; see the generic.
+        !! A forward onto the form above: `g` is widened before the range check and `n` comes
+        !! back in `g`'s kind, narrowed by the same helper the array forms use, and the column
+        !! kinds it takes are that form's.
+        module subroutine grp_gather_i32_g32(self, name, g, buf, n, is_valid)
+            class(parquet_grouping), intent(in) :: self     !! the grouping.
+            character(len=*), intent(in) :: name            !! the column; read if not resident.
+            integer(int32), intent(in) :: g                 !! the group number, 1 to %ngroups().
+            integer(int32), intent(inout) :: buf(:)         !! receives the values in buf(1:n); the rest is left alone.
+            integer(int32), intent(out) :: n                !! the group's row count.
+            logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
+        end subroutine grp_gather_i32_g32
         !> %gather specific, an integer(int64) buffer; see the generic.
         !! An int32 column is accepted too, widened on the way -- the set `%get` widens, and no more.
         module subroutine grp_gather_i64(self, name, g, buf, n, is_valid)
@@ -10623,6 +10694,18 @@ module parquet_tables
             integer(int64), intent(out) :: n                !! the group's row count.
             logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
         end subroutine grp_gather_i64
+        !> %gather specific, an integer(int64) buffer with an int32 group number; see the generic.
+        !! A forward onto the form above: `g` is widened before the range check and `n` comes
+        !! back in `g`'s kind, narrowed by the same helper the array forms use, and the column
+        !! kinds it takes are that form's.
+        module subroutine grp_gather_i64_g32(self, name, g, buf, n, is_valid)
+            class(parquet_grouping), intent(in) :: self     !! the grouping.
+            character(len=*), intent(in) :: name            !! the column; read if not resident.
+            integer(int32), intent(in) :: g                 !! the group number, 1 to %ngroups().
+            integer(int64), intent(inout) :: buf(:)         !! receives the values in buf(1:n); the rest is left alone.
+            integer(int32), intent(out) :: n                !! the group's row count.
+            logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
+        end subroutine grp_gather_i64_g32
         !> %gather specific, a real(real32) buffer; see the generic.
         !! The column must be of this kind: nothing widens into this buffer, as through `%get`.
         module subroutine grp_gather_f32(self, name, g, buf, n, is_valid)
@@ -10633,6 +10716,18 @@ module parquet_tables
             integer(int64), intent(out) :: n                !! the group's row count.
             logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
         end subroutine grp_gather_f32
+        !> %gather specific, a real(real32) buffer with an int32 group number; see the generic.
+        !! A forward onto the form above: `g` is widened before the range check and `n` comes
+        !! back in `g`'s kind, narrowed by the same helper the array forms use, and the column
+        !! kinds it takes are that form's.
+        module subroutine grp_gather_f32_g32(self, name, g, buf, n, is_valid)
+            class(parquet_grouping), intent(in) :: self     !! the grouping.
+            character(len=*), intent(in) :: name            !! the column; read if not resident.
+            integer(int32), intent(in) :: g                 !! the group number, 1 to %ngroups().
+            real(real32), intent(inout) :: buf(:)           !! receives the values in buf(1:n); the rest is left alone.
+            integer(int32), intent(out) :: n                !! the group's row count.
+            logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
+        end subroutine grp_gather_f32_g32
         !> %gather specific, a real(real64) buffer; see the generic.
         !! A float32 column is accepted too, widened on the way -- the set `%get` widens, and no more.
         module subroutine grp_gather_f64(self, name, g, buf, n, is_valid)
@@ -10643,6 +10738,18 @@ module parquet_tables
             integer(int64), intent(out) :: n                !! the group's row count.
             logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
         end subroutine grp_gather_f64
+        !> %gather specific, a real(real64) buffer with an int32 group number; see the generic.
+        !! A forward onto the form above: `g` is widened before the range check and `n` comes
+        !! back in `g`'s kind, narrowed by the same helper the array forms use, and the column
+        !! kinds it takes are that form's.
+        module subroutine grp_gather_f64_g32(self, name, g, buf, n, is_valid)
+            class(parquet_grouping), intent(in) :: self     !! the grouping.
+            character(len=*), intent(in) :: name            !! the column; read if not resident.
+            integer(int32), intent(in) :: g                 !! the group number, 1 to %ngroups().
+            real(real64), intent(inout) :: buf(:)           !! receives the values in buf(1:n); the rest is left alone.
+            integer(int32), intent(out) :: n                !! the group's row count.
+            logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
+        end subroutine grp_gather_f64_g32
         !> %gather specific, a logical buffer; see the generic.
         !! The column must be of this kind: nothing widens into this buffer, as through `%get`.
         module subroutine grp_gather_bool(self, name, g, buf, n, is_valid)
@@ -10653,6 +10760,18 @@ module parquet_tables
             integer(int64), intent(out) :: n                !! the group's row count.
             logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
         end subroutine grp_gather_bool
+        !> %gather specific, a logical buffer with an int32 group number; see the generic.
+        !! A forward onto the form above: `g` is widened before the range check and `n` comes
+        !! back in `g`'s kind, narrowed by the same helper the array forms use, and the column
+        !! kinds it takes are that form's.
+        module subroutine grp_gather_bool_g32(self, name, g, buf, n, is_valid)
+            class(parquet_grouping), intent(in) :: self     !! the grouping.
+            character(len=*), intent(in) :: name            !! the column; read if not resident.
+            integer(int32), intent(in) :: g                 !! the group number, 1 to %ngroups().
+            logical, intent(inout) :: buf(:)                !! receives the values in buf(1:n); the rest is left alone.
+            integer(int32), intent(out) :: n                !! the group's row count.
+            logical, intent(inout), optional :: is_valid(:) !! receives in is_valid(1:n) whether each value is non-null.
+        end subroutine grp_gather_bool_g32
     end interface
     ! ---- The join (parquet_tables_join -- HAND-WRITTEN, not generated) ----
     interface

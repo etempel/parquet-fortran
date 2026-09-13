@@ -1769,6 +1769,8 @@ scenarios=(
     "table_group_add_apply_name_taken:1"
     "table_group_stale_add_apply:1"
     "table_group_add_apply_threads_zero:1"
+    "table_group_rows_g32_out_of_range:1"
+    "table_group_gather_g32_short_buffer:1"
     "table_group_stale_apply:1"
     "table_group_stale_apply_object:1"
     "table_group_apply_nout:1"

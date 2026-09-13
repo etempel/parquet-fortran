@@ -318,6 +318,26 @@ contains
         v32 = int(v64, int32)
     end subroutine grp_narrow
     !
+    !> The scalar twin of `grp_narrow`, for `%gather`'s `n`: the same refusal, one value. Kept
+    !! beside it so that the two texts cannot drift apart.
+    subroutine grp_narrow_scalar(v64, proc, what, v32)
+        integer(int64), intent(in) :: v64       !! the answer.
+        character(len=*), intent(in) :: proc    !! calling binding, for the message.
+        character(len=*), intent(in) :: what    !! "row", "count" or "group number", for the message.
+        integer(int32), intent(out) :: v32      !! the same answer.
+        character(len=32) :: txt
+        !
+        if (v64 > int(huge(0_int32), int64)) then
+            ! No test-sized fixture reaches this: it needs a group above 2**31 rows.
+            ! GCOVR_EXCL_START
+            write(txt, "(I0)") v64
+            error stop GP // trim(proc) // ": " // what // " " // trim(txt) // " does not " // &
+                "fit the int32 answer asked for; use an int64 variable"
+            ! GCOVR_EXCL_STOP
+        end if
+        v32 = int(v64, int32)
+    end subroutine grp_narrow_scalar
+    !
     !> Resolves `name` for a per-group read through the grouping's own cache pointer, triggering
     !! the same lazy first touch the table's accessors do -- the row handle's rule
     !! (`row_resolve`, `src/parquet_tables_row.f90`), which is why the grouping carries the
@@ -440,6 +460,28 @@ contains
         offsets = self%offsets
         rows = self%perm
     end procedure grp_csr
+    !
+    ! The `int32` forms below compute NOTHING: each widens `g` with `int(g, int64)` BEFORE the
+    ! range check -- so a refusal prints the number the caller wrote -- forwards every other
+    ! argument by keyword, and narrows the answer through `grp_narrow` or its scalar twin, which
+    ! abort naming the value rather than wrapping. One walk, one set of rules, whichever kind was
+    ! asked for (feature_risks.md Risk-264).
+    !
+    module procedure grp_rows_g32_i64
+        call grp_rows_i64(self, int(g, int64), rows)
+    end procedure grp_rows_g32_i64
+    !
+    module procedure grp_rows_g32_i32
+        call grp_rows_i32(self, int(g, int64), rows)
+    end procedure grp_rows_g32_i32
+    !
+    module procedure grp_csr_i32
+        integer(int64), allocatable :: o64(:), r64(:)
+        !
+        call grp_csr(self, o64, r64)
+        call grp_narrow(o64, "csr", "offset", offsets)
+        call grp_narrow(r64, "csr", "row", rows)
+    end procedure grp_csr_i32
     !
     module procedure grp_first_rows_i64
         integer(int64) :: g
@@ -1952,6 +1994,21 @@ contains
         !$omp end parallel do
     end procedure grp_broadcast_i64
     !
+    module procedure grp_broadcast_i32
+        integer(int64), allocatable :: pg64(:), pr64(:)
+        !
+        ! A forward, like every other int32 form: widened in, narrowed out, one walk. The narrow
+        ! can never refuse here -- every entry of the answer is one of this call's own int32
+        ! inputs -- but it is the one route out, so it is the route this takes too.
+        pg64 = int(per_group, int64)
+        if (present(fill)) then
+            call grp_broadcast_i64(self, pg64, pr64, int(fill, int64), threads)
+        else
+            call grp_broadcast_i64(self, pg64, pr64, threads=threads)
+        end if
+        call grp_narrow(pr64, "broadcast", "value", per_row)
+    end procedure grp_broadcast_i32
+    !
     !> `size(is_valid)` when it is present, else 0: the length `gather_prepare` checks.
     integer(int64) function valid_size(is_valid) result(n)
         logical, intent(in), optional :: is_valid(:) !! the caller's validity buffer, or absent.
@@ -2102,4 +2159,40 @@ contains
         buf(1:n) = p(self%perm(lo:hi))
         if (present(is_valid)) call gather_validity(self, idx, lo, hi, is_valid)
     end procedure grp_gather_bool
+    !
+    module procedure grp_gather_i32_g32
+        integer(int64) :: n64
+        !
+        call grp_gather_i32(self, name, int(g, int64), buf, n64, is_valid)
+        call grp_narrow_scalar(n64, "gather", "count", n)
+    end procedure grp_gather_i32_g32
+    !
+    module procedure grp_gather_i64_g32
+        integer(int64) :: n64
+        !
+        call grp_gather_i64(self, name, int(g, int64), buf, n64, is_valid)
+        call grp_narrow_scalar(n64, "gather", "count", n)
+    end procedure grp_gather_i64_g32
+    !
+    module procedure grp_gather_f32_g32
+        integer(int64) :: n64
+        !
+        call grp_gather_f32(self, name, int(g, int64), buf, n64, is_valid)
+        call grp_narrow_scalar(n64, "gather", "count", n)
+    end procedure grp_gather_f32_g32
+    !
+    module procedure grp_gather_f64_g32
+        integer(int64) :: n64
+        !
+        call grp_gather_f64(self, name, int(g, int64), buf, n64, is_valid)
+        call grp_narrow_scalar(n64, "gather", "count", n)
+    end procedure grp_gather_f64_g32
+    !
+    module procedure grp_gather_bool_g32
+        integer(int64) :: n64
+        !
+        call grp_gather_bool(self, name, int(g, int64), buf, n64, is_valid)
+        call grp_narrow_scalar(n64, "gather", "count", n)
+    end procedure grp_gather_bool_g32
+    !
 end submodule parquet_tables_group

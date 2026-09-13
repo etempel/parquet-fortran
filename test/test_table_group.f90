@@ -187,7 +187,9 @@ contains
             new_unittest("gather equals get_slice over the group's rows for five kinds, widening as get does", &
                 test_gather_equals_get_slice), &
             new_unittest("broadcast over an empty grouping is all fill, zero-length over an empty table", &
-                test_broadcast_empty_grouping) &
+                test_broadcast_empty_grouping), &
+            new_unittest("every int32 form answers what its int64 sibling answers", &
+                test_int32_forms_equal_int64) &
             ]
     end subroutine collect_tests_table_group
 
@@ -1250,6 +1252,18 @@ contains
             same_answer = a == b
         end if
     end function same_answer
+
+    !> `same_answer` over two buffers of equal length: the element-wise comparison the gather
+    !! arms need, since a gathered column may hold a NaN.
+    function same_answer_v(a, b) result(same)
+        real(real64), intent(in) :: a(:)    !! one buffer.
+        real(real64), intent(in) :: b(:)    !! the other, of the same length.
+        logical :: same(size(a))            !! element by element: equal bits, or both NaN.
+        integer :: i
+        do i = 1, size(a)
+            same(i) = same_answer(a(i), b(i))
+        end do
+    end function same_answer_v
 
     !> The oracle of one real64 token over one group's real64 values: the named `pf_*`
     !! procedure, `is_valid` given only when the group holds a null (as the grouping passes it)
@@ -2553,6 +2567,117 @@ contains
         call grp%broadcast(none, per_row)
         call check(error, allocated(per_row) .and. size(per_row) == 0, "an empty table: zero rows, allocated")
     end subroutine test_broadcast_empty_grouping
+
+    !> **An `int32` form is a second route onto the same walk, and must answer the same thing.**
+    !! With `int32` loop counters as `g`, `%rows` in both `rows` kinds, `%csr`, `%gather` over all
+    !! five buffer kinds with `is_valid=` given and absent, and `%broadcast` with `fill=` given
+    !! and absent each equal their `int64` siblings, entry for entry -- on a fixture with four
+    !! unequal groups and a null in every value column, then on one with dropped rows so that the
+    !! fill is observable (feature_risks.md Risk-264). A forwarder that dropped an optional or
+    !! narrowed the wrong quantity would answer something plausible and different.
+    subroutine test_int32_forms_equal_int64(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, u
+        type(parquet_grouping) :: grp, gnn
+        integer(int64), allocatable :: r64(:), r64b(:), o64(:), w64(:), c64(:), pr64(:)
+        integer(int32), allocatable :: r32(:), o32(:), w32(:), c32(:), pr32(:), i32b(:)
+        integer(int64), allocatable :: i64b(:)
+        real(real64), allocatable :: b64(:), b64b(:)
+        real(real32), allocatable :: b32(:), b32b(:)
+        logical, allocatable :: lb(:), lbb(:), m1(:), m2(:)
+        integer(int64) :: n64, cap
+        integer(int32) :: g32, n32
+        integer :: ng
+        logical :: agree
+        !
+        call build_agg(t)
+        call t%group_by("k", grp)
+        ng = int(grp%ngroups(), int32)
+        cap = grp%max_size() + 1_int64
+        allocate(b64(cap), b64b(cap), b32(cap), b32b(cap), i32b(cap), i64b(cap), lb(cap), lbb(cap))
+        allocate(m1(cap), m2(cap))
+        call check(error, ng == 4 .and. cap == 6_int64, "four unequal groups, the largest of five rows")
+        if (allocated(error)) return
+        ! ---- %rows: an int32 g with either kind of answer, against the int64 g.
+        agree = .true.
+        do g32 = 1_int32, int(ng, int32)
+            call grp%rows(int(g32, int64), r64)
+            call grp%rows(g32, r64b)
+            call grp%rows(g32, r32)
+            if (size(r64b) /= size(r64) .or. size(r32) /= size(r64)) then
+                agree = .false.
+            else
+                if (.not. all(r64b == r64)) agree = .false.
+                if (.not. all(int(r32, int64) == r64)) agree = .false.
+            end if
+        end do
+        call check(error, agree, "%rows with an int32 g gives the int64 g's rows, in either answer kind")
+        if (allocated(error)) return
+        ! ---- %csr: one kind per call, both arrays.
+        call grp%csr(o64, w64)
+        call grp%csr(o32, w32)
+        call check(error, size(o32) == size(o64) .and. size(w32) == size(w64), &
+            "the int32 %csr hands back arrays of the same lengths")
+        if (allocated(error)) return
+        call check(error, all(int(o32, int64) == o64) .and. all(int(w32, int64) == w64), &
+            "...holding the int64 partition, offsets and rows alike")
+        if (allocated(error)) return
+        ! ---- %gather: five buffer kinds, n in g's kind, is_valid given and absent.
+        agree = .true.
+        do g32 = 1_int32, int(ng, int32)
+            b64 = -7.0_real64
+            b64b = -7.0_real64
+            m1 = .false.
+            m2 = .false.
+            call grp%gather("x", int(g32, int64), b64, n64, is_valid=m1)
+            call grp%gather("x", g32, b64b, n32, is_valid=m2)
+            if (int(n32, int64) /= n64) agree = .false.
+            if (.not. all(same_answer_v(b64b, b64))) agree = .false.
+            if (.not. all(m2 .eqv. m1)) agree = .false.
+            ! is_valid ABSENT on both sides: the optional must be forwarded as absent, not as a
+            ! buffer of the forwarder's own.
+            b64 = -7.0_real64
+            b64b = -7.0_real64
+            call grp%gather("x", int(g32, int64), b64, n64)
+            call grp%gather("x", g32, b64b, n32)
+            if (int(n32, int64) /= n64 .or. .not. all(same_answer_v(b64b, b64))) agree = .false.
+            call grp%gather("i", int(g32, int64), i32b, n64)
+            call grp%gather("i", g32, i32b, n32, is_valid=m2)
+            if (int(n32, int64) /= n64) agree = .false.
+            call grp%gather("big", g32, i64b, n32, is_valid=m2)
+            call grp%gather("big", int(g32, int64), i64b, n64)
+            if (int(n32, int64) /= n64) agree = .false.
+            call grp%gather("f", int(g32, int64), b32, n64, is_valid=m1)
+            call grp%gather("f", g32, b32b, n32, is_valid=m2)
+            if (int(n32, int64) /= n64 .or. .not. all(b32b == b32) .or. .not. all(m2 .eqv. m1)) agree = .false.
+            call grp%gather("b", int(g32, int64), lb, n64, is_valid=m1)
+            call grp%gather("b", g32, lbb, n32, is_valid=m2)
+            if (int(n32, int64) /= n64 .or. .not. all(lbb .eqv. lb) .or. .not. all(m2 .eqv. m1)) agree = .false.
+        end do
+        call check(error, agree, "%gather with an int32 g fills the same buffers and hands n back in g's kind")
+        if (allocated(error)) return
+        ! The int32 halves of the two widening buffers, read back against their own int64 runs.
+        call grp%gather("i", 2_int32, i32b, n32)
+        call grp%gather("i", 2_int64, i64b, n64)
+        call check(error, all(int(i32b(1:n32), int64) == i64b(1:n64)), &
+            "an int32 column reaches an int32 buffer and an int64 one alike through the int32 g")
+        if (allocated(error)) return
+        ! ---- %broadcast: on a fixture with dropped rows, so the fill is observable.
+        call build_nullnan(u)
+        call u%group_by(["k"], gnn)
+        call gnn%size(c64)
+        call gnn%size(c32)
+        call gnn%broadcast(c64, pr64)
+        call gnn%broadcast(c32, pr32)
+        call check(error, size(pr32) == size(pr64) .and. all(int(pr32, int64) == pr64), &
+            "the int32 %broadcast equals the int64 one, the default fill included")
+        if (allocated(error)) return
+        call gnn%broadcast(c64, pr64, fill=-1_int64)
+        call gnn%broadcast(c32, pr32, fill=-1_int32)
+        call check(error, all(int(pr32, int64) == pr64), "...and with an explicit fill in its own kind")
+        if (allocated(error)) return
+        call check(error, count(pr32 == -1_int32) == 2, "which landed on exactly the fixture's two dropped rows")
+    end subroutine test_int32_forms_equal_int64
 
     ! ---- the callbacks: module procedures, never internal ones (see the header) ----------------
 

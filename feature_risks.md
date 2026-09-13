@@ -332,6 +332,7 @@ something a reader is expected to have.
 | [Risk-261](#risk-261--key_tablereserve-reserves-a-total-computed-from-what-the-call-creates-and-a-short-reservation-fails-only-on-the-last-add) | `%key_table(reserve=)` reserves a TOTAL, and a short reservation fails only on the last add | 4 — covered |
 | [Risk-262](#risk-262--a-per-group-column-must-land-on-a-table-with-one-row-per-group-and-the-source-table-is-the-one-target-that-fails-silently) | A per-group column must land on a table with one row per group, and the SOURCE table fails silently | 4 — covered |
 | [Risk-263](#risk-263--the-nan-to-null-and-unit-rules-of-a-table-target-binding-live-in-one-helper-and-a-second-add_column-route-bypasses-both) | The NaN-to-Null and unit rules of a table-target binding live in ONE helper | 4 — covered |
+| [Risk-264](#risk-264--an-int32-grouping-form-is-a-second-route-onto-the-same-walk-and-a-dropped-optional-is-silent) | An `int32` grouping form is a second route onto the same walk, and a dropped optional is silent | 4 — covered |
 
 ---
 
@@ -9890,3 +9891,32 @@ two `%add_apply` forms are covered by `test_add_apply_names_and_forms`, where a 
 could not compute is a Null in ITS column and no other, `nan_to_null=.false.` is again the control,
 and `unit=` is asserted on every column named. Confirmed by mutation: skipping the `%set_null`
 call, and inheriting the unit for `"var"`, each fail those assertions.
+
+### Risk-264 — An `int32` grouping form is a second route onto the same walk, and a dropped optional is silent
+
+`parquet_grouping`'s `int32` forms (`%rows` and `%gather` with an `int32` `g`, `%csr`,
+`%broadcast`; `src/parquet_tables_group.f90`) exist so that an `int32` loop counter needs no
+conversion. Each is a FORWARD onto the `int64` body — Risk-258's opposite choice, taken here
+because nothing about a grouping is memory-bound the way a bulk sweep is — and a forward has its
+own silent failure: `%gather`'s `is_valid=`, `%broadcast`'s `fill=` and `threads=` all change the
+answer without aborting, so a forwarder that drops one returns a plausible array and only its
+`int64` sibling disagrees. `threads=` is worse than plausible: the answer is right and the loop ran
+serially, which no value assertion can see.
+
+**Rule.** Every `int32` form forwards every argument it takes, by keyword where an optional could
+be reordered; widens `g` with `int(g, int64)` BEFORE the range check, so the refusal names the
+number the caller wrote; narrows its answer through `grp_narrow` (arrays) or `grp_narrow_scalar`
+(`%gather`'s `n`), which abort naming the value rather than wrapping; and computes nothing of its
+own. Nothing is walked twice, and the two kinds cannot answer differently because only one of them
+walks.
+
+**Covered by** `test_int32_forms_equal_int64` (`test/test_table_group.f90`), which compares every
+`int32` form against its `int64` sibling entry for entry on one fixture of four unequal groups with
+a null in every value column and another with dropped rows — `%rows` in both answer kinds for every
+group, `%csr`, `%gather` over all five buffer kinds with `is_valid=` given AND absent, and
+`%broadcast` with `fill=` given and absent — and by `test_broadcast_i32_group_team`
+(`test/test_table_parallel.f90`) for `threads=`, which reads the team back through
+`parquet_debug_get_group_threads_used` because the values alone cannot see it. The scenarios
+`table_group_rows_g32_out_of_range` and `table_group_gather_g32_short_buffer` assert that the two
+refusals reached through an `int32` `g` carry the `int64` texts. The mutation to catch is an
+optional dropped from one forward, or `n` narrowed from the wrong quantity.

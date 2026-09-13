@@ -67,8 +67,8 @@ n  = grp%max_size()              ! rows in the largest group
 nk = grp%nkeys()                 ! how many key columns; a default integer, as t%ncols() is
 call grp%key_names(names)        ! the key column names, in key order
 call grp%size(counts)            ! counts(ngroups): rows per group; int32 or int64
-call grp%rows(g, rows)           ! the rows of group g, ascending; g int64, rows int32 or int64
-call grp%csr(offsets, rows)      ! the whole partition, int64: group g is rows(offsets(g):offsets(g+1)-1)
+call grp%rows(g, rows)           ! the rows of group g, ascending; g and rows each int32 or int64
+call grp%csr(offsets, rows)      ! the whole partition: group g is rows(offsets(g):offsets(g+1)-1)
 call grp%first_rows(rows)        ! one row per group: its LOWEST row index; int32 or int64
 call grp%last_rows(rows)         ! one row per group: its HIGHEST row index
 call grp%group_ids(codes)        ! codes(t%nrows()): each table row's group, 0 for none; int32 or int64
@@ -85,9 +85,14 @@ call grp%clear()                 ! back to the never-built state
   minimum and maximum of each group's rows, computed, never read off the ends of the sort.
 - **`%group_ids`** is the join-back key for anything computed per group: `codes(i)` is the group
   row `i` belongs to, so a per-group array indexed by it is a per-row array.
-- Every count or index that can exceed `int32` comes in both kinds; the group number `g` is
-  `int64` only. `%nkeys()` is the exception in the other direction: a default `integer`, as
-  `t%ncols()` is, because a key count is a column count.
+- Every count or index that can exceed `int32` comes in both kinds, **one kind per call**:
+  `%rows` and `%gather` take the group number `g` in either kind and `%gather` hands `n` back in
+  `g`'s kind, `%csr` and `%broadcast` answer in either kind, and an answer that does not fit the
+  `int32` asked for aborts naming the value rather than wrapping. So an `int32` loop counter needs
+  no conversion at either end. A callback (`%apply`, `%add_apply`) always receives `g` and `rows`
+  in `int64`; inside one, `int(rows, int32)` is a line, and `rows` indexes an array at either kind.
+  `%nkeys()` is the exception in the other direction: a default `integer`, as `t%ncols()` is,
+  because a key count is a column count.
 
 ## The key table, and the summary pattern
 
@@ -557,7 +562,7 @@ pair with the group id a scalar column; then `%group_by` on that column is the m
 ## Back onto the rows, and into your buffer: `%broadcast` and `%gather`
 
 ```fortran
-call grp%broadcast(per_group, per_row, [fill], [threads])  ! per_group(ngroups) -> per_row(t%nrows()); real64 or int64
+call grp%broadcast(per_group, per_row, [fill], [threads])  ! per_group(ngroups) -> per_row(t%nrows())
 call grp%gather(name, g, buf, n, [is_valid])               ! group g's values of `name` into buf(1:n); allocates nothing
 ```
 
@@ -575,9 +580,11 @@ mag = mag - med_of_row
 ```
 
 `per_group` holds exactly one value per group, in group order — what `%size`, `%agg` and `%apply`
-give — and any other length is refused naming both counts. The loop threads automatically
-(`threads=` as on `%agg`); every grouped row is written once, by its own group, so the answer is
-the same at every thread count.
+give — and any other length is refused naming both counts. Its values are `real64`, `int64` or
+`int32`, with `per_row` and `fill` in that same kind, so an `int32` `%size` or `%count` answer
+reaches the rows without a conversion. The loop threads automatically (`threads=` as on `%agg`);
+every grouped row is written once, by its own group, so the answer is the same at every thread
+count.
 
 `%gather` is the values form of the `%csr` loop: group `g`'s values of a column into the first `n`
 entries of a buffer **you own**, in row order, for a buffer of `int32`, `int64`, `real32`, `real64`
@@ -588,7 +595,8 @@ per group, leaves the entries past `n` as they were, and **aborts rather than tr
 buffer is shorter than the group, naming both sizes, because a statistic over the first `size(buf)`
 rows of a group is a plausible wrong answer. `is_valid`, a logical buffer under the same rule,
 receives for each entry whether the value is non-null; without it a null row's entry is whatever
-the column stores there.
+the column stores there. The group number `g` is `int32` or `int64`, and `n` comes back in `g`'s
+own kind.
 
 ```fortran
 real(real64), allocatable :: v(:)
@@ -644,7 +652,8 @@ procedure costs, times the number of groups, divided by the team you asked for. 
 answer into the target's column, and one pass over the answers under `nan_to_null`;
 `%key_table(reserve=)` is what keeps those adds from relocating the target's column slots. `%broadcast` costs
 one pass over the rows and `%gather` one copy of the group's rows into your buffer; neither
-allocates per group. The object holds two `int64` arrays the length of the grouped rows and the
+allocates per group, and the `int32` forms of both are forwards onto the `int64` ones, so
+`%broadcast` in `int32` costs one more pass and a temporary the length of the table. The object holds two `int64` arrays the length of the grouped rows and the
 group count — nothing per group, and nothing of the table's columns.
 
 `bench/benchmark_table.sh`'s group mode measures all of this on your own machine: the partition

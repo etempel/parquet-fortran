@@ -2849,7 +2849,9 @@ contains
                 test_table_group_agg_ddof_refused_aborts), &
             new_unittest("agg with scale= outside mad aborts", test_table_group_agg_scale_refused_aborts), &
             new_unittest("agg with a NaN weight aborts", test_table_group_agg_nan_weight_aborts), &
-            new_unittest("agg with an infinite weight aborts", test_table_group_agg_infinite_weight_aborts) &
+            new_unittest("agg with an infinite weight aborts", test_table_group_agg_infinite_weight_aborts), &
+            new_unittest("key_table with a negative reserve aborts", &
+                test_table_group_key_table_reserve_negative_aborts) &
             ]
         ! The `int32` and string-keyed refusals of `parquet_index`: each repeats its `int64`
         ! sibling's guard rather than delegating to it, so each copy needs a scenario of its own.
@@ -17850,6 +17852,15 @@ contains
             failure_message="key_table with a size_name naming a key was expected to abort", &
             required_stderr="is already a key column's name")
     end subroutine test_table_group_size_name_clash_aborts
+    !
+    !> See `scenario_table_group_key_table_reserve_negative` (test/error_scenarios.f90).
+    subroutine test_table_group_key_table_reserve_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_key_table_reserve_negative", &
+            expect_abort=.true., &
+            failure_message="key_table with a negative reserve was expected to abort", &
+            required_stderr="parquet_grouping: key_table: reserve= must be at least 0, got -1")
+    end subroutine test_table_group_key_table_reserve_negative_aborts
     !
     !> See `scenario_table_group_stale_apply` (test/error_scenarios.f90).
     subroutine test_table_group_stale_apply_aborts(error)

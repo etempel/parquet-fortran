@@ -3432,6 +3432,8 @@ program error_scenarios
         call scenario_table_group_out_of_range()
     case ("table_group_size_name_clash")
         call scenario_table_group_size_name_clash()
+    case ("table_group_key_table_reserve_negative")
+        call scenario_table_group_key_table_reserve_negative()
     case ("table_group_stale_apply")
         call scenario_table_group_stale_apply()
     case ("table_group_stale_apply_object")
@@ -29908,6 +29910,19 @@ contains
         call grp%key_table(kt, size_name="key")
         print '(a,i0)', "unexpectedly accepted a size_name that names a key, cols=", kt%ncols()
     end subroutine scenario_table_group_size_name_clash
+    !
+    !> `%key_table(reserve=)` is a count of spare slots, so a negative one is refused rather
+    !! than silently reserving nothing. The control reserves four.
+    subroutine scenario_table_group_key_table_reserve_negative()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt, reserve=4)
+        print '(a,i0)', "key_table with a reserve of four ran, spare=", kt%column_capacity(free=.true.)
+        call grp%key_table(kt, reserve=-1)
+        print '(a,i0)', "unexpectedly accepted a negative reserve, spare=", kt%column_capacity(free=.true.)
+    end subroutine scenario_table_group_key_table_reserve_negative
     !
     !> `%apply` on a stale grouping, in its procedure form: the generation check runs before the
     !! callback is called even once, so no procedure of the caller's computes anything from rows

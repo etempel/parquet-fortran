@@ -97,6 +97,10 @@ contains
                 test_group_ids_round_trip), &
             new_unittest("key_table equals drop_duplicates on a clone, sorted by the keys", &
                 test_key_table_equals_drop_duplicates), &
+            new_unittest("key_table reserve= leaves room for that many further adds, relocating none", &
+                test_key_table_reserve), &
+            new_unittest("nkeys answers a default integer, before a build and after one", &
+                test_nkeys_is_default_integer), &
             new_unittest("key_table keeps each key's kind and unit, and a null key group's null", &
                 test_key_table_kinds_unit_and_null_group), &
             new_unittest("a NaN key is one group under every dropna; a null key only under .false.", &
@@ -544,6 +548,84 @@ contains
         call check(error, kt2%nrows() == kt%nrows() - 1_int64 .and. .not. kt2%has_nulls("r"), &
             "under the default dropna the null key group is not there")
     end subroutine test_key_table_kinds_unit_and_null_group
+
+    !> `%key_table(reserve=)` is an INCREMENT on the columns the call itself creates, and what
+    !! it buys is `%reserve_columns`' published guarantee without the caller counting the keys:
+    !! after `reserve=10` on a two-key grouping with `size_name=`, ten further adds under NEW
+    !! names relocate nothing -- a `%col` pointer taken before them still reads the key column
+    !! and `%generation()` has not moved. The negative control is the same key table built
+    !! WITHOUT `reserve=`, where `parquet_new_table`'s headroom carries five adds and the ninth
+    !! column is the one that grows the slot array (feature_risks.md Risk-262).
+    subroutine test_key_table_reserve(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, kt, kt2
+        type(parquet_grouping) :: grp
+        integer(int32), pointer :: p(:)
+        integer(int32), allocatable :: k0(:)
+        real(real64), allocatable :: v(:)
+        integer(int64) :: gen0
+        character(len=8) :: nm
+        integer :: i
+        !
+        call build_kinds(t)
+        call t%group_by(["k", "s"], grp)
+        call grp%key_table(kt, size_name="n", reserve=10)
+        call check(error, kt%ncols() == 3, "the call itself creates the two keys and the count column")
+        if (allocated(error)) return
+        call check(error, kt%column_capacity(free=.true.) >= 10, &
+            "and reserve= is an increment on top of those: ten slots are spare")
+        if (allocated(error)) return
+        call kt%get("k", k0)
+        call kt%col("k", p)
+        gen0 = kt%generation()
+        allocate(v(kt%nrows()))
+        v = 1.0_real64
+        do i = 1, 10
+            write(nm, "(a,i0)") "c", i
+            call kt%add_column(trim(nm), v)
+        end do
+        call check(error, kt%ncols() == 13, "ten more columns went on")
+        if (allocated(error)) return
+        call check(error, kt%generation() == gen0, "...without advancing %generation()")
+        if (allocated(error)) return
+        call check(error, associated(p), "the %col pointer taken before them is still associated")
+        if (allocated(error)) return
+        call check(error, size(p) == size(k0), "...at the same length")
+        if (allocated(error)) return
+        call check(error, all(p == k0), "...and still reads the key column's own values")
+        if (allocated(error)) return
+        call grp%key_table(kt2, size_name="n")
+        gen0 = kt2%generation()
+        do i = 1, 5
+            write(nm, "(a,i0)") "c", i
+            call kt2%add_column(trim(nm), v)
+        end do
+        call check(error, kt2%ncols() == 8 .and. kt2%generation() == gen0, &
+            "without reserve= the default headroom carries five adds")
+        if (allocated(error)) return
+        call kt2%add_column("c6", v)
+        call check(error, kt2%generation() /= gen0, "and the ninth column is the one that grows the slot array")
+    end subroutine test_key_table_reserve
+
+    !> `%nkeys()` answers a DEFAULT `integer`, as `t%ncols()` does: a key count is a column
+    !! count. `kind()` is an inquiry and never calls the procedure, so the value is asserted
+    !! beside the kind (.claude/rules/testing.md).
+    subroutine test_nkeys_is_default_integer(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_grouping) :: grp
+        integer :: nk
+        !
+        call check(error, kind(grp%nkeys()) == kind(0), "%nkeys() is a default integer")
+        if (allocated(error)) return
+        nk = grp%nkeys()
+        call check(error, nk == 0, "and it answers 0 before a build")
+        if (allocated(error)) return
+        call build_kinds(t)
+        call t%group_by(["k", "s"], grp)
+        nk = grp%nkeys()
+        call check(error, nk == 2, "a two-key grouping has two keys")
+    end subroutine test_nkeys_is_default_integer
 
     !> A NaN is a value: one group, present under both `dropna` settings, after the values; a
     !! null is subject to `dropna`: no group under the default, one group last under `.false.`.

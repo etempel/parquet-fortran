@@ -357,8 +357,8 @@ contains
     end procedure grp_max_size
     !
     module procedure grp_nkeys
-        n = 0_int64
-        if (allocated(self%slots)) n = size(self%slots, kind=int64)
+        n = 0
+        if (allocated(self%slots)) n = size(self%slots)
     end procedure grp_nkeys
     !
     module procedure grp_key_names
@@ -505,10 +505,19 @@ contains
         integer(int64), allocatable :: first(:), counts(:)
         type(parquet_column) :: vals
         character(len=:), allocatable :: cname
-        integer :: k
+        character(len=32) :: rtxt
+        integer :: k, nsize
         !
         call grp_resolve(self, PROC)
+        if (present(reserve)) then
+            if (reserve < 0) then
+                write(rtxt, "(I0)") reserve
+                error stop GP // PROC // ": reserve= must be at least 0, got " // trim(rtxt)
+            end if
+        end if
+        nsize = 0
         if (present(size_name)) then
+            nsize = 1
             cname = trim(adjustl(size_name))
             do k = 1, size(self%slots)
                 if (self%keys(k) == cname) then
@@ -520,6 +529,11 @@ contains
         end if
         call grp_first_rows_i64(self, first)
         call parquet_new_table(out)
+        ! The reservation is made BEFORE the first add and over the TOTAL this call will reach,
+        ! `reserve` being the caller's INCREMENT on top of it (feature_risks.md Risk-261):
+        ! %reserve_columns takes a total and is a no-op at or below the current capacity, so the
+        ! key adds themselves never relocate either, and the caller's next `reserve` adds cannot.
+        if (present(reserve)) call out%reserve_columns(size(self%slots) + nsize + reserve)
         do k = 1, size(self%slots)
             ! A copy, then a gather on the copy: the source column must come out of this
             ! unchanged (Risk-208). The gather carries each row's null state with it, which is
@@ -697,13 +711,25 @@ contains
         integer, intent(in) :: nout                         !! results per group; at least 1.
         real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
         integer, intent(in), optional :: threads            !! the team; absent = serial.
-        character(len=*), parameter :: PROC = "apply"
+        call apply_proc_matrix_impl(self, func, nout, out, "apply", threads)
+    end subroutine grp_apply_proc_matrix
+    !
+    !> The matrix `%apply` over a procedure, with the CALLING BINDING's name as an argument
+    !! instead of a parameter of its own, so that the one body serves every binding that runs
+    !! this loop and each refusal names the binding the caller actually wrote.
+    subroutine apply_proc_matrix_impl(self, func, nout, out, proc, threads)
+        class(parquet_grouping), intent(in) :: self         !! the grouping.
+        procedure(parquet_group_apply_i) :: func            !! called once per group; see the interface.
+        integer, intent(in) :: nout                         !! results per group; at least 1.
+        real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
+        character(len=*), intent(in) :: proc                !! calling binding, for every message.
+        integer, intent(in), optional :: threads            !! the team; absent = serial.
         integer(int64) :: g
         integer :: nt, chunk
         !
-        call grp_resolve(self, PROC)
-        call grp_check_nout(nout, PROC)
-        call group_team(self%ngrp, threads, PROC, .false., nt)
+        call grp_resolve(self, proc)
+        call grp_check_nout(nout, proc)
+        call group_team(self%ngrp, threads, proc, .false., nt)
         allocate(out(nout, self%ngrp))
         if (nt > 1) then
             chunk = group_chunk(self%ngrp, nt)
@@ -717,7 +743,7 @@ contains
                 call func(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(:, g))
             end do
         end if
-    end subroutine grp_apply_proc_matrix
+    end subroutine apply_proc_matrix_impl
     !
     module procedure grp_apply_obj_scalar
         character(len=*), parameter :: PROC = "apply"
@@ -742,13 +768,24 @@ contains
     end procedure grp_apply_obj_scalar
     !
     module procedure grp_apply_obj_matrix
-        character(len=*), parameter :: PROC = "apply"
+        call apply_obj_matrix_impl(self, reducer, nout, out, "apply", threads)
+    end procedure grp_apply_obj_matrix
+    !
+    !> The matrix `%apply` over a reducer object, with the calling binding's name as an
+    !! argument; the procedure form's twin, for the reason given there.
+    subroutine apply_obj_matrix_impl(self, reducer, nout, out, proc, threads)
+        class(parquet_grouping), intent(in) :: self         !! the grouping.
+        class(parquet_group_reducer), intent(in) :: reducer !! the caller's extension; its %reduce is called once per group.
+        integer, intent(in) :: nout                         !! results per group; at least 1.
+        real(real64), allocatable, intent(out) :: out(:, :) !! (nout, ngroups): group g's results are out(:, g).
+        character(len=*), intent(in) :: proc                !! calling binding, for every message.
+        integer, intent(in), optional :: threads            !! the team; absent = serial.
         integer(int64) :: g
         integer :: nt, chunk
         !
-        call grp_resolve(self, PROC)
-        call grp_check_nout(nout, PROC)
-        call group_team(self%ngrp, threads, PROC, .false., nt)
+        call grp_resolve(self, proc)
+        call grp_check_nout(nout, proc)
+        call group_team(self%ngrp, threads, proc, .false., nt)
         allocate(out(nout, self%ngrp))
         if (nt > 1) then
             chunk = group_chunk(self%ngrp, nt)
@@ -762,7 +799,7 @@ contains
                 call reducer%reduce(g, self%perm(self%offsets(g) : self%offsets(g + 1_int64) - 1_int64), out(:, g))
             end do
         end if
-    end procedure grp_apply_obj_matrix
+    end subroutine apply_obj_matrix_impl
     !
     ! ---- %nunique -------------------------------------------------------------------------------
     !
@@ -1240,7 +1277,25 @@ contains
     end subroutine agg_call_func
     !
     module procedure grp_agg_stat_real
-        character(len=*), parameter :: PROC = "agg"
+        call agg_stat_real_impl(self, name, stat, out, "agg", weights, weight_column, q, ddof, method, scale, threads)
+    end procedure grp_agg_stat_real
+    !
+    !> One token of the real64 vocabulary per group, with the CALLING BINDING's name as an
+    !! argument instead of a parameter of its own, so that the one body serves every binding
+    !! that asks for a statistic and each refusal names the binding the caller actually wrote.
+    subroutine agg_stat_real_impl(self, name, stat, out, proc, weights, weight_column, q, ddof, method, scale, threads)
+        class(parquet_grouping), intent(in) :: self             !! the grouping.
+        character(len=*), intent(in) :: name                    !! the column; read if not resident.
+        character(len=*), intent(in) :: stat                    !! the statistic's token, case-insensitive.
+        real(real64), allocatable, intent(out) :: out(:)        !! one value per group, in group order.
+        character(len=*), intent(in) :: proc                    !! calling binding, for every message.
+        real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
+        character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+        real(real64), intent(in), optional :: q                 !! the probability, 0 to 1, for "quantile".
+        integer, intent(in), optional :: ddof                   !! degrees of freedom charged; default 1.
+        character(len=*), intent(in), optional :: method        !! the quantile method, as pf_quantile's.
+        character(len=*), intent(in), optional :: scale         !! "raw" for an unscaled "mad", as pf_mad's.
+        integer, intent(in), optional :: threads                !! the team; absent = automatic.
         real(real64), allocatable :: wall(:), v0(:), w0(:)
         logical, allocatable :: m0(:)
         integer(int64), allocatable :: nu(:)
@@ -1248,12 +1303,12 @@ contains
         integer :: code, idx, kind, nt, chunk
         logical :: anynull, weighted, has_null
         !
-        call grp_resolve(self, PROC)
-        call agg_parse_stat(stat, .false., PROC, code)
-        call agg_value_column(self, name, PROC, .false., idx, kind)
-        call agg_weights(self, PROC, weights, weight_column, wall)
+        call grp_resolve(self, proc)
+        call agg_parse_stat(stat, .false., proc, code)
+        call agg_value_column(self, name, proc, .false., idx, kind)
+        call agg_weights(self, proc, weights, weight_column, wall)
         weighted = allocated(wall)
-        call agg_check_options(code, PROC, q, ddof, method, scale, weighted)
+        call agg_check_options(code, proc, q, ddof, method, scale, weighted)
         if (code == AG_NUNIQUE) then
             ! The one token with its own engine: the sort's, through %nunique.
             call grp_nunique_i64(self, name, nu)
@@ -1262,7 +1317,7 @@ contains
             call group_note_threads(1)
             return
         end if
-        call group_team(self%ngrp, threads, PROC, .true., nt)
+        call group_team(self%ngrp, threads, proc, .true., nt)
         allocate(out(self%ngrp))
         anynull = parquet_column_any_null(self%cache%cols(idx)%values)
         cap = max(self%maxsz, 1_int64)
@@ -1294,10 +1349,21 @@ contains
                 call agg_one(code, v0, m0, w0, n, has_null, weighted, q, ddof, method, scale, out(g))
             end do
         end if
-    end procedure grp_agg_stat_real
+    end subroutine agg_stat_real_impl
     !
     module procedure grp_agg_stat_int
-        character(len=*), parameter :: PROC = "agg"
+        call agg_stat_int_impl(self, name, stat, out, "agg", threads)
+    end procedure grp_agg_stat_int
+    !
+    !> The exact `int64` family per group, with the calling binding's name as an argument; the
+    !! real64 form's twin, for the reason given there.
+    subroutine agg_stat_int_impl(self, name, stat, out, proc, threads)
+        class(parquet_grouping), intent(in) :: self        !! the grouping.
+        character(len=*), intent(in) :: name               !! the column; read if not resident.
+        character(len=*), intent(in) :: stat               !! the statistic's token, case-insensitive.
+        integer(int64), allocatable, intent(out) :: out(:) !! one exact value per group, in group order.
+        character(len=*), intent(in) :: proc               !! calling binding, for every message.
+        integer, intent(in), optional :: threads           !! the team; absent = automatic.
         integer(int32), pointer :: pi32(:)
         integer(int64), pointer :: pi64(:)
         logical, pointer :: pb(:)
@@ -1306,9 +1372,9 @@ contains
         logical :: anynull, seen
         character(len=32) :: gtxt
         !
-        call grp_resolve(self, PROC)
-        call agg_parse_stat(stat, .true., PROC, code)
-        call agg_value_column(self, name, PROC, .true., idx, kind)
+        call grp_resolve(self, proc)
+        call agg_parse_stat(stat, .true., proc, code)
+        call agg_value_column(self, name, proc, .true., idx, kind)
         select case (code)
         case (AG_NUNIQUE)
             call grp_nunique_i64(self, name, out)
@@ -1323,7 +1389,7 @@ contains
             call group_note_threads(1)
             return
         end select
-        call group_team(self%ngrp, threads, PROC, .true., nt)
+        call group_team(self%ngrp, threads, proc, .true., nt)
         allocate(out(self%ngrp))
         anynull = parquet_column_any_null(self%cache%cols(idx)%values)
         nullify(pi32, pi64, pb)
@@ -1380,7 +1446,7 @@ contains
             end do
             if (.not. seen .and. code /= AG_SUM) then
                 write(gtxt, "(I0)") g
-                call agg_abort(GP // PROC // ": group " // trim(gtxt) // " has no non-null value of '" // &
+                call agg_abort(GP // trim(proc) // ": group " // trim(gtxt) // " has no non-null value of '" // &
                     trim(name) // "', so its exact " // trim(stat) // " does not exist; the real64 form " // &
                     "answers NaN there")
             end if
@@ -1393,11 +1459,11 @@ contains
             integer(int64), intent(in) :: gg !! the group.
             character(len=32) :: t
             write(t, "(I0)") gg
-            call agg_abort(GP // PROC // ": the int64 sum of '" // trim(name) // "' over group " // trim(t) // &
+            call agg_abort(GP // trim(proc) // ": the int64 sum of '" // trim(name) // "' over group " // trim(t) // &
                 " overflows; it is refused rather than wrapped -- use the real64 form for an " // &
                 "approximate sum")
         end subroutine agg_overflow ! GCOVR_EXCL_LINE -- unreachable: agg_abort never returns.
-    end procedure grp_agg_stat_int
+    end subroutine agg_stat_int_impl
     !
     !> %agg specific, the caller's per-column procedure; the contract is on the interface in the
     !! module spec. Restated in full for the reason the two procedure-form `%apply` bodies are.
@@ -1409,18 +1475,32 @@ contains
         real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
         character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
         integer, intent(in), optional :: threads                !! the team; absent = serial.
-        character(len=*), parameter :: PROC = "agg"
+        call agg_func_impl(self, name, func, out, "agg", weights, weight_column, threads)
+    end subroutine grp_agg_func
+    !
+    !> The caller's per-column procedure per group, with the CALLING BINDING's name as an
+    !! argument instead of a parameter of its own, so that the one body serves every binding
+    !! that takes such a procedure and each refusal names the binding the caller actually wrote.
+    subroutine agg_func_impl(self, name, func, out, proc, weights, weight_column, threads)
+        class(parquet_grouping), intent(in) :: self             !! the grouping.
+        character(len=*), intent(in) :: name                    !! the column; read if not resident.
+        procedure(parquet_group_column_reduce_i) :: func        !! called once per group; see the interface.
+        real(real64), allocatable, intent(out) :: out(:)        !! one value per group, in group order.
+        character(len=*), intent(in) :: proc                    !! calling binding, for every message.
+        real(real64), intent(in), optional :: weights(:)        !! one weight per table row.
+        character(len=*), intent(in), optional :: weight_column !! a scalar numeric column of weights.
+        integer, intent(in), optional :: threads                !! the team; absent = serial.
         real(real64), allocatable :: wall(:), v0(:), w0(:)
         logical, allocatable :: m0(:)
         integer(int64) :: g, n, cap
         integer :: idx, kind, nt, chunk
         logical :: anynull, weighted, has_null
         !
-        call grp_resolve(self, PROC)
-        call agg_value_column(self, name, PROC, .false., idx, kind)
-        call agg_weights(self, PROC, weights, weight_column, wall)
+        call grp_resolve(self, proc)
+        call agg_value_column(self, name, proc, .false., idx, kind)
+        call agg_weights(self, proc, weights, weight_column, wall)
         weighted = allocated(wall)
-        call group_team(self%ngrp, threads, PROC, .false., nt)
+        call group_team(self%ngrp, threads, proc, .false., nt)
         allocate(out(self%ngrp))
         anynull = parquet_column_any_null(self%cache%cols(idx)%values)
         cap = max(self%maxsz, 1_int64)
@@ -1446,7 +1526,7 @@ contains
                 call agg_call_func(func, v0, m0, w0, n, has_null, weighted, out(g))
             end do
         end if
-    end subroutine grp_agg_func
+    end subroutine agg_func_impl
     !
     !
     ! ---- %broadcast and %gather: the two ends of the hot loop ----------------------------------

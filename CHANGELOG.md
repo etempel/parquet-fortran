@@ -81,9 +81,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Grouping: `parquet_table%group_by` and the `parquet_grouping` object.**
   `t%group_by(keys, grp)` partitions a table's rows by the values of one or more key columns and
   keeps the partition as an object that answers per group, without reordering the table. `%rows`,
-  `%csr`, `%size`, `%first_rows`, `%last_rows` and `%group_ids` describe the partition; `%key_table`
-  gives one row per group carrying each key's kind, width and unit, which is the skeleton a summary
-  table is built on. `%agg(name, stat, out)` computes one statistic of one column per group over the
+  `%csr`, `%size`, `%first_rows`, `%last_rows` and `%group_ids` describe the partition and
+  `%nkeys()` answers a default `integer`; `%key_table` gives one row per group carrying each key's
+  kind, width and unit, which is the skeleton a summary table is built on, and its `reserve=`
+  leaves that many spare column slots on it so the columns you add next relocate nothing.
+  `%agg(name, stat, out)` computes one statistic of one column per group over the
   `parquet_stats` vocabulary — `"mean"`, `"median"`, `"std"`, `"quantile"` and thirteen more —
   weighted by `weights=` or `weight_column=` if you want; an `integer(int64)` result selects the
   exact family, whose `"sum"` aborts rather than wraps. `%agg(name, func, out)` takes a procedure of

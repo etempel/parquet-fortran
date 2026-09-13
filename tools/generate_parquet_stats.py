@@ -1685,11 +1685,13 @@ ORDER_HELPER_IFACES = """        !> Applies the exclusion rules and hands back t
         !> The two-sample two-pass, over pairs the caller has already compacted.
         !!
         !! **It exists so that `pf_cov(x, x)` is EXACTLY `pf_variance(x)`**, which it could not be
-        !! if the covariance had its own accumulation loop: it is written here, in the same
-        !! submodule as `stats_engine`, so that both reach the same `STATS_BLOCK` block tree, the
-        !! same `pair_reduce`, the same refined mean and the same re-centring correction. A second
-        !! loop elsewhere would agree to fifteen digits and differ in the sixteenth, and the
-        !! identity is worth more than the duplication costs.
+        !! if the covariance had its own accumulation loop elsewhere: it is written here, in the
+        !! same submodule as `stats_engine`, so that both reach the same `STATS_BLOCK` block tree,
+        !! the same `pair_reduce`, the same refined mean and the same re-centring correction --
+        !! and so that the diagonal can take `stats_block_moments` itself, which is what makes the
+        !! identity hold to the bit rather than to fifteen digits. The fork, and the two ways a
+        !! mirrored pair kernel diverges from the single-sample one without it, are written out at
+        !! the `diagonal` scan in the body.
         module subroutine stats_pair_moments(kx, ky, kw, m, mean_x, mean_y, sxx, sxy, syy, &
                 w_sum, w_sq)
             real(real64), intent(in) :: kx(:) !! the surviving first-sample values.

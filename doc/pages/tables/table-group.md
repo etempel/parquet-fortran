@@ -67,7 +67,7 @@ lowest row). Every group has at least one row.
 n  = grp%ngroups()               ! integer(int64); 0 before a build, or over an empty table
 n  = grp%nrows()                 ! rows that belong to some group: fewer than t%nrows() under dropna
 n  = grp%max_size()              ! rows in the largest group
-n  = grp%nkeys()                 ! how many key columns
+nk = grp%nkeys()                 ! how many key columns; a default integer, as t%ncols() is
 call grp%key_names(names)        ! the key column names, in key order
 call grp%size(counts)            ! counts(ngroups): rows per group; int32 or int64
 call grp%rows(g, rows)           ! the rows of group g, ascending; g int64, rows int32 or int64
@@ -89,13 +89,14 @@ call grp%clear()                 ! back to the never-built state
 - **`%group_ids`** is the join-back key for anything computed per group: `codes(i)` is the group
   row `i` belongs to, so a per-group array indexed by it is a per-row array.
 - Every count or index that can exceed `int32` comes in both kinds; the group number `g` is
-  `int64` only.
+  `int64` only. `%nkeys()` is the exception in the other direction: a default `integer`, as
+  `t%ncols()` is, because a key count is a column count.
 
 ## The key table, and the summary pattern
 
 ```fortran
-call grp%key_table(out, [size_name])   ! one row per group: the key columns, in group order
-call grp%count(name, out)              ! non-null rows of `name` per group; int32 or int64
+call grp%key_table(out, [size_name], [reserve])  ! one row per group: the key columns, in group order
+call grp%count(name, out)                        ! non-null rows of `name` per group; int32 or int64
 ```
 
 `%key_table` is one row per group carrying each key column's value, kind, width and unit — a
@@ -104,6 +105,24 @@ rows per group; a `size_name=` that repeats a key column's name is refused rathe
 table with two columns of that name. It is an ordinary table: sort it, filter it, write it, and
 above all `%add_column` the per-group answers onto it, which is the summary pattern the opening
 example shows. The per-group answers come from `%size`, `%count` and `%apply` below.
+
+`reserve=` is how many **spare column slots** the key table is to carry beyond the columns the
+call itself creates — the keys, plus one when `size_name=` is given. It is an **increment**, not a
+total, because a caller cannot state a total for a table that does not exist yet; the call adds
+the keys to it. After `call grp%key_table(kt, reserve=n)`, `kt%column_capacity(free=.true.)` is at
+least `n`, and `n` further `%add_column` calls under **new** names relocate nothing: every `%col`
+pointer and every row or column handle into `kt` stays valid and `kt%generation()` does not move
+— `%reserve_columns`' guarantee
+([table-mutate.html#making-room-for-columns-and-the-one-guarantee-that-comes-with-it](table-mutate.html#making-room-for-columns-and-the-one-guarantee-that-comes-with-it)),
+reached without counting the keys by hand. Absent or 0 leaves the default headroom, which carries a few
+adds before the slot array grows; a negative `reserve` is refused. A summary with more columns than
+that headroom is the case it is for:
+
+```fortran
+call grp%key_table(summary, size_name="n_sources", reserve=4)
+call grp%agg("mag_g", "median", med_mag)
+call summary%add_column("median_mag_g", med_mag)
+```
 
 `%count` counts a column's non-null rows per group, for a column of any kind, and reads the
 column from the file if nothing has yet.

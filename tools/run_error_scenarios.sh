@@ -1755,6 +1755,7 @@ scenarios=(
     "table_group_never_built:1"
     "table_group_out_of_range:1"
     "table_group_size_name_clash:1"
+    "table_group_key_table_reserve_negative:1"
     "table_group_stale_apply:1"
     "table_group_stale_apply_object:1"
     "table_group_apply_nout:1"

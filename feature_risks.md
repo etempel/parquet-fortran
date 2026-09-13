@@ -329,6 +329,7 @@ something a reader is expected to have.
 | [Risk-258](#risk-258--an-int32-bulk-form-is-a-second-route-through-the-same-walk) | An `int32` bulk form is a second route through the same walk | 4 — covered |
 | [Risk-259](#risk-259--two-loops-written-to-mirror-each-other-do-not-round-alike-and-pf_covx-x--pf_variancex-is-exact) | Two loops written to mirror each other do not round alike | 4 — covered |
 | [Risk-260](#risk-260--a-nested-range-taken-from-a-container-payload-goes-stale-on-a-set_null-of-an-earlier-row) | A `%nested` range goes stale on a `%set_null` of an EARLIER row | 4 — covered |
+| [Risk-261](#risk-261--key_tablereserve-reserves-a-total-computed-from-what-the-call-creates-and-a-short-reservation-fails-only-on-the-last-add) | `%key_table(reserve=)` reserves a TOTAL, and a short reservation fails only on the last add | 4 — covered |
 
 ---
 
@@ -9795,3 +9796,38 @@ reads the NEXT element — the wrong-but-plausible answer itself. Its negative c
 row and asserts the held range is unchanged. Confirmed by mutation: making `%set_null` keep the
 row's elements — the behaviour the `### Changed` entry replaced — fails it on the moved-range
 assertion.
+
+### Risk-261 — `%key_table(reserve=)` reserves a TOTAL computed from what the call creates, and a short reservation fails only on the last add
+
+`%reserve_columns(n)` takes a **total**, while `%key_table`'s `reserve=` is an **increment** on the
+columns that call creates — the keys, plus one for `size_name=`. So `grp_key_table`
+(`src/parquet_tables_group.f90`) must reserve `nkeys + nsize + reserve`, and a version that passes
+`reserve` alone reserves nothing at all while the total still fits inside `parquet_new_table`'s
+`COL_HEADROOM`, and above it leaves the reservation `nkeys + nsize` columns short.
+
+**The failure is at the end and it is not loud.** Every value in every column is right; what breaks
+is the guarantee the argument exists for — the caller's `reserve`-th `%add_column` grows the slot
+array after all, `MOVE_ALLOC` leaves the association status of every `%col` pointer taken earlier
+UNDEFINED (`fortran-gotchas.md`), and `%generation()` moves under any grouping built from that
+table. Code that reads through such a pointer usually still works.
+
+**What a future change must keep.** The reservation is computed from what the call creates plus the
+caller's increment, and it is made before the first `%add_column`. Changing `reserve=` to mean a
+total would be a breaking change to a published argument, not a refactor.
+
+**Covered by** `test_key_table_reserve` (`test/test_table_group.f90`), which reserves 10 on a
+two-key grouping with `size_name=` — deliberately above the headroom, so the wrong total (10
+instead of 13) is short — and asserts `%column_capacity(free=.true.) >= 10`, then that ten adds
+under new names leave `%generation()` where it was and a `%col` pointer taken before them still
+reads the key column. Its negative control is the same key table without `reserve=`, where the
+ninth column grows the slot array and `%generation()` does move. Confirmed by mutation: reserving
+`reserve` alone, and dropping the reservation entirely, each fail the capacity assertion.
+`%key_table(reserve=-1)` is refused out of process
+(`table_group_key_table_reserve_negative`), since `%reserve_columns` of a negative total is a
+silent no-op here; dropping that guard makes the scenario exit 0.
+
+The **order** of the reservation relative to the key adds is an efficiency rule only, kept by the
+comment at the call: the table is created inside `%key_table`, so no caller can hold a pointer
+across those adds and no assertion outside can tell the two orders apart. Mutation confirms it
+(moving the reservation below the key adds leaves `test_key_table_reserve` green); do not add a
+test claiming otherwise.

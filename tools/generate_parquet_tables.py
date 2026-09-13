@@ -1822,7 +1822,7 @@ def gen_grouping_type():
         procedure :: ngroups => grp_ngroups       !! How many groups; 0 before a build.
         procedure :: nrows => grp_nrows           !! Rows that belong to some group; fewer than the table's under dropna.
         procedure :: max_size => grp_max_size     !! Rows in the largest group.
-        procedure :: nkeys => grp_nkeys           !! How many key columns.
+        procedure :: nkeys => grp_nkeys           !! How many key columns; a default `integer`.
         procedure :: key_names => grp_key_names   !! The key columns' names, in key order.
         procedure, private :: grp_size_i32        !! %size specific, int32 counts.
         procedure, private :: grp_size_i64        !! %size specific, int64 counts.
@@ -1856,8 +1856,9 @@ def gen_grouping_type():
         procedure :: is_current => grp_is_current !! Whether the grouping is built AND the table has not changed since.
         procedure :: clear => grp_clear           !! Back to the never-built state.
         !> One row per group, in group order: the key columns, whatever their kinds, plus an
-        !! `int64` count column when `size_name=` is given. The summary pattern: `%key_table`,
-        !! then `%add_column` the per-group answers onto it.
+        !! `int64` count column when `size_name=` is given and `reserve=` spare column slots
+        !! beyond them. The summary pattern: `%key_table`, then `%add_column` the per-group
+        !! answers onto it.
         procedure :: key_table => grp_key_table
         procedure, private :: grp_count_i32       !! %count specific, int32 counts.
         procedure, private :: grp_count_i64       !! %count specific, int64 counts.
@@ -2388,10 +2389,12 @@ def group_interfaces():
             class(parquet_grouping), intent(in) :: self !! the grouping.
             integer(int64) :: n                         !! the largest group's row count.
         end function grp_max_size
-        !> How many key columns the grouping was built over; 0 before a build.
+        !> How many key columns the grouping was built over; 0 before a build. A default
+        !! `integer`, as `t%ncols()` is: a key count is a column count, bounded by Arrow's
+        !! `int32` schema width.
         module function grp_nkeys(self) result(n)
             class(parquet_grouping), intent(in) :: self !! the grouping.
-            integer(int64) :: n                         !! the key count.
+            integer :: n                                !! the key count.
         end function grp_nkeys
         !> The key columns' names, in key order, into an array allocated here; zero-size before
         !! a build.
@@ -2478,10 +2481,20 @@ def group_interfaces():
         !! The gathers are of deep COPIES, and the source table is untouched (feature_risks.md
         !! Risk-208). An ordinary table: sort it, filter it, `%add_column` the aggregates onto
         !! it, write it.
-        module subroutine grp_key_table(self, out, size_name)
+        !!
+        !! `reserve=` is how many SPARE column slots the result is to carry beyond the columns
+        !! this call creates (the keys, plus one when `size_name=` is given) -- an INCREMENT,
+        !! not a total, because a caller cannot state a total for a table that does not exist
+        !! yet. After `call grp%key_table(kt, reserve=n)`, `kt%column_capacity(free=.true.)` is
+        !! at least `n`, so `n` further `%add_column` calls under NEW names relocate nothing,
+        !! keep every `%col` pointer and handle into `kt` valid and leave `kt%generation()`
+        !! unchanged -- `%reserve_columns`' published guarantee, reached without counting the
+        !! keys by hand. Absent or 0 leaves the default headroom; negative is refused.
+        module subroutine grp_key_table(self, out, size_name, reserve)
             class(parquet_grouping), intent(in) :: self         !! the grouping.
             type(parquet_table), intent(out) :: out             !! receives one row per group.
             character(len=*), intent(in), optional :: size_name !! name for a rows-per-group column; absent adds none.
+            integer, intent(in), optional :: reserve            !! spare column slots beyond those created here; default 0.
         end subroutine grp_key_table
         !> %count specific, int32 counts; see the generic.
         module subroutine grp_count_i32(self, name, out)

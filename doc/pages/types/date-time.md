@@ -392,6 +392,29 @@ The three types are also first-class outside the reader and writer:
   directly, with their null state understood as part of the ordering — see
   [Supported types](../utilities/sorting.html#supported-types).
 
+## Where else a temporal column can be used
+
+A `date`, `time` or `timestamp` column is a key, not only a value. Each of the four is described on
+the page that owns it rather than repeated here:
+
+- **Filtering**, including `in`/`not_in` against a set of temporal elements bound with `%bind` or
+  `%add_in` — see [Filtering `date`, `time` and `timestamp`
+  columns](../io/filter-sort-sample.html#filtering-date-time-and-timestamp-columns) and
+  [Membership in a set](../io/filter-sort-sample.html#membership-in-a-set-in-and-not_in).
+- **Indexing**: `%build_index` takes a temporal element as its key, which must be of the column's
+  own type — see [Looking a value up](../tables/table-mutate.html#looking-a-value-up-build_index).
+- **Grouping**: `%group_by` accepts a temporal column as a group key — see [Grouping rows and
+  aggregating per group](../tables/table-group.html).
+- **Filling**: `%fillna` takes a temporal value for a temporal column — see [Filling in what is
+  missing](../tables/table-mutate.html#filling-in-what-is-missing).
+
+**A key is taken from the element, not from the file's stored unit**, which is the one consequence
+of the above that belongs on this page. A `timestamp` is keyed as the normalised
+`(seconds, nanoseconds)` pair its `%get_raw` returns, so a set built from a millisecond file matches
+a microsecond column by instant, with no unit arithmetic on your side; a `date` keys as its day
+count and a `time` as its nanoseconds since midnight. A null element is left out of a set and
+skipped by an index rather than being keyed as zero.
+
 ## Not yet supported
 
 - `qc:` range checks (`min:`/`max:`) on `date`/`time`/`timestamp` columns (deferred; rejected at

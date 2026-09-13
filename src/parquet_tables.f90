@@ -8431,7 +8431,13 @@ module parquet_tables
         !! A parsed DATE/TIME/TIMESTAMP column carries no recorded resolution, exactly as one
         !! added by `%add_column` does, so a schema-less `parquet_write_table` writes it at the
         !! writer's default. Pass a schema when the resolution matters.
-        module subroutine table_parse_column(self, name, to_kind, invalid, to_name)
+        !!
+        !! **An in-place parse of a PREDEFINED column needs `force=.true.`**, the same guard
+        !! `%drop_column` and `%keep_columns` carry and for the same reason: a generated table
+        !! type's accessor has the column's kind compiled into it, so changing that kind leaves
+        !! the accessor aborting on its next call, at a site other than the one that caused it.
+        !! `to_name=` is never refused -- it leaves the predefined column untouched.
+        module subroutine table_parse_column(self, name, to_kind, invalid, to_name, force)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the string column to read.
             integer, intent(in) :: to_kind              !! target PK_* kind.
@@ -8439,6 +8445,8 @@ module parquet_tables
             character(len=*), intent(in), optional :: invalid
             !> name for a NEW column to hold the result; absent converts in place.
             character(len=*), intent(in), optional :: to_name
+            !> .true. to convert a predefined column in place anyway; default .false.
+            logical, intent(in), optional :: force
         end subroutine table_parse_column
         !> Renders a column's values as text -- `.astype(str)`, and the inverse of
         !! `%parse_column`.
@@ -8462,14 +8470,18 @@ module parquet_tables
         !!
         !! In place by default, with `to_name` for a new column beside it, and `%parse_column`'s
         !! pointer rule exactly: storage is replaced, `%generation()` advances, nothing detaches,
-        !! and the result is marked as holding written values.
-        module subroutine table_format_column(self, name, fmt, to_name)
+        !! and the result is marked as holding written values. Its `force=` rule is the same one
+        !! too: an in-place render of a PREDEFINED column needs `force=.true.`, because a
+        !! generated accessor's kind is compiled in; `to_name=` is never refused.
+        module subroutine table_format_column(self, name, fmt, to_name, force)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! the column to render.
             !> format specification with parentheses; absent uses `pf_to_str`'s own default.
             character(len=*), intent(in), optional :: fmt
             !> name for a NEW column to hold the text; absent converts in place.
             character(len=*), intent(in), optional :: to_name
+            !> .true. to render a predefined column in place anyway; default .false.
+            logical, intent(in), optional :: force
         end subroutine table_format_column
     end interface
     !

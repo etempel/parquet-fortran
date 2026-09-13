@@ -800,6 +800,12 @@ contains
                 test_format_column_vector_source_aborts), &
             new_unittest("format_column with fmt= on a temporal column aborts", &
                 test_format_column_fmt_on_temporal_aborts), &
+            new_unittest("parse_column in place on a predefined column aborts", &
+                test_parse_column_predefined_aborts), &
+            new_unittest("format_column in place on a predefined column aborts", &
+                test_format_column_predefined_aborts), &
+            new_unittest("format_column force=.false. on a predefined column aborts too", &
+                test_format_column_predefined_false_aborts), &
             new_unittest("parse_column/format_column: every well-formed call runs", &
                 test_convert_control_succeeds), &
             new_unittest("explode with a count list of the wrong length aborts", &
@@ -12425,6 +12431,37 @@ contains
             failure_message="%format_column with fmt= on a temporal column was expected to abort", &
             required_stderr="format_column: fmt= is not accepted for a PK_DATE column")
     end subroutine test_format_column_fmt_on_temporal_aborts
+
+    subroutine test_parse_column_predefined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_predefined", expect_abort=.true., &
+            failure_message="%parse_column in place on a predefined column without force= was " // &
+                "expected to abort", &
+            required_stderr="parse_column: this is a predefined column")
+    end subroutine test_parse_column_predefined_aborts
+
+    subroutine test_format_column_predefined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "format_column_predefined", expect_abort=.true., &
+            failure_message="%format_column in place on a predefined column without force= was " // &
+                "expected to abort", &
+            required_stderr="format_column: this is a predefined column")
+    end subroutine test_format_column_predefined_aborts
+
+    !> `force=.false.` spelled out must behave exactly as an absent `force=`. A guard keyed on
+    !> `present(force)` rather than on its value passes the scenario above and lets this one
+    !> through, so the pair is the discriminator.
+    subroutine test_format_column_predefined_false_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "format_column_predefined_false", &
+            expect_abort=.true., &
+            failure_message="%format_column with force=.false. on a predefined column was " // &
+                "expected to abort, exactly as an absent force= does", &
+            required_stderr="format_column: this is a predefined column")
+    end subroutine test_format_column_predefined_false_aborts
 
     subroutine test_convert_control_succeeds(error)
         type(error_type), allocatable, intent(out) :: error

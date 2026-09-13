@@ -942,8 +942,8 @@ number in it, and the library will not pick one for you. So the pair that does t
 puts the failure policy in the caller's hands and has no silent option at all.
 
 ```fortran
-call t%parse_column(name, to_kind, [invalid], [to_name])   ! text -> numbers
-call t%format_column(name, [fmt], [to_name])               ! numbers -> text
+call t%parse_column(name, to_kind, [invalid], [to_name], [force])   ! text -> numbers
+call t%format_column(name, [fmt], [to_name], [force])               ! numbers -> text
 ```
 
 ```fortran
@@ -992,6 +992,14 @@ that is already taken.
 One consequence worth knowing: a converted column is marked as holding values you wrote, so
 `%reload` and `%evict_column` refuse it without `force=.true.`. That is not caution — the file
 holds text, and re-reading it into the parsed kind is not something the reader can do.
+
+**A PREDEFINED column — one a generated table type's `%init` bound to a schema — is refused in
+place without `force=.true.`**, because that type's accessor has the column's kind compiled into
+it: converting the column would leave the accessor aborting on its next call, at a site other than
+the one that caused it. `to_name=` is never refused, since it leaves the predefined column exactly
+as it was, and it is usually what you want here. The guard is `%drop_column`'s and `%keep_columns`'
+one step further along — see [Generated table
+types](../utilities/generated-tables.html#writing-one-out). `%cast` carries no such guard.
 
 ## Seeing what a table holds
 

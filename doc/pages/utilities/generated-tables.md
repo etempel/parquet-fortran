@@ -159,9 +159,11 @@ is where the two column families differ — `%ra(5, 4)` on a numeric or temporal
 and yields a zero-length pointer, matching Fortran's own section rules, while the same call on a
 string column aborts, because `parquet_string_column` rejects an empty range outright.
 
-Every accessor pointer is **invalidated by a row-structural mutation** (`%filter_rows`, `%sort_by`,
-`%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`) — Fortran cannot detect this,
-so take the pointer again afterwards. See
+Every accessor pointer is **invalidated by a row-structural mutation** — every verb in the **row**
+class of [Changing a table](../tables/table-mutate.html#changing-a-table), from `%filter_rows` and
+`%sort_by` through `%explode`, `%drop_duplicates` and `%join`. That table is the list; it is not
+repeated here, because a copy of it is a copy that will disagree. Fortran cannot detect a stale
+pointer, so take it again afterwards, and see
 [What "detaching" means](../tables/table-mutate.html#what-detaching-means) for the full rule.
 
 ## Opening one: `%init`, `%init_slice`, `%init_empty`
@@ -226,6 +228,20 @@ rather than a wrong answer. Two ways past it:
 - **drop the computed column before writing** — `call t%drop_column("flux", force=.true.)`, then the
   result opens with `%init` and the computed slot is recreated, all null, as usual. `force=` is
   required because `%init` marked every declared column predefined.
+
+**That mark guards three verbs, and one of them guards by omission.** `%drop_column` and
+`%drop_columns` refuse a predefined column without `force=.true.`, and so does `%keep_columns` —
+which is the whole reason it takes a `force=` at all, since a projection drops a column by *not*
+naming it rather than by naming it. `%rename_column` refuses one outright, with no override, because
+an accessor is bound to the name.
+
+**It guards a change of *kind* too, on the two verbs that can make one.** An accessor's type is
+fixed when the module is generated, so `%parse_column` and `%format_column` refuse a predefined
+column **in place** without `force=.true.` — pass `to_name=` to write the result into a new column
+beside it, which is never refused. **`%cast` is the exception and carries no such guard**: it
+converts a predefined column in place, after which the accessor aborts on its next call with a kind
+mismatch rather than returning anything wrong — a clean failure, but at a site other than the one
+that caused it.
 
 A write schema does not help here: restricting the write to omit one column omits every column you
 did not declare, and `%init` then fails on the first *missing* one instead.

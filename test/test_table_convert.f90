@@ -38,6 +38,7 @@
 !! shared one would be truncated out from under its neighbour.
 module test_table_convert
     use parquet
+    use parquet_table_example, only : parquet_table_test
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
@@ -77,7 +78,9 @@ contains
             new_unittest("parse_column reads a column that was never touched", test_parse_reads_lazily), &
             new_unittest("a format-then-parse round trip keeps a column's temporal resolution", &
                 test_round_trip_keeps_resolution), &
-            new_unittest("both verbs handle a column with no rows at all", test_convert_zero_rows) &
+            new_unittest("both verbs handle a column with no rows at all", test_convert_zero_rows), &
+            new_unittest("to_name= and force= both convert a predefined column; bare does not", &
+                test_convert_predefined_control) &
             ]
     end subroutine collect_tests_table_convert
 
@@ -725,6 +728,44 @@ contains
         call t%get("s", txt)
         call check(error, size(txt) == 0, "still with no rows")
     end subroutine test_convert_zero_rows
+
+    !> The negative control for the two `*_predefined` abort scenarios: the guard must refuse the
+    !> bare in-place call and NOTHING else. Without this, a guard that refused every conversion on
+    !> a generated table would pass both scenarios.
+    !>
+    !> `parquet_table_test`'s accessors are declared at the schema's kinds, which is what the
+    !> guard protects: `%name_chr` is a string accessor and `%uberid` an `int64` one, so an
+    !> in-place conversion of either would leave that accessor aborting on its next call.
+    subroutine test_convert_predefined_control(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        type(parquet_table_test) :: t
+        !
+        call t%init_empty(2_int32)
+        ! to_name= writes beside the predefined column and leaves it a string.
+        call t%parse_column("name", PK_INT64, to_name="name_num")
+        call check(error, t%kind("name") == PK_STRING, "to_name= leaves the predefined column's kind alone")
+        if (allocated(error)) return
+        call check(error, t%kind("name_num") == PK_INT64, "and the new column holds the parsed kind")
+        if (allocated(error)) return
+        ! force= converts the predefined column itself.
+        call t%parse_column("name", PK_INT64, force=.true.)
+        call check(error, t%kind("name") == PK_INT64, "force=.true. converts a predefined column in place")
+        if (allocated(error)) return
+        call t%format_column("name", force=.true.)
+        call check(error, t%kind("name") == PK_STRING, "and %format_column honours force= the same way")
+        if (allocated(error)) return
+        ! force=.false. is the default spelled out, and must be refused exactly as absence is --
+        ! asserted out of process by the format_column_predefined_false scenario, not here.
+        call t%format_column("uberid", to_name="uberid_txt")
+        call check(error, t%kind("uberid") == PK_INT64, "%format_column to_name= leaves the source kind alone")
+        if (allocated(error)) return
+        call check(error, t%kind("uberid_txt") == PK_STRING, "and renders into the new column")
+        if (allocated(error)) return
+        ! A column this table added itself is not predefined, so neither verb asks for anything.
+        call t%add_column("plain", ["7", "8"])
+        call t%parse_column("plain", PK_INT64)
+        call check(error, t%kind("plain") == PK_INT64, "a non-predefined column converts with no force=")
+    end subroutine test_convert_predefined_control
 
     ! ---- shared plumbing --------------------------------------------------------------------------
 

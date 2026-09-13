@@ -175,6 +175,19 @@ same applies to `parquet_close_reader`/`parquet_close_writer` themselves: closin
 that was never opened, or that was already closed, also fails with `error stop` rather than silently
 doing nothing.
 
+**An object built *from* a table can outlive what it describes**, which is the same mistake one step
+along. A `parquet_grouping` (`%group_by`), a `parquet_table_index` (`%build_index`) and a
+`parquet_table_writer` each refuse to answer rather than answering from storage that has moved:
+
+- **Never built.** Querying one that holds no result stops with *"no grouping has been built into
+  this object"* — or *"no index has been built into this object"* — naming the call that builds it.
+- **Built, then outrun.** A structural change to the table stops the next query with *"this table
+  has changed structurally since the grouping was built (generation N, grouping M); rebuild it with
+  `%group_by`"*, showing both numbers. The comparison is made on every query and never cached, so
+  there is no stale "still valid" flag to trust.
+- **Closed.** A `parquet_table_writer` used after its close stops with *"this output file has
+  already been closed"*.
+
 ## Asking instead of aborting: `found=`
 
 The reader, writer and schema surface has no way to say "tell me rather than stopping". The

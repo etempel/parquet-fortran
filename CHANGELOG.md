@@ -182,7 +182,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `invalid="error"` (the default) stops naming the row, the column and the offending text, and
   `invalid="null"` marks that row missing and carries on. `%format_column` renders a numeric,
   logical or temporal column as text, with an optional `fmt`. Both take `to_name=` for a new column
-  beside the original, and neither detaches. `pf_from_str` in `parquet_utils` is the strict
+  beside the original, and neither detaches; both refuse a predefined column in place without
+  `force=.true.`. `pf_from_str` in `parquet_utils` is the strict
   single-value parser underneath, the inverse of `pf_to_str`: a list-directed `read` accepts
   `"5 6"` as 5, and this does not. See
   [Text to numbers and back](doc/pages/tables/table.md#text-to-numbers-and-back-parse_column-and-format_column)

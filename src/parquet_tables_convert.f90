@@ -73,6 +73,7 @@ contains
         end select
         !
         call convert_check_to_name(self, to_name, "parse_column")
+        call convert_check_predefined(self, idx, to_name, force, "parse_column")
         ! Through %unit rather than off the descriptor, because a column's unit can live in
         ! EITHER place -- the slot when a MAML declared it, the values when %add_column was
         ! given one -- and that precedence is implemented once, in slot_unit. Reading the
@@ -380,6 +381,7 @@ contains
         end if
         !
         call convert_check_to_name(self, to_name, "format_column")
+        call convert_check_predefined(self, idx, to_name, force, "format_column")
         call self%unit(name, unit)   ! see %parse_column's own call for why not off the descriptor
         call format_build(self, idx, fmt, text)
         call out%init(PK_STRING, text%size(), 1_int32, unit)
@@ -533,6 +535,42 @@ contains
         error stop EP // trim(proc) // ": to_name=""" // trim(to_name) // """ is already a " // &
             "column of this table; this verb never replaces one, so drop or rename it first" // sfx
     end subroutine convert_check_to_name
+    !
+    !> Refuses an IN-PLACE conversion of a predefined column unless `force` is .true.
+    !!
+    !! The mirror of `%drop_column`'s guard and of `column_keep_apply`'s
+    !! (src/parquet_tables_matrix.f90), one step further along: those protect a generated table
+    !! type's accessor from losing its COLUMN, this one from losing its KIND. A generated
+    !! accessor is declared at the kind its schema gave it, so a converted column leaves it
+    !! aborting inside `cache_require_ptr_kind` on the next call -- at a site other than the one
+    !! that caused it, which is the diagnostic problem `%rename_column`'s own guard exists to
+    !! prevent.
+    !!
+    !! `to_name` is never refused: it writes a NEW column and leaves the predefined one exactly
+    !! as it was, so there is nothing to protect.
+    !!
+    !! Impure by design, as every guard-only subroutine here is: ifx deletes a `pure` one at
+    !! -O0 (.claude/rules/api-conventions.md).
+    subroutine convert_check_predefined(self, idx, to_name, force, proc)
+        class(parquet_table), intent(in) :: self           !! the table.
+        integer, intent(in) :: idx                         !! the source column's slot.
+        character(len=*), intent(in), optional :: to_name  !! the caller's new-column name, if any.
+        logical, intent(in), optional :: force             !! the caller's override, if any.
+        character(len=*), intent(in) :: proc               !! calling procedure, for the message.
+        character(len=:), allocatable :: sfx
+        logical :: forced
+        !
+        if (present(to_name)) return
+        if (.not. self%cache%cols(idx)%predefined) return
+        forced = .false.
+        if (present(force)) forced = force
+        if (forced) return
+        call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
+        error stop EP // trim(proc) // ": this is a predefined column, whose generated " // &
+            "accessor has its kind compiled in, so converting it in place would leave that " // &
+            "accessor aborting on its next call; pass to_name= to write the result into a new " // &
+            "column beside it, or force=.true. if you really mean to convert this one" // sfx
+    end subroutine convert_check_predefined
     !
     !> Caps caller-controlled text for an `error stop` message. See `CV_PREVIEW`.
     subroutine preview_text(text, shown)

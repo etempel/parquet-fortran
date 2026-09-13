@@ -337,6 +337,12 @@ null row nor a null field value. That is the only way to declare a *streamed* st
 null-free, because a struct column carries its null state inside itself and there is no mask whose
 presence could stand in for "might this contain a Null?".
 
+Its opposite, **`extra: nullable_cols:`, applies at every level too**: a declared struct column's
+row field and each of its field children are written nullable, whatever the values contain. A
+streamed struct column is already nullable at every level unless it is protected, so the key changes
+nothing there; it is the whole-column write, whose flags are otherwise read off the values, that it
+governs. A column named under both keys is refused.
+
 ## Temporal fields are written at microseconds
 
 A `date`, `time` or `timestamp` field is written at **microsecond** resolution, timezone-naive, and

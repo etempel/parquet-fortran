@@ -806,6 +806,12 @@ program error_scenarios
         call scenario_format_column_bad_source("vec")
     case ("format_column_fmt_on_temporal")
         call scenario_format_column_fmt_on_temporal()
+    case ("parse_column_predefined")
+        call scenario_parse_column_predefined()
+    case ("format_column_predefined")
+        call scenario_format_column_predefined(.false.)
+    case ("format_column_predefined_false")
+        call scenario_format_column_predefined(.true.)
     case ("convert_control")
         call scenario_convert_control()
     case ("explode_wrong_length")
@@ -9967,6 +9973,33 @@ contains
         call t%format_column("d", fmt="(i0)")
         print '(a,i0)', "unexpectedly accepted fmt= on a temporal column, kind is now ", t%kind("d")
     end subroutine scenario_format_column_fmt_on_temporal
+
+    !> An in-place `%parse_column` of a PREDEFINED column: refused, because a generated table
+    !> type's accessor has the column's kind compiled in.
+    subroutine scenario_parse_column_predefined()
+        type(parquet_table_test) :: t
+
+        call t%init_empty(2_int32)
+        call t%parse_column("name", PK_INT64)
+        print '(a,i0)', "unexpectedly converted a predefined column, kind is now ", t%kind("name")
+    end subroutine scenario_parse_column_predefined
+
+    !> The same for `%format_column`, with `spelled_out` choosing between an absent `force=` and
+    !> an explicit `force=.false.`. The two must behave identically: a caller who writes the
+    !> default out is not asking for anything, and a guard keyed on `present(force)` rather than
+    !> on its value would pass the first arm and let the second through.
+    subroutine scenario_format_column_predefined(spelled_out)
+        logical, intent(in) :: spelled_out
+        type(parquet_table_test) :: t
+
+        call t%init_empty(2_int32)
+        if (spelled_out) then
+            call t%format_column("uberid", force=.false.)
+        else
+            call t%format_column("uberid")
+        end if
+        print '(a,i0)', "unexpectedly rendered a predefined column, kind is now ", t%kind("uberid")
+    end subroutine scenario_format_column_predefined
 
     !> The negative control for every conversion scenario above: the same fixture, taken through
     !> both verbs, both policies, both `to_name` forms and a `fmt`. Without it a guard that

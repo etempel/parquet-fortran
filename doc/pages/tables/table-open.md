@@ -525,14 +525,15 @@ than its schema, and how a struct's fields are addressed.
 A table holds the same column types the rest of the library reads — `int32`, `int64`, `float32`,
 `float64`, `logical`, `string`, `date`, `time` and `timestamp`, each as a scalar column or as a
 fixed-width vector one (18 kinds, to which the container kinds below add `PK_LIST`, `PK_MAP` and
-`PK_STRUCT` — together, the `PK_*` constants `%kind` reports) — see
+`PK_STRUCT` — together, the 21 `PK_*` constants a column this library can read reports; `PK_NONE`
+below is the twenty-second) — see
 [Supported data types](../types/supported-data-types.html).
 
 A parquet file may contain a column whose physical type this library cannot read at all — an
 `INTERVAL`/duration or a binary column, or a `LIST` whose own elements are a list, a map or a
 struct. **Such a column does not stop the file from opening.** It gets a slot, so it still appears
-in `%column_names` and `%has_column`, but it holds no values: `%is_supported` reports `.false.`, `%kind` reports `PK_NONE`, and any attempt to read
-its values is an error naming the column.
+in `%column_names` and `%has_column`, but it holds no values: `%is_supported` reports `.false.`,
+`%kind` reports `PK_NONE`, and any attempt to read its values is an error naming the column.
 
 That way one exotic column never makes an otherwise-usable file unopenable.
 

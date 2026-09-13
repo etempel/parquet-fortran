@@ -71,7 +71,7 @@ do i = 1, n                          ! n need not be known before the loop
 end do
 call c%set_null(3_int64)
 
-call t%add_column("mass", c)         ! [, unit=] [, force=] as usual
+call t%add_column("mass", c)         ! [unit=] and [force=] as usual
 ```
 
 This is the only form that covers every kind and width through one call, and the only way to hand
@@ -297,7 +297,12 @@ The full call form, with square brackets marking the optional arguments (the bra
 here and elsewhere on this page, not something you type) — the arguments are introduced a group at a
 time above and below, and this is the one place they appear together:
 
-`call parquet_write_table(table, filename, [schema], [row_mask], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite], [release], [row_index_name])`
+```fortran
+call parquet_write_table(table, filename, [schema], [row_mask], [copy_metadata], &
+                         [metadata_keys], [write_maml], [qc], [compression],      &
+                         [compression_level], [chunk_size], [use_threads],        &
+                         [overwrite], [release], [row_index_name])
+```
 
 Everything [`parquet_open_writer`](../io/writing.html#writer-options) can be told,
 `parquet_write_table` can be told too, under the same names and with the same defaults:
@@ -448,7 +453,12 @@ declare zero fields; materialize something first.
 `parquet_write_table` takes, under the same name and with the same default (the brackets mark the
 optional arguments, as [above](#writer-options)):
 
-`call parquet_open_writer_like(writer, filename, table, [schema], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite])`
+```fortran
+call parquet_open_writer_like(writer, filename, table, [schema], [copy_metadata], &
+                              [metadata_keys], [write_maml], [qc], [compression], &
+                              [compression_level], [chunk_size], [use_threads],   &
+                              [overwrite])
+```
 
 ```fortran
 call parquet_open_writer_like(w, "out.parquet", t, chunk_size=200000, write_maml=.true.)
@@ -475,7 +485,9 @@ options](../io/writing.html#writer-options) in the I/O guide.
 
 ### One table, one row group: `parquet_write_table_chunk`
 
-`call parquet_write_table_chunk(writer, table, [row_mask])`
+```fortran
+call parquet_write_table_chunk(writer, table, [row_mask])
+```
 
 writes `table`'s rows as **one complete row group** of an open writer: one
 [`parquet_new_row_group`](../io/writing.html#streamingchunked-writes), one
@@ -545,7 +557,12 @@ has no lifecycle logic, no `opened` flag and no knowledge of row groups. When th
 output is known up front, the template is a table built and left empty — `%add_column` with
 zero-length arrays — and the first iteration stops being special.
 
-`call parquet_open_table_writer(out, filename, template, [schema], [copy_metadata], [metadata_keys], [write_maml], [qc], [compression], [compression_level], [chunk_size], [use_threads], [overwrite])`
+```fortran
+call parquet_open_table_writer(out, filename, template, [schema], [copy_metadata], &
+                               [metadata_keys], [write_maml], [qc], [compression], &
+                               [compression_level], [chunk_size], [use_threads],   &
+                               [overwrite])
+```
 
 The arguments are `parquet_write_table`'s, minus `row_mask=` and `release=` (neither has a meaning
 for a file that stays open), and the writer options are the same pass-throughs with the same

@@ -25,9 +25,9 @@ detaching — are the ones [Changing a table](table-mutate.html) sets out, and i
 ## The call
 
 ```fortran
-call t%join(other, on [, other_on] [, how] [, columns] [, other_suffix] &
-                     [, require] [, order] [, max_rows] [, matched] &
-                     [, pairs] [, other_pairs] [, threads])
+call t%join(other, on, [other_on], [how], [columns], [other_suffix], &
+                       [require], [order], [max_rows], [matched], &
+                       [pairs], [other_pairs], [threads])
 ```
 
 Square brackets mark an optional argument, and the comma sits outside the bracket; every bracketed

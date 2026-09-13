@@ -3764,6 +3764,14 @@ def check_counted_lists_match_their_bullets():
     and stops only at a line that is neither, which is what makes the count match what a reader
     sees rather than what the HTML happens to nest.
 
+    **Both Markdown bullet markers are accepted, and a list is counted with the one it opened
+    with.** The guide uses `- ` almost everywhere, but `tables/table-open.md`'s "Three rules are
+    worth knowing" opens with `* `, and a check that knew only `- ` skipped that list silently --
+    found by the unit after the one that added this check, which is exactly the blindness the
+    empty-scan guard below exists to prevent and did not catch, because the scan was not empty.
+    Counting with the marker the list opened with, rather than either marker, keeps a `- ` line
+    inside a `* ` list's continuation from being counted as a top-level bullet.
+
     The scan is by shape rather than by a page list, and an empty scan FAILS (CLAUDE.md, "A static
     check that enumerates names goes stale silently").
     """
@@ -3788,7 +3796,8 @@ def check_counted_lists_match_their_bullets():
             j = i + 1
             while j < len(lines) and lines[j].strip() == "":
                 j += 1
-            if j >= len(lines) or not lines[j].startswith("- "):
+            marker = next((mk for mk in ("- ", "* ") if lines[j].startswith(mk)), None)
+            if marker is None:
                 continue      # a count above a table, a code block or prose: not this shape
             checked += 1
             said = COUNTED_LIST_WORDS[m.group(1).lower()]
@@ -3799,7 +3808,7 @@ def check_counted_lists_match_their_bullets():
                     fenced = not fenced
                 elif fenced or s.strip() == "" or s.startswith((" ", "\t")):
                     pass      # a fenced example, a blank line or a bullet's continuation
-                elif s.startswith("- "):
+                elif s.startswith(marker):
                     got += 1
                 else:
                     break     # ordinary prose at column 0: the list has ended
@@ -3812,6 +3821,125 @@ def check_counted_lists_match_their_bullets():
                 )
     if not checked:
         return ["doc/pages/: no counted lists found -- this check has gone blind on the guide"]
+    return problems
+
+
+#: Matches a procedure declaration in `src/`, after `_logical_lines` has folded its `&`
+#: continuations. The prefixes are the ones this project actually uses; a new one silently drops
+#: that procedure out of `check_documented_signatures_match_source`'s comparison set rather than
+#: causing a false failure, which is why the check also refuses an empty scan.
+PROC_DECL = re.compile(
+    r"^(?:module\s+)?(?:pure\s+|elemental\s+|impure\s+|recursive\s+)*"
+    r"(?:subroutine|function)\s+([a-z_0-9]+)\s*\((.*?)\)", re.IGNORECASE)
+
+
+def _documented_call_signatures(text):
+    """Yield (name, args, offset) for every `call NAME(...)` on a page carrying a `[optional]`.
+
+    The `[` is the discriminator between a SIGNATURE and a call EXAMPLE, and it is exact: a
+    signature written under `.claude/rules/documentation.md`'s bracket convention always has at
+    least one optional argument in brackets, and a runnable example never contains a bracket (the
+    same rule says so). Without it, `generated-tables.md`'s
+    `call parquet_write_table(t, "out.parquet")` -- a two-argument example of a fifteen-argument
+    procedure -- is a false positive.
+
+    Fortran `&` continuations are folded first, so the fenced multi-line form counts the same as a
+    single-line one. Both forms are in the guide and neither is preferred here.
+    """
+    folded = re.sub(r"&\s*\n\s*", " ", text)
+    for m in re.finditer(r"call ([a-z_0-9]+)\(", folded):
+        depth, start = 0, m.end() - 1
+        close = -1
+        for j in range(start, len(folded)):
+            if folded[j] == "(":
+                depth += 1
+            elif folded[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    close = j
+                    break
+        if close < 0:
+            continue          # an unbalanced span: not a signature we can read
+        args = [a.strip() for a in folded[start + 1:close].split(",") if a.strip()]
+        if not any(a.startswith("[") for a in args):
+            continue          # a call example, not a signature
+        yield m.group(1).lower(), [a.strip("[]").lower() for a in args], m.start()
+
+
+def check_documented_signatures_match_source():
+    """A call form written out on a guide page must name the procedure's own arguments, in order.
+
+    `doc/pages/tables/table-write.md` writes `parquet_write_table`'s **fifteen** argument names out
+    by hand, and `parquet_open_writer_like`'s and `parquet_open_table_writer`'s thirteen each,
+    under a heading saying "this is the one place they appear together". Nothing but this compares
+    them with the source. A renamed or reordered argument leaves the page telling a reader to type
+    a keyword that does not exist, or to expect one at a position it no longer occupies.
+
+    **Where this sits on the campaign's own rule** (`feature_doc.md` section 8): drift makes the
+    page affirmatively wrong rather than merely incomplete, which is the class worth checking --
+    but the resulting failure is LOUD, since a wrong keyword will not compile. That makes it the
+    weaker half of that class, and it was proposed and approved on that footing rather than on a
+    silent-failure argument. What carries it is breadth: the scan is guide-wide, so every page that
+    adopts the bracket convention is covered from the day it does, at no extra cost.
+
+    **What is compared.** Every `call NAME(...)` span on any `doc/pages/**/*.md` page that carries
+    at least one `[optional]` argument, against `NAME`'s dummy list read from `src/*.f90`. Names
+    and ORDER both, since a positional call depends on the order and the page's own bracket
+    convention is written to be read positionally.
+
+    **Deliberately not covered: a type-bound call.** `doc/pages/tables/table-join.md`'s
+    `call t%join(other, on, [other_on], ...)` is a generic with six specifics and no single dummy
+    list to compare against, and `%`-rooted spans are not matched at all. Those signatures stay a
+    hand check.
+
+    A procedure declared twice in `src/` with two different dummy lists is reported as ambiguous
+    and not compared, rather than guessed at. The scan refuses to pass on an empty result in either
+    direction -- no pages, or no signatures found -- because both mean it has gone blind rather
+    than that the guide is clean (CLAUDE.md, "A static check that enumerates names goes stale
+    silently").
+    """
+    problems = []
+    sigs, ambiguous = {}, set()
+    for path in sorted(SRC.glob("*.f90")):
+        for _, line in _logical_lines(path):
+            m = PROC_DECL.match(line)
+            if not m:
+                continue
+            name = m.group(1).lower()
+            args = [a.strip().lower() for a in m.group(2).split(",") if a.strip()]
+            if name in sigs and sigs[name] != args:
+                ambiguous.add(name)
+            sigs[name] = args
+    if not sigs:
+        return ["src/: no procedure declarations found -- this check has gone blind on the source"]
+
+    pages = sorted((REPO_ROOT / "doc" / "pages").glob("**/*.md"))
+    if not pages:
+        return ["doc/pages/: no .md pages found -- this check has gone blind on the guide"]
+
+    checked = 0
+    for page in pages:
+        rel = page.relative_to(REPO_ROOT)
+        text = page.read_text()
+        for name, args, off in _documented_call_signatures(text):
+            if name not in sigs:
+                continue          # not a procedure of this library
+            lineno = text[:off].count("\n") + 1
+            if name in ambiguous:
+                problems.append(
+                    "%s:%d: `%s` is declared with two different argument lists in src/, so its "
+                    "documented signature cannot be checked -- give the check one declaration to "
+                    "compare against, or drop the page's bracketed form" % (rel, lineno, name))
+                continue
+            checked += 1
+            if args != sigs[name]:
+                problems.append(
+                    "%s:%d: the documented call form of `%s` does not match its declaration:\n"
+                    "    page: %s\n    src : %s" % (rel, lineno, name,
+                                                    ", ".join(args), ", ".join(sigs[name])))
+    if not checked:
+        return ["doc/pages/: no documented call signatures found -- this check has gone blind; "
+                "it matches `call NAME(...)` spans carrying a [optional] argument"]
     return problems
 
 
@@ -6177,6 +6305,8 @@ CHECKS = (
      check_sorting_threads_inventory_documented),
     ("a guide page's counted list has that many bullets",
      check_counted_lists_match_their_bullets),
+    ("a documented call signature matches the procedure's arguments",
+     check_documented_signatures_match_source),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

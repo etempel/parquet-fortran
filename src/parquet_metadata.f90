@@ -11,7 +11,7 @@ submodule (parquet_core) parquet_metadata
     use iso_fortran_env, only: int64, real64
     use parquet_bindings
     use parquet_settings, only: parquet_max_maml_line_len, parquet_emit_warning
-    use parquet_settings_base, only: parquet_output_is_suppressed
+    use parquet_settings_base, only: parquet_output_is_suppressed, parquet_message_unit
     use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     use parquet_temporal, only: parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
     implicit none
@@ -1336,16 +1336,19 @@ contains
                 "parquet_parse_maml on it first, or pass allow_uninitialized=.true. to skip silently" // name_suffix
         end if
 
-        if (.not. present(unit) .and. .not. present(filename)) then
-            error stop "parquet_schema%print_schema_info: either unit or filename must be given" // name_suffix
-        end if
-
         ! Solicited output: verbosity="silent" and below turn this into a no-op. Placed after the
         ! argument validation above (so a bad call is still reported) but before the file is opened
         ! below (so a suppressed call does not leave an empty file behind as a side effect).
         if (parquet_output_is_suppressed()) return
 
-        if (present(unit)) then
+        ! Neither unit= nor filename= is the ordinary call: the listing goes wherever
+        ! `message_stream` names, exactly as every other printer in this library does with no
+        ! unit=. This used to abort instead, which made %print_schema_info the one printer without
+        ! a default destination.
+        if (.not. present(unit) .and. .not. present(filename)) then
+            u = parquet_message_unit()
+            opened_here = .false.
+        else if (present(unit)) then
             inquire(unit=unit, opened=is_open)
             if (.not. is_open) then
                 error stop "parquet_schema%print_schema_info: unit is not open" // name_suffix

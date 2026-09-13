@@ -1572,9 +1572,10 @@ contains
                 if (writer%write_counts(i) == 0) then
                     ! Filename/schema name go on their own lines rather than into the error stop
                     ! text, to keep that text short -- so they are ERROR CONTEXT, not warnings, and
-                    ! go through the channel that is never suppressed and never redirected. Routing
-                    ! them through parquet_emit_warning instead would let verbosity="errors_only"
-                    ! produce an abort that names no file at all.
+                    ! go through the channel that is never suppressed. Routing them through
+                    ! parquet_emit_warning instead would let verbosity="errors_only" produce an
+                    ! abort that names no file at all. (Where they go still follows message_stream,
+                    ! as everything this library writes does; only the suppression differs.)
                     if (allocated(writer%filename)) call parquet_emit_error_context( &
                         "parquet_close_writer: output file: " // trim(writer%filename))
                     if (allocated(writer%maml_name)) then

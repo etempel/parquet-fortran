@@ -331,6 +331,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Everything the library writes follows `message_stream`.** `%print_stat`,
+  `parquet_string_column%print`, `parquet_string%print`, `parquet_print_settings`, the
+  `parquet_close_reader(..., print_stat=.true.)` report and the context lines a failing writer close
+  prints before aborting all go to the stream the setting names when no `unit=` is given, joining
+  `%print_rows` and `pf_stats%print`; an `error stop` and the C++ layer's fatal-error report stay on
+  standard error whatever it is set to. Under the default `"stdout"` nothing moves.
+  `parquet_print_settings` still prints at every verbosity level — its exemption is from
+  `verbosity`, not from `message_stream`. See
+  [Terminal output](doc/pages/operating/settings.md#terminal-output).
+- **`parquet_schema%print_schema_info` with neither `unit=` nor `filename=` writes to the
+  `message_stream` unit** instead of aborting. See
+  [Printing column info](doc/pages/schema/building-schema-in-code.md#printing-column-info-with-schemaprint_schema_info).
 - **`parquet_list_column%set_null` and `parquet_map_column%set_null` drop the row's elements or
   entries, so a null row is zero-length.** `%clear_null` brings the row back empty rather than
   restoring them, `%total_elements`/`%total_entries` fall by the row's former length, and both
@@ -388,6 +400,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `parquet_string_column%print` failed at runtime with an invalid-edit-descriptor I/O error for any
+  element longer than two characters.
+- `parquet_string%print` on an unbound handle returned quietly under `verbosity="silent"` instead of
+  reporting the unbound handle; the handle is now checked before the verbosity is.
+- `parquet_close_reader(..., print_stat=.true.)` printed its report when `verbosity="silent"` was set
+  after the reader was opened.
 - A schema-less `parquet_write_table(t, file, write_maml=.true.)` dropped the unit of a column
   built with `%add_column(unit=)` from the sidecar `.maml`; the unit is now carried, as it already
   was for a column read from a file with a MAML.

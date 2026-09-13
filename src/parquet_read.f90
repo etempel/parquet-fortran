@@ -2116,7 +2116,15 @@ contains
             error stop "parquet_close_reader: reader has not been opened, or was already closed"
         end if
         if (present(print_stat)) then
-            if (print_stat) call parquet_reader_print_stat(reader%handle)
+            if (print_stat) then
+                ! The report is printed by C++, which reads its own mirrored copy of `verbosity`
+                ! and `message_stream`. That mirror is refreshed when a reader or writer is opened,
+                ! so without this push a setting changed AFTER the open would not reach it: a
+                ! program that opened a reader and then asked for silence still got the report.
+                ! The grouped push, never a half-refresh (feature_risks.md Risk-42).
+                call parquet_push_settings_to_cpp()
+                call parquet_reader_print_stat(reader%handle)
+            end if
         end if
         do_check_complete = .false.
         if (present(check_complete)) do_check_complete = check_complete

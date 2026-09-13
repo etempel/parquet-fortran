@@ -67,8 +67,8 @@ contains
                 test_conversion_logical_array_no_default_aborts), &
             new_unittest("missing string array key with no default aborts", &
                 test_missing_string_array_no_default_aborts), &
-            new_unittest("print_schema_info: neither unit nor filename given aborts", &
-                test_print_schema_info_no_unit_no_filename_aborts), &
+            new_unittest("print_schema_info: neither unit nor filename given writes to the stream", &
+                test_print_schema_info_no_unit_no_filename), &
             new_unittest("print_schema_info: unit not already open aborts", &
                 test_print_schema_info_unit_not_open_aborts), &
             new_unittest("print_schema_info: unit open for reading only aborts", &
@@ -264,12 +264,16 @@ contains
             failure_message="reading a missing string array metadata key with no default was expected to abort")
     end subroutine test_missing_string_array_no_default_aborts
 
-    subroutine test_print_schema_info_no_unit_no_filename_aborts(error)
+    !> With neither destination argument the listing goes to the `message_stream` unit, so the
+    !> call completes instead of aborting. Covers the in-code (%init/%add_field) schema; the
+    !> parsed-MAML path and the stream assertion are in test_errors.f90's
+    !> test_print_schema_info_default_stream.
+    subroutine test_print_schema_info_no_unit_no_filename(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "print_schema_info_no_unit_no_filename", expect_abort=.true., &
-            failure_message="print_schema_info with neither unit nor filename was expected to abort")
-    end subroutine test_print_schema_info_no_unit_no_filename_aborts
+        call check_scenario_exit_status(error, "print_schema_info_no_unit_no_filename", expect_abort=.false., &
+            failure_message="print_schema_info with neither unit nor filename should write to the stream")
+    end subroutine test_print_schema_info_no_unit_no_filename
 
     subroutine test_print_schema_info_unit_not_open_aborts(error)
         type(error_type), allocatable, intent(out) :: error

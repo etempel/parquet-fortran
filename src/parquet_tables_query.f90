@@ -1015,10 +1015,9 @@ contains
         ! stays ABOVE it, so a print_stat on an unopened table still reports that mistake rather
         ! than silently doing nothing for the wrong reason.
         if (parquet_output_is_suppressed()) return
-        ! Standard output unless the caller names a unit. Deliberately NOT message_stream: this
-        ! printer shipped writing to stdout, and reading the setting here would move a released
-        ! procedure's output. %print_rows, which is new, does consult it.
-        u = output_unit
+        ! Wherever `message_stream` names, unless the caller names a unit -- the one rule every
+        ! printer and every emit channel in this library follows, through the one resolver.
+        u = parquet_message_unit()
         if (present(unit)) u = unit
         want_all = .false.
         if (present(all)) want_all = all

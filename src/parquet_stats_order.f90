@@ -2111,23 +2111,15 @@ contains
     module procedure obj_print
         integer :: u
         real(real64) :: q1, q2, q3
-        character(len=:), allocatable :: head, stream
+        character(len=:), allocatable :: head
 
         ! Solicited output, so `verbosity = "silent"` governs it exactly as it governs every other
         ! printer in this library: the call returns having written nothing.
         if (parquet_output_is_suppressed()) return
-        if (present(unit)) then
-            u = unit
-        else
-            ! Resolved from the setting's own token rather than from its private integer, so this
-            ! reaches `parquet_settings_base` through the same public surface a caller would.
-            call parquet_get_message_stream(stream)
-            if (stream == "stderr") then
-                u = error_unit
-            else
-                u = output_unit
-            end if
-        end if
+        ! `unit=` when the caller named one, otherwise the library's one destination resolver --
+        ! the same function the emit channels and every other printer use.
+        u = parquet_message_unit()
+        if (present(unit)) u = unit
         head = "pf_stats"
         if (present(name)) head = "pf_stats " // trim(name)
         if (.not. self%live) then

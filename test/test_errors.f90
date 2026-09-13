@@ -267,6 +267,22 @@ contains
                 test_join_max_rows_hash_tuple_key_aborts), &
             new_unittest("%print_rows follows message_stream when no unit= is given", &
                 test_print_rows_follows_message_stream), &
+            new_unittest("%print_stat follows message_stream when no unit= is given", &
+                test_print_stat_follows_message_stream), &
+            new_unittest("both parquet_strings printers follow message_stream", &
+                test_string_print_follows_message_stream), &
+            new_unittest("parquet_print_settings follows message_stream even at verbosity=silent", &
+                test_print_settings_follows_message_stream), &
+            new_unittest("%print_schema_info with neither unit= nor filename= writes to the stream", &
+                test_print_schema_info_default_stream), &
+            new_unittest("a failing close's context lines follow message_stream", &
+                test_error_context_follows_message_stream), &
+            new_unittest("the C++ reader report follows message_stream", &
+                test_reader_print_stat_follows_message_stream), &
+            new_unittest("verbosity=silent set after the open still silences the reader report", &
+                test_close_reader_print_stat_silenced_late), &
+            new_unittest("an unbound parquet_string handle is reported at verbosity=silent too", &
+                test_string_print_unbound_handle_silent_aborts), &
             new_unittest("%get_matrix refuses a column that holds no values", &
                 test_get_matrix_unsupported_column_aborts), &
             new_unittest("%keep_columns truncates a long list of absent names", &
@@ -1050,9 +1066,8 @@ contains
                 test_close_writer_missing_write_aborts), &
             new_unittest("closing a hand-built-schema writer with an unwritten enabled column " // &
                 "aborts with an unnamed-schema message", test_close_writer_missing_write_unnamed_schema_aborts), &
-            new_unittest("error context reaches stdout even at verbosity=errors_only, " // &
-                "message_stream=stderr", &
-                test_error_context_ignores_output_settings), &
+            new_unittest("error context survives verbosity=errors_only and follows message_stream", &
+                test_error_context_survives_suppression), &
             new_unittest("the two failure classes exit with the two documented statuses", &
                 test_failure_classes_exit_statuses), &
             new_unittest("closing a writer with NO column written writes them empty and warns", &
@@ -14123,34 +14138,35 @@ contains
             "a C++-side failure must NOT exit 1 -- that is the Fortran class")
     end subroutine test_failure_classes_exit_statuses
 
-    !> Error CONTEXT lines reach stdout even when both output settings are turned against them --
-    !> `verbosity="errors_only"`, the strictest level, and `message_stream="stderr"`.
+    !> Error CONTEXT lines survive `verbosity="errors_only"`, the strictest level, and travel with
+    !> `message_stream` like everything else the library writes.
     !!
-    !! `parquet_emit_error_context` (src/parquet_settings_base.f90) carries a contract its own
-    !! doc-comment states outright -- *"Never suppressed and never redirected"* -- and nothing
-    !! tested it. The lines it prints are the ones parquet_close_writer's abort message
-    !! deliberately leaves out, the output filename and the schema name, so losing them turns a
-    !! diagnosable failure into one that names nothing.
+    !! `parquet_emit_error_context` (src/parquet_settings_base.f90) carries half a contract: the
+    !! lines it prints are the ones parquet_close_writer's abort message deliberately leaves out,
+    !! the output filename and the schema name, so **no verbosity level may suppress them** --
+    !! losing them turns a diagnosable failure into one that names nothing. Where they GO is not
+    !! part of that: they follow `message_stream`, so a caller who routed the library's output to
+    !! stderr reads one stream to diagnose one failure instead of two.
     !!
     !! **This needs check_scenario_streams, not the usual helper.** Every other assertion here goes
     !! through scenario_capture_contains, which searches BOTH captured streams -- so a context line
-    !! that started honouring `message_stream` and moved to stderr would look byte-identical to it.
+    !! that stopped honouring `message_stream` and stayed on stdout would look byte-identical to it.
     !! check_scenario_streams asserts the text is on one stream *and absent from the other*, which
     !! is the half with teeth (feature_risks.md Risk-41's decorative-knob rule).
     !!
     !! **The negative control is the warning the scenario emits first.** Under the same two settings
     !! it must reach neither stream. Without it, this test would pass just as happily against a
     !! build where `parquet_set_verbosity` did nothing at all -- it is the warning vanishing that
-    !! proves the knobs were really in force while the context lines ignored them.
-    subroutine test_error_context_ignores_output_settings(error)
+    !! proves the level was really in force while the context lines came through it.
+    subroutine test_error_context_survives_suppression(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=:), allocatable :: out_file, err_file
         integer :: exitstat, cmdstat
         logical :: found
 
         call check_scenario_streams(error, "close_writer_missing_write_silenced", &
-            "parquet_close_writer: output file:", "stdout", &
-            "the error-context filename must stay on stdout at verbosity=errors_only, message_stream=stderr")
+            "parquet_close_writer: output file:", "stderr", &
+            "the error-context filename must survive verbosity=errors_only and follow message_stream=stderr")
         if (allocated(error)) return
 
         ! **The library's own text, NOT the compiler's `ERROR STOP` prefix.** The assertion is that
@@ -14171,8 +14187,8 @@ contains
         call scenario_capture_contains(out_file, err_file, "control warning that must be suppressed", found)
         call check(error, .not. found, &
             "verbosity=errors_only must suppress the warning -- if it did not, this test proves " // &
-            "nothing about the error-context channel ignoring the same setting")
-    end subroutine test_error_context_ignores_output_settings
+            "nothing about the error-context channel surviving the same setting")
+    end subroutine test_error_context_survives_suppression
 
     subroutine test_close_writer_missing_write_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -18400,6 +18416,123 @@ contains
             "streammarker", expect_on="stderr", &
             failure_message="message_stream=stderr should move %print_rows's output to stderr")
     end subroutine test_print_rows_follows_message_stream
+
+    !> The same rule for %print_stat, which used to be pinned to standard output.
+    !!
+    !! The mutation this must catch is a restored `u = output_unit` default in table_print_stat:
+    !! the listing then appears on the stream the caller did not choose, at default settings looks
+    !! exactly right, and nothing else in the suite notices.
+    subroutine test_print_stat_follows_message_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "print_stat_follows_message_stream", &
+            "statmarker", expect_on="stderr", &
+            failure_message="message_stream=stderr should move %print_stat's listing to stderr")
+    end subroutine test_print_stat_follows_message_stream
+
+    !> `parquet_string_column%print` and `parquet_string%print` together.
+    !!
+    !! The marker is the stored string, which both printers emit, so a change applied to only one
+    !! of the two leaves it on stdout and trips the "must NOT also appear on the other stream" half.
+    subroutine test_string_print_follows_message_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "string_print_follows_message_stream", &
+            "strmarker", expect_on="stderr", &
+            failure_message="message_stream=stderr should move both parquet_strings printers to stderr")
+    end subroutine test_string_print_follows_message_stream
+
+    !> `parquet_print_settings` is exempt from `verbosity`, not from `message_stream`.
+    !!
+    !! Run at "silent", so the test asserts both halves of that sentence at once: the dump appears
+    !! (the verbosity exemption) and it appears on stderr (the routing that is not exempt).
+    subroutine test_print_settings_follows_message_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "print_settings_follows_message_stream", &
+            "parquet-fortran settings", expect_on="stderr", &
+            failure_message="parquet_print_settings must print at silent, on the message_stream unit")
+    end subroutine test_print_settings_follows_message_stream
+
+    !> `%print_schema_info` with neither `unit=` nor `filename=` is a call form that used to abort.
+    !!
+    !! Two things at once: the scenario exits 0 (so the `error stop` really is gone) and the
+    !! listing lands on the stream. A restored abort fails the exit check inside
+    !! check_scenario_streams before either stream is examined.
+    subroutine test_print_schema_info_default_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "print_schema_info_default_stream", &
+            "schemamarker", expect_on="stderr", &
+            failure_message="%print_schema_info with no destination should write to the message_stream unit")
+    end subroutine test_print_schema_info_default_stream
+
+    !> The context lines a failing `parquet_close_writer` prints follow `message_stream`.
+    !!
+    !! These were pinned to standard output. The scenario aborts, which is the path being tested:
+    !! the context has to reach the same stream as everything else the library said, so a caller
+    !! who routed output to stderr does not have to read two streams to diagnose one failure.
+    subroutine test_error_context_follows_message_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "error_context_follows_message_stream", &
+            "scenario_ctx_stream", expect_on="stderr", &
+            failure_message="a failing close's context lines should follow message_stream")
+    end subroutine test_error_context_follows_message_stream
+
+    !> The reader report is printed by C++, from the mirrored copy of the setting.
+    !!
+    !! This is the one destination assertion that cannot be satisfied by a Fortran-side change:
+    !! the report has no `unit=` and every line of it is a `std::fprintf`. A mutation that restores
+    !! `stdout` at any single line of the report leaves that line on the other stream and trips the
+    !! "must NOT also appear" half, which is why the marker is the filename the report's own
+    !! "file:" line carries.
+    subroutine test_reader_print_stat_follows_message_stream(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_streams(error, "reader_print_stat_follows_message_stream", &
+            "fixtures/element_nulls.parquet", expect_on="stderr", &
+            failure_message="the C++ reader report should follow the mirrored message_stream")
+    end subroutine test_reader_print_stat_follows_message_stream
+
+    !> `verbosity="silent"` set AFTER the open still silences the reader's print_stat report.
+    !!
+    !! The mirror C++ reads is refreshed when a reader is opened, so before the push at close time
+    !! this exact sequence printed the report in full. Asserted by absence on BOTH streams, since a
+    !! report that merely moved would be just as wrong.
+    subroutine test_close_reader_print_stat_silenced_late(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: on_out, on_err
+
+        call run_error_scenario("close_reader_print_stat_silenced_late", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "the scenario should close the reader cleanly")
+        if (allocated(error)) return
+        call file_contains(out_file, "=== parquet_reader stats ===", on_out)
+        call file_contains(err_file, "=== parquet_reader stats ===", on_err)
+        call check(error, .not. on_out .and. .not. on_err, &
+            'verbosity="silent" set after the open must still silence the C++ reader report')
+        if (allocated(error)) return
+        ! The control: without it, a scenario that failed to run at all would satisfy the absence
+        ! check above for the wrong reason.
+        call file_contains(out_file, "control: the reader closed", on_out)
+        call check(error, on_out, "the scenario did not reach its control line")
+    end subroutine test_close_reader_print_stat_silenced_late
+
+    !> `%print` on an unbound `parquet_string` aborts at `verbosity="silent"` as it does at normal.
+    !!
+    !! The mutation: put the suppression test back above `check_handle`. The call then returns
+    !! quietly, the scenario exits 0 instead of aborting, and a caller's programming error is
+    !! reported or not depending on an output setting.
+    subroutine test_string_print_unbound_handle_silent_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "string_print_unbound_handle_silent", expect_abort=.true., &
+            failure_message="an unbound parquet_string handle must be reported even at verbosity=silent")
+    end subroutine test_string_print_unbound_handle_silent_aborts
 
 
     !> The same guard, reached through the matrix verbs' own prepare step.

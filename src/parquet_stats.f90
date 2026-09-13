@@ -88,12 +88,12 @@ module parquet_stats
         parquet_string_column_is_null, parquet_string_column_size, &
         parquet_string_column_null_count
     ! `%print` writes solicited output, and `verbosity = "silent"` governs solicited output
-    ! wherever it lives. `parquet_sorting` re-exports the getters and setters but not this
-    ! predicate, so it is named directly; `parquet_settings_base` is already in the closure.
-    use parquet_settings_base, only : parquet_output_is_suppressed
-    ! `output_unit`/`error_unit` are for `%print`, which resolves the `message_stream` setting's
-    ! token to a unit the same way the library's own emitters do.
-    use iso_fortran_env, only : int32, int64, real32, real64, output_unit, error_unit
+    ! wherever it lives; with no `unit=` it writes where `parquet_message_unit` says, which is the
+    ! one resolver the library's own emit channels use too. `parquet_sorting` re-exports the
+    ! getters and setters but neither of these, so both are named directly; `parquet_settings_base`
+    ! is already in the closure.
+    use parquet_settings_base, only : parquet_output_is_suppressed, parquet_message_unit
+    use iso_fortran_env, only : int32, int64, real32, real64
     implicit none
     private
 

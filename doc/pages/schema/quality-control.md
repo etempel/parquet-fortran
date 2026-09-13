@@ -221,7 +221,7 @@ With qc active, every `parquet_write_column` call runs two independent checks pe
 `min:`/`max:` always run only over non-null elements, whatever `miss:` says — which is why the two
 warnings below disagree about the denominator.
 
-Neither check ever stops the write — each prints its own one-line `WARNING` to stdout naming the
+Neither check ever stops the write — each prints its own one-line `WARNING` naming the
 column, e.g.:
 ```
 WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here)
@@ -258,7 +258,7 @@ lets a `float64` column declare `min: 1.5`.
 above, but on the read side. By default a violation is a **hard error** (`qc_soft=.false.`): the
 process aborts with a diagnostic on stderr, the same class of clean, deliberate abort as the
 read-side Null/type-mismatch checks (see [Limitations](../../index.html#limitations)). Pass
-`qc_soft=.true.` to instead **warn and continue**: a `WARNING` is printed to stdout and reading
+`qc_soft=.true.` to instead **warn and continue**: a `WARNING` is printed and reading
 proceeds. Either way, the existing strict-by-default Null behavior (`error stop` on a genuine Null
 unless `null_value=`/`is_valid=` is passed — see [Null
 values](../types/supported-data-types.html#null-values)) is completely unchanged.

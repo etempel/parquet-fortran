@@ -89,11 +89,13 @@ module parquet_tables
         parquet_split_name_list, parquet_parse_sort_key, &
         parquet_parse_filter_rules, parquet_eval_filter_leaf, parquet_eval_filter_program, &
         filter_leaf_name_len, filter_leaf_op_len, filter_leaf_value_len
-    ! The table layer's two solicited printers (%print_stat) and its own warnings go through the
-    ! library's output channels rather than printing directly, so verbosity/message_stream apply
-    ! here as everywhere -- see tools/check_source_conventions.py's `no direct printing` check.
+    ! The table layer's solicited printers (%print_stat, %print_rows) and its own warnings go
+    ! through the library's output channels rather than printing directly, so verbosity and
+    ! message_stream apply here as everywhere -- see tools/check_source_conventions.py's
+    ! `no direct printing` check. parquet_message_unit is the one destination resolver they share
+    ! with those channels.
     use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed, &
-        parquet_get_arrow_version
+        parquet_message_unit, parquet_get_arrow_version
     ! The one binding this layer reaches for directly, and it needs no reader: the seed for a
     ! sample_fraction= open is settled BEFORE the table's reader is created, so that reader and
     ! every later one (a clone's, a per-thread one) draw the identical rows. It stays out of the
@@ -4834,14 +4836,13 @@ module parquet_tables
         !! lists the columns with their kind and width only -- the form to reach for on a large
         !! table when the question is what is resident, not what it holds.
         !!
-        !! `unit=` names where to write; absent, the listing goes to standard output. It does NOT
-        !! consult `message_stream`, which %print_rows does -- so a program that routed messages to
-        !! standard error passes the unit here explicitly.
+        !! `unit=` names where to write; absent, the listing goes wherever `message_stream` names,
+        !! as everything this library writes does.
         module subroutine table_print_stat(self, all, stats, unit)
             class(parquet_table), intent(in) :: self !! the table.
             logical, intent(in), optional :: all     !! .true.: list every column, not just the resident ones.
             logical, intent(in), optional :: stats   !! .false.: no null count, min or max (default .true.).
-            integer, intent(in), optional :: unit    !! where to write; absent is standard output.
+            integer, intent(in), optional :: unit    !! where to write; default the `message_stream` setting's unit.
         end subroutine table_print_stat
         !> Prints the table's rows -- the first `first` and the last `last` of them, aligned in
         !! columns, with the column names and their kinds above. Where %print_stat DESCRIBES what

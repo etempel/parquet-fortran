@@ -429,12 +429,16 @@ or touched at all, even in `filename=` mode) rather than aborting.
 
 This is *solicited* output, so `parquet_set_verbosity("silent")` (or `"errors_only"`) turns the
 whole call into the same complete no-op — again without opening or creating the file in `filename=`
-mode — while a bad call (neither `unit` nor `filename`, an unopened `unit`, an unparsed schema
-without `allow_uninitialized=.true.`) still `error stop`s, because the argument checks run first.
+mode — while a bad call (an unopened `unit`, an unparsed schema without
+`allow_uninitialized=.true.`) still `error stop`s, because the argument checks run first.
 See [Terminal output](../operating/settings.html#terminal-output).
 
-Exactly one of `unit`/`filename` must identify the destination:
+`unit`/`filename` name the destination, and with neither the listing goes where
+[`message_stream`](../operating/settings.html#terminal-output) says, as everything this library
+writes does:
 
+- **neither** — the `message_stream` unit, which is standard output unless you moved it. The
+  shortest call: `call schema%print_schema_info()`.
 - **`unit`** — an already-open unit. This is the primary way to print several schemas into one
   combined listing: open the unit once yourself and call `%print_schema_info(unit=...)` repeatedly,
   once per schema; each call appends its own block.
@@ -442,9 +446,9 @@ Exactly one of `unit`/`filename` must identify the destination:
   returning — a convenience for a one-off call, or for accumulating across separate calls without
   managing a unit yourself.
 
-Giving neither, or an already-given `unit` that isn't open, or open for reading only, or a
-`unit`+`filename` pair where `filename` doesn't match (exact, trimmed string equality against
-`inquire(unit=unit, name=)`) the file the unit is actually connected to — all `error stop`.
+An already-given `unit` that isn't open, or open for reading only, or a `unit`+`filename` pair where
+`filename` doesn't match (exact, trimmed string equality against `inquire(unit=unit, name=)`) the
+file the unit is actually connected to — all `error stop`.
 
 Optional formatting arguments:
 

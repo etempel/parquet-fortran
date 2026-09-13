@@ -2138,13 +2138,13 @@ module parquet_core
         !> derived from the longest value actually present across the enabled columns (and, when
         !> header=.true., the header label itself), so each call produces its own self-contained,
         !> internally-aligned block; two calls for different schemas are not aligned with each
-        !> other. Exactly one of unit/filename must identify the destination: unit (an
-        !> already-open unit, e.g. opened once by the caller and reused across several schemas'
-        !> worth of calls to build up one combined listing) or filename (opened here with
-        !> position="append", written, and closed again before returning). Giving neither, or an
-        !> unopened/read-only unit, or a unit+filename pair where filename does not match (exact,
-        !> trimmed string equality against inquire(unit=unit, name=)) the file unit is already
-        !> connected to, all error stop. Calling this on a schema that has not been parsed yet
+        !> other. The destination is unit (an already-open unit, e.g. opened once by the caller and
+        !> reused across several schemas' worth of calls to build up one combined listing) or
+        !> filename (opened here with position="append", written, and closed again before
+        !> returning); with neither, the listing goes wherever the message_stream setting names, as
+        !> everything this library writes does. An unopened/read-only unit, or a unit+filename pair
+        !> where filename does not match (exact, trimmed string equality against
+        !> inquire(unit=unit, name=)) the file unit is already connected to, both error stop. Calling this on a schema that has not been parsed yet
         !> (schema%cinfo not populated -- neither parquet_parse_maml nor, for an in-code schema,
         !> %init/%add_field followed by parquet_parse_maml, has run) also error stops by default,
         !> with the message "schema is not initialized (not parsed)" -- pass
@@ -2158,7 +2158,8 @@ module parquet_core
         module subroutine schema_print_schema_info(this, unit, filename, prefix, header, table_name, &
                 dash_before_header, dash_after_header, dash_after_fields, dash_char, allow_uninitialized)
             class(parquet_schema), intent(in) :: this !! schema whose enabled (is_set) columns are listed.
-            integer, intent(in), optional :: unit !! already-open unit to write to (see filename for the alternative).
+            integer, intent(in), optional :: unit !! already-open unit to write to; with neither this nor
+            !! filename, the `message_stream` setting's unit.
             character(len=*), intent(in), optional :: filename !! output path; opened with position="append" if unit absent.
             character(len=*), intent(in), optional :: prefix !! prepended to every emitted line (default: none).
             logical, intent(in), optional :: header !! print a "name unit type len ucd info" header row (default .true.).

@@ -89,6 +89,7 @@ module parquet_io
     private :: parquet_valid_compressions, parquet_resolve_writer_compression
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
+    private :: parquet_message_unit
     private :: parquet_clamp_to_affinity
     ! The Fortran->C++ mirror push: parquet_read and parquet_write (both submodules of a DIFFERENT
     ! module) call it when a reader or writer opens, so parquet_settings must make it public.

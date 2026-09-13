@@ -105,10 +105,12 @@ reader works exactly as you would expect; changing one *while a reader is alread
 reader using the value that was current when it was opened, for the rest of its life. Open the
 reader after setting the knob, which is what the advice above already asks for.
 
-For the two output knobs, that delay only affects what the **C++ half** prints — three warnings and
-the `print_stat` report — because everything the Fortran half prints reads them per message. For
-`target_row_group_bytes`, `statistics_prescreen` and `file_date` it is the whole story, since all
-three act only inside C++.
+For the two output knobs, that delay only affects the three warnings the **C++ half** prints,
+because everything the Fortran half prints reads them per message. The `print_stat` report is the
+exception on that side too: `parquet_close_reader(..., print_stat=.true.)` refreshes the mirror
+before printing, so setting `verbosity="silent"` after the reader was opened still silences it. For
+`target_row_group_bytes`, `statistics_prescreen` and `file_date` the delay is the whole story, since
+all three act only inside C++.
 
 `sort_counting_path` and `sort_counting_bucket_limit` have a C++ mirror too and are deliberately
 **not** in that list: the sort engine
@@ -650,35 +652,47 @@ call parquet_set_verbosity("errors_only")   ! a clean run in a batch pipeline
 and the context lines a failing writer close prints before aborting all survive. Your program's
 control flow depends on that output being findable, so no setting may hide it.
 
-**One consequence to know before you use `"silent"`:** it turns `%print_rows`, `%print_stat`,
-`%print_schema_info` and `parquet_string_column`'s printers into no-ops, along with
-`parquet_open_reader(..., print_stat=.true.)`. That is what a global output control means, and it is
-a debugging trap worth naming — add a print, see nothing, and the table is not at fault.
-`parquet_print_settings` is the one exemption: it prints at every level, so a silenced program can
-always be asked why it is silent.
+**One consequence to know before you use `"silent"`:** it turns **every** explicitly-called print
+procedure into a no-op — the rule, not a list to check: a `%print*` call returns having written
+nothing. `parquet_close_reader(..., print_stat=.true.)` goes quiet too. That is what a global output
+control means, and it is a debugging trap worth naming — add a print, see nothing, and the table is
+not at fault. `parquet_print_settings` is the one exemption: it prints at every level, so a silenced
+program can always be asked why it is silent.
 
 `parquet_set_message_stream(stream)` takes `"stdout"` (default) or `"stderr"` and decides where the
-library's own messages go. The reason to change it is a program that pipes its own standard output
-to a data consumer and does not want warnings mixed into that stream.
+library's own output goes. The reason to change it is a program that pipes its own standard output
+to a data consumer and does not want the library's text mixed into that stream.
 
 ```fortran
 call parquet_set_message_stream("stderr")   ! keep stdout clean for piped data
 ```
 
+**It governs everything this library writes.** The warnings, the remarks, the context lines a
+failing close prints before aborting, and every explicitly-called `%print*` procedure you did not
+give a `unit=`:
+
+| what | where it goes |
+|---|---|
+| `%print_stat`, `%print_rows`, `%print_schema_info`, `pf_stats%print`, `parquet_string_column%print`, `parquet_string%print` | `unit=` if given, otherwise the `message_stream` unit |
+| `parquet_print_settings` | the `message_stream` unit (its exemption is from `verbosity`, not from this) |
+| `parquet_close_reader(..., print_stat=.true.)` | the `message_stream` unit — this one has no `unit=` |
+| warnings, and the context lines before an abort | the `message_stream` unit |
+| an `error stop`, and the C++ layer's fatal-error report | **always stderr**, whatever this is set to |
+
+An explicit `unit=` always wins over the setting, as an explicit argument always does.
+
 **Only those two values are accepted, and that is a constraint rather than a preference.** A Fortran
 unit number means nothing to this library's C++ half, which prints three of the warnings and one
 of the reports itself — so a setting holding an arbitrary unit could be honoured by the Fortran half
 and silently ignored by the other. Sending messages to a log file is therefore not supported; a
-shell redirect covers it. The explicitly-called print procedures are unaffected either way: they
-keep their own `unit=` argument.
+shell redirect covers it.
 
-**The error path does not follow this setting, in either direction, and that catches people out.**
-An `error stop` and the C++ layer's fatal-error report always go to **stderr**; the context lines a
-failing close prints just before aborting — the output filename, the schema name — always go to
-**stdout**. So a program that sets `"stderr"` precisely to keep stdout clean still gets those
-context lines on stdout, and one that leaves the default still gets the abort message on stderr.
-Neither can be moved, because an abort that names no file is not diagnosable. See [Contextual error
-messages](error-handling.html#contextual-error-messages).
+**The one thing no setting can move is an abort message.** An `error stop` and the C++ layer's
+fatal-error report always go to **stderr**, because your program's control flow depends on finding
+them. The context lines that precede an abort — the output filename, the schema name — are not part
+of that: they are never suppressed by any verbosity level, but they follow `message_stream` like
+everything else, so setting `"stderr"` puts them beside the abort text they exist to explain. See
+[Contextual error messages](error-handling.html#contextual-error-messages).
 
 ## Setting from the environment
 

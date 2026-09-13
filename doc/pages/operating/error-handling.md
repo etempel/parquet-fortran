@@ -142,11 +142,11 @@ emits before aborting — not appended to the abort message. See
 [the logger-routed variant](#one-variant-of-the-first-class-a-failure-routed-through-the-logger)
 above for where that record goes.
 
-**Some context arrives on a second stream instead, and this catches people out.** Where naming the
-file would make the abort message unreasonably long, the library prints it as its own line *before*
-aborting — and those lines go to **standard output**, while the abort message itself goes to
-standard error. Closing a writer with a declared column left unwritten is the case you are most likely to
-meet:
+**Some context arrives as its own lines, before the abort.** Where naming the file would make the
+abort message unreasonably long, the library prints it separately instead — and those lines follow
+the [`message_stream`](settings.html#terminal-output) setting, while the abort message itself always
+goes to standard error. Closing a writer with a declared column left unwritten is the case you are
+most likely to meet:
 
 ```
 stdout:  parquet_close_writer: output file: catalogue.parquet
@@ -156,11 +156,11 @@ stderr:  ERROR STOP parquet_close_writer: missing write for enabled column: col_
 
 (the `ERROR STOP` prefix there is gfortran's; see [Telling them apart](#telling-them-apart))
 
-**These lines are never suppressed and never redirected**, deliberately: not even
-`verbosity="errors_only"`, the strictest setting, removes them, and `message_stream` does not move
-them, because silencing them would leave an abort that names no file at all. The practical
-consequence is the one to remember — **a program that captures only stderr loses the filename**.
-Capture both streams when you want a diagnosable failure.
+**These lines are never suppressed**, deliberately: not even `verbosity="errors_only"`, the
+strictest setting, removes them, because silencing them would leave an abort that names no file at
+all. The practical consequence is the one to remember — **under the default `message_stream`, a
+program that captures only stderr loses the filename**. Capture both streams, or set
+`parquet_set_message_stream("stderr")` to put the context beside the abort text it explains.
 
 ## Calling before open, or after close
 

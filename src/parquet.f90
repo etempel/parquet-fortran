@@ -124,10 +124,12 @@ module parquet
     ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as the
     ! statements below do for the other cross-module plumbing.
     private :: parquet_valid_compressions, parquet_resolve_writer_compression
-    ! The three output channels and the suppression query are the same case: every module that
-    ! emits has to reach them, so parquet_settings makes them public, and the facade hides them.
+    ! The three output channels, the suppression query and the destination resolver are the same
+    ! case: every module that emits or prints has to reach them, so parquet_settings makes them
+    ! public, and the facade hides them.
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
+    private :: parquet_message_unit
     private :: parquet_clamp_to_affinity
     ! The Fortran->C++ mirror push, and the validity bitmap's block width. Both are public from
     ! their own module because a sibling needs them -- parquet_read/parquet_write/

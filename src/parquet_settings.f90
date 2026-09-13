@@ -49,6 +49,9 @@ module parquet_settings
     ! ---- Re-exported from parquet_settings_base, so this module's surface is unchanged ----
     public :: parquet_output_is_suppressed
     public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    ! The one destination resolver. Re-exported for the same reason the channels above are: the
+    ! solicited printers live in other modules and there is no package scope to share it through.
+    public :: parquet_message_unit
     ! Re-exported for `parquet_tables_read`'s `prefetch_thread_count`, which is three tiers away
     ! from the leaf and can only reach it through here. Both facades hide it again; Fortran has no
     ! package scope, so this is the same shape the emit channels above already use.
@@ -1203,12 +1206,17 @@ contains
     !>
     !> **Always prints, whatever else has been silenced.** A settings dump that could itself be
     !> suppressed would leave a quiet program with no way to be asked why it is quiet.
+    !>
+    !> **That exemption is from `verbosity` only.** Where the dump goes still follows
+    !> `message_stream`, like everything else this library writes: a program that routed the
+    !> library's text to standard error to keep a stdout pipe clean does not want this in that pipe
+    !> either. Pass `unit=` to override.
     subroutine parquet_print_settings(unit)
-        integer, intent(in), optional :: unit !! output unit (default output_unit).
+        integer, intent(in), optional :: unit !! where to write; default the `message_stream` setting's unit.
         integer :: u
         character(len=:), allocatable :: codec, token
 
-        u = output_unit
+        u = parquet_message_unit()
         if (present(unit)) u = unit
         write (u, '(a)') "parquet-fortran settings"
         call print_one(u, "arrow_threads", parquet_get_arrow_threads())

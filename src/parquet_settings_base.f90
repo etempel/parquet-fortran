@@ -93,6 +93,7 @@ module parquet_settings_base
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    public :: parquet_message_unit
     !
     ! ---- Shared token-vocabulary helpers, used by the setters above and by
     ! ---- parquet_settings_from_env, which must accept exactly what the setters accept.
@@ -749,11 +750,12 @@ contains
     !> report, and the context lines a failing close prints before aborting all appear whatever this
     !> is set to -- a program's control flow depends on that output being findable.
     !>
-    !> **"silent" turns the explicitly-called print procedures into no-ops** -- `%print_stat`,
-    !> `%print_schema_info` and `parquet_string_column`'s printers included. That is deliberate (it
-    !> is what a global output control means) and it is a debugging trap worth knowing about: add a
-    !> print, see nothing, and the table is not at fault. `parquet_print_settings` is the one
-    !> exemption, so a silenced program can always be asked why it is silent.
+    !> **"silent" turns EVERY explicitly-called print procedure into a no-op** -- the rule, rather
+    !> than a list that goes stale as printers are added: a `%print*` procedure returns having
+    !> written nothing. That is deliberate (it is what a global output control means) and it is a
+    !> debugging trap worth knowing about: add a print, see nothing, and the table is not at fault.
+    !> `parquet_print_settings` is the one exemption, so a silenced program can always be asked why
+    !> it is silent.
     subroutine parquet_set_verbosity(level)
         character(len=*), intent(in) :: level !! "normal" | "silent" | "errors_only".
         character(len=:), allocatable :: tok, expected
@@ -791,8 +793,13 @@ contains
     !> "stderr". Case-insensitive; anything else aborts.
     !>
     !> Read per message, so it takes effect immediately. The usual reason to change it is a program
-    !> that pipes its own stdout to a data consumer and does not want the library's warnings mixed
+    !> that pipes its own stdout to a data consumer and does not want the library's output mixed
     !> into that stream.
+    !>
+    !> **It governs EVERYTHING this library writes**, through one resolver
+    !> (`parquet_message_unit`): the warnings, the advice, the remarks, the context lines a failing
+    !> close prints before aborting, and every explicitly-called `%print*` procedure that was not
+    !> given a `unit=`. There is no second rule to remember and no printer that opts out.
     !>
     !> **Only these two values are accepted, and that is a constraint rather than a preference.** A
     !> Fortran unit number means nothing to the C++ half of this library, which prints three of the
@@ -800,11 +807,10 @@ contains
     !> honoured by the Fortran sites and silently ignored by the C++ ones. Sending messages to a log
     !> file is therefore not supported; a shell redirect or the program's own logging covers it.
     !>
-    !> **The error path does not follow this knob at all.** An `error stop` and the C++ side's
-    !> fatal-error report always go to stderr, and the context lines `parquet_emit_error_context`
-    !> prints just before an abort always go to stdout -- see that procedure for why. The
-    !> explicitly-called print procedures are unaffected too: they keep their own `unit=` argument
-    !> and its `output_unit` default.
+    !> **The one exception is an abort message itself.** An `error stop` and the C++ side's
+    !> fatal-error report always go to stderr whatever this is set to, because a program's control
+    !> flow depends on that output being findable. An explicit `unit=` on a print procedure still
+    !> wins over this setting, as an explicit argument always does.
     subroutine parquet_set_message_stream(stream)
         character(len=*), intent(in) :: stream !! "stdout" | "stderr".
         character(len=:), allocatable :: tok, expected
@@ -845,7 +851,7 @@ contains
         character(len=*), intent(in) :: text !! the message, with no prefix.
 
         if (cfg_verbosity >= verb_silent) return
-        write (message_unit(), '(a)') text
+        write (parquet_message_unit(), '(a)') text
     end subroutine parquet_emit_info
     !
     !> Emits one warning about the data or the schema. Suppressed only at "errors_only".
@@ -859,31 +865,46 @@ contains
         character(len=*), intent(in) :: text !! the message, without the "WARNING: " prefix.
 
         if (cfg_verbosity >= verb_errors_only) return
-        write (message_unit(), '(a)') "WARNING: " // text
+        write (parquet_message_unit(), '(a)') "WARNING: " // text
     end subroutine parquet_emit_warning
     !
     !> Emits one line of context belonging to an error that is about to abort.
     !>
-    !> **Never suppressed and never redirected.** These lines carry what the abort message
-    !> deliberately leaves out -- the output filename, the schema name -- so silencing them would
-    !> turn a diagnosable failure into one that names nothing. They stay on standard output, where
-    !> they are today, rather than following `message_stream`: they belong to the error path, and
-    !> moving them would change what an existing program sees for no gain.
+    !> **Never suppressed.** These lines carry what the abort message deliberately leaves out -- the
+    !> output filename, the schema name -- so silencing them would turn a diagnosable failure into
+    !> one that names nothing. No verbosity level touches them.
+    !>
+    !> **Routed like everything else**, through `message_stream`. Under the default "stdout" that is
+    !> where they have always gone; under "stderr" they land beside the `error stop` text they
+    !> exist to explain, which is the arrangement a program that set "stderr" was asking for. The
+    !> abort message itself is the one thing no setting can move: it is always on standard error.
     subroutine parquet_emit_error_context(text)
         character(len=*), intent(in) :: text !! the context line, printed verbatim.
 
-        write (output_unit, '(a)') text
+        write (parquet_message_unit(), '(a)') text
     end subroutine parquet_emit_error_context
     !
-    !> The unit the emit channels write to. One function so the three cannot disagree.
-    integer function message_unit() result(u)
+    !> The unit `message_stream` names right now: `error_unit` for "stderr", `output_unit` otherwise.
+    !>
+    !> **One function for the whole library, which is the point.** Every emit channel above and every
+    !> explicitly-called `%print*` procedure that was not given a `unit=` resolves its destination
+    !> here, so the setting cannot mean one thing to a warning and another to a listing. A second
+    !> copy of these four lines is the failure `feature_risks.md` Risk-40 describes for
+    !> `cfg_sort_threads`, arriving through a destination rather than through a thread count: both
+    !> answers look right in isolation and only disagree once someone changes the setting.
+    !>
+    !> **Public only because Fortran has no package scope.** The printers live in other modules, so
+    !> they cannot reach a private name here; both facades give it a `private ::` line
+    !> (src/parquet.f90, src/parquet_io.f90) so it never reaches a user's namespace, exactly as
+    !> `parquet_output_is_suppressed` and the three channels do.
+    integer function parquet_message_unit() result(u)
 
         if (cfg_message_stream == stream_stderr) then
             u = error_unit
         else
             u = output_unit
         end if
-    end function message_unit
+    end function parquet_message_unit
     !
     !> Renders a token vocabulary as "a, b, c", for an error message.
     subroutine token_list(tokens, out)

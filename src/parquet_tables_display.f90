@@ -23,16 +23,15 @@ submodule (parquet_tables) parquet_tables_display
     ! parquet_utils are both already in this module's compile footprint (through
     ! parquet_output_is_suppressed and pf_to_str respectively), so nothing downstream compiles
     ! more because this file exists.
-    use, intrinsic :: iso_fortran_env, only : output_unit, error_unit
     ! A real cell is rendered by normalizing the value, which NaN and the infinities have no
     ! normal form for -- so both are tested for and handed straight to the compiler's own
     ! spelling. Not a hot loop (at most max_columns by the rows shown), so the intrinsic inquiry
     ! is used rather than the `x /= x` idiom.
     use ieee_arithmetic, only : ieee_is_nan, ieee_is_finite
-    ! The message stream is read from the setting's own public token rather than from any private
-    ! integer, so this printer reaches parquet_settings_base through the same surface a caller
-    ! would -- the shape pf_stats%print established.
-    use parquet_settings, only : parquet_get_message_stream
+    ! The library's one destination resolver, shared with the emit channels and with every other
+    ! solicited printer, so `message_stream` cannot mean one thing to a warning and another to a
+    ! listing. Hidden from the user by both facades' `private ::` lines.
+    use parquet_settings, only : parquet_message_unit
     use parquet_utils, only : pf_to_lower
     implicit none
     !
@@ -444,18 +443,12 @@ contains
     subroutine resolve_unit(unit, u)
         integer, intent(in), optional :: unit !! the caller's unit, if any.
         integer, intent(out) :: u             !! the unit to write to.
-        character(len=:), allocatable :: stream
         !
         if (present(unit)) then
             u = unit
             return
         end if
-        call parquet_get_message_stream(stream)
-        if (stream == "stderr") then
-            u = error_unit
-        else
-            u = output_unit
-        end if
+        u = parquet_message_unit()
     end subroutine resolve_unit
     !
     !> One cell as text, never longer than `maxw`.

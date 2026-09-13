@@ -4030,16 +4030,19 @@ contains
     ! Diagnostics
     ! ==================================================================================
     !
-    !> Writes a human-readable representation of the column to `unit` (default: standard output),
-    !! showing each element (or <null>) up to `max_rows` (default 20).
+    !> Writes a human-readable representation of the column, showing each element (or <null>) up
+    !! to `max_rows` (default 20).
+    !!
+    !! Solicited output: `verbosity = "silent"` returns having written nothing. With no `unit=` the
+    !! text goes wherever `message_stream` names, as everything this library writes does.
     subroutine col_print(self, unit, max_rows)
         class(parquet_string_column), intent(in) :: self !! the column.
-        integer, intent(in), optional :: unit            !! output unit (default output_unit).
+        integer, intent(in), optional :: unit            !! where to write; default the `message_stream` setting's unit.
         integer(int64), intent(in), optional :: max_rows  !! max elements to print (default 20).
         integer :: u
         integer(int64) :: i, lim, a, b, j
         if (parquet_output_is_suppressed()) return
-        u = output_unit
+        u = parquet_message_unit()
         if (present(unit)) u = unit
         lim = 20_int64
         if (present(max_rows)) lim = max_rows
@@ -4063,7 +4066,12 @@ contains
                 ! silent. Measured both ways with ifx 2026.1.1.
                 call elem_bounds(self, i, a, b)
                 if (b >= a) then
-                    write(u, '(2x,i0,a,a,a)') i, ': "', (self%data(j), j = a, b), '"'
+                    ! The payload is one list item PER BYTE, so the format needs an unlimited
+                    ! repeat rather than a fixed count of `a` descriptors: with `(2x,i0,a,a,a)`
+                    ! anything longer than two characters exhausted the format, reverted to the
+                    ! start of it, and hit a character against `i0` -- an I/O runtime error, on
+                    ! every element of every column whose strings are longer than two bytes.
+                    write(u, '(2x,i0,*(a))') i, ': "', (self%data(j), j = a, b), '"'
                 else
                     ! A column whose elements are ALL zero-length never allocates `data` at all
                     ! (`ensure_data_cap` skips a zero request), so the slice above would reference
@@ -4406,16 +4414,24 @@ contains
         res = self%col%endswith_i64(self%idx, suffix, check_null)
     end function psv_endswith
     !
-    !> Writes a human-readable representation of the referenced string to `unit` (default stdout).
+    !> Writes a human-readable representation of the referenced string.
+    !!
+    !! Solicited output: `verbosity = "silent"` returns having written nothing. With no `unit=` the
+    !! text goes wherever `message_stream` names.
+    !!
+    !! **The handle is checked BEFORE the verbosity is**, so a stale or unbound handle is reported
+    !! whether or not anything would have been printed -- the ordering every other printer in this
+    !! library uses, and the reason is the same: silently doing nothing for the wrong reason is
+    !! worse than saying so.
     subroutine psv_print(self, unit)
         class(parquet_string), intent(in) :: self !! the handle.
-        integer, intent(in), optional :: unit      !! output unit (default output_unit).
+        integer, intent(in), optional :: unit      !! where to write; default the `message_stream` setting's unit.
         integer :: u
         character(len=:), allocatable :: s
-        if (parquet_output_is_suppressed()) return
-        u = output_unit
-        if (present(unit)) u = unit
         call check_handle(self, "print")
+        if (parquet_output_is_suppressed()) return
+        u = parquet_message_unit()
+        if (present(unit)) u = unit
         if (self%col%is_null_i64(self%idx)) then
             write(u, '(a)') "<null>"
         else

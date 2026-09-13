@@ -1056,7 +1056,7 @@ Every argument is optional and every one is a display choice:
 | `columns` | show these columns, in the order named, **reading any that is not resident yet**. Either a `"ra;dec, mag"` string or an array of names, the same two spellings [`%prefetch`](#laziness-and-what-it-costs) takes. Naming `parquet_row_index` here creates it, exactly as reading it any other way does. |
 | `first`, `last` | rows from the top and from the bottom. Default 5 and 5; naming **either one sets the other to 0**, so `first=20` is `head(20)` and `last=3` is `tail(3)`. Both clamp to the table, and a table the two ends cover prints once, with no `...` row. |
 | `rows` | show exactly the rows this `parquet_slice` names, in the slice's own order — repeats and all. The form for "show me the rows that lookup returned" (`parquet_slice_list(ix%find_all(...))`). Cannot be combined with `first=`/`last=`. |
-| `unit` | the unit number to write to. Absent, the `message_stream` setting decides between standard output and standard error. `%print_stat` below takes a `unit` too, but does **not** consult `message_stream` — absent, it writes to standard output — so routing messages to standard error moves this printer and not that one. |
+| `unit` | the unit number to write to. Absent, the `message_stream` setting decides between standard output and standard error, as it does for everything this library writes. |
 | `digits` | significant digits in a real cell, 1..17. Default 6. |
 | `max_width` | longest cell text before it is cut to `max_width - 3` characters plus `...`. At least 8, default 32. A column NAME is never cut — a truncated heading would leave you guessing which column you are reading. |
 | `max_columns` | most columns to show. At least 1, default 20; the heading says `... (+N more)` for the rest. |
@@ -1114,9 +1114,8 @@ Worth knowing:
 - **Printing never reads anything.** A deferred plain-`LIST` column prints as `pending` rather
   than being measured — a diagnostic that changes what it is diagnosing is worse than one that
   admits it does not know.
-- **`unit=` names where the listing goes**, and without one it goes to standard output. Unlike
-  `%print_rows` this printer does not consult `message_stream`, so a program that routed the
-  library's messages to standard error passes the unit here itself.
+- **`unit=` names where the listing goes**, and without one it follows the `message_stream`
+  setting, exactly as `%print_rows` and everything else this library writes does.
 - **A column this layer cannot read shows its stored Arrow type in the `kind` cell**, instead of
   the `PK_NONE` that is every such column's kind and so tells them all apart from nothing. The
   kind column widens to fit it, so the listing stays aligned.

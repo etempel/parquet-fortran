@@ -572,6 +572,22 @@ program error_scenarios
         call scenario_print_rows_negative_last()
     case ("print_rows_follows_message_stream")
         call scenario_print_rows_follows_message_stream()
+    case ("print_stat_follows_message_stream")
+        call scenario_print_stat_follows_message_stream()
+    case ("string_print_follows_message_stream")
+        call scenario_string_print_follows_message_stream()
+    case ("print_settings_follows_message_stream")
+        call scenario_print_settings_follows_message_stream()
+    case ("print_schema_info_default_stream")
+        call scenario_print_schema_info_default_stream()
+    case ("error_context_follows_message_stream")
+        call scenario_error_context_follows_message_stream()
+    case ("reader_print_stat_follows_message_stream")
+        call scenario_reader_print_stat_follows_message_stream()
+    case ("close_reader_print_stat_silenced_late")
+        call scenario_close_reader_print_stat_silenced_late()
+    case ("string_print_unbound_handle_silent")
+        call scenario_string_print_unbound_handle_silent()
     case ("get_matrix_unsupported_column")
         call scenario_get_matrix_unsupported_column()
     case ("keep_columns_many_missing")
@@ -14764,15 +14780,20 @@ contains
         print '(a)', "unexpectedly copied a non-existent field via schema%add_field_from"
     end subroutine scenario_add_field_from_source_not_found
 
-    !> schema%print_schema_info error stops if given neither unit nor filename -- there is
-    !> nowhere to write to.
+    !> schema%print_schema_info with neither unit nor filename writes to the `message_stream`
+    !> unit; it used to abort, because it was the one printer with no default destination.
+    !!
+    !! The schema here is built IN CODE (%init + %add_field) rather than parsed from MAML, which
+    !! is a different path into the printer than scenario_print_schema_info_default_stream's --
+    !! that one covers the parsed schema and asserts which stream the text lands on, this one
+    !! covers the in-code schema and asserts the call completes at all. Exits 0.
     subroutine scenario_print_schema_info_no_unit_no_filename()
         type(parquet_schema) :: schema
 
         call schema%init(table="t")
         call schema%add_field("x", "int32")
         call schema%print_schema_info()
-        print '(a)', "unexpectedly printed schema info with neither unit nor filename given"
+        print '(a)', "control: printed schema info with neither unit nor filename given"
     end subroutine scenario_print_schema_info_no_unit_no_filename
 
     !> schema%print_schema_info error stops if the given unit is not already open.
@@ -30898,6 +30919,149 @@ contains
         call parquet_set_message_stream("stdout")
         print '(a)', "control: the stream was put back to stdout"
     end subroutine scenario_print_rows_follows_message_stream
+
+    !> `%print_stat` with no `unit=` follows `message_stream`.
+    !!
+    !! Out-of-process for the same reason `%print_rows`' scenario is: neither stream can be
+    !! captured from inside the process, and the setting is global to it.
+    subroutine scenario_print_stat_follows_message_stream()
+        type(parquet_table) :: t
+
+        call parquet_new_table(t)
+        call t%add_column("statmarker", [1_int32, 2_int32])
+        call parquet_set_message_stream("stderr")
+        call t%print_stat()
+        call parquet_set_message_stream("stdout")
+        print '(a)', "control: the stream was put back to stdout"
+    end subroutine scenario_print_stat_follows_message_stream
+
+    !> Both `parquet_strings` printers follow `message_stream` with no `unit=`.
+    !!
+    !! One scenario for the pair because they share a destination rule; the marker is the column's
+    !! own content, so a half-applied change (the column printer moved, the handle printer not)
+    !! leaves the handle's line on stdout and fails the "must not also appear on the other
+    !! stream" half of the assertion.
+    subroutine scenario_string_print_follows_message_stream()
+        ! `target` because %view hands back a handle that points into the column: F2018 15.5.2.4
+        ! leaves that pointer undefined otherwise, and only nagfor's -C=dangling reports it.
+        type(parquet_string_column), target :: col
+        type(parquet_string) :: h
+
+        call col%append_string("strmarker")
+        call parquet_set_message_stream("stderr")
+        call col%print()
+        h = col%view(1_int64)
+        call h%print()
+        call parquet_set_message_stream("stdout")
+        print '(a)', "control: the stream was put back to stdout"
+    end subroutine scenario_string_print_follows_message_stream
+
+    !> `parquet_print_settings` follows `message_stream` too: its exemption is from `verbosity`,
+    !! not from where the text goes.
+    !!
+    !! Run at `verbosity="silent"`, which is the exemption that matters -- the dump must still
+    !! appear, and it must appear on the stream the setting names.
+    subroutine scenario_print_settings_follows_message_stream()
+        call parquet_set_verbosity("silent")
+        call parquet_set_message_stream("stderr")
+        call parquet_print_settings()
+        call parquet_reset_settings()
+        print '(a)', "control: the settings were reset"
+    end subroutine scenario_print_settings_follows_message_stream
+
+    !> `%print_schema_info` called with NEITHER `unit=` nor `filename=` writes to the
+    !! `message_stream` unit instead of aborting.
+    !!
+    !! This call form did not exist before: it used to `error stop` with "either unit or filename
+    !! must be given". The scenario exits cleanly, which is half the assertion; the other half is
+    !! that the listing lands on stderr.
+    subroutine scenario_print_schema_info_default_stream()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "schema_default_stream.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: schemamarker", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call parquet_set_message_stream("stderr")
+        call schema%print_schema_info()
+        call parquet_set_message_stream("stdout")
+        print '(a)', "control: the stream was put back to stdout"
+    end subroutine scenario_print_schema_info_default_stream
+
+    !> The context lines a failing `parquet_close_writer` prints follow `message_stream`.
+    !!
+    !! The writer is closed with a column declared and never written, which is the path that emits
+    !! the context line naming the output file before aborting. The scenario therefore ABORTS
+    !! (exit 1); what is asserted is which stream carried the filename.
+    subroutine scenario_error_context_follows_message_stream()
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "ctx_stream.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: ctxmarker", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call parquet_set_message_stream("stderr")
+        call parquet_open_writer(writer, "test_run/scenario_ctx_stream.parquet", schema)
+        call parquet_write_column(writer, "a", [1_int32, 2_int32])
+        call parquet_close_writer(writer)   ! -> aborts naming the file (column 'b' was never written)
+        print '(a)', "unexpectedly closed a writer with a column missing"
+    end subroutine scenario_error_context_follows_message_stream
+
+    !> `parquet_close_reader(print_stat=.true.)` prints its report from C++, and that report
+    !! follows the mirrored `message_stream`.
+    !!
+    !! The marker is the fixture's own filename, which the report's "file:" line carries.
+    subroutine scenario_reader_print_stat_follows_message_stream()
+        type(parquet_reader) :: reader
+
+        ! Nothing is read: the report's header and its "file:" line are printed whatever was
+        ! touched, and the marker this asserts on is that filename.
+        call parquet_set_message_stream("stderr")
+        call parquet_open_reader(reader, "test/fixtures/element_nulls.parquet")
+        call parquet_close_reader(reader, print_stat=.true.)
+        call parquet_set_message_stream("stdout")
+        print '(a)', "control: the stream was put back to stdout"
+    end subroutine scenario_reader_print_stat_follows_message_stream
+
+    !> `verbosity="silent"` set AFTER the reader was opened still silences its `print_stat` report.
+    !!
+    !! The report is printed by C++ from a mirrored copy of the setting, and that mirror is
+    !! refreshed when a reader is opened -- so without a refresh at close time, this sequence
+    !! printed the report in full. The marker is the fixture's filename: it must appear on
+    !! neither stream.
+    subroutine scenario_close_reader_print_stat_silenced_late()
+        type(parquet_reader) :: reader
+
+        ! The verbosity is set AFTER the open, which is the whole point: the C++ mirror is
+        ! refreshed at open, so before the push at close time this printed the report in full.
+        call parquet_open_reader(reader, "test/fixtures/element_nulls.parquet")
+        call parquet_set_verbosity("silent")
+        call parquet_close_reader(reader, print_stat=.true.)
+        call parquet_reset_settings()
+        print '(a)', "control: the reader closed and the settings were reset"
+    end subroutine scenario_close_reader_print_stat_silenced_late
+
+    !> A `parquet_string` handle that was never bound is reported at EVERY verbosity.
+    !!
+    !! `%print` checks the handle before it consults the verbosity, so `"silent"` suppresses the
+    !! output and not the diagnosis. With the two lines the other way round this call returns
+    !! quietly and the scenario exits 0 instead of aborting.
+    subroutine scenario_string_print_unbound_handle_silent()
+        type(parquet_string) :: h
+
+        call parquet_set_verbosity("silent")
+        call h%print()   ! -> aborts (the handle was never bound)
+        print '(a)', "unexpectedly printed through an unbound parquet_string handle"
+    end subroutine scenario_string_print_unbound_handle_silent
 
 
     !> `%get_matrix` naming a column whose type this library cannot read is refused by the shared

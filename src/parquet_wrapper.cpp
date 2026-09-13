@@ -1114,13 +1114,21 @@ extern "C"
 		return g_verbosity >= 1;
 	}
 
+	// Where message_stream points right now -- this side's counterpart of parquet_settings_base's
+	// parquet_message_unit, and the one place the mirrored integer is turned into a stream. Both
+	// C++ printers ask it, so a warning and the reader report cannot land on different streams.
+	static std::FILE *message_stream_file(void)
+	{
+		return g_message_stream == 1 ? stderr : stdout;
+	}
+
 	// The one place a C++-side warning is printed, so the three call sites cannot disagree about
 	// either setting. Mirrors parquet_emit_warning: suppressed only at errors_only, prefixed here
 	// rather than at each site, and routed by the shared stream selector.
 	static void emit_warning_cpp(const std::string &msg)
 	{
 		if (g_verbosity >= 2) return;
-		std::fprintf(g_message_stream == 1 ? stderr : stdout, "WARNING: %s\n", msg.c_str());
+		std::fprintf(message_stream_file(), "WARNING: %s\n", msg.c_str());
 	}
 
 	// ==== Performance settings, mirrored from parquet_settings.f90 ====
@@ -10138,6 +10146,11 @@ extern "C"
 		// as %print_stat and %print_schema_info are on the Fortran side. The rule is about who
 		// asked, not about which language the printer happens to be written in.
 		if (output_is_suppressed()) return;
+		// Resolved ONCE, not per line: a line added below must not be able to keep stdout while the
+		// rest of the report follows the setting. This is solicited output with no unit= of its own
+		// -- a Fortran unit number cannot cross this boundary -- so message_stream is the only way
+		// a caller can move it.
+		std::FILE *out = message_stream_file();
 		auto reader_handle = as_reader_handle(handle);
 
 		std::vector<int> touched;
@@ -10282,29 +10295,29 @@ extern "C"
 				line.append(widths[i] - row[i].size(), ' ');
 				if (i + 1 < row.size()) line += "  ";
 			}
-			std::fprintf(stdout, "%s\n", line.c_str());
+			std::fprintf(out, "%s\n", line.c_str());
 		};
 
-		std::fprintf(stdout, "=== parquet_reader stats ===\n");
-		std::fprintf(stdout, "file: %s\n", reader_handle->filename.c_str());
+		std::fprintf(out, "=== parquet_reader stats ===\n");
+		std::fprintf(out, "file: %s\n", reader_handle->filename.c_str());
 		if (reader_handle->nrows != reader_handle->total_nrows)
 		{
 			// GCOVR_EXCL_START -- gcov attribution artifact under GCC: these continuation lines of a
 			// single fprintf call show uncovered even though this exact branch is directly exercised
 			// by error_scenarios.f90's print_stat_filtered_rows scenario.
-			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n",
+			std::fprintf(out, "columns: %d   shown: %zu   rows: %lld (of %lld total)\n",
 				reader_handle->schema->num_fields(), rows.size(),
 				static_cast<long long>(reader_handle->nrows), static_cast<long long>(reader_handle->total_nrows));
 			// GCOVR_EXCL_STOP
 		}
 		else
 		{
-			std::fprintf(stdout, "columns: %d   shown: %zu   rows: %lld\n",
+			std::fprintf(out, "columns: %d   shown: %zu   rows: %lld\n",
 				reader_handle->schema->num_fields(), rows.size(), static_cast<long long>(reader_handle->nrows));
 		}
 		if (reader_handle->has_sample)
 		{
-			std::fprintf(stdout, "sample: fraction=%.6g seed=%lld\n", reader_handle->sample_fraction,
+			std::fprintf(out, "sample: fraction=%.6g seed=%lld\n", reader_handle->sample_fraction,
 				static_cast<long long>(reader_handle->sample_seed_used));
 		}
 		// The whole expression, as re-rendered from the parse tree. The per-column "filter" cell
@@ -10312,24 +10325,24 @@ extern "C"
 		// expression is not a flat AND -- this line is what stays exact.
 		if (!reader_handle->filter_expr_text.empty())
 		{
-			std::fprintf(stdout, "filter: %s\n", reader_handle->filter_expr_text.c_str());
+			std::fprintf(out, "filter: %s\n", reader_handle->filter_expr_text.c_str());
 		}
 		// The sort keys as given, in the order they were added. Its own line for the same reason
 		// the filter expression has one: it cannot be decomposed into the per-column table below.
 		if (!reader_handle->sort_key_text.empty())
 		{
-			std::fprintf(stdout, "sort: %s\n", reader_handle->sort_key_text.c_str());
+			std::fprintf(out, "sort: %s\n", reader_handle->sort_key_text.c_str());
 		}
 		// What the row-group statistics pre-screen managed to skip. Printed only when it actually
 		// pruned something, so the line is a statement that the optimization engaged rather than
 		// noise on every filtered read -- and it is the only way a user can see that it did.
 		if (reader_handle->row_groups_pruned > 0)
 		{
-			std::fprintf(stdout, "screened: %lld of %lld row groups skipped (statistics)\n",
+			std::fprintf(out, "screened: %lld of %lld row groups skipped (statistics)\n",
 				static_cast<long long>(reader_handle->row_groups_pruned),
 				static_cast<long long>(reader_handle->num_row_groups));
 		}
-		std::fprintf(stdout, "\n");
+		std::fprintf(out, "\n");
 
 		print_row(headers);
 		std::vector<std::string> sep;

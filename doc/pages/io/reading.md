@@ -729,11 +729,16 @@ see [Performance and memory](../operating/performance.html).
 ## Printing reader statistics with `parquet_close_reader(..., print_stat=.true.)`
 
 `parquet_close_reader(reader, print_stat=.true.)` prints a debug/diagnostic summary of the
-reader's activity to stdout, right before actually closing it. `print_stat` is optional and
+reader's activity right before actually closing it. `print_stat` is optional and
 defaults to `.false.` (no output). This is *solicited* output, so it is still governed by the
 library's verbosity setting: under
 [`parquet_set_verbosity("silent")`](../operating/settings.html#terminal-output) or `"errors_only"`
-the report is suppressed entirely and `print_stat=.true.` prints nothing.
+the report is suppressed entirely and `print_stat=.true.` prints nothing — including when you set
+the level after the reader was opened.
+
+The report is written by the library's C++ half and so takes no `unit=` of its own; it goes wherever
+[`message_stream`](../operating/settings.html#terminal-output) names, which is standard output
+unless you moved it.
 
 The summary has two parts:
 

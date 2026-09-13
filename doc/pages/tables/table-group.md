@@ -100,9 +100,10 @@ call grp%count(name, out)              ! non-null rows of `name` per group; int3
 
 `%key_table` is one row per group carrying each key column's value, kind, width and unit — a
 gathered **copy**, so the source table is untouched — and, with `size_name=`, an `int64` column of
-rows per group. It is an ordinary table: sort it, filter it, write it, and above all `%add_column`
-the per-group answers onto it, which is the summary pattern the opening example shows. The
-per-group answers come from `%size`, `%count` and `%apply` below.
+rows per group; a `size_name=` that repeats a key column's name is refused rather than producing a
+table with two columns of that name. It is an ordinary table: sort it, filter it, write it, and
+above all `%add_column` the per-group answers onto it, which is the summary pattern the opening
+example shows. The per-group answers come from `%size`, `%count` and `%apply` below.
 
 `%count` counts a column's non-null rows per group, for a column of any kind, and reads the
 column from the file if nothing has yet.
@@ -285,7 +286,8 @@ needed in one program, the object form below is the better spelling in any case.
 
 The second way to give `%apply` a procedure with context is an **object**: extend the abstract type
 `parquet_group_reducer`, put the context — `%col` pointers, tunables, a seed — into components,
-implement the one deferred binding `reduce`, and pass the object where the procedure would go.
+implement the one deferred binding `reduce` (published as `parquet_group_reducer_reduce_i`), and
+pass the object where the procedure would go.
 
 ```fortran
 module dispersion_mod
@@ -352,7 +354,10 @@ end program example
 `threads=` **absent means serial** on `%apply`, a deliberate exception to the library's automatic
 threading, because the library cannot know whether your procedure can be called from several
 threads at once. Giving `threads=` is your statement that it can — locals only, shared state
-read-only, no `save` variable, nothing written outside its own result — and the loop then runs on
+read-only, no `save` variable, nothing written outside its own result, **and no column read for
+the first time inside it**, which is a hard error on any table shared across a team
+([thread safety](../operating/thread-safety.html)): take the `%col` pointers and `%get` arrays
+before the loop, or `%prefetch` the columns the procedure reads. The loop then runs on
 a team of that size, clamped to the processors this process may use. The groups are dealt out
 dynamically, since they are unequal; each result lands at its own `g`, so the answer is the same at
 every thread count. A `%col` pointer is live storage that nothing here moves, so reading the table
@@ -432,12 +437,13 @@ the same at every thread count.
 `%gather` is the values form of the `%csr` loop: group `g`'s values of a column into the first `n`
 entries of a buffer **you own**, in row order, for a buffer of `int32`, `int64`, `real32`, `real64`
 or `logical`, widening exactly as `%get` does — an `int32` column into an `int64` buffer, a
-`float32` column into a `real64` one — and nothing else. Size the buffer once by `%max_size()`: the
-call allocates nothing, leaves the entries past `n` as they were, and **aborts rather than
-truncates** when the buffer is shorter than the group, naming both sizes, because a statistic over
-the first `size(buf)` rows of a group is a plausible wrong answer. `is_valid`, a logical buffer under
-the same rule, receives for each entry whether the value is non-null; without it a null row's entry
-is whatever the column stores there.
+`float32` column into a `real64` one — and nothing else. It reads the column from the file if
+nothing has yet, as `%count` does. Size the buffer once by `%max_size()`: the call allocates nothing
+per group, leaves the entries past `n` as they were, and **aborts rather than truncates** when the
+buffer is shorter than the group, naming both sizes, because a statistic over the first `size(buf)`
+rows of a group is a plausible wrong answer. `is_valid`, a logical buffer under the same rule,
+receives for each entry whether the value is non-null; without it a null row's entry is whatever
+the column stores there.
 
 ```fortran
 real(real64), allocatable :: v(:)
@@ -459,16 +465,21 @@ string, temporal or vector column keeps `%get_slice`.
 
 A grouping describes the table *as it was built*. It stamps the table's `%generation()` when it is
 built and compares it on every per-group query, so after any row-structural change — `%filter_rows`,
-`%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%explode`, `%drop_duplicates` — a
-query **aborts**, naming the table and both generations, instead of handing out in-range row
-numbers that name the wrong rows (and, through `%apply`, a plausible mass from the wrong galaxies).
+`%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, the `%append` forms, `%explode`,
+`%drop_duplicates`, a `%join` that rebuilds the rows — a query **aborts**, naming the table and
+both generations, instead of handing out in-range row numbers that name the wrong rows (and,
+through `%apply`, a plausible mass from the wrong galaxies).
 `%is_current()` is the question without the abort; `%group_by` again is the remedy.
 
-A change that moves no row leaves the grouping usable: `%set`, `%set_null`, `%fillna`, and an
-`%add_column` that fits inside the room `%reserve_columns` made. An `%add_column` that has to
-relocate the column slots advances the generation, and so stales it, like a row change. The five
-questions about the object itself (`%ngroups`, `%nrows`, `%max_size`, `%nkeys`, `%key_names`)
-answer without the check.
+What leaves a grouping usable is a change to **values** alone: `%set`, `%set_null`, `%fillna`, and
+an `%add_column` of a new name that fits inside the room `%reserve_columns` made. **A change to the
+column set stales it even though it moves no row** — `%drop_column`, `%rename_column`,
+`%copy_column`, `%cast`, `%parse_column`, `%format_column`, `%drop_columns`, `%keep_columns`,
+`%evict_column`, `%reload`, `%compact`, an `%add_column` that replaces an existing column or has to
+relocate the column slots, and `%reserve`/`%reserve_columns`, which *are* the relocation, so the
+grouping is built after the reservation rather than before. Writing the table with `release=.true.`
+stales it too, by giving back the columns that write had to read. The five questions about the
+object itself (`%ngroups`, `%nrows`, `%max_size`, `%nkeys`, `%key_names`) answer without the check.
 
 The raw permutation from `%argsort_by(group_offsets=)` is the same partition without the object,
 and without the check: its [stale-permutation warning](table-mutate.html#grouping) is what this

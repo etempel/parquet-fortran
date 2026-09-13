@@ -3943,6 +3943,140 @@ def check_documented_signatures_match_source():
     return problems
 
 
+#: `%agg`'s vocabulary claims on `doc/pages/tables/table-group.md`, each as
+#: (key, page anchor, how the page span ends). The page writes every token as a `"..."` code span,
+#: which is what makes both halves machine-readable. `q`/`method`/`ddof`/`scale` share one
+#: sentence and are cut apart on their own option markers, so they carry no anchor of their own.
+AGG_DOC_ANCHORS = (
+    ("exact", r"and keeps them exact:(.*?), on an integer or logical column"),
+    ("options", r"An option a token does not take is refused rather than ignored\*\*:(.*?)\.\s"),
+    ("weights", r"weights on a statistic they cannot affect \((.*?)\)"),
+)
+
+#: The options `%agg` refuses, in the order their refusals appear in `agg_check_options`.
+AGG_OPTIONS = ("q", "method", "ddof", "scale")
+
+
+def _fortran_string_text(literal):
+    """The text a Fortran string-concatenation chain produces: the quoted runs, joined.
+
+    `'a "x" and ' // '"y"'` gives `a "x" and "y"`. Written as a scanner rather than a regex
+    because the messages carry `"` inside `'`-delimited literals and `'` is legal inside
+    `"`-delimited ones, which no single pattern gets right.
+    """
+    out, i, n = [], 0, len(literal)
+    while i < n:
+        ch = literal[i]
+        if ch in "'\"":
+            j = i + 1
+            while j < n and literal[j] != ch:
+                j += 1
+            out.append(literal[i + 1:j])
+            i = j + 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def check_agg_vocabulary_matches_its_documentation():
+    """`%agg`'s exact family and its option refusals must match what the source says they are.
+
+    `doc/pages/tables/table-group.md` writes out, by hand, three lists the source owns:
+
+    * the **exact int64 family** -- `AG_INT_TOKENS` (`src/parquet_tables_group.f90`);
+    * which statistics **`q=`, `method=`, `ddof=` and `scale=` belong to** -- the four refusal
+      messages in `agg_check_options`, which are the authority on those sets because they are what
+      a caller is told;
+    * the statistics **weights cannot affect** -- the fifth refusal message in the same procedure.
+
+    **Why these three and not `%agg`'s 17-row token table.** `feature_doc.md` section 8 ("A check is
+    worth proposing when drift makes the page state something FALSE") splits this class in two, and
+    only these three fall on the checkable side. The page's sentence says declaring `out` as
+    `integer(int64)` "selects the statistics that are exact", and says `method=` "belongs to" three
+    named tokens -- closed claims, so a token added to or removed from either set makes the page
+    tell a reader something false about code they are about to write. Drift in the 17-row table
+    leaves the page merely INCOMPLETE, which is the class that was proposed and declined on U3, so
+    that table is deliberately outside this check and stays a hand count.
+
+    **Sets, not sequences.** Unlike a signature's argument list, none of these is positional, so
+    reordering the page's list is an editorial choice rather than a defect; only membership is
+    compared, and a mismatch prints both sides.
+
+    The scan refuses to pass when an anchor does not match or a source list comes back empty: both
+    mean it has gone blind rather than that the page is clean (CLAUDE.md, "A static check that
+    enumerates names goes stale silently").
+    """
+    src = SRC / "parquet_tables_group.f90"
+    page = REPO_ROOT / "doc" / "pages" / "tables" / "table-group.md"
+    if not src.is_file() or not page.is_file():
+        return ["check_agg_vocabulary_matches_its_documentation: %s or %s is missing -- this "
+                "check has gone blind" % (src.name, page.name)]
+
+    # ---- the source half -------------------------------------------------------------------
+    want = {}
+    for _, line in _logical_lines(src):
+        m = re.search(r"AG_INT_TOKENS\s*=\s*(.+)$", line)
+        if m:
+            want["exact"] = {t.strip() for t in
+                             _fortran_string_text(m.group(1)).split(",") if t.strip()}
+        if "error stop" not in line:
+            continue
+        msg = _fortran_string_text(line[line.index("error stop") + len("error stop"):])
+        for m in re.finditer(r"\b(%s)= belongs to (.*?)(?:;|$)" % "|".join(AGG_OPTIONS), msg):
+            want[m.group(1)] = set(re.findall(r'"([a-z]+)"', m.group(2)))
+        m = re.search(r"weights have no effect on (.*?)(?:;|$)", msg)
+        if m:
+            want["weights"] = set(re.findall(r'"([a-z]+)"', m.group(1)))
+
+    missing_src = [k for k in ("exact", "weights") + AGG_OPTIONS if not want.get(k)]
+    if missing_src:
+        return ["src/parquet_tables_group.f90: could not read %s out of the source -- this check "
+                "has gone blind. It reads AG_INT_TOKENS and the `X= belongs to \"...\"` and "
+                "`weights have no effect on \"...\"` refusal messages in agg_check_options."
+                % ", ".join(missing_src)]
+
+    # ---- the page half ---------------------------------------------------------------------
+    flat = re.sub(r"\s+", " ", page.read_text())
+    got, problems = {}, []
+    for key, anchor in AGG_DOC_ANCHORS:
+        m = re.search(anchor, flat)
+        if m is None:
+            problems.append("doc/pages/tables/table-group.md: the '%s' sentence no longer matches "
+                            "its anchor, so this check can no longer see it. Either restore the "
+                            "wording or update AGG_DOC_ANCHORS; do not leave it unmatched."
+                            % key)
+            continue
+        span = m.group(1)
+        if key != "options":
+            got[key] = set(re.findall(r'`"([a-z]+)"`', span))
+            continue
+        marks = [(mm.start(), mm.group(1))
+                 for mm in re.finditer(r"`(%s)=`" % "|".join(AGG_OPTIONS), span)]
+        for i, (pos, name) in enumerate(marks):
+            end = marks[i + 1][0] if i + 1 < len(marks) else len(span)
+            got[name] = set(re.findall(r'`"([a-z]+)"`', span[pos:end]))
+    if problems:
+        return problems
+
+    # ---- compare ---------------------------------------------------------------------------
+    labels = {"exact": "the exact int64 family (AG_INT_TOKENS)",
+              "weights": "the statistics weights cannot affect"}
+    for key in ("exact", "weights") + AGG_OPTIONS:
+        page_set = got.get(key)
+        if not page_set:
+            problems.append("doc/pages/tables/table-group.md: names no statistic for %s, so this "
+                            "check has gone blind on it; the source says: %s"
+                            % (labels.get(key, "`%s=`" % key), ", ".join(sorted(want[key]))))
+            continue
+        if page_set != want[key]:
+            problems.append(
+                "doc/pages/tables/table-group.md: %s disagrees with the source.\n"
+                "    page: %s\n    src : %s"
+                % (labels.get(key, "`%s=`" % key),
+                   ", ".join(sorted(page_set)), ", ".join(sorted(want[key]))))
+    return problems
+
+
 def check_maml_keys_case_insensitive():
     """A MAML block header must never be recognized by a literal case-SENSITIVE comparison.
 
@@ -6307,6 +6441,8 @@ CHECKS = (
      check_counted_lists_match_their_bullets),
     ("a documented call signature matches the procedure's arguments",
      check_documented_signatures_match_source),
+    ("%agg's exact family and option refusals match the source",
+     check_agg_vocabulary_matches_its_documentation),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

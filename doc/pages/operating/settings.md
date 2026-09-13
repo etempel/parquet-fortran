@@ -356,7 +356,7 @@ from a population of a trillion is 100 elements of work, and stays serial.
 `parquet_get_random_threads()` and `parquet_get_random_parallel_min_elements()` report the raw
 settings.
 
-## Threads for a bulk spatial query, and the rebuild warning
+## Threads for a bulk spatial query, and the rebuild it may trigger
 
 `parquet_set_spatial_threads(n)` caps the threads one bulk `pf_spatial_index` query —
 `%all_within`, `%pairs_within`, `%count_all_within` — may use. Like every other per-area cap it is a
@@ -370,16 +370,17 @@ threading admissible here as a setting rather than as something that would have 
 argument. (That ordering is also why two threads must not call a bulk query on the *same* index at
 once — see [Threading and settings](../utilities/spatial.html#threading-and-settings).)
 
-`parquet_set_spatial_rebuild_warning(flag)` governs whether an index says so when it rebuilds
-itself. A bulk query whose radius disagrees badly with the `radius=` the index was built for
-re-tunes the cell size before sweeping, and warns once per index that it has done so. The warning is
-on by default because a silent rebuild is a silent performance cliff: the message exists to tell you
+**An index says so when it rebuilds itself.** A bulk query whose radius disagrees badly with the
+`radius=` the index was built for re-tunes the cell size before sweeping, and says so once per index.
+It is said because a silent rebuild is a silent performance cliff: the message exists to tell you
 your `radius=` hint was wrong, and without it the symptom is simply a library that seems slow.
-Turning it off does not stop the rebuild — it stops the library mentioning it. `verbosity="silent"`
-silences it too, as it does all solicited output; this knob is the narrower control for a program
-that wants everything else.
 
-`parquet_get_spatial_threads()` and `parquet_get_spatial_rebuild_warning()` report the raw settings.
+That message is [advice](#terminal-output), so `verbosity` governs it with every other piece of
+advice: `parquet_set_verbosity("silent")` silences it, and nothing silences the rebuild itself.
+There is no per-message knob — there used to be a `spatial_rebuild_warning`, and it was the last
+setting in this library that governed exactly one line of output.
+
+`parquet_get_spatial_threads()` reports the raw setting.
 
 ## Threads for a bulk HEALPix conversion
 
@@ -641,12 +642,22 @@ effect immediately.
 | level | what still prints |
 |---|---|
 | `"normal"` (default) | everything |
-| `"silent"` | warnings and errors. Remarks and **explicitly-called print procedures** go quiet |
+| `"silent"` | warnings and errors. Remarks, advice and **explicitly-called print procedures** go quiet |
 | `"errors_only"` | errors only |
 
 ```fortran
 call parquet_set_verbosity("errors_only")   ! a clean run in a batch pipeline
 ```
+
+**The level applies to a message's CLASS, and the class is written on the line.** Every message this
+library emits opens with one of four markers, and nothing is decided message by message:
+
+| marker | what it is | goes quiet at |
+|---|---|---|
+| `WARNING: ` | a finding about your data or your schema — something the library thinks is wrong | `"errors_only"` |
+| `NOTE: ` | advice about how the library is being used — a hint that was wrong, a request the environment would not allow. Nothing is wrong and every result is identical | `"silent"` |
+| `INFO: ` | a remark about the library itself, such as a development build | `"silent"` |
+| *(no marker)* | the context lines a failing close prints before aborting | never |
 
 **Errors are never suppressed, at any level** — an `error stop`, the C++ layer's fatal-error report,
 and the context lines a failing writer close prints before aborting all survive. Your program's
@@ -667,16 +678,16 @@ to a data consumer and does not want the library's text mixed into that stream.
 call parquet_set_message_stream("stderr")   ! keep stdout clean for piped data
 ```
 
-**It governs everything this library writes.** The warnings, the remarks, the context lines a
-failing close prints before aborting, and every explicitly-called `%print*` procedure you did not
-give a `unit=`:
+**It governs everything this library writes.** The warnings, the advice, the remarks, the context
+lines a failing close prints before aborting, and every explicitly-called `%print*` procedure you did
+not give a `unit=`:
 
 | what | where it goes |
 |---|---|
 | `%print_stat`, `%print_rows`, `%print_schema_info`, `pf_stats%print`, `parquet_string_column%print`, `parquet_string%print` | `unit=` if given, otherwise the `message_stream` unit |
 | `parquet_print_settings` | the `message_stream` unit (its exemption is from `verbosity`, not from this) |
 | `parquet_close_reader(..., print_stat=.true.)` | the `message_stream` unit — this one has no `unit=` |
-| warnings, and the context lines before an abort | the `message_stream` unit |
+| warnings, advice, remarks, and the context lines before an abort | the `message_stream` unit |
 | an `error stop`, and the C++ layer's fatal-error report | **always stderr**, whatever this is set to |
 
 An explicit `unit=` always wins over the setting, as an explicit argument always does.
@@ -727,7 +738,6 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_SPATIAL_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_HEALPIX_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_INDEX_THREADS` | integer >= 0 (`0` = automatic) |
-| `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING` | `true` / `false` |
 | `PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS` | integer >= 0 (`0` = no floor) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_RADIX_PATH` | `true`/`false`/`1`/`0` |
@@ -798,7 +808,6 @@ parquet-fortran settings
   healpix_threads                  0
   index_threads                    0
   random_parallel_min_elements     1000
-  spatial_rebuild_warning          true
   sort_counting_path               true
   sort_radix_path                  true
   sort_counting_bucket_limit       4194304

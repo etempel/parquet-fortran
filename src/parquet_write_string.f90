@@ -44,6 +44,7 @@ contains
         integer(int64) :: i, n_valid, n_violate
         logical :: any_valid, ok, use_mask
         character(len=:), allocatable :: data_min, data_max, bounds_desc, fmt_int, fmt_int2
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
 
         if (.not. writer%qc) return
         if (.not. writer%is_schema_enforced) return
@@ -95,9 +96,13 @@ contains
 
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
+        ! The file this violation is about, as every qc warning carries it -- see
+        ! parquet_check_qc_miss (src/parquet_write.f90) for why, and the read side's counterpart in
+        ! src/parquet_wrapper.cpp.
+        call writer_context_suffix(writer, ctx)
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range ['" // data_min // "', '" // data_max // "'], " // &
-            fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range" // ctx)
     end subroutine parquet_check_qc_string
     !> Same as parquet_check_qc_string but reading from a parquet_string_column source directly
     !> (the compact write path, parquet_write_string_column_compact/_chunk_compact) instead of
@@ -115,6 +120,7 @@ contains
         integer(int64) :: i, n_valid, n_violate, nrows, imin, imax, widest, elen
         logical :: any_valid, ok
         character(len=:), allocatable :: data_min, data_max, bounds_desc, fmt_int, fmt_int2
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         character(len=:), allocatable :: scratch
 
         if (.not. writer%qc) return
@@ -182,9 +188,13 @@ contains
 
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
+        ! The file this violation is about, as every qc warning carries it -- see
+        ! parquet_check_qc_miss (src/parquet_write.f90) for why, and the read side's counterpart in
+        ! src/parquet_wrapper.cpp.
+        call writer_context_suffix(writer, ctx)
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range ['" // data_min // "', '" // data_max // "'], " // &
-            fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range" // ctx)
     end subroutine parquet_check_qc_string_compact
     !> Reports whether any element of a space-padded string array is longer, once trailing blanks
     !> are ignored, than the column's declared `array_size` -- stopping at the first one that is.

@@ -328,6 +328,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rules are stated on the angles in degrees. `PF_LINK_SUM` sweeps twice each radius, so it re-tunes
   the index against the doubled radius and refuses an angular radius above 45 degrees. See
   [Choosing the rule](doc/pages/utilities/spatial.md#choosing-the-rule-with-combine).
+- **A `NOTE: ` class for advice, suppressed one level before a warning.** Advice about how the
+  library is being used — a hint that turned out to be wrong, a request the environment would not
+  allow, a resolution that was coarsened — is now its own class, silenced by
+  `verbosity="silent"` while a `WARNING:` about the data survives to `"errors_only"`. Six messages
+  moved into it: the affinity clamp's, and the five a `pf_spatial_index` raises. See
+  [Terminal output](doc/pages/operating/settings.md#terminal-output).
 
 ### Changed
 
@@ -343,6 +349,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`parquet_schema%print_schema_info` with neither `unit=` nor `filename=` writes to the
   `message_stream` unit** instead of aborting. See
   [Printing column info](doc/pages/schema/building-schema-in-code.md#printing-column-info-with-schemaprint_schema_info).
+- **Every message the library emits opens with its class and names the procedure it came from, and
+  a warning raised from a read, write or schema path names its file.** The four qc violation
+  warnings gain `(file: …, maml: …)`, as their aborts already carried; the C++ read side's qc
+  warnings and its incomplete-column warning gain `(file: …)` for the file they read; the
+  development-build remark gains `INFO: ` in place of a hand-written `note: `;
+  `parquet_map_row%get`, `parquet_struct_row%field` and `parquet_column_info%set_protected` name
+  themselves as their aborts do. A program matching this library's output by exact text will need
+  updating; one matching a substring of the message body will not.
 - **`parquet_list_column%set_null` and `parquet_map_column%set_null` drop the row's elements or
   entries, so a null row is zero-length.** `%clear_null` brings the row back empty rather than
   restoring them, `%total_elements`/`%total_entries` fall by the row's former length, and both
@@ -397,6 +411,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unspecified). See
   [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses)
   and [Threading](doc/pages/utilities/index-maps.md#threading).
+
+### Removed
+
+- **`parquet_set_spatial_rebuild_warning`, `parquet_get_spatial_rebuild_warning` and
+  `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING`.** The message they governed is advice, so
+  `parquet_set_verbosity("silent")` silences it with every other piece of advice; nothing silences
+  the rebuild itself. `parquet_print_settings` no longer prints a `spatial_rebuild_warning` row and
+  `parquet_spatial` no longer re-exports the pair. See
+  [Threads for a bulk spatial query](doc/pages/operating/settings.md#threads-for-a-bulk-spatial-query-and-the-rebuild-it-may-trigger).
 
 ### Fixed
 

@@ -174,20 +174,25 @@ per row at every thread count from 1 to 64** — more than twenty times what the
 `OMP_PLACES=sockets`, and with no error and no failure. `OMP_PROC_BIND=close` with
 `OMP_PLACES=cores` behaves the same way.
 
-**The library warns when this happens**, once per process:
+**The library says so when this happens**, once per process:
 
 ```
-WARNING: sorting is limited to 2 thread(s) because this process's CPU affinity allows no more,
+NOTE: sorting is limited to 2 thread(s) because this process's CPU affinity allows no more,
 although 64 were requested. This usually means OMP_PROC_BIND is set with OMP_PLACES=cores;
 OMP_PLACES=sockets avoids it.
 ```
 
-The first word names whichever subsystem noticed — `sorting`, `table prefetching`,
+`NOTE: ` rather than `WARNING: ` because this is **advice about the process's environment**, not a
+finding about your data: nothing is wrong, every result is identical, and the only thing to fix is
+outside the library. That class goes quiet one level earlier than a warning does — see
+[Terminal output](settings.html#terminal-output).
+
+The word after that prefix names whichever subsystem noticed — `sorting`, `table prefetching`,
 `table rewriting`, `column gathering`, `string operations`, `random draws`, `spatial`, `healpix`,
 `index` or `grouping`. There is
 one line per process, not one per subsystem: they all have the same cause and the same fix.
 
-The warning fires only when the clamp actually reduced the thread count, so a job deliberately
+The message fires only when the clamp actually reduced the thread count, so a job deliberately
 confined to a small cpuset — or one rank pinned per core with `OMP_NUM_THREADS=1` — stays quiet. It
 follows [the verbosity setting](settings.html#terminal-output): `parquet_set_verbosity("silent")`
 suppresses it, and so does `"errors_only"`.

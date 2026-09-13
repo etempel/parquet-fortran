@@ -105,9 +105,12 @@ contains
             ! A remark rather than a warning: it says something about how this copy of the library
             ! was BUILT, not about the caller's data, and it fires on every call in a build whose
             ! macro substitution did not happen. So it goes through the informational channel, which
-            ! `verbosity="silent"` quiets while leaving real warnings alone.
-            call parquet_emit_info("note: this is a development build of parquet-fortran " // &
-                "(library version " // trim(cversion) // ", RELEASE_VERSION " // trim(ver_string) // ")")
+            ! `verbosity="silent"` quiets while leaving real warnings alone. The class marker is the
+            ! channel's own "INFO: " -- this message used to hand-write a lowercase "note: ", which
+            ! is now parquet_emit_advice's word for a different class at the same level.
+            call parquet_emit_info("parquet_get_version: this is a development build of " // &
+                "parquet-fortran (library version " // trim(cversion) // ", RELEASE_VERSION " // &
+                trim(ver_string) // ")")
         end if ! GCOVR_EXCL_STOP
         !
         if (present(mode)) then

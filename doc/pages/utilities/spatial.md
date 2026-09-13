@@ -753,8 +753,9 @@ collision would mean silently answering about the old positions.
 `%rebuild_for`, which re-tunes without looking at coordinates at all, works on both.
 
 A bulk query also **re-tunes itself** when the radius it has been given would choose a very
-different cell from the one the index was built with, and says so once per index. Silence it with
-`parquet_set_spatial_rebuild_warning(.false.)`.
+different cell from the one the index was built with, and says so once per index. The message is
+advice rather than a warning, so `parquet_set_verbosity("silent")` silences it along with every other
+piece of advice the library gives.
 
 ## Threading and settings
 

@@ -912,6 +912,8 @@ contains
                 test_settings_mirror_is_taken_at_open), &
             new_unittest("settings: message_stream moves a warning off stdout", &
                 test_settings_message_stream_moves_warning), &
+            new_unittest("settings: silent takes the advice and leaves the warning", &
+                test_settings_advice_is_its_own_class), &
             new_unittest("settings: an abort still reports itself when everything is silenced", &
                 test_settings_error_survives_silence), &
             new_unittest("read_qc: an entry longer than the supported maximum aborts", &
@@ -2028,8 +2030,8 @@ contains
             new_unittest("an out-of-range edge endpoint aborts", test_spatial_components_range_aborts), &
             new_unittest("min_size = 0 aborts", test_spatial_components_min_size_aborts), &
             new_unittest("a negative vertex count aborts", test_spatial_components_nvert_aborts), &
-            new_unittest("the automatic-rebuild warning is said, and can be silenced", &
-                test_spatial_rebuild_warning) &
+            new_unittest("the automatic-rebuild advice is said, and can be silenced", &
+                test_spatial_rebuild_advice) &
             ]
         ! The line-of-sight cylinder's scenarios (%within_los, %pairs_within_los, observer=, los=):
         ! their own part rather than more entries in p7, which sits near the 255-continuation-line
@@ -7199,30 +7201,33 @@ contains
             required_stderr="threads= must be >= 1")
     end subroutine test_spatial_threads_below_one_aborts
 
-    !> The observed effect of `spatial_rebuild_warning`, WITH its negative control.
+    !> The rebuild advice, said and silenced, WITH its negative control.
     !>
     !> Both scenarios rebuild -- each prints `rebuilds=1` -- so the only thing that differs is
     !> whether the library says so. Asserting only the first half would pass just as happily
-    !> against a knob that is stored and never read.
-    subroutine test_spatial_rebuild_warning(error)
+    !> against a verbosity level that silenced the rebuild itself.
+    !>
+    !> This replaced the observed-effect test for `spatial_rebuild_warning`: the message that knob
+    !> governed is advice now, so `verbosity` governs it with every other piece of advice.
+    subroutine test_spatial_rebuild_advice(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_warning_on", expect_abort=.false., &
-            failure_message="the rebuild-warning scenario was not expected to abort", &
-            required_stderr="rebuilt for a query radius far from the one it was built for")
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_advice_normal", expect_abort=.false., &
+            failure_message="the rebuild-advice scenario was not expected to abort", &
+            required_stderr="NOTE: pf_spatial_index: rebuilt for a query radius far from the one it was built for")
         if (allocated(error)) return
-        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_warning_on", expect_abort=.false., &
-            failure_message="the rebuild-warning scenario was expected to rebuild", &
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_advice_normal", expect_abort=.false., &
+            failure_message="the rebuild-advice scenario was expected to rebuild", &
             required_stderr="rebuilds=1")
         if (allocated(error)) return
-        call check_scenario_exit_status_and_no_output(error, "spatial_rebuild_warning_off", expect_abort=.false., &
-            failure_message="the silenced rebuild-warning scenario was not expected to abort", &
+        call check_scenario_exit_status_and_no_output(error, "spatial_rebuild_advice_silent", expect_abort=.false., &
+            failure_message="the silenced rebuild-advice scenario was not expected to abort", &
             forbidden_text="rebuilt for a query radius")
         if (allocated(error)) return
-        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_warning_off", expect_abort=.false., &
-            failure_message="the silenced scenario must still rebuild -- the knob governs the message, not the rebuild", &
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_advice_silent", expect_abort=.false., &
+            failure_message="silencing the advice must not silence the rebuild it describes", &
             required_stderr="rebuilds=1")
-    end subroutine test_spatial_rebuild_warning
+    end subroutine test_spatial_rebuild_advice
 
     !> Every configuration mistake `parquet_logging` refuses, and the negative control that
     !> proves the refusals are not simply firing unconditionally.
@@ -13307,6 +13312,36 @@ contains
         call check_scenario_streams(error, "settings_warning_on_stderr", "WARNING: qc violation", "stderr", &
             "message_stream='stderr' should move the warning off stdout")
     end subroutine test_settings_message_stream_moves_warning
+
+    !> `parquet_emit_advice` is a CLASS, not a wording: `"silent"` takes it and leaves an ordinary
+    !> warning standing, in the same process.
+    !>
+    !> Four assertions over two runs, and none of them is redundant. The two at `"normal"` are what
+    !> stop the `"silent"` half passing against a build that never coarsens an `nside=` or never
+    !> reaches the qc check at all; the warning at `"silent"` is what stops it passing against a
+    !> channel that is simply broken, or against a `"silent"` that silences everything.
+    !>
+    !> The prefix is asserted too, because it is the channel's job to supply it: a site that
+    !> hand-wrote `"NOTE: "` into its own message would satisfy a text-only assertion.
+    subroutine test_settings_advice_is_its_own_class(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_advice_normal", expect_abort=.false., &
+            failure_message="the advice scenario was not expected to abort", &
+            required_stderr="NOTE: pf_spatial_index%build_sky: nside= was coarsened from")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "settings_advice_normal", expect_abort=.false., &
+            failure_message="the advice scenario must also raise the qc warning it is controlled against", &
+            required_stderr="WARNING: qc violation")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "settings_advice_silent", expect_abort=.false., &
+            failure_message="the silenced advice scenario was not expected to abort", &
+            forbidden_text="nside= was coarsened")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "settings_advice_silent", expect_abort=.false., &
+            failure_message="silent must take the advice and leave the warning about the data", &
+            required_stderr="WARNING: qc violation")
+    end subroutine test_settings_advice_is_its_own_class
 
     !> The one guarantee neither output setting may break.
     subroutine test_settings_error_survives_silence(error)

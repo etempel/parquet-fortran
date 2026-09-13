@@ -76,7 +76,7 @@ module parquet_settings_base
     public :: cfg_random_threads, cfg_random_parallel_min_elements
     public :: cfg_sort_threads, cfg_sort_counting_path, cfg_sort_radix_path
     public :: cfg_sort_counting_bucket_limit, cfg_message_stream
-    public :: cfg_spatial_threads, cfg_spatial_rebuild_warning, cfg_healpix_threads
+    public :: cfg_spatial_threads, cfg_healpix_threads
     public :: cfg_index_threads
     !
     ! ---- The settings API for the Arrow-free modules: state, getter AND setter ----
@@ -89,10 +89,10 @@ module parquet_settings_base
     public :: parquet_set_spatial_threads, parquet_get_spatial_threads
     public :: parquet_set_healpix_threads, parquet_get_healpix_threads
     public :: parquet_set_index_threads, parquet_get_index_threads
-    public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
-    public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    public :: parquet_emit_info, parquet_emit_advice, parquet_emit_warning
+    public :: parquet_emit_error_context
     public :: parquet_message_unit
     !
     ! ---- Shared token-vocabulary helpers, used by the setters above and by
@@ -183,15 +183,6 @@ module parquet_settings_base
     !! answers to `sort_threads` instead, because that is the sort's own work being done -- so a
     !! sorted build reads both knobs, each for the phase it owns.
     integer, save :: cfg_index_threads = 0
-    !> Whether a `pf_spatial_index` says so when a query radius disagrees badly enough with the one
-    !! it was built for that it rebuilds itself.
-    !!
-    !! **On by default, because a silent rebuild is a silent performance cliff.** The whole point of
-    !! the message is to tell the caller their `radius=` hint was wrong -- an index that quietly
-    !! rebuilds inside a bulk sweep looks like a library that is slow rather than like a hint that
-    !! needs fixing. This is the narrower control for a program that wants everything else the
-    !! library prints; `verbosity="silent"` silences it too, as it does all solicited output.
-    logical, save :: cfg_spatial_rebuild_warning = .true.
     !> Which stream the library's own messages go to. Read only by the emit channels below.
     integer, save :: cfg_message_stream = stream_stdout
     !> Whether the sort's integer counting fast path may be taken at all. Mirrored to C++ by
@@ -373,13 +364,9 @@ contains
         seen = affinity_clamp_claims
         if (seen /= 0_int64) return
         ! Suppression is checked BEFORE the claim, deliberately: a run that silenced its output must
-        ! not consume the one warning, so a later call with output enabled still receives it.
-        !
-        ! **`parquet_output_is_suppressed` rather than `parquet_emit_warning`'s own threshold**, so
-        ! this one message goes quiet at verbosity `"silent"` while an ordinary warning survives to
-        ! `"errors_only"`. That is deliberate and is what `doc/pages/operating/performance.md`
-        ! documents: this is advice about the caller's ENVIRONMENT, not a report of anything the
-        ! library found wrong, so it belongs with the output a `"silent"` run is asking to be spared.
+        ! not consume the one message, so a later call with output enabled still receives it.
+        ! `parquet_emit_advice` tests the same predicate again on its way out, which is harmless --
+        ! what this test buys is that the claim below is not spent on a line nobody sees.
         if (parquet_output_is_suppressed()) return
         !$omp atomic capture
         seen = affinity_clamp_claims
@@ -394,7 +381,10 @@ contains
         ! it is right on both paths: the caller's own number when they named one, and the
         ! environment's (already narrowed by any cap) when they did not.
         write (asked, '(i0)') n
-        call parquet_emit_warning(trim(area) // " is limited to " // trim(got) // &
+        ! Advice, not a warning: nothing is wrong with the caller's data or their request, and the
+        ! operation proceeds. What it describes is the process's ENVIRONMENT, which is why it goes
+        ! quiet one level earlier than a finding about the data would.
+        call parquet_emit_advice(trim(area) // " is limited to " // trim(got) // &
             " thread(s) because this process's CPU affinity allows no more, although " // &
             trim(asked) // " were requested. This usually means OMP_PROC_BIND is set with " // &
             "OMP_PLACES=cores; OMP_PLACES=sockets avoids it.")
@@ -582,23 +572,6 @@ contains
         n = cfg_index_threads
     end function parquet_get_index_threads
     !
-    !> Turns the spatial index's automatic-rebuild warning on or off.
-    !>
-    !> The warning fires at most once per index object, when a query radius disagrees badly enough
-    !> with the radius the index was built for that the index rebuilds itself. Turning it off does
-    !> not stop the rebuild -- it stops the library saying so.
-    subroutine parquet_set_spatial_rebuild_warning(on)
-        logical, intent(in) :: on !! .true. warns (the default), .false. rebuilds silently.
-
-        cfg_spatial_rebuild_warning = on
-    end subroutine parquet_set_spatial_rebuild_warning
-    !
-    !> Whether the spatial index's automatic-rebuild warning is enabled.
-    logical function parquet_get_spatial_rebuild_warning() result(on)
-
-        on = cfg_spatial_rebuild_warning
-    end function parquet_get_spatial_rebuild_warning
-    !
     !> Sets the cap on how many threads one bulk `pf_random_permutation`/`pf_random_subset` call
     !> may use internally.
     !>
@@ -740,9 +713,13 @@ contains
     end function parquet_get_sort_counting_bucket_limit
     !
     !> Sets how much the library prints. One of "normal" (everything, the factory default),
-    !> "silent" (the library's own remarks and its explicitly-called print procedures go quiet;
-    !> warnings and errors still appear) or "errors_only" (warnings go quiet too). Case-insensitive;
-    !> anything else aborts.
+    !> "silent" (the library's own remarks, its advice and its explicitly-called print procedures go
+    !> quiet; warnings and errors still appear) or "errors_only" (warnings go quiet too).
+    !> Case-insensitive; anything else aborts.
+    !>
+    !> **The level is a property of the message's CLASS, and the class is its channel**:
+    !> parquet_emit_info and parquet_emit_advice go at "silent", parquet_emit_warning at
+    !> "errors_only", parquet_emit_error_context never. Nothing is decided per call site.
     !>
     !> Read per message, so it takes effect immediately.
     !>
@@ -839,20 +816,61 @@ contains
         end if
     end subroutine parquet_get_message_stream
     !
-    !> Emits one informational remark -- something worth mentioning that is not a warning about the
-    !> data. Suppressed from "silent" downward.
+    !> Emits one informational remark about the LIBRARY itself -- a fact about this build, not a
+    !> finding about the caller's data and not advice about how they are using it. Suppressed from
+    !> "silent" downward.
     !>
-    !> The library has exactly one of these today (the development-build notice in
-    !> parquet_get_version). It has its own channel rather than a special case inside
-    !> parquet_emit_warning because it is the one message whose suppression level differs, and a
-    !> hard-coded exception there would have to be re-explained every time someone read the
-    !> suppression logic.
+    !> The library has exactly one of these today: the development-build notice in
+    !> parquet_get_version. It keeps its own channel rather than becoming a special case inside
+    !> parquet_emit_advice because the two say different things about the same run -- advice is
+    !> about the caller's code, a remark is about the library's own state -- and a reader who
+    !> silences one is not necessarily asking to silence the other, even though today both go at
+    !> the same level.
+    !>
+    !> **The "INFO: " prefix is supplied here**, as every other channel supplies its own. The one
+    !> message this channel carries used to open with a hand-written lowercase "note: ", which
+    !> collided with parquet_emit_advice's class marker while being the less classified of the two.
     subroutine parquet_emit_info(text)
-        character(len=*), intent(in) :: text !! the message, with no prefix.
+        character(len=*), intent(in) :: text !! the message, without the "INFO: " prefix.
 
         if (cfg_verbosity >= verb_silent) return
-        write (parquet_message_unit(), '(a)') text
+        write (parquet_message_unit(), '(a)') "INFO: " // text
     end subroutine parquet_emit_info
+    !
+    !> Emits one piece of advice about how the library is being USED -- a hint that turned out to be
+    !> wrong, a request the environment would not allow, a coarsening the caller did not ask for.
+    !> Suppressed from "silent" downward, one level before an ordinary warning.
+    !>
+    !> **Its own channel because its suppression level differs, not because its wording does.**
+    !> Advice reports nothing wrong with the caller's data: nothing is malformed, no value is out of
+    !> bounds, and the operation did exactly what was asked -- it just says how it could have been
+    !> asked better. That is the class of output a run setting `verbosity="silent"` is asking to be
+    !> spared, whereas a warning about the data survives to "errors_only" because losing it means
+    !> losing a finding.
+    !>
+    !> Before this channel existed each of its six sites tested `parquet_output_is_suppressed` by
+    !> hand ahead of a `parquet_emit_warning` call, and each carried its own paragraph explaining
+    !> why -- six copies of one decision, drifting apart at exactly the rate nobody was checking.
+    !>
+    !> **The "NOTE: " prefix is supplied here**, as the other three channels supply theirs, so the
+    !> class is carried by the channel rather than by whoever wrote the message.
+    !>
+    !> A site may still test the predicate itself before calling, and one does:
+    !> `parquet_clamp_to_affinity` must not consume its once-per-process claim in a silenced run, so
+    !> its own test stays above the claim. This channel then tests the same predicate a second time,
+    !> which is harmless.
+    !>
+    !> **No C++ counterpart.** The C++ half emits no message of this class -- its three warnings are
+    !> genuine data findings -- and an `emit_advice_cpp` that nothing called would be a global no
+    !> code reads, which is the shape `feature_risks.md` Risk-42 warns about and the stated reason
+    !> `cfg_sort_radix_path` is deliberately unmirrored. Add one on the day C++ acquires such a
+    !> message.
+    subroutine parquet_emit_advice(text)
+        character(len=*), intent(in) :: text !! the message, without the "NOTE: " prefix.
+
+        if (cfg_verbosity >= verb_silent) return
+        write (parquet_message_unit(), '(a)') "NOTE: " // text
+    end subroutine parquet_emit_advice
     !
     !> Emits one warning about the data or the schema. Suppressed only at "errors_only".
     !>

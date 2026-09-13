@@ -74,17 +74,22 @@ contains
         dbg_rebuilds = dbg_rebuilds + 1_int64
         ! Once per index, not once per query: the message exists to tell the caller their radius=
         ! hint was wrong, and repeating it per query would bury that under itself.
-        if (.not. self%warned .and. cfg_spatial_rebuild_warning .and. .not. parquet_output_is_suppressed()) then
+        !
+        ! The suppression test stays here even though `parquet_emit_advice` repeats it, for the same
+        ! reason `parquet_clamp_to_affinity` keeps its own: `self%warned` is claimed inside this
+        ! branch, so a silenced query must not spend the one message an unsilenced later query would
+        ! have received.
+        if (.not. self%warned .and. .not. parquet_output_is_suppressed()) then
             self%warned = .true.
             ! A sky index accumulates chords; the caller asked in degrees and must read degrees.
             if (self%metric_id == PF_METRIC_SKY) then
                 r_cur = 2.0_real64 * asin(min(0.5_real64 * r_cur, 1.0_real64)) * spatial_rad2deg
                 r_new = 2.0_real64 * asin(min(0.5_real64 * r_new, 1.0_real64)) * spatial_rad2deg
             end if
-            call parquet_emit_warning("pf_spatial_index: rebuilt for a query radius far from the one " // &
+            call parquet_emit_advice("pf_spatial_index: rebuilt for a query radius far from the one " // &
                 "it was built for (built " // num_text(r_cur) // ", now " // num_text(r_new) // &
                 ", cell " // num_text(self%cell_side) // "). Pass a better radius= to %build, or " // &
-                "parquet_set_spatial_rebuild_warning(.false.) to silence this.")
+                "parquet_set_verbosity('silent') to silence this and every other piece of advice.")
         end if
     end procedure spatial_maybe_rebuild
 
@@ -764,12 +769,10 @@ contains
         ! the sweep is slow and exact, and the window can be meant.
         if (n > 1_int64) then
             if (self%lip * maxval(b_par) > self%d_hi - self%d_lo) then
-                if (.not. parquet_output_is_suppressed()) then
-                    call parquet_emit_warning("pf_spatial_index%" // what // ": L x max(b_par) = " // &
-                        num_text(self%lip * maxval(b_par)) // " exceeds the catalogue's range in distance from " // &
-                        "the observer (" // num_text(self%d_hi - self%d_lo) // "), so the parallel window spans " // &
-                        "the whole catalogue along every line of sight; is b_par in los='s units?")
-                end if
+                call parquet_emit_advice("pf_spatial_index%" // what // ": L x max(b_par) = " // &
+                    num_text(self%lip * maxval(b_par)) // " exceeds the catalogue's range in distance from " // &
+                    "the observer (" // num_text(self%d_hi - self%d_lo) // "), so the parallel window spans " // &
+                    "the whole catalogue along every line of sight; is b_par in los='s units?")
             end if
         end if
         call spatial_storage(self, xs, ys, zs)

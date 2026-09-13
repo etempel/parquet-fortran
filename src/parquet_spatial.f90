@@ -38,12 +38,12 @@ module parquet_spatial
         parquet_set_sort_radix_path, parquet_get_sort_radix_path, &
         parquet_set_sort_counting_path, parquet_get_sort_counting_path, &
         parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
-    use parquet_settings_base, only: cfg_spatial_threads, cfg_spatial_rebuild_warning, &
+    use parquet_settings_base, only: cfg_spatial_threads, &
         parquet_set_spatial_threads, parquet_get_spatial_threads, &
-        parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning, &
         parquet_set_verbosity, parquet_get_verbosity, &
         parquet_set_message_stream, parquet_get_message_stream, &
-        parquet_clamp_to_affinity, parquet_emit_warning, parquet_output_is_suppressed
+        parquet_clamp_to_affinity, parquet_emit_warning, parquet_emit_advice, &
+        parquet_output_is_suppressed
     ! **The HEALPix sky backend's whole dependency, and the one import that grows what a
     ! `use parquet_spatial` consumer compiles** -- from 9 Fortran files to 15. That was weighed
     ! and accepted: both modules are Arrow-free, so no C++ or Arrow boundary moves and the cost is
@@ -86,10 +86,9 @@ module parquet_spatial
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
-    !> Its own two knobs. `spatial_threads` caps a bulk query's team; `spatial_rebuild_warning`
-    !! governs whether an automatic rebuild says so.
+    !> Its own knob: `spatial_threads` caps a bulk query's team. Whether an automatic rebuild says
+    !! so is not a knob of its own -- the message is advice, and `verbosity` governs the class.
     public :: parquet_set_spatial_threads, parquet_get_spatial_threads
-    public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     !> The sorting knobs, because `%build` buckets through `pf_argsort` and every one of them
     !! governs which path that takes -- `sort_counting_bucket_limit` is read directly by the
     !! cell-count clamp.

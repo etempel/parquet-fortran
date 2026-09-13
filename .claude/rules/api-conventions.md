@@ -40,12 +40,21 @@
 
 ## Errors and diagnostics
 
+- **Every message has one shape**: its class marker, the procedure it came from, then its
+  file/schema context. Each of the three is decided in one place, not per call site.
 - `error stop` messages in read/write/schema paths append file/schema context through
-  `writer_context_suffix`, `reader_filename_suffix`, `maml_name_suffix` (post-open messages only).
+  `writer_context_suffix`, `reader_filename_suffix`, `maml_name_suffix` (post-open messages only)
+  or `table_context_suffix`. A WARNING from the same path appends the same suffix, through the same
+  helper: `check_warnings_carry_their_context`, whose allow-list carries a reason per entry.
+- A message names the PROCEDURE it came from, inline and type-qualified
+  (`pf_spatial_index%build_sky: ...`), not the module. A module's `EP` parameter is for `error stop`
+  text and stays there.
 - Cap caller-supplied text inside a message to ~100 characters plus `"..."` (`parquet_filter_add`).
-- Library output goes through `parquet_emit_info`/`_warning`/`_error_context`
-  (`parquet_settings_base`); `check_no_direct_printing`. `parquet_toml` is the one exception
-  (`module-structure.md`).
+- Library output goes through `parquet_emit_info`/`_advice`/`_warning`/`_error_context`
+  (`parquet_settings_base`), which supply `"INFO: "`, `"NOTE: "`, `"WARNING: "` and nothing
+  respectively; `check_no_direct_printing`. Pick the channel by CLASS: advice is about the caller's
+  code or environment and goes quiet at `"silent"`, a warning is a finding about their data and
+  survives to `"errors_only"`. `parquet_toml` is the one exception (`module-structure.md`).
 - An `error stop` reachable from a parallel region is reached through one `critical` so only one
   thread aborts: `pf_log_fatal` (`parquet_logging`) or `ix_abort` (`parquet_index`;
   `check_index_aborts_go_through_reporter`). Give a new one the same treatment.

@@ -3342,10 +3342,13 @@ contains
         real(real64), allocatable :: x(:), y(:), z(:)
         integer(int64), allocatable :: counts(:)
         type(pf_spatial_index) :: sx
-        logical :: warn_was
+        character(len=:), allocatable :: verb_was
 
-        warn_was = parquet_get_spatial_rebuild_warning()
-        call parquet_set_spatial_rebuild_warning(.false.)
+        ! The re-tune below is provoked on purpose, so its once-per-index advice is noise here.
+        ! `verbosity` is the control now that spatial_rebuild_warning is gone; restored at the end,
+        ! and the suite runs its tests serially so nothing else sees the toggle.
+        call parquet_get_verbosity(verb_was)
+        call parquet_set_verbosity("silent")
         call parquet_debug_reset_spatial_counters()
         call make_cloud(3000_int64, 1.0_real64, .false., x, y, z)
 
@@ -3362,7 +3365,7 @@ contains
         call check(error, sx%effective_radius() > 0.01_real64, &
             "an automatic rebuild must fold the new radius into the recorded ones")
 
-        call parquet_set_spatial_rebuild_warning(warn_was)
+        call parquet_set_verbosity(verb_was)
         call parquet_debug_reset_spatial_counters()
     end subroutine test_auto_rebuild
 
@@ -4850,12 +4853,13 @@ contains
         logical, allocatable :: want(:, :)
         type(pf_spatial_index) :: borrowed, owned
         integer(int64) :: n, a, nwant, rebuilds
-        logical :: changed, warn_was
+        logical :: changed
+        character(len=:), allocatable :: verb_was
 
-        ! The re-tune below is provoked on purpose, so its once-per-index warning is noise here;
+        ! The re-tune below is provoked on purpose, so its once-per-index advice is noise here;
         ! restored at the end, and the suite runs its tests serially so nothing else sees the toggle.
-        warn_was = parquet_get_spatial_rebuild_warning()
-        call parquet_set_spatial_rebuild_warning(.false.)
+        call parquet_get_verbosity(verb_was)
+        call parquet_set_verbosity("silent")
         call make_wedge(220_int64, 40_int64, 500.0_real64, 1500.0_real64, 12_int64, ra, dec, d, x, y, z)
         n = size(x, kind=int64)
         allocate (bp(n), bl(n), want(n, n))
@@ -4909,7 +4913,7 @@ contains
         ! A moved los over unmoved points is a change too.
         call owned%rebuild(x2, y2, z2, rebuilt=changed, los=0.25_real64 * d2)
         call check(error, changed, "%rebuild with a changed los alone must rebuild")
-        call parquet_set_spatial_rebuild_warning(warn_was)
+        call parquet_set_verbosity(verb_was)
     end subroutine test_pairs_los_survives_rebuild_and_copy_false
 
     !> The pair list `(pi, pj)` as a set over `n` rows, for use as the reference another walk is

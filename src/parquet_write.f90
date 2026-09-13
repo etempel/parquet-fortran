@@ -1139,6 +1139,7 @@ contains
         integer :: idx
         integer(int64) :: n_null, n_total
         character(len=:), allocatable :: fmt_int, fmt_int2
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
 
         if (.not. writer%qc) return
         if (.not. writer%is_schema_enforced) return
@@ -1152,8 +1153,15 @@ contains
 
         call parquet_qc_format_int(n_null, fmt_int)
         call parquet_qc_format_int(n_total, fmt_int2)
+        ! The file this qc violation is about, appended exactly as an abort from the write path
+        ! appends it. A batch run over many files otherwise emits one indistinguishable line per
+        ! file, naming the column and never the file -- while a HARD violation on the same data
+        ! names it. The C++ read-side qc warnings name their reader's file for the same reason, so
+        ! the two halves stay matched in SHAPE: core message plus the file it concerns.
+        call writer_context_suffix(writer, ctx)
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': " // fmt_int // " of " // &
-            fmt_int2 // " element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here)")
+            fmt_int2 // " element(s) are Null (qc: miss: is declared empty, so Nulls are not expected " // &
+            "here)" // ctx)
     end subroutine parquet_check_qc_miss
     !> Builds the int8 validity buffer and c_ptr passed down to the C++
     !> append_* functions from a caller's flattened `is_valid` mask (1 =

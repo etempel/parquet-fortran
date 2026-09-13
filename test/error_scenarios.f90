@@ -988,6 +988,10 @@ program error_scenarios
         call scenario_settings_warning(level="errors_only", stream="stdout")
     case ("settings_warning_on_stderr")
         call scenario_settings_warning(level="normal", stream="stderr")
+    case ("settings_advice_normal")
+        call scenario_settings_advice(level="normal")
+    case ("settings_advice_silent")
+        call scenario_settings_advice(level="silent")
     case ("settings_print_stat_normal")
         call scenario_settings_print_stat(level="normal")
     case ("settings_print_stat_silent")
@@ -2952,10 +2956,10 @@ program error_scenarios
         call scenario_spatial_components_min_size_zero()
     case ("spatial_components_nvert_negative")
         call scenario_spatial_components_nvert_negative()
-    case ("spatial_rebuild_warning_on")
-        call scenario_spatial_rebuild_warning(warn=.true.)
-    case ("spatial_rebuild_warning_off")
-        call scenario_spatial_rebuild_warning(warn=.false.)
+    case ("spatial_rebuild_advice_normal")
+        call scenario_spatial_rebuild_advice(level="normal")
+    case ("spatial_rebuild_advice_silent")
+        call scenario_spatial_rebuild_advice(level="silent")
     case ("spatial_sky_query_before_build")
         call scenario_spatial_sky_query_before_build()
     case ("spatial_sky_radius_nan")
@@ -7361,6 +7365,51 @@ contains
         call parquet_close_writer(writer)
         call parquet_reset_settings()
     end subroutine scenario_settings_warning
+
+    !> Emits one ADVICE message and one WARNING in the same process, at a chosen verbosity, so the
+    !> test can assert that `"silent"` separates the two CLASSES rather than silencing output
+    !> wholesale.
+    !>
+    !> **The negative control is inside the scenario, not beside it.** Advice that is absent at
+    !> `"silent"` proves nothing on its own: a broken channel, a build that never coarsens an
+    !> `nside=`, and a correctly suppressed message all look identical from outside the process.
+    !> The qc warning raised by the same run is what tells them apart -- it must still be there,
+    !> because a warning about the data survives to `"errors_only"`.
+    !>
+    !> Its fixture path is derived from `level` for the reason given on
+    !> `scenario_settings_cpp_warning`: two scenario names share this helper and run concurrently.
+    subroutine scenario_settings_advice(level)
+        character(len=*), intent(in) :: level !! verbosity to set first.
+        type(pf_spatial_index) :: sk
+        real(real64), allocatable :: ra(:), dec(:)
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: out_file
+        integer(int32) :: v(4) = [1, 2, 3, 400]
+
+        out_file = "test_run/scenario_settings_advice_" // trim(level) // ".parquet"
+
+        schema%maml%name = "settings_advice.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: advice_demo", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    max: 10" ]
+        call parquet_parse_maml(schema)
+
+        call spatial_sky_cloud(64, ra, dec)
+
+        call parquet_set_verbosity(level)
+        ! Advice: 64 points allow 19 pixels, so the explicit nside=8 (768) is coarsened and said so.
+        call sk%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX, nside=8_int64)
+        ! Warning: a qc violation on the same run, which goes quiet only at "errors_only".
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+        call parquet_reset_settings()
+    end subroutine scenario_settings_advice
 
     !> Calls a SOLICITED printer (%print_stat) at a chosen verbosity, so the test can assert that
     !> "silent" turns an explicitly-requested print into a no-op.
@@ -24079,23 +24128,35 @@ contains
         print '(a)', "unexpectedly accepted threads= 0"
     end subroutine scenario_spatial_threads_below_one
 
-    !> The automatic-rebuild warning, on and off. Exits cleanly either way -- what differs is
-    !> whether the library says anything, which is the whole observable this knob has.
-    subroutine scenario_spatial_rebuild_warning(warn)
-        logical, intent(in) :: warn !! whether to leave the warning enabled.
+    !> The automatic-rebuild ADVICE, at two verbosities. Exits cleanly either way -- what differs
+    !> is whether the library says anything, and the printed `rebuilds=` count is what proves the
+    !> rebuild itself happened in both runs.
+    !>
+    !> This pair replaced the observed-effect test for `spatial_rebuild_warning`, the per-message
+    !> knob that used to control exactly this one line. The message is advice now, so the class-wide
+    !> control is what governs it -- and the property worth pinning is unchanged: silencing the
+    !> message must not silence the rebuild.
+    !>
+    !> Its fixture is built in memory, so the two scenario names share no path and may run
+    !> concurrently.
+    subroutine scenario_spatial_rebuild_advice(level)
+        character(len=*), intent(in) :: level !! verbosity to set first.
         type(pf_spatial_index) :: sx
         real(real64), allocatable :: x(:), y(:), z(:)
         integer(int64), allocatable :: counts(:)
 
         call parquet_set_message_stream("stderr")
-        call parquet_set_spatial_rebuild_warning(warn)
+        call parquet_set_verbosity(level)
         call spatial_cloud(3000, x, y, z)
         call sx%build(x, y, z, radius=0.005_real64)
         ! A radius two orders of magnitude from the hint: far enough that the cell the model would
         ! choose for it differs by more than the rebuild factor, so the index re-tunes itself.
         call sx%count_all_within(0.5_real64, counts)
+        ! Printed AFTER the settings are put back, because "silent" turns every print procedure into
+        ! a no-op -- and this line is the control that says the rebuild happened at all.
+        call parquet_reset_settings()
         print '(a,i0)', "rebuilds=", parquet_debug_spatial_rebuilds()
-    end subroutine scenario_spatial_rebuild_warning
+    end subroutine scenario_spatial_rebuild_advice
 
     !
     ! ---- Abort paths reached only through a second entry point ----

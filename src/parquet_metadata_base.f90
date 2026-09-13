@@ -558,7 +558,7 @@ contains
         ! reader looking for a section that need not exist. Keep the wording to what the condition
         ! below actually tests.
         if (this%col(idx)%is_protected .and. .not. want) then
-            call parquet_emit_warning("set_protected: column '" // trim(name) // &
+            call parquet_emit_warning("parquet_column_info%set_protected: column '" // trim(name) // &
                 "' is currently protected and is being unprotected in code; it may now be " // &
                 "written with Null values")
         end if

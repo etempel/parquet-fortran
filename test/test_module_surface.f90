@@ -419,16 +419,21 @@ contains
         integer(int64) :: got(8), m, ncomp
         integer(int64), allocatable :: labels(:)
         integer :: n_spatial, i
-        logical :: warn
+        character(len=:), allocatable :: verb
 
         what = ""
         n_spatial = parquet_get_spatial_threads()
-        warn = parquet_get_spatial_rebuild_warning()
+        call parquet_get_verbosity(verb)
 
         call parquet_set_spatial_threads(3)
         if (parquet_get_spatial_threads() /= 3) what = "spatial_threads"
-        call parquet_set_spatial_rebuild_warning(.not. warn)
-        if (what == "" .and. parquet_get_spatial_rebuild_warning() .eqv. warn) what = "spatial_rebuild_warning"
+        ! `verbosity` is this module's control over what a rebuild says, now that the per-message
+        ! knob is gone: a `use parquet_spatial` program must be able to reach it through this import
+        ! alone, exactly as it reached the knob it replaced.
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (what == "" .and. tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity(verb)
         ! The sorting knobs: %build buckets through pf_argsort, so a user of this module alone must
         ! be able to steer which path that takes.
         call parquet_set_sort_threads(2)
@@ -473,7 +478,6 @@ contains
         if (what == "" .and. sx%metric() /= PF_METRIC_EUCLIDEAN) what = "PF_METRIC_EUCLIDEAN"
 
         call parquet_set_spatial_threads(n_spatial)
-        call parquet_set_spatial_rebuild_warning(warn)
         call parquet_set_sort_threads(0)
     end subroutine check_spatial_surface
 

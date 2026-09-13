@@ -234,7 +234,7 @@ contains
         !
         call parquet_get_column_names(table%cache%reader, names)
         call table_enumerate_columns(table%cache, names, remap_internal, remap_physical, n_remap, filename)
-        call drop_shadowed_row_index(table%cache, filename)
+        call drop_shadowed_row_index(table%cache)
         ncol = table%cache%ncols
         !
         ! Classify everything up front (schema only, no column data), so %kind/%width/%nrows
@@ -295,18 +295,21 @@ contains
     !!
     !! A warning rather than an abort, because the caller may not own the file -- the same choice
     !! `parquet_get_metadata` makes for a missing key.
-    subroutine drop_shadowed_row_index(cache, filename)
+    subroutine drop_shadowed_row_index(cache)
         type(parquet_table_cache), intent(inout) :: cache !! the column store, freshly enumerated.
-        character(len=*), intent(in) :: filename          !! the file, for the warning.
         integer :: i, k
+        character(len=:), allocatable :: sfx !! table_context_suffix scratch.
         !
         do i = 1, cache%ncols
             if (cache%cols(i)%name /= PARQUET_ROW_INDEX) cycle
             cache%row_index_shadowed = .true.
+            ! Through the helper rather than by hand: the caller's `filename` and
+            ! `cache%source_file` are the same string here (parquet_open_table sets it before this
+            ! runs), and building the same suffix a second way is how the two spellings drift.
+            call table_context_suffix(cache, "", sfx)
             call parquet_emit_warning("parquet_open_table: this file has a column called '" // &
                 PARQUET_ROW_INDEX // "', which is the reserved name of the automatic row-index " // &
-                "column; the file's own column is unreachable unless a read-in MAML remaps it " // &
-                "(file '" // trim(filename) // "')")
+                "column; the file's own column is unreachable unless a read-in MAML remaps it" // sfx)
             do k = i, cache%ncols - 1
                 call move_table_column(cache%cols(k), cache%cols(k + 1))
             end do

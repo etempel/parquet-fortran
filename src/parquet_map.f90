@@ -1970,7 +1970,11 @@ contains
         if (present(warn)) soft = warn
         if (present(found)) found = .false.
         if (soft) then
-            call parquet_emit_warning(EP//msg)
+            ! The type-qualified procedure name rather than EP: `msg` opens with the bare binding
+            ! name ("get", "get_at"), which identifies nothing on its own, and a warning names the
+            ! procedure the caller called. EP stays on the `error stop` below, where it is doing its
+            ! own job -- see .claude/rules/api-conventions.md.
+            call parquet_emit_warning("parquet_map_row%"//msg)
             return
         end if
         if (present(found)) return

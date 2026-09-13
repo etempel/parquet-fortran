@@ -1131,6 +1131,21 @@ extern "C"
 		std::fprintf(message_stream_file(), "WARNING: %s\n", msg.c_str());
 	}
 
+	// The " (file: X)" a read-side message carries, spelled exactly as parquet_read.f90's
+	// reader_filename_suffix spells it -- the same convention .claude/rules/api-conventions.md
+	// requires of every Fortran message raised from a read, write or schema path. Every message
+	// this file raises about a reader is about ONE file, and a batch run over many of them
+	// otherwise emits lines that name the column and never the file. Defined next to
+	// emit_warning_cpp because both halves of a message's shape belong in one place.
+	//
+	// Declared taking the handle rather than the string so a caller cannot append the wrong one.
+	static std::string reader_file_suffix(const ParquetReaderHandle *reader_handle)
+	{
+		if (reader_handle == nullptr) return std::string();
+		if (reader_handle->filename.empty()) return std::string();
+		return " (file: " + reader_handle->filename + ")";
+	}
+
 	// ==== Performance settings, mirrored from parquet_settings.f90 ====
 	//
 	// Five values this file reads on hot paths: the sort's parallel threshold and its counting
@@ -3208,8 +3223,10 @@ extern "C"
 		int64_t nulls = array->null_count();
 		if (nulls == 0) return false;
 		// Core message only (no "WARNING: " prefix, no "parquet-fortran: "
-		// prefix) -- run_qc_checks adds whichever is appropriate for the
-		// soft (WARNING to stdout) vs hard (report_fatal_error) mode.
+		// prefix, no file suffix) -- run_qc_checks appends the reader's
+		// filename and then hands the result to whichever of the soft
+		// (emit_warning_cpp) and hard (report_fatal_error) paths applies, so
+		// both say exactly the same thing about the same data.
 		out_message = "qc violation for column '" + colname + "' (based on incomplete column information): " +
 			std::to_string(nulls) + " unexpected Null value(s) found (qc: miss: is declared empty, so Nulls are not expected here)";
 		return true;
@@ -3222,7 +3239,12 @@ extern "C"
 	// evaluation already uses). Always false for a boolean array (min/max
 	// isn't meaningful there) or a column with neither bound declared.
 	// Fires at most one combined message covering either/both bounds,
-	// mirroring the writer's own qc: WARNING wording exactly.
+	// mirroring the writer's own qc: WARNING wording.
+	//
+	// The two are matched in SHAPE rather than byte-for-byte: run_qc_checks appends this reader's
+	// filename, and the writer's own qc warnings append their writer's, so each names the file it
+	// is actually about. Byte-matching two messages about two different files was always slightly
+	// false, and it was the reason neither side named one.
 	static bool run_qc_range_check(const std::shared_ptr<arrow::Array> &array, const QcRule &rule,
 		const std::string &colname, std::string &out_message)
 	{
@@ -3414,6 +3436,7 @@ extern "C"
 			std::string msg;
 			if (run_qc_null_check(flat, it->second, name, msg))
 			{
+				msg += reader_file_suffix(reader_handle);
 				if (!reader_handle->qc_soft)
 				{
 					report_fatal_error("qc hard check", msg);
@@ -3428,6 +3451,7 @@ extern "C"
 			std::string msg;
 			if (run_qc_range_check(flat, it->second, name, msg))
 			{
+				msg += reader_file_suffix(reader_handle);
 				if (!reader_handle->qc_soft)
 				{
 					report_fatal_error("qc hard check", msg);
@@ -13718,7 +13742,7 @@ extern "C"
 			}
 			std::string colname = reader_handle->schema->field(idx)->name();
 			std::string msg = "column '" + colname + "' was read via parquet_read_column_chunk but not every row " +
-				"group was read -- missing row group(s): " + missing;
+				"group was read -- missing row group(s): " + missing + reader_file_suffix(reader_handle);
 			if (hard)
 			{
 				report_fatal_error("parquet_close_reader", msg);

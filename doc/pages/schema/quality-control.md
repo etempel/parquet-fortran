@@ -222,14 +222,19 @@ With qc active, every `parquet_write_column` call runs two independent checks pe
 warnings below disagree about the denominator.
 
 Neither check ever stops the write — each prints its own one-line `WARNING` naming the
-column, e.g.:
+column and the file, e.g.:
 ```
-WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here)
-WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.500000, 359.9000], 3 of 998 valid element(s) out of range
+WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here) (file: data.parquet, maml: qc.maml)
+WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.500000, 359.9000], 3 of 998 valid element(s) out of range (file: data.parquet, maml: qc.maml)
 ```
 That is one column of 1000 rows declaring `min: '>= 0'`, `max: '< 360'` and an empty `miss:`, holding
 two Nulls and three values below zero. The Null count is over all 1000 rows; the range count is over
 the 998 that hold a value.
+
+The trailing `(file: …, maml: …)` is the same context an `error stop` from the write path appends —
+it is what tells two otherwise identical lines apart in a run over many files. A schema built in code
+rather than loaded reports `maml: internal:<table>`; a writer opened without a schema reports the
+file alone.
 **A NaN is a violation, and it is left out of the reported range.** Every comparison against a NaN
 is false, so it satisfies no bound however the bound is written, and it is counted among the
 elements out of range. It plays no part in the `data range [...]` the message quotes, which is over
@@ -326,9 +331,12 @@ end program qc_read_example
 which prints:
 
 ```
-WARNING: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [-5, 400], 2 of 5 valid element(s) out of range
+WARNING: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [-5, 400], 2 of 5 valid element(s) out of range (file: data.parquet)
 read 5 values; qc reported the out-of-range ones above
 ```
+
+The read side names the file it read, as the write side names the file it wrote. The two are matched
+in shape rather than word for word, because they are about different files.
 
 Drop the `qc_soft=.true.` and the same violation aborts instead, with the same text on stderr behind
 a `parquet-fortran: qc hard check:` prefix — nothing is read and the process stops. A second field

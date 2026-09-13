@@ -306,8 +306,6 @@ contains
         if (.not. allocated(error)) call check(error, parquet_get_index_threads() == 0, &
             "index_threads defaults to 0 (automatic)")
         if (allocated(error)) return
-        call check(error, parquet_get_spatial_rebuild_warning(), "spatial_rebuild_warning defaults to .true.")
-        if (allocated(error)) return
         call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
             "random_parallel_min_elements defaults to 1000 elements per thread")
         if (allocated(error)) return
@@ -372,7 +370,6 @@ contains
         call parquet_set_spatial_threads(5)
         call parquet_set_healpix_threads(5)
         call parquet_set_index_threads(5)
-        call parquet_set_spatial_rebuild_warning(.false.)
         call parquet_set_random_parallel_min_elements(77_int64)
         call parquet_set_default_compression("gzip")
         call parquet_set_default_compression_level(9)
@@ -396,8 +393,6 @@ contains
         call check(error, parquet_get_spatial_threads() == 0, "reset restores spatial_threads")
         if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 0, &
             "reset restores healpix_threads")
-        if (allocated(error)) return
-        call check(error, parquet_get_spatial_rebuild_warning(), "reset restores spatial_rebuild_warning")
         if (allocated(error)) return
         call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
             "reset restores random_parallel_min_elements")

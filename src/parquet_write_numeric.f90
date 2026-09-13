@@ -560,6 +560,7 @@ contains
         integer(int64), intent(in), optional :: idata_min !! smallest valid element, exactly.
         integer(int64), intent(in), optional :: idata_max !! largest valid element, exactly.
         character(len=:), allocatable :: bounds_desc, fmt_num, fmt_num2, fmt_int, fmt_int2
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
 
         bounds_desc = ""
         if (have_min) then
@@ -592,9 +593,13 @@ contains
         end if
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
+        ! The file this violation is about, as every qc warning carries it -- see
+        ! parquet_check_qc_miss (src/parquet_write.f90) for why, and the read side's counterpart in
+        ! src/parquet_wrapper.cpp.
+        call writer_context_suffix(writer, ctx)
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range [" // fmt_num // ", " // fmt_num2 // "], " // &
-            fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
+            fmt_int // " of " // fmt_int2 // " valid element(s) out of range" // ctx)
     end subroutine qc_numeric_report
     !> Converts a real64 qc bound to an exactly-equivalent int64 one, reporting .false. when it
     !> has no exact int64 equivalent (a fractional bound, or one beyond int64's range).

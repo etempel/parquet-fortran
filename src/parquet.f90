@@ -124,10 +124,11 @@ module parquet
     ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as the
     ! statements below do for the other cross-module plumbing.
     private :: parquet_valid_compressions, parquet_resolve_writer_compression
-    ! The three output channels, the suppression query and the destination resolver are the same
+    ! The four output channels, the suppression query and the destination resolver are the same
     ! case: every module that emits or prints has to reach them, so parquet_settings makes them
     ! public, and the facade hides them.
-    private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    private :: parquet_emit_info, parquet_emit_advice, parquet_emit_warning
+    private :: parquet_emit_error_context
     private :: parquet_output_is_suppressed
     private :: parquet_message_unit
     private :: parquet_clamp_to_affinity

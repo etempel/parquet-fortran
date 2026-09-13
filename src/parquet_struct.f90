@@ -1633,7 +1633,9 @@ contains
             ! a misspelled or reordered field is the overwhelmingly common cause.
             call field_list_text(self%col, known)
             if (soft) then
-                call parquet_emit_warning(EP//"field: no field named '"//trim(name)// &
+                ! Named for the procedure, not for the module: EP is this file's `error stop`
+                ! prefix and stays on the abort below (.claude/rules/api-conventions.md).
+                call parquet_emit_warning("parquet_struct_row%field: no field named '"//trim(name)// &
                     "' in this struct column"//known)
                 ! h is returned in its default-initialized state: %is_valid() is .false. and any
                 ! %get on it aborts through check_handle.

@@ -87,7 +87,8 @@ module parquet_io
     ! different module) can resolve a compression token, and so every module that emits can reach
     ! the output channels. Same case again: public for want of package scope, hidden here.
     private :: parquet_valid_compressions, parquet_resolve_writer_compression
-    private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    private :: parquet_emit_info, parquet_emit_advice, parquet_emit_warning
+    private :: parquet_emit_error_context
     private :: parquet_output_is_suppressed
     private :: parquet_message_unit
     private :: parquet_clamp_to_affinity

@@ -137,7 +137,7 @@ anything else.
 | `parquet_toml` | none — it reads none; its output is governed by `parquet_logging`, not by `verbosity`/`message_stream` |
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
-| `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |
+| `parquet_spatial` | `spatial_threads`, the four sorting knobs, plus `verbosity` and `message_stream` |
 | `parquet_healpix` | `healpix_threads`, plus `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_index` | `index_threads`, the four sorting knobs (a `method="sorted"` build sorts through `pf_argsort`), plus `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |

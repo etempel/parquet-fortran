@@ -106,7 +106,7 @@ end program write_parquet_qc_example
 The WARNING the write prints in full:
 
 ```
-WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [10, 400], 1 of 3 valid element(s) out of range
+WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [10, 400], 1 of 3 valid element(s) out of range (file: data.parquet, maml: internal:qc_example_table)
 ```
 
 Note the count: **1 of 3**, not 1 of 4. The Null written at row 3 is not a value, so the range check

@@ -1199,7 +1199,8 @@ def check_settings_are_read():
 #: rather than routing through a channel. Every other write in src/ has to go through a channel, or
 #: the two output settings silently do not apply to it.
 DIRECT_PRINT_ALLOWED = {
-    "parquet_emit_info", "parquet_emit_warning", "parquet_emit_error_context",
+    "parquet_emit_info", "parquet_emit_advice", "parquet_emit_warning",
+    "parquet_emit_error_context",
     # parquet_logging is a separate system with a separate audience: it carries the USER's
     # program's output, not the library's, so it must NOT route through the emit channels --
     # `verbosity` and `message_stream` govern what this library says, not what its caller says.
@@ -1392,7 +1393,8 @@ def check_affinity_areas_documented():
     backticked word, because the page names `sorting` and `index` in ordinary prose several times
     over and a whole-page reverse scan would report every one of those. A sentence that no longer
     matches is a FAILURE, not a pass: this check has then gone half blind and must be re-anchored
-    deliberately.
+    deliberately -- as it was when the clamp's message moved to the advice channel and gained a
+    `NOTE: ` prefix, so that the area name stopped being the line's first word.
     """
     problems = []
     areas = set()
@@ -1411,11 +1413,11 @@ def check_affinity_areas_documented():
                 "`%s`, but the page never names it -- a reader who sees that warning has no way to "
                 "tell which subsystem noticed. Add it to the list of area names (re-derive the set "
                 "with `grep -rn parquet_clamp_to_affinity src/`)." % area)
-    listed = re.search(r"The first word names whichever subsystem noticed[^.]*\.", text, re.S)
+    listed = re.search(r"names whichever subsystem noticed[^.]*\.", text, re.S)
     if listed is None:
         return problems + [
-            "doc/pages/operating/performance.md: could not find the sentence beginning \"The first "
-            "word names whichever subsystem noticed\", which is where the area names are "
+            "doc/pages/operating/performance.md: could not find the sentence containing \"names "
+            "whichever subsystem noticed\", which is where the area names are "
             "enumerated -- the reverse half of this check cannot tell that list from the page's "
             "ordinary prose any more; re-anchor it deliberately"]
     for name in sorted(set(re.findall(r"`([a-z][a-z ]*)`", listed.group(0)))):
@@ -6481,7 +6483,7 @@ def _pure_callable_names():
     return pure | bindings
 
 
-def _scenario_statements(path):
+def _joined_statements(path):
     """Yield (first_lineno, joined_statement) for `path`, with `&` continuations folded together."""
     out = []
     buf, first = "", None
@@ -6530,7 +6532,7 @@ def check_scenario_uses_a_pure_result():
     call = re.compile(r"(?<!\w)(?:" + alternatives + r")\s*\(")
     problems = []
     name, body = None, []
-    for n, stmt in _scenario_statements(path):
+    for n, stmt in _joined_statements(path):
         opened = re.match(r"^\s*subroutine\s+(scenario_\w+)\s*\(", stmt)
         if opened:
             name, body = opened.group(1), []
@@ -6561,6 +6563,127 @@ def check_scenario_uses_a_pure_result():
             continue
         if name:
             body.append((n, stmt))
+    return problems
+
+
+#: The four helpers that build a message's file/schema context suffix, one per path the library
+#: raises messages from. `.claude/rules/api-conventions.md` requires an `error stop` in a read,
+#: write or schema path to append one; a WARNING from the same path says the same thing about the
+#: same data and must append one too.
+CONTEXT_SUFFIX_HELPERS = (
+    "writer_context_suffix", "reader_filename_suffix", "maml_name_suffix", "table_context_suffix",
+)
+
+#: Procedures allowed to raise a warning with no suffix even though their file uses a helper,
+#: keyed by procedure name and valued by the reason. Each entry must still match a real site --
+#: asserted below, because an allow-list nothing re-derives is exactly how the `no direct
+#: printing` check went half blind (seven of its nine entries had stopped matching anything).
+CONTEXT_SUFFIX_EXEMPT = {
+    "parquet_metadata_warn_duplicate":
+        "names its table INLINE (\"key 'k' in table 't'\"), which is the schema context at that "
+        "point: the procedure takes a parquet_table_metadata and no parquet_maml_file is in "
+        "scope, so maml_name_suffix -- the helper its file uses elsewhere -- cannot be called "
+        "here at all.",
+}
+
+
+def check_warnings_carry_their_context():
+    """A warning from a path that names its file when it ABORTS must name it when it warns.
+
+    The same code path used to identify itself two ways: `parquet_write.f90:205` appended the
+    writer's file and maml to its warning, and the qc report four hundred lines later did not --
+    so a soft qc violation printed the column and never the file, while a HARD violation on the
+    identical data named it. Over a batch of two hundred files that is two hundred warning lines
+    nobody can tell apart.
+
+    The rule is anchored on the HELPERS rather than on a list of files or paths, deliberately. A
+    file list is a list written here describing a set owned by src/, which goes stale silently in
+    the direction that keeps passing -- a new file full of warnings is simply not on it. The
+    helper set is small, each entry is grep-able, and its liveness is asserted below.
+
+    "A helper is in scope" is approximated by "this file calls one somewhere", which is an
+    over-approximation: a procedure may sit in a file that uses a helper and still have nothing to
+    name. That is why CONTEXT_SUFFIX_EXEMPT exists and why it carries a reason per entry rather
+    than a bare name. The over-approximation is the cheap half of P4's bargain: a false positive
+    costs one reviewed line, a false negative costs an undiagnosable warning.
+    """
+    problems = []
+    defined = set()
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text()
+        for helper in CONTEXT_SUFFIX_HELPERS:
+            if re.search(r"^\s*(?:module\s+)?subroutine\s+%s\s*\(" % helper, text, re.M):
+                defined.add(helper)
+    missing = [h for h in CONTEXT_SUFFIX_HELPERS if h not in defined]
+    if missing:
+        return ["src/: context-suffix helper(s) %s are named by this check but defined nowhere in "
+                "src/ -- they were renamed or removed and this check is now enforcing a rule "
+                "against a helper that no longer exists" % ", ".join(sorted(missing))]
+
+    # Deliberately NOT check_no_direct_printing's copy of this pattern: that one's third
+    # alternative is anchored on `::`, so it matches a `character(len=12), parameter :: x(9) =`
+    # DECLARATION as if it opened a procedure (and matches no typed function at all, since a
+    # function statement carries no `::`). Attributing a warning to the last parameter declared
+    # above it would put a meaningless name in every message below, and in the exemption list.
+    proc_start = re.compile(
+        r"^\s*(?:module\s+procedure\s+(\w+)"
+        r"|(?:(?:recursive|pure|impure|elemental|module)\s+)*"
+        r"(?:(?:integer|logical|real|character|type|class)\s*(?:\([^)]*\))?\s+)?"
+        r"(?:subroutine|function)\s+(\w+))")
+    helper_call = re.compile(r"\bcall\s+(?:%s)\s*\(" % "|".join(CONTEXT_SUFFIX_HELPERS))
+    used_exemptions = set()
+    checked = 0
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text()
+        if "call parquet_emit_warning" not in text:
+            continue
+        suffix_vars, emits, current = set(), [], ""
+        for lineno, stmt in _joined_statements(path):
+            m = proc_start.match(stmt)
+            if m and any(m.groups()):
+                current = next(g for g in m.groups() if g)
+            if helper_call.search(stmt):
+                # The helper's LAST argument is the variable it fills. Taken from the joined
+                # statement rather than by a `([^)]*)` match, because two call sites pass an
+                # expression of their own -- `table_context_suffix(cache, trim(name), sfx)`.
+                tail = stmt.rstrip().rstrip(")")
+                if "," in tail:
+                    suffix_vars.add(tail.rsplit(",", 1)[1].strip())
+            if "call parquet_emit_warning" in stmt:
+                emits.append((lineno, current, stmt))
+        # No helper is called anywhere in this file, so there is nothing here to unify onto and
+        # nothing this check can say. parquet_map/parquet_struct (container columns with no file
+        # behind them) and parquet_settings_base/parquet_spatial_* (advice, which names nothing)
+        # are the files this skips, and each is a deliberate class rather than an oversight.
+        if not suffix_vars:
+            continue
+        for lineno, proc, stmt in emits:
+            checked += 1
+            if any(re.search(r"//\s*%s\b" % re.escape(v), stmt) for v in suffix_vars):
+                continue
+            if proc in CONTEXT_SUFFIX_EXEMPT:
+                used_exemptions.add(proc)
+                continue
+            problems.append(
+                "%s:%d: `%s` raises a warning with no file/schema context, in a file whose "
+                "messages carry one (%s) -- an `error stop` from this path names the file and "
+                "this does not, so the two say different things about the same data. Append the "
+                "suffix, or add `%s` to CONTEXT_SUFFIX_EXEMPT with the reason it has nothing to "
+                "name."
+                % (path.relative_to(REPO_ROOT), lineno, proc or "<file scope>",
+                   ", ".join(sorted(suffix_vars)), proc or "<file scope>"))
+    if checked == 0:
+        return ["src/: this check examined no parquet_emit_warning call at all -- either the emit "
+                "channel was renamed or the statement folding stopped working, and the rule is "
+                "now enforcing nothing"]
+    stale = sorted(set(CONTEXT_SUFFIX_EXEMPT) - used_exemptions)
+    if stale:
+        problems.append(
+            "tools/check_source_conventions.py: CONTEXT_SUFFIX_EXEMPT names %s, which no longer "
+            "matches a warning that would otherwise be flagged -- the procedure was renamed, "
+            "removed, or has since gained its suffix. Delete the entry: an exemption nobody "
+            "re-derives is how the `no direct printing` allow-list went half blind."
+            % ", ".join("`%s`" % s for s in stale))
     return problems
 
 
@@ -6924,6 +7047,8 @@ CHECKS = (
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),
+    ("every warning carries the context its path's aborts carry",
+     check_warnings_carry_their_context),
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("the C++ side draws no random numbers of its own", check_one_random_number_generator),

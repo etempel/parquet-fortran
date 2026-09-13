@@ -458,13 +458,11 @@ contains
         ! is exact.
         secant = (self%d_hi - self%d_lo) / range
         if (ll > 100.0_real64 * secant) then
-            if (.not. parquet_output_is_suppressed()) then
-                call parquet_emit_warning("pf_spatial_index%" // what // ": los= is not a function of the " // &
-                    "distance from the observer, or is noisy at small separations: its steepest slope over " // &
-                    "pairs at least " // real_text(w) // " apart is " // real_text(ll) // " against a " // &
-                    "catalogue-wide " // real_text(secant) // ". Every line-of-sight walk will be " // &
-                    real_text(ll) // " x b_par wide; the answer stays exact.")
-            end if
+            call parquet_emit_advice("pf_spatial_index%" // what // ": los= is not a function of the " // &
+                "distance from the observer, or is noisy at small separations: its steepest slope over " // &
+                "pairs at least " // real_text(w) // " apart is " // real_text(ll) // " against a " // &
+                "catalogue-wide " // real_text(secant) // ". Every line-of-sight walk will be " // &
+                real_text(ll) // " x b_par wide; the answer stays exact.")
         end if
     end procedure spatial_los_bounds
 
@@ -786,8 +784,8 @@ contains
             ! capped is the ordinary state of any index with more radius than points, and warning
             ! about it would fire on essentially every small index for no action the caller can
             ! take.
-            if (present(nside) .and. coarsened .and. .not. parquet_output_is_suppressed()) then
-                call parquet_emit_warning("pf_spatial_index%build_sky: nside= was coarsened from " // &
+            if (present(nside) .and. coarsened) then
+                call parquet_emit_advice("pf_spatial_index%build_sky: nside= was coarsened from " // &
                     int_text(ns) // " to " // int_text(self%nside_v) // " to keep the pixel count " // &
                     "under 0.3 per point, which is what keeps the bucketing on the counting fast path")
             end if
@@ -807,8 +805,8 @@ contains
             call spatial_set_grid(self, h, coarsened)
             ! An explicit cell is a statement that the caller has measured something, so coarsening
             ! it must SAY so rather than happen in silence.
-            if (present(cell) .and. coarsened .and. .not. parquet_output_is_suppressed()) then
-                call parquet_emit_warning("pf_spatial_index%build: cell= was coarsened from " // &
+            if (present(cell) .and. coarsened) then
+                call parquet_emit_advice("pf_spatial_index%build: cell= was coarsened from " // &
                     real_text(cell) // " to " // real_text(self%cell_side) // " to keep the grid under " // &
                     "0.3 cells per point, which is what keeps the bucketing on the counting fast path")
             end if

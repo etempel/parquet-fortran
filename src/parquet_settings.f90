@@ -48,7 +48,8 @@ module parquet_settings
     !
     ! ---- Re-exported from parquet_settings_base, so this module's surface is unchanged ----
     public :: parquet_output_is_suppressed
-    public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    public :: parquet_emit_info, parquet_emit_advice, parquet_emit_warning
+    public :: parquet_emit_error_context
     ! The one destination resolver. Re-exported for the same reason the channels above are: the
     ! solicited printers live in other modules and there is no package scope to share it through.
     public :: parquet_message_unit
@@ -68,7 +69,6 @@ module parquet_settings
     public :: parquet_set_spatial_threads, parquet_get_spatial_threads
     public :: parquet_set_healpix_threads, parquet_get_healpix_threads
     public :: parquet_set_index_threads, parquet_get_index_threads
-    public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_random_parallel_min_elements
     public :: parquet_get_random_parallel_min_elements
     public :: parquet_set_verbosity, parquet_get_verbosity
@@ -935,12 +935,6 @@ contains
             call parquet_set_index_threads(n32)
         end if
 
-        call env_value("PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING", text, got)
-        if (got) then
-            call env_logical("PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING", text, flag)
-            call parquet_set_spatial_rebuild_warning(flag)
-        end if
-
         call env_value("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", text, got)
         if (got) then
             call env_int64("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", text, n64)
@@ -1181,7 +1175,6 @@ contains
         cfg_spatial_threads = 0
         cfg_healpix_threads = 0
         cfg_index_threads = 0
-        cfg_spatial_rebuild_warning = .true.
         cfg_random_parallel_min_elements = 1000_int64
         cfg_default_compression = ""
         cfg_default_compression_level = level_codec_default
@@ -1229,7 +1222,6 @@ contains
         call print_one(u, "healpix_threads", cfg_healpix_threads)
         call print_one(u, "index_threads", cfg_index_threads)
         call print_big(u, "random_parallel_min_elements", cfg_random_parallel_min_elements)
-        call print_text(u, "spatial_rebuild_warning", merge("true ", "false", cfg_spatial_rebuild_warning))
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
         call print_text(u, "sort_radix_path", merge("true ", "false", cfg_sort_radix_path))
         call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())

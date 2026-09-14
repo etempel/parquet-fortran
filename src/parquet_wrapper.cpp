@@ -4420,6 +4420,10 @@ extern "C"
 	// Builds the flat key-value file metadata: the VOTable XML sidecar (if any columns are
 	// declared), the DATE/name/version keys, every table_metadata entry, and per-column
 	// unit/description/ucd/datatype keys.
+	//
+	// A key this function starts generating must be added to writer_regenerates_key
+	// (parquet_tables_write.f90), or a copy_metadata carry shadows it silently
+	// (`test_write_table_copy_metadata_skips_regenerated`).
 	static std::shared_ptr<arrow::KeyValueMetadata> build_file_metadata(
 		const std::vector<ColumnMetadata> &column_metadata,
 		const std::vector<TableMetadataEntry> &table_metadata)
@@ -7837,6 +7841,9 @@ extern "C"
 			std::string op(ops_packed + i * op_len, static_cast<size_t>(op_len));
 			op = trim_right_spaces_and_nuls(op);
 			std::string value(values_packed + i * value_len, static_cast<size_t>(value_len));
+			// A rule literal's trailing spaces cannot be told from slot padding, so both engines trim
+			// them: this line and `trim(leaf_value(i))` in parquet_tables_filter.f90 change together or
+			// not at all (`test_string_match_is_byte_exact` pins both sides).
 			value = trim_right_spaces_and_nuls(value);
 			bool is_string = is_string_flags[i] != 0;
 
@@ -8023,7 +8030,7 @@ extern "C"
 		// live row groups), where each live row group's segment is copied from its own physical
 		// offset to its own live offset and a pruned row group contributes nothing at all.
 		//
-		// This gather is the whole of feature_risks.md R-b: slicing the array by live row instead
+		// This gather is what `test_in_bounded_matches_unscoped` pins: slicing by live row instead
 		// of physical row misaligns every row group after the first pruned one, by exactly that row
 		// group's length, and the surviving row count can still come out right.
 		auto fill_pre_leaf = [&](int pre_index, int64_t phys_base, size_t rows, std::vector<uint8_t> &out)
@@ -8334,7 +8341,8 @@ extern "C"
 		// call on `source` at this instant. A deterministic test would have to hold that thread
 		// mid-call, and a timing-dependent one is worse than none (it passes on a quiet machine and
 		// gets disabled on a busy one). Kept because the transform being copied out is exactly the
-		// state a concurrent call could be rebuilding.
+		// state a concurrent call could be rebuilding. Keep it, but never rely on it to make a new
+		// kind of source access safe: it is racy by nature, since the source is read unguarded.
 		//
 		// The exclusion starts INSIDE the braces, not above the `if`: the condition is evaluated on
 		// every call and is genuinely covered, so excluding its line too would report a live line
@@ -8386,7 +8394,9 @@ extern "C"
 		}
 
 		// The mask and everything derived from it. Order does not matter here -- unlike
-		// set_filter/set_sort, nothing below is computed from anything else below.
+		// set_filter/set_sort, nothing below is computed from anything else below. A new
+		// ParquetReaderHandle field derived from the mask or the permutation joins this list, or an
+		// adopting reader answers with stale bookkeeping (the equality tests in test_table_parallel.f90).
 		reader_handle->nrows = src->nrows;
 		reader_handle->live_mask = src->live_mask;                          // refcount increment
 		reader_handle->row_group_live = src->row_group_live;

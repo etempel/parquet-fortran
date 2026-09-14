@@ -119,6 +119,9 @@ contains
         do i = 1, nleaves
             name = trim(leaf_name(i))
             call table_resolve(self, name, proc, idx)
+            ! `trim(leaf_value(i))` drops a rule literal's trailing spaces exactly as the reader's
+            ! `trim_right_spaces_and_nuls` (parquet_wrapper.cpp) does: change the two together or
+            ! the engines disagree on such a literal (`test_string_match_is_byte_exact`).
             associate (slot => self%cache%cols(idx))
                 call parquet_eval_filter_leaf(filter, slot%values, slot%declared_kind, slot%width, &
                     slot%time_unit, self%row_count, name, trim(leaf_op(i)), trim(leaf_value(i)), &

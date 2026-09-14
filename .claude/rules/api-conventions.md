@@ -87,7 +87,7 @@
 - Not settings: vocabulary, mathematical facts, Parquet/Arrow format ceilings, container internals,
   input-sanity bounds (`parquet_max_*` are read-only constants by design).
 - Every knob needs three assertions: its default, its round trip, and an observed effect with a
-  negative control (`feature_risks.md` Risk-41; `check_settings_are_read` is the static half).
+  negative control (`check_settings_are_read` is the static half).
 - Every knob is resettable, printable, documented and reachable from the environment:
   `check_print_settings_documented` and `check_env_covers_every_setting` take their list from
   `parquet_print_settings`' printed rows, `check_env_table_matches_the_source` compares the guide's
@@ -95,9 +95,12 @@
   `test_reset_all_knobs` covers reset.
 - A knob the C++ side needs is MIRRORED: values cross `bind(C)` already resolved (no tokens, no
   "0 means default"), one push function per group, C++ initialisers equal to the Fortran defaults
-  (`feature_risks.md` Risk-42).
+  (`settings: the C++ half honours the mirrored verbosity`, `test/test_errors.f90`).
 - No second way to set the same thing (no `parquet_debug_set_*` for a real setting); observation
   hooks (`parquet_debug_get_*`) are fine.
+- **A new message does not get a knob of its own**; it is governed by its class through
+  `verbosity`. If one seems needed, decide which class it belongs to first
+  (`settings: the automatic-rebuild advice is said, and can be silenced`, `test/test_errors.f90`).
 - Renaming a public setting is a semantic-versioning event; check the published CHANGELOG sections
   first. The C++ side is decoupled by `bind(C, name=)`.
 - Every `feature_*.md` carries a settings analysis (`workflow.md`).

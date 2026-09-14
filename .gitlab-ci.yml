@@ -212,7 +212,7 @@ test:
     #
     # --shipped-only is deliberate and must not be dropped. The full run also builds the OTHER
     # route (e) kernel by defeating the compiler allowlist, and on gfortran that half currently
-    # fails under LTO -- a real gfortran bug (feature_risks.md Risk-101) affecting a kernel
+    # fails under LTO -- a real gfortran bug (the script's xfail_reason) affecting a kernel
     # gfortran never ships, so failing the pipeline on it would train people to ignore CI. It stays
     # the default for a manual run, where the failure is information. The script refuses a gfortran
     # below the project's floor rather than reporting its miscompilations as findings.

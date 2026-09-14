@@ -73,11 +73,15 @@ in `code-style.md`.
 - **An array-section assignment whose two sides are the SAME array costs a heap temporary per
   iteration** (the compiler cannot prove no overlap). Same array: scalar loop; different arrays:
   section (one `memcpy`).
+- **`floor`/`ceiling`/`nint`/`int` without `kind=` return a DEFAULT integer and wrap a large
+  value**, even when assigned to an `int64` or `real64` (the truncation is inside the intrinsic).
+  Give `kind=int64` to every one whose argument can exceed `2**31`, and give every refusal scenario
+  a control that must succeed (`random_poisson_int32_overflow`).
 - **A wrapping overflow is still undefined behaviour the optimiser may reason from elsewhere**: an
   expression measured to wrap let ifx delete an `if (s < 0)` branch two functions away. Compute
   without overflowing (`sub64`/`add64`, `src/parquet_random.f90`); a deliberately overflowing site
-  must be guarded by a comparison against an overflow-free implementation (`feature_risks.md`
-  Risk-94).
+  must be guarded by a comparison against an overflow-free implementation (`test_agreement_int`,
+  `test/test_random.f90`).
 - **A `huge()` sentinel standing for "unbounded" is a NUMBER: centring, scaling or differencing it
   OVERFLOWS.** The overflow delivers the infinity that was meant, so gfortran and ifx look correct
   and nagfor's `-ieee=stop` aborts on the documented call; a quiet build is no evidence. Produce
@@ -115,7 +119,10 @@ done | sort | uniq -c | sort -rn
 ```
 
   Every procedure it names screens the NaN or takes only validated values; the healpix
-  `pure elemental` conversions are the documented exception.
+  `pure elemental` conversions are the documented exception. **A running fold on `<`/`>`
+  (`if (v > acc) acc = v`: a cumulative or windowed extremum, a running argmax) DROPS a NaN** meant
+  to propagate; give it an explicit `if (v /= v)` arm ahead of the comparison (`cum_scan`,
+  `src/parquet_stats_relate.f90`; `test_cumulative_null_rule`). Arithmetic folds need none.
 - **`sign(1.0, x)` is not a portable negative-zero test** (processor-dependent for a zero `B`; ifx
   answers `+1`). Use `(x == 0.0_real64) .and. transfer(x, 0_int64) < 0_int64` or
   `ieee_is_negative`; build the value at runtime, and have a one-bit fixture assert its own
@@ -146,8 +153,8 @@ done | sort | uniq -c | sort -rn
   same way with no FMA anywhere: `w*(d*d)` is not `(w*d)*d`. Both are silent, both give a plausible
   number one ulp out, and `-ffp-contract=off` is the diagnosis rather than the fix. A fixture whose
   centring is EXACT proves nothing about such an identity, which is how a suite stays green over
-  one (`stats_pair_moments`' `diagonal` fork, `src/parquet_stats_core.f90`; `feature_risks.md`
-  Risk-259).
+  one (`stats_pair_moments`' `diagonal` fork, `src/parquet_stats_core.f90`;
+  `test_cov_identity_survives_inexact_centring`).
 - **An OpenMP `reduction(+:...)` over reals is not bit-reproducible** across calls or thread counts;
   measure the tolerance floor by calling twice, or use an ordered/compensated sum.
 - **Nested OpenMP needs both `omp_set_nested(.true.)` and `omp_set_max_active_levels(2)`**
@@ -185,7 +192,7 @@ done | sort | uniq -c | sort -rn
 - **`-ftrapv` traps only the wrapping arm of `src/parquet_random.f90`** (the one ifx ships); a
   non-aborting `-ftrapv` build is not evidence a site is safe (dead results are optimised away
   before instrumentation). `tools/check_random_ubsan.sh` (machine B only) drives UBSan over both
-  arms and is the instrument (`feature_risks.md` Risk-112).
+  arms and is the instrument.
 
 ## gfortran-specific gotchas
 
@@ -232,8 +239,9 @@ done | sort | uniq -c | sort -rn
   `parquet_column`, `parquet_string_column`) uses **a shared array allocated before the region, one
   slot per thread, indexed by `omp_get_thread_num() + 1`** (`materialize_marked_parallel`).
   `parquet_table` stays block-local-safe only because it has no allocatable component
-  (`feature_risks.md` Risk-45). Diagnose with `nm <object> | grep -E "for_alloc_private|mold_ctor"`
-  before blaming the compiler; no scaffolding means the crashing binary is stale.
+  (`prefetch_threads caps the parallel prefetch`, `test/test_settings.f90`). Diagnose with
+  `nm <object> | grep -E "for_alloc_private|mold_ctor"` before blaming the compiler; no scaffolding
+  means the crashing binary is stale.
 - **`fpm test --profile debug` under ifx needs `export FOR_DISABLE_STACK_TRACE=1`**: `-check all`
   emits `warning (406)` per array temporary, `-traceback` prints a traceback per warning, and
   libifcore's traceback code is not thread safe under test-drive's parallel dispatch (crash, abort
@@ -297,7 +305,7 @@ flang builds here are serial only and `--profile release` does not link (`build.
 - **A rejected format is reported through `iostat` AND leaves partial text in the buffer**
   (`ios = 1005`; gfortran/ifx/nagfor leave it empty), so never decide "was this rendered?" from
   emptiness (`rendered_ok`, `src/parquet_utils.f90`, keys on the overflow asterisk;
-  `feature_risks.md` Risk-187). A literal bad format is a compile error under flang; a reproducer
+  `test_to_str_bad_fmt`). A literal bad format is a compile error under flang; a reproducer
   must pass it through a `character(len=*)` variable.
 - **A `character` temporary built inside a loop is not reclaimed until the procedure returns**, so
   a long loop of `call sub("%" // what // ": ...")` exhausts the stack (SIGSEGV in the callee's
@@ -324,7 +332,8 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   and `int(NaN)` trap (test `ieee_is_nan` first, as its own statement); `arrow::compute::MinMax`
   raises `FE_INVALID` benignly on every non-empty float array. Mask the traps around a foreign call
   known to raise with `feholdexcept` + `feclearexcept` + `fesetenv` (never `feupdateenv`), scoped
-  to the one call. `-ieee=full` is a diagnosis, not the fix (`feature_risks.md` Risk-124).
+  to the one call. `-ieee=full` is a diagnosis, not the fix (`print_stat_all_types` and
+  `write_float_nan_to_int32` scenarios).
 - **A test FIXTURE's own arithmetic trips those traps too.** Build a NaN or an Infinity with
   `ieee_value`, never as `0/0` or an overflowing quotient, and keep a reference expression a test
   computes beside the procedure under test (`a(i)/b(i)`) inside the finite range — it raises exactly
@@ -352,7 +361,7 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   `popcnt` correct): a descending `63 - leadz(w)` walk never terminates, a watermark scan is
   silently high. Banned outright across `src/`, `test/`, `app/`, `bench/`, `tools/`
   (`check_no_leadz`); use `trailz` and keep the last index reached, walking ascending and filling
-  from the far end when order mattered (`feature_risks.md` Risk-186).
+  from the far end when order mattered.
 - **`len(s(d+1:))` is wrong when the lower bound is an EXPRESSION** (correct for a variable or
   literal), and at `-O2` the wrong length folds an unrelated `dot == len(s)` comparison. Never form
   a possibly-empty substring with an expression lower bound in a procedure that also compares
@@ -365,7 +374,7 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   optimiser propagates the constant back at `-O2`+); write the unsigned comparison out as
   `(a < b) .neqv. ((a < 0) .neqv. (b < 0))`. A most-negative constant whose `ieor` result is stored
   rather than compared (`SORT_SIGN_BIT`) is safe. Printing the expression shows the right value
-  (`feature_risks.md` Risk-125).
+  (`temporal_ts_to_unix_overflow_negative` scenario).
 - **Keep finalizers deallocate-only; never assign a scalar component in one.** Under
   `-C=undefined` an implicitly invoked finalizer indexes a null definedness map and segfaults on
   the first scalar store, with no diagnostic. Do not re-add the finalizers removed from

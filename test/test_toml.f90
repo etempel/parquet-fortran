@@ -98,6 +98,7 @@ contains
             new_unittest("append_section builds an array of tables", test_append_section), &
             new_unittest("save writes the effective configuration", test_save_effective), &
             new_unittest("get_opt records the variable's own value for save", test_opt_reaches_the_shadow), &
+            new_unittest("every read specific records its key for save", test_every_getter_reaches_the_shadow), &
             new_unittest("delete removes a key, and an absent key is a no-op", test_delete), &
             new_unittest("dump writes the parsed document, save writes the effective one", test_dump), &
             new_unittest("shared file, concurrent reader 1", test_shared_reader_1), &
@@ -1100,6 +1101,167 @@ contains
         call check(error, kept == 42, "save must record the value get_opt resolved from the variable")
         call pf_toml_close(back)
     end subroutine test_opt_reaches_the_shadow
+
+    !> EVERY read specific records the value it resolved, so `pf_toml_save` writes its key.
+    !>
+    !> A getter that reads correctly but skips its shadow write passes every value test and
+    !> silently drops its key from each saved file. Each specific therefore reads a key of its
+    !> own -- a key shared by two specifics would be recorded by whichever did not forget -- once
+    !> from the file (`f_`/`o_` keys: plain, `_opt`, `_alloc`, `_alloc_opt`, `_strings`, `_level`)
+    !> and once absent, resolved from `default=` or from the variable (`d_`/`v_` keys; `_alloc` and
+    !> `_strings` have no absent form). The saved file must hold all of them. A NEW read specific
+    !> adds its keys here.
+    subroutine test_every_getter_reaches_the_shadow(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        character(len=*), parameter :: out_file = "test_run/toml_every_getter_shadow.toml"
+        integer, parameter :: nkeys = 68
+        character(len=*), parameter :: fscal = "i32 = 1" // achar(10) // "i64 = 2" // achar(10) // &
+            "r32 = 1.5" // achar(10) // "r64 = 2.5" // achar(10) // "log = true" // achar(10) // &
+            'str = "x"' // achar(10) // "i32a = [1, 2]" // achar(10) // "i64a = [3, 4]" // achar(10) // &
+            "r32a = [0.5, 1.5]" // achar(10) // "r64a = [2.5, 3.5]" // achar(10) // &
+            "loga = [true, false]" // achar(10) // 'stra = ["a", "bc"]' // achar(10)
+        !> Every key the saved file must hold, one per specific per form.
+        character(len=10), parameter :: keys(nkeys) = [character(len=10) :: &
+            "f_i32", "f_i64", "f_r32", "f_r64", "f_log", "f_str", &
+            "f_i32a", "f_i64a", "f_r32a", "f_r64a", "f_loga", "f_stra", &
+            "o_i32", "o_i64", "o_r32", "o_r64", "o_log", "o_str", &
+            "o_i32a", "o_i64a", "o_r32a", "o_r64a", "o_loga", "o_stra", &
+            "d_i32", "d_i64", "d_r32", "d_r64", "d_log", "d_str", &
+            "d_i32a", "d_i64a", "d_r32a", "d_r64a", "d_loga", "d_stra", &
+            "v_i32", "v_i64", "v_r32", "v_r64", "v_log", "v_str", &
+            "v_i32a", "v_i64a", "v_r32a", "v_r64a", "v_loga", "v_stra", &
+            "fa_i32", "fa_i64", "fa_r32", "fa_r64", "fa_log", "fao_i32", "fao_i64", "fao_r32", "fao_r64", &
+            "fao_log", "vao_i32", "vao_i64", "vao_r32", "vao_r64", "vao_log", &
+            "f_list", "fo_list", "vo_list", "f_level", "d_level"]
+        type(pf_toml) :: conf, s, back, sback
+        type(pf_toml_strings) :: list
+        character(len=:), allocatable :: text, str
+        character(len=4) :: stra(2)
+        integer(int32) :: i32, i32a(2)
+        integer(int64) :: i64, i64a(2)
+        real(real32) :: r32, r32a(2)
+        real(real64) :: r64, r64a(2)
+        logical :: flag, loga(2)
+        integer(int32), allocatable :: ai32(:)
+        integer(int64), allocatable :: ai64(:)
+        real(real32), allocatable :: ar32(:)
+        real(real64), allocatable :: ar64(:)
+        logical, allocatable :: alog(:)
+        integer :: level, k
+
+        text = "[s]" // achar(10)
+        call add_prefixed(text, "f_", fscal)
+        call add_prefixed(text, "o_", fscal)
+        text = text // "fa_i32 = [1]" // achar(10) // "fa_i64 = [2]" // achar(10) // "fa_r32 = [0.5]" // achar(10) // &
+            "fa_r64 = [1.5]" // achar(10) // "fa_log = [true]" // achar(10) // &
+            "fao_i32 = [1]" // achar(10) // "fao_i64 = [2]" // achar(10) // "fao_r32 = [0.5]" // achar(10) // &
+            "fao_r64 = [1.5]" // achar(10) // "fao_log = [true]" // achar(10) // &
+            'f_list = ["a", "bc"]' // achar(10) // 'fo_list = ["d"]' // achar(10) // &
+            'f_level = "WARNING"' // achar(10)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "s", s)
+        ! Plain pf_toml_get, from the file and from default=.
+        call pf_toml_get(s, "f_i32", i32)
+        call pf_toml_get(s, "f_i64", i64)
+        call pf_toml_get(s, "f_r32", r32)
+        call pf_toml_get(s, "f_r64", r64)
+        call pf_toml_get(s, "f_log", flag)
+        call pf_toml_get(s, "f_str", str)
+        call pf_toml_get(s, "f_i32a", i32a)
+        call pf_toml_get(s, "f_i64a", i64a)
+        call pf_toml_get(s, "f_r32a", r32a)
+        call pf_toml_get(s, "f_r64a", r64a)
+        call pf_toml_get(s, "f_loga", loga)
+        call pf_toml_get(s, "f_stra", stra)
+        call pf_toml_get(s, "d_i32", i32, default = 1_int32)
+        call pf_toml_get(s, "d_i64", i64, default = 2_int64)
+        call pf_toml_get(s, "d_r32", r32, default = 1.5_real32)
+        call pf_toml_get(s, "d_r64", r64, default = 2.5_real64)
+        call pf_toml_get(s, "d_log", flag, default = .true.)
+        call pf_toml_get(s, "d_str", str, default = "x")
+        call pf_toml_get(s, "d_i32a", i32a, default = [1_int32, 2_int32])
+        call pf_toml_get(s, "d_i64a", i64a, default = [3_int64, 4_int64])
+        call pf_toml_get(s, "d_r32a", r32a, default = [0.5_real32, 1.5_real32])
+        call pf_toml_get(s, "d_r64a", r64a, default = [2.5_real64, 3.5_real64])
+        call pf_toml_get(s, "d_loga", loga, default = [.true., .false.])
+        call pf_toml_get(s, "d_stra", stra, default = ["a   ", "bc  "])
+        ! pf_toml_get_opt, from the file and from the variable (each already holds a value).
+        call pf_toml_get_opt(s, "o_i32", i32)
+        call pf_toml_get_opt(s, "o_i64", i64)
+        call pf_toml_get_opt(s, "o_r32", r32)
+        call pf_toml_get_opt(s, "o_r64", r64)
+        call pf_toml_get_opt(s, "o_log", flag)
+        call pf_toml_get_opt(s, "o_str", str)
+        call pf_toml_get_opt(s, "o_i32a", i32a)
+        call pf_toml_get_opt(s, "o_i64a", i64a)
+        call pf_toml_get_opt(s, "o_r32a", r32a)
+        call pf_toml_get_opt(s, "o_r64a", r64a)
+        call pf_toml_get_opt(s, "o_loga", loga)
+        call pf_toml_get_opt(s, "o_stra", stra)
+        call pf_toml_get_opt(s, "v_i32", i32)
+        call pf_toml_get_opt(s, "v_i64", i64)
+        call pf_toml_get_opt(s, "v_r32", r32)
+        call pf_toml_get_opt(s, "v_r64", r64)
+        call pf_toml_get_opt(s, "v_log", flag)
+        call pf_toml_get_opt(s, "v_str", str)
+        call pf_toml_get_opt(s, "v_i32a", i32a)
+        call pf_toml_get_opt(s, "v_i64a", i64a)
+        call pf_toml_get_opt(s, "v_r32a", r32a)
+        call pf_toml_get_opt(s, "v_r64a", r64a)
+        call pf_toml_get_opt(s, "v_loga", loga)
+        call pf_toml_get_opt(s, "v_stra", stra)
+        ! pf_toml_get_alloc from the file; pf_toml_get_alloc_opt from the file, then from the
+        ! variables the file just allocated.
+        call pf_toml_get_alloc(s, "fa_i32", ai32)
+        call pf_toml_get_alloc(s, "fa_i64", ai64)
+        call pf_toml_get_alloc(s, "fa_r32", ar32)
+        call pf_toml_get_alloc(s, "fa_r64", ar64)
+        call pf_toml_get_alloc(s, "fa_log", alog)
+        call pf_toml_get_alloc_opt(s, "fao_i32", ai32)
+        call pf_toml_get_alloc_opt(s, "fao_i64", ai64)
+        call pf_toml_get_alloc_opt(s, "fao_r32", ar32)
+        call pf_toml_get_alloc_opt(s, "fao_r64", ar64)
+        call pf_toml_get_alloc_opt(s, "fao_log", alog)
+        call pf_toml_get_alloc_opt(s, "vao_i32", ai32)
+        call pf_toml_get_alloc_opt(s, "vao_i64", ai64)
+        call pf_toml_get_alloc_opt(s, "vao_r32", ar32)
+        call pf_toml_get_alloc_opt(s, "vao_r64", ar64)
+        call pf_toml_get_alloc_opt(s, "vao_log", alog)
+        ! The string lists and the level.
+        call pf_toml_get_strings(s, "f_list", list)
+        call pf_toml_get_strings_opt(s, "fo_list", list)
+        call pf_toml_get_strings_opt(s, "vo_list", list)
+        call pf_toml_get_level(s, "f_level", level)
+        call pf_toml_get_level(s, "d_level", level, default = "INFO")
+        call pf_toml_save(conf, out_file)
+        call pf_toml_close(conf)
+
+        call pf_toml_load(back, out_file)
+        call pf_toml_section(back, "s", sback)
+        do k = 1, nkeys
+            if (.not. pf_toml_has(sback, trim(keys(k)))) then
+                call check(error, .false., "save must write the key its getter resolved: " // trim(keys(k)))
+                exit
+            end if
+        end do
+        call pf_toml_close(back)
+    contains
+        !> Appends `body` to `text` with every line's key prefixed by `pre`.
+        subroutine add_prefixed(text, pre, body)
+            character(len=:), allocatable, intent(inout) :: text  !! the document being built.
+            character(len=*), intent(in) :: pre   !! the key prefix.
+            character(len=*), intent(in) :: body  !! newline-terminated `key = value` lines.
+            integer :: i
+            logical :: at_start
+
+            at_start = .true.
+            do i = 1, len(body)
+                if (at_start) text = text // pre
+                text = text // body(i:i)
+                at_start = body(i:i) == achar(10)
+            end do
+        end subroutine add_prefixed
+    end subroutine test_every_getter_reaches_the_shadow
 
     !> `pf_toml_delete` removes a key from the parsed AND the effective document, and does nothing
     !> at all when the key is not there.

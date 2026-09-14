@@ -49,7 +49,7 @@ in `api-conventions.md`; module placement in `module-structure.md`; language and
   binding fails lint until that list is updated.
 - A generator whose output is user-editable uses marker-delimited windows: refuse a malformed marker
   set before rewriting anything, run `--check` in CI, and stamp a digest of the source input in the
-  header (`feature_risks.md` Risk-32).
+  header (`tools/generate_user_table_code.py --self-test`).
 
 ## Interface blocks and submodules
 

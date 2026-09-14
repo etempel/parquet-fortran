@@ -567,7 +567,10 @@ contains
     !
     ! Each applies the exclusion rules through `stats_compact` -- pass one of the moment engine
     ! and nothing else, so no order statistic pays for four central moments it would discard --
-    ! and then either selects or orders, per `single_probe` below.
+    ! and then either selects or orders, per `single_probe` below. Every consumer of
+    ! `stats_compact` tests its `saw_nan` out-argument before answering, not only the empty case:
+    ! a NaN sorts to one end instead of poisoning an order statistic, so an untested flag answers a
+    ! plain number (`test_propagating_nan_reaches_every_tier`; the object side uses `obj_undefined`).
     ! ==================================================================================
 
     !> Whether a one-shot call should SELECT rather than order the population.

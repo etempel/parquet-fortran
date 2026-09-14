@@ -16815,7 +16815,7 @@ contains
     !! block LOCATOR compared against a lowercase literal, so a MAML spelling its section `Extra:`
     !! validated cleanly with its nested `protected_cols:`/`col_map:`/`remap:`/`filter:`/`sort:`
     !! never found at all -- no warning, and a file whose Null protection had quietly vanished.
-    !! See feature_risks.md Risk-91.
+    !! Enforced statically by `check_maml_keys_case_insensitive`.
     !!
     !! Both spellings run the SAME body, because "the block was found" is only observable through
     !! something the block does: here a `protected_cols:` naming a column that does not exist, which

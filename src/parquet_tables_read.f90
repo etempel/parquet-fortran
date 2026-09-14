@@ -661,7 +661,10 @@ contains
                 ! applies the mask segment AFTERWARDS, so an empty-but-live row group costs a full
                 ! row-group decode per column. Under the scattered-survivor filter a bounded read
                 ! exists for, that is most of the file. materialize_column_parallel skips them for
-                ! the same reason.
+                ! the same reason. Both skips are safe only because a table never closes its reader
+                ! with check_complete=.true.; a chunked read whose caller may ask for that check must
+                ! still visit every row group, empty or pruned (`check_complete is satisfied by a
+                ! filtered chunked pass`, test/test_filter.f90).
                 if (rows_rg <= 0_int64) cycle
                 if (present(rdr)) then
                     call table_materialize_chunk_kind(slot%declared_kind, rdr, &

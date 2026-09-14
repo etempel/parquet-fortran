@@ -462,6 +462,9 @@ contains
     !> column, or item_len*col_size for a packed fixed-width string buffer) -- i.e. mask(i)
     !> applies to elements ((i-1)*block_width+1) : (i*block_width). Used with `pack` to compact
     !> a flat values/is_valid buffer down to its kept rows in one step.
+    !>
+    !> The single place a row mask becomes an element mask: a write worker never inlines its own
+    !> expansion (pinned by `parquet_write_row_mask expands to whole rows of a vector column`).
     function parquet_mask_expand_block(mask, block_width) result(elem_mask)
         logical, intent(in) :: mask(:) !! per-row keep mask.
         integer(int64), intent(in) :: block_width !! array elements per row.

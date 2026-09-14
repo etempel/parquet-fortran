@@ -18,8 +18,8 @@ paths:
   hot path.
 - **Every fatal path goes through `claim_fatal_path_or_park()` + `fatal_exit()`**
   (`std::_Exit(134)`); never call `abort()`/`exit()` directly (glibc's `abort()` deadlocks when
-  several threads reach it; `feature_risks.md` Risk-99). 134 is what a shell reports for SIGABRT,
-  and `_Exit` skips the gcov flush exactly as `abort()` did.
+  several threads reach it; the `concurrent_calls_into_shared_*` scenarios). 134 is what a shell
+  reports for SIGABRT, and `_Exit` skips the gcov flush exactly as `abort()` did.
 - **A per-row helper takes `const arrow::Array *`, never `const std::shared_ptr<arrow::Array> &`**
   (two atomic refcount operations per call; `check_no_per_element_shared_ptr` matches by shape).
 - **It stays ONE translation unit** (`check_single_cpp_translation_unit`; CONTRIBUTING.md
@@ -32,6 +32,11 @@ paths:
 - Uncaught exceptions crossing `extern "C"` terminate the process; the one working `try`/`catch` is
   `parquet_reader_set_filter`. Treat every other `throw` site as unreachable by a clean test.
 - `// ====` banner comments are the navigation aid; keep them when adding sections.
+- **Code switching on `resolved.leaf_field->type()` peels a dictionary wrapper
+  (`unwrap_encoding_layers`) or reads the decoded array's own type**: a top-level dictionary column
+  is decoded to a dense array while the reader's schema keeps the dictionary type. Never peel for a
+  leaf under a struct path or a list, which the decode does not reach
+  (`test/fixtures/dictionary_types.parquet`'s `plain` twin of `cat`).
 - **Never range-for over a reference into a temporary** (`for (auto &c : x->Slice(...)->chunks())`):
   C++20 extends no lifetime through the member call, so the loop reads a destroyed object.
   Name the temporary first, then iterate its member.
@@ -57,6 +62,9 @@ paths:
   Scalar mirrors are `std::atomic`; the string pair (`g_file_date`, …) is mutex-guarded and the push
   compares before assigning. **Any new mirrored setting that owns heap gets the same treatment** —
   a same-value `std::string` store from two threads is a double free.
+- **Every entry point reaching a C++ printer calls the grouped `parquet_push_settings_to_cpp`
+  first**, not only the opens: otherwise a setting changed after the open is not seen
+  (`settings: silent turns parquet_close_reader(print_stat=) into a no-op`, `test/test_errors.f90`).
 - `-fsanitize=address` is the tool (valgrind serialises threads; `-check all` moves the layout);
   under ifx add `-mllvm -asan-globals=0`.
 

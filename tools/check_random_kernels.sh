@@ -37,7 +37,7 @@
 # a flag someone later "tidies up". On gfortran the forced half builds the wrapping kernel, which
 # gfortran NEVER SHIPS -- it has a 128-bit kind and always takes the protected arm. That half
 # FAILS at `-O3 -flto` and `-Ofast -flto`, reproducibly, because gfortran miscompiles the wrapping
-# arithmetic under LTO (see feature_risks.md Risk-101). That is a real hazard and a real gfortran
+# arithmetic under LTO (`xfail_reason` below). That is a real hazard and a real gfortran
 # bug, but it is not a defect in any configuration this library ships: gfortran ships the int128
 # kernel and is clean, ifx ships the wrapping kernel and is clean at every setting measured
 # including `-ipo`. CI checks the shipped kernel -- which nothing else covers under LTO -- and the
@@ -66,10 +66,9 @@
 # a gfortran below the project's floor of 13 rather than reporting that compiler's own
 # miscompilations as findings. Two arms -- the forced wrapping kernel at `-O3 -flto` and `-Ofast
 # -flto` on gfortran -- are listed as known exposures and reported as `XFAIL` instead of failing the
-# run, because gfortran never ships that kernel and miscompiles it under LTO (Risk-101
-# (feature_risks.md)); the list is checked in both directions, so a listed arm that passes is a hard
-# error rather than a silent weakening, and it is not a place to park an inconvenient failure -- an
-# entry needs a configuration this library does not ship and a risk-register entry behind it. This
+# run, because gfortran never ships that kernel and miscompiles it under LTO; the list is checked
+# in both directions, so a listed arm that passes is a hard error rather than a silent weakening, and it is not a place to park an inconvenient failure -- an
+# entry needs a configuration this library does not ship and says why in its own text. This
 # cannot be an `fpm test` arm: `-U__GFORTRAN__` also flips `src/parquet.f90`'s stringify branch, so
 # the package will not compile with it, and a standalone compile of the one module is the only form
 # that works.
@@ -262,17 +261,17 @@ xpass=0
 # check just got stronger rather than to have it silently absorbed.
 #
 # **This is not a licence to silence a failure by adding a line here.** An entry may be added only
-# for a configuration this library does not ship, with a `feature_risks.md` entry behind it.
+# for a configuration this library does not ship, and its text says why that configuration fails.
 xfail_reason() {
     case "$FAMILY|$1" in
         'gnu|forced -O3 -flto'|'gnu|forced -Ofast -flto')
-            echo "gfortran miscompiles the WRAPPING kernel under LTO (feature_risks.md Risk-101)."
+            echo "gfortran miscompiles the WRAPPING kernel under LTO."
             echo "        gfortran has a 128-bit kind and always ships the protected arm, so this"
             echo "        configuration exists only inside this check. ifx ships the wrapping"
             echo "        kernel and is clean at every setting including -ipo."
             echo "        If this arm ever PASSES: the exposure is gone -- confirm whether the"
             echo "        compiler was fixed or the source stopped overflowing, then delete this"
-            echo "        entry and update Risk-101."
+            echo "        entry."
             ;;
     esac
 }

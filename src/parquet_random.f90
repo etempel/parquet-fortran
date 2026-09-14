@@ -1981,7 +1981,7 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         root = pf_random_key(seed, normal_zig_label)
         do k = 1_int64, m
-            call zig_normal(pf_random_key(root, draw + k - 1_int64), stream, 1_int64, v(k), pairs, path)
+            call zig_normal(pf_random_key(root, draw + (k - 1_int64)), stream, 1_int64, v(k), pairs, path)
         end do
     end subroutine fill_normal
 
@@ -1996,7 +1996,7 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         root = pf_random_key(seed, normal_polar_label)
         do k = 1_int64, m
-            call polar_normal(pf_random_key(root, draw + k - 1_int64), stream, 1_int64, v(k), pairs)
+            call polar_normal(pf_random_key(root, draw + (k - 1_int64)), stream, 1_int64, v(k), pairs)
         end do
     end subroutine fill_normal_portable
 

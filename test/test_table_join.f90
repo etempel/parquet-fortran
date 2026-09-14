@@ -130,6 +130,10 @@ contains
     end subroutine collect_tests_table_join_hash
     !
     !> The tests both suites share, in one list so the two cannot drift apart.
+    !!
+    !! Every join test is registered here, never in one collector only. A join abort the hash engine
+    !! re-implements gets a `_hash` twin scenario as well (`scenario_join_hash_twin`,
+    !! test/error_scenarios.f90), or the hash engine's copy of that check goes untested.
     subroutine join_tests(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the tests.
         testsuite = [ &
@@ -169,6 +173,8 @@ contains
                 test_join_string_form), &
             new_unittest("columns= and residency, all four combinations", &
                 test_join_columns_residency), &
+            new_unittest("a join against an unread table, written with no schema, holds the left columns", &
+                test_join_then_schemaless_write), &
             new_unittest("a join detaches, and skips a left column that was never read", &
                 test_join_detaches), &
             new_unittest("a zero-row right table joins to all-nulls", &
@@ -997,9 +1003,10 @@ contains
     !> `columns=` and residency, all four combinations.
     !!
     !! The rule a caller is most likely to be caught by, and the one whose default failure is
-    !! SILENT (`feature_risks.md` R-f): a join that carried no payload, followed by a schema-less
-    !! `parquet_write_table`, emits a valid file quietly missing columns. Case (3) is the negative
-    !! control that stops "carry everything" passing as "carry what is resident".
+    !! SILENT: a join that carried no payload, followed by a schema-less `parquet_write_table`,
+    !! emits a valid file quietly missing columns (`test_join_then_schemaless_write` pins that
+    !! composition). Case (3) is the negative control that stops "carry everything" passing as
+    !! "carry what is resident".
     subroutine test_join_columns_residency(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: f = "test_run/join_residency.parquet"
@@ -1068,6 +1075,73 @@ contains
         if (allocated(error)) return
         call check(error, ok, "a column columns= named must arrive holding its own values")
     end subroutine test_join_columns_residency
+    !
+    !> A join against an unread right table, written with no schema, reopens with the LEFT
+    !! table's columns only; after `%materialize_all()` on the right table it reopens with every
+    !! column and the carried values.
+    !!
+    !! Each half is asserted in memory by `test_join_columns_residency`; this pins the composition
+    !! on the file a caller keeps. A join that carried an unread column across as nulls, or a
+    !! schema-less write that emitted a column the table does not hold, fails the first half; the
+    !! second half is the negative control that stops a write dropping everything from passing.
+    subroutine test_join_then_schemaless_write(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_schemaless_right.parquet"
+        character(len=*), parameter :: g1 = "test_run/join_schemaless_unread.parquet"
+        character(len=*), parameter :: g2 = "test_run/join_schemaless_all.parquet"
+        type(parquet_table) :: src, a, b, c
+        integer(int64), allocatable :: extra(:), got(:), id(:)
+        integer(int64) :: k
+        logical :: ok, seen
+        !
+        call build(src, "id", RKEY)
+        allocate(extra(size(RKEY)))
+        do k = 1_int64, size(RKEY, kind=int64)
+            extra(k) = 100_int64 * k
+        end do
+        call src%add_column("extra", extra)
+        call parquet_write_table(src, f, overwrite=.true.)
+        ! Unread right table: the file holds the left table's two columns and nothing else.
+        call build(a, "id", LKEY)
+        call parquet_open_table(b, f)
+        call a%join(b, "id", how="left")
+        call parquet_write_table(a, g1, overwrite=.true.)
+        call parquet_open_table(c, g1)
+        call check(error, c%ncols() == 2 .and. c%has_column("id") .and. c%has_column("payload"), &
+            "a schema-less write after a join against an unread table must hold the left columns only")
+        if (allocated(error)) return
+        call check(error, .not. c%has_column("extra") .and. .not. c%has_column("payload_2"), &
+            "a right column the join never read must not reach the file, not even as nulls")
+        if (allocated(error)) return
+        ! Negative control: %materialize_all() on the right table puts every column in the file.
+        call build(a, "id", LKEY)
+        call parquet_open_table(b, f)
+        call b%materialize_all()
+        call a%join(b, "id", how="left")
+        call parquet_write_table(a, g2, overwrite=.true.)
+        call parquet_open_table(c, g2)
+        call check(error, c%ncols() == 4 .and. c%has_column("payload_2") .and. c%has_column("extra"), &
+            "after materialize_all the schema-less write must hold every joined column")
+        if (allocated(error)) return
+        call c%get("extra", got)
+        call c%get("id", id)
+        ok = .true.
+        seen = .false.
+        do k = 1_int64, c%nrows()
+            if (c%is_null("extra", k)) cycle
+            seen = .true.
+            ! `extra` is 100*r for right row r, so the value names the row whose key it must carry.
+            if (mod(got(k), 100_int64) /= 0_int64 .or. got(k) < 100_int64 .or. &
+                    got(k) > 100_int64 * size(RKEY, kind=int64)) then
+                ok = .false.
+            else if (RKEY(got(k) / 100_int64) /= id(k)) then
+                ok = .false.
+            end if
+        end do
+        call check(error, seen, "some row must have matched, or the value assertion is vacuous")
+        if (allocated(error)) return
+        call check(error, ok, "the written file must carry each right column's own values")
+    end subroutine test_join_then_schemaless_write
     !
     !> A join detaches, and a left column that was never read is skipped rather than read.
     !!

@@ -4840,7 +4840,8 @@ module parquet_core
         !> the keys nested inside it must agree on that rule: they did not once, and a MAML
         !> spelling its section `Extra:` then passed validation (which is case-insensitive) while
         !> its `protected_cols:`/`col_map:`/`remap:`/`filter:`/`sort:` were silently never found.
-        !> See feature_risks.md Risk-91.
+        !> Enforced by `check_maml_keys_case_insensitive`; pinned by
+        !> `test_maml_block_headers_case_insensitive` and the `extra_section_capitalized` scenario.
         !>
         !> Indentation is deliberately NOT considered: a caller that requires a top-level header
         !> keeps its own `line(1:1) /= " "` test, and a caller looking one level inside a block

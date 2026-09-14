@@ -37,9 +37,9 @@ addition:
   description says and stops. The rules it applies stay in `.claude/rules/`; the skill points at
   them rather than restating them.
 - **Forward-looking only.** These files are not a changelog or session log; git history and
-  `CHANGELOG.md` record what happened when, and `feature_risks.md` records the silent-failure
-  properties of specific areas with their test status.
-- **Cite what the repository can verify**: the lint check, the test, the procedure, the
+  `CHANGELOG.md` record what happened when, and `feature_risks.md` lists the open silent-failure
+  risks no test covers.
+- **Cite what the repository can verify**: the lint check, the test, the procedure, an open
   `feature_risks.md` entry. Never write a count or a list the repository owns; point at the source
   and re-derive before quoting.
 - **Scope a file-anchored rule with `paths:` frontmatter**; it is loaded when a matching file is

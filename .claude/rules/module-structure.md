@@ -133,8 +133,8 @@ parquet_wrapper.cpp             (the single C++ translation unit)
   index. Every `random_block` call site names its tag explicitly, `DOM_REAL64` included.
 - A new generic decides which space it reads. Two contract identities: `pf_random_at` is the top 53
   bits of `pf_random_bits_at`; `pf_random_exp_at` is `-log(1 - u)` for that same `u`.
-- No call site passes a block index above the one its own draw addresses (`feature_risks.md`
-  Risk-133).
+- No call site passes a block index above the one its own draw addresses
+  (`test_generic_stride_aliasing`, `test/test_random.f90`).
 
 ## Sorting tiers
 

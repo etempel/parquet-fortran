@@ -61,8 +61,9 @@ Injected context:
   candidate checked against the admission test (`api-conventions.md`, Settings), or per knob its
   name, default, validation, environment variable, printed row, reset, C++ mirror and
   observed-effect test.
-- **Risks**: each silent-failure property the feature creates, as proposed `Risk-N` text for
-  `feature_risks.md` section 1 (proposed here; added by the implementation).
+- **Risks**: each silent-failure property the feature creates, with the test that will cover it.
+  Propose a `feature_risks.md` entry only for one passing the admission test in `workflow.md`
+  (usually none).
 - **Performance**: if a hot path changes, the `bench/` tool that measures it and the machine-free
   wording the guide will carry.
 - **Not in scope**: what the request could be read to include and deliberately is not.

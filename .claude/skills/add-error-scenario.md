@@ -90,5 +90,4 @@ to on-demand spawning.
 
 ## 6 Report
 
-Scenario name, suite, the message asserted, the mutation that proved it, the checks run. If the
-abort guards a silent-failure property, propose a `feature_risks.md` entry.
+Scenario name, suite, the message asserted, the mutation that proved it, the checks run.

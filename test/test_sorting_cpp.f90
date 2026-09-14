@@ -3351,7 +3351,12 @@ contains
                     "the final merge round must really be co-ranked at n="//itoa(n)// &
                     " threads="//itoa(t)//"; a single-threaded merge satisfies the oracle below")
                 if (allocated(error)) exit
-                call check(error, size(par) == n .and. all(par == ser), &
+                ! Two checks, not one `.and.`: `all(par == ser)` would be evaluated over mismatched
+                ! extents when the size is wrong, since `.and.` does not short-circuit.
+                call check(error, size(par) == n, &
+                    "co-ranking must return n indices at n="//itoa(n)//" threads="//itoa(t))
+                if (allocated(error)) exit
+                call check(error, all(par == ser), &
                     "co-ranking must equal the serial permutation at n="//itoa(n)// &
                     " threads="//itoa(t))
                 if (allocated(error)) exit

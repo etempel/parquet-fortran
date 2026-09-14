@@ -66,7 +66,7 @@ Procedure for adding one: the `/add-error-scenario` skill.
   refuse on it fire suite-wide; `columns-tables.md`).
 - An excluded suite runs through `run_selected` per test with NO enclosing region
   (`run_testsuite(..., parallel=.false.)` still opens an inactive region one level down, which
-  deadlocks libgomp intermittently — `feature_risks.md` Risk-104). Its tests may assume
+  deadlocks libgomp intermittently; `test_nested_team_guard`). Its tests may assume
   `omp_get_level() == 0`; `run_suite` refuses a suite with two tests of the same name.
 - **An intermittent failure has a third cause besides a race and a shared path: a test reading
   memory the library never wrote** (a null row's value bytes are unspecified by design; `NaN - NaN`
@@ -105,7 +105,17 @@ void *malloc(size_t n) {
   which is exactly 134 everywhere). The shared helpers already do this; grep `exitstat ==` before
   adding a comparison. A guide page may not state an exit status either.
 - Reserve exact-equality assertions for values that are stored, never re-derived through a
-  transcendental (`fortran-gotchas.md`, ifx).
+  transcendental (`fortran-gotchas.md`, ifx). **A libm-backed bulk form and its scalar twin agree
+  to a few ulp only** (a vector libm variant inside one binary): assert that, and assert CHUNK
+  INVARIANCE exactly at every split size (`test_exp_cross_form`); never add `NOVECTOR` to force it.
+- **A parallel-versus-serial equality needs an independent oracle beside it**: both arms share
+  everything above the point they diverge, so a defect there passes the A/B. Build the fixture as a
+  pure function of the row number and check every surviving row against it
+  (`check_rows_consistent`, `test/test_table_parallel.f90`).
+- **Test a sufficient-condition fast path by its IMPLICATION on every element it handled**, never
+  by a distribution or an answer A/B: re-run the exact test on each candidate a rejection sampler's
+  squeeze accepted and require agreement (`test_squeezes_are_valid`). A wrong squeeze moves no
+  moment a feasible sample resolves.
 - **An assertion whose whole subject is an INQUIRY does not call the procedure it names.**
   `kind(f(x))`, `len(g(s))`, `size(h(v))` and their kin are resolved from the interface, so a
   generic-resolution test written that way passes without the specific ever running and reports
@@ -149,10 +159,16 @@ fast path, a short-circuit, a cache, a guard). The `/mutation-test` skill carrie
 as caught). Rules for reading a result:
 
 - Check which path the test reaches: a comparator mutation survives when both sides use the same
-  comparator or a counting fast path never calls it (`feature_risks.md` Risk-35); a size threshold
-  is the same trap (Risk-49) — give every gating constant a `parquet_debug_set_*` override and lower
-  it in tests (`parquet_debug_set_sort_merge_min_segment`,
-  `parquet_debug_set_disable_sort_counting_path`).
+  comparator or a counting fast path never calls it (`nth_element is stable on duplicates`); a size
+  threshold is the same trap (`the final merge round is really co-ranked`) — give every gating
+  constant a `parquet_debug_set_*` override and lower it in tests
+  (`parquet_debug_set_sort_merge_min_segment`, `parquet_set_sort_counting_path`).
+  Lower EVERY floor on the path, the one deciding the decomposition runs as well as those opening
+  the team. **Assert a threaded path through its team or design counter, never only through its
+  answer**: the answer is identical at every team size, so a count resolved and then dropped, or a
+  team that opens and runs serially, passes every answer A/B. Pair the counter with a `threads=1`
+  negative control and read the one belonging to the engine under test (`threaded_split_ran()`,
+  `threaded_design_was()`, `parquet_debug_sort_threads_used()`; `test/test_sorting.f90`).
 - An optional argument no internal caller passes, and the degenerate shapes of an entry point
   (non-empty destination, zero-length input), are untested until enumerated deliberately.
 - An argument that only FORWARDS through a layer, especially an abort-only one, needs one scenario

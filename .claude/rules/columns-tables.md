@@ -45,7 +45,8 @@ the containers, `parquet_tables`).
 - `set_validity` writes a whole mask in one pass; a table write hands the element mask straight to
   the writer (`test_element_null_round_trip`).
 - **Storage grows geometrically (`ensure_capacity`, 1.5x) and rebuilds are exact-fit**;
-  `size(storage)` is `cap`, so every read is bounded by `1:nrows` (`feature_risks.md` Risk-67).
+  `size(storage)` is `cap`, so every read is bounded by `1:nrows`
+  (`spare capacity is invisible to every reader`, `test/test_columns.f90`).
   `%shrink_to_fit`/`%compact` are no-ops on a never-appended column.
 - **Assemble from pieces with `init` at full size + `%paste(src, at, [from], [count])`**
   (`materialize_slice`). `%paste` REPLACES the pasted range's validity (`%append` merges). The
@@ -109,7 +110,7 @@ the containers, `parquet_tables`).
   rather than inherits.
 - The polymorphic-`intent(out)` setter rule (`fortran-gotchas.md`, general) is enforced for the
   temporal types by `check_temporal_setters_assign_all`, which derives the component and setter
-  lists from the source (`feature_risks.md` Risk-70). The whole-array elemental call is slower than
+  lists from the source. The whole-array elemental call is slower than
   the indexed loop; the win is in the intent, not the call shape.
 - `civil_from_days`'s final `if (m <= 2) y = y + 1` is easy to drop when re-deriving; re-read both
   functions and sanity-check a hand-derived boundary value by round trip
@@ -144,7 +145,8 @@ the containers, `parquet_tables`).
   Arrow's own per-column threading stays enabled inside the region; re-measure before changing.
 - **Disjoint ROWS are not disjoint BITS**: validity blocks (`parquet_validity_block_bits`, exported
   by `parquet_columns` for this caller) are read-modify-write, so threads filling adjacent row groups
-  trim to whole blocks and put the ragged ends in a `critical` (`feature_risks.md` Risk-64). Publish
+  trim to whole blocks and put the ragged ends in a `critical`
+  (`no two row groups' pastes share a validity block`, `test/test_table_parallel.f90`). Publish
   a layout constant a sibling needs for correctness; never copy it.
 - Every new guard needs a negative control (`test_table_private_mutation_allowed`,
   `test/test_openmp.f90`).
@@ -179,5 +181,6 @@ the containers, `parquet_tables`).
 - `%clone` copies `rg_bounds` with an explicit `allocate` plus an element-wise loop, never an
   intrinsic assignment through the pointer component.
 - `parquet_debug_table_set_inflight` forces the in-flight counters so both concurrency aborts can
-  be provoked from one thread; `parquet_debug_table_drop_name_index` (required `had_index`
-  argument) forces `cache_find`'s linear-scan fallback (`feature_risks.md` Risk-6, Risk-75).
+  be provoked from one thread (`table_read_during_append`, `table_append_during_read` scenarios);
+  `parquet_debug_table_drop_name_index` (required `had_index` argument) forces `cache_find`'s
+  linear-scan fallback (`column lookup falls back to a linear scan when the name index is gone`).

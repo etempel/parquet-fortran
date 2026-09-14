@@ -14468,7 +14468,8 @@ contains
     !> A MAML key is case-insensitive, block headers included -- so `Extra:` must be read as the
     !! `extra:` section, and the `protected_cols:` inside it must still be validated. Before this
     !! was fixed the capitalized spelling validated cleanly, because the block was never found:
-    !! silent, and it took a column's Null protection with it. See feature_risks.md Risk-91.
+    !! silent, and it took a column's Null protection with it. The in-process half is
+    !! `test_maml_block_headers_case_insensitive`; `check_maml_keys_case_insensitive` is the static one.
     !!
     !! The message is asserted, not only the abort, because "validation rejected this MAML" is a
     !! thing several unrelated defects could also produce -- only naming the unknown column proves

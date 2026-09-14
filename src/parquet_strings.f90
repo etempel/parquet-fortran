@@ -617,9 +617,10 @@ contains
     !! **This is the correctness rule of the whole threading layer, not a convenience.** The validity
     !! bitmap packs 8 rows per byte, so two threads writing rows in the same byte race on that byte:
     !! a read-modify-write each, one of which is lost. Nothing aborts, the column still validates,
-    !! and the nulls are simply wrong -- `feature_risks.md` Risk-60's silent class. Splitting on
+    !! and the nulls are simply wrong. Splitting on
     !! arbitrary row counts is what makes that possible; splitting on byte boundaries makes it
-    !! impossible, because no two threads ever touch the same byte.
+    !! impossible, because no two threads ever touch the same byte. Pinned by the test
+    !! `thread row ranges cover every row and never share a validity byte` (`test/test_parquet_string.f90`).
     !!
     !! Ranges are returned even when the split is uneven, and an empty range (`lo > hi`) is a valid
     !! answer for a trailing thread -- callers must tolerate it rather than assume every thread gets

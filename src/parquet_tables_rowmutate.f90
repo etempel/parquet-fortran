@@ -91,6 +91,10 @@ contains
     end procedure table_detach
     !
     module procedure table_mutable_column
+        ! Skipping a column that is not RES_FULL is safe only because such a column is RES_EMPTY: it
+        ! holds no storage and the detach guard stops every later read (`container_skipped_by_mutation`).
+        ! A RES_PARTIAL column skipped here would keep storage misaligned with the rebuilt rows, so
+        ! implementing RES_PARTIAL means revisiting this predicate in the same change.
         ok = self%cache%cols(idx)%supported .and. self%cache%cols(idx)%residency == RES_FULL
     end procedure table_mutable_column
     !

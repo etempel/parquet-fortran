@@ -443,7 +443,7 @@ contains
     !> Builds the schema a SCHEMA-LESS write uses: one field per resident column, in slot order,
     !! under the column's own internal name.
     !!
-    !! Three rules decide what goes in, and each is a decision rather than an implementation
+    !! Four rules decide what goes in, and each is a decision rather than an implementation
     !! detail:
     !!
     !! * **Resident columns only.** That is what makes this the quick path -- it writes what is
@@ -463,6 +463,9 @@ contains
     !!   both from the data at the first write exactly as it would with no schema at all, so this
     !!   procedure cannot get them wrong -- and the sidecar MAML, emitted at close, records the
     !!   resolved values.
+    !! * **Nullability is declared, never measured.** No value is read and no `%has_nulls`/`is_null`
+    !!   is asked: the table is one batch of many, and a field declared non-nullable from it is one a
+    !!   later batch may need a Null in (`test_derive_schema_does_not_measure_nullability`).
     !!
     !! The `table:` name is the caller's, since a schema-less table has no schema name to take one
     !! from and MAML requires the key: the output file's stem for a write, the source file's stem

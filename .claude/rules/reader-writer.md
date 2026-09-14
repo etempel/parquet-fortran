@@ -33,6 +33,9 @@ survives `/=` and any negated comparison). Never harmonise the two.
 - A bare `nan` comparison value is rejected; `inf` is accepted.
 - `x is_nan` ≡ `not (x >= 0 or x < 0)`; `test_filter.f90` uses it as an independent oracle. Copy
   that pattern for any future operator that is sugar over the existing grammar.
+- **The table engine (`src/parquet_read_eval.f90`) and the reader engine answer one grammar
+  separately**: a new operator, leaf kind or column family gets a rule in the A/B sweep
+  (`expect_same_rows`, `test/test_table_verbs.f90`), not only a single-engine test.
 
 ## The row-group statistics screen: every uncertainty DECLINES
 
@@ -58,7 +61,7 @@ wrong answer, so every rule keeps the failure direction at "prune nothing":
 - **A scoped filter's row-group cut is STRUCTURAL, and runs above the `g_statistics_prescreen`
   gate**; only the statistics decisions sit below it. Classify any new work in `screen_row_groups`
   that way before placing it: gating a structural cut costs the mask's bound with every answer still
-  right (`feature_risks.md` Risk-221).
+  right (`a scoped filter's retained mask scales with its scope, not the file`).
 - A test needs both halves: A/B equality against `parquet_set_statistics_prescreen(.false.)` AND an
   assertion on `parquet_debug_get_row_groups_pruned()`. That hook and
   `parquet_debug_get_row_mask_length` (the mask's own row count, which is how the scope's bound is
@@ -95,8 +98,8 @@ wrong answer, so every rule keeps the failure direction at "prune nothing":
 
 ## A written column's nullability is a CONTRACT with the array beside it
 
-`build_field` (`parquet_wrapper.cpp`) decides the field's `nullable` flag (`feature_risks.md`
-Risk-82):
+`build_field` (`parquet_wrapper.cpp`) decides the field's `nullable` flag
+(`test_streamed_nullability_follows_first_mask`, `test/test_writing.f90`):
 
 - A whole-column write decides from the VALUES (`has_any_null`; `false` for a null mask pointer).
 - A streamed write decides from mask PRESENCE on the FIRST row group (`resolve_chunk_nullability`);

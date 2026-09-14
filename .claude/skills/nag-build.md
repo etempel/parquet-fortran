@@ -81,8 +81,8 @@ residue of flagged imports is the healthy state.
 
 **Correct by design, do not "fix"**: `Last statement of DO loop body is an unconditional
 RETURN/EXIT/ERROR STOP` (the `cycle`-guard search idiom); `Expression in OpenMP IF clause is always
-.FALSE.` (`test/test_sorting.f90` opens an inactive region on purpose, `feature_risks.md`
-Risk-104); `CONTINUE statement with no label` (a deliberately empty branch); `Non-standard
+.FALSE.` (`test_nested_team_guard`, `test/test_sorting.f90`, opens an inactive region on
+purpose); `CONTINUE statement with no label` (a deliberately empty branch); `Non-standard
 intrinsic module OMP_LIB`.
 
 **`Questionable: Variable X set but never referenced` is read every time**: a dead store (remove),

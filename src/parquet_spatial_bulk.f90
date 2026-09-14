@@ -613,7 +613,9 @@ contains
         ! been converted into the index's own units, so nothing downstream can tell degrees from
         ! chords -- which is exactly the confusion this catches. Every bulk binding therefore
         ! declares which metric it converted FROM, and a mismatch aborts here rather than
-        ! producing a plausible answer to a question nobody asked.
+        ! producing a plausible answer to a question nobody asked. A new bulk form comes through
+        ! here too, converting an angular radius at its own entry point through `sky_chords`
+        ! (scenarios `spatial_sky_bulk_refused`, `spatial_sky_bulk_on_euclidean`).
         if (self%metric_id /= expect_metric) then
             if (expect_metric == PF_METRIC_SKY) error stop &
                 "pf_spatial_index: this is a Euclidean index; use the plain bulk forms, not the _sky ones"

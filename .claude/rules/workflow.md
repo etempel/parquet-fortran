@@ -61,28 +61,29 @@ Rules for how work is done in this repository. Read before any change.
   archives by hand.
 - A source comment citing a planning document that is no longer present is attribution and stays.
 
-## The `feature_risks.md` standing-risks register
+## The `feature_risks.md` open-risks register
 
-Tracked register of properties a future change can break **silently** (no test failure, no abort).
-Read it before editing an area.
+Tracked list of OPEN risks: silent failures a user can suffer that no test or check catches today.
+A covered risk is not in it. Read the entries for an area before editing it.
 
-- **Admission: MAJOR silent failures only** — a wrong answer, lost/corrupted data, a stale pointer,
-  a hang, a broken frozen contract. Not a cost, not a loud failure, not a property of the test
-  harness, build or benchmark method (those belong in `.claude/rules/`). Move a rejected entry's
-  useful check or constant into the code rather than dropping it.
-- **`Risk-N` numbers are permanent**: numbered upward across the whole file, never renumbered,
-  never reused after deletion.
-- **Four sections**: 1 New risks (healthy state: empty), 2 Proposed testing scenario, 3 Not
-  testable, 4 Covered, kept for what they still forbid. A new risk takes the next number and goes in
-  section 1.
-- **Section 4 is pruned, not archived**: an entry stays only while it still forbids something; a
-  "works and is tested" entry is deleted. Prune whenever you are in the file.
-- **Check a verdict against the suite, never infer it**: grep the tests before marking "proposed";
-  name the test before marking "covered".
-- **Implementing a proposed test updates the entry in the same change** (move to section 4 or
-  delete; name the test).
-- **A newly discovered silent-failure property gets a new `Risk-N` in section 1**, not only a code
-  comment.
+- **Admission requires all four**, each answered in the proposal:
+  1. the failure is a silent wrong answer, lost or corrupted data, or a hang, reachable through the
+     public API on a realistic path;
+  2. no test or check in `fpm test` or `tools/run_lint_check.sh` fails when the property is broken
+     (name the mutation tried, or why none can be);
+  3. a test cannot be written in the same change — if one can, write the test instead;
+  4. it is in no excluded class: performance or memory; diagnostics and log routing; a compiler or
+     toolchain trap (`fortran-gotchas.md`); a test-design lesson (`testing.md`); a documented caller
+     contract (the guide page); a contributor-only or unreachable-today trap (a comment at the site).
+- **Claude never adds an entry.** Propose the text with the four answers; the maintainer decides.
+- **At most 15 entries, each body at most 15 lines**: what breaks, why no test, what would close it,
+  what it forbids. A sixteenth closes or replaces one. `check_risk_register_shape` enforces the shape
+  and the next-number line.
+- **Covering a risk deletes its entry in the same change**, after its "must not" moves into a
+  comment at the site or a rule file; the change rewrites every citation of the number in
+  `.claude/`, CLAUDE.md, CONTRIBUTING.md, `.gitlab-ci.yml` and lint messages to name the test.
+- **`Risk-N` numbers are never reused**: a new entry takes the `Next number:` line's value and
+  increments it. Cite a number only for an open entry.
 
 ## Scripted edits to documents
 

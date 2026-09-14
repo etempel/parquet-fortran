@@ -1815,6 +1815,9 @@ contains
         character(len=32) :: a_str
         !
         n = size(first, kind=int64)
+        ! `found` means "a key matched", also when `default` is given: it comes from the match
+        ! indices, before any substitution, and the fill loop below never touches it
+        ! (`test_remap_unmapped_policies`, the both-arguments assertion).
         if (present(found)) then
             allocate(found(n))
             if (n > 0_int64) found = first /= 0_int64
@@ -1856,6 +1859,9 @@ contains
         character(len=32) :: a_str
         !
         n = size(first, kind=int64)
+        ! `found` means "a key matched", also when `default` is given: it comes from the match
+        ! indices, before any substitution, and the fill loop below never touches it
+        ! (`test_remap_unmapped_policies`, the both-arguments assertion).
         if (present(found)) then
             allocate(found(n))
             if (n > 0_int64) found = first /= 0_int64
@@ -1899,6 +1905,9 @@ contains
         character(len=32) :: a_str
         !
         n = size(first, kind=int64)
+        ! `found` means "a key matched", also when `default` is given: it comes from the match
+        ! indices, before any substitution, and the fill loop below never touches it
+        ! (`test_remap_unmapped_policies`, the both-arguments assertion).
         if (present(found)) then
             allocate(found(n))
             if (n > 0_int64) found = first /= 0_int64
@@ -1942,6 +1951,9 @@ contains
         character(len=32) :: a_str
         !
         n = size(first, kind=int64)
+        ! `found` means "a key matched", also when `default` is given: it comes from the match
+        ! indices, before any substitution, and the fill loop below never touches it
+        ! (`test_remap_unmapped_policies`, the both-arguments assertion).
         if (present(found)) then
             allocate(found(n))
             if (n > 0_int64) found = first /= 0_int64
@@ -1985,6 +1997,9 @@ contains
         character(len=32) :: a_str
         !
         n = size(first, kind=int64)
+        ! `found` means "a key matched", also when `default` is given: it comes from the match
+        ! indices, before any substitution, and the fill loop below never touches it
+        ! (`test_remap_unmapped_policies`, the both-arguments assertion).
         if (present(found)) then
             allocate(found(n))
             if (n > 0_int64) found = first /= 0_int64
@@ -2029,6 +2044,9 @@ contains
         character(len=32) :: a_str
         !
         n = size(first, kind=int64)
+        ! `found` means "a key matched", also when `default` is given: it comes from the match
+        ! indices, before any substitution, and the fill loop below never touches it
+        ! (`test_remap_unmapped_policies`, the both-arguments assertion).
         if (present(found)) then
             allocate(found(n))
             if (n > 0_int64) found = first /= 0_int64

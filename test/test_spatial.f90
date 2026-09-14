@@ -235,6 +235,7 @@ contains
             new_unittest("rebuild is a no-op on unchanged data and rebuilds on changed", test_rebuild_detects_change), &
             new_unittest("rebuild_for re-tunes without the caller's arrays", test_rebuild_for_retunes), &
             new_unittest("a distant query radius rebuilds, a near one does not", test_auto_rebuild), &
+            new_unittest("a single-point query never rebuilds the index", test_single_queries_never_rebuild), &
             new_unittest("copy=.false. answers exactly as copy=.true.", test_copy_false_matches), &
             new_unittest("the metadata queries report what was built", test_metadata_queries), &
             new_unittest("the HEALPix backend answers every single-point sky query identically", &
@@ -3368,6 +3369,75 @@ contains
         call parquet_set_verbosity(verb_was)
         call parquet_debug_reset_spatial_counters()
     end subroutine test_auto_rebuild
+
+    !> A SINGLE-point query never rebuilds, however far its radius is from the built one.
+    !>
+    !> Only a bulk entry point may rebuild: it does so in `spatial_bulk_setup`, before its parallel
+    !> region, while single queries are what callers run concurrently from their own threads, and
+    !> a rebuild reallocates the arrays another thread is walking. Every single Euclidean and sky
+    !> query is run at a radius that makes a bulk query rebuild, and must leave the rebuild counter,
+    !> the cell and the recorded radius untouched. The closing bulk call at the same radius is the
+    !> negative control: without it the test passes against an index that never rebuilds at all.
+    subroutine test_single_queries_never_rebuild(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        integer(int64), parameter :: n = 3000_int64
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:)
+        integer(int64), allocatable :: got(:), counts(:)
+        real(real64) :: p(3), p2(3), h_was, r_was
+        integer(int64) :: base, m
+        type(pf_spatial_index) :: sx, sk
+        character(len=:), allocatable :: verb_was
+
+        ! The closing bulk calls re-tune on purpose; their once-per-index advice is noise here.
+        call parquet_get_verbosity(verb_was)
+        call parquet_set_verbosity("silent")
+        allocate (got(n))
+
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.01_real64)
+        h_was = sx%cell_size()
+        r_was = sx%effective_radius()
+        base = parquet_debug_spatial_rebuilds()
+        p = 0.5_real64
+        p2 = [0.2_real64, 0.3_real64, 0.7_real64]
+        m = sx%within(p, 0.5_real64, got)
+        m = sx%count_within(p, 0.5_real64)
+        m = sx%within_segment(p, p2, 0.5_real64, got)
+        m = sx%within_cylinder(p, p2, 0.5_real64, got)
+        m = sx%within_cone(p, p2, 0.4_real64, 0.5_real64, got)
+        m = sx%nearest(p, 2000_int32, got)
+        call check(error, parquet_debug_spatial_rebuilds() == base, &
+            "a single Euclidean query must never rebuild the index")
+        if (allocated(error)) return
+        call check(error, sx%cell_size() == h_was .and. sx%effective_radius() == r_was, &
+            "a single Euclidean query must leave the cell and the recorded radius as built")
+        if (allocated(error)) return
+        call sx%count_all_within(0.5_real64, counts)
+        call check(error, parquet_debug_spatial_rebuilds() == base + 1_int64, &
+            "a bulk query at the same radius must rebuild, or the assertions above are vacuous")
+        if (allocated(error)) return
+
+        call make_sky(n, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=0.1_real64)
+        h_was = sk%cell_size()
+        r_was = sk%effective_radius()
+        base = parquet_debug_spatial_rebuilds()
+        m = sk%within_sky(10.0_real64, 20.0_real64, 40.0_real64, got)
+        m = sk%count_within_sky(10.0_real64, 20.0_real64, 40.0_real64)
+        m = sk%nearest_sky(10.0_real64, 20.0_real64, 2000_int32, got)
+        call check(error, parquet_debug_spatial_rebuilds() == base, &
+            "a single sky query must never rebuild the index")
+        if (allocated(error)) return
+        call check(error, sk%cell_size() == h_was .and. sk%effective_radius() == r_was, &
+            "a single sky query must leave the cell and the recorded radius as built")
+        if (allocated(error)) return
+        call sk%count_all_within_sky(40.0_real64, counts)
+        call check(error, parquet_debug_spatial_rebuilds() == base + 1_int64, &
+            "a bulk sky query at the same radius must rebuild, or the assertions above are vacuous")
+        if (allocated(error)) return
+
+        call parquet_set_verbosity(verb_was)
+    end subroutine test_single_queries_never_rebuild
 
     !> A no-copy index answers exactly as a copying one, in every query family.
     !>

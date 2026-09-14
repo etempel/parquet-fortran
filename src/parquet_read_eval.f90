@@ -119,7 +119,9 @@ contains
             shape_token = "struct"
         case default
             ! Every *_VEC kind, and PK_NONE. A vector column is named by its shape rather than its
-            ! element type, because that is the half of the answer the refusal is about.
+            ! element type, because that is the half of the answer the refusal is about. This arm
+            ! must keep refusing (an empty type token): mapping an unknown kind onto a guessed type
+            ! would filter a new column family as something else, silently.
             type_token = ""
             shape_token = "vector"
         end select

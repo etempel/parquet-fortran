@@ -37,7 +37,7 @@ Code). The instructions Claude Code works from live in [CLAUDE.md](CLAUDE.md) an
 
 Project conventions are recorded in `.claude/rules/` and indexed by [CLAUDE.md](CLAUDE.md). Read
 `workflow.md`, `code-style.md`, `api-conventions.md` and `documentation.md` there before a first
-change, and `feature_risks.md` (this repository's standing-risks register) before editing an area it
+change, and `feature_risks.md` (this repository's open-risks register) before editing an area it
 covers. The mechanical conventions are enforced by `tools/run_lint_check.sh`, the same checks CI's
 lint stage runs.
 
@@ -470,7 +470,7 @@ if you extend MAML structure in this library, update `allowed_maml_sections` and
 Report a fatal condition through `report_fatal_error(...)`; never call `std::abort()` or `exit()`
 yourself, and route any new fatal path through `claim_fatal_path_or_park()` and `fatal_exit()`. The
 rules for the C++ side are in `.claude/rules/cpp-wrapper.md` and at the top of
-`src/parquet_wrapper.cpp` beside `claim_fatal_path_or_park`; see also `feature_risks.md` Risk-99.
+`src/parquet_wrapper.cpp` beside `claim_fatal_path_or_park`.
 
 ## Features considered but not implemented
 

@@ -5,7 +5,7 @@ Each one protects a property whose violation compiles cleanly, passes the whole 
 fails somewhere else entirely -- in a user's program, on another compiler, or in a coverage report.
 That is what makes them worth a static check rather than a test:
 
-  1. `parquet_table` must have NO allocatable component (feature_risks.md Risk-13).
+  1. `parquet_table` must have NO allocatable component.
      The type is finalizable, so every allocatable component it gains makes the compiler generate a
      deeper recursive walk for its `intent(out)` entry and its FINAL -- and this project has three
      confirmed compiler bugs in exactly that machinery on exactly this type (gfortran leaving an
@@ -14,7 +14,8 @@ That is what makes them worth a static check rather than a test:
      `parquet_table_cache`, reached through the pointer. See `.claude/rules/columns-tables.md`, "New `parquet_table` state
      goes on the CACHE".
 
-  2. Every pointer a table accessor hands out must be reached through `self%cache` (feature_risks.md Risk-12).
+  2. Every pointer a table accessor hands out must be reached through `self%cache`
+     (`.claude/rules/columns-tables.md`, "`parquet_table` pointers and row-structural mutation").
      `%col` needs no `target` attribute on the caller's table only because the pointer targets heap
      owned by the cache rather than the dummy argument, so F2018 15.5.2.4's "pointer to a dummy's
      target becomes undefined on return" never applies. An accessor that points at `self` directly
@@ -22,7 +23,8 @@ That is what makes them worth a static check rather than a test:
      library still compiles, every test still passes, and a caller's program corrupts memory.
      `target` is a requirement on the CALLER, which is why nothing on this side can catch it.
 
-  3. Generated files must carry the conventions their generator is supposed to emit (feature_risks.md Risk-19).
+  3. Generated files must carry the conventions their generator is supposed to emit
+     (`.claude/rules/code-style.md`, "Generated files: edit the generator, never the output").
      `--check` on the generators compares the committed file against the generator, so a TEMPLATE
      that omits a `!>` doc-comment or a `! GCOVR_EXCL_LINE` produces output that matches perfectly
      and is wrong in every kind it emits at once. Only `ford --warn docs.md` would reveal the first
@@ -30,14 +32,15 @@ That is what makes them worth a static check rather than a test:
      "FORD doc-comment conventions"), and nothing at all reveals the second. A third generator
      inherits this check for free by adding its output to GENERATED_FILES below.
 
-  4. The schema-less write declares `auto` sizes (feature_risks.md Risk-2).
+  4. The schema-less write declares `auto` sizes (this check is the only enforcement; see its docstring).
      `build_table_schema` must never MEASURE a `col_size`/`array_size` -- declaring `auto` is what
      makes it unable to get one wrong, since the writer then resolves both from the data exactly as
      it would with no schema at all. A change that measures here gets string widths wrong first, and
      the sidecar MAML still looks right because it is emitted at close, after the writer resolved
      them -- so a round-trip test cannot see the difference.
 
-  5. Row-group-scoped reads guard against a sort (feature_risks.md Risk-4).
+  5. Row-group-scoped reads guard against a sort
+     (`.claude/rules/reader-writer.md`, "Row transforms: a MASK or a PERMUTATION").
      A sort permutation destroys row-group locality, so every row-group-scoped read must refuse
      while one is installed or it hands back rows in FILE order -- the right row count and the wrong
      rows. `check_row_group_valid` is what makes a procedure row-group-scoped, so requiring the two
@@ -50,12 +53,14 @@ That is what makes them worth a static check rather than a test:
      was written (the docs named a `prefetc` column the code calls `fetched`, and omitted four
      others), which is the failure it exists to stop repeating.
 
-  7. print_settings matches its documentation (feature_risks.md Risk-41).
+  7. print_settings matches its documentation
+     (`.claude/rules/api-conventions.md`, "Settings (`parquet_settings`)").
      Every row parquet_print_settings emits must be named in doc/pages/operating/settings.md. Matched by the
      SHAPE of a row call rather than by a list of helper names, because the list went blind twice --
      see check_print_settings_documented.
 
-  8. Every setting is actually read (feature_risks.md Risk-41).
+  8. Every setting is actually read
+     (`.claude/rules/api-conventions.md`, "Settings (`parquet_settings`)").
      A `cfg_*` that nothing consults still round-trips through its own getter, still reports the
      right factory value, and silently does nothing. This finds the "nothing reads it" half; the
      observed-effect tests in test/test_settings.f90 find the "reads it wrongly" half.
@@ -65,12 +70,14 @@ That is what makes them worth a static check rather than a test:
      `verbosity` and `message_stream` apply everywhere. A print written the old way still appears at
      default settings, so the suite stays green and only users who changed a setting are affected.
 
- 10. The row-group sizing arithmetic exists once (feature_risks.md Risk-43).
+ 10. The row-group sizing arithmetic exists once (test/test_settings.f90's two
+     `target_row_group_bytes sizes ...` tests pin one caller each).
      Its two callers serve different writers. A re-inlined copy takes the built-in constant instead
      of the setting, so parquet_set_target_row_group_bytes governs one kind of write and not the
      other -- every row correct, the row-group count wrong, nothing failing.
 
- 11. Every settable knob has an environment variable (feature_risks.md Risk-44).
+ 11. Every settable knob has an environment variable
+     (`.claude/rules/api-conventions.md`, "Settings (`parquet_settings`)").
      `parquet_settings_from_env` applies one PARQUET_FORTRAN_* variable per knob. A knob left out of
      that sequence makes its variable silently do nothing -- indistinguishable, from the user's side,
      from the setting being broken. Reuses parquet_print_settings' rows as the knob list, so a new
@@ -80,7 +87,8 @@ That is what makes them worth a static check rather than a test:
      Every process-global in parquet_wrapper.cpp is a file-scope `static`, so a second `.cpp` would
      get its own copy of each. Not a ban on splitting -- the note firing at the moment someone does.
 
- 13. Every `intent(inout)` temporal setter assigns every component (feature_risks.md Risk-70).
+ 13. Every `intent(inout)` temporal setter assigns every component (`.claude/rules/columns-tables.md`,
+     "`parquet_temporal` and the containers").
      The setters on parquet_date/parquet_time/parquet_timestamp take `class(...), intent(inout)`
      rather than `intent(out)`, because a POLYMORPHIC `intent(out)` dummy makes the compiler
      default-initialise the element through the runtime on every elemental call -- measured at 3.6x
@@ -112,6 +120,13 @@ That is what makes them worth a static check rather than a test:
      markdown renderer wants, FORD exits 0, and nothing reads the generated HTML, so the only
      evidence is the published page. Six blocks across three pages had shipped that way.
 
+ 16. feature_risks.md is a short register of OPEN risks (`check_risk_register_shape`).
+     At most RISK_REGISTER_MAX_ENTRIES entries of at most RISK_REGISTER_MAX_BODY_LINES body lines,
+     every `### ` heading an entry heading, no repeated number, one `Next number:` line above them
+     all. CLAUDE.md, CONTRIBUTING.md, .gitlab-ci.yml, `.claude/**/*.md` and this script cite only
+     open entries; a closed entry's requirement is cited by the rule or test that states it.
+     Source, test and tool comments elsewhere are exempt (a closed number there is attribution).
+
 The numbered notes above are the ones whose rationale needs more than a line; they are NOT the
 complete list, and deliberately carry no count, because a hardcoded one drifts silently every time a
 check is added (this docstring said "twelve" while CHECKS held fifteen). `--list` prints all of them.
@@ -124,8 +139,8 @@ Exits nonzero and prints one line per violation, each naming file:line and what 
 
 Enforces sixteen structural invariants that no compiler and no
 runtime test can see -- each one's violation compiles cleanly, passes the whole suite, and fails
-somewhere else entirely. Each names the feature_risks.md (feature_risks.md) entry it protects, in
-its own docstring and in the message it prints:
+somewhere else entirely. Each names the rule or the test that states its requirement, in its own
+docstring and in the message it prints:
 
   * `parquet_table` must gain no allocatable component. The type is finalizable, and this project
     has three confirmed compiler bugs in exactly the `intent(out)`/`FINAL` machinery on exactly this
@@ -160,8 +175,9 @@ its own docstring and in the message it prints:
     see them.
   * Every `cfg_*` setting must be read somewhere other than where it is written. A setting nothing
     consults still round-trips through its own getter and still reports the right factory value,
-    while doing nothing at all (Risk-41 (feature_risks.md)). This catches "nothing reads it"; the
-    observed-effect tests in `test/test_settings.f90` catch "reads it wrongly".
+    while doing nothing at all (`.claude/rules/api-conventions.md`, "Settings (`parquet_settings`)").
+    This catches "nothing reads it"; the observed-effect tests in `test/test_settings.f90` catch
+    "reads it wrongly".
   * Nothing in `src/` writes to a unit directly outside the three emit channels. Routing every
     message through `parquet_emit_info`/`_warning`/`_error_context` is what makes `verbosity` and
     `message_stream` apply everywhere. A print written the old way still appears at default
@@ -170,7 +186,7 @@ its own docstring and in the message it prints:
     whole-table write and the streaming path's estimate), so a re-inlined copy takes the built-in
     constant instead of the setting: `parquet_set_target_row_group_bytes` then governs one kind of
     write and not the other, with every row correct, the row-group count wrong, and nothing failing
-    (Risk-43 (feature_risks.md)).
+    (the two `target_row_group_bytes` tests in `test/test_settings.f90` pin one caller each).
   * `src/` must hold exactly one C++ translation unit. Every process-global in `parquet_wrapper.cpp`
     is a file-scope `static`, so a second `.cpp` would silently get its own copy of each -- breaking
     both the `parquet_debug_*` test overrides and the settings mirrored from `parquet_settings`. Not
@@ -191,7 +207,7 @@ its own docstring and in the message it prints:
     of-bounds write on a valid call rather than a wrong answer -- unlike the sibling `arr = p`
     shape, where intrinsic assignment to an allocatable resizes and hides the mistake. Matched by
     shape with no exemption list, since `kind=int64` costs nothing even where the extent is provably
-    small (Risk-105 (feature_risks.md)).
+    small (`.claude/rules/code-style.md`, "Files and program units").
   * No per-element helper in `parquet_wrapper.cpp` may take an Arrow array by `const
     std::shared_ptr<arrow::Array> &`. A `shared_ptr` parameter looks free and is not: every
     `std::static_pointer_cast` inside such a helper builds a new one, i.e. an atomic increment and
@@ -306,7 +322,10 @@ def type_body_lines(path, type_name):
 
 
 def check_no_allocatable_component():
-    """feature_risks.md Risk-13 -- `parquet_table`'s own body must hold only scalars and the pointer."""
+    """`parquet_table`'s own body must hold only scalars and the pointer.
+
+    `.claude/rules/columns-tables.md`, "New `parquet_table` state goes on the CACHE".
+    """
     problems = []
     type_name, path = FINALIZABLE_TYPE
     body = type_body_lines(path, type_name)
@@ -333,7 +352,10 @@ POINTER_CALL = re.compile(r"^\s*call\s+(\S.*?)%(data_ptr|string_column)\s*\(", r
 
 
 def check_pointers_go_through_cache():
-    """feature_risks.md Risk-12 -- a returned pointer must target cache-owned heap, never `self`."""
+    """A returned pointer must target cache-owned heap, never `self`.
+
+    `.claude/rules/columns-tables.md`, "`parquet_table` pointers and row-structural mutation".
+    """
     problems = []
     for path in TABLE_FILES:
         for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
@@ -360,7 +382,8 @@ def check_pointers_go_through_cache():
             problems.append(
                 "%s:%d: a pointer handed out by a table accessor must be reached through "
                 "`self%%cache`, not from `self` directly -- otherwise the caller needs `target` "
-                "on their table and nothing diagnoses its absence (feature_risks.md Risk-12):\n    %s"
+                "on their table and nothing diagnoses its absence (.claude/rules/columns-tables.md, "
+                "\"`parquet_table` pointers and row-structural mutation\"):\n    %s"
                 % (path.relative_to(REPO_ROOT), lineno, stripped)
             )
     return problems
@@ -747,7 +770,10 @@ def check_no_type_bound_string_column_access():
     return problems
 
 def check_generated_file_conventions():
-    """feature_risks.md Risk-19 -- a template omission is invisible to the generators' --check modes."""
+    """A template omission is invisible to the generators' --check modes.
+
+    `.claude/rules/code-style.md`, "Generated files: edit the generator, never the output".
+    """
     problems = []
     for path in GENERATED_FILES:
         if not path.exists():
@@ -774,7 +800,8 @@ def check_generated_file_conventions():
                 if not previous.startswith("!>") and not previous.startswith("!!"):
                     problems.append(
                         "%s:%d: this interface body has no `!>` doc-comment -- add it to the "
-                        "generator's template, not here (feature_risks.md Risk-19):\n    %s"
+                        "generator's template, not here "
+                        "(.claude/rules/code-style.md, \"Generated files\"):\n    %s"
                         % (path.relative_to(REPO_ROOT), i + 1, stripped[:100])
                     )
             # An `end module`/`end submodule` line can never be executed, so it is excluded from
@@ -785,7 +812,7 @@ def check_generated_file_conventions():
                     problems.append(
                         "%s:%d: an `end module`/`end submodule` line is never executed and must "
                         "carry `! GCOVR_EXCL_LINE` -- add it to the generator's template "
-                        "(feature_risks.md Risk-19):\n    %s"
+                        "(.claude/rules/code-style.md, \"Generated files\"):\n    %s"
                         % (path.relative_to(REPO_ROOT), i + 1, stripped[:100])
                     )
     return problems
@@ -825,7 +852,7 @@ def procedure_bodies(path):
 
 
 def check_schemaless_write_declares_auto():
-    """feature_risks.md Risk-2 -- the generated schema must never carry a MEASURED size.
+    """The generated schema must never carry a MEASURED size.
 
     A schema-less `parquet_write_table` builds a `parquet_schema` from the resident columns'
     descriptors and declares `col_size:`/`array_size:` as `auto`, so the writer resolves both from
@@ -851,8 +878,7 @@ def check_schemaless_write_declares_auto():
                         problems.append(
                             "%s:%d: build_table_schema must declare `%s` as `parquet_size_auto`, "
                             "never a measured value -- the writer resolves it from the data, and a "
-                            "size computed here is one the generator can get wrong "
-                            "(feature_risks.md Risk-2):\n    %s"
+                            "size computed here is one the generator can get wrong:\n    %s"
                             % (path.relative_to(REPO_ROOT), start + offset + 1, keyword,
                                code.strip())
                         )
@@ -860,7 +886,7 @@ def check_schemaless_write_declares_auto():
 
 
 def check_row_group_reads_guard_against_sort():
-    """feature_risks.md Risk-4 -- a row-group-scoped read must refuse while a sort is active.
+    """A row-group-scoped read must refuse while a sort is active.
 
     A sort permutation destroys row-group locality (sorted row 5 may come from row group 47), so
     every row-group-scoped operation has to refuse while one is installed, or it silently hands back
@@ -883,7 +909,8 @@ def check_row_group_reads_guard_against_sort():
             problems.append(
                 "%s:%d: `%s` is row-group-scoped (it calls check_row_group_valid) but never calls "
                 "check_reader_no_sort -- under a sort it would hand back rows in FILE order, with "
-                "the right row count and the wrong rows (feature_risks.md Risk-4)"
+                "the right row count and the wrong rows -- add `call check_reader_no_sort` beside "
+                "the row-group check (.claude/rules/reader-writer.md, \"Row transforms\")"
                 % (path.relative_to(REPO_ROOT), start, name)
             )
     return problems
@@ -1126,7 +1153,7 @@ def check_print_settings_documented():
 
 
 def check_settings_are_read():
-    """feature_risks.md Risk-41 -- a setting that is stored but never read passes every test.
+    """A setting that is stored but never read passes every test.
 
     A `parquet_settings` knob is a module variable that some *other* procedure has to consult. If
     nothing ever reads it -- the read site was never added, or was dropped in a later refactor --
@@ -1190,7 +1217,8 @@ def check_settings_are_read():
         if not read_somewhere:
             problems.append(
                 "src/parquet_settings*.f90: `%s` is written but never read -- the setting it backs "
-                "does nothing, and a set/get test would not notice (feature_risks.md Risk-41)" % name)
+                "does nothing, and a set/get test would not notice -- add its read site, or remove the "
+                "knob (.claude/rules/api-conventions.md, \"Settings\")" % name)
     return problems
 
 
@@ -1229,9 +1257,10 @@ DIRECT_PRINT_ALLOWED = {
 }
 
 #: C++ functions in src/parquet_wrapper.cpp allowed to write to a stream directly. Same rule, same
-#: liveness assertion, the other side of the `bind(C)` boundary -- feature_risks.md Risk-42 states
-#: the requirement in prose ("Any new C++-side print needs either the shared `emit_warning_cpp`
-#: helper or the `output_is_suppressed()` query"), and this is what enforces it.
+#: liveness assertion, the other side of the `bind(C)` boundary. The requirement -- any new C++-side
+#: print needs either the shared `emit_warning_cpp` helper or the `output_is_suppressed()` query --
+#: is the C++ half of `.claude/rules/api-conventions.md`, "Errors and diagnostics", and this is
+#: what enforces it.
 #:
 #: `parquet_reader_print_stat` is on the list even though it resolves through `message_stream_file`,
 #: for the same reason the Fortran printers are: resolving the STREAM correctly is not the same as
@@ -1414,9 +1443,11 @@ def check_no_direct_printing_cpp():
 
     src/parquet_wrapper.cpp prints in its own right -- three warnings, the fatal-error report, the
     concurrency guard's message and the whole reader report -- and every one of those has to honour
-    the two settings mirrored across the boundary. feature_risks.md Risk-42 states the requirement
-    in prose; before this check nothing enforced it, and the file had accumulated ten
-    `std::fprintf(stdout, ...)` calls in one function that ignored `message_stream` completely.
+    the two settings mirrored across the boundary
+    (`.claude/rules/cpp-wrapper.md`, "Mirrored settings";
+    `.claude/rules/api-conventions.md`, "Errors and diagnostics"). Before this check nothing
+    enforced it, and the file had accumulated ten `std::fprintf(stdout, ...)` calls in one function
+    that ignored `message_stream` completely.
 
     Same liveness rule as the Fortran arm: an allow-list entry that stops matching is a failure.
     """
@@ -1459,7 +1490,7 @@ ROW_GROUP_SIZING_CONSTANTS = (
 
 
 def check_row_group_sizing_not_duplicated():
-    """feature_risks.md Risk-43 -- a second copy of the sizing arithmetic ignores the setting.
+    """A second copy of the sizing arithmetic ignores the setting.
 
     Row groups are sized from a byte target by chunk_size_from_bytes_per_row, and it has two callers
     that serve DIFFERENT writers: close_parquet_writer's whole-table write, and
@@ -1472,7 +1503,9 @@ def check_row_group_sizing_not_duplicated():
     row is present and correct, and nothing fails.
 
     The rule is therefore about DEFINITIONS, not uses -- reading a constant in ten places is fine,
-    declaring it in two is the bug.
+    declaring it in two is the bug. The two callers are pinned by `target_row_group_bytes sizes the
+    row groups of a whole-table write` and `... also sizes the streaming path's estimate`
+    (test/test_settings.f90); a third caller needs its own test, since this check counts definitions.
     """
     problems = []
     path = SRC / "parquet_wrapper.cpp"
@@ -1485,7 +1518,7 @@ def check_row_group_sizing_not_duplicated():
                 "src/parquet_wrapper.cpp: `%s` is defined %d times -- the row-group sizing "
                 "arithmetic must exist once, in chunk_size_from_bytes_per_row, or "
                 "parquet_set_target_row_group_bytes silently governs only some writes "
-                "(feature_risks.md Risk-43)" % (name, len(hits)))
+                "-- delete the copy and call chunk_size_from_bytes_per_row" % (name, len(hits)))
         elif not hits:
             problems.append(
                 "src/parquet_wrapper.cpp: `%s` is not defined at all -- if the row-group sizing "
@@ -1494,7 +1527,7 @@ def check_row_group_sizing_not_duplicated():
 
 
 def check_env_covers_every_setting():
-    """feature_risks.md Risk-44 -- a knob with no environment variable is silently unreachable.
+    """A knob with no environment variable is silently unreachable.
 
     `parquet_settings_from_env` applies one `PARQUET_FORTRAN_*` variable per knob. A knob left out
     of that sequence is not a compile error and not a test failure: the variable simply does
@@ -1528,7 +1561,8 @@ def check_env_covers_every_setting():
             problems.append(
                 "src/parquet_settings.f90: `%s` is a settable knob but parquet_settings_from_env "
                 "never reads `%s` -- the variable would silently do nothing, which a user cannot "
-                "tell apart from the setting being broken (feature_risks.md Risk-44)" % (knob, var))
+                "tell apart from the setting being broken; add it (.claude/rules/api-conventions.md, "
+                "\"Settings\")" % (knob, var))
     return problems
 
 
@@ -2035,7 +2069,7 @@ def check_single_cpp_translation_unit():
         `g_sort_counting_path`, `g_sort_counting_bucket_limit`,
         `g_target_row_group_bytes`, `g_statistics_prescreen`) -- a user's setting would apply to
         some of the library and not the rest, with the Fortran getters still reporting it correctly
-        (feature_risks.md Risk-42).
+        (`.claude/rules/api-conventions.md`, "Settings (`parquet_settings`)").
 
     So this check is not a ban on splitting the file. It is the note firing at the moment somebody
     does it: promote both families to `extern` globals with one definition in a shared internal
@@ -3307,7 +3341,8 @@ def check_no_per_element_string_alloc():
     **Nothing fails when this comes back.** Results stay byte-identical, the suite stays green, and
     the allocating form reads as ordinary idiomatic Fortran -- only a benchmark notices. That is what
     makes it a lint check rather than a comment, and it is the Fortran twin of
-    `check_no_per_element_shared_ptr` above (feature_risks.md Risk-60).
+    `check_no_per_element_shared_ptr` above. The direct-copy paths it protects are pinned by
+    `to_character matches %get element for element, padded with blanks` (test/test_parquet_string.f90).
 
     The rule is about the LOOP, not about `%get`, which is exactly right for its own job of returning
     one element. Alternatives that need no allocation: `elem_bounds` inside `parquet_strings` itself,
@@ -3387,7 +3422,7 @@ def check_no_per_element_string_alloc():
                     "src/%s:%d: `%s` materializes a string element through `%%get`/`%%to_string` "
                     "inside a loop, which allocates a deferred-length string per row -- use "
                     "`%%copy_buffers` for a bulk copy, `%%compare` for an ordering scan, or "
-                    "`elem_bounds` inside parquet_strings (see feature_risks.md Risk-60)"
+                    "`elem_bounds` inside parquet_strings"
                     % (name, n, proc)
                 )
     for name, allowed in sorted(KNOWN_REMAINING.items()):
@@ -3505,7 +3540,12 @@ def temporal_setters():
 
 
 def check_temporal_setters_assign_all():
-    """feature_risks.md Risk-70 -- an `intent(inout)` setter must leave no component stale."""
+    """An `intent(inout)` setter must leave no component stale.
+
+    `.claude/rules/fortran-gotchas.md`, "`class(t), intent(out)` is expensive per element", enforced
+    for the temporal types per
+    `.claude/rules/columns-tables.md`, "`parquet_temporal` and the containers".
+    """
     problems = []
     if not TEMPORAL_FILE.exists():
         return ["%s: not found -- this check needs updating" % TEMPORAL_FILE]
@@ -3563,7 +3603,7 @@ def check_temporal_setters_assign_all():
                 "%s:%d: `%s` takes `class(%s), intent(inout) :: self` but never assigns %s -- "
                 "under intent(inout) that component keeps whatever the element held before, so a "
                 "reused element comes back stale. Assign every component, or delegate to a setter "
-                "that does (feature_risks.md Risk-70)."
+                "that does (.claude/rules/columns-tables.md, \"`parquet_temporal` and the containers\")."
                 % (
                     TEMPORAL_FILE.relative_to(REPO_ROOT),
                     lineno,
@@ -4781,8 +4821,9 @@ def check_maml_keys_case_insensitive():
     So a header is matched with `parquet_maml_key_matches` (parquet_core's subtree) or
     `maml_key_matches` (parquet_tables_maml.f90's own twin -- that file deliberately carries its
     own parsing primitives). Two copies of the predicate cannot drift in any harmful way; a NEW
-    site forgetting both is the real hazard, and it is what this check catches. See
-    feature_risks.md Risk-91.
+    site forgetting both is the real hazard, and it is what this check catches. The run-time half is
+    `test_maml_block_headers_case_insensitive` (test/test_maml.f90) and the paired
+    `extra_section_capitalized`/`extra_section_lowercase_control` error scenarios.
 
     Matched by shape, not by a file list, and an empty scan FAILS (CLAUDE.md, "A static check that
     enumerates names goes stale silently"). Only a `"<word>:"` literal counts -- a comparison
@@ -5272,7 +5313,8 @@ def check_noinline_directives_are_paired():
     32-bit grid was being adopted -- a bulk fill's shape pushing `int_reduce` past GCC's inline
     budget cost the SCALAR draw 9 %; the narrow arm inlined into `int_at_impl` cost the WIDE scalar
     draw 13 %; the fix for that cost the stream fills 60 %; and so on. Each was found only with
-    `objdump`. See `feature_risks.md` Risk-114 and Risk-115.
+    `objdump`. `int_reduce_retry`'s doc-comment in src/parquet_random.f90 carries the one-command
+    disassembly check.
 
     A directive is an ordinary comment to a compiler that does not know it, so carrying both is
     free; carrying one is a silent, compiler-specific de-optimisation.
@@ -6510,7 +6552,8 @@ def check_index_map_components_are_adopted_and_reset():
     silently -- nothing aborts, the map simply answers as if the component were at its default --
     and no run-based test can see a component that is not there. So the rule is held from the
     source: every component declared in the type's body must be named in both procedures, in the
-    form each uses. See `feature_risks.md` Risk-213.
+    form each uses. The concurrency the swap buys is pinned by `test_concurrent_builds_overlap`
+    (test/test_index_omp.f90).
     """
     problems = []
     spec = SRC / "parquet_index.f90"
@@ -6574,7 +6617,8 @@ def check_index_aborts_go_through_reporter():
     only works if every impure abort goes through it, and a new `error stop` written the natural
     way compiles and passes every scenario. A `pure` procedure cannot call it (an OpenMP directive
     may not appear in a pure procedure), so those keep a bare `error stop`; a `module procedure`
-    body is pure when the spec declares its interface `pure`. See `feature_risks.md` Risk-179.
+    body is pure when the spec declares its interface `pure`. `.claude/rules/api-conventions.md`,
+    "Errors and diagnostics"; `scenario_index_concurrent_abort` races two aborts through it.
     """
     problems = []
     spec = (SRC / "parquet_index.f90").read_text()
@@ -6629,7 +6673,8 @@ def check_no_leadz():
     `pool_do_compact` now does. If an `int32`-only use is ever genuinely wanted, record the
     exemption HERE with the reason -- do not delete the check.
 
-    See `feature_risks.md` Risk-186 and `src/parquet_index_pool.f90`'s `pool_do_compact` header.
+    See `.claude/rules/fortran-gotchas.md`, "nagfor-specific gotchas", and
+    `src/parquet_index_pool.f90`'s `pool_do_compact` header.
     """
     problems = []
     for directory in ("src", "test", "app", "bench", "tools"):
@@ -7074,7 +7119,9 @@ def check_filter_operators_are_handled_everywhere():
     differently when one is missed. Four refuse what they do not know, loudly and at the right
     moment. **One guesses**: `cmp_op_of` maps everything that is not one of the five ordering
     spellings to `CmpOp::Ne`, so an operator that reaches it turns into `/=` and the read returns a
-    plausible, complete and wrong row set with no diagnostic anywhere (feature_risks.md Risk-231).
+    plausible, complete and wrong row set with no diagnostic anywhere (pinned at run time by
+    `test_ab_string_match`, test/test_table_verbs.f90, and `test_starts_with_equals_range_oracle`,
+    test/test_filter.f90).
 
     That asymmetry is what makes this a static check rather than a test. A test can only exercise
     an operator someone remembered to write a test for, and the failure being guarded against is
@@ -7297,9 +7344,149 @@ def check_instruction_citations_resolve():
     return problems
 
 
+#: The tracked open-risks register.
+RISK_REGISTER = REPO_ROOT / "feature_risks.md"
+#: Most open entries the register may hold; past it, entries are closed or replaced, not added.
+RISK_REGISTER_MAX_ENTRIES = 15
+#: Most body lines one entry may carry (blank edges stripped); past it, the entry is cut down.
+RISK_REGISTER_MAX_BODY_LINES = 15
+#: Where the register's rules live, named in every message this check prints:
+#: .claude/rules/workflow.md, "The `feature_risks.md` open-risks register".
+RISK_REGISTER_RULE = '.claude/rules/workflow.md, "The `feature_risks.md` open-risks register"'
+#: An entry heading: `### Risk-<n> — <title>`.
+RISK_ENTRY_HEADING = re.compile(r"^### Risk-(\d+) — \S")
+#: The register's one next-number line.
+RISK_NEXT_NUMBER = re.compile(r"^Next number: Risk-(\d+)\s*$")
+#: A citation of a register entry anywhere in prose.
+RISK_CITATION = re.compile(r"\bRisk-(\d+)\b")
+
+
+def risk_register_problems(text, name="feature_risks.md"):
+    """Parse an open-risks register's TEXT; return (open entry numbers, problems).
+
+    Split from `check_risk_register_shape` so the parsing can be exercised on a synthetic register.
+    Headings inside a fenced code block are body text, not structure.
+    """
+    lines = text.split("\n")
+    problems = []
+    entries = []          # (number, heading line number, body line count)
+    next_numbers = []     # (value, line number)
+    current = None        # [number, heading line number, body lines]
+    in_fence = False
+
+    def close(entry):
+        if entry is None:
+            return
+        body = entry[2]
+        while body and not body[0].strip():
+            body.pop(0)
+        while body and not body[-1].strip():
+            body.pop()
+        entries.append((entry[0], entry[1], len(body)))
+
+    for lineno, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence:
+            found = RISK_NEXT_NUMBER.match(line)
+            if found:
+                next_numbers.append((int(found.group(1)), lineno))
+            if line.startswith("## ") or line.startswith("### "):
+                close(current)
+                current = None
+                if line.startswith("### "):
+                    heading = RISK_ENTRY_HEADING.match(line)
+                    if heading:
+                        current = [int(heading.group(1)), lineno, []]
+                    else:
+                        problems.append(
+                            "%s:%d: a `### ` heading that is not a register entry -- every `### ` "
+                            "heading must read `### Risk-<n> — <title>`; fold this text into an "
+                            "entry or the header prose (%s):\n    %s"
+                            % (name, lineno, RISK_REGISTER_RULE, line.strip()[:100]))
+                continue
+        if current is not None:
+            current[2].append(line)
+    close(current)
+
+    seen = {}
+    for number, lineno, body_lines in entries:
+        if number in seen:
+            problems.append(
+                "%s:%d: Risk-%d is already the entry at line %d -- a number names one entry; merge "
+                "the two or give the new one the next number (%s)"
+                % (name, lineno, number, seen[number], RISK_REGISTER_RULE))
+        else:
+            seen[number] = lineno
+        if body_lines > RISK_REGISTER_MAX_BODY_LINES:
+            problems.append(
+                "%s:%d: Risk-%d's body is %d lines, over the limit of %d -- cut it to the risk, "
+                "why it is silent, and what would close it (%s)"
+                % (name, lineno, number, body_lines, RISK_REGISTER_MAX_BODY_LINES, RISK_REGISTER_RULE))
+    if len(entries) > RISK_REGISTER_MAX_ENTRIES:
+        problems.append(
+            "%s: %d open entries, over the limit of %d -- close or replace an entry (%s)"
+            % (name, len(entries), RISK_REGISTER_MAX_ENTRIES, RISK_REGISTER_RULE))
+    if len(next_numbers) != 1:
+        problems.append(
+            "%s: the line `Next number: Risk-<n>` occurs %d times, not once -- keep exactly one, "
+            "in the header before the entries (%s)" % (name, len(next_numbers), RISK_REGISTER_RULE))
+    elif entries and next_numbers[0][0] <= max(number for number, _, _ in entries):
+        problems.append(
+            "%s:%d: `Next number: Risk-%d` is not above every entry number (highest: Risk-%d) -- "
+            "numbers are never reused; set it past the highest ever issued (%s)"
+            % (name, next_numbers[0][1], next_numbers[0][0],
+               max(number for number, _, _ in entries), RISK_REGISTER_RULE))
+    return set(seen), problems
+
+
+def risk_citation_problems(open_numbers, sources):
+    """Report every `Risk-<n>` citation in SOURCES ((name, text) pairs) naming no open entry."""
+    problems = []
+    for name, text in sources:
+        for lineno, line in enumerate(text.split("\n"), start=1):
+            for found in RISK_CITATION.finditer(line):
+                if int(found.group(1)) not in open_numbers:
+                    problems.append(
+                        "%s:%d: cites %s, which is not an open entry of feature_risks.md -- cite the "
+                        "rule (`.claude/rules/<file>.md`, \"<section>\") or the test that states the "
+                        "requirement instead (%s)" % (name, lineno, found.group(0), RISK_REGISTER_RULE))
+    return problems
+
+
+def check_risk_register_shape():
+    """`feature_risks.md` stays a short register of OPEN risks, and nothing cites a closed one.
+
+    The register holds at most `RISK_REGISTER_MAX_ENTRIES` entries of at most
+    `RISK_REGISTER_MAX_BODY_LINES` body lines each; every `### ` heading is an entry heading
+    (`### Risk-<n> — <title>`), no number repeats, and exactly one `Next number: Risk-<n>` line
+    sits above every entry number. The instruction and CI files (CLAUDE.md, CONTRIBUTING.md,
+    .gitlab-ci.yml, `.claude/**/*.md`, and this script) cite only open entries: a closed entry's
+    requirement lives in the rule or the test that states it, and a citation of it leads nowhere.
+    Comments in `src/`, `test/`, `tools/` and `bench/` are exempt -- a closed number there is
+    attribution. Rules for the register: `.claude/rules/workflow.md`.
+    """
+    if not RISK_REGISTER.is_file():
+        return ["feature_risks.md: not found -- the register is tracked and must exist (%s)"
+                % RISK_REGISTER_RULE]
+    open_numbers, problems = risk_register_problems(RISK_REGISTER.read_text(encoding="utf-8"))
+    paths = [REPO_ROOT / "CLAUDE.md", REPO_ROOT / "CONTRIBUTING.md", REPO_ROOT / ".gitlab-ci.yml",
+             Path(__file__).resolve()]
+    paths += sorted((REPO_ROOT / ".claude").rglob("*.md"))
+    sources = [(str(path.relative_to(REPO_ROOT)), path.read_text(encoding="utf-8", errors="replace"))
+               for path in paths if path.is_file()]
+    if len(sources) < 4:
+        problems.append("check_risk_register_shape found only %d of the files it scans -- its file "
+                        "list has gone stale, so a green citation result proves nothing" % len(sources))
+    problems += risk_citation_problems(open_numbers, sources)
+    return problems
+
+
 CHECKS = (
     ("every instruction citation names the file that carries the topic",
      check_instruction_citations_resolve),
+    ("feature_risks.md is a short register of open risks, and only open ones are cited",
+     check_risk_register_shape),
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
     ("pf_index_map components are adopted and reset",
      check_index_map_components_are_adopted_and_reset),

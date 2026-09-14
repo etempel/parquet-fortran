@@ -3060,7 +3060,9 @@ contains
             ": this index has not been built; call %build first"
         ! The metric is a property of the INDEX, and this is what that buys: a Euclidean query on a
         ! sky index would otherwise answer in chords to a caller who is thinking in degrees, which
-        ! is a wrong answer wearing the right units.
+        ! is a wrong answer wearing the right units. A new query family goes through this guard or
+        ! `spatial_bulk_setup`'s; one reaching `spatial_scan` by another route is unguarded
+        ! (scenario `spatial_euclidean_query_on_sky`).
         if (self%metric_id /= PF_METRIC_EUCLIDEAN) error stop "pf_spatial_index%" // what // &
             ": this index was built with %build_sky; use %within_sky, which answers in degrees"
         if (size(p) /= self%ncoord) error stop "pf_spatial_index%" // what // &

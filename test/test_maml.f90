@@ -1744,7 +1744,8 @@ contains
     !! the scalar keys. It did not: `parquet_find_maml_section` lowercased both sides while the block
     !! locators compared against lowercase literals, so a MAML spelling its section `Extra:` passed
     !! validation with its nested `protected_cols:`/`col_map:` never found at all -- silently, with
-    !! the Null protection the author asked for simply gone. See feature_risks.md Risk-91.
+    !! the Null protection the author asked for simply gone. `check_maml_keys_case_insensitive` is the
+    !! static half.
     !!
     !! This is the in-process half: that a fully capitalized MAML parses to the same schema and the
     !! same metadata as its lowercase twin. The abort half -- that a capitalized `Extra:` block's

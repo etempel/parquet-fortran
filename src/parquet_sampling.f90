@@ -127,6 +127,10 @@ module parquet_sampling
     !! disagrees with the current one. **That reasoning expires the moment `/v2` ships**: from the
     !! first release carrying it, any change to what it answers requires a new string, and the
     !! exception recorded here is not a precedent for one taken afterwards.
+    !!
+    !! **Never replace the construction with a shuffle** (Fisher-Yates, or key-and-argsort): a shuffle
+    !! is order-dependent, so element `k` would stop being a function of `(seed, m, k)` alone, and
+    !! single-element access, prefix consistency and bit-identity across `threads=` all go with it.
     character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-16p/zaxzb/exact20/v3"
 
     !> Feistel rounds. **Sixteen, and it must stay even.**
@@ -624,6 +628,8 @@ module parquet_sampling
         integer(int64) :: zkey = 0      !! derived seed ordering the zero-weight tail
         logical :: ready = .false.      !! `%init` has run; guards every other entry point
     contains
+        ! No FINAL binding, and none may be added: the allocatable components free themselves, and a
+        ! finalizer would add gfortran's finalizable-type `private()` hazard (`test_weighted_per_thread`).
         procedure, private :: init_base => wd_init_base  !! `%init` with no stream
         procedure, private :: init_s32 => wd_init_s32    !! `%init` with an `int32` stream
         procedure, private :: init_s64 => wd_init_s64    !! `%init` with an `int64` stream

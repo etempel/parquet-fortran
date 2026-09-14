@@ -1358,6 +1358,10 @@ def main(argv=None):
         out_path.write_text(text, encoding="utf-8")
         print(f"generate_user_table_code.py: wrote {out_path} from {path} "
               f"({len(text.splitlines())} lines)")
+        # Keep this warning. It is the only notice that a component was not handled, and a
+        # component `clone_extra` does not copy arrives default-initialized in every `%clone`, with
+        # nothing else reporting it (`test_clone_carries_user_state`). Do not widen
+        # parse_components to guess at what it skips instead.
         for name, why in skipped:
             print(f"  note: component '{name}' was left for you -- {why}", file=sys.stderr)
     return 0

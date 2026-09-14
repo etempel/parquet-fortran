@@ -303,8 +303,6 @@ validates, aborts or prints"), whose test is usually a lint check.
 - An uncovered claim gets a **proposed** test, never a written one: the claim quoted with its source
   location; the file and whether in-process or scenario; what it asserts in one sentence **and its
   negative control**; the fixture, with its own filename.
-- If breaking the claim would be silent, also propose a `feature_risks.md` entry after checking
-  none covers it. Propose; do not apply.
 
 **Pass 4 — conventions.** Check the page against `.claude/rules/documentation.md`; the conventions
 live there, not here. Four items are about reviewing rather than the convention:
@@ -427,7 +425,7 @@ library does. Neither bound moves for an unreleased surface (A8).
 | other guide pages | any doc-only fix within the bounds, wherever a wrong claim is found; record the file and list in "Deferred" what was NOT checked on that page |
 | README | an API-overview entry, a stale link into the guide, a claim the source contradicts |
 | CONTRIBUTING.md, CHANGELOG.md, CLAUDE.md and `.claude/rules/` | a stale link or anchor. A published changelog section: a dead link only. `[Unreleased]`: a factual correction (an argument the code lacks, a default the source contradicts); restructuring it or moving entries between groups is proposed |
-| `feature_risks.md` | a stale link or anchor only; never a verdict, number, section move or pruning |
+| `feature_risks.md` | a stale link or anchor only; never an entry, a number or a deletion |
 | source doc-comments | a wrong or stale doc-comment within the bounds |
 | generated sources | the same fix in the generator's template, regenerated, never in the emitted file |
 | tests | only a mirrored example and its assertions, together with the page; a new test is proposed |

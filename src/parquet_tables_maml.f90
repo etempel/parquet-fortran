@@ -107,8 +107,8 @@ contains
     !! independent of the write-side one. What must not diverge is the RULE, and
     !! `check_maml_keys_case_insensitive` (`tools/check_source_conventions.py`) is what enforces
     !! that — it fails on any new literal `== "<key>:"` comparison in either subtree, which is the
-    !! shape that once let a capitalized `Extra:` silently lose its whole block. See
-    !! `feature_risks.md` Risk-91.
+    !! shape that once let a capitalized `Extra:` silently lose its whole block. Pinned by
+    !! `test_maml_block_headers_case_insensitive` (`test/test_maml.f90`).
     !!
     !! Indentation is not considered here; a caller needing a top-level header keeps its own
     !! `line(1:1) /= " "` test. Values stay case-sensitive — a `remap:` column name is data.

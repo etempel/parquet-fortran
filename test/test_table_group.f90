@@ -1242,6 +1242,10 @@ contains
     end subroutine test_apply_empty_grouping
 
     ! ---- %agg and %nunique ----------------------------------------------------------------------
+    !
+    ! `build_agg`'s largest group is its FIRST, so nothing here sees `%agg` buffers sized from the
+    ! first group rather than `%max_size()`; only `test_agg_group_team` (test_table_parallel.f90) can.
+    ! A new group-buffer fixture in this file puts its largest group somewhere other than first.
 
     !> Whether two real64 values are the same answer: equal bits, or both NaN.
     logical function same_answer(a, b)

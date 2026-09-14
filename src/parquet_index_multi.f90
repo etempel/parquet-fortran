@@ -1067,8 +1067,7 @@ contains
         if (self%map%nk == 0_int64) return
         allocate(pairs(self%map%nk, 1))
         call ix_collect_keys(self%map, pairs)
-        call ix_keys_fit_i32(minval(pairs(:, 1)), maxval(pairs(:, 1)), MM // "keys")
-        list = int(pairs(:, 1), int32)
+        call ix_narrow_keys_1(pairs(:, 1), MM // "keys", list)
     end procedure mm_keys_r1_i32
 
     module procedure mm_keys_r2_i32
@@ -1083,8 +1082,7 @@ contains
         if (self%map%nk == 0_int64) return
         allocate(pairs(self%map%nk, nc))
         call ix_collect_keys(self%map, pairs)
-        call ix_keys_fit_i32(minval(pairs), maxval(pairs), MM // "keys")
-        list = int(pairs, int32)
+        call ix_narrow_keys_n(pairs, MM // "keys", list)
     end procedure mm_keys_r2_i32
 
     ! ============================================================================================

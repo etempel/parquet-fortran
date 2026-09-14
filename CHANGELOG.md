@@ -79,6 +79,8 @@ without `unit=` follows `message_stream`.
   or very large weights while answering correctly, aborting under trapping compilers.
 - `pf_cov(x, x)` could differ from `pf_variance(x)` by one ulp under a compiler using a
   value-unsafe floating-point model, such as ifx's default `-fp-model=fast`.
+- `pf_index_map%keys`/`pf_index_multimap%keys` into an `int32` list silently truncated a key below
+  the `int32` range instead of aborting, in an ifx `-O0 -check all` build.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

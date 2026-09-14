@@ -3356,6 +3356,8 @@ program error_scenarios
         call scenario_multimap_string_keys_rank1()
     case ("index_keys_int32_negative")
         call scenario_index_keys_int32_negative()
+    case ("index_keys_rank2_int32_negative")
+        call scenario_index_keys_rank2_int32_negative()
     case ("multimap_csr_int32_value")
         call scenario_multimap_csr_int32_value()
     case ("index_keys_int32_on_string_map")
@@ -28942,6 +28944,29 @@ contains
         call m%keys(got32)
         print '(a,i0)', "unexpectedly answered keys in int32, n=", size(got32)
     end subroutine scenario_index_keys_int32_negative
+
+    !> `%keys` into an `int32` RANK-2 list over a composite map holding a key below `int32`.
+    !!
+    !! **`scenario_index_keys_int32_negative`'s composite twin, and not covered by it.** The two
+    !! ranks narrow through separate procedures -- `ix_narrow_keys_1` and `ix_narrow_keys_n` --
+    !! so the rank-2 bound check had no scenario of its own until this one, which is how the
+    !! rank-1 check went on to be deleted outright by a compiler without anything going red
+    !! twice. A dropped check here answers a plausible positive key rather than failing visibly.
+    subroutine scenario_index_keys_rank2_int32_negative()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2)
+        integer(int64), allocatable :: got64(:,:)
+        integer(int32), allocatable :: got32(:,:)
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, -3000000000_int64]
+        ! Hashed explicitly: a direct backend over a key range this wide would try to allocate it.
+        call m%build(pairs, method="hash")
+        call m%keys(got64)
+        print '(a,i0)', "int64 rank-2 keys rows=", size(got64, 1)
+        call m%keys(got32)
+        print '(a,i0)', "unexpectedly answered rank-2 keys in int32, rows=", size(got32, 1)
+    end subroutine scenario_index_keys_rank2_int32_negative
 
     !> `%csr` into `int32` arrays over a multimap holding a value above what `int32` can hold.
     subroutine scenario_multimap_csr_int32_value()

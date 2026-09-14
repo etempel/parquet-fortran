@@ -59,7 +59,11 @@
   thread aborts: `pf_log_fatal` (`parquet_logging`) or `ix_abort` (`parquet_index`;
   `check_index_aborts_go_through_reporter`). Give a new one the same treatment.
 - A guard-only subroutine is written impure and its doc-comment says so (`ix_check_mask_len`); ifx
-  deletes a `pure` one at `-O0`.
+  deletes a `pure` one at `-O0`. **When the caller is itself `pure` that fix is unavailable**, so
+  fold the test into a procedure that PRODUCES something instead — a `pure function` whose result
+  the caller uses (`ix_narrow`, `ix_tuple_width`) or a `pure subroutine` that writes the answer the
+  guard protects (`ix_narrow_keys_1`). A call the compiler cannot delete without losing an output
+  is the only form that survives.
 
 ## Mutation guards and finalizers
 

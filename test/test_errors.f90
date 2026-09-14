@@ -2610,6 +2610,8 @@ contains
                 test_multimap_string_keys_rank1_aborts), &
             new_unittest("an int32 keys answer over a key below int32 aborts", &
                 test_index_keys_int32_negative_aborts), &
+            new_unittest("a rank-2 int32 keys answer over a key below int32 aborts", &
+                test_index_keys_rank2_int32_negative_aborts), &
             new_unittest("an int32 csr over a stored value above int32 aborts", &
                 test_multimap_csr_int32_value_aborts), &
             new_unittest("every legal string-key path of both types completes", &
@@ -4321,6 +4323,15 @@ contains
             failure_message="a key below the int32 range was expected to be refused by %keys", &
             required_stderr="a stored key is outside the range an int32 answer can hold")
     end subroutine test_index_keys_int32_negative_aborts
+
+    !> See `scenario_index_keys_rank2_int32_negative` (test/error_scenarios.f90). The rank-2
+    !> narrowing is a separate procedure from the rank-1 one, so it needs its own control.
+    subroutine test_index_keys_rank2_int32_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_rank2_int32_negative", expect_abort=.true., &
+            failure_message="a key below the int32 range was expected to be refused by the rank-2 %keys", &
+            required_stderr="a stored key is outside the range an int32 answer can hold")
+    end subroutine test_index_keys_rank2_int32_negative_aborts
 
     !> See `scenario_multimap_csr_int32_value` (test/error_scenarios.f90).
     subroutine test_multimap_csr_int32_value_aborts(error)

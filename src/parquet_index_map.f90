@@ -818,8 +818,7 @@ contains
         if (self%nk == 0_int64) return
         allocate(pairs(self%nk, 1))
         call ix_collect_keys(self, pairs)
-        call ix_keys_fit_i32(minval(pairs(:, 1)), maxval(pairs(:, 1)), "pf_index_map%keys")
-        list = int(pairs(:, 1), int32)
+        call ix_narrow_keys_1(pairs(:, 1), "pf_index_map%keys", list)
     end procedure map_keys_r1_i32
 
     module procedure map_keys_r2_i32
@@ -834,8 +833,7 @@ contains
         if (self%nk == 0_int64) return
         allocate(pairs(self%nk, nc))
         call ix_collect_keys(self, pairs)
-        call ix_keys_fit_i32(minval(pairs), maxval(pairs), "pf_index_map%keys")
-        list = int(pairs, int32)
+        call ix_narrow_keys_n(pairs, "pf_index_map%keys", list)
     end procedure map_keys_r2_i32
 
     ! ============================================================================================
@@ -1133,20 +1131,45 @@ contains
         out = int(v, int32)
     end function ix_narrow
 
-    !> Aborts unless every element of a collected KEY list fits `int32`.
+    !> Narrows a collected rank-1 KEY list to `int32`, aborting rather than truncating.
     !!
     !! **Two-sided, unlike `ix_narrow`.** A stored index value is non-negative, so one comparison
     !! settles it; a key is a caller's own value and may be as negative as `int64` allows, and a
     !! one-sided check would truncate such a key into a plausible positive one. Checked once over
     !! the whole list, so a narrowed answer never fails half-way through its array.
-    pure subroutine ix_keys_fit_i32(lo, hi, what)
-        integer(int64), intent(in) :: lo !! the smallest collected key.
-        integer(int64), intent(in) :: hi !! the largest collected key.
+    !!
+    !! **The test and the narrowing are ONE procedure deliberately, and the test cannot be split
+    !! back out into a guard of its own.** It was one, and ifx 2026.1.1 DELETED the call: a `pure`
+    !! subroutine whose only effect is an `error stop` is elided at `-O0 -check all` (fpm's debug
+    !! profile), so `scenario_index_keys_int32_negative` came back with the key truncated --
+    !! -3000000000 answered as 1294967296 -- and exit status 0. The usual fix, writing a
+    !! guard-only subroutine impure (`ix_check_mask_len`), is not available here: `%keys` is
+    !! `pure` public API and a `pure` procedure may only call `pure` ones. Writing `out` is an
+    !! effect the call cannot lose, which is how `ix_narrow` already holds the scalar case.
+    !! See `.claude/rules/api-conventions.md` and `.claude/rules/fortran-gotchas.md`.
+    pure subroutine ix_narrow_keys_1(keys, what, out)
+        integer(int64), intent(in) :: keys(:) !! the collected keys.
         character(len=*), intent(in) :: what !! the entry point's full name, for the message.
+        integer(int32), intent(out) :: out(:) !! the same keys, as `int32`.
 
-        if (hi > int(huge(0_int32), int64) .or. lo < -int(huge(0_int32), int64) - 1_int64) &
+        if (maxval(keys) > int(huge(0_int32), int64) .or. &
+            minval(keys) < -int(huge(0_int32), int64) - 1_int64) &
             error stop what // ": a stored key is outside the range an int32 answer can hold; take it as int64"
-    end subroutine ix_keys_fit_i32
+        out = int(keys, int32)
+    end subroutine ix_narrow_keys_1
+
+    !> Narrows a collected rank-2 KEY list to `int32`. `ix_narrow_keys_1`'s composite twin, and
+    !! everything said there applies here.
+    pure subroutine ix_narrow_keys_n(keys, what, out)
+        integer(int64), intent(in) :: keys(:,:) !! the collected keys, one row per key.
+        character(len=*), intent(in) :: what !! the entry point's full name, for the message.
+        integer(int32), intent(out) :: out(:,:) !! the same keys, as `int32`.
+
+        if (maxval(keys) > int(huge(0_int32), int64) .or. &
+            minval(keys) < -int(huge(0_int32), int64) - 1_int64) &
+            error stop what // ": a stored key is outside the range an int32 answer can hold; take it as int64"
+        out = int(keys, int32)
+    end subroutine ix_narrow_keys_n
 
     !> Checks that an index value fits `int32` and returns it unchanged.
     !!

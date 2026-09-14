@@ -318,7 +318,14 @@ done | sort | uniq -c | sort -rn
   pass an optional array dummy into a parallel region: fill a local that always exists and
   `move_alloc` it into the optional afterwards (`mm_probe_hit_buffer`).
 - **A `pure` guard-only subroutine's CALL is deleted at `-O0`** (debug profile only; `-O2` and
-  gfortran abort). Write guard-only subroutines impure (`api-conventions.md`).
+  gfortran abort). Write guard-only subroutines impure (`api-conventions.md`). **Where the caller
+  is `pure` too, impure is not an option and the guard has to produce something**: the two-sided
+  `int32` key check was a `pure` guard called from `pure module subroutine map_keys_r1_i32`, so
+  `fpm test --profile debug run_tester_errors -- errors` answered -3000000000 as 1294967296 with
+  exit status 0 while the same source aborted correctly without `-check all`. Merged into
+  `ix_narrow_keys_1`, which writes the narrowed list, it cannot be elided. A silent-truncation
+  symptom with no diagnostic anywhere is what this looks like from the outside, so treat a
+  guard-only `pure` procedure as a defect on sight rather than waiting for the scenario to fail.
 
 ## flang-specific gotchas
 

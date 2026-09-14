@@ -1719,6 +1719,7 @@ scenarios=(
     "multimap_string_probe_on_integer:1"
     "multimap_string_keys_rank1:1"
     "index_keys_int32_negative:1"
+    "index_keys_rank2_int32_negative:1"
     "multimap_csr_int32_value:1"
     "index_keys_int32_on_string_map:1"
     "index_keys_rank1_int32_on_composite:1"

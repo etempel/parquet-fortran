@@ -27,8 +27,9 @@ call parquet_write_table(summary, "field_summary.parquet")
 Each `%add_agg` is one `%agg` and one `%add_column`: ask for the array instead
 (`call grp%agg("mag_g", "median", med_mag)`) whenever you want the numbers rather than a column.
 
-Every procedure on this page is a **read** of the table: none reorders it, touches a row, detaches
-it from its file or advances `%generation()`.
+Every procedure on this page is a **read** of the grouped table: none reorders it, touches a row,
+detaches it from its file or advances its `%generation()`. The `%add_` forms write to a *second*
+table — the summary — and that one they do change, exactly as `%add_column` would.
 
 ## The call
 
@@ -245,6 +246,11 @@ end function robust_mad
 call grp%agg("mag_g", robust_mad, scatter)
 ```
 
+**Pass the procedure by name.** A procedure *pointer* is not the same call: the token form and
+this one differ only in that argument, and some compilers resolve a pointer to the token form —
+which then reads a statistic name out of it and refuses what it finds. `%add_agg` below carries
+the same rule for the same reason.
+
 A procedure that needs the exact integer values, a string, or several columns at once uses
 `%apply` below and reads the columns through its own pointers. The threading contract is
 `%apply`'s: `threads=` absent means serial, and giving it is your statement that the procedure may
@@ -266,7 +272,9 @@ call grp%add_agg(name, func, table, as, [weights], [weight_column], [unit], [nan
 ```
 
 `table` is the target — normally this grouping's `%key_table`, which is why `%key_table(reserve=)`
-exists — and `as` is the new column's name. The column holds exactly what `%agg` writes into an
+exists — and `as` is the new column's name, **exactly one**: a list of names is refused naming the
+count it found, since a caller who wrote one wanted `%add_apply`. The same holds for `%add_size`.
+The column holds exactly what `%agg` writes into an
 array, bit for bit, so every rule of `%agg` above holds unchanged: the vocabulary and its options,
 the null and NaN rules, the weights, the threading, the refusals. `name`, `stat` and `func` mean
 what they do on `%agg`, and `func` must be passed by **name** rather than through a procedure
@@ -320,52 +328,9 @@ call grp%add_agg("mag_g", robust_mad, summary, "robust_scatter", unit="mag")
 `%add_size` (above) is the same thing for the group size, and an answer you compute yourself goes
 on through `%add_apply` below — or with `%add_column`, when you already hold the array.
 
-### Several results per group: `%add_apply`
-
-`%add_apply` is `%apply` followed by one `%add_column` per result: your callback runs once per
-group, and each of its results becomes a named column of the target.
-
-```fortran
-call grp%add_apply(func, table, as, [unit], [nan_to_null], [force], [threads])
-call grp%add_apply(reducer, table, as, [unit], [nan_to_null], [force], [threads])
-```
-
-- **`as` is a list of names**, separated by commas and/or semicolons with blanks trimmed —
-  `"mass,mass_err"` — read by the same tokenizer as `%group_by`'s keys. **Its length is the number
-  of results per group**: `func` is called with `size(out)` equal to it, and column k holds
-  `out(k, :)` of the matrix `%apply` would give, bit for bit. There is no `nout`, so the names and
-  the results cannot disagree.
-- **One name is the one-result case**: `as="mass"` calls the subroutine with a one-entry `out`.
-- **The object form** takes anything extending `parquet_group_reducer` in place of `func`, with
-  the same `as` and the same rules. A procedure is passed by **name**, as on `%add_agg`.
-- **`unit=` is the unit of every column named** — the common several-result case is a value and its
-  error, which share one — and absent means none: the library cannot know a callback's dimension.
-  A mixed set of units is two calls.
-- **A result the callback could not compute is a Null row** in that result's column and no other,
-  under the default `nan_to_null=.true.`: a NaN from a callback means "no answer" by the
-  interface's own contract. `nan_to_null=.false.` stores it as a value.
-- **`force=`, `threads=` and the target rules are `%add_agg`'s**, except that `threads=` absent is
-  **serial**, as on `%apply`. An `as` that names nothing, and one that names a column twice, are
-  refused; **every name is checked against the target before the first column is written**, so a
-  call refused on its last name leaves the target exactly as it was.
-
-```fortran
-subroutine mass_and_error(g, rows, out)      ! parquet_group_apply_i
-    integer(int64), intent(in) :: g
-    integer(int64), intent(in) :: rows(:)
-    real(real64), intent(out) :: out(:)      ! size(out) == 2: the two names in as=
-    out(1) = sum(lum(rows)) * mass_to_light
-    out(2) = out(1) / sqrt(real(size(rows), real64))
-end subroutine mass_and_error
-
-call grp%key_table(summary, size_name="n_members", reserve=2)
-call grp%add_apply(mass_and_error, summary, "mass,mass_err", unit="Msun")
-```
-
-**The one-value FUNCTION form of `%apply` is not offered here.** A function and a subroutine dummy
-cannot be told apart in one generic, and there is no `out` whose rank would separate them, so the
-one-result case is a `parquet_group_apply_i` subroutine writing `out(1)` under a single name in
-`as` — which is also how a reducer object already serves both shapes.
+The same answers written straight onto a table with one row per group are
+[`%add_apply`](#several-results-per-group-add_apply), below — the procedure and the
+object form alike.
 
 ## One answer per group: `%apply`
 
@@ -498,6 +463,53 @@ end program example
   in a host: it is the form to lead with for any procedure that needs context.
 - The type carries no components and no finalizer, so an extension may be a module variable, a
   local or an array element.
+
+### Several results per group: `%add_apply`
+
+`%add_apply` is `%apply` followed by one `%add_column` per result: your callback runs once per
+group, and each of its results becomes a named column of the target.
+
+```fortran
+call grp%add_apply(func, table, as, [unit], [nan_to_null], [force], [threads])
+call grp%add_apply(reducer, table, as, [unit], [nan_to_null], [force], [threads])
+```
+
+- **`as` is a list of names**, separated by commas and/or semicolons with blanks trimmed —
+  `"mass,mass_err"` — read by the same tokenizer as `%group_by`'s keys. **Its length is the number
+  of results per group**: `func` is called with `size(out)` equal to it, and column k holds
+  `out(k, :)` of the matrix `%apply` would give, bit for bit. There is no `nout`, so the names and
+  the results cannot disagree.
+- **One name is the one-result case**: `as="mass"` calls the subroutine with a one-entry `out`.
+- **The object form** takes anything extending `parquet_group_reducer` in place of `func`, with
+  the same `as` and the same rules. A procedure is passed by **name**, as on `%add_agg`.
+- **`unit=` is the unit of every column named** — the common several-result case is a value and its
+  error, which share one — and absent means none: the library cannot know a callback's dimension.
+  A mixed set of units is two calls.
+- **A result the callback could not compute is a Null row** in that result's column and no other,
+  under the default `nan_to_null=.true.`: a NaN from a callback means "no answer" by the
+  interface's own contract. `nan_to_null=.false.` stores it as a value.
+- **`force=`, `threads=` and the target rules are `%add_agg`'s**, except that `threads=` absent is
+  **serial**, as on `%apply`. An `as` that names nothing, and one that names a column twice, are
+  refused; **every name is checked against the target before the first column is written**, so a
+  call refused on its last name leaves the target exactly as it was.
+
+```fortran
+subroutine mass_and_error(g, rows, out)      ! parquet_group_apply_i
+    integer(int64), intent(in) :: g
+    integer(int64), intent(in) :: rows(:)
+    real(real64), intent(out) :: out(:)      ! size(out) == 2: the two names in as=
+    out(1) = sum(lum(rows)) * mass_to_light
+    out(2) = out(1) / sqrt(real(size(rows), real64))
+end subroutine mass_and_error
+
+call grp%key_table(summary, size_name="n_members", reserve=2)
+call grp%add_apply(mass_and_error, summary, "mass,mass_err", unit="Msun")
+```
+
+**The one-value FUNCTION form of `%apply` is not offered here.** A function and a subroutine dummy
+cannot be told apart in one generic, and there is no `out` whose rank would separate them, so the
+one-result case is a `parquet_group_apply_i` subroutine writing `out(1)` under a single name in
+`as` — which is also how a reducer object already serves both shapes.
 
 ### Running the loop on a team
 

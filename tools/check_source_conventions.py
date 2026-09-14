@@ -4620,6 +4620,8 @@ AGG_DOC_ANCHORS = (
     ("exact", r"and keeps them exact:(.*?), on an integer or logical column"),
     ("options", r"An option a token does not take is refused rather than ignored\*\*:(.*?)\.\s"),
     ("weights", r"weights on a statistic they cannot affect \((.*?)\)"),
+    ("keepsunit", r"unit for the statistics that keep its dimension —(.*?)— and none for"),
+    ("nounit", r"— and none for(.*?), since a count has no unit"),
 )
 
 #: The options `%agg` refuses, in the order their refusals appear in `agg_check_options`.
@@ -4682,12 +4684,16 @@ def check_agg_vocabulary_matches_its_documentation():
                 "check has gone blind" % (src.name, page.name)]
 
     # ---- the source half -------------------------------------------------------------------
-    want = {}
+    want, every = {}, set()
     for _, line in _logical_lines(src):
         m = re.search(r"AG_INT_TOKENS\s*=\s*(.+)$", line)
         if m:
             want["exact"] = {t.strip() for t in
                              _fortran_string_text(m.group(1)).split(",") if t.strip()}
+        m = re.search(r"AG_REAL_TOKENS\s*=\s*(.+)$", line)
+        if m:
+            every = {t.strip() for t in
+                     _fortran_string_text(m.group(1)).split(",") if t.strip()}
         if "error stop" not in line:
             continue
         msg = _fortran_string_text(line[line.index("error stop") + len("error stop"):])
@@ -4697,12 +4703,26 @@ def check_agg_vocabulary_matches_its_documentation():
         if m:
             want["weights"] = set(re.findall(r'"([a-z]+)"', m.group(1)))
 
-    missing_src = [k for k in ("exact", "weights") + AGG_OPTIONS if not want.get(k)]
+    # The unit partition, from `agg_unit`'s one `select case` arm. The AG_* constant names ARE the
+    # token names uppercased, which is what makes this derivable at all; scoped to that procedure
+    # so a `case (AG_...)` anywhere else in the file cannot be read as this one.
+    body = re.search(r"subroutine agg_unit\(.*?end subroutine agg_unit", src.read_text(), re.S)
+    if body is not None:
+        arm = re.search(r"case \(([^)]*AG_[A-Z_, ]*)\)", body.group(0))
+        if arm is not None:
+            want["nounit"] = {t.lower() for t in re.findall(r"AG_([A-Z]+)", arm.group(1))}
+    if every and want.get("nounit"):
+        # The complement, so that a statistic in NEITHER of the page's two lists is caught as well
+        # -- U4's third direction, the one a two-way comparison cannot see.
+        want["keepsunit"] = every - want["nounit"]
+
+    missing_src = [k for k in ("exact", "weights", "nounit", "keepsunit") + AGG_OPTIONS
+                   if not want.get(k)]
     if missing_src:
         return ["src/parquet_tables_group.f90: could not read %s out of the source -- this check "
-                "has gone blind. It reads AG_INT_TOKENS and the `X= belongs to \"...\"` and "
-                "`weights have no effect on \"...\"` refusal messages in agg_check_options."
-                % ", ".join(missing_src)]
+                "has gone blind. It reads AG_INT_TOKENS, AG_REAL_TOKENS, agg_unit's `case (AG_...)` "
+                "arm, and the `X= belongs to \"...\"` and `weights have no effect on \"...\"` "
+                "refusal messages in agg_check_options." % ", ".join(missing_src)]
 
     # ---- the page half ---------------------------------------------------------------------
     flat = re.sub(r"\s+", " ", page.read_text())
@@ -4729,8 +4749,10 @@ def check_agg_vocabulary_matches_its_documentation():
 
     # ---- compare ---------------------------------------------------------------------------
     labels = {"exact": "the exact int64 family (AG_INT_TOKENS)",
-              "weights": "the statistics weights cannot affect"}
-    for key in ("exact", "weights") + AGG_OPTIONS:
+              "weights": "the statistics weights cannot affect",
+              "nounit": "the statistics %add_agg gives NO unit (agg_unit's case arm)",
+              "keepsunit": "the statistics %add_agg gives the source column's unit"}
+    for key in ("exact", "weights", "nounit", "keepsunit") + AGG_OPTIONS:
         page_set = got.get(key)
         if not page_set:
             problems.append("doc/pages/tables/table-group.md: names no statistic for %s, so this "

@@ -1771,6 +1771,7 @@ scenarios=(
     "table_group_add_agg_as_two_names:1"
     "table_group_add_agg_nan_to_null_exact:1"
     "table_group_stale_add_agg:1"
+    "table_group_stale_add_size:1"
     "table_group_add_agg_unknown_token:1"
     "table_group_add_size_name_taken:1"
     "table_group_add_apply_target_is_source:1"

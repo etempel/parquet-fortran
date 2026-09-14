@@ -3464,6 +3464,8 @@ program error_scenarios
         call scenario_table_group_add_agg_nan_to_null_exact()
     case ("table_group_stale_add_agg")
         call scenario_table_group_stale_add_agg()
+    case ("table_group_stale_add_size")
+        call scenario_table_group_stale_add_size()
     case ("table_group_add_agg_unknown_token")
         call scenario_table_group_add_agg_unknown_token()
     case ("table_group_add_size_name_taken")
@@ -30116,6 +30118,23 @@ contains
         call grp%add_agg("x", "mean", kt, "m2")
         print '(a,i0)', "a stale grouping answered add_agg, cols=", kt%ncols()
     end subroutine scenario_table_group_stale_add_agg
+    !
+    !> `%add_size` runs the same check, and it is the one of the three where a missing check would
+    !! be hardest to notice: the column it writes is a count, so group sizes belonging to a
+    !! partition the table has outrun look exactly like group sizes that belong to it. An add
+    !! before the row change is the control.
+    subroutine scenario_table_group_stale_add_size()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_size(kt, "n")
+        print '(a,i0)', "add_size ran before the change, cols=", kt%ncols()
+        call t%filter_rows([.true., .false., .true., .true., .true.])
+        call grp%add_size(kt, "n2")
+        print '(a,i0)', "a stale grouping answered add_size, cols=", kt%ncols()
+    end subroutine scenario_table_group_stale_add_size
     !
     !> Every refusal `%agg` raises is raised by `%add_agg` too, and names the binding the caller
     !! actually wrote rather than `agg` -- the reason the shared bodies take the calling binding's

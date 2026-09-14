@@ -2878,6 +2878,7 @@ contains
             new_unittest("add_agg with nan_to_null= and exact= together aborts", &
                 test_table_group_add_agg_nan_to_null_exact_aborts), &
             new_unittest("add_agg on a stale grouping aborts", test_table_group_stale_add_agg_aborts), &
+            new_unittest("add_size on a stale grouping aborts", test_table_group_stale_add_size_aborts), &
             new_unittest("add_agg with an unknown statistic token aborts, naming add_agg", &
                 test_table_group_add_agg_unknown_token_aborts), &
             new_unittest("add_size under a name the target already carries aborts", &
@@ -17984,6 +17985,14 @@ contains
             failure_message="add_agg on a stale grouping was expected to abort", &
             required_stderr="parquet_grouping: add_agg: this table has changed structurally")
     end subroutine test_table_group_stale_add_agg_aborts
+    !
+    !> See `scenario_table_group_stale_add_size` (test/error_scenarios.f90).
+    subroutine test_table_group_stale_add_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "table_group_stale_add_size", expect_abort=.true., &
+            failure_message="add_size on a stale grouping was expected to abort", &
+            required_stderr="parquet_grouping: add_size: this table has changed structurally")
+    end subroutine test_table_group_stale_add_size_aborts
     !
     !> See `scenario_table_group_add_agg_unknown_token` (test/error_scenarios.f90).
     subroutine test_table_group_add_agg_unknown_token_aborts(error)

@@ -31,7 +31,6 @@ submodule (parquet_tables) parquet_tables_display
     ! The library's one destination resolver, shared with the emit channels and with every other
     ! solicited printer, so `message_stream` cannot mean one thing to a warning and another to a
     ! listing. Hidden from the user by both facades' `private ::` lines.
-    use parquet_settings, only : parquet_message_unit
     use parquet_utils, only : pf_to_lower
     implicit none
     !

@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [unreleased] - 2026-09-14
+## [v2.4.0] - 2026-09-14
 
 **Compatibility:** parquet files written by earlier 2.x releases are read unchanged. Library 
 messages gain a class marker, the emitting procedure and file context, and every listing printed 

@@ -287,6 +287,42 @@ contains
         if (present(ok)) ok = .false.
         if (m == 0_int64) return
 
+        ! **`pf_cov(x, x)` IS `pf_variance(x)`, and the only way to be that to the bit is to run
+        ! the variance -- not to run a second procedure written to match it.** The identity is
+        ! documented as exact (`test_cov_identity_survives_inexact_centring` asserts `==` over
+        ! every size from 3 to 200 and both weight conventions), and the covariance had its own
+        ! mirror of the single-sample two-pass: same block tree, same `pair_reduce`, same refined
+        ! mean, the diagonal even taking `stats_block_moments` itself. That is enough only for as
+        ! long as the compiler compiles two textually identical expressions into the same
+        ! instructions, which is not a promise any of them makes. ifx 2026.1 at `-O0` broke it in
+        ! two independent places at once, under the `-fp-model fast` it applies by default:
+        !
+        ! * `stats_block_moments` is `pure` and small, so an inlined copy exists beside the
+        !   out-of-line one `stats_pass_two` calls -- and the out-of-line one is vectorised
+        !   (`addpd`/`mulpd`, two lanes combined at the end) while the inlined one is not, so the
+        !   block sum groups its additions differently;
+        ! * `mux = px(1) / w_sum` and `mu = acc%vsum / acc%w_sum` are the same division of the
+        !   same two bit-identical operands, and came out one ulp apart because `w_sum` divides
+        !   four times in one procedure and twice in the other, which is enough for the reciprocal
+        !   substitution `-fp-model fast` allows to be worth it in one of them and not the other.
+        !
+        ! Neither is reachable from the source, and a third would have been found after those two.
+        ! Delegating removes the class: `variance_f64` is one out-of-line procedure, so
+        ! `pf_cov(x, x, ...)` and `pf_variance(x, ...)` are the same instructions over the same
+        ! survivors, for every compiler, optimisation level and floating-point model. The
+        ! survivors do coincide: `pair_compact` drops a null, a NaN and a zero weight, and those
+        ! are exactly the three `stats_engine` would have dropped from `x` itself. It is the
+        ! cheaper route as well -- both walks are two passes, and this one reads one array per
+        ! pass where the pair walk reads two.
+        !
+        ! `n_null`/`n_nan` are already reported above and are deliberately not passed on: they
+        ! count what the PAIR compaction dropped, and `kx` no longer holds any of it. `weights=kw`
+        ! is absent when `kw` is unallocated, which is the unweighted call.
+        if (stats_pair_is_diagonal(kx, ky, m)) then
+            call variance_f64(kx, c, weights=kw, weight_type=weight_type, ddof=dd, ok=ok)
+            return
+        end if
+
         call stats_pair_moments(kx, ky, kw, m, mx, my, sxx, sxy, syy, w_sum, w_sq)
         if (w_sum <= 0.0_real64) return
         ! **The same two denominators `pf_variance` uses, and that is the requirement rather than

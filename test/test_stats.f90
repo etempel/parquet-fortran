@@ -7981,7 +7981,16 @@ contains
     !! weight of `1/err**2` over a measurement with a tiny error produces it.
     subroutine test_absorbing_weight_keeps_positions_ordered(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
-        real(real64) :: x(3), w(3), q, total, prev
+        real(real64) :: x(3), w(3), q, prev
+        !> **`volatile`, and load-bearing rather than decoration.** The precondition below asks
+        !! whether the STORED sum still equals `w(1)`, and written plainly it is the algebraic
+        !! identity `(a + b + c) - a == 0`, which a compiler free to reassociate folds to
+        !! `b + c` -- 2e-300, not 0 -- so the fixture reports itself unusable when it is exactly
+        !! what the test needs. ifx 2026.1 does that at `-O0`, `-fp-model fast` being its default;
+        !! it is also a Heisenbug, since printing `total` first is enough to hide it. `volatile`
+        !! forces the value to be read back instead of the expression that produced it, which is
+        !! the question being asked.
+        real(real64), volatile :: total
         integer :: k
 
         x = [1.0_real64, 2.0_real64, 3.0_real64]

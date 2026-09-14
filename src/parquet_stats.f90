@@ -2786,14 +2786,15 @@ module parquet_stats
         end subroutine stats_weight_kind
         !> The two-sample two-pass, over pairs the caller has already compacted.
         !!
-        !! **It exists so that `pf_cov(x, x)` is EXACTLY `pf_variance(x)`**, which it could not be
-        !! if the covariance had its own accumulation loop elsewhere: it is written here, in the
-        !! same submodule as `stats_engine`, so that both reach the same `STATS_BLOCK` block tree,
-        !! the same `pair_reduce`, the same refined mean and the same re-centring correction --
-        !! and so that the diagonal can take `stats_block_moments` itself, which is what makes the
-        !! identity hold to the bit rather than to fifteen digits. The fork, and the two ways a
-        !! mirrored pair kernel diverges from the single-sample one without it, are written out at
-        !! the `diagonal` scan in the body.
+        !! Written in the same submodule as `stats_engine` so that both reach the same
+        !! `STATS_BLOCK` block tree, the same `pair_reduce`, the same refined mean and the same
+        !! re-centring correction.
+        !!
+        !! **`pf_cov(x, x)` does not come through here**: `cov_f64` answers a diagonal pair by
+        !! calling `variance_f64`, since the identity `pf_cov(x, x) == pf_variance(x)` is
+        !! documented as exact and no arrangement of mirrored source can deliver that under a
+        !! compiler free to rewrite arithmetic -- see the note at that call site. The diagonal
+        !! fork in the body remains for `pf_corr(x, x) == 1`, and is written out there.
         module subroutine stats_pair_moments(kx, ky, kw, m, mean_x, mean_y, sxx, sxy, syy, &
                 w_sum, w_sq)
             real(real64), intent(in) :: kx(:) !! the surviving first-sample values.
@@ -2808,6 +2809,19 @@ module parquet_stats
             real(real64), intent(out) :: w_sum !! `sum(w)`.
             real(real64), intent(out) :: w_sq !! `sum(w**2)`, which the reliability `ddof` needs.
         end subroutine stats_pair_moments
+        !> Is this pair the diagonal -- `kx(i) == ky(i)` for every surviving pair?
+        !!
+        !! One copy, because two callers ask: `cov_f64`, which hands a diagonal pair to
+        !! `variance_f64`, and `stats_pair_moments`, whose own diagonal fork keeps the three
+        !! centred sums exactly equal. Neither array can hold a NaN (the pair compaction in
+        !! parquet_stats_relate.f90 drops any pair holding one), so `/=` is an ordinary
+        !! comparison; an infinity compares equal to itself and raises nothing.
+        module function stats_pair_is_diagonal(kx, ky, m) result(res)
+            real(real64), intent(in) :: kx(:) !! the surviving first-sample values.
+            real(real64), intent(in) :: ky(:) !! the surviving second-sample values, paired.
+            integer(int64), intent(in) :: m !! how many pairs survived.
+            logical :: res !! .true. when every pair is diagonal, .false. on the first that is not.
+        end function stats_pair_is_diagonal
         !> The mean and standard deviation of one population, from ONE engine run.
         !!
         !! `pf_zscore` needs both and would otherwise pay four traversals for two. Also reports

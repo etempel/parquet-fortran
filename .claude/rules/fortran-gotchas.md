@@ -284,6 +284,28 @@ done | sort | uniq -c | sort -rn
   **Do not apply the same fix to an FMA-contractable shape.** `rm + 1 - 2*a` contracts at run time,
   so the library and a matching run-time expression agree while an unfused folded constant does
   not; that reference stays run-time arithmetic.
+- **The same reciprocal substitution also fires on a RUN-TIME divisor that divides more than once
+  in a procedure**, so the constant-denominator entry above is the narrow case rather than the
+  rule. `mux = px(1) / w_sum` (four divisions by `w_sum` in `stats_pair_moments`) and
+  `mu = acc%vsum / acc%w_sum` (two in `stats_engine`) are the same division of the same
+  bit-identical operands and came out **one ulp apart**, because the substitution is worth it in
+  one procedure and not the other. Nothing in either source says so.
+- **`-fp-model=fast` also folds an algebraic identity out of an expression, which can turn a test's
+  own PRECONDITION into a lie.** `total = a + b + c` followed by `total - a == 0.0` — the check
+  that two tiny weights vanished into a huge one — is rewritten to `b + c`, so the fixture reports
+  itself unusable when it is exactly what the test needs
+  (`test_absorbing_weight_keeps_positions_ordered`). It is a Heisenbug: printing `total` first
+  hides it. Declare the variable `volatile` so the stored value is read back rather than the
+  expression that produced it, which is the question such a precondition is asking.
+- **A `pure` procedure can be INLINED at one call site and left out-of-line at another — at `-O0` —
+  so "both routes call the same kernel" does not mean "both routes round alike."** ifx compiled the
+  out-of-line `stats_block_moments` vectorised (`addpd`/`mulpd`, two lanes combined at the end) and
+  an inlined copy of it scalar, which grouped one block's additions differently and moved the last
+  bit. Confirm with `objdump -dr <object>` and the relocation list for the caller: a missing
+  `R_X86_64_PLT32` to the callee means it was inlined. The lesson is general — **a documented
+  bit-for-bit identity between two public procedures has to be delivered by CALLING one from the
+  other, never by writing two bodies to match** (`cov_f64` hands a diagonal pair to
+  `variance_f64`).
 - **ifx turns flush-to-zero AND denormals-are-zero on at `-O1` and above**; gfortran and nagfor
   leave gradual underflow in force. It is a process-wide MXCSR setting made by the main program, so
   a library procedure receives a subnormal argument already collapsed to zero and cannot recover

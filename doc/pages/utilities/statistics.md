@@ -319,8 +319,9 @@ G2 = ((n_eff + 1)*g2 + 6) * (n_eff - 1)
 `3` instead of `0`. `G1` needs `n_eff > 2` and `G2` needs `n_eff > 3`; below that they are NaN,
 which is the fourth row of the undefined table below.
 
-**`pf_cov` is the same expression over a pair**, with the same two divisors — which is what makes
-`pf_cov(x, x)` equal `pf_variance(x)` bit for bit rather than merely to a tolerance:
+**`pf_cov` is the same expression over a pair**, with the same two divisors — and `pf_cov(x, x)`
+equals `pf_variance(x)` bit for bit rather than merely to a tolerance, because a diagonal pair is
+answered by running the variance itself:
 
 ```
 Mxy      = sum(w*(x - mux)*(y - muy))
@@ -762,9 +763,11 @@ is not a number. `n_null` and `n_nan` therefore count **pairs** here, not elemen
 Two identities hold **exactly**, and the test suite asserts them with `==` rather than a tolerance:
 
 - `pf_cov(x, x)` is `pf_variance(x)` bit for bit, at any `ddof` **and under either
-  `weight_type`**. That is why the covariance is accumulated by the same block tree the variance
-  is, rather than by a loop of its own, and why `pf_cov` takes `weight_type=` at all: without it
-  the identity would fail for any caller who asked the variance for frequency weights.
+  `weight_type`**. A pair whose two samples are identical is answered by running the variance
+  itself, so the identity holds under every compiler, optimisation level and floating-point model
+  rather than for as long as two separately written accumulations happen to round alike. It is
+  also why `pf_cov` takes `weight_type=` at all: without it the identity would fail for any caller
+  who asked the variance for frequency weights.
 - `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`.
 
 **An infinity in either sample leaves all of `pf_cov` and `pf_corr` undefined**, reported as a

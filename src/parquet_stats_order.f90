@@ -1926,7 +1926,13 @@ contains
         ! elements. `stats_ensure` is a no-op when nothing is pending.
         call stats_ensure(self)
         if (self%ordered) return
-        call order_in_place(self%keep, self%keep_w, self%keep_n)
+        ! **Guarded on `keep_n`, not left to `order_in_place`'s own `m <= 1` return.** `%init`
+        ! leaves `keep` unallocated, and associating an unallocated allocatable with that
+        ! non-optional `x(:)` dummy is not conforming even when nothing would be read (F2018
+        ! 15.5.2.4) -- nagfor `-C=array` aborts on the call itself. Every tier-B binding comes
+        ! through here first, so this one test covers them all
+        ! (`test_empty_retained_object_reads_are_nan`). Zero or one live value is already ordered.
+        if (self%keep_n > 1_int64) call order_in_place(self%keep, self%keep_w, self%keep_n)
         self%ordered = .true.
     end subroutine ensure_ordered
 

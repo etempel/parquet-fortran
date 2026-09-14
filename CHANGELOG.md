@@ -4,503 +4,79 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [2.4.0] - 2026-09-14
+## [unreleased] - 2026-09-14
 
-**Toolchain floor:** unchanged from 2.3.0 — gfortran >= 13 (13 on CI; 15.2.0 the primary
-development target), and, confirmed by hand rather than by CI, Intel Fortran (ifx)
-2026.1.0/2026.1.1, NAG Fortran 7.2 and LLVM flang 22.1.8. Also fpm >= 0.13.0, a C++20-capable C++
-compiler, and Arrow/Parquet C++ >= 24.0.0. See [Prerequisites](README.md#prerequisites).
-
-**SemVer scope:** unchanged from 2.0.0 — the whole `use parquet` surface, and each advertised entry
-module in its own right. `parquet_spatial` loses two public procedures in this release (see
-Compatibility), which is a removal from that surface; it is released as a MINOR bump deliberately,
-because the pair governed one line of output and the behaviour they controlled is still reachable
-through `verbosity`.
-
-**Compatibility:** parquet files written by any earlier 2.x are read unchanged, and no file format,
-schema or MAML behaviour moves. What changes is what the library **says** and **where it says it**,
-in four ways, plus four behaviour changes listed under Changed.
-
-*Where messages go.* Every message and every `%print*` procedure with no `unit=` now follows
-`message_stream`; previously `%print_stat`, both `parquet_strings` printers, `parquet_print_settings`
-and the reader's close-time report went to standard output whatever that setting said. Under the
-factory default (`"stdout"`) nothing moves. A program that set `message_stream="stderr"` will see
-those listings move to standard error, which is what it was asking for; a harness that captures only
-standard output should capture both streams.
-
-*What messages say.* Every message now opens with its class marker — `WARNING: `, `NOTE: `, `INFO: `
-— names the procedure it came from, and, where it was raised from a read, write or schema path,
-ends with the file it concerns. A program matching this library's output by exact text will need
-updating; one matching a substring of the message body will not. The qc violation warnings are the
-ones most likely to be matched: they keep their wording and gain a ` (file: …)` suffix.
-
-*What `verbosity` silences.* Advice about how the library is being used — the affinity clamp's
-message and the five a `pf_spatial_index` raises — is now its own class, marked `NOTE: ` and
-silenced at `"silent"` rather than at `"errors_only"`. A program running at `"errors_only"` sees no
-change; one at `"normal"` sees the same messages with a new prefix; one at `"silent"` loses six
-messages it used to receive.
-
-*One setting removed.* `parquet_set_spatial_rebuild_warning` and
-`parquet_get_spatial_rebuild_warning` are gone, with the `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING`
-variable and the `spatial_rebuild_warning` row of `parquet_print_settings`. A program calling either
-will not compile; the message they governed is advice, so `parquet_set_verbosity("silent")` silences
-it, and nothing silences the rebuild itself.
+**Compatibility:** parquet files written by earlier 2.x releases are read unchanged. Library 
+messages gain a class marker, the emitting procedure and file context, and every listing printed 
+without `unit=` follows `message_stream`.
 
 ### Added
 
-- **`int32` answers from the bulk spatial and index queries.** `%all_within`, `%count_all_within`,
-  `%pairs_within`, their `_sky` forms and `%grid` (`pf_spatial_index`), `pf_connected_components`,
-  `%csr`, `%keys` and `%used_indexes` (`parquet_index`) and `pf_healpix_threads` allocate their
-  answer in the kind of the argument they are given, `integer(int32)` or `integer(int64)`, as the
-  caller-owned buffers of the single queries already did. One kind per call: the arrays one call
-  hands back share it, and `pf_connected_components` takes its edge list in that kind too, with
-  `nvert` keeping its own. An `int32` answer that cannot hold a value aborts before anything is
-  allocated rather than truncating, naming the quantity that was too large — which for a CSR's
-  `offsets` is the length of the neighbour list and not the row count, and for `%keys` is a bound
-  at either end. See [Ball search](doc/pages/utilities/spatial.md#ball-search) and
-  [Index maps](doc/pages/utilities/index-maps.md).
-- **Probit-function statistics: `pf_probit` and the `parquet_stats` family built on it.**
-  `pf_probit`, `pf_norm_cdf`, `pf_norm_sf` and `pf_norm_pdf` (`parquet_utils`, `pure elemental`,
-  `real32` and `real64`, computing in the kind they are handed) are the standard normal quantile
-  function, distribution function, survival function and density. `pf_probit(p)` is `-Infinity` at
-  0, `+Infinity` at 1, a quiet NaN outside `[0, 1]`, exactly `0` at `p = 0.5`, antisymmetric about
-  it bit for bit wherever `1-p` is an exact double, and accurate to about 3 ulp over the whole
-  range including the subnormal tail, where `pf_probit(5e-324)` is about `-38.47` rather than
-  `-Infinity`; `pf_norm_sf(z)` is the upper tail computed in its own right and never as
-  `1 - pf_norm_cdf(z)`, which has no significant digits left past about `z = 8`. Nothing in that
-  family validates or aborts.
-
-  On top of it, four `parquet_stats` generics. `pf_normal_scores(values, s, [...])` replaces each
-  value by the normal quantile its midrank marks — rankits, the van der Waerden transform, the
-  x-axis of a Q-Q plot — with `s` in the caller's original order, ties sharing one score, ranks
-  taken over the surviving elements, and `method=` choosing the plotting position: `"blom"` (the
-  default), `"weibull"`, `"tukey"`, `"hazen"`, `"cunnane"` or `"filliben"`, the median rank.
-  `pf_probit_fit(values, loc, sigma, [corr], [...])` is the least-squares line of the sorted
-  survivors on the normal scores of their plotting positions: `loc` is the intercept, which is the
-  mean of the survivors, `sigma` is the slope, and the optional `corr` is the probability-plot
-  correlation coefficient; `method="filliben"` reproduces `scipy.stats.probplot`.
-  `pf_probit_scale(values, sigma, [prob], [...])` is `(Q(1-prob) - Q(prob)) / (2 Phi^-1(1-prob))`,
-  the scale a symmetric quantile pair implies for Gaussian data, `prob = 0.25` by default and
-  outside `(0, 0.5)` an abort. `pf_probit_mean(values, m, [...])` averages probabilities on the
-  probit scale and maps the result back: a value outside `[0, 1]` gives a quiet NaN with
-  `ok = .false.`, a `0` in the population gives exactly `0` and a `1` gives exactly `1`, and a
-  population holding both gives NaN.
-
-  An excluded element is marked in `out_valid` or written as a quiet NaN, exactly as `pf_zscore`
-  does; under `skipnan = .false.` every answer is NaN. `pf_normal_scores` and `pf_probit_fit` take
-  no `weights` and `pf_normal_scores` has no `pf_stats` binding; `pf_stats` gains `%probit_fit`,
-  `%probit_scale` and `%probit_mean`. See
-  [Statistics](doc/pages/utilities/statistics.md#pf_probit_fit-and-pf_probit_scale--the-normal-probability-plot)
-  and [The normal distribution](doc/pages/utilities/utils.md#the-normal-distribution-probit-cdf-density).
-- **A cylinder along the line of sight: `pf_spatial_index%within_los` and `%pairs_within_los`.**
-  `sx%pairs_within_los(b_perp, b_par, i, j)` returns every pair, once and with `i < j`, whose
-  transverse separation about an observer is within `b_perp` and whose parallel separation is
-  within `b_par`, with one pair of lengths for every point or one per point;
-  `m = sx%within_los(p, b_perp, b_par, found)` is the same cylinder about one point, with `dist=`
-  the normalised measure `max(d_perp/b_perp, d_par/b_par)` and `sorted=` ordering by it. `%build`
-  takes `observer=` (default the origin) and `los=`, an optional parallel coordinate per point in
-  its own units, the redshift itself over comoving coordinates being the intended use: `b_perp` and
-  `dperp=` are in the coordinates' units, `b_par` and `dpar=` in `los=`'s, and without `los=` the
-  parallel separation is the difference in distance from the observer. `combine=` chooses how two
-  points' lengths decide a pair, `PF_LINK_MAX` meaning the union of the two cylinders; `dperp=` and
-  `dpar=` return the two separations per pair. `%rebuild` takes `los=` exactly when the index
-  carries one. The candidates are walked as each point's own cylinder along its line of sight,
-  bounded in distance by the spread of the stored points within `b_par` of it in `los`, or as its
-  covering ball where that is the cheaper walk, so a long thin cylinder tests few candidates it
-  does not keep; build with `radius = b_perp`.
-  `i` and `j` come back as `integer(int32)` or `integer(int64)`, as every allocated spatial answer
-  does. `bench/benchmark_spatial.sh` gains `MODE=los`, with `WALK=`, `SPREAD=` and
-  `CELLS_PER_POINT=` arms. See
-  [Cylinders along the line of sight](doc/pages/utilities/spatial.md#cylinders-along-the-line-of-sight).
-- **Truncated normal draws: `rng%normal_truncated(lo, hi, x, [mu], [sigma])`.** Draws a normal
-  restricted to an interval, with the bounds, the location, the scale and the result all on one
-  scale, and the result guaranteed inside `[lo, hi]`. One-sided truncation is a `huge()` or
-  infinite bound. The draw costs between one and about two proposals for any interval, however far
-  into the tail it sits, and which of its three proposals runs is frozen contract published through
-  `pf_normal_truncated_algorithm`. See [Distributions](doc/pages/utilities/random.md).
-- **Grouping: `parquet_table%group_by` and the `parquet_grouping` object.**
-  `t%group_by(keys, grp)` partitions a table's rows by the values of one or more key columns and
-  keeps the partition as an object that answers per group, without reordering the table. `%rows`,
-  `%csr`, `%size`, `%first_rows`, `%last_rows` and `%group_ids` describe the partition and
-  `%nkeys()` answers a default `integer`; `%key_table` gives one row per group carrying each key's
-  kind, width and unit, which is the skeleton a summary table is built on, and its `reserve=`
-  leaves that many spare column slots on it so the columns you add next relocate nothing.
-  `%agg(name, stat, out)` computes one statistic of one column per group over the
-  `parquet_stats` vocabulary — `"mean"`, `"median"`, `"std"`, `"quantile"` and thirteen more —
-  weighted by `weights=` or `weight_column=` if you want; an `integer(int64)` result selects the
-  exact family, whose `"sum"` aborts rather than wraps. `%agg(name, func, out)` takes a procedure of
-  yours over one column's values instead, and `%count`/`%nunique` count non-null and distinct values
-  per group. `%add_agg(name, stat, table, as)` writes that same statistic straight onto a table with
-  one row per group — the key table — as a column named `as`, keeping the source column's unit
-  where the statistic keeps its dimension, marking a group without an answer Null, taking
-  `exact=.true.` for the exact family and a procedure of yours in place of `stat`;
-  `%add_size(table, as)` puts the group size onto a table that already exists. `%apply` calls a
-  procedure or an object extending `parquet_group_reducer` once per group with the group's rows,
-  serially unless you give `threads=`, and `%add_apply(func, table, as)` writes its results onto
-  such a table as well, one named column per result — `as="mass,mass_err"` names them and is what
-  tells the callback how many results per group to write. `%broadcast` carries a per-group
-  array back onto the rows and `%gather` copies one group's values into a buffer you own. `%rows`
-  and `%gather` take the group number in `int32` or `int64`, `%gather` returns `n` in that kind,
-  and `%csr` and `%broadcast` answer in either kind, one kind per call. Groups come in ascending
-  key order, rows within a group in ascending row order, a Null key drops its row
-  unless `dropna=.false.`, and a query on a grouping whose table has changed structurally aborts
-  instead of answering about the wrong rows. `use parquet_tables` now also compiles the statistics
-  tier. See [Grouping rows and aggregating per
+- **Grouping and aggregation**: `parquet_table%group_by` partitions a table's rows by key columns
+  into a `parquet_grouping` that computes per-group statistics (the `parquet_stats` vocabulary or a
+  procedure of your own), applies callbacks, broadcasts results back onto the rows and builds
+  one-row-per-group summary tables. See [Grouping rows and aggregating per
   group](doc/pages/tables/table-group.md).
-- **Row filters match part of a string: `starts_with`, `ends_with` and `contains`.**
-  `filt%add('field starts_with "S18"')` keeps the rows whose value begins with those bytes,
-  `ends_with` those that end with them, and `contains` those that hold them anywhere. The match is
-  byte-exact and case-sensitive over a `string` column, the pattern is a literal rather than a
-  wildcard pattern, and a Null row is unknown for all three exactly as it is for a comparison.
-  Negation is `not (...)`, and the three compose with `and`/`or`/parentheses, a bound set, a dotted
-  struct-leaf path and a dictionary-encoded column like any other clause. A `starts_with` clause
-  skips the row groups its footer statistics rule out, the way an ordinary comparison does;
-  `ends_with` and `contains` read every row group the filter's other clauses leave alive. The
-  same operators work on a `parquet_table` through `%filter_rows`/`%row_mask`. See
-  [Matching part of a
-  string](doc/pages/io/filter-sort-sample.md#matching-part-of-a-string-starts_with-ends_with-and-contains).
-- **The filter, sort-key and read-QC specification types gain `%clear`.** `filt%clear()`,
-  `srt%clear()` and `qc%clear()` drop everything added so far — every rule and bound set, every
-  sort key and its null placement, every QC entry — returning the object to its initial state so
-  one variable can serve a second read instead of being redeclared. A cleared filter filters
-  nothing, and clearing one never disturbs a reader already open on it. See
-  [Reusing a filter](doc/pages/io/filter-sort-sample.md#reusing-a-filter-clear).
-- **`parquet_utils` gains eight numeric helpers**, `pure` and in both real kinds like everything
-  else there. `pf_safe_div(a, b)` is `a/b` with the IEEE value a zero denominator would have
-  produced, returned by construction so that no exception flag is raised. `pf_wrap_deg`,
-  `pf_wrap_180`, `pf_wrap_rad` and `pf_wrap_pi` reduce an angle to `[0, 360)`, `[-180, 180)`,
-  `[0, 2*pi)` and `[-pi, pi)`, for any input and any number of turns. `pf_deg2rad` and `pf_rad2deg`
-  convert between the two units, and `pf_cross_product` is the cross product of two 3-vectors. See
-  [Text and path helpers](doc/pages/utilities/utils.md). The module now imports `ieee_arithmetic`
-  alongside `iso_fortran_env`; both are intrinsic, so it remains a leaf compiling one file.
-- **`pf_log_now(date, time, [millis])`** returns the current local date and time as
-  `YYYY-MM-DD` and `HH:MM:SS`, in the shape the `{date}` and `{time}` record placeholders render,
-  for a program stamping its own output rather than a log record. See
-  [Logging](doc/pages/utilities/logging.md#the-wall-clock-for-your-own-output).
-- **`parquet_table%print_stat` takes `stats=.false.` and `unit=`.** `stats=.false.` lists the
-  columns with their kind and width only, skipping the null count and min/max; `unit=` writes the
-  listing to a unit of your choosing instead of standard output. See
-  [Describing the columns](doc/pages/tables/table.md#describing-the-columns-print_stat).
-- **Row filters accept a bound set: `in` and `not_in`.** `filt%add_in("ID", ids)` keeps the rows
-  whose value appears in an array you attach, and `filt%bind("wanted", ids)` plus
-  `filt%add("ID in @wanted or flag == 7")` puts the same set inside an ordinary expression. Integer,
-  floating-point, string, date, time and timestamp sets are accepted, with an optional `is_valid=`
-  mask; a timestamp set matches a column of any stored unit by instant. The membership
-  test is evaluated before the file's data columns are read, so a set clause prunes row groups where
-  a min/max rule cannot — on a string column, on a file written without statistics, and on a
-  scattered set — which is what lets `parquet_open_table(..., bounded=.true.)` restrict one file by
-  another file's results without either becoming resident. A short set can also be written out in
-  the rule itself — `filt%add("field_id in (3, 5, 9)")` — and means exactly what the same members
-  bound with `%bind` mean. Adds the read-only limit `parquet_max_filter_sets`. See
-  [Membership in a set](doc/pages/io/filter-sort-sample.md#membership-in-a-set-in-and-not_in).
-- **Row filters accept `is_finite` and `is_not_finite`** on a floating-point column, alongside the
-  existing `is_nan`/`is_not_nan`. `x is_finite` keeps the values you can do arithmetic with,
-  excluding a NaN and both infinities; like the NaN operators it is Kleene-honest about nullness, so
-  a Null row is unknown for it. See
-  [NaN is a value, not a Null](doc/pages/io/filter-sort-sample.md#nan-is-a-value-not-a-null).
-- **`parquet_table%filter_rows` and `%row_mask` take a filter expression.**
-  `t%filter_rows("n_obs >= 8 and score > 3")` drops the rows a rule does not select, and
-  `t%row_mask(rule, keep)` reports which rows it selects without changing anything — the mask to
-  count before deciding, or to combine with a test the grammar has no words for. Both also take a
-  `parquet_filter`, which is what carries a bound set. The rule is the read-time filter grammar and
-  selects the same rows a read-time `filter=` would, including the null, NaN, string-ordering and
-  temporal-unit rules; a column the rule names is read if it is not resident yet. See
-  [Removing rows by a filter expression](doc/pages/tables/table-mutate.md#removing-rows-by-a-filter-expression).
-- **The missing-data verbs: `%fillna`, `%ffill`, `%bfill` and `%dropna`.** `t%fillna(names, value)`
-  writes one value into every null of the named columns **and clears the null flag with it**, which
-  a loop of `%set_element` could not do — `%clear_null` takes one row at a time, so filling a
-  sentinel by hand left every filled row reading back as both the sentinel and Null, and written to
-  a file as Null. The value is converted per column (an integer widens into a wider integer or a
-  real column; a real is refused for an integer column, naming it), all three of the storage classes
-  a null lives in are handled, and on a vector column every null element takes the value.
-  `%ffill`/`%bfill` carry the previous or next non-null value instead, with `limit=` capping the run
-  one value may fill. `%dropna([names], [min_valid], [how])` drops the rows that are null in the
-  named columns, or in every resident column when none is named. See
-  [Filling in what is missing](doc/pages/tables/table-mutate.md#filling-in-what-is-missing).
-- **The column-shape verbs: `%get_matrix`, `%set_matrix`, `%drop_columns` and `%keep_columns`.**
-  `t%get_matrix(names, arr)` copies a group of scalar columns out as one `(column, row)` array, so
-  one row's values across the group are contiguous and `count(arr > lim, dim=1)` is a per-row cut;
-  `%set_matrix` writes one back. `%get_matrix` widens as `%get` does and `%set_matrix` takes the
-  column's kind exactly, as `%set` does. `t%drop_columns(names, [force], [ignore_missing])` removes
-  several columns at once and `t%keep_columns(names, [force])` removes everything else — the
-  projection, and cheap on a lazy table, since a column that was never read costs nothing to drop.
-  Neither detaches. See
-  [Several columns at once](doc/pages/tables/table.md#several-columns-at-once-as-one-matrix) and
-  [Dropping and keeping several columns](doc/pages/tables/table-mutate.md#dropping-and-keeping-several-columns).
-- **Text to numbers and back: `%parse_column`, `%format_column` and `pf_from_str`.**
-  `t%parse_column("uberID", PK_INT64)` reads a string column's text as numbers, in place, which is
-  the one conversion `%cast` refuses — and refuses because the interesting part is the failure:
-  `invalid="error"` (the default) stops naming the row, the column and the offending text, and
-  `invalid="null"` marks that row missing and carries on. `%format_column` renders a numeric,
-  logical or temporal column as text, with an optional `fmt`. Both take `to_name=` for a new column
-  beside the original, and neither detaches; both refuse a predefined column in place without
-  `force=.true.`. `pf_from_str` in `parquet_utils` is the strict
-  single-value parser underneath, the inverse of `pf_to_str`: a list-directed `read` accepts
-  `"5 6"` as 5, and this does not. See
-  [Text to numbers and back](doc/pages/tables/table.md#text-to-numbers-and-back-parse_column-and-format_column)
-  and [Reading a value back out of text](doc/pages/utilities/utils.md#reading-a-value-back-out-of-text).
-- **The row-set verbs: `%explode`, `%drop_duplicates`/`%duplicated` and
-  `%sort_by_values`/`%argsort_by_values`.** `t%explode(counts)` repeats each row as many times as a
-  count list says — the expansion a one-to-many relationship needs — with `origin=` naming each
-  output row's source row so an array the table does not hold lines up with the result, and
-  `keep_empty=` choosing whether a count of zero keeps its row (pandas) or drops it (SQL's
-  `UNNEST`). `t%drop_duplicates([keys], [keep])` keeps one row per group of rows equal under the
-  keys, in the table's own order, with `keep="first"|"last"|"none"`; `%duplicated` hands back the
-  mask it would apply without applying it. Equality is the sort engine's, so all nulls are one
-  value and all NaNs are one value. `t%sort_by_values(values)` orders every column by values the
-  caller computed rather than by a column, and `%argsort_by_values` answers with the order alone.
-  `%argsort_by` also gained a `threads=` argument. See
-  [Dropping duplicate rows](doc/pages/tables/table-mutate.md#dropping-duplicate-rows),
-  [Repeating rows](doc/pages/tables/table-mutate.md#repeating-rows-explode) and
-  [Ordering by values you computed yourself](doc/pages/tables/table-mutate.md#ordering-by-values-you-computed-yourself).
-- **Counting and mapping: `%value_counts`, `pf_value_counts` and `pf_remap`.**
-  `t%value_counts("band", out)` answers with a new two-column table — the counted column's distinct
-  values, keeping its name, kind and unit, beside an `int64` `count` — ordered by count descending
-  and by value ascending among equal counts, with `dropna=.false.` keeping the null group as a
-  final row. One binding covers every column kind. `pf_value_counts` is the array-level form,
-  `pf_unique` with the run lengths kept from the same pass. `pf_remap(values, from_keys, to_values,
-  out)` applies a lookup table to an array over any of eleven key types crossed with six value
-  types, and has no silent path for a value that matches no key: `default=` substitutes, `found=`
-  reports, and giving neither aborts naming the position. A repeated key aborts naming both
-  positions. See
-  [Counting how often each value occurs](doc/pages/tables/table-mutate.md#counting-how-often-each-value-occurs)
-  and [Mapping values through a lookup table](doc/pages/utilities/sorting.md#mapping-values-through-a-lookup-table).
-- **`pf_index_map` gains string keys, bulk dictionary encoding and validity masks.** `%build`,
-  `%get`, `%get_many`, `%set`, `%get_or_add`, `%remove` and `%keys` take a string — a `character`
-  array, a `character` scalar or a `parquet_string_column` — keyed by its exact bytes and verified
-  on every hit. `m%get_or_add_many(keys, codes, [threads])` is `%get_or_add` over a whole array
-  under one lock and on a team, the way to factorise a key column; `valid=` on `%build`, `%get_many` and
-  `%get_or_add_many` skips the rows a mask marks `.false.`, so a nullable key column can be
-  indexed or probed without compacting it first. See
-  [String keys](doc/pages/utilities/index-maps.md#string-keys) and
-  [Filling a map as you go](doc/pages/utilities/index-maps.md#filling-a-map-as-you-go).
-- **`pf_index_multimap`: a map from a key to every position that holds it.** Built from a key
-  array in which keys repeat, it answers `%count`, `%get_first` and `%get_all` per key, and
-  `%get_first_many` and `%probe_many` for a whole probe array at once — the latter as the CSR pair
-  `pf_match_all` returns, on a hash engine and on a team. Tuple keys, string keys, `values=`,
-  `valid=` masks and the three backends are the map's. See
-  [A key that repeats](doc/pages/utilities/index-maps.md#a-key-that-repeats-pf_index_multimap).
-- **`parquet_table%build_index` and `parquet_table_index`: a lookup index over one column.**
-  `call t%build_index("id", ix)` then `call ix%find(key, row)`, `%find_all`, `%find_many` and
-  `%count` answer "which row holds this key?" in a few nanoseconds without reordering the table,
-  over an integer, real, string, date, time or timestamp column; `unique=.false.` indexes a key
-  that repeats. The index checks the table's `%generation()` on every query and refuses once the rows
-  have changed. See
-  [Looking a value up](doc/pages/tables/table-mutate.md#looking-a-value-up-build_index).
-- **Bulk row-set primitives on both column types.** `parquet_column%gather_from(src, idx,
-  [valid], [threads])` builds a column from another column's listed rows in one pass — the
-  source's kind, width, unit and nulls carried, a mask's nulls added — on a team when `threads=`
-  asks for one, and `%gather` takes the same `valid=` and `threads=`.
-  `parquet_string_column` gains `%gather_from` with the same shape, plus `%set_validity` and
-  `%set_where`: null every element a mask marks, or write one value into every element it marks,
-  in one rebuild of the column instead of one payload shift per element, and `%argminmax` for the
-  indices of its lexicographically smallest and largest elements in one allocation-free pass. See
-  [Row-set rebuilds](doc/pages/types/column-storage.md#row-set-rebuilds) and
-  [Bulk row-set operations](doc/pages/types/string-columns.md#bulk-row-set-operations).
-- **A dictionary-encoded column reads as an ordinary column of its values** — what pandas writes
-  for a `Categorical`. Such a column is decoded as it is read, so `parquet_get_column_type` reports
-  the value type, and `parquet_read_column`, the compact `parquet_string_column` read, `filter=`,
-  `sort_by=`, the row-group statistics screen and `parquet_table` all accept it where they
-  previously reported it as an unreadable column. The category codes, their order and pandas'
-  `ordered` flag are not carried. See
-  [Reading dictionary columns from other tools](doc/pages/types/supported-data-types.md#reading-dictionary-columns-from-other-tools)
-  and [Files written by pandas](doc/pages/io/reading.md#files-written-by-pandas).
-- **`parquet_table%print_rows`: look at a table.** `call t%print_rows()` prints the first and last
-  rows of every resident column, aligned, with a kind row under the names, this table's own row
-  number in a gutter and `<null>` where a value is missing; `first=`/`last=`, `rows=` (a slice),
-  `columns=`, `unit=`, `digits=`, `max_width=` and `max_columns=` choose what is shown and where.
-  It reads nothing unless `columns=` names a column that is not resident yet. See
-  [Showing the rows](doc/pages/tables/table.md#showing-the-rows-print_rows).
-- **`parquet_get_column_arrow_type`: what a column is actually stored as.**
-  `call parquet_get_column_arrow_type(reader, name, arrow_type)` reports a column's stored type as
-  Arrow spells it — `dictionary<values=string, indices=int8, ordered=0>`, `decimal128(10, 2)`,
-  `fixed_size_list<element: double>[3]` — including for the columns `parquet_get_column_type`
-  answers `"unknown"` for. It peels nothing, reads no column data, and aborts only on a name that
-  does not exist. `parquet_table` uses it in two diagnostics: reaching an unsupported column's
-  values names the stored type in the abort message, and `%print_stat(all=.true.)` shows it in that
-  column's `kind` cell instead of `PK_NONE`. See
-  [What a column is actually stored as](doc/pages/io/reading.md#what-a-column-is-actually-stored-as-parquet_get_column_arrow_type).
-- **An output file that stays open: `parquet_table_writer`.** `parquet_open_table_writer(out,
-  file, template)` opens a parquet file for writing, `out%append(t)` hands it any number of rows
-  at a time (or one `parquet_table_row`), and `parquet_close_table_writer(out)` finishes it — the
-  rows are buffered and written one row group at a time, so a result far larger than memory can be
-  produced by a loop that never holds more than one row group of it. `chunk_size=` sets the rows
-  per row group and is resolved from the schema when omitted; `schema=` selects and names the
-  columns; `%flush()` forces a row-group boundary; `%nrows()`, `%rows_pending()`, `%row_groups()`,
-  `%chunk_size()`, `%filename()` and `%is_open()` report on it. A column the output declares that
-  an appended table has not read is read for the copy. See
+- **Writing a table incrementally**: `parquet_table_writer` keeps an output file open and appends
+  tables or rows to it one row group at a time, `parquet_write_table_chunk` writes a table as one
+  row group of an open writer, and `parquet_derive_schema`/`parquet_open_writer_like` derive a
+  table's schema. `parquet_write_table` gains `row_index_name=`, and a schema can declare a column
+  nullable with `extra: nullable_cols:`. See
   [An output file that stays open](doc/pages/tables/table-write.md#an-output-file-that-stays-open-parquet_table_writer).
-  The same write is available a row group at a time:
-  `call parquet_write_table_chunk(writer, t, [row_mask])` writes a table's rows as one complete
-  row group of an open writer, every column the writer's schema declares, so a loop over the row
-  groups of a file larger than memory can open each as a table, transform it and write it out.
-  A validity mask is passed for every column that takes one, whether or not it holds a Null, so a
-  Null may appear in any row group; `protected_cols:` opts a column out.
-  `call parquet_derive_schema(t, s, [name])` hands back the `parquet_schema` a schema-less
-  `parquet_write_table(t, file)` builds — one field per resident column, `auto` sizes, a `unit:`
-  where the column has one, `parquet_row_index` only on request — parsed and ready for `%set_protected`,
-  `%add_metadata` or `parquet_open_writer`; `call parquet_open_writer_like(writer, file, t)`
-  derives it and opens the writer in one call, taking `schema=`, `copy_metadata=`/`metadata_keys=`
-  and every writer option under `parquet_write_table`'s names. `parquet_get_column_names` also
-  takes a writer, listing the internal name of every field its schema declares in schema order,
-  and `parquet_is_column_enabled(writer, name)` is public. See
-  [Writing a table one row group at a time](doc/pages/tables/table-write.md#writing-a-table-one-row-group-at-a-time).
-- **Writing the source file's row numbers: `row_index_name=`.**
-  `call parquet_write_table(t, file, row_index_name="src_row")` adds a last `int64` column of that
-  name holding each written row's physical row number in the source parquet file — the automatic
-  `parquet_row_index` answer, under a name of your choosing, whether or not it was materialized and
-  without adding a column to the table. `row_mask=` cuts it with every other column and
-  `parquet_derive_schema(t, s, row_index_name=...)` declares it the same way. It excludes `schema=`,
-  needs a table that still has its source file, and warns when the name given is `parquet_row_index`
-  itself. See
-  [Writing the source file's row numbers](doc/pages/tables/table-write.md#writing-the-source-files-row-numbers-row_index_name).
-- **A schema can declare that a column may hold Nulls: `extra: nullable_cols:`.** The counterpart of
-  `protected_cols:` — one forbids a Null and aborts if it finds one, the other declares that a Null
-  is expected, so the column is written with a nullable field even when the values in hand have
-  none, and one schema then produces one file layout whether it is written whole or a row group at a
-  time. `schema%set_nullable(name, [nullable])` sets it in code. A column named under both keys is
-  refused, naming it. See [Null values](doc/pages/types/supported-data-types.md#null-values).
-- **`combine=` chooses how two per-point radii decide a pair.** `%pairs_within` and
-  `%pairs_within_sky` take `combine=` on their per-point-radius forms, selecting `PF_LINK_MAX`
-  (either ball reaches the other point, the default and the existing behaviour), `PF_LINK_MIN`
-  (both balls reach the other point), `PF_LINK_MEAN` (the arithmetic mean of the two lengths
-  reaches the other point) or `PF_LINK_SUM` (the two balls touch or overlap). On a sky index the
-  rules are stated on the angles in degrees. `PF_LINK_SUM` sweeps twice each radius, so it re-tunes
-  the index against the doubled radius and refuses an angular radius above 45 degrees. See
-  [Choosing the rule](doc/pages/utilities/spatial.md#choosing-the-rule-with-combine).
-- **A `NOTE: ` class for advice, suppressed one level before a warning.** Advice about how the
-  library is being used — a hint that turned out to be wrong, a request the environment would not
-  allow, a resolution that was coarsened — is now its own class, silenced by
-  `verbosity="silent"` while a `WARNING:` about the data survives to `"errors_only"`. Six messages
-  moved into it: the affinity clamp's, and the five a `pf_spatial_index` raises. See
-  [Terminal output](doc/pages/operating/settings.md#terminal-output).
+- **More `parquet_table` verbs**: filling and dropping nulls (`%fillna`, `%ffill`, `%bfill`,
+  `%dropna`), several columns at once (`%get_matrix`, `%set_matrix`, `%drop_columns`,
+  `%keep_columns`), text/number conversion (`%parse_column`, `%format_column`), row-set operations
+  (`%explode`, `%drop_duplicates`, `%sort_by_values`, `%value_counts`), filtering by expression
+  (`%filter_rows`, `%row_mask`), a lookup index over one column (`%build_index`) and a row viewer
+  (`%print_rows`). See [Changing a table](doc/pages/tables/table-mutate.md).
+- **Richer row filters**: set membership (`in`/`not_in`, over a bound array or a literal list),
+  substring matching (`starts_with`, `ends_with`, `contains`) and `is_finite`/`is_not_finite`; the
+  filter, sort-key and read-QC specifications gain `%clear`. See
+  [Filtering, sorting and sampling rows](doc/pages/io/filter-sort-sample.md).
+- **Dictionary-encoded columns** (as pandas writes a `Categorical`) are read as ordinary columns of
+  their values, and `parquet_get_column_arrow_type` reports any column's stored Arrow type. See
+  [Reading dictionary columns from other tools](doc/pages/types/supported-data-types.md#reading-dictionary-columns-from-other-tools).
+- **Normal-distribution statistics**: `pf_probit`, `pf_norm_cdf`, `pf_norm_sf` and `pf_norm_pdf` in
+  `parquet_utils`, and `pf_normal_scores`, `pf_probit_fit`, `pf_probit_scale` and `pf_probit_mean`
+  in `parquet_stats`. See
+  [Statistics](doc/pages/utilities/statistics.md#pf_probit_fit-and-pf_probit_scale--the-normal-probability-plot).
+- **Spatial and index-map additions**: line-of-sight cylinder searches
+  (`pf_spatial_index%within_los`, `%pairs_within_los`), a `combine=` rule for per-point radii,
+  string keys and bulk dictionary encoding in `pf_index_map`, the one-to-many `pf_index_multimap`,
+  and `int32` answers from the bulk spatial and index queries. See
+  [Spatial neighbour search](doc/pages/utilities/spatial.md) and
+  [Index maps](doc/pages/utilities/index-maps.md).
+- **Smaller utilities**: truncated normal draws (`rng%normal_truncated`), `pf_value_counts` and
+  `pf_remap` over arrays, bulk gather and mask primitives on both column types, and `pf_from_str`,
+  `pf_safe_div`, angle wrapping and conversion, `pf_cross_product` and `pf_log_now`.
 
 ### Changed
 
-- **Everything the library writes follows `message_stream`.** `%print_stat`,
-  `parquet_string_column%print`, `parquet_string%print`, `parquet_print_settings`, the
-  `parquet_close_reader(..., print_stat=.true.)` report and the context lines a failing writer close
-  prints before aborting all go to the stream the setting names when no `unit=` is given, joining
-  `%print_rows` and `pf_stats%print`; an `error stop` and the C++ layer's fatal-error report stay on
-  standard error whatever it is set to. Under the default `"stdout"` nothing moves.
-  `parquet_print_settings` still prints at every verbosity level — its exemption is from
-  `verbosity`, not from `message_stream`. See
+- **Library messages**: every message opens with its class marker, names the procedure it came
+  from and, from a read, write or schema path, the file. Advice is a new `NOTE: ` class silenced at
+  `verbosity="silent"`. Every printer given no `unit=` follows `message_stream`, and
+  `%print_schema_info` with no destination writes there instead of aborting. See
   [Terminal output](doc/pages/operating/settings.md#terminal-output).
-- **`parquet_schema%print_schema_info` with neither `unit=` nor `filename=` writes to the
-  `message_stream` unit** instead of aborting. See
-  [Printing column info](doc/pages/schema/building-schema-in-code.md#printing-column-info-with-schemaprint_schema_info).
-- **Every message the library emits opens with its class and names the procedure it came from, and
-  a warning raised from a read, write or schema path names its file.** The four qc violation
-  warnings gain `(file: …, maml: …)`, as their aborts already carried; the C++ read side's qc
-  warnings and its incomplete-column warning gain `(file: …)` for the file they read; the
-  development-build remark gains `INFO: ` in place of a hand-written `note: `;
-  `parquet_map_row%get`, `parquet_struct_row%field` and `parquet_column_info%set_protected` name
-  themselves as their aborts do. A program matching this library's output by exact text will need
-  updating; one matching a substring of the message body will not.
-- **`parquet_list_column%set_null` and `parquet_map_column%set_null` drop the row's elements or
-  entries, so a null row is zero-length.** `%clear_null` brings the row back empty rather than
-  restoring them, `%total_elements`/`%total_entries` fall by the row's former length, and both
-  calls are O(n) in the payload rather than O(1). A column carrying such a row can now be written:
-  writing one previously aborted the process from inside Arrow.
-- **`pf_mad(scale="normal")` and `pf_sigma_clipped_stats(stdfunc="mad_std")` scale by the
-  correctly rounded `1/Phi^-1(3/4)`.** The constant was `1.482602218505602`, one ulp above the
-  nearest double; it is now `1.4826022185056018`. Results move by at most 1.5e-16 relative.
-- **`parquet_table%cast` refuses a predefined column without `force=.true.`** —
-  `call t%cast(name, to_kind, [exact], [found], [force])`. A column a generated table type's
-  `%init` bound to its schema is refused in place; `%copy_column` and a cast to the kind the column
-  already holds are not. See
-  [Changing a column's type](doc/pages/tables/table.md#changing-a-columns-type).
-- **`parquet_table%append`** treats a column the appended table has but has not read as absent on
-  both forms (null-filled, as `%append(row)` already did; the table form aborted), and drops an
-  appended table's `parquet_row_index` when this table has none instead of refusing it.
-- **`parquet_table%print_stat` computes its statistics in one pass per column, and scans the
-  columns in parallel** on a large table, capped by `parquet_set_table_threads`. The listing is
-  unchanged.
-- **`parquet_table%join` builds its match on a hash engine.** A join over integer, real, date,
-  time or timestamp keys, or over one string key, under the default `order="left"` builds a
-  `pf_index_multimap` over the other table's keys and probes it once per row, in place of sorting
-  both key columns; `order="key"`, a logical key and a string key beside another key still take
-  the sort engine. The rows that come out, and their order, are unchanged. `threads=` now sizes
-  whichever engine builds the match, under `parquet_set_index_threads` for the hash engine. Each
-  column the join carries is built in one pass from the other table's rows, holding one transient
-  copy of it rather than two, and the rewrite of either side divides one column's rows across the
-  team when the columns are fewer than the threads, under `parquet_set_table_threads` as before. See
-  [How the match is built](doc/pages/tables/table-join.md#how-the-match-is-built) and
-  [Threads for mutating a table](doc/pages/operating/settings.md#threads-for-mutating-a-table).
-- **The sort tier's run detection threads.** The pass that flags where runs of equal rows begin
-  and the pass that turns the flags into group offsets now run on the team the sort resolved, so
-  `pf_unique_count`, `pf_unique`, `pf_value_counts`, `pf_rank`, `pf_match`, `pf_match_all`,
-  `pf_in`, `pf_argsort(..., group_offsets=)`, `%drop_duplicates`, `%duplicated`, `%value_counts`
-  and a `%join` on the sort engine thread it; every answer is unchanged. A `%join` on the sort
-  engine also classifies the runs, checks `require=`, counts and emits its rows on that team, and
-  every join turns its match into row indices on its engine's team. See
-  [Sorting in parallel](doc/pages/utilities/sorting.md#sorting-in-parallel).
-- **`pf_index_map` builds and bulk lookups thread, and both backends are faster.** A build now
-  runs outside the type's lock, which `%build` takes only to swap its finished result in, so builds
-  of different maps on different threads no longer take turns. A hash build fills its table by a
-  partitioned insert on the team, costing a few nanoseconds per key rather than the serial insert's
-  tens; an automatic build threads from 32768 keys and an automatic `method="sorted"` build sorts
-  on the team from 262144, with an explicit `threads=` honoured at every size as before.
-  `%get_many` threads too — one chunk of keys per thread, by that same rule, capped by
-  `index_threads` and serial inside a parallel region — and takes `threads=` to say otherwise; it
-  is no longer `pure`. Lookups are faster on both backends: the hash backend probes a block of keys
-  at a time, about twice as fast on a map larger than the cache, and holds a composite key's tuple
-  and value in one record per slot with a cheaper tuple hash; the sorted backend carries a prefix
-  table, about ten times faster on an integer key and fourteen on a tuple. No answer changes,
-  except that the order `%keys()` lists a composite hash map in has changed (it was and remains
-  unspecified). See
-  [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses)
-  and [Threading](doc/pages/utilities/index-maps.md#threading).
-
-### Removed
-
 - **`parquet_set_spatial_rebuild_warning`, `parquet_get_spatial_rebuild_warning` and
-  `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING`.** The message they governed is advice, so
-  `parquet_set_verbosity("silent")` silences it with every other piece of advice; nothing silences
-  the rebuild itself. `parquet_print_settings` no longer prints a `spatial_rebuild_warning` row and
-  `parquet_spatial` no longer re-exports the pair. See
-  [Threads for a bulk spatial query](doc/pages/operating/settings.md#threads-for-a-bulk-spatial-query-and-the-rebuild-it-may-trigger).
+  `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING` are removed**; `verbosity="silent"` silences the
+  message they governed.
+- `parquet_list_column%set_null` and `parquet_map_column%set_null` drop the row's elements, so a
+  null row is zero-length and the column can be written.
+- `parquet_table%cast` refuses a predefined column without `force=.true.`; `parquet_table%append`
+  null-fills a column the appended table has not read.
+- **Faster and more parallel**: `parquet_table%join` matches on a hash engine, sort-tier run
+  detection and `%print_stat` thread, and `pf_index_map` builds and bulk lookups thread and are
+  faster (`%get_many` is no longer `pure`). Answers are unchanged.
 
 ### Fixed
 
-- `parquet_string_column%print` failed at runtime with an invalid-edit-descriptor I/O error for any
-  element longer than two characters.
-- `parquet_string%print` on an unbound handle returned quietly under `verbosity="silent"` instead of
-  reporting the unbound handle; the handle is now checked before the verbosity is.
-- `parquet_close_reader(..., print_stat=.true.)` printed its report when `verbosity="silent"` was set
-  after the reader was opened.
-- A schema-less `parquet_write_table(t, file, write_maml=.true.)` dropped the unit of a column
-  built with `%add_column(unit=)` from the sidecar `.maml`; the unit is now carried, as it already
-  was for a column read from a file with a MAML.
-- `pf_chord2_from_angle` is now monotone in the angle over its whole domain: an angle at or above
-  pi gives 4 rather than the falling half of the sine, and a negative angle gives -1 rather than the
-  bound for the positive one. The documented substitution of a squared-chord comparison for
-  `pf_angdist(v1, v2) <= r` was silently wrong for those two ranges. No value inside `[0, pi)`
-  changes.
-- A column added with `%add_column` after another had been dropped could report a unit it was never
-  given — the unit of whichever column had been last — and write it into the file.
-- A `left`, `right` or `outer` join that null-filled a string column, and a string vector column
-  read from a file with many nulls, took time quadratic in the number of nulls.
-- With `parquet_set_statistics_prescreen(.false.)`, a filter scoped to a row-group range — the
-  engine behind `parquet_open_table(..., bounded=.true.)` — held a row mask covering the whole file
-  and read the row groups outside its scope.
-- `pf_cov(x, x)` differed from `pf_variance(x)` by a rounding step instead of being equal to it
-  bit for bit, as documented: for weights at every optimisation level, and unweighted in an
-  optimised build on a target with a fused multiply-add.
-- A `string` column whose total byte payload exceeds 2 GiB (Arrow's `utf8` offset limit) could
-  not be read: every whole-column read of it, `parquet_table%materialize_all` included, aborted the
-  process with `offset overflow while concatenating arrays`. Such a column is widened to 64-bit
-  offsets as it is read.
-- Several `parquet_stats` reductions raised `IEEE_INVALID` on a population holding an infinity, or
-  a NaN kept under `skipnan=.false.`, while answering it correctly: `pf_zscore`, `pf_skewness`,
-  `pf_kurtosis` and `pf_corr` each compared a NaN with an ordered operator, and a `pf_stats`
-  accumulator fed such a population through `%update` did the same while combining its blocks.
-  Under a compiler that unmasks the IEEE traps, nagfor's default among them, that ends the process.
-- `pf_sum`, `pf_mean` and every `parquet_stats` order statistic — `pf_median`, `pf_quantile`,
-  `pf_quantiles`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad` and `pf_mode` —
-  raised `IEEE_OVERFLOW` on a weighted population carrying a weight above about 1.3e154, while
-  answering it correctly. Under a compiler that unmasks the IEEE traps, nagfor's default among
-  them, that ends the process.
+- A `string` column whose byte payload exceeds 2 GiB could not be read.
+- `pf_chord2_from_angle` was wrong for angles at or above pi and below zero.
+- A column's unit could be dropped from a schema-less `write_maml=.true.` sidecar, or taken from
+  another column after `%add_column` followed a column drop.
+- `parquet_string_column%print` failed with an I/O error on elements longer than two characters.
+- Several `parquet_stats` procedures raised `IEEE_INVALID` or `IEEE_OVERFLOW` on infinities, NaNs
+  or very large weights while answering correctly, aborting under trapping compilers.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

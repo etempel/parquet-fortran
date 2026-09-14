@@ -507,12 +507,13 @@ contains
         if (len_trim(release) == 0) what = "parquet_get_version (default mode)"
         call parquet_get_version(internal, mode="internal")
         if (what == "" .and. len_trim(internal) == 0) what = "parquet_get_version(mode='internal')"
-        ! The internal string is the "vX.Y.Z (date)" form of the same release, so the default
-        ! form must appear inside it -- an assertion that both spellings answer, not merely that
-        ! neither is empty. Under NAG the two are derived from one another, which is the case
-        ! this deliberately still holds for.
-        if (what == "" .and. index(internal, release) == 0) what = "the two forms disagree"
+        ! Each form is checked for its own shape, never against the other: the default form comes
+        ! from VERSION.txt and the internal one from cversion, and the two legitimately differ
+        ! between a version bump on one side and the other (parquet_get_version remarks on it).
+        if (what == "" .and. verify(trim(release), "0123456789.") /= 0) &
+            what = "the default form is not a bare release number"
         if (what == "" .and. internal(1:1) /= "v") what = "mode='internal' is not v-prefixed"
+        if (what == "" .and. index(internal, " (") == 0) what = "mode='internal' carries no date"
     end subroutine check_version_surface
 
 end module test_module_surface_version

@@ -2587,6 +2587,22 @@ def check_parquet_utils_stays_arrow_free():
         "Joining two path components must not require the Arrow stack.")
 
 
+def check_parquet_integrate_stays_arrow_free():
+    """`use parquet_integrate` must not reach parquet_bindings.
+
+    Quadrature reaches no reader, no writer and no setting: the module imports the INTRINSIC
+    modules `iso_fortran_env` and `ieee_arithmetic` and nothing else, which is what makes
+    `use parquet_integrate` cost three Fortran files. The obvious import to add is
+    `parquet_settings`, for a verbosity knob -- and the module has nothing to print, by design
+    (it reports through `converged=`, `info=` and the `PF_INT_*` codes), so it needs none.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_integrate",
+        "Integrating a function of one variable must not require the Arrow stack.")
+
+
 def check_parquet_utils_is_total():
     """Every `parquet_utils` procedure is `pure`, and the module contains no `error stop`.
 
@@ -7556,6 +7572,7 @@ CHECKS = (
     ("parquet_utils is total: every procedure pure, no error stop",
      check_parquet_utils_is_total),
     ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),
+    ("parquet_integrate stays Arrow-free", check_parquet_integrate_stays_arrow_free),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",
      check_facade_inventory_matches_its_use_lines),

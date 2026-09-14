@@ -22,7 +22,8 @@ path helpers, and the process-global settings. Every page below assumes that sin
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
-`parquet_argsort`, `parquet_stats`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`,
+`parquet_argsort`, `parquet_stats`, `parquet_integrate`, `parquet_sampling`, `parquet_spatial`,
+`parquet_healpix`,
 `parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`,
 `parquet_settings`, `parquet_version`, `parquet_maml_base`) can be named directly when you want a
 narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one
@@ -56,7 +57,8 @@ point in the library.
   touched — or built in memory and written out; then changed in place, joined against another table
   on one or more key columns, and grouped by key columns for one answer per group.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
-  statistics, reproducible random numbers and the sampling built on them, spatial neighbour search,
+  statistics, numerical integration, reproducible random numbers and the sampling built on them,
+  spatial neighbour search,
   sphere pixelisation, key-to-index lookup, logging for your own program, TOML configuration files,
   numeric, text and path helpers, generated table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
@@ -66,7 +68,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 37 pages, in reading order. (This list, each group's own page list and the
+All 38 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -106,6 +108,7 @@ All 37 pages, in reading order. (This list, each group's own page list and the
 
 - [Sorting, ranking and selection](utilities/sorting.html)
 - [Array statistics with the `pf_` reduction family](utilities/statistics.html)
+- [Numerical integration with pf_integrate](utilities/integration.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)

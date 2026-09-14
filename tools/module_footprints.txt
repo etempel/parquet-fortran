@@ -222,6 +222,12 @@ parquet_temporal.f90
 parquet_utils.f90
 parquet_wrapper.cpp
 
+[parquet_integrate]
+parquet_integrate.f90
+parquet_integrate_driver.f90
+parquet_integrate_engine.f90
+parquet_wrapper.cpp
+
 [parquet_logging]
 parquet_logging.f90
 parquet_wrapper.cpp
@@ -433,6 +439,9 @@ parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
 parquet_index_str.f90
+parquet_integrate.f90
+parquet_integrate_driver.f90
+parquet_integrate_engine.f90
 parquet_io.f90
 parquet_list.f90
 parquet_logging.f90

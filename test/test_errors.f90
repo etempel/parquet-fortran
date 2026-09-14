@@ -84,7 +84,7 @@ contains
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
-                                            p22(:), p23(:), p24(:), p25(:), p26(:)
+                                            p22(:), p23(:), p24(:), p25(:), p26(:), p27(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3066,8 +3066,38 @@ contains
             new_unittest("a sky index re-tuned by a distant radius warns in degrees", &
                 test_spatial_sky_rebuild_warns) &
             ]
+        p27 = [ &
+            new_unittest("a negative rtol is refused", &
+                test_integrate_negative_rtol_aborts), &
+            new_unittest("a NaN rtol is refused", &
+                test_integrate_nan_rtol_aborts), &
+            new_unittest("a negative atol is refused", &
+                test_integrate_negative_atol_aborts), &
+            new_unittest("two zero tolerances are refused", &
+                test_integrate_zero_tolerances_aborts), &
+            new_unittest("an rtol below 50*epsilon with no atol is refused", &
+                test_integrate_rtol_below_floor_aborts), &
+            new_unittest("a zero max_neval is refused", &
+                test_integrate_bad_max_neval_aborts), &
+            new_unittest("a max_neval above huge(1)/42 is refused", &
+                test_integrate_huge_max_neval_aborts), &
+            new_unittest("a NaN integration bound is refused", &
+                test_integrate_nan_bound_aborts), &
+            new_unittest("reversed integration bounds are refused", &
+                test_integrate_reversed_bounds_aborts), &
+            new_unittest("an infinite bound is refused until the walk lands", &
+                test_integrate_infinite_bound_unsupported_aborts), &
+            new_unittest("log_base from a non-positive lower bound is refused", &
+                test_integrate_log_base_nonpositive_aborts), &
+            new_unittest("an integrand returning a non-finite value aborts naming x", &
+                test_integrate_integrand_nan_aborts), &
+            new_unittest("a context reaches the abort message", &
+                test_integrate_context_reported_aborts), &
+            new_unittest("a long context is capped in the abort message", &
+                test_integrate_context_capped_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26]
+            p19, p21, p23, p24, p25, p26, p27]
     end subroutine collect_tests_parquet_errors
 
 
@@ -18664,4 +18694,108 @@ contains
             required_stderr="is not finite")
     end subroutine test_healpix_disc_vector_infinite_aborts
 
+    !
+    ! ---- pf_integrate abort paths ------------------------------------------------------------
+    !
+    !> Every one of `pf_integrate`'s caller-contract refusals, asserted by the exact text the
+    !> guide page's table publishes. Each names the scenario that provokes it; see
+    !> `test/error_scenarios.f90` for why each call is refused rather than answered.
+    subroutine test_integrate_negative_rtol_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_negative_rtol", expect_abort=.true., &
+            failure_message="a negative rtol was expected to abort", &
+            required_stderr="rtol must be a finite, non-negative number")
+    end subroutine test_integrate_negative_rtol_aborts
+    !
+    subroutine test_integrate_nan_rtol_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_nan_rtol", expect_abort=.true., &
+            failure_message="a NaN rtol was expected to abort", &
+            required_stderr="rtol must be a finite, non-negative number")
+    end subroutine test_integrate_nan_rtol_aborts
+    !
+    subroutine test_integrate_negative_atol_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_negative_atol", expect_abort=.true., &
+            failure_message="a negative atol was expected to abort", &
+            required_stderr="atol must be a finite, non-negative number")
+    end subroutine test_integrate_negative_atol_aborts
+    !
+    subroutine test_integrate_zero_tolerances_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_zero_tolerances", expect_abort=.true., &
+            failure_message="two zero tolerances were expected to abort", &
+            required_stderr="at least one of rtol and atol must be positive")
+    end subroutine test_integrate_zero_tolerances_aborts
+    !
+    subroutine test_integrate_rtol_below_floor_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_rtol_below_floor", expect_abort=.true., &
+            failure_message="an rtol below 50*epsilon with no atol was expected to abort", &
+            required_stderr="rtol below 50*epsilon needs a positive atol")
+    end subroutine test_integrate_rtol_below_floor_aborts
+    !
+    subroutine test_integrate_bad_max_neval_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_bad_max_neval", expect_abort=.true., &
+            failure_message="a zero max_neval was expected to abort", &
+            required_stderr="max_neval must be positive")
+    end subroutine test_integrate_bad_max_neval_aborts
+    !
+    subroutine test_integrate_huge_max_neval_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_huge_max_neval", expect_abort=.true., &
+            failure_message="a max_neval above the ceiling was expected to abort", &
+            required_stderr="max_neval must not exceed huge(1)/42")
+    end subroutine test_integrate_huge_max_neval_aborts
+    !
+    subroutine test_integrate_nan_bound_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_nan_bound", expect_abort=.true., &
+            failure_message="a NaN bound was expected to abort", &
+            required_stderr="integration bounds must not be NaN")
+    end subroutine test_integrate_nan_bound_aborts
+    !
+    subroutine test_integrate_reversed_bounds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_reversed_bounds", expect_abort=.true., &
+            failure_message="reversed bounds were expected to abort", &
+            required_stderr="lower bound must not exceed the upper bound")
+    end subroutine test_integrate_reversed_bounds_aborts
+    !
+    subroutine test_integrate_infinite_bound_unsupported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_infinite_bound_unsupported", expect_abort=.true., &
+            failure_message="an infinite bound was expected to abort in this phase", &
+            required_stderr="infinite bounds arrive in a later phase")
+    end subroutine test_integrate_infinite_bound_unsupported_aborts
+    !
+    subroutine test_integrate_log_base_nonpositive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_log_base_nonpositive", expect_abort=.true., &
+            failure_message="log_base from a non-positive bound was expected to abort", &
+            required_stderr="lower bound must be positive when integrating in log x")
+    end subroutine test_integrate_log_base_nonpositive_aborts
+    !
+    subroutine test_integrate_integrand_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_integrand_nan", expect_abort=.true., &
+            failure_message="a non-finite integrand value was expected to abort", &
+            required_stderr="the integrand returned a non-finite value at x =")
+    end subroutine test_integrate_integrand_nan_aborts
+    !
+    subroutine test_integrate_context_reported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_context_reported", expect_abort=.true., &
+            failure_message="reversed bounds with a context were expected to abort", &
+            required_stderr="context: my_call_site")
+    end subroutine test_integrate_context_reported_aborts
+    !
+    subroutine test_integrate_context_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_context_capped", expect_abort=.true., &
+            failure_message="a 150-character context was expected to abort with a capped message", &
+            required_stderr="abcdefghij...")
+    end subroutine test_integrate_context_capped_aborts
+    !
 end module test_errors

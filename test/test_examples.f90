@@ -233,6 +233,7 @@ contains
     !> parquet_columns (PK_FLOAT64/parquet_kind_name),
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
     !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
+    !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
     !> parquet_settings (parquet_get_arrow_threads /
     !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
     !> parquet_get_version.
@@ -438,6 +439,17 @@ contains
             call pf_join_path("data", "cat.parquet", joined)
             call check(error, joined == "data/cat.parquet", &
                 "pf_join_path must be reachable from use parquet alone and join POSIX-style")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_integrate: the quadrature generic and its record types.
+        block
+            type(pf_integration_info) :: qinfo
+            real(real64) :: quad
+            quad = pf_integrate(facade_square, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=qinfo)
+            call check(error, abs(quad - 1.0_real64/3.0_real64) <= 1.0e-12_real64 .and. &
+                qinfo%status == PF_INT_OK, &
+                "pf_integrate must be reachable from use parquet alone and integrate x*x to 1/3")
             if (allocated(error)) return
         end block
 
@@ -1681,4 +1693,14 @@ contains
             "shows as 3 for its three-row mass column")
     end subroutine test_found_or_abort_example
     !
+    !> `x*x`, for the facade test's `pf_integrate` call: a module procedure, because a callback
+    !> in this library is never an internal one (flang cannot pass one at all).
+    function facade_square(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x*x
+
+    end function facade_square
+
 end module test_examples

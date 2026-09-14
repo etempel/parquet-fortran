@@ -46,6 +46,10 @@
 !>                          `pf_split_path`, `pf_path_add_suffix`). A leaf
 !>                          below everything: nothing in it validates, aborts
 !>                          or prints, and it imports only iso_fortran_env.
+!>   * `parquet_integrate` -- `pf_integrate`: adaptive quadrature of a function
+!>                          of one real64 variable over a finite range, with the
+!>                          integrand as an object carrying its own parameters
+!>                          or as a plain function.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -85,6 +89,7 @@ module parquet
     use parquet_logging
     use parquet_toml
     use parquet_utils
+    use parquet_integrate
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

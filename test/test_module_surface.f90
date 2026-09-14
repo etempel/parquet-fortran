@@ -1307,6 +1307,77 @@ contains
 
 end module test_module_surface_toml
 
+!> `parquet_integrate` alone: the generic, both tolerance forms, the record, the info record,
+!! `pf_infinity` and the `PF_INT_*` codes, and no settings knob at all.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! makes two claims nothing else checks: that `use parquet_integrate` compiles three Fortran files,
+!! and that it re-exports no setting -- quadrature reads none and can print nothing, so there is
+!! no knob for it to re-export.
+!!
+!! `pf_infinity()` is NAMED here rather than integrated over: an infinite bound is refused until
+!! the outward walk lands, so a call using one would abort this whole runner. The phase that adds
+!! the walk turns the assertion below into an integration over `[1, +inf)`.
+module test_module_surface_integrate
+    use parquet_integrate                ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_integrate_surface
+
+contains
+
+    !> Exercises one entry point from each family through `use parquet_integrate` alone.
+    subroutine check_integrate_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_integration_info)   :: info
+        type(pf_integration_points) :: pts
+        real(real64)                :: r, inf
+
+        what = ""
+
+        ! The generic, in its bare-rtol form, with the info and points records.
+        r = pf_integrate(unit_square, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info, points=pts)
+        if (abs(r - 1.0_real64/3.0_real64) > 1.0e-12_real64) what = "pf_integrate"
+        if (what == "" .and. .not. info%converged) what = "pf_integration_info%converged"
+        if (what == "" .and. info%status /= PF_INT_OK) what = "PF_INT_OK"
+        if (what == "" .and. pts%n /= 21) what = "pf_integration_points%n"
+        if (what == "" .and. abs(sum(pts%w(1:pts%n)*pts%f(1:pts%n)) - r) > 1.0e-12_real64) &
+            what = "pf_integration_points weights"
+
+        ! The pf_tolerance form.
+        if (what == "") then
+            r = pf_integrate(unit_square, 0.0_real64, 1.0_real64, &
+                             pf_tolerance(rtol=0.0_real64, atol=1.0e-10_real64))
+            if (abs(r - 1.0_real64/3.0_real64) > 1.0e-10_real64) what = "pf_tolerance"
+        end if
+
+        ! pf_infinity is reachable and is an infinity, which is all this phase can assert of it.
+        if (what == "") then
+            inf = pf_infinity()
+            if (inf <= 0.0_real64 .or. abs(inf) <= huge(1.0_real64)) what = "pf_infinity"
+        end if
+
+        ! The remaining status codes are reachable by name through this import alone.
+        if (what == "" .and. PF_INT_LIMIT == PF_INT_ROUNDOFF) what = "PF_INT_LIMIT"
+        if (what == "" .and. PF_INT_BAD_INTEGRAND == PF_INT_NO_CONVERGENCE) what = "PF_INT_BAD_INTEGRAND"
+        if (what == "" .and. PF_INT_DIVERGENT == PF_INT_OK) what = "PF_INT_DIVERGENT"
+
+    end subroutine check_integrate_surface
+
+    !> `x*x`, whose integral over the unit interval is `1/3`. A module procedure, because a
+    !! callback in this library is never an internal one.
+    function unit_square(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x*x
+
+    end function unit_square
+
+end module test_module_surface_integrate
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -1316,6 +1387,7 @@ module test_module_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_utils, only : check_utils_surface
+    use test_module_surface_integrate, only : check_integrate_surface
     use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
@@ -1434,6 +1506,8 @@ contains
                          test_healpix_surface), &
             new_unittest("parquet_utils alone folds text and takes a path apart", &
                          test_utils_surface), &
+            new_unittest("parquet_integrate alone integrates and hands back its record", &
+                         test_integrate_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
             new_unittest("parquet_toml alone reads a whole configuration", &
@@ -1537,6 +1611,16 @@ contains
         call check_utils_surface(what)
         call check(error, what == "", "the helpers were not usable through `use parquet_utils` alone: " // what)
     end subroutine test_utils_surface
+
+    !> The test-drive wrapper over check_integrate_surface.
+    subroutine test_integrate_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_integrate_surface(what)
+        call check(error, what == "", &
+            "quadrature was not usable through `use parquet_integrate` alone: " // what)
+    end subroutine test_integrate_surface
 
     !> The test-drive wrapper over check_logging_surface.
     subroutine test_logging_surface(error)

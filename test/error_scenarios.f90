@@ -26,6 +26,9 @@ program error_scenarios
         parquet_debug_index_partition, parquet_debug_index_spills, &
         parquet_debug_set_index_pair_limit
     use parquet_table_example, only : parquet_table_test
+    ! The quadrature scenarios' integrands: module procedures shared with test_integrate.f90,
+    ! so a scenario and a test can name the same integrand and neither reaches an internal one.
+    use test_integrate_support, only : runge, nan_at_half
     use parquet_tables
     ! The grouping scenarios' callbacks: module procedures, since an internal one of this
     ! program cannot be passed as a callback under every supported compiler.
@@ -3590,6 +3593,34 @@ program error_scenarios
         call scenario_bounded_qc_soft_warns()
     case ("bounded_arrow_pool")
         call scenario_bounded_arrow_pool()
+    case ("integrate_negative_rtol")
+        call scenario_integrate_negative_rtol()
+    case ("integrate_nan_rtol")
+        call scenario_integrate_nan_rtol()
+    case ("integrate_negative_atol")
+        call scenario_integrate_negative_atol()
+    case ("integrate_zero_tolerances")
+        call scenario_integrate_zero_tolerances()
+    case ("integrate_rtol_below_floor")
+        call scenario_integrate_rtol_below_floor()
+    case ("integrate_bad_max_neval")
+        call scenario_integrate_bad_max_neval()
+    case ("integrate_huge_max_neval")
+        call scenario_integrate_huge_max_neval()
+    case ("integrate_nan_bound")
+        call scenario_integrate_nan_bound()
+    case ("integrate_reversed_bounds")
+        call scenario_integrate_reversed_bounds()
+    case ("integrate_infinite_bound_unsupported")
+        call scenario_integrate_infinite_bound_unsupported()
+    case ("integrate_log_base_nonpositive")
+        call scenario_integrate_log_base_nonpositive()
+    case ("integrate_integrand_nan")
+        call scenario_integrate_integrand_nan()
+    case ("integrate_context_reported")
+        call scenario_integrate_context_reported()
+    case ("integrate_context_capped")
+        call scenario_integrate_context_capped()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -31332,4 +31363,137 @@ contains
         print '(a)', "unexpectedly accepted an infinite component in the centre vector"
     end subroutine scenario_healpix_disc_vector_infinite
 
+    !
+    ! ---- pf_integrate: every caller contract it refuses -------------------------------------
+    !
+    !> Each of these calls is the smallest one that provokes exactly one of `pf_integrate`'s
+    !> aborts, and each prints the result afterwards. Printing it is what makes the scenario
+    !> meaningful: a scenario that discarded the result would pass whether or not the guard fired,
+    !> because the compiler may delete a call whose value nothing uses.
+    subroutine scenario_integrate_negative_rtol()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, -1.0_real64)
+        print '(a, es22.15)', "accepted a negative rtol: ", r
+    end subroutine scenario_integrate_negative_rtol
+    !
+    !> See `scenario_integrate_negative_rtol`. A NaN tolerance is refused by the same guard, and
+    !> is built with `ieee_value` rather than by arithmetic so the FIXTURE does not trap first.
+    subroutine scenario_integrate_nan_rtol()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan))
+        print '(a, es22.15)', "accepted a NaN rtol: ", r
+    end subroutine scenario_integrate_nan_rtol
+    !
+    !> A negative absolute tolerance is as meaningless as a negative relative one.
+    subroutine scenario_integrate_negative_atol()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, &
+                         pf_tolerance(rtol=1.0e-8_real64, atol=-1.0_real64))
+        print '(a, es22.15)', "accepted a negative atol: ", r
+    end subroutine scenario_integrate_negative_atol
+    !
+    !> Both tolerances zero asks for an exact answer, which no quadrature can report reaching.
+    subroutine scenario_integrate_zero_tolerances()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 0.0_real64)
+        print '(a, es22.15)', "accepted a zero tolerance: ", r
+    end subroutine scenario_integrate_zero_tolerances
+    !
+    !> QUADPACK's own floor: below `50*epsilon` a relative tolerance cannot be met by the
+    !> arithmetic, and without a positive `atol` there is nothing else for convergence to rest on.
+    subroutine scenario_integrate_rtol_below_floor()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-15_real64)
+        print '(a, es22.15)', "accepted an rtol below the floor: ", r
+    end subroutine scenario_integrate_rtol_below_floor
+    !
+    !> A budget of zero evaluations cannot buy the one rule application every call makes.
+    subroutine scenario_integrate_bad_max_neval()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, max_neval=0)
+        print '(a, es22.15)', "accepted a zero max_neval: ", r
+    end subroutine scenario_integrate_bad_max_neval
+    !
+    !> Above `huge(1)/42` the subinterval count the budget implies does not fit in a default
+    !> integer, so the budget is refused rather than silently overflowed.
+    subroutine scenario_integrate_huge_max_neval()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, max_neval=huge(1))
+        print '(a, es22.15)', "accepted a huge max_neval: ", r
+    end subroutine scenario_integrate_huge_max_neval
+    !
+    !> A NaN bound has no ordering against the other, so neither the range nor its refusal could
+    !> be decided; it is refused before anything else looks at the bounds.
+    subroutine scenario_integrate_nan_bound()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: r
+
+        r = pf_integrate(runge, ieee_value(1.0_real64, ieee_quiet_nan), 1.0_real64, 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a NaN bound: ", r
+    end subroutine scenario_integrate_nan_bound
+    !
+    !> Reversed bounds are refused rather than silently negated: a caller who wrote them the wrong
+    !> way round meant something, and it was not the negative of the integral.
+    subroutine scenario_integrate_reversed_bounds()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 2.0_real64, 1.0_real64, 1.0e-8_real64)
+        print '(a, es22.15)', "accepted reversed bounds: ", r
+    end subroutine scenario_integrate_reversed_bounds
+    !
+    !> TEMPORARY, for this phase only. `pf_infinity()` exists from the phase that introduced the
+    !> module so that an infinite bound can never be mistaken for a large finite one, and it is
+    !> refused until the outward walk lands. The phase that adds the walk deletes this scenario
+    !> from `error_scenarios.f90`, `test_errors.f90` and `tools/run_error_scenarios.sh` together.
+    subroutine scenario_integrate_infinite_bound_unsupported()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 1.0_real64, pf_infinity(), 1.0e-8_real64)
+        print '(a, es22.15)', "accepted an infinite bound: ", r
+    end subroutine scenario_integrate_infinite_bound_unsupported
+    !
+    !> Integrating in `log x` needs a positive lower bound, because `log(0)` is where the
+    !> transformed range would start.
+    subroutine scenario_integrate_log_base_nonpositive()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, log_base=.true.)
+        print '(a, es22.15)', "accepted log_base from a non-positive bound: ", r
+    end subroutine scenario_integrate_log_base_nonpositive
+    !
+    !> A non-finite integrand value aborts naming the point, rather than propagating a NaN that
+    !> nagfor's default traps would turn into an abort with no message at all.
+    subroutine scenario_integrate_integrand_nan()
+        real(real64) :: r
+
+        r = pf_integrate(nan_at_half, 0.0_real64, 1.0_real64, 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a non-finite integrand value: ", r
+    end subroutine scenario_integrate_integrand_nan
+    !
+    !> `context=` identifies the call site in the abort message, which is the whole of its job.
+    subroutine scenario_integrate_context_reported()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 2.0_real64, 1.0_real64, 1.0e-8_real64, context="my_call_site")
+        print '(a, es22.15)', "accepted reversed bounds with a context: ", r
+    end subroutine scenario_integrate_context_reported
+    !
+    !> Caller text inside a message is capped, so that a context built from a long path or a whole
+    !> query cannot push the message itself out of a terminal or a log line.
+    subroutine scenario_integrate_context_capped()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 2.0_real64, 1.0_real64, 1.0e-8_real64, &
+                         context=repeat("abcdefghij", 15))
+        print '(a, es22.15)', "accepted reversed bounds with a long context: ", r
+    end subroutine scenario_integrate_context_capped
+    !
 end program error_scenarios

@@ -2,6 +2,7 @@
 title: Utilities and code generation
 ordered_subpage: sorting.md
 ordered_subpage: statistics.md
+ordered_subpage: integration.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
@@ -36,6 +37,12 @@ helpers, and the two generators meant to be copied into your own project.
   population (a null, a NaN and a zero weight all leave it, in that order), what aborts and what
   quietly returns nothing, and the fixed optional-argument order every procedure in the family
   shares.
+- [Numerical integration with pf_integrate](integration.html) — adaptive quadrature of a
+  function of one variable over a finite range, with the integrand supplied as an object
+  carrying its own parameters or as a plain function. Tolerances as `rtol` or as a
+  `pf_tolerance` with `atol`, a budget on integrand evaluations, a status code rather than a
+  printed warning, integration in `log x` for a range spanning many decades, and a record of
+  every evaluation on request whose weighted sum reproduces the integral. Nothing is printed.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

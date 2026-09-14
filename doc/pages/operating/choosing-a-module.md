@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **116** of this library's Fortran files.
+also the largest: a project that imports it compiles **119** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -58,10 +58,11 @@ in every one of them.
 | `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
+| `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite range |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 116 | **yes** | everything above, through one `use` |
+| `parquet` | 119 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -143,6 +144,7 @@ anything else.
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |
 | `parquet_stats` | `verbosity` and `message_stream` — `pf_stats%print` writes solicited output |
+| `parquet_integrate` | none — it reads none, and prints nothing at all |
 | `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |
 
 The output pair (`verbosity`, `message_stream`) appears wherever a module can print something: a

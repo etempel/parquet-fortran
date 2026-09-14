@@ -3030,7 +3030,7 @@ contains
         ! non-conforming. It is also the normal case here rather than an edge case: two seeds are
         ! meant to select different row COUNTS, so the guard fails almost every run. gfortran runs
         ! straight past it; nagfor's -C=array (the `nagdeb` profile) aborts with
-        ! "Rank 1 of HI_BITS(1:N_HI) has extent 102 instead of 99". See CLAUDE.md, "`.and.` does not
+        ! "Rank 1 of HI_BITS(1:N_HI) has extent 102 instead of 99". See `.claude/rules/fortran-gotchas.md`, "`.and.` does not
         ! short-circuit".
         same = .false.
         if (n_lo == n_hi) same = all(lo_bits(1:n_lo) == hi_bits(1:n_hi))

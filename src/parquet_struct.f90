@@ -107,7 +107,7 @@ module parquet_struct
     !
     !> Largest field count Arrow can address: `arrow::StructType::num_fields()` returns `int`.
     !!
-    !! Absurd in practice and guarded anyway, per CLAUDE.md's "Guarding a hard Arrow int32-only
+    !! Absurd in practice and guarded anyway, per `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only
     !! ceiling" -- the same constant the writer's column-count guard uses, so that a struct with
     !! an impossible field count fails here, naming the column, rather than inside Arrow.
     integer, parameter :: MAX_FIELDS = 2147483647

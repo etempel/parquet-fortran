@@ -462,7 +462,7 @@ contains
     !>
     !> Implemented here, after the two procedures it drives, because nagfor 7.2 binds a separate
     !> module procedure's name to an implicit EXTERNAL at its first call site and then rejects the
-    !> later `module procedure` implementing it (CLAUDE.md's "implemented before it is called"
+    !> later `module procedure` implementing it (`.claude/rules/code-style.md`'s "Interface blocks and submodules"
     !> rule). gfortran, ifx and flang accept either order, so nothing else would report a swap.
     module procedure parquet_parse_filter_rules
         integer :: i

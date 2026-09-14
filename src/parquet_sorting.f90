@@ -19,8 +19,9 @@
 !! against it -- see that file's sort-engine banner. No user-facing path reaches it.
 !!
 !! **Naming.** Everything public here carries the `pf_` prefix (parquet-fortran) rather than
-!! `parquet_`, because the subject is not a parquet file -- see CLAUDE.md's "Naming
-!! conventions". The module is `parquet_sorting` rather than `parquet_sort` because a module
+!! `parquet_`, because the subject is not a parquet file -- see
+!! `.claude/rules/api-conventions.md`'s "Naming". The module is `parquet_sorting` rather than
+!! `parquet_sort` because a module
 !! cannot share its name with a procedure it declares.
 !!
 !! Four operations, over eleven element types:

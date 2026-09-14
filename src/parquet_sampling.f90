@@ -1334,7 +1334,8 @@ contains
     !! **The stream-carrying specifics are separate procedures rather than one with an optional
     !! dummy**, because an optional argument that differs only by kind cannot be the sole
     !! disambiguator in a generic interface -- a call omitting it would match both. This is the split
-    !! CLAUDE.md's "Public numeric arguments" note prescribes and `parquet_open_reader` already uses.
+    !! `.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and int64" note prescribes and `parquet_open_reader`
+    !! already uses.
     subroutine pf_random_resample_i32_i32_s32(idx, m, seed, stream, threads)
         integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int32), intent(in) :: m             !! population size
@@ -1469,7 +1470,7 @@ contains
     !!
     !! Public because it has to be: the value lives in Fortran, and this module reaches no `bind(C)`
     !! surface, so the C++-side debug-hook convention the rest of the library uses is unavailable
-    !! here. See CLAUDE.md, "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one".
+    !! here. See `.claude/rules/testing.md`, "Debug hooks".
     !!
     !! **It is load-bearing rather than convenient, and that is a consequence of the exact path.**
     !! Every `m` small enough to enumerate all `m!` permutations of is also small enough to be

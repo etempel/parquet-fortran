@@ -11,7 +11,7 @@ silently at runtime instead of failing to build. This script makes that failure 
 immediately instead of only via a review.
 
 Two Fortran declaration shapes matter, both used throughout src/parquet_bindings.f90 -- a naive
-regex misses one or both (see CLAUDE.md's "Why the earlier check found only 113 of 121" note):
+regex misses one or both (a regex over one shape alone undercounts):
 
   1. Five bindings are named after their C symbol directly, without the `parquet_` prefix
      (create_parquet_writer, create_parquet_reader, close_parquet_writer, close_parquet_reader,
@@ -33,10 +33,10 @@ list is globbed by shape (`_fortran_files` below), which is what closes CLAUDE.m
 check that enumerates names goes stale silently". It was a hand-kept list of five paths until
 2026-08-21, and a benchmark that had grown its own hooks was simply not being checked.
 
-What this does NOT check (see CLAUDE.md's "What this check does not cover" note): length/ownership
+What this does NOT check (see `.claude/rules/cpp-wrapper.md`'s "The `bind(C)` boundary" note): length/ownership
 contracts (does the C++ side write exactly as many elements as Fortran allocated?), array
 rank/assumed-size shape, or NUL-termination/sentinel conventions. Those need a buffer-contract
-audit, not a signature checker -- see CLAUDE.md's "The parquet_strings module" notes and feature_doc.md's
+audit, not a signature checker -- see `.claude/rules/columns-tables.md`'s "`parquet_strings`" notes and feature_doc.md's
 point 4 for the one confirmed instance of that class of bug found so far.
 
 Usage:

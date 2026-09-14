@@ -86,8 +86,12 @@ Each is invoked by the maintainer, does what its description says, and stops; no
 
 ## Headings kept for links from other documents
 
-Planning documents link to the anchors below; each points at the rule's home. Remove a stub only
-after every link to it is repointed (`tools/check_doc_anchors.py` lists them).
+Planning documents link to the anchors below, and source, tooling and CI comments cite them by
+title; each points at the rule's home. **Most citations are prose in `.py`/`.sh`/`.f90`/`.yml`
+that `tools/check_doc_anchors.py` cannot see** — find them with
+`grep -rn "<the heading text>" tools/ bench/ test/ src/ .gitlab-ci.yml *.md`, and remove a stub
+only once that returns nothing. `check_instruction_citations_resolve` fails on a citation naming a
+heading no instruction file carries.
 
 ### A static check that enumerates names goes stale silently
 

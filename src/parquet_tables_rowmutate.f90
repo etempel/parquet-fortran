@@ -384,7 +384,7 @@ contains
         ! Both `if` lines below therefore carry the artifact tag: the CONDITION is evaluated once
         ! per selected row whether or not the guard fires, so gcov counts each of those two lines
         ! as hit (1017 apiece in one full run) while every line of both guarded bodies stays at 0.
-        ! That is the guard-clause shape CLAUDE.md's "Fortran gcov attribution artifacts" note
+        ! That is the guard-clause shape `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts" note
         ! describes, and the zero-count bodies are what distinguishes it from a live exclusion.
         do k = 1_int64, size(sel, kind=int64)
             p = sel(k)

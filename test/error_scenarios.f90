@@ -6306,7 +6306,7 @@ contains
     !> 2^31-1: all four used to materialize the *whole* column (via get_single_chunk_array's
     !> ReadColumn) just to answer a size query, fetch one row, or fetch one element position
     !> across all rows -- which is exactly what Arrow's own int32 list-index ceiling trips over on
-    !> a genuinely huge column (see CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). The
+    !> a genuinely huge column (see `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only ceiling"). The
     !> fix makes col_size/total_elements read the FIXED_SIZE_LIST width straight off the schema
     !> (no data read at all), makes row-mode reads fetch only the one row group the requested row
     !> lives in (get_row_group_chunk_array), and makes element-mode reads stream row group by row
@@ -7510,7 +7510,7 @@ contains
         if (present(after_open)) late = after_open
         ! The fixture path carries BOTH arguments, because three scenario names share this helper
         ! and tools/run_error_scenarios.sh runs them concurrently -- two processes writing one path
-        ! is the collision CLAUDE.md's "never share a fixture file path" note describes.
+        ! is the collision `.claude/rules/testing.md`'s "Tests run concurrently" note describes.
         out_file = "test_run/scenario_settings_cpp_warning_" // trim(level) // &
             merge("_late", "_open", late) // ".parquet"
 
@@ -15482,7 +15482,7 @@ contains
 
     !> Reading a DATE column via the plain int32 parquet_read_column entry point aborts (strict
     !> typing: a temporal column is only readable through its matching parquet_date/time/timestamp
-    !> type, per CLAUDE.md's "Strict reads" decision).
+    !> type, per `.claude/rules/columns-tables.md`'s "`parquet_temporal` and the containers" decision).
     subroutine scenario_temporal_read_date_via_int32()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -26272,7 +26272,7 @@ contains
         type(parquet_reader) :: reader
         ! TARGET on `back`: %view hands back a handle whose %col points at it, and F2018 15.5.2.4
         ! leaves that pointer UNDEFINED on return when the actual argument is not a target. Only
-        ! nagfor's -C=dangling sees it (CLAUDE.md, "-C=dangling and -C=calls are BOTH in the set").
+        ! nagfor's -C=dangling sees it (`.claude/rules/fortran-gotchas.md`, "nagfor-specific gotchas").
         type(parquet_list_column) :: lc
         type(parquet_list_column), target :: back
         type(parquet_list_row) :: row
@@ -27881,7 +27881,7 @@ contains
         call m%get_many([1_int64], out32)   ! -> aborts
         ! The result is printed so the trailing message is a diagnostic rather than a claim.
         ! (`%get_many` was `pure` until it threaded, and then this was also what kept the
-        ! optimiser from deleting the call -- CLAUDE.md, "A scenario whose abort is inside a
+        ! optimiser from deleting the call -- `.claude/rules/testing.md`, "A scenario whose abort is inside a
         ! `pure` function must USE the result"; the habit costs nothing to keep.)
         print '(a,i0)', "an oversized value narrowed into an int32 answer, got=", out32(1)
     end subroutine scenario_index_get_many_int32_overflow

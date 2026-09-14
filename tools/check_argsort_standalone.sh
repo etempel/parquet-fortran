@@ -14,7 +14,7 @@
 # It is the direct descendant of tools/check_random_kernels.sh, and the precedent is not
 # hypothetical: when the weighted draw first acquired `use parquet_sorting`, every configuration
 # in that check died on a missing `.mod` while the full build stayed green, and nothing else
-# noticed. See CLAUDE.md, "`parquet_random` is a LEAF".
+# noticed. See `.claude/rules/module-structure.md`, "`parquet_random` is a LEAF".
 #
 # IF THIS FAILS, ADDING THE MISSING MODULE TO `SRC` IS THE WRONG FIX. It makes the check pass
 # while destroying the property it measures. The right fix is to move whatever needed the import
@@ -100,7 +100,7 @@ tools/check_argsort_standalone.f90"
 # the CURRENT directory for `.mod` files, so a stray parquet_argsort.mod left in the repository
 # root by a hand-run compile without `-J` would shadow this script's own output and fail every
 # configuration with a message that reads as a defect in the library. A global `*.mod` gitignore
-# hides such a file from `git status`. See CLAUDE.md, "A hand-run `gfortran` without `-J`".
+# hides such a file from `git status`. See `.claude/rules/build.md`, "Hand-run compiles".
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $ROOT_DIR/$f"; done
 

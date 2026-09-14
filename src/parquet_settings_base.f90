@@ -273,7 +273,7 @@ contains
     !! `omp_get_max_threads()` when the caller is not inside an OpenMP parallel region, and 1 when
     !! they are, because a nested region is the caller's business. This picks a DEFAULT and refuses
     !! nothing: an explicit `threads=` is still honoured inside a region, which is the distinction
-    !! CLAUDE.md's "Auto-threading: `omp_in_parallel()` picks a DEFAULT" note draws. Without it, T
+    !! `.claude/rules/columns-tables.md`'s "`parquet_table` concurrency: guards key on OWNERSHIP" note draws. Without it, T
     !! OpenMP threads would each ask for T more, and T*T oversubscription is slower than not
     !! threading at all.
     !!

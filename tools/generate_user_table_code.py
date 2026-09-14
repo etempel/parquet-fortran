@@ -652,7 +652,7 @@ def wrap_doc(indent, marker, text, width=MAX_LINE):
     comment -- exactly what blows the limit. Mirrors generate_parquet_maml.sh's own emit_doc.
     """
     # `!>` opens the block and `!!` continues it, which is this project's convention (see
-    # CLAUDE.md's "FORD doc-comment conventions"): a leading `!>` is a predoc, and every
+    # `.claude/rules/documentation.md`'s "FORD doc-comment conventions"): a leading `!>` is a predoc, and every
     # following line of the same block carries `!!`.
     first = f"{indent}{marker} "
     rest = f"{indent}!! " if marker == "!>" else f"{indent}{marker} "
@@ -795,7 +795,7 @@ def render(schema, windows):
     w("")
     # Tagged for the same reason the same line is tagged in tools/generate_parquet_tables.py: an
     # `end module` line has no executable statement, but gcov gives it a positive hit count, so an
-    # untagged exclusion is reported forever as a candidate stale one. See CLAUDE.md, "Fortran
+    # untagged exclusion is reported forever as a candidate stale one. See `.claude/rules/coverage.md`, "Fortran
     # gcov attribution artifacts".
     w(f"end module {schema.dataset} ! GCOVR_EXCL_LINE -- gcov attribution artifact")
     w("")

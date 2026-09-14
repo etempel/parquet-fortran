@@ -1017,7 +1017,7 @@ contains
     !! three mask-length error scenarios then walk past the mask and die on the bounds check
     !! instead of aborting with this message, while the same binary at `-O2`, and gfortran at
     !! both profiles, abort here. Reproduced with a twelve-line program; an impure call is never
-    !! deleted. Same family as CLAUDE.md's "A scenario whose abort is inside a `pure` function
+    !! deleted. Same family as `.claude/rules/testing.md`'s "A scenario whose abort is inside a `pure` function
     !! must USE the result" -- a guard with no result to use has to be impure instead.
     subroutine ix_check_mask_len(nmask, n, what)
         integer(int64), intent(in) :: nmask    !! entries in the mask.

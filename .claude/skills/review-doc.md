@@ -311,19 +311,9 @@ live there, not here. Four items are about reviewing rather than the convention:
 
 - **A page describes the current state, never a former one.** The review loop manufactures this
   defect (a fix updates the page with a sentence saying what changed), so a recently reviewed page
-  is not settled on it. Five greps, each added after the previous set missed a real instance:
-
-```bash
-grep -nE "used to|previously|formerly|no longer|in the past|historically|originally" <page>
-grep -nE "ha(ve|s) always|as before|unchanged from|for (backward )?compatibility" <page>
-grep -nE "\bnow\b" <page>
-grep -nE "\balways\b|\bstill\b" <page>
-grep -nE "has moved|has changed|was renamed|has since|used to be|no longer does" <page>
-```
-
-  Read every hit and never replace mechanically: most are innocent (a state after an operation, a
-  guarantee). Not innocent is a sentence a reader cannot evaluate without knowing a release they
-  never used.
+  is not settled on it. Run every grep in `documentation.md`'s current-state rule; read each hit and
+  never replace mechanically. Most are innocent (a state after an operation, a guarantee); not
+  innocent is a sentence a reader cannot evaluate without knowing a release they never used.
 - Performance figures are approximate and machine-free; contract numbers and parity claims stay
   exact (the rule and its test are in `documentation.md`).
 - A page that accreted edits without a rewrap has lines of wildly uneven length and enumerations

@@ -954,7 +954,7 @@ contains
     !! three mask-carrying families use `is_valid=`; `string` here is the padded `character` form;
     !! `parquet_string_column` and the three temporal types carry their null state inside the
     !! element instead, which is exactly why they are worth including -- they reach a different
-    !! write path (see CLAUDE.md, "A written column's nullability is a CONTRACT").
+    !! write path (see `.claude/rules/reader-writer.md`, "A written column's nullability is a CONTRACT").
     !!
     !! **Negative control:** column `ctl` is written with no mask and no null element at all, and
     !! must come back with every row valid. Without it a reader that reported everything as Null

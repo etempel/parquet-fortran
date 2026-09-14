@@ -441,7 +441,7 @@ contains
     !>
     !> Each of them writes its OWN file rather than sharing one: testdrive runs the tests in a
     !> collection concurrently, and two tests writing one path truncate it under each other (see
-    !> CLAUDE.md, "Tests run concurrently").
+    !> `.claude/rules/testing.md`, "Tests run concurrently").
     subroutine write_table_fixture(filename, nrows)
         character(len=*), intent(in) :: filename
         integer, intent(in) :: nrows

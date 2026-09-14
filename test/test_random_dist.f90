@@ -847,7 +847,7 @@ contains
 
     !> Every Ziggurat branch is reached over an ordinary fixture, and each one returns the value.
     !!
-    !! **This is CLAUDE.md's "check WHICH CODE PATH the test actually reaches", made explicit.** The
+    !! **This is `.claude/rules/testing.md`'s "Mutation testing", made explicit.** The
     !! tail is entered about once in 4000 draws and the wedge about once in 125; a suite that never
     !! counted them would pass identically against a build in which either branch was dead. The
     !! rates are asserted loosely -- the point is that the branch runs and produces the returned

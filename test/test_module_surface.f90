@@ -757,7 +757,7 @@ end module test_module_surface_list
 !> `parquet_column` -- all through one import.
 !!
 !! **One library import, and it must stay that way.** A second `use` here would silently stop this
-!! testing anything (CLAUDE.md, "Nested submodule tree"): the point is that everything a struct
+!! testing anything (`.claude/rules/code-style.md`, "Interface blocks and submodules"): the point is that everything a struct
 !! column needs -- the type, the handle, the `PK_*` kinds, the abstract container face, the
 !! temporal element types and the two settings knobs governing its one warning -- is reachable
 !! from `use parquet_struct` and nothing else.

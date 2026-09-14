@@ -303,7 +303,7 @@ contains
         ! (grow_storage returns early at n == 0), so `p => col%i32(1:col%nrows)` references an
         ! unallocated allocatable. Only nagfor's -C=array sees it -- gfortran, ifx and flang hand
         ! back a null-based pointer nothing then dereferences, so the whole suite stays green.
-        ! CLAUDE.md, "a zero-length case reaches storage that was never allocated".
+        ! `.claude/rules/fortran-gotchas.md`, "a zero-length case reaches storage that was never allocated".
         select case (kind)
         case (PK_INT32)
             allocate(b_i32(max(nelems, 1_int64)))

@@ -25,7 +25,7 @@
 !!   the reader was tolerant" -- and without it a round trip would pass against the latter.
 !!
 !! Every test writes to its own fixture path: test-drive runs a suite's tests concurrently, so a
-!! shared output filename is a truncation race (CLAUDE.md, "Tests run concurrently").
+!! shared output filename is a truncation race (`.claude/rules/testing.md`, "Tests run concurrently").
 module test_list_write
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet

@@ -25,7 +25,7 @@
 !! behaviour in Fortran, so a multiply-based LCG would be a latent trap).
 !!
 !! Rules this program follows, each because breaking it produced a wrong number somewhere in this
-!! repository before (CLAUDE.md, "Manual (never-`fpm test`) large-scale/benchmark tools"):
+!! repository before (`.claude/rules/benchmarking.md`, "Where benchmark tools live"):
 !!
 !!   * **Every input and every destination is written through once before any timing.** A freshly
 !!     allocated array pays first-touch page faults on its first pass and never again, which is

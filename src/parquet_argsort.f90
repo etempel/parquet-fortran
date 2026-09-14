@@ -23,7 +23,7 @@
 !! `parquet_argsort_bind_oracle` below.
 !!
 !! **Naming.** Everything public carries the `pf_` prefix (parquet-fortran) rather than `parquet_`,
-!! because the subject is not a parquet file -- see CLAUDE.md's "Naming conventions". The module is
+!! because the subject is not a parquet file -- see `.claude/rules/api-conventions.md`'s "Naming". The module is
 !! `parquet_argsort` rather than `pf_argsort` because a module cannot share its name with a
 !! procedure it declares.
 !!
@@ -1473,7 +1473,7 @@ contains
     !! `check_source_conventions.py`'s `check_no_submodule_oracle_pointer_call` enforces
     !! it, because nothing in CI or a plain `fpm test` builds with `-flto` -- a
     !! reintroduced call would sit in the tree until someone next asked for a release
-    !! build. See CLAUDE.md, "Compiler & language gotchas".
+    !! build. See `.claude/rules/fortran-gotchas.md`, "General Fortran & language gotchas".
     subroutine oracle_argsort(keys, nrows, nthreads, proc, perm)
         type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
         integer(int64), intent(in) :: nrows                !! rows each key describes.
@@ -1574,7 +1574,7 @@ contains
         ! gcov attribution artifact: the condition is evaluated on EVERY call (414 times in a
         ! full suite run) while the guarded body below is never reached, so this excluded
         ! line is expected to report a positive hit count and is not a stale exclusion. See
-        ! CLAUDE.md's "Fortran gcov attribution artifacts".
+        ! `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts".
         if (.not. bound) then ! GCOVR_EXCL_START -- unreachable; see the note above.
             error stop EP // proc // ": the C++ sort engine was selected but is not bound; " // &
                 "add `use parquet_sorting_oracle` to the program that selects it"

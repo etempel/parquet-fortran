@@ -23,7 +23,7 @@
 !!
 !! **Every fixture's first element is its shortest**, and elements are blank-padded to one
 !! declared length, so a key sized from the first element or left untrimmed would fail here
-!! (CLAUDE.md, "sized/typed from the first element"). Fixture values are row-distinct for the
+!! (`.claude/rules/testing.md`, "Assertions"). Fixture values are row-distinct for the
 !! reason `test_index.f90` gives.
 !!
 !! This suite touches no file; its one piece of process-global state is the hook above.

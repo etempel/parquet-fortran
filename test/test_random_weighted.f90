@@ -818,7 +818,7 @@ contains
     !! `pf_random_at(seed, 0, 1)`, and an exponential race over `pf_random_at(seed, 0, i)` -- so it
     !! is coupled by construction. It must fire; a run where BOTH arms look independent proves only
     !! that the fixture is too small to resolve anything, which is exactly how a statistic like this
-    !! rots into a pass. See CLAUDE.md's "Every `check()` call needs its own message" for the
+    !! rots into a pass. See `.claude/rules/testing.md`'s "Assertions" for the
     !! shape, and `feature_risks.md` Risk-123 for what the separation forbids.
     subroutine test_families_independent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error carrier

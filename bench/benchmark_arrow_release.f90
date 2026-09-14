@@ -19,7 +19,7 @@
 !!   * **RSS cannot answer this question at all.** Arrow's pool keeps freed pages instead of
 !!     returning them to the OS (and so does glibc/macOS malloc for ordinary allocations), so a
 !!     correct release and a complete failure to release look nearly identical in `ps`. See
-!!     CLAUDE.md, "Measuring whether Arrow memory was actually freed".
+!!     `.claude/rules/benchmarking.md`, "Memory".
 !!
 !! What each mode asserts: after the work is done and while the table is **still alive**, the Arrow
 !! pool holds no more than `--tolerance` of one copy of the column data it just read. A table that

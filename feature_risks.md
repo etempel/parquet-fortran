@@ -5,7 +5,7 @@ contributor reads *before editing an area*, not a to-do list: each entry records
 breaks with **no test failing and no abort** — a wrong answer, a stale pointer, a corrupted heap, a
 silently skipped row group — together with whether a test would actually catch it today.
 
-`CLAUDE.md`'s "The `feature_risks.md` standing-risks register" states the rules for editing this
+`.claude/rules/workflow.md`'s "The `feature_risks.md` standing-risks register" states the rules for editing this
 file; the summary is that `Risk-N` numbers are permanent, entries move between the four sections
 below as their status changes, and section 4 is pruned rather than archived.
 
@@ -630,7 +630,7 @@ handed back. The library is behaving exactly as documented throughout; only the 
 **Why the failure is quiet, and worse than quiet.** It is *intermittent*. The one instance found
 failed **once in six full suite runs** and then passed ten reruns in a row, which is indistinguishable
 from a flake and is triaged as one. Both natural explanations for an intermittent failure in this
-project — a data race, and two tests sharing a fixture path (see CLAUDE.md's "Tests run concurrently")
+project — a data race, and two tests sharing a fixture path (see `.claude/rules/testing.md`'s "Tests run concurrently")
 — are documented well enough to be the obvious first guesses, and both were tried here and were wrong.
 The failure also reports whichever accessor form happened to touch a NaN row, so its *message* moves
 between runs, which reads as nondeterminism in the library rather than in the fixture.
@@ -662,7 +662,7 @@ static can see it — the assertion is well-formed and the memory is genuinely a
 The proposed scenario is the instrument that found it: run the **whole suite** with an `LD_PRELOAD`
 shim that fills every `malloc` block with `0xFF`, so every uninitialized `real32`/`real64` reads as a
 NaN. Under it the original defect was **100% reproducible** (1411 passed / exactly 1 failed, the same
-test every time) and after the fix the same run is **1412 / 0**. The shim is recorded in CLAUDE.md's
+test every time) and after the fix the same run is **1412 / 0**. The shim is recorded in `.claude/rules/testing.md`'s
 "An intermittent test failure has THREE causes".
 
 Two things to settle before implementing it, which is why this is a proposal rather than a test:
@@ -2092,7 +2092,7 @@ nulls match each other** — the one thing `pf_match`/`pf_match_all`/`pf_in` pro
 **Confirmed by mutation, in both directions.** Deleting either test alone leaves the whole suite
 green, so a reviewer trimming what looks like a duplicated condition gets no signal at all; deleting
 the pair fails immediately. That is the same shape as `column_has_nulls_from_footer`'s guard pair
-(CLAUDE.md, "The row-group statistics screen") and it fails the same way — quietly, in a valid-looking
+(`.claude/rules/reader-writer.md`, "The row-group statistics screen") and it fails the same way — quietly, in a valid-looking
 answer of the right size.
 
 **Rule:** do not delete either half on the strength of a coverage report or a surviving mutation.
@@ -2878,7 +2878,7 @@ exists so the `#ifdef _OPENMP` plumbing sits in exactly one file. If the three e
 symptom is a guard that fires on the per-thread slice pattern (loud, and immediately obvious) or one
 that does not fire when it should (silent, and not).
 
-CLAUDE.md's "`parquet_table` concurrency" entry is the full rule set. Four properties are worth
+`.claude/rules/columns-tables.md`'s "`parquet_table` concurrency" entry is the full rule set. Four properties are worth
 repeating here, because each fails quietly:
 
 - **The parallel `%prefetch` gate is a correctness boundary, not a tuning knob.**
@@ -3032,7 +3032,7 @@ load-bearing rather than incidental: it is finalizable, so every allocatable com
 the compiler generate a deeper recursive walk for its `intent(out)` entry and its `FINAL` — and this
 project has **three confirmed compiler bugs in exactly that machinery on exactly this type** (gfortran
 leaving an OpenMP `private()` copy uninitialized; `%detached` surviving an `intent(out)` reset; ifx
-segfaulting inside its own runtime on a nested derived-type component). Full detail in CLAUDE.md, "New
+segfaulting inside its own runtime on a nested derived-type component). Full detail in `.claude/rules/columns-tables.md`, "New
 `parquet_table` state goes on the CACHE".
 
 The ordering consequence is easy to get wrong: anything stored on the cache has to be assigned *after*
@@ -3898,7 +3898,7 @@ slower than not threading at all, and nothing about the result would look wrong.
 precisely so the read-time `parquet_open_reader(..., sort_by=)` can ask the same question from
 `parquet_read.f90` rather than keeping a second copy that could drift.
 
-**This is a guard that picks a DEFAULT, not one that refuses an operation**, which is why CLAUDE.md's
+**This is a guard that picks a DEFAULT, not one that refuses an operation**, which is why `.claude/rules/columns-tables.md`'s
 "never key a guard on `omp_in_parallel()` alone" does not apply — that rule exists to stop a
 *refusal* firing across a whole test suite. `parallel_prefetch_ok` (`src/parquet_tables_read.f90`)
 is the standing precedent, with the same two lines and the same reason in its own comment: nested
@@ -4156,7 +4156,7 @@ no library code — compiler-generated frames bottoming out in libc, which reads
 anywhere in the program.
 
 **This is almost certainly the same bug as the `parquet_schema`-component crash** recorded in
-CLAUDE.md's "New `parquet_table` state goes on the CACHE": hanging a `type(parquet_schema),
+`.claude/rules/columns-tables.md`'s "New `parquet_table` state goes on the CACHE": hanging a `type(parquet_schema),
 allocatable` off `parquet_table` segfaulted ifx inside its own runtime, in a **block-local table
 opened inside an `!$omp parallel do`**, with a backtrace of unnamed RTL frames bottoming out in
 `free()`. That component is precisely what would have given `parquet_table` its first allocatable
@@ -4175,7 +4175,7 @@ nm build/ifx_*/parquet-fortran/src_parquet_tables_read.f90.o | grep -E "for_allo
 ```
 
 Scaffolding absent ⇒ the source under test **cannot** produce that backtrace, so the binary that
-crashed was stale (CLAUDE.md's "Stale `fpm` build cache" — `fpm clean --skip` before believing any
+crashed was stale (`.claude/rules/build.md`'s "Stale build cache" — `fpm clean --skip` before believing any
 result). Reach for that check before reaching for a per-compiler bail-out.
 
 **Covered by** `prefetch_threads caps the parallel prefetch` (`test/test_settings.f90`), whose
@@ -4474,7 +4474,7 @@ slowest operation in the module because it paid the allocation *and* grew its de
 **The failure is not a wrong answer — it is no signal at all.** The allocating form returns byte-identical
 results, so every test passes, every error scenario stays green, and the code reads as ordinary, idiomatic
 Fortran. Only a benchmark notices. It is the Fortran twin of the C++ side's per-element `shared_ptr`
-parameter (CLAUDE.md, "A `shared_ptr` parameter on a per-row helper"), found the same way and for the
+parameter (`.claude/rules/cpp-wrapper.md`, "Rules for the file"), found the same way and for the
 same underlying reason: a per-element convenience that the surrounding loop never needed.
 
 **Test.** Not testable as such — a timing assertion would be the flakiest test in the suite. What *is*
@@ -4632,8 +4632,8 @@ Four properties now keep it correct, and each is one edit from being lost:
   gfortran 15 and ifx 2026.1, including a return out of a loop. Converting `writer_lock` to explicit
   enter/leave calls reintroduces 64 chances to leak a claim.
 - **`writer_lock` must stay free of allocatable components.** A finalizable type that has any is the
-  shape ifx miscompiles when it is block-local inside an OpenMP parallel region (CLAUDE.md's
-  "Compiler & language gotchas"), and these locks sit in exactly the procedures a misusing caller
+  shape ifx miscompiles when it is block-local inside an OpenMP parallel region (`.claude/rules/fortran-gotchas.md`'s
+  "General Fortran & language gotchas"), and these locks sit in exactly the procedures a misusing caller
   invokes from inside one.
 - **The guard is owner-keyed, so a leaked claim does NOT fail loudly.** The owning thread may
   re-enter, so a missed release leaves everything single-threaded passing; only a later, legitimate
@@ -5208,7 +5208,7 @@ code rather than in this repository's tests.
   test genuinely has to grow the array. Without that fill the test passes against a
   `%reserve_columns` that does nothing at all — which is not hypothetical: that mutation **survived**
   the first version of this test, because `parquet_new_table`'s eight slots of headroom already
-  covered the adds. This is CLAUDE.md's "check WHICH code path the test actually reaches" trap, in
+  covered the adds. This is `.claude/rules/testing.md`'s "Mutation testing" trap, in
   its purest form.
 - The **both-directions sweep** (Risk-11): a growing add must bump, an add within capacity must not.
 

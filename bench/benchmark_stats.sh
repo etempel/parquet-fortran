@@ -175,7 +175,7 @@ fpm build --profile release >/dev/null
 # macOS ships and what `#!/usr/bin/env bash` finds there -- treats an EMPTY array's expansion as an
 # unbound variable and dies. `THREADS` is empty by default, so the plain form made this wrapper
 # unrunnable on two of this project's three machines for every mode at once, with an error naming
-# the array rather than the cause. See CLAUDE.md, "A tools/*.sh check must run under bash 3.2".
+# the array rather than the cause. See `.claude/rules/testing.md`, "`tools/*.sh` checks".
 THREAD_FLAG=()
 if [[ -n "$THREADS" ]]; then
     THREAD_FLAG=(--threads="$THREADS")

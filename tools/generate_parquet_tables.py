@@ -165,7 +165,7 @@ def mask_dims(rank):
     The rule is one line and applies to every paired accessor: **the mask has the same shape as
     the values it describes.** A vector column's validity is per element, so a rank-2 `arr`/`p`
     takes a rank-2 mask -- there is deliberately no rank-1 form that would widen a row's worth of
-    elements into one bit (CLAUDE.md, "Validity is per ELEMENT, and a vector row is not one bit").
+    elements into one bit (`.claude/rules/columns-tables.md`, "`parquet_column`").
     """
     return "(:)" if rank == 1 else "(:,:)"
 
@@ -750,7 +750,7 @@ module parquet_tables
     w("    !")
     # The tag is not decoration: an `end module` line carries no executable statement, yet gcov
     # credits it with a large hit count (1690 in one full run here), so without the phrase it is
-    # reported forever as a candidate stale exclusion. See CLAUDE.md, "Fortran gcov attribution
+    # reported forever as a candidate stale exclusion. See `.claude/rules/coverage.md`, "Fortran gcov attribution
     # artifacts".
     # table_finalize is bound as `final ::` and its body is emitted HERE, module-contained,
     # rather than in parquet_tables_lifecycle.f90 with the rest of the lifecycle code. Not a style
@@ -1431,7 +1431,7 @@ def gen_row_type():
     !! **No allocatable components, mandatory.** A per-thread handle declared in a `block` inside a
     !! parallel region is an obvious thing to write, and this project has recorded both an ifx
     !! segfault and a gfortran uninitialised-`private()` bug for types in that position that carry
-    !! one. See CLAUDE.md's "New `parquet_table` state goes on the CACHE".
+    !! one. See `.claude/rules/columns-tables.md`'s "New `parquet_table` state goes on the CACHE".
     type :: parquet_table_col
         private
         type(parquet_table_cache), pointer :: cache => null() !! the table's column store.
@@ -8566,7 +8566,7 @@ def stat_impl(k):
         # must not open with a bare `word:` -- so the float arm says "Smallest and largest
         # PK_FLOAT32 value" where the single-line kinds keep "PK_INT32: smallest and largest
         # value". `ford docs.md` reports "Ignoring unknown Ford metadata", once per kind, if either
-        # is reverted. See CLAUDE.md's "FORD doc-comment conventions".
+        # is reverted. See `.claude/rules/documentation.md`'s "FORD doc-comment conventions".
         if isreal:
             headline = ("    !> Smallest and largest %s value over the rows that hold one, and the null count, "
                         "in one\n    !! pass.\n    !!\n    !! A NaN never enters the ordering. It is excluded, as "

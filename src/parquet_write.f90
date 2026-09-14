@@ -1367,7 +1367,7 @@ contains
                 ! legitimate way to reach this fallback and then NOT abort -- see
                 ! scenario_mask_row_group_no_writes_at_all), and a std::abort() discards this whole
                 ! process's coverage counters (Fortran gcov included, not just C++'s own -- see
-                ! CLAUDE.md's "Fortran gcov attribution artifacts"/report_fatal_error notes), so
+                ! `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts"/report_fatal_error notes), so
                 ! these two lines can never show as covered despite genuinely executing every time.
                 call parquet_writer_new_row_group(writer%handle, writer%current_row_group_nrows) ! GCOVR_EXCL_LINE
                 writer%cpp_row_group_open = .true. ! GCOVR_EXCL_LINE

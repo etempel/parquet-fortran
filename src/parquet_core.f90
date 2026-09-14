@@ -659,7 +659,7 @@ module parquet_core
     !>
     !> **It deliberately has no allocatable components.** A finalizable type that has any is the
     !> shape ifx miscompiles when it is declared block-local inside an OpenMP parallel region (see
-    !> CLAUDE.md's "Compiler & language gotchas"), and these locks sit in exactly the procedures a
+    !> `.claude/rules/fortran-gotchas.md`'s "General Fortran & language gotchas"), and these locks sit in exactly the procedures a
     !> misusing caller invokes from inside one. One `type(c_ptr)` keeps it exempt; keep it that way.
     type writer_lock
         private
@@ -1553,7 +1553,7 @@ module parquet_core
     !> integer(int32)/integer(int64) kind. `nrows` for a scalar column and `nrows * col_size` for
     !> a FIXED_SIZE_LIST one, both known from the file footer/schema, so no column data is read --
     !> which is what makes this safe on a column whose element count itself exceeds int32 (see
-    !> CLAUDE.md's "Guarding a hard Arrow int32-only ceiling").
+    !> `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only ceiling").
     !>
     !> For a plain LIST/LARGE_LIST column it is the SUM OF THE ROWS' OWN LENGTHS, which for a
     !> ragged column is not `nrows * col_size`: a 3-row column holding 2, 0 and 3 elements answers

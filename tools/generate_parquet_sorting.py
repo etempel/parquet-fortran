@@ -125,7 +125,7 @@ REMAP_VALUES = [
 #: What an UNMAPPED element becomes when `found=` was asked for and no `default=` given. Never
 #: read as a value -- `found` is the answer -- but never left undefined either, since an
 #: undefined `real` is a signalling NaN under nagfor\'s `-nan` and a wrong answer under nobody\'s
-#: rules at all. See CLAUDE.md, "-nan poisons every undefined real".
+#: rules at all. See `.claude/rules/fortran-gotchas.md`, "nagfor-specific gotchas".
 REMAP_ZERO = {
     "i32": "0_int32", "i64": "0_int64", "f32": "0.0_real32", "f64": "0.0_real64",
     "bool": ".false.", "chr": '""',
@@ -326,7 +326,7 @@ ARGSORT_SPEC_HEADER = '''!> `pf_argsort` over plain Fortran arrays, and the sort
 !! `parquet_argsort_bind_oracle` below.
 !!
 !! **Naming.** Everything public carries the `pf_` prefix (parquet-fortran) rather than `parquet_`,
-!! because the subject is not a parquet file -- see CLAUDE.md's "Naming conventions". The module is
+!! because the subject is not a parquet file -- see `.claude/rules/api-conventions.md`'s "Naming". The module is
 !! `parquet_argsort` rather than `pf_argsort` because a module cannot share its name with a
 !! procedure it declares.
 !!
@@ -631,8 +631,9 @@ def gen_specs():
 !! against it -- see that file's sort-engine banner. No user-facing path reaches it.
 !!
 !! **Naming.** Everything public here carries the `pf_` prefix (parquet-fortran) rather than
-!! `parquet_`, because the subject is not a parquet file -- see CLAUDE.md's "Naming
-!! conventions". The module is `parquet_sorting` rather than `parquet_sort` because a module
+!! `parquet_`, because the subject is not a parquet file -- see
+!! `.claude/rules/api-conventions.md`'s "Naming". The module is `parquet_sorting` rather than
+!! `parquet_sort` because a module
 !! cannot share its name with a procedure it declares.
 !!
 !! Four operations, over eleven element types:
@@ -2183,7 +2184,7 @@ def emit_oracle_plumbing(W):
     w("    !! `check_source_conventions.py`'s `check_no_submodule_oracle_pointer_call` enforces")
     w("    !! it, because nothing in CI or a plain `fpm test` builds with `-flto` -- a")
     w("    !! reintroduced call would sit in the tree until someone next asked for a release")
-    w("    !! build. See CLAUDE.md, \"Compiler & language gotchas\".")
+    w("    !! build. See `.claude/rules/fortran-gotchas.md`, \"General Fortran & language gotchas\".")
     w("    subroutine oracle_argsort(keys, nrows, nthreads, proc, perm)")
     w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
     w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
@@ -2284,7 +2285,7 @@ def emit_oracle_plumbing(W):
     w("        ! gcov attribution artifact: the condition is evaluated on EVERY call (414 times in a")
     w("        ! full suite run) while the guarded body below is never reached, so this excluded")
     w("        ! line is expected to report a positive hit count and is not a stale exclusion. See")
-    w("        ! CLAUDE.md's \"Fortran gcov attribution artifacts\".")
+    w("        ! `.claude/rules/coverage.md`'s \"Fortran gcov attribution artifacts\".")
     w("        if (.not. bound) then ! GCOVR_EXCL_START -- unreachable; see the note above.")
     w("            error stop EP // proc // \": the C++ sort engine was selected but is not bound; \" // &")
     w("                \"add `use parquet_sorting_oracle` to the program that selects it\"")
@@ -2335,7 +2336,7 @@ MATCH_RULES = [
 
 #: `pf_remap`'s generic doc-comment. Written out in prose because FORD 7.0.13 renders no
 #: per-argument documentation at all for a member of a named multi-specific generic -- see
-#: CLAUDE.md's "FORD config gotchas" -- and this generic has sixty-six of them.
+#: `.claude/rules/documentation.md`'s "FORD config gotchas" -- and this generic has sixty-six of them.
 REMAP_BLURB = [
     "Replaces every element of `values` with the value its key maps to: a lookup table applied",
     "to an array. pandas' `Series.map`/`replace`, polars' `replace`, SQL's `CASE WHEN`.",
@@ -3477,7 +3478,7 @@ ARGSORT_HEAD = BANNER + '''
 !! -- for `pf_sort` -- gather the result. No ordering decision is made here.
 !!
 !! **The int32 permutation forms exist because a caller with a default-kind `INTEGER` should not be
-!! forced to widen one** (CLAUDE.md's "Public numeric arguments"). They compute in int64 and narrow
+!! forced to widen one** (`.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and int64"). They compute in int64 and narrow
 !! at the end, aborting rather than truncating when the array is longer than `huge(1_int32)`.
 submodule (parquet_sorting) parquet_sorting_argsort
     implicit none
@@ -4886,7 +4887,7 @@ def gen_argsort():
 !! decision is made here.
 !!
 !! **The int32 permutation forms exist because a caller with a default-kind `INTEGER` should not be
-!! forced to widen one** (CLAUDE.md's "Public numeric arguments"). They compute in int64 and narrow
+!! forced to widen one** (`.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and int64"). They compute in int64 and narrow
 !! at the end, aborting rather than truncating when the array is longer than `huge(1_int32)`.
 submodule (parquet_sorting) parquet_sorting_argsort
     implicit none

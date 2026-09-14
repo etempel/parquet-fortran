@@ -44,7 +44,7 @@
 # maintainer command, not part of tools/run_lint_check.sh or CI's lint stage.
 #
 # bash 3.2 only (macOS ships 3.2 and this is run by hand there): no associative arrays, no
-# mapfile, no ${var,,}. See CLAUDE.md, "A tools/*.sh check must run under bash 3.2".
+# mapfile, no ${var,,}. See `.claude/rules/testing.md`, "`tools/*.sh` checks".
 # ---------------------------------------------------------------------------------------------
 # Answers the adjacent question -- not does an entry module's
 # graph reach Arrow, but how big did it get. For each advertised entry module -- the rows of

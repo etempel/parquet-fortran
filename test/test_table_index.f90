@@ -11,7 +11,7 @@
 !! the point.
 !!
 !! **Every fixture holds repeats, absent probes and a null row, and says so with a vacuity guard**
-!! where a loop could otherwise assert nothing (CLAUDE.md, "A test that searches a live fixture").
+!! where a loop could otherwise assert nothing (`.claude/rules/testing.md`, "Assertions").
 !!
 !! The wrapper's two silent failure modes each get a test of their own: the key conversion (a NaN
 !! that is TWO keys by payload, a -0.0 that misses +0.0, a null element that finds 1970-01-01) and

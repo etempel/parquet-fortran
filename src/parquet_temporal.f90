@@ -106,7 +106,7 @@ module parquet_temporal
     real(real64), parameter :: JD_MJD_OFFSET = 2400000.5_real64
     !
     !> The minimum int64 value, built with ibset to avoid the out-of-symmetric-range literal
-    !! `-huge-1` (same idiom as the int8 case in CLAUDE.md's "Build and compiler notes").
+    !! `-huge-1` (same idiom as the int8 case in `.claude/rules/build.md`'s "Hand-run compiles").
     !!
     !! **Never combine it with a runtime value in an expression -- not even through a local copy.**
     !! nagfor 7.2 mis-evaluates such an expression, silently: `v < INT64_MIN - delta` answers
@@ -1191,7 +1191,7 @@ contains
     !! `offset` itself must already be validated to fit in [-86400e9, 86400e9] by the caller
     !! (the 24h magnitude guard), so this worker never aborts once entered. Uses floor_div-style
     !! floored modulo, not the intrinsic MOD, so a negative offset wraps correctly (see
-    !! CLAUDE.md's "Implementation notes" for feature_temporal.md).
+    !! feature_temporal.md's implementation notes).
     impure elemental function time_offset_ns_impl(self, offset) result(res)
         class(parquet_time), intent(in) :: self !! the element to shift.
         integer(int64), intent(in) :: offset    !! signed ns offset, already within [-86400e9, 86400e9].
@@ -1738,8 +1738,8 @@ contains
     !
     !> Shared worker for the ns-offset operator(+)/operator(-) specifics: shifts self by
     !! `n` nanoseconds, carrying the normalized nanosecond-of-second component back into
-    !! [0, 999999999] via floor_div (see CLAUDE.md's "Implementation notes" for
-    !! feature_temporal.md). Aborts on a null operand or if the shifted result overflows int64
+    !! [0, 999999999] via floor_div (see feature_temporal.md's implementation
+    !! notes). Aborts on a null operand or if the shifted result overflows int64
     !! seconds -- unlike parquet_date/parquet_time, there is no smaller domain-specific range to
     !! enforce, only int64 itself.
     impure elemental function ts_offset_ns_impl(self, n) result(res)

@@ -2122,7 +2122,7 @@ contains
     !! them, which is what this asserts.
     !!
     !! The NaN comes from `ieee_value`, never a `transfer` of a bit pattern: nagfor constant-folds
-    !! such a transfer and then refuses its own result (CLAUDE.md, "-C=undefined").
+    !! such a transfer and then refuses its own result (`.claude/rules/fortran-gotchas.md`, "-C=undefined").
     subroutine test_join_nan_key(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b

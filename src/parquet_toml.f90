@@ -3499,7 +3499,7 @@ contains
     !! `class default` reading the inherited `%origin` off the polymorphic pointer would be exactly
     !! equivalent -- and nagfor 7.2 generates invalid C for it under `-C=undefined`, failing the
     !! `nagundef` profile with `no member named 'addr'`. Writing the arms out keeps the type static
-    !! at every read. See CLAUDE.md, "nagfor-specific gotchas". The `class default` below is
+    !! at every read. See `.claude/rules/fortran-gotchas.md`, "nagfor-specific gotchas". The `class default` below is
     !! unreachable and exists only to make the construct total.
     integer function key_origin(sect, key) result(origin)
         type(pf_toml), intent(in) :: sect      !! Handle the key belongs to.

@@ -21,7 +21,7 @@
 !! process.
 !!
 !! Every test writes its OWN fixture file: test-drive runs these concurrently, so a shared path
-!! would let one test truncate the file another is reading (CLAUDE.md, "Tests run concurrently").
+!! would let one test truncate the file another is reading (`.claude/rules/testing.md`, "Tests run concurrently").
 module test_table_codegen
     use parquet
     use parquet_table_example, only : parquet_table_test

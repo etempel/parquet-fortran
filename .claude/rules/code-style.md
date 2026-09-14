@@ -24,20 +24,19 @@ in `api-conventions.md`; module placement in `module-structure.md`; language and
 - **Read the top of any `src/*.f90` before editing it.** A `GENERATED FILE -- DO NOT EDIT BY HAND`
   / `automatically generated` banner means the change goes into the generator's input (kind table,
   template) and the generator is re-run. Trust the banner, not the list below.
-- Generated today: `parquet_maml_base.f90` (`tools/generate_parquet_maml.sh` + `schemas/*.maml`);
-  `parquet_columns.f90`, `_access`, `_mutate` (`tools/generate_parquet_columns.py`, whose kind table
-  is the single declaration of a supported column kind); `parquet_tables.f90`, `_access`, `_addcol`,
-  `_materialize` (`tools/generate_parquet_tables.py`); the ten sorting/argsort files
-  (`tools/generate_parquet_sorting.py`); `parquet_ziggurat.f90` (`tools/generate_parquet_ziggurat.py`);
-  `parquet_stats.f90` and `parquet_stats_kernel.f90` only (`tools/generate_parquet_stats.py` — the
-  other stats files are hand-written bodies against that generated spec); `parquet_table_example.f90`
-  (`tools/generate_user_table_code.py` from `table_types/maml_example4.maml`).
+- **Re-derive the set, never quote one**: `grep -lniE "GENERATED FILE -- DO NOT EDIT|automatically
+  generated" src/*.f90`; each banner names its generator. One generator per area — MAML
+  (`generate_parquet_maml.sh` + `schemas/*.maml`), columns, tables, sorting/argsort, ziggurat,
+  stats, the consumer-facing table example (`generate_user_table_code.py` from `table_types/`).
+  Two carry a caveat: `generate_parquet_columns.py`'s kind table is the single declaration of a
+  supported column kind, and `generate_parquet_stats.py` emits only the spec, the other stats
+  files being hand-written bodies against it.
 - **`src/parquet_tables.f90` is the table layer's module spec**: adding a `parquet_table` binding
   means editing the generator's template text.
 - **`src/parquet_argsort_engine.f90` is hand-written** (its header opens "NOT a generated file" —
-  read it, never case-insensitively grep for "generated file"). Its four interfaces live in the
-  generated `parquet_argsort.f90` (`emit_engine_interfaces()`): a signature change is a generator
-  edit, a body change is not. Every other sorting file, including module-level `save` variables and
+  read it, never case-insensitively grep for "generated file"). Its procedures' interfaces live in
+  the generated `parquet_argsort.f90` (`emit_engine_interfaces()`): a signature change is a
+  generator edit, a body change is not. Every other sorting file, including module-level `save` variables and
   `parquet_debug_*` declarations, is generated.
 - **`src/parquet_sorting_oracle.f90` is hand-written** and outside the generator; it is the only
   sorting file allowed to import `parquet_bindings`.

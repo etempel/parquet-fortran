@@ -658,7 +658,7 @@ static bool generate_no_stats_fixture()
 // produces (see CONTRIBUTING.md's "Additional scalar types" note and
 // doc/pages/types/supported-data-types.md) -- INT8/16, UINT8/16/32/64,
 // HALF_FLOAT, and DECIMAL32/64/128/256. 3 rows throughout (uniform column
-// length is required within one Arrow Table); per CLAUDE.md's "sized/typed
+// length is required within one Arrow Table); per `.claude/rules/testing.md`'s "sized/typed
 // from the first element" convention, every column's most extreme/telling
 // value is deliberately row 3, never row 1.
 //
@@ -1821,7 +1821,7 @@ static bool generate_element_nulls_fixture()
 //   v_decimal DECIMAL128(10,2), null in row group 3 (rows 21-30)
 //   v_half    HALF_FLOAT,     null in row group 4 (rows 31-40)
 // So `v_uint32 is_null` can prune 3 row groups and `v_uint32 is_not_null` exactly 1, and likewise
-// for the other two on their own row groups. Per CLAUDE.md's "sized/typed from the first element"
+// for the other two on their own row groups. Per `.claude/rules/testing.md`'s "Assertions"
 // convention the nulls are deliberately never in row group 1.
 static bool generate_screen_declined_nulls_fixture()
 {

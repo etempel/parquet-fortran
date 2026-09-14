@@ -255,7 +255,7 @@ contains
     !> helper rather than a procedure contained in its caller: passing a section of a
     !> deferred-length allocatable character array to an assumed-length dummy declared inside a
     !> submodule's module procedure is the shape that ICEs gfortran 15.2 (see also the
-    !> parquet_parse_protected_cols relay note in CLAUDE.md's "Nested submodule tree").
+    !> parquet_parse_protected_cols relay note in `.claude/rules/code-style.md`'s "Interface blocks and submodules").
     subroutine append_source_lines(metadata, lines, first)
         type(parquet_table_metadata), intent(inout) :: metadata !! gains the same lines.
         character(len=*), intent(in) :: lines(:) !! the schema's full %maml%lines.

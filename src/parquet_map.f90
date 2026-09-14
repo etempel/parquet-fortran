@@ -95,7 +95,7 @@ module parquet_map
     public :: PK_DATE, PK_TIME, PK_TIMESTAMP, PK_MAP
     public :: parquet_date, parquet_time, parquet_timestamp
     ! Re-exported because this module's soft-fail paths EMIT: a module re-exports, getter and
-    ! setter both, every settings knob its own code reads (CLAUDE.md, "Nested submodule tree").
+    ! setter both, every settings knob its own code reads (`.claude/rules/code-style.md`, "Interface blocks and submodules").
     public :: parquet_get_verbosity, parquet_set_verbosity
     public :: parquet_get_message_stream, parquet_set_message_stream
     !

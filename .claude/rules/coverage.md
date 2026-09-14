@@ -17,23 +17,14 @@ paths:
   (concurrent `.gcda` merges corrupt the file; `RUN_ERROR_SCENARIOS_JOBS` overrides). Keep both.
 - Noise can only LOSE counts: a line reported covered in any run is covered; compare two runs
   before chasing a line.
-- **`run_tester_cpp` fails roughly one run in fifteen under the INSTRUMENTED build, and has never
-  been seen to fail outside it.** Measured 2026-09-08: 2 failures in ~29 instrumented runs against
-  0 in every ordinary-build run of the same tree (3 consecutive full runs, plus every gate run of
-  P7 and P8). The two were not the same failure — one exited 134 inside `table_container` printing
-  `parquet_read_int32_column_chunk: type mismatch for column: ragged`, the other exited 1 with no
-  message and no `[FAILED]` line — and neither reproduces on demand. **No root cause; do not
-  assume one.** What was checked and ruled out: `list_columns=` is a per-call argument, not a
-  process-global, so no setting bleeds between concurrent tests; `coverage.sh` runs the five
-  runners in a plain sequential loop, so interleaved output from another runner is not possible
-  and the qc warnings that appeared just before the abort are late-flushed stderr from earlier in
-  the same runner; and no suite in `run_tester_cpp` spawns the `*_ragged_list_column` scenarios
-  (only `test_errors` does, in `run_tester_errors`), so the message was NOT a child scenario's
-  expected abort leaking into the log.
-- **So a single failed coverage run is not evidence of a defect, and not evidence of its absence:
-  re-run before acting on one**, and capture the failing run's whole output when it happens — a
-  frequency without the message is nearly useless, and the second occurrence above was lost that
-  way. A percentage from a run that aborted partway is not a measurement; discard it.
+- **`run_tester_cpp` fails intermittently under the INSTRUMENTED build only** (order 1 run in 15,
+  a different symptom each time, none reproducible on demand). **No root cause; do not assume
+  one** — a settings bleed, interleaved runner output and a leaked child scenario are each ruled
+  out.
+- **So a single failed coverage run is neither evidence of a defect nor of its absence: re-run
+  before acting on one**, and capture the whole output when it happens (a frequency without the
+  message is nearly useless). A percentage from a run that aborted partway is not a measurement;
+  discard it.
 - `src/parquet_wrapper.cpp` is measured by CI's `test` job (matched apt GCC) and locally by the
   separate `tools/coverage_cpp.sh` (a dev machine's `clang++` gcov data is unreadable by GNU
   `gcov`); the two cannot share one pass.

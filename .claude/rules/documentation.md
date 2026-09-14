@@ -122,6 +122,8 @@ Working rules:
 grep -nE "used to|previously|formerly|no longer|in the past|historically|originally" doc/pages/<page>
 grep -nE "ha(ve|s) always|as before|unchanged from|for (backward )?compatibility|root-caused" doc/pages/<page>
 grep -nE "\bnow\b" doc/pages/<page>
+grep -nE "\balways\b|\bstill\b" doc/pages/<page>
+grep -nE "has moved|has changed|was renamed|has since|used to be|no longer does" doc/pages/<page>
 ```
 
 - On an already-reviewed page fix the sentences and nothing else; rewrap only on the round that

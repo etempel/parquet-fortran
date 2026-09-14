@@ -39,7 +39,7 @@ before_script:
 
   # gcovr via pipx, NOT `apt-get install gcovr`: Ubuntu's apt archive can lag upstream by a lot
   # (24.04 ships 7.0, which cannot parse gcov output for a file at/past 10,000 lines -- see
-  # CLAUDE.md's "gcovr <7.1 cannot parse gcov output for a 10,000+ line file" note, confirmed
+  # `.claude/rules/coverage.md`'s "Measuring" note, confirmed
   # against src/parquet_wrapper.cpp). Pinning >=7.1 here sidesteps relying on the OS package
   # ever catching up. The upper bound <8.4 is equally load-bearing, not just a "latest is best"
   # default: gcovr 8.4-8.6 has a confirmed upstream regression (gcovr/gcovr#1253) that drops

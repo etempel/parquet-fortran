@@ -91,7 +91,7 @@ fi
 WORK="$(mktemp -d)"
 # `finished` guards against the script stopping early and still exiting 0. A check whose failure
 # mode is a green report is worse than no check, because it also removes the doubt that would have
-# prompted a look. See CLAUDE.md, "A `tools/*.sh` check must run early".
+# prompted a look. See `.claude/rules/testing.md`, "`tools/*.sh` checks".
 finished=0
 trap '[ "$finished" = "1" ] || { echo "check_downstream_maml_module.sh: TERMINATED EARLY -- this run proves nothing" >&2; rm -rf "$WORK"; exit 2; }' EXIT
 

@@ -273,7 +273,7 @@ contains
         ! libc's allocator here on GitLab CI's (older) gfortran, while the identical code runs
         ! clean on gfortran 15. Allocating with an explicit length and copying element by element
         ! removes the reallocation from the picture entirely. Element-wise, not `dst = src`, per
-        ! the whole-array-assignment hazard in CLAUDE.md's "Compiler & language gotchas".
+        ! the whole-array-assignment hazard in `.claude/rules/fortran-gotchas.md`'s "General Fortran & language gotchas".
         if (allocated(self%cache%meta_keys)) then
             allocate(character(len=len(self%cache%meta_keys)) :: out%cache%meta_keys(size(self%cache%meta_keys, kind=int64)))
             do i = 1, size(self%cache%meta_keys)

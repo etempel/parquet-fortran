@@ -93,7 +93,7 @@ contains
 
         ! The `if` line below is a gcov attribution artifact: its condition is evaluated on every
         ! call, so gcov counts that line as hit even though the guarded body (verified) never runs
-        ! -- the same shape CLAUDE.md's "Fortran gcov attribution artifacts" documents.
+        ! -- the same shape `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts" documents.
         ! GCOVR_EXCL_START -- defensive, and unreachable through any key this parser accepts: the
         ! text is adjustl'd and checked non-empty on entry (and again after a leading '-' is
         ! stripped), so it can never begin with a blank, which means the name half of the split

@@ -239,7 +239,7 @@ contains
     ! its own caller is rejected ("PARQUET_WRITE_MAP_COLUMN is not the interface of a separate
     ! module procedure"), naming the implementing statement rather than the call that caused it.
     ! gfortran, ifx and flang accept either order, so nothing else in the fleet enforces this.
-    ! See CLAUDE.md, "A separate module procedure must be IMPLEMENTED before it is CALLED".
+    ! See `.claude/rules/code-style.md`, "Interface blocks and submodules".
     module procedure parquet_write_empty_map_column
         type(parquet_map_column) :: empty_map
         integer :: kind

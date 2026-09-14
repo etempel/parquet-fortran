@@ -670,7 +670,7 @@ contains
         ! (test_load_maml_file in test/test_maml.f90; tools/coverage.sh shows this file at 100%
         ! locally) -- only GitLab CI's toolchain misattributes this one entry line, consistently
         ! across separate runs, same as the module-procedure-header shape documented in
-        ! CLAUDE.md's "Fortran gcov attribution artifacts".
+        ! `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts".
         call parquet_read_maml_source_lines(filename, "parquet_load_maml_file", lines, nlines) ! GCOVR_EXCL_LINE
 
         maml%name = trim(filename)
@@ -729,7 +729,7 @@ contains
         ! logic; serializing the whole open/read-loop/close sequence works around the runtime
         ! race regardless of its exact cause. (Written "schemas dir" below, not "schemas/*.maml",
         ! since a literal "/*" anywhere in this file opens a C block comment under cpp -- see
-        ! CLAUDE.md's "Compiler & language gotchas".)
+        ! `.claude/rules/fortran-gotchas.md`'s "General Fortran & language gotchas".)
         !$omp critical (parquet_read_maml_source_lines_critical)
         open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
         if (ios /= 0) error stop trim(context) // ": cannot open file: " // trim(filename)
@@ -765,7 +765,7 @@ contains
         ! gcov attribution artifact: same shape/cause as parquet_load_maml_file's call to this
         ! same helper above -- confirmed exercised (test_load_qc_maml_file in test/test_maml.f90;
         ! 100% locally) but consistently misattributed by GitLab CI's toolchain across separate
-        ! runs. See CLAUDE.md's "Fortran gcov attribution artifacts".
+        ! runs. See `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts".
         call parquet_read_maml_source_lines(filename, "parquet_load_qc_maml_file", lines, nlines) ! GCOVR_EXCL_LINE
 
         schema%maml%name = trim(filename)

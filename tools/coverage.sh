@@ -68,7 +68,7 @@ GCOV="$(resolve_gcov)"
 echo "Using compiler: $(command -v "$FC")" >&2
 echo "Using gcov:      $GCOV" >&2
 
-# Safeguard against a stale fpm build cache (see CLAUDE.md, "Stale fpm build cache").
+# Safeguard against a stale fpm build cache (see `.claude/rules/build.md`, "Stale build cache").
 # A leftover default build/ tree with several build/gfortran_* dirs (accumulated from
 # runs with different FPM_FFLAGS) can make fpm -- and test_errors.f90's
 # error_scenarios_bin binary lookup, which does `find build -name error_scenarios |
@@ -256,7 +256,7 @@ ARTIFACT_PHRASE = "gcov attribution artifact"
 def gcovr_artifact_lines(path):
     """Excluded line numbers that are *expected* to show a positive gcov hit
     count despite being genuinely dead/unreachable code -- a known gfortran/gcov
-    quirk (see CLAUDE.md's "Fortran gcov attribution artifacts" note), not
+    quirk (see `.claude/rules/coverage.md`'s "Fortran gcov attribution artifacts" note), not
     evidence of a stale exclusion: a guard-clause `if (...) then` condition is
     evaluated -- and thus counted as "hit" -- on every call regardless of
     whether the guarded body is ever reached, and a few bare `return`

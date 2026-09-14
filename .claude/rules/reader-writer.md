@@ -108,9 +108,9 @@ Risk-82):
   inside the element). `date` is int32-backed and goes through `append_typed_column_chunk`, so it
   needs `always_nullable` set explicitly — a rule touching only `stash_temporal_column_chunk` misses
   it.
-- Five chunk-write sites (`append_typed_column_chunk`, `parquet_write_string_column_chunk`,
-  `parquet_write_string_array_column_chunk`, `parquet_write_string_column_chunk_buffers`,
-  `stash_temporal_column_chunk`); a sixth must call `resolve_chunk_nullability`.
+- **Every chunk-write site calls `resolve_chunk_nullability`**, a new one included; re-derive the
+  set with `grep -n "= resolve_chunk_nullability(" src/parquet_wrapper.cpp` rather than trusting a
+  list (the typed, string, temporal and container writers are each in it).
 - Invariant: a non-nullable field never receives an array containing nulls (an absent mask reaches
   the builder as a null `valid_bytes`).
 - A field and its array must agree or `Table::Validate()` fails at close. `align_array_to_field`

@@ -205,7 +205,7 @@ submodule (parquet_argsort) parquet_argsort_engine
     !
     ! ---- NaN detection: `x /= x`, deliberately NOT ieee_is_nan -------------------------------
     !
-    ! CLAUDE.md's "Compiler & language gotchas" says to test for NaN with `ieee_is_nan` rather than
+    ! `.claude/rules/fortran-gotchas.md`'s "General Fortran & language gotchas" says to test for NaN with `ieee_is_nan` rather than
     ! this idiom, because this one trips gfortran's -Wcompare-reals. **That convention is knowingly
     ! broken here, and only here**, for one measured reason:
     !

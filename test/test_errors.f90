@@ -15497,11 +15497,11 @@ contains
     !> someone running the built run_tester directly rather than through fpm, or an unusual
     !> runner. Note what it costs: `find ... | head -n 1` picks whichever `build/gfortran_<hash>/`
     !> tree the filesystem returns first, which is a guess as soon as more than one exists (see
-    !> CLAUDE.md's "Stale `fpm` build cache"). Avoiding that guess is half the reason the
+    !> `.claude/rules/build.md`'s "Stale build cache"). Avoiding that guess is half the reason the
     !> argument-0 path is primary -- do not demote it back.
     !>
     !> Written as a subroutine with an allocatable `character` argument rather than a function
-    !> returning one, per CLAUDE.md's "Build & compiler notes": gfortran's codegen for receiving
+    !> returning one, per `.claude/rules/build.md`'s "Hand-run compiles": gfortran's codegen for receiving
     !> such a function result is not reliably thread-safe, and this is reachable from suites that
     !> test-drive runs concurrently.
     subroutine get_error_scenarios_bin(bin)

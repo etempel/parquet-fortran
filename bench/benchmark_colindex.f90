@@ -37,7 +37,7 @@
 !! still runs; only that three-way split is unavailable.
 !!
 !! Rules this program follows, each because breaking it produced a wrong number somewhere in this
-!! repository before (CLAUDE.md, "Manual (never-`fpm test`) large-scale/benchmark tools"):
+!! repository before (`.claude/rules/benchmarking.md`, "Where benchmark tools live"):
 !! every column and every destination is written through once before any timing; every figure is
 !! the best of several rounds; every value read is accumulated into a checksum printed at the end,
 !! so nothing is optimised away; and the wrapper passes `--profile release`, without which fpm

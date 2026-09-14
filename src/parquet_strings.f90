@@ -506,7 +506,7 @@ contains
     !!
     !! **Public only because Fortran has no narrower visibility, and deliberately accepted** --
     !! `parquet_debug_table_set_inflight` is the existing precedent and the reasoning is the same
-    !! (CLAUDE.md, "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one"). The C++ route
+    !! (`.claude/rules/testing.md`, "Debug hooks"). The C++ route
     !! is not available here: `parquet_strings` is standalone by design and reaches no `bind(C)`
     !! surface at all, so routing this through `parquet_wrapper.cpp` would cost the module's
     !! independence to save one public name. No library code calls this.

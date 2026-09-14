@@ -163,7 +163,7 @@ module parquet_settings
     !
     !> Longest environment-variable value this module will read. A longer one aborts naming the
     !! variable rather than being silently truncated -- the same failure the MAML line-length cap
-    !! exists to prevent (CLAUDE.md, "Reading MAML source files"), and just as invisible: a truncated
+    !! exists to prevent (`.claude/rules/reader-writer.md`, "Schemas and MAML sources"), and just as invisible: a truncated
     !! codec name or verbosity token would simply look like a typo the user did not make.
     integer, parameter :: env_max_len = 4096
     !
@@ -1135,7 +1135,7 @@ contains
     !> **The value is capped to a short preview.** It is caller-controlled text of unbounded length,
     !> and ifx's ERROR STOP runtime corrupts the heap once the composed message reaches 8192 bytes --
     !> so a "value too long"-style guard that echoed the whole value would crash on exactly the input
-    !> that triggers it (CLAUDE.md, "Never interpolate unbounded caller-supplied text").
+    !> that triggers it (`.claude/rules/api-conventions.md`, "Errors and diagnostics").
     subroutine env_reject(name, text, why)
         character(len=*), intent(in) :: name !! the variable's full name.
         character(len=*), intent(in) :: text !! its value, shown truncated if long.

@@ -76,7 +76,7 @@ rasterization currently only works on macOS (uses the built-in `qlmanage`
 QuickLook thumbnailer -- no extra package needed); pass `--no-png` and
 rasterize manually (e.g. `rsvg-convert`, Inkscape, a browser screenshot) on
 other platforms. For the FORD favicon specifically, a further 32x32 PNG is
-needed (see CLAUDE.md's "Publishing" notes) -- resize the generated PNG down.
+needed (for the FORD favicon) -- resize the generated PNG down.
 
 Regenerates `doc/media/logo.svg`/`logo.png`/`logo-192.png`/
 `favicon.png` from an original raster source: it traces the raster into an editable SVG via

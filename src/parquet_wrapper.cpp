@@ -2197,7 +2197,7 @@ extern "C"
 	// parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode) never
 	// take the whole-column path for a FIXED_SIZE_LIST column -- the actual fix for the "List
 	// index overflow" crash these functions used to hit once nrows * col_size exceeded int32 (see
-	// CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). Same process-global/subprocess-
+	// `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only ceiling"). Same process-global/subprocess-
 	// isolation reasoning as g_debug_string_offset_limit, above: safe only because the scenario
 	// that flips it runs as its own isolated subprocess.
 	static bool g_debug_force_whole_column_read_error = false;
@@ -2576,7 +2576,7 @@ extern "C"
 	//
 	// Takes a raw pointer rather than a shared_ptr: max_list_row_length calls it twice per ROW, and
 	// a shared_ptr parameter on a per-element helper costs two atomic refcount operations per call
-	// (CLAUDE.md, "A `shared_ptr` parameter on a per-row helper"). The caller owns the array for
+	// (`.claude/rules/cpp-wrapper.md`, "Rules for the file"). The caller owns the array for
 	// the whole walk, so there is nothing to share.
 	static int64_t list_array_value_offset(const arrow::Array *array, int64_t i)
 	{
@@ -9645,7 +9645,7 @@ extern "C"
 	// write side. This is what lets col_size be queried on a multi-billion-element column
 	// without ever materializing it (see get_single_chunk_array's whole-column read, and the
 	// int32 element-count ceiling documented on parquet_reader_get_column_total_elements below
-	// and in CLAUDE.md's "Guarding a hard Arrow int32-only ceiling"). A plain LIST/LARGE_LIST
+	// and in `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only ceiling"). A plain LIST/LARGE_LIST
 	// column (only ever produced by a non-this-library writer -- this library always writes
 	// FIXED_SIZE_LIST for vector columns) has no such schema-level constant, since its per-row
 	// width can vary; that case, and ONLY that case, still falls back to get_col_size's own
@@ -9735,7 +9735,7 @@ extern "C"
 	// case. This is the fix for a whole-column read (the old get_single_chunk_array-based
 	// implementation, still used below for the non-FIXED_SIZE_LIST fallback) throwing Arrow's
 	// "List index overflow" once nrows * col_size exceeds int32, purely to answer a size query --
-	// see CLAUDE.md's "Guarding a hard Arrow int32-only ceiling" for the underlying limit (write
+	// see `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only ceiling" for the underlying limit (write
 	// side only there; this is the read-side counterpart).
 	int64_t parquet_reader_get_column_total_elements(void *handle, const char *name)
 	{
@@ -9973,7 +9973,7 @@ extern "C"
 	// scenario_filter_scoped_reads_no_whole_column in test/error_scenarios.f90, which explains why
 	// an earlier version of a check built on this counter had to move out of the ordinary test
 	// suite for exactly that reason. bench/benchmark_table.f90 (a manual, never-fpm-test tool -- see
-	// CLAUDE.md's "Manual (never-fpm test) large-scale/benchmark tools") is this function's only
+	// `.claude/rules/benchmarking.md`'s "Where benchmark tools live") is this function's only
 	// caller, run single-process by a human, where the counter is meaningful.
 	int64_t parquet_get_arrow_bytes_allocated() // GCOVR_EXCL_START
 	{
@@ -10593,7 +10593,7 @@ extern "C"
 	// row count -- never reads any column data. Used by read_list_primitive_row
 	// (parquet_read_array_row_mode) so a single row of a vector column can be fetched by reading
 	// only the one row group it lives in, instead of materializing the whole column (see
-	// get_single_chunk_array's int32 element-count ceiling, documented in CLAUDE.md's "Guarding a
+	// get_single_chunk_array's int32 element-count ceiling, documented in `.claude/rules/cpp-wrapper.md`'s "Guarding a
 	// hard Arrow int32-only ceiling"). Aborts via report_fatal_error if row_index is out of range.
 	//
 	// The row count it walks is row_group_effective_rows, i.e. the SURVIVING count when a filter/
@@ -11126,7 +11126,7 @@ static int64_t resolve_element_mode_col_size(ParquetReaderHandle *reader_handle,
 // data from EVERY row group -- it cannot skip any of them the way row_mode skips all but one.
 // What this avoids is ever materializing the whole flattened nrows*col_size array in a single
 // Arrow call (the original bug: identical in shape to row_mode's own pre-fix bug -- see
-// resolve_row_group_for_row's comment and CLAUDE.md's "Guarding a hard Arrow int32-only
+// resolve_row_group_for_row's comment and `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only
 // ceiling"). Each row group's own element count (row_group_nrows*col_size) is already kept under
 // the int32 ceiling by the write side's row-group auto-sizing, so reading/flattening one row
 // group at a time (via get_row_group_chunk_array, the same helper row_mode's fix uses) never
@@ -11264,7 +11264,7 @@ static void read_list_primitive_element(void *handle, const char *name, int64_t 
 // "s"/"seconds" at parse time), but from ANY file: confirmed empirically that Arrow's own writer
 // silently coerces a SECOND-unit array to MILLI on write even with store_schema() set, so no
 // tool can ever produce a file with a genuine SECOND-unit TIME/TIMESTAMP column to read back
-// either. See CLAUDE.md's "The parquet_temporal module" section.
+// either. See `.claude/rules/columns-tables.md`'s "`parquet_temporal` and the containers" section.
 
 // Maps a parquet_unit_* selector (1..4) to arrow::TimeUnit; aborts on an out-of-range selector.
 static arrow::TimeUnit::type temporal_selector_to_arrow_unit(int32_t unit, const char *context)
@@ -12481,7 +12481,7 @@ extern "C"
 	// extract_string_buffers' own comment records as never yet observed. So no Fortran-side test
 	// can reach a nonzero `base`, and a mutation setting it to 0 survives the whole suite --
 	// which is a fact about what is reachable, not a coverage gap to be closed with an
-	// unbuildable fixture (CLAUDE.md, "Coverage tooling never drives design").
+	// unbuildable fixture (`.claude/rules/coverage.md`, "Coverage tooling never drives design").
 	//
 	// It was instead verified OUT OF PROCESS, against a genuinely sliced array carrying a null row
 	// and a null element, by replicating this logic exactly: base=10, and all four rows' lengths,
@@ -14515,7 +14515,7 @@ static int64_t effective_map_offset_limit()
 //
 // Unlike the list and string equivalents this is a dead end rather than a fork: there is no
 // large_map to switch to, so the only truthful outcomes are "it fits" and "this cannot be
-// written". See CLAUDE.md's "Guarding a hard Arrow int32-only ceiling".
+// written". See `.claude/rules/cpp-wrapper.md`'s "Guarding a hard Arrow int32-only ceiling".
 static void check_map_entries_fit_arrow_limit(int64_t nentries, const std::string &name, const char *context)
 {
 	int64_t limit = effective_map_offset_limit();

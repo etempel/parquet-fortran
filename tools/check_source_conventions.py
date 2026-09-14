@@ -11,7 +11,7 @@ That is what makes them worth a static check rather than a test:
      confirmed compiler bugs in exactly that machinery on exactly this type (gfortran leaving an
      OpenMP `private()` copy uninitialized; `%detached` surviving an `intent(out)` reset; ifx
      segfaulting inside its own runtime on a nested derived-type component). New table state goes on
-     `parquet_table_cache`, reached through the pointer. See CLAUDE.md, "New `parquet_table` state
+     `parquet_table_cache`, reached through the pointer. See `.claude/rules/columns-tables.md`, "New `parquet_table` state
      goes on the CACHE".
 
   2. Every pointer a table accessor hands out must be reached through `self%cache` (feature_risks.md Risk-12).
@@ -26,7 +26,7 @@ That is what makes them worth a static check rather than a test:
      `--check` on the generators compares the committed file against the generator, so a TEMPLATE
      that omits a `!>` doc-comment or a `! GCOVR_EXCL_LINE` produces output that matches perfectly
      and is wrong in every kind it emits at once. Only `ford --warn docs.md` would reveal the first
-     (and it is not run in CI, and is drowned in thousands of expected warnings -- see CLAUDE.md's
+     (and it is not run in CI, and is drowned in thousands of expected warnings -- see `.claude/rules/documentation.md`'s
      "FORD doc-comment conventions"), and nothing at all reveals the second. A third generator
      inherits this check for free by adding its output to GENERATED_FILES below.
 
@@ -318,7 +318,7 @@ def check_no_allocatable_component():
             problems.append(
                 "%s:%d: `%s` must have no allocatable component -- put the state on "
                 "parquet_table_cache instead (three confirmed compiler bugs sit behind this "
-                "rule; see CLAUDE.md, \"New `parquet_table` state goes on the CACHE\"):\n    %s"
+                "rule; see `.claude/rules/columns-tables.md`, \"New `parquet_table` state goes on the CACHE\"):\n    %s"
                 % (path.relative_to(REPO_ROOT), lineno, type_name, line.strip())
             )
     return problems
@@ -2973,7 +2973,7 @@ def check_no_submodule_oracle_pointer_call():
 
     This needs a static check rather than a test because NOTHING in CI or in a plain `fpm test`
     builds with `-flto`: a reintroduced call would compile, pass every test and sit in the tree
-    until someone next asked for a release build. See CLAUDE.md's "Compiler & language gotchas".
+    until someone next asked for a release build. See `.claude/rules/fortran-gotchas.md`'s "General Fortran & language gotchas".
     """
     pointers = ("p_argsort", "p_partial", "p_nth", "p_is_sorted", "p_runs", "p_search", "p_merge")
     problems = []
@@ -5041,7 +5041,7 @@ def check_no_aliased_output_argument():
     leave thousands unresolved behind an [ok], which is exactly how a static check goes blind (see
     CLAUDE.md, "A static check that enumerates names goes stale silently"). Overlap between a
     parent and its own component (`f(t%cache, t%cache%reader)`) is a related hazard this does NOT
-    cover -- see CLAUDE.md's "A component and its parent cannot both be actual arguments of one
+    cover -- see `.claude/rules/fortran-gotchas.md`'s "A component and its parent cannot both be actual arguments of one
     call", where the shipped API takes an optional argument specifically to avoid it.
     """
     problems = []
@@ -7210,7 +7210,96 @@ def check_filter_operators_are_handled_everywhere():
     return problems
 
 
+def check_instruction_citations_resolve():
+    """A comment citing an instruction file by topic must name the file that still carries it.
+
+    Source, test, tooling and CI comments cite the working rules by file and quoted title. The
+    rules moved out of CLAUDE.md into
+    `.claude/rules/*.md`, and a citation left naming the old home sends a reader to a file that no
+    longer holds the text. `tools/check_doc_anchors.py` cannot see any of this: it resolves
+    Markdown links, and these are prose inside `.py`/`.sh`/`.f90`/`.cpp`/`.yml`.
+
+    A citation resolves when the named file exists and the quoted text matches one of its headings
+    or appears in its body. Quoting is what makes a citation checkable, so an unquoted pointer
+    ("see CLAUDE.md") is deliberately out of scope -- it stays correct whatever moves.
+
+    SCOPE, so a green run is not read as more than it is: the citation must sit on ONE line. A
+    quoted topic wrapped across two comment lines is invisible here, and a stale one will not be
+    reported; audit those by hand with
+    `grep -rn 'CLAUDE.md' tools/ bench/ test/ src/ .gitlab-ci.yml`. Prefer citing the FILE without
+    a quoted title in new comments -- a title duplicates wording the rule owns, and drifts the
+    first time the rule is reworded, which is what left the wrapped ones behind.
+
+    When a rule is reworded, this check fires on every comment quoting the old wording: repoint the
+    comment, or quote the new heading. Moving a rule between files fires it the same way.
+    """
+    instr = {}
+    for rel in ["CLAUDE.md"] + sorted(str(p.relative_to(REPO_ROOT))
+                                      for p in (REPO_ROOT / ".claude").rglob("*.md")):
+        path = REPO_ROOT / rel
+        if path.is_file():
+            instr[rel] = path.read_text()
+    if not instr:
+        return ["no instruction files found -- this check proves nothing; fix its file list"]
+
+    def norm(text):
+        text = text.lower().replace("`", "").replace("*", "")
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", text)).strip()
+
+    heads, bodies = {}, {}
+    for rel, text in instr.items():
+        bodies[rel] = norm(text)
+        for line in text.split("\n"):
+            if line.startswith("#"):
+                heads.setdefault(norm(line.lstrip("# ")), set()).add(rel)
+
+    # (?<![\"']) keeps the pattern off its own source: a bare "CLAUDE.md" string literal in this
+    # file is not a citation, only a mention inside prose is.
+    cite = re.compile(r"(?<![\"'])(CLAUDE\.md|\.claude/(?:rules|skills)/[\w.-]+\.md)"
+                      r"`?\s*(?:'s)?\s*[,:]?\s*(?:own\s+)?[\"\u201c]([^\"\u201d\n]{4,90})[\"\u201d]")
+    # Only what the repository carries: the root-level `feature_*.md` planning documents are
+    # git-ignored scratch, so scanning them would give CI and a working tree different answers.
+    scanned = [REPO_ROOT / name for name in
+               (".gitlab-ci.yml", "README.md", "CONTRIBUTING.md", "CHANGELOG.md", "feature_risks.md")]
+    for directory in ("src", "test", "app", "bench", "tools", "doc"):
+        base = REPO_ROOT / directory
+        if base.is_dir():
+            scanned.extend(sorted(base.rglob("*")))
+    problems, seen = [], 0
+    for path in scanned:
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(REPO_ROOT))
+        if not rel.endswith((".py", ".sh", ".f90", ".cpp", ".yml", ".md")):
+            continue
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for n, line in enumerate(text.split("\n"), 1):
+            for match in cite.finditer(line):
+                target, topic = match.group(1), match.group(2)
+                seen += 1
+                if target not in instr:
+                    problems.append("%s:%d: cites `%s`, which does not exist" % (rel, n, target))
+                    continue
+                key = norm(topic)
+                if target in heads.get(key, ()) or key in bodies[target]:
+                    continue
+                elsewhere = sorted(heads.get(key, set()) | {f for f, b in bodies.items() if key in b})
+                where = (" -- it is in %s" % ", ".join(elsewhere)) if elsewhere else ""
+                problems.append(
+                    "%s:%d: cites %s's \"%s\", which that file does not carry%s"
+                    % (rel, n, target, topic, where))
+    if not seen:
+        return ["no instruction citations found at all -- the pattern has gone stale, so a "
+                "green result here proves nothing; fix this check before trusting it"]
+    return problems
+
+
 CHECKS = (
+    ("every instruction citation names the file that carries the topic",
+     check_instruction_citations_resolve),
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
     ("pf_index_map components are adopted and reset",
      check_index_map_components_are_adopted_and_reset),

@@ -1388,7 +1388,7 @@ module parquet_tables
     !! **No allocatable components, mandatory.** A per-thread handle declared in a `block` inside a
     !! parallel region is an obvious thing to write, and this project has recorded both an ifx
     !! segfault and a gfortran uninitialised-`private()` bug for types in that position that carry
-    !! one. See CLAUDE.md's "New `parquet_table` state goes on the CACHE".
+    !! one. See `.claude/rules/columns-tables.md`'s "New `parquet_table` state goes on the CACHE".
     type :: parquet_table_col
         private
         type(parquet_table_cache), pointer :: cache => null() !! the table's column store.

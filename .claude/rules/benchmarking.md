@@ -24,9 +24,11 @@ paths:
 - The `/plan-benchmark` skill writes the run sheet (`feature_benchmark_<name>.md`, one copy per
   machine, carried by hand) and carries the runner's steps and the rules every run follows; never
   write a run sheet from scratch. Machine facts are in `developer-environments.md`.
-- Everything the run EXECUTES lives in the repository under `bench/`, committed and pushed first
-  (the one case where work is committed rather than left for the maintainer); never paste code into
-  the instruction file.
+- Everything the run EXECUTES lives in the repository under `bench/`; never paste code into the
+  instruction file. **The MAINTAINER commits and pushes it before the campaign starts** — the other
+  machines pull it, and `workflow.md`'s no-commit rule is not lifted here (`.claude/settings.json`
+  denies `git push` outright). Report that the campaign is blocked on that push rather than
+  attempting one.
 - Verdicts can agree everywhere while magnitudes span 3–6x and a sub-conclusion inverts; a
   single-machine run does not size work. Read every returned copy side by side, once.
 - Tooling fixed mid-campaign invalidates every figure taken before the fix.

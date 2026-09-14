@@ -367,7 +367,7 @@ contains
     !
     !> reindex is the bulk counterpart of a permutation applied with erase/append: it rebuilds
     !> payload, offsets and validity in one pass. The fixture puts the SHORTEST element first
-    !> (CLAUDE.md's "sized from the first element" rule), so a length derived from element 1
+    !> (`.claude/rules/testing.md`'s "Assertions" rule), so a length derived from element 1
     !> would truncate the later, longer ones.
     subroutine test_reindex(error)
         type(error_type), allocatable, intent(out) :: error
@@ -974,7 +974,7 @@ contains
     !> aborts when that happens -- the column still validates -- so the values are checked one by
     !> one rather than through a size or a null count.
     !>
-    !> **The first element is deliberately the SHORTEST.** CLAUDE.md's "sized/typed from the first
+    !> **The first element is deliberately the SHORTEST.** `.claude/rules/testing.md`'s "sized/typed from the first
     !> element" bug class applies directly: a length derived from `values(1)` instead of per element
     !> would truncate everything after it, and a fixture whose first element is longest passes such
     !> a bug happily.

@@ -29,7 +29,7 @@
 !! a row reads back with every field null. See `test_null_row_fields_do_not_survive`.
 !!
 !! Every test writes to its own fixture path: test-drive runs a suite's tests concurrently, so a
-!! shared output filename is a truncation race (CLAUDE.md, "Tests run concurrently").
+!! shared output filename is a truncation race (`.claude/rules/testing.md`, "Tests run concurrently").
 module test_struct_write
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet

@@ -545,7 +545,7 @@ contains
     !> Implemented HERE rather than in parquet_core itself because gfortran does not emit a private
     !> module-contained ELEMENTAL procedure whose in-module calls it has inlined, and this submodule
     !> references it -- an `undefined symbol` at link time, invisible until something links. See
-    !> CLAUDE.md's "A private procedure contained directly in a module".
+    !> `.claude/rules/code-style.md`'s "A private procedure contained directly in a module".
     module procedure parquet_filter_real_key
         if (v == 0.0_real64) then
             key = 0_int64

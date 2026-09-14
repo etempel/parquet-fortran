@@ -136,7 +136,7 @@ module parquet
     ! their own module because a sibling needs them -- parquet_read/parquet_write/
     ! parquet_sorting_oracle call the push when a reader, writer or sort opens, and
     ! parquet_tables_read needs the block width to trim a threaded paste to whole blocks rather
-    ! than copying the constant (CLAUDE.md, "Disjoint ROWS are not disjoint BITS"). Publishing to
+    ! than copying the constant (`.claude/rules/columns-tables.md`, "Disjoint ROWS are not disjoint BITS"). Publishing to
     ! a SIBLING and publishing to every user of the library are different decisions, and only the
     ! first was ever taken. Row 30's code issues 2 and 3.
     private :: parquet_push_settings_to_cpp

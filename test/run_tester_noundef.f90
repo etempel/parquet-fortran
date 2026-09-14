@@ -50,7 +50,7 @@ program run_tester_noundef
         ! unrun. (Beware measuring this yourself: a sweep that reports ALL 117 failing is
         ! measuring the harness. MacPorts' BSD `timeout` rejects `-s KILL`, and zsh does not
         ! word-split an unquoted variable holding a command; both give a uniform, clean-
-        ! looking, wrong answer. See CLAUDE.md's "probe with what you will actually run".)
+        ! looking, wrong answer. See `.claude/rules/testing.md`'s "Error scenarios".)
         !
         ! SPLITTING THOSE THREE OUT WOULD RECOVER THE 114, AND IS DELIBERATELY NOT DONE --
         ! keeping the sorting suite whole was chosen over the coverage. Do not "tidy" this by

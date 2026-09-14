@@ -831,7 +831,7 @@ contains
             ! generated accessor could declare a column before it is ever populated or read from
             ! a file, and that is exactly the state this checks for.
             ! gcov attribution artifact: the `if` line itself is evaluated on every call and so
-            ! shows hits, while the body below never runs -- see CLAUDE.md's "Fortran gcov
+            ! shows hits, while the body below never runs -- see `.claude/rules/coverage.md`'s "Fortran gcov
             ! attribution artifacts", the guard-clause shape.
             if (.not. slot%file_source) then ! GCOVR_EXCL_START
                 call table_context_suffix(cache, slot%name, sfx)

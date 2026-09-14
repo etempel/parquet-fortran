@@ -107,9 +107,32 @@ r = pf_integrate(power_law, 1.0e-3_real64, 1.0e3_real64, 1.0e-10_real64, log_bas
 
 The record (below) still reports the abscissae in your own `x`, not in `log x`.
 
-**`pf_infinity()` exists** and returns `+Infinity` for use as a bound. Integration over an
-infinite range is not available yet: an infinite bound is refused with a message saying so, rather
-than being quietly treated as a large finite one.
+**An infinite range is spelled with `pf_infinity()`** as a bound, which returns `+Infinity`.
+There are four spellings and they are the same call:
+
+```fortran
+r = pf_integrate(f, 0.0_real64, 1.0_real64, 1.0e-8_real64)           ! [0, 1]
+r = pf_integrate(f, 1.0_real64, pf_infinity(), 1.0e-8_real64)        ! [1, +inf)
+r = pf_integrate(f, -pf_infinity(), 0.0_real64, 1.0e-8_real64)       ! (-inf, 0]
+r = pf_integrate(f, -pf_infinity(), pf_infinity(), 1.0e-8_real64)    ! (-inf, +inf)
+```
+
+Both bounds the same infinity aborts, and so does `log_base` on an infinite range: the walk below
+works in `log x` already, by its own transform.
+
+**An infinite range is walked outward, not transformed.** The integrator looks for a first panel
+the integrand is not negligible on, integrates it, and then steps outward one factor of e at a
+time, stopping when the tail estimated from the observed decay is inside the tolerance. That is
+why a feature far along the range is found rather than stepped over — see
+[What the integrator cannot see](#what-the-integrator-cannot-see). `(-inf, b]` is the same walk
+with every evaluation mirrored, and `(-inf, +inf)` is two walks from zero.
+
+**Build an infinite bound with `pf_infinity()`, never by overflowing an expression.** A bound
+computed as, say, `1.0e308_real64*10` does reach `+Infinity` on the way, but it raises
+`IEEE_OVERFLOW` doing so, which some compilers are configured to treat as fatal. A bound that
+overflowed silently inside a caller's own arithmetic is the other hazard, and it is why
+`max_panels` on a finite range aborts instead of being ignored: a call that caps the walk of a
+range that has no walk usually meant an infinite bound that did not survive.
 
 ## Tolerances
 
@@ -135,7 +158,14 @@ because no double-precision quadrature can report having met it. The same `rtol`
 ## Budget and outcome
 
 `max_neval` bounds the integrand evaluations; it defaults to 100000. **It is a ceiling, not a
-suggestion**: the count never exceeds it on a finite range. Reaching it is a status, not an error.
+suggestion**: the count never exceeds it on a finite range, and an infinite range may overshoot it
+by at most one rule application, because a panel costs its 21 points even when five of them would
+have been enough. Reaching it is a status, not an error.
+
+`max_panels` bounds the panels ONE walk of an infinite range may use, counting the first panel the
+search accepted; it defaults to 50, and reaching it is `PF_INT_LIMIT` in the same way. It applies
+only to an infinite range — passing it with two finite bounds aborts — and on `(-inf, +inf)`,
+which is two walks, it caps each of them.
 
 `converged=` is the short answer. `info=` is the long one, a `pf_integration_info` carrying:
 
@@ -147,8 +177,8 @@ suggestion**: the count never exceeds it on a finite range. Reaching it is a sta
 | `abserr` | the engine's own estimate of the absolute error |
 | `partition_integral` | the plain sum over the final partition |
 | `neval` | integrand evaluations, counted |
-| `nsub` | subintervals in the final partition |
-| `npanels` | 1 on a finite range |
+| `nsub` | subintervals in the final partition, summed over the walk's panels |
+| `npanels` | 1 on a finite range; the panels the walk used, both halves counted, on an infinite one |
 
 **Nothing is ever printed.** This module reads no verbosity setting and has no message stream; it
 reports through these values, and speaks only by aborting when a caller contract is broken.
@@ -156,7 +186,7 @@ reports through these values, and speaks only by aborting when a caller contract
 | Code | Means | What to do |
 |---|---|---|
 | `PF_INT_OK` | the requested accuracy was achieved | nothing |
-| `PF_INT_LIMIT` | `max_neval` ran out first | raise the budget, or loosen the tolerance |
+| `PF_INT_LIMIT` | `max_neval` or `max_panels` ran out first | raise the cap, or loosen the tolerance |
 | `PF_INT_ROUNDOFF` | round-off prevents the tolerance being met | loosen the tolerance; the result is as good as the arithmetic allows |
 | `PF_INT_BAD_INTEGRAND` | the integrand behaves extremely badly somewhere | split the range at the offending point |
 | `PF_INT_NO_CONVERGENCE` | round-off in the extrapolation table | loosen the tolerance, or turn `extrapolate` off |
@@ -237,6 +267,26 @@ you expected the integrand to do something tells you exactly what happened. And 
 range yourself** at a point near the feature puts a rule application where it is needed — the
 integral of the parts is the integral of the whole, and `%append` joins the records.
 
+**An infinite range is the case where this goes better, not worse.** The obvious way to integrate
+to infinity is to map the range onto `(0, 1]` and bisect there, which is what QUADPACK's own
+infinite-range routine does. That transform packs everything beyond about twenty past the lower
+bound into the last two abscissae of the first rule application, so a unit-width feature at 40 —
+and every feature narrower than about a fifth of its distance from the bound — falls between two
+samples. The answer comes back as zero, converged, in a few dozen evaluations.
+
+The outward walk does not have that shape. It samples 21 points per factor of e, all the way out,
+so the same bump is found from any lower bound:
+
+```fortran
+r = pf_integrate(bump_at_40, 0.0_real64, pf_infinity(), 1.0e-8_real64)
+! r is sqrt(pi), the right answer
+```
+
+What remains is the narrower blind spot above: a feature between the samples of one panel. The
+search for the first panel is built around exactly that — when its first, wide probe finds
+nothing it tries a much NARROWER panel before trying wider ones, because an integrand that falls
+off far faster than the first guess assumed lives in a sliver just above the bound.
+
 ## What aborts
 
 Every abort message begins `pf_integrate: `, and carries ` (context: ...)` when `context=` was
@@ -251,9 +301,12 @@ refused rather than answered, because every one of them means the call did not s
 | `rtol` below `50*epsilon` with no `atol` | `rtol below 50*epsilon needs a positive atol` |
 | `max_neval < 1` | `max_neval must be positive` |
 | `max_neval` above `huge(1)/42` | `max_neval must not exceed huge(1)/42` |
+| `max_panels < 1` | `max_panels must be positive` |
+| `max_panels` with two finite bounds | `max_panels applies only to an infinite range` |
 | a NaN bound | `integration bounds must not be NaN` |
 | `a > b` | `lower bound must not exceed the upper bound` |
-| an infinite bound | `infinite bounds arrive in a later phase` |
+| both bounds the same infinity | `bounds must not both be the same infinity` |
+| `log_base` with a non-finite bound | `log_base applies only to a finite range` |
 | `log_base` with `a <= 0` | `lower bound must be positive when integrating in log x` |
 | the integrand returned a NaN or an infinity | `the integrand returned a non-finite value at x = ...` |
 
@@ -273,6 +326,15 @@ tolerance tightens, because the underlying rule is exact for polynomials up to d
 endpoint singularity is the expensive case, and the one the extrapolation turns from thousands of
 evaluations into hundreds. Integrating a power law in `log x` can be an order of magnitude cheaper
 than in linear `x`.
+
+**A decaying tail costs a few hundred evaluations** — the walk pays 21 points per factor of e, and
+a few probes for the panel it starts from, so what sets the price is how many factors of e the
+integrand takes to die away. An exponential tail is cheap and an algebraic one several times
+dearer. Against the transform-based alternative the walk is comparable on the tails both methods
+answer, and it is the only one of the two that answers the tails with a feature in them. An
+oscillatory tail is the case neither method answers at a tight tolerance: it exhausts the budget,
+reports `PF_INT_LIMIT`, and still returns a good estimate. The `walk` mode of the benchmark is
+where these come from.
 
 No figure on this page is compiler- or machine-specific; run the benchmark on the machine you care
 about.

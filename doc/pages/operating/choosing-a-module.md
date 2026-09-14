@@ -58,7 +58,7 @@ in every one of them.
 | `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
-| `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite range |
+| `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |

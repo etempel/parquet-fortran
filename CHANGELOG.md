@@ -9,17 +9,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Numerical integration: `parquet_integrate` and `pf_integrate`.** Adaptive quadrature of a
-  function of one `real64` variable over a finite range `[a, b]`, by the 21-point Gauss-Kronrod
+  function of one `real64` variable over a finite or infinite range, by the 21-point Gauss-Kronrod
   rule with adaptive bisection and, for an endpoint singularity, Wynn-epsilon extrapolation
   (`extrapolate=`). The integrand is an object extending `pf_integrand`, with its parameters as
   components and an `eval` that may update them, or a plain function; tolerances are `rtol` or a
   `pf_tolerance` with `atol`; `max_neval` bounds the integrand evaluations and is never exceeded;
-  `log_base=` integrates a range spanning many decades in `log x`. `converged=` and `info=`
-  (`pf_integration_info`: status, error estimate, evaluation count) report the outcome and nothing
-  is printed; `points=` (`pf_integration_points`) records every abscissa, weight and value of the
-  final partition, whose weighted sum reproduces the integral. `pf_infinity()` is available as a
-  bound but integration over an infinite range is not yet supported. An Arrow-free entry module.
-  `bench/benchmark_integrate.sh` measures it. See
+  `log_base=` integrates a range spanning many decades in `log x`. Either bound may be
+  `pf_infinity()` or its negative, spelling `[a, +inf)`, `(-inf, b]` and `(-inf, +inf)`; an
+  infinite range is integrated by an outward walk that searches for a first panel the integrand is
+  not negligible on and then steps outward a factor of e at a time, so a feature far along the
+  range is found rather than stepped over, and `max_panels=` caps the panels one walk may use.
+  `converged=` and `info=` (`pf_integration_info`: status, error estimate, evaluation count,
+  panels) report the outcome and nothing is printed; `points=` (`pf_integration_points`) records
+  every abscissa, weight and value of the final partition, whose weighted sum reproduces the
+  integral. An Arrow-free entry module. `bench/benchmark_integrate.sh` measures it. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).
 
 ## [v2.4.0] - 2026-09-14

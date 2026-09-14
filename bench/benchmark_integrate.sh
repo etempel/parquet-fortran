@@ -2,7 +2,7 @@
 # What `pf_integrate` costs: accuracy against evaluations per integrand class, and the per-call
 # floor the work arrays and the record buffer impose.
 #
-# Two modes, both driving `bench/benchmark_integrate.f90`:
+# Three modes, all driving `bench/benchmark_integrate.f90`:
 #
 #   cost      Four integrand classes -- smooth and oscillatory, an endpoint singularity, an
 #             interior peak, and a smooth integrand that is expensive per evaluation -- over a
@@ -17,16 +17,31 @@
 #             tolerance, where the work arrays actually grow, which is what the geometric growth
 #             policy exists for.
 #
+#   walk      What the outward walk of an infinite range costs: five tail shapes and the two
+#             features QUADPACK's change of variable loses -- a narrow spike just above the lower
+#             bound and a unit-width bump at 40 -- with the evaluation count, the panel count, the
+#             relative error against each closed form, and the ratio against `dqagi`'s count at
+#             the same tolerances. COUNTS ONLY, no timing: the count is the walk's cost and is
+#             deterministic to within one rule application across compilers, while the oscillatory
+#             shape would dominate a wall clock without saying anything.
+#
+#             The width of one panel is a parameter of the module (`TAIL_STEP`), not an argument,
+#             so sweeping it means recompiling: copy `src/parquet_integrate*.f90` outside the
+#             repository, edit the constant, and build them with a driver -- the module is
+#             Arrow-free and needs nothing else. The sweep over 1, 2 and 3 natural-log units was
+#             run that way and is recorded in the design document; a width above 1 loses the
+#             spike, which is what settles it.
+#
 # The figures the guide page quotes are derived from `cost`, in general terms only -- the page
 # carries no machine, no compiler and no exact count, because a bisection decision rests on an
 # error estimate whose last bits differ between compilers.
 #
 # Usage:
-#   bench/benchmark_integrate.sh              # both modes
-#   MODE=cost bench/benchmark_integrate.sh    # one of them
+#   bench/benchmark_integrate.sh              # every mode
+#   MODE=walk bench/benchmark_integrate.sh    # one of them
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=both      Which mode to run: cost, overhead, or both.
+#   MODE=both      Which mode to run: cost, overhead, walk, or both, which runs all three.
 #   ROUNDS=5       Timed rounds per measurement; the BEST is kept, never the mean, because the
 #                  slow rounds are the machine's other work rather than this code's.
 #   REPEATS=200    Integrations inside one timed round. A single `pf_integrate` of a cheap
@@ -46,8 +61,8 @@ ROUNDS="${ROUNDS:-5}"
 REPEATS="${REPEATS:-200}"
 
 case "$MODE" in
-    cost|overhead|both) ;;
-    *) echo "benchmark_integrate.sh: MODE must be cost, overhead or both (got '$MODE')" >&2
+    cost|overhead|walk|both) ;;
+    *) echo "benchmark_integrate.sh: MODE must be cost, overhead, walk or both (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -82,5 +97,10 @@ fi
 if [[ "$MODE" == "overhead" || "$MODE" == "both" ]]; then
     fpm run benchmark_integrate --profile release -- \
         --mode=overhead --rounds="$ROUNDS" --repeats="$REPEATS"
+    echo
+fi
+
+if [[ "$MODE" == "walk" || "$MODE" == "both" ]]; then
+    fpm run benchmark_integrate --profile release -- --mode=walk
     echo
 fi

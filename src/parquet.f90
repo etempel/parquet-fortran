@@ -47,9 +47,9 @@
 !>                          below everything: nothing in it validates, aborts
 !>                          or prints, and it imports only iso_fortran_env.
 !>   * `parquet_integrate` -- `pf_integrate`: adaptive quadrature of a function
-!>                          of one real64 variable over a finite range, with the
-!>                          integrand as an object carrying its own parameters
-!>                          or as a plain function.
+!>                          of one real64 variable over a finite or infinite
+!>                          range, with the integrand as an object carrying its
+!>                          own parameters or as a plain function.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.

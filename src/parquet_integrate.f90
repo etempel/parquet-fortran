@@ -81,6 +81,35 @@ module parquet_integrate
     !! `...` (`api-conventions.md`, errors and diagnostics).
     integer, parameter :: CONTEXT_CAP = 100
 
+    ! ---- the outward walk of an infinite range, qfeet's constants ---------------------------
+
+    !> Default cap on the panels one walk may use, `max_panels`'s default. qfeet's
+    !! `default_max_tail_steps`, kept: the panel count is what the walk's cost is made of.
+    integer, parameter :: DEFAULT_MAX_PANELS = 50
+    !> Width of one walk panel, in natural-log units of `x`, so each panel spans a factor of e.
+    !! qfeet's `tail_step`. Question Q23 sweeps 1, 2 and 3 in the benchmark's `walk` mode.
+    real(real64), parameter :: TAIL_STEP = 1.0_real64
+    !> Multiple of `epsilon` below which a panel's contribution is indistinguishable from
+    !! accumulated rounding. qfeet's `roundoff_factor`: not a tolerance, and fixed on purpose.
+    real(real64), parameter :: ROUNDOFF_FACTOR = 8.0_real64
+    !> Lower bound below which the search for a first panel works in absolute rather than
+    !! relative steps. qfeet's `start_min_a`.
+    real(real64), parameter :: START_MIN_A = 1.0_real64
+    !> Factor applied to a small lower bound when the first panel comes back negligible.
+    real(real64), parameter :: START_MULT_A = 1.1_real64
+    !> Offset applied, in `log x`, to a large lower bound when the first panel is negligible.
+    real(real64), parameter :: START_ADD_A = 0.1_real64
+    !> Factor by which the search widens a negligible panel, in `log x`.
+    real(real64), parameter :: START_WIDEN = 3.0_real64
+    !> Cap on attempts to find a starting panel that is not negligible. qfeet's
+    !! `max_start_steps`: 30 widenings by a factor of three reach `exp(33)` from `x = 1`.
+    integer, parameter :: MAX_START_STEPS = 30
+    !> Largest `log x` a panel bound may take. `exp` of anything above `log(huge(1.0_real64))`,
+    !! which is 709.78, is an infinity, and the integrand would then be asked for a value at a
+    !! point that is not a number. Written as a literal because a constant expression may not
+    !! call `log`; the margin below 709.78 is deliberate.
+    real(real64), parameter :: LOG_X_CEILING = 709.0_real64
+
     ! ---- the integrand -----------------------------------------------------------------------
 
     !> Base type for an integrand that carries its own parameters as components.
@@ -174,9 +203,18 @@ module parquet_integrate
     !!
     !! ```
     !! res = pf_integrate(f, a, b, rtol, [max_neval], [converged], [info], [points], [context], &
-    !!                    [log_base], [extrapolate])
+    !!                    [log_base], [extrapolate], [max_panels])
     !! res = pf_integrate(f, a, b, tol,  [max_neval], [converged], [info], [points], [context], &
-    !!                    [log_base], [extrapolate])
+    !!                    [log_base], [extrapolate], [max_panels])
+    !! ```
+    !!
+    !! Either bound may be an infinity, which is how the four ranges are spelled:
+    !!
+    !! ```fortran
+    !! r = pf_integrate(f, 0.0_real64, 1.0_real64, 1.0e-8_real64)        ! [0, 1]
+    !! r = pf_integrate(f, 1.0_real64, pf_infinity(), 1.0e-8_real64)     ! [1, +inf)
+    !! r = pf_integrate(f, -pf_infinity(), 0.0_real64, 1.0e-8_real64)    ! (-inf, 0]
+    !! r = pf_integrate(f, -pf_infinity(), pf_infinity(), 1.0e-8_real64) ! (-inf, +inf)
     !! ```
     !!
     !! Optional arguments are shown in square brackets, with the comma outside the bracket.
@@ -187,7 +225,11 @@ module parquet_integrate
     !!   plain `procedure(pf_integrand_func)` function. Must be a module procedure or a
     !!   type-bound procedure of an object, never an internal procedure.
     !! * `a`, `b` -- the bounds, `real64`. `a == b` returns zero without evaluating the integrand;
-    !!   `a > b` aborts. An infinite bound arrives in a later phase and is refused today.
+    !!   `a > b` aborts. Either may be `pf_infinity()` or its negative, and an infinite range is
+    !!   answered by an outward walk rather than by a change of variable: the walk looks for a
+    !!   first panel the integrand is not negligible on and then steps outward a factor of e at a
+    !!   time, so a feature far along the range is found rather than fallen between two abscissae.
+    !!   Both bounds the same infinity aborts.
     !! * `rtol` -- relative tolerance, `real64`. Convergence is `abserr <= max(atol, rtol*|res|)`.
     !! * `tol` -- a `pf_tolerance` supplying `rtol` and `atol` together, in place of `rtol`.
     !! * `max_neval` -- optional budget on integrand evaluations, default 100000. Reaching it is
@@ -205,6 +247,9 @@ module parquet_integrate
     !! * `extrapolate` -- optional `logical`, default false: use the Wynn-epsilon extrapolation,
     !!   which pays for itself on an endpoint singularity and nowhere else. With it false the
     !!   result is always the partition sum, which is what `points` reproduces exactly.
+    !! * `max_panels` -- optional cap on the panels ONE walk may use, default 50, counting the
+    !!   first panel the search accepted. Reaching it is `PF_INT_LIMIT`, not an error. Present on
+    !!   a finite range aborts; on `(-inf, +inf)`, which is two walks, it caps each of them.
     !!
     !! There is no optional `real64` argument in the list and there must never be one: an optional
     !! dummy counts against the margin that distinguishes the `rtol` specifics from the `tol`
@@ -214,7 +259,7 @@ module parquet_integrate
 
         !> Integrand as an object, tolerance as a bare `rtol`.
         module function integrate_obj_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                           context, log_base, extrapolate) result(res)
+                                           context, log_base, extrapolate, max_panels) result(res)
             implicit none
             class(pf_integrand), intent(inout)                  :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -227,12 +272,13 @@ module parquet_integrate
             character(len=*), intent(in), optional              :: context    !! call-site text
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
+            integer, intent(in), optional                       :: max_panels !! walk panel cap
             real(real64)                                        :: res        !! the integral
         end function integrate_obj_rtol
 
         !> Integrand as an object, tolerance as a `pf_tolerance`.
         module function integrate_obj_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                          context, log_base, extrapolate) result(res)
+                                          context, log_base, extrapolate, max_panels) result(res)
             implicit none
             class(pf_integrand), intent(inout)                  :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -245,12 +291,13 @@ module parquet_integrate
             character(len=*), intent(in), optional              :: context    !! call-site text
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
+            integer, intent(in), optional                       :: max_panels !! walk panel cap
             real(real64)                                        :: res        !! the integral
         end function integrate_obj_tol
 
         !> Integrand as a plain function, tolerance as a bare `rtol`.
         module function integrate_func_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                            context, log_base, extrapolate) result(res)
+                                            context, log_base, extrapolate, max_panels) result(res)
             implicit none
             procedure(pf_integrand_func)                        :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -263,12 +310,13 @@ module parquet_integrate
             character(len=*), intent(in), optional              :: context    !! call-site text
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
+            integer, intent(in), optional                       :: max_panels !! walk panel cap
             real(real64)                                        :: res        !! the integral
         end function integrate_func_rtol
 
         !> Integrand as a plain function, tolerance as a `pf_tolerance`.
         module function integrate_func_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                           context, log_base, extrapolate) result(res)
+                                           context, log_base, extrapolate, max_panels) result(res)
             implicit none
             procedure(pf_integrand_func)                        :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -281,6 +329,7 @@ module parquet_integrate
             character(len=*), intent(in), optional              :: context    !! call-site text
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
+            integer, intent(in), optional                       :: max_panels !! walk panel cap
             real(real64)                                        :: res        !! the integral
         end function integrate_func_tol
 
@@ -356,7 +405,7 @@ module parquet_integrate
     interface
 
         !> One application of the 21-point Gauss-Kronrod rule over `[a, b]`.
-        module subroutine qk21(f, a, b, log_base, res, abserr, resabs, resasc, neval, &
+        module subroutine qk21(f, a, b, log_base, negate, res, abserr, resabs, resasc, neval, &
                                rx, rw, rf, context)
             implicit none
             class(pf_integrand), intent(inout)     :: f        !! the integrand
@@ -364,6 +413,7 @@ module parquet_integrate
                                                                !! variable
             real(real64), intent(in)               :: b        !! upper limit, same variable
             logical, intent(in)                    :: log_base !! evaluate `f(exp(u))*exp(u)`
+            logical, intent(in)                    :: negate   !! evaluate at `-x`, recording `-x`
             real(real64), intent(out)              :: res      !! the Kronrod approximation
             real(real64), intent(out)              :: abserr   !! estimate of `|error|`
             real(real64), intent(out)              :: resabs   !! approximation to the integral of
@@ -379,8 +429,8 @@ module parquet_integrate
 
         !> Adaptive bisection over the finite range `[a, b]`, optionally with the Wynn-epsilon
         !! extrapolation.
-        module subroutine qagse(f, a, b, epsabs, epsrel, limit, log_base, extrapolate, work, &
-                                res, abserr, neval, ier, last, extrapolated, context)
+        module subroutine qagse(f, a, b, epsabs, epsrel, limit, log_base, negate, extrapolate, &
+                                work, res, abserr, defabs, neval, ier, last, extrapolated, context)
             implicit none
             class(pf_integrand), intent(inout)     :: f            !! the integrand
             real(real64), intent(in)               :: a            !! lower limit, engine variable
@@ -389,10 +439,16 @@ module parquet_integrate
             real(real64), intent(in)               :: epsrel       !! relative accuracy requested
             integer, intent(in)                    :: limit        !! cap on subintervals
             logical, intent(in)                    :: log_base     !! evaluate `f(exp(u))*exp(u)`
+            logical, intent(in)                    :: negate       !! evaluate at `-x`
             logical, intent(in)                    :: extrapolate  !! run the epsilon table
             type(engine_work), intent(inout)       :: work         !! the subinterval lists
             real(real64), intent(out)              :: res          !! the integral
             real(real64), intent(out)              :: abserr       !! estimate of `|error|`
+            real(real64), intent(out)              :: defabs       !! the FIRST rule application's
+                                                                   !! approximation to the integral
+                                                                   !! of `|f|` over `[a, b]`, which
+                                                                   !! is what the walk's round-off
+                                                                   !! floor is measured against
             integer, intent(inout)                 :: neval        !! evaluation counter
             integer, intent(out)                   :: ier          !! QUADPACK's raw status
             integer, intent(out)                   :: last         !! subintervals produced

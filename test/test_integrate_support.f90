@@ -32,6 +32,9 @@ module test_integrate_support
     public :: x_squared, zero_integrand, unit_step, unit_step_exact
     public :: compact_bump, compact_bump_exact, far_bump, far_bump_exact
     public :: nan_at_half
+    public :: tail_exp, tail_neg_exp, tail_pow2, tail_gauss, tail_osc, tail_osc_exact
+    public :: rising_exp, exp_over_x, exp_over_x_exact, exp_cos, exp_cos_exact
+    public :: narrow_spike, narrow_spike_exact, sliver_bump, sliver_bump_exact
     public :: scaled_runge, exp_profile
 
     !> Half-width of `compact_bump`'s support, which is centred on `BUMP_CENTRE`.
@@ -42,6 +45,15 @@ module test_integrate_support
     real(real64), parameter, public :: STEP_AT = 0.7071067811865476_real64
     !> Terms in `heavy_f`, the deliberately expensive smooth integrand.
     integer, parameter, public :: HEAVY_TERMS = 40
+    !> Half-width of `narrow_spike`, the feature sitting just above a lower bound of one.
+    real(real64), parameter, public :: SPIKE_WIDTH = 1.0e-3_real64
+    !> Centre of `narrow_spike`.
+    real(real64), parameter, public :: SPIKE_AT = 1.02_real64
+    !> Half-width of `sliver_bump`, whose whole support lies between the first two abscissae the
+    !! start-panel search's WIDE first probe places above a lower bound of one.
+    real(real64), parameter, public :: SLIVER_HALF = 5.0e-4_real64
+    !> Centre of `sliver_bump`; its support is `[1.0005, 1.0015]`.
+    real(real64), parameter, public :: SLIVER_AT = 1.001_real64
 
     !> Runge's function scaled by an amplitude, with a counter, as the guide's object example.
     type, extends(pf_integrand) :: scaled_runge
@@ -338,6 +350,175 @@ contains
         end if
 
     end function nan_at_half
+
+
+    ! ---- the infinite ranges -------------------------------------------------------------------
+
+    !> `exp(-x)`: the plainest decaying tail. Integral over `[a, inf)` is `exp(-a)`.
+    function tail_exp(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-x)
+
+    end function tail_exp
+
+    !> `-exp(-x)`: the same tail negated, which is what catches a negligibility test that lost
+    !! its `abs` and steps straight over an integrand that is everywhere below zero.
+    function tail_neg_exp(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = -exp(-x)
+
+    end function tail_neg_exp
+
+    !> `x**-2`: an algebraic tail. Integral over `[a, inf)` is `1/a`.
+    function tail_pow2(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x**(-2.0_real64)
+
+    end function tail_pow2
+
+    !> `exp(-x**2)`: a gaussian tail, the one integrand of this set that is also integrable over
+    !! the whole line.
+    function tail_gauss(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-x*x)
+
+    end function tail_gauss
+
+    !> `sin(x)/x**2`: an oscillatory tail that no method answers to a tight tolerance inside a
+    !! reasonable budget, and which is therefore asserted loosely and NOT asserted to converge.
+    function tail_osc(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = sin(x)/(x*x)
+
+    end function tail_osc
+
+    !> `sin(1) - Ci(1)`, the integral of `sin(x)/x**2` over `[1, inf)`, by parts:
+    !! `integral sin(x)/x^2 = -sin(x)/x + integral cos(x)/x`, which at the bounds is
+    !! `sin(1) - Ci(1)`. qfeet asserts the same literal.
+    pure function tail_osc_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = 0.5040670619069284_real64
+
+    end function tail_osc_exact
+
+    !> `exp(x)`: rising, and integrable only towards `-infinity`. Integral over `(-inf, b]` is
+    !! `exp(b)`, so over `(-inf, 0]` it is one.
+    function rising_exp(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(x)
+
+    end function rising_exp
+
+    !> `exp(-x)/x`: reference integrand D of the design's engine comparison, whose integral over
+    !! `[1, inf)` is the exponential integral `E1(1)`.
+    function exp_over_x(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-x)/x
+
+    end function exp_over_x
+
+    !> `E1(1) = 0.219383934395520274...`, Abramowitz and Stegun 5.1.1, to the digits `real64`
+    !! carries.
+    pure function exp_over_x_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = 0.2193839343955203_real64
+
+    end function exp_over_x_exact
+
+    !> `exp(-x)*cos(x)`: reference integrand E, an oscillatory tail that still converges quickly.
+    function exp_cos(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-x)*cos(x)
+
+    end function exp_cos
+
+    !> `1/2`: the antiderivative of `exp(-x) cos(x)` is `exp(-x)(sin(x) - cos(x))/2`, which is
+    !! `-1/2` at zero and zero at infinity.
+    pure function exp_cos_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = 0.5_real64
+
+    end function exp_cos_exact
+
+    !> A gaussian spike of half-width `SPIKE_WIDTH` centred at `SPIKE_AT`, just above a lower
+    !! bound of one.
+    !!
+    !! This is the shape the start-panel search's NARROW retry exists for: the first panel it
+    !! tries spans a whole factor of e, in which 21 points see nothing at all.
+    function narrow_spike(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-((x - SPIKE_AT)/SPIKE_WIDTH)**2)
+
+    end function narrow_spike
+
+    !> A compactly supported bump in the sliver `[1.0005, 1.0015]`, which is EXACTLY zero
+    !! outside it.
+    !!
+    !! This is the shape the start-panel search's narrow retry exists for, and the only one in
+    !! this suite that needs it. The search's first probe spans `[1, e]`, whose leftmost abscissa
+    !! is at about `1.0022` -- past the whole support -- so all 21 of its values are exactly zero
+    !! and the panel reads as negligible. Widening from there moves every abscissa further right
+    !! and never comes back, so without the retry the walk answers ZERO and reports convergence.
+    !! The retry's much narrower panel `[1, 1.105]` puts an abscissa at about `1.0013`, inside the
+    !! support, and the bump is found.
+    !!
+    !! Compact rather than gaussian on purpose: a gaussian underflows to zero so fast that a probe
+    !! missing it by a few half-widths reads zeros anyway, which makes the fixture depend on the
+    !! exponent range rather than on the abscissae.
+    function sliver_bump(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        real(real64) :: u
+
+        f = 0.0_real64
+        u = (x - SLIVER_AT)/SLIVER_HALF
+        if (abs(u) < 1.0_real64) f = (1.0_real64 - u*u)**2
+
+    end function sliver_bump
+
+    !> `SLIVER_HALF*16/15`: the integral of `(1-u^2)^2` over `[-1, 1]` is `16/15`, and `du` is
+    !! `dx/SLIVER_HALF`.
+    pure function sliver_bump_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = SLIVER_HALF*16.0_real64/15.0_real64
+
+    end function sliver_bump_exact
+
+    !> Integral of `narrow_spike` over `[1, inf)`.
+    !!
+    !! `SPIKE_WIDTH*sqrt(pi)/2*(1 + erf((SPIKE_AT - 1)/SPIKE_WIDTH))`; the `erf` is of twenty, so
+    !! the bracket is two to every bit a `real64` carries, but it is written out rather than
+    !! folded so that moving the spike moves the reference with it.
+    pure function narrow_spike_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = SPIKE_WIDTH*sqrt(acos(-1.0_real64))*0.5_real64 &
+            *(1.0_real64 + erf((SPIKE_AT - 1.0_real64)/SPIKE_WIDTH))
+
+    end function narrow_spike_exact
 
     !> Evaluates `amp/(1 + 25 x^2)` and counts the call.
     function scaled_runge_eval(this, x) result(f)

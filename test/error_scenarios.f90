@@ -3611,8 +3611,14 @@ program error_scenarios
         call scenario_integrate_nan_bound()
     case ("integrate_reversed_bounds")
         call scenario_integrate_reversed_bounds()
-    case ("integrate_infinite_bound_unsupported")
-        call scenario_integrate_infinite_bound_unsupported()
+    case ("integrate_bad_max_panels")
+        call scenario_integrate_bad_max_panels()
+    case ("integrate_max_panels_finite")
+        call scenario_integrate_max_panels_finite()
+    case ("integrate_same_infinity")
+        call scenario_integrate_same_infinity()
+    case ("integrate_log_base_infinite")
+        call scenario_integrate_log_base_infinite()
     case ("integrate_log_base_nonpositive")
         call scenario_integrate_log_base_nonpositive()
     case ("integrate_integrand_nan")
@@ -31449,16 +31455,40 @@ contains
         print '(a, es22.15)', "accepted reversed bounds: ", r
     end subroutine scenario_integrate_reversed_bounds
     !
-    !> TEMPORARY, for this phase only. `pf_infinity()` exists from the phase that introduced the
-    !> module so that an infinite bound can never be mistaken for a large finite one, and it is
-    !> refused until the outward walk lands. The phase that adds the walk deletes this scenario
-    !> from `error_scenarios.f90`, `test_errors.f90` and `tools/run_error_scenarios.sh` together.
-    subroutine scenario_integrate_infinite_bound_unsupported()
+    !> A walk needs at least one panel, so a cap of zero asks for an integral of nothing.
+    subroutine scenario_integrate_bad_max_panels()
         real(real64) :: r
 
-        r = pf_integrate(runge, 1.0_real64, pf_infinity(), 1.0e-8_real64)
-        print '(a, es22.15)', "accepted an infinite bound: ", r
-    end subroutine scenario_integrate_infinite_bound_unsupported
+        r = pf_integrate(runge, 1.0_real64, pf_infinity(), 1.0e-8_real64, max_panels=0)
+        print '(a, es22.15)', "accepted max_panels = 0: ", r
+    end subroutine scenario_integrate_bad_max_panels
+    !
+    !> A finite range has no walk to cap, so `max_panels` on one is a call that does not mean what
+    !> it says -- most often an infinite bound that did not survive the caller's own arithmetic.
+    subroutine scenario_integrate_max_panels_finite()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, max_panels=3)
+        print '(a, es22.15)', "accepted max_panels on a finite range: ", r
+    end subroutine scenario_integrate_max_panels_finite
+    !
+    !> `[+inf, +inf]` is not a zero-width range but a range with no points in it at all, and its
+    !> integral is not zero: it has no value. The finite `a == b` returns zero.
+    subroutine scenario_integrate_same_infinity()
+        real(real64) :: r
+
+        r = pf_integrate(runge, pf_infinity(), pf_infinity(), 1.0e-8_real64)
+        print '(a, es22.15)', "accepted both bounds as the same infinity: ", r
+    end subroutine scenario_integrate_same_infinity
+    !
+    !> `log_base` substitutes `x = exp(u)` over the range the caller named, which needs two finite
+    !> bounds; an infinite range is walked in `log x` already, by the walk's own transform.
+    subroutine scenario_integrate_log_base_infinite()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 1.0_real64, pf_infinity(), 1.0e-8_real64, log_base=.true.)
+        print '(a, es22.15)', "accepted log_base on an infinite range: ", r
+    end subroutine scenario_integrate_log_base_infinite
     !
     !> Integrating in `log x` needs a positive lower bound, because `log(0)` is where the
     !> transformed range would start.

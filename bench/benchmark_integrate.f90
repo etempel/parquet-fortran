@@ -19,10 +19,19 @@ module benchmark_integrate_kernels
     public :: k_heavy, k_heavy_exact
     public :: k_linear, k_linear_exact
     public :: k_gauss, k_gauss_exact
+    public :: k_tail_exp, k_tail_pow15, k_tail_pow2, k_tail_gauss, k_tail_osc
+    public :: k_spike, k_spike_exact, k_bump, k_bump_exact
 
     !> Terms in `k_heavy`, which exists to make one evaluation expensive enough that the
     !! framework's own cost per evaluation stops dominating the measurement.
     integer, parameter :: HEAVY_TERMS = 40
+
+    !> Half-width of `k_spike`, the narrow feature sitting just above the lower bound `1`.
+    real(real64), parameter :: SPIKE_WIDTH = 1.0e-3_real64
+    !> Centre of `k_spike`.
+    real(real64), parameter :: SPIKE_AT = 1.02_real64
+    !> Centre of `k_bump`, far along the range from every lower bound the walk mode uses.
+    real(real64), parameter :: BUMP_AT = 40.0_real64
 
 contains
 
@@ -145,6 +154,92 @@ contains
 
     end function k_gauss_exact
 
+    !> `exp(-x)`: the plainest decaying tail. Integral over `[a, inf)` is `exp(-a)`.
+    function k_tail_exp(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-x)
+
+    end function k_tail_exp
+
+    !> `x**-1.5`: an algebraic tail, which decays far more slowly. Integral over `[a, inf)` is
+    !! `2/sqrt(a)`.
+    function k_tail_pow15(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x**(-1.5_real64)
+
+    end function k_tail_pow15
+
+    !> `x**-2`. Integral over `[a, inf)` is `1/a`. QUADPACK's transform turns this one into a
+    !! CONSTANT, so its reference count is 15 and no method can be scored against it.
+    function k_tail_pow2(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x**(-2.0_real64)
+
+    end function k_tail_pow2
+
+    !> `exp(-x**2)`: a gaussian tail. Integral over `[0, inf)` is `sqrt(pi)/2`.
+    function k_tail_gauss(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-x*x)
+
+    end function k_tail_gauss
+
+    !> `sin(x)/x**2`: an oscillatory tail, which defeats every method at a tight tolerance and is
+    !! reported rather than scored. Integral over `[1, inf)` is `sin(1) - Ci(1)`.
+    function k_tail_osc(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = sin(x)/(x*x)
+
+    end function k_tail_osc
+
+    !> A gaussian spike of half-width `1e-3` centred at `1.02`: the narrow feature sitting just
+    !! above a lower bound of 1, which the start-panel search's NARROW retry is what finds.
+    function k_spike(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-((x - SPIKE_AT)/SPIKE_WIDTH)**2)
+
+    end function k_spike
+
+    !> `spike_width*sqrt(pi)/2*(1 + erf(20))`, which is `spike_width*sqrt(pi)/2` to every bit a
+    !! `real64` carries: 20 half-widths of a gaussian is the whole of it.
+    pure function k_spike_exact() result(v)
+        real(real64) :: v !! the exact integral over [1, inf)
+
+        v = SPIKE_WIDTH*sqrt(acos(-1.0_real64))*0.5_real64 &
+            *(1.0_real64 + erf((SPIKE_AT - 1.0_real64)/SPIKE_WIDTH))
+
+    end function k_spike_exact
+
+    !> A unit-width gaussian bump centred at 40: the feature far along the range that QUADPACK's
+    !! change of variable steps straight over (section 3.4 of the design document).
+    function k_bump(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = exp(-(x - BUMP_AT)**2)
+
+    end function k_bump
+
+    !> `sqrt(pi)`: from any lower bound well below 40 the whole bump is inside the range.
+    pure function k_bump_exact() result(v)
+        real(real64) :: v !! the exact integral over [a, inf) for a well below 40
+
+        v = sqrt(acos(-1.0_real64))
+
+    end function k_bump_exact
+
 end module benchmark_integrate_kernels
 
 !> What `pf_integrate` costs: accuracy against evaluations per integrand class (`cost`), and the
@@ -173,6 +268,8 @@ program benchmark_integrate
         call run_cost(rounds, repeats)
     case ("overhead")
         call run_overhead(rounds, repeats)
+    case ("walk")
+        call run_walk()
     case default
         write (error_unit, '(a)') "benchmark_integrate: unknown mode '"//trim(mode)//"'"
         error stop 1
@@ -212,8 +309,8 @@ contains
             case default
                 write (error_unit, '(a)') "benchmark_integrate: unknown option '" &
                     //trim(arg(1:eq - 1))//"'"
-                write (error_unit, '(a)') "Usage: benchmark_integrate [--mode=cost|overhead] " &
-                    //"[--rounds=N] [--repeats=N]"
+                write (error_unit, '(a)') "Usage: benchmark_integrate " &
+                    //"[--mode=cost|overhead|walk] [--rounds=N] [--repeats=N]"
                 error stop 1
             end select
         end do
@@ -359,5 +456,81 @@ contains
         if (keep /= keep) print '(a)', "  (checksum went non-finite)"
 
     end subroutine run_overhead
+
+    !> What the outward walk costs on a tail, beside the count QUADPACK's change of variable takes.
+    !!
+    !! Counts only, no timing: the evaluation count IS the walk's cost, it is deterministic to
+    !! within one rule application across compilers, and the oscillatory shape -- which neither
+    !! method answers at this tolerance -- would otherwise dominate the wall clock without saying
+    !! anything. The reference column is `dqagi`'s count at the same tolerances, recorded in the
+    !! design document; there is no `dqagi` in this build.
+    !!
+    !! The last four rows are the two features the reference method loses: a narrow spike just
+    !! above the lower bound, and a unit-width bump at 40 approached from three lower bounds.
+    !! `dqagi` answers ZERO on those and reports convergence, which is why the walk exists; they
+    !! carry no ratio, only a relative error that has to stay small.
+    subroutine run_walk()
+
+        real(real64), parameter :: RTOL = 1.0e-10_real64
+        real(real64), parameter :: ATOL = 1.0e-14_real64
+        !> `sin(1) - Ci(1)`, by parts.
+        real(real64), parameter :: OSC_EXACT = 0.5040670619069284_real64
+
+        real(real64) :: inf
+
+        inf = pf_infinity()
+
+        print '(a)', "=== pf_integrate: the outward walk on an infinite range ==="
+        print '(a,es8.1,a,es8.1)', "rtol ", RTOL, ", atol ", ATOL
+        print '(a)', ""
+        print '(a)', "  tail shape                 neval  npanels    relerr   cvg   dqagi   ratio"
+
+        call walk_row("exp(-x)      [1, inf)  ", k_tail_exp, 1.0_real64, inf, &
+                      exp(-1.0_real64), 135)
+        call walk_row("x**-1.5      [1, inf)  ", k_tail_pow15, 1.0_real64, inf, &
+                      2.0_real64, 165)
+        call walk_row("x**-2        [1, inf)  ", k_tail_pow2, 1.0_real64, inf, &
+                      1.0_real64, 15)
+        call walk_row("exp(-x**2)   [0, inf)  ", k_tail_gauss, 0.0_real64, inf, &
+                      0.5_real64*sqrt(acos(-1.0_real64)), 195)
+        call walk_row("sin(x)/x**2  [1, inf)  ", k_tail_osc, 1.0_real64, inf, OSC_EXACT, 14985)
+        print '(a)', ""
+        call walk_row("spike @1.02  [1, inf)  ", k_spike, 1.0_real64, inf, k_spike_exact(), 0)
+        call walk_row("bump @40     [1, inf)  ", k_bump, 1.0_real64, inf, k_bump_exact(), 0)
+        call walk_row("bump @40     [0.5, inf)", k_bump, 0.5_real64, inf, k_bump_exact(), 0)
+        call walk_row("bump @40     [0, inf)  ", k_bump, 0.0_real64, inf, k_bump_exact(), 0)
+        print '(a)', ""
+        print '(a)', "  x**-2 is excluded from the score: the reference method's change of"
+        print '(a)', "  variable turns it into a constant, which one rule application is exact"
+        print '(a)', "  on. The oscillatory row is reported, not scored -- neither method"
+        print '(a)', "  converges on it at this tolerance."
+
+    end subroutine run_walk
+
+    !> One tail shape: the count, the panels, the error and the ratio against the reference.
+    subroutine walk_row(tag, fn, a, b, want, reference)
+        character(len=*), intent(in) :: tag       !! names the shape in the report
+        procedure(pf_integrand_func) :: fn        !! the integrand
+        real(real64), intent(in)     :: a         !! lower bound
+        real(real64), intent(in)     :: b         !! upper bound
+        real(real64), intent(in)     :: want      !! the closed form over [a, b]
+        integer, intent(in)          :: reference !! `dqagi`'s count, or 0 where it has none
+
+        type(pf_integration_info) :: info
+        real(real64)              :: r
+
+        r = pf_integrate(fn, a, b, pf_tolerance(1.0e-10_real64, 1.0e-14_real64), info=info)
+
+        if (reference > 0) then
+            print '(a,a,i9,i9,es11.2,a,i8,f8.2)', "  ", tag, info%neval, info%npanels, &
+                abs(r - want)/abs(want), merge("  yes", "   no", info%converged), reference, &
+                real(info%neval, real64)/real(reference, real64)
+        else
+            print '(a,a,i9,i9,es11.2,a,a)', "  ", tag, info%neval, info%npanels, &
+                abs(r - want)/abs(want), merge("  yes", "   no", info%converged), &
+                "       -       -"
+        end if
+
+    end subroutine walk_row
 
 end program benchmark_integrate

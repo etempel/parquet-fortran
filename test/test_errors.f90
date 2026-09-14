@@ -3085,8 +3085,14 @@ contains
                 test_integrate_nan_bound_aborts), &
             new_unittest("reversed integration bounds are refused", &
                 test_integrate_reversed_bounds_aborts), &
-            new_unittest("an infinite bound is refused until the walk lands", &
-                test_integrate_infinite_bound_unsupported_aborts), &
+            new_unittest("a max_panels of zero is refused", &
+                test_integrate_bad_max_panels_aborts), &
+            new_unittest("max_panels on a finite range is refused", &
+                test_integrate_max_panels_finite_aborts), &
+            new_unittest("both bounds the same infinity is refused", &
+                test_integrate_same_infinity_aborts), &
+            new_unittest("log_base on an infinite range is refused", &
+                test_integrate_log_base_infinite_aborts), &
             new_unittest("log_base from a non-positive lower bound is refused", &
                 test_integrate_log_base_nonpositive_aborts), &
             new_unittest("an integrand returning a non-finite value aborts naming x", &
@@ -18763,12 +18769,33 @@ contains
             required_stderr="lower bound must not exceed the upper bound")
     end subroutine test_integrate_reversed_bounds_aborts
     !
-    subroutine test_integrate_infinite_bound_unsupported_aborts(error)
+    subroutine test_integrate_bad_max_panels_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "integrate_infinite_bound_unsupported", expect_abort=.true., &
-            failure_message="an infinite bound was expected to abort in this phase", &
-            required_stderr="infinite bounds arrive in a later phase")
-    end subroutine test_integrate_infinite_bound_unsupported_aborts
+        call check_scenario_exit_status_and_stderr(error, "integrate_bad_max_panels", expect_abort=.true., &
+            failure_message="a max_panels of zero was expected to abort", &
+            required_stderr="max_panels must be positive")
+    end subroutine test_integrate_bad_max_panels_aborts
+    !
+    subroutine test_integrate_max_panels_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_max_panels_finite", expect_abort=.true., &
+            failure_message="max_panels on a finite range was expected to abort", &
+            required_stderr="max_panels applies only to an infinite range")
+    end subroutine test_integrate_max_panels_finite_aborts
+    !
+    subroutine test_integrate_same_infinity_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_same_infinity", expect_abort=.true., &
+            failure_message="both bounds the same infinity was expected to abort", &
+            required_stderr="bounds must not both be the same infinity")
+    end subroutine test_integrate_same_infinity_aborts
+    !
+    subroutine test_integrate_log_base_infinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_log_base_infinite", expect_abort=.true., &
+            failure_message="log_base on an infinite range was expected to abort", &
+            required_stderr="log_base applies only to a finite range")
+    end subroutine test_integrate_log_base_infinite_aborts
     !
     subroutine test_integrate_log_base_nonpositive_aborts(error)
         type(error_type), allocatable, intent(out) :: error

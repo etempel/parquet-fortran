@@ -37,9 +37,10 @@
 !! 1. The integrand is a `class(pf_integrand), intent(inout)` dummy instead of
 !!    `procedure(func) :: f`; every evaluation is `f%eval(x)`. QUADPACK's procedure interface has
 !!    no user-data argument, and this library passes no internal procedure as an actual argument.
-!! 2. A `log_base` flag travels beside the integrand: with it set, the rule works in `u = log x`
-!!    and evaluates `f(exp(u))*exp(u)`. The `negate` flag of the semi-infinite ranges arrives with
-!!    the outward walk in a later phase.
+!! 2. Two evaluation flags travel beside the integrand. With `log_base` the rule works in
+!!    `u = log x` and evaluates `f(exp(u))*exp(u)`; with `negate` it evaluates `f(-x)`, which is
+!!    how the outward walk answers a range whose lower bound is `-infinity`. Both are tested once
+!!    per point, in `eval_point`, and neither is visible to the adaptive logic above it.
 !! 3. A real evaluation counter (`neval`, `intent(inout)`) is incremented once per `f%eval`,
 !!    replacing QUADPACK's `Neval = 42*Last - 21`. The formula remains true on a finite, non-log
 !!    run and `test_neval_matches_the_rule_formula` asserts it as a cross-check.
@@ -64,6 +65,10 @@
 !!     sum, which is what the `points` record reproduces exactly.
 !! 12. 132 columns, lower-case dummy names, and `!>`/`!!` doc-comments throughout; upstream's
 !!     argument documentation is kept where it is still correct.
+!! 13. `qagse` returns `defabs` -- the first rule application's approximation to the integral of
+!!     `|f|` over the whole range it was given -- which upstream keeps as a local. The outward
+!!     walk measures its round-off floor against the sum of these, exactly as qfeet measured its
+!!     own against the unrefined rule's `resabs`, and nothing else reads it.
 submodule (parquet_integrate) parquet_integrate_engine
 
     implicit none
@@ -126,11 +131,18 @@ contains
     !! its value is `f(exp(u))` rather than the `f(exp(u))*exp(u)` the rule consumes, so that
     !! `wrec*frec` is this point's contribution either way.
     !!
+    !! **`negate` puts its sign on the abscissa, never on the weight.** Integrating `f` over
+    !! `(-inf, b]` is integrating `g(y) = f(-y)` over `[-b, +inf)`, and a rule `sum(w*g(y))` is
+    !! `sum(w*f(-y))` -- the same weights, read at the mirrored points. Reversing the caller's
+    !! bounds is what absorbs the `-1` of `dx = -dy`, so a sign on the weight would make the
+    !! record's weighted sum the negative of the integral it is supposed to reproduce.
+    !!
     !! Impure: it aborts, and a `pure` guard-only procedure's call is deleted by ifx at `-O0`.
-    subroutine eval_point(f, u, log_base, wgt, neval, xrec, wrec, frec, fval, context)
+    subroutine eval_point(f, u, log_base, negate, wgt, neval, xrec, wrec, frec, fval, context)
         class(pf_integrand), intent(inout)     :: f        !! the integrand
         real(real64), intent(in)               :: u        !! abscissa, in the engine's variable
         logical, intent(in)                    :: log_base !! the engine's variable is `log x`
+        logical, intent(in)                    :: negate   !! evaluate and record at `-x`
         real(real64), intent(in)               :: wgt      !! Kronrod weight times the half-length
         integer, intent(inout)                 :: neval    !! evaluation counter, incremented
         real(real64), intent(out)              :: xrec     !! recorded abscissa, the caller's `x`
@@ -139,13 +151,18 @@ contains
         real(real64), intent(out)              :: fval     !! value the RULE consumes
         character(len=*), intent(in), optional :: context  !! caller's call-site text
 
-        real(real64) :: x, fx
+        real(real64) :: x, y, fx
         logical      :: bad
 
         if (log_base) then
-            x = exp(u)
+            y = exp(u)
         else
-            x = u
+            y = u
+        end if
+        if (negate) then
+            x = -y
+        else
+            x = y
         end if
 
         fx = f%eval(x)
@@ -165,8 +182,10 @@ contains
         xrec = x
         frec = fx
         if (log_base) then
-            wrec = wgt*x
-            fval = fx*x
+            ! `y`, not `x`: under `negate` the abscissa is mirrored but the Jacobian `dy/du` of
+            ! the walk's own `y = exp(u)` is positive, and it is the Jacobian that is a weight.
+            wrec = wgt*y
+            fval = fx*y
         else
             wrec = wgt
             fval = fx
@@ -203,17 +222,18 @@ contains
 
         resg = 0.0_real64
         k = 1
-        call eval_point(f, centr, log_base, WGK(11)*hlgth, neval, rx(k), rw(k), rf(k), fc, context)
+        call eval_point(f, centr, log_base, negate, WGK(11)*hlgth, neval, rx(k), rw(k), rf(k), &
+                        fc, context)
         resk = WGK(11)*fc
         resabs = abs(resk)
         do j = 1, 5
             jtw = 2*j
             absc = hlgth*XGK(jtw)
             k = k + 1
-            call eval_point(f, centr - absc, log_base, WGK(jtw)*hlgth, neval, &
+            call eval_point(f, centr - absc, log_base, negate, WGK(jtw)*hlgth, neval, &
                             rx(k), rw(k), rf(k), fval1, context)
             k = k + 1
-            call eval_point(f, centr + absc, log_base, WGK(jtw)*hlgth, neval, &
+            call eval_point(f, centr + absc, log_base, negate, WGK(jtw)*hlgth, neval, &
                             rx(k), rw(k), rf(k), fval2, context)
             fv1(jtw) = fval1
             fv2(jtw) = fval2
@@ -226,10 +246,10 @@ contains
             jtwm1 = 2*j - 1
             absc = hlgth*XGK(jtwm1)
             k = k + 1
-            call eval_point(f, centr - absc, log_base, WGK(jtwm1)*hlgth, neval, &
+            call eval_point(f, centr - absc, log_base, negate, WGK(jtwm1)*hlgth, neval, &
                             rx(k), rw(k), rf(k), fval1, context)
             k = k + 1
-            call eval_point(f, centr + absc, log_base, WGK(jtwm1)*hlgth, neval, &
+            call eval_point(f, centr + absc, log_base, negate, WGK(jtwm1)*hlgth, neval, &
                             rx(k), rw(k), rf(k), fval2, context)
             fv1(jtwm1) = fval1
             fv2(jtwm1) = fval2
@@ -430,7 +450,7 @@ contains
 
     module procedure qagse
 
-        real(real64) :: abseps, correc, defabs, dres, ertest, resabs, reseps, res3la(3)
+        real(real64) :: abseps, correc, dres, ertest, resabs, reseps, res3la(3)
         integer      :: id, ierro, iroff1, iroff2, iroff3, jupbnd, k, ksgn, ktmin, nrmax
         real(real64) :: area12, erro12
         real(real64) :: area1, a1, b1, defab1, error1
@@ -472,7 +492,8 @@ contains
             ! First approximation to the integral.
 
             ierro = 0
-            call qk21(f, a, b, log_base, res, abserr, defabs, resabs, neval, sx1, sw1, sf1, context)
+            call qk21(f, a, b, log_base, negate, res, abserr, defabs, resabs, neval, &
+                      sx1, sw1, sf1, context)
 
             ! Test on accuracy.
 
@@ -526,9 +547,9 @@ contains
                 a2 = b1
                 b2 = work%blist(maxerr)
                 erlast = errmax
-                call qk21(f, a1, b1, log_base, area1, error1, resabs, defab1, neval, &
+                call qk21(f, a1, b1, log_base, negate, area1, error1, resabs, defab1, neval, &
                           sx1, sw1, sf1, context)
-                call qk21(f, a2, b2, log_base, area2, error2, resabs, defab2, neval, &
+                call qk21(f, a2, b2, log_base, negate, area2, error2, resabs, defab2, neval, &
                           sx2, sw2, sf2, context)
 
                 ! Improve previous approximations to the integral and error, and test for

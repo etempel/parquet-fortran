@@ -2647,9 +2647,19 @@ contains
             call grp%gather("big", g32, i64b, n32, is_valid=m2)
             call grp%gather("big", int(g32, int64), i64b, n64)
             if (int(n32, int64) /= n64) agree = .false.
+            ! Both buffers are blanked to the SAME sentinel before each pair, exactly as `b64` is
+            ! above: `%gather` writes `buf(1:n)` and leaves the tail alone, so comparing the whole
+            ! array reads what the library never wrote -- heap garbage that differs between two
+            ! allocations, and an intermittent failure rather than a finding (`testing.md`,
+            ! "Tests run concurrently"). Blanked, the full-length comparison still asserts that
+            ! neither specific wrote past `n`.
+            b32 = -7.0_real32
+            b32b = -7.0_real32
             call grp%gather("f", int(g32, int64), b32, n64, is_valid=m1)
             call grp%gather("f", g32, b32b, n32, is_valid=m2)
             if (int(n32, int64) /= n64 .or. .not. all(b32b == b32) .or. .not. all(m2 .eqv. m1)) agree = .false.
+            lb = .false.
+            lbb = .false.
             call grp%gather("b", int(g32, int64), lb, n64, is_valid=m1)
             call grp%gather("b", g32, lbb, n32, is_valid=m2)
             if (int(n32, int64) /= n64 .or. .not. all(lbb .eqv. lb) .or. .not. all(m2 .eqv. m1)) agree = .false.

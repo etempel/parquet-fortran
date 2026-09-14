@@ -314,6 +314,8 @@ contains
                 test_selection_route_and_nearest_tie), &
             new_unittest("an absorbing weight keeps the quantile positions ordered", &
                 test_absorbing_weight_keeps_positions_ordered), &
+            new_unittest("a weight near huge does not overflow the levels that never square it", &
+                test_weight_near_huge_survives_the_lower_levels), &
             new_unittest("no reduction raises an IEEE exception on a non-finite population", &
                 test_no_reduction_raises_on_a_non_finite_population) &
             ]
@@ -8011,6 +8013,50 @@ contains
             prev = q
         end do
     end subroutine test_absorbing_weight_keeps_positions_ordered
+
+    !> A weight near `huge` does not overflow the levels that never read `sum(w**2)`.
+    !!
+    !! **A contract about the process rather than the answer**, and the twin of
+    !! `test_no_reduction_raises_on_a_non_finite_population` one weight-shaped step along. Squaring
+    !! a weight above about 1.3e154 overflows, and `stats_engine` formed `sum(w**2)` for every
+    !! caller regardless of the moment level it was asked for -- so `pf_sum`, `pf_mean` and every
+    !! ORDER statistic (which reach pass one at level 0, through `stats_compact`) executed an
+    !! overflow on a population they answer about perfectly well. Under gfortran and ifx that is a
+    !! line at program exit attached to nothing; under nagfor, whose default `-ieee=stop` unmasks
+    !! the traps, the process DIES and takes every later suite in the runner with it.
+    !!
+    !! The fix is that the total is formed at level 2 and above, where the variance family reads
+    !! it, and nowhere below -- so this test calls exactly the entry points BELOW that line and
+    !! asserts each answers. `1/err**2` over a precise measurement reaches this range, so the
+    !! fixture is an ordinary input. The variance family itself is out of scope here: it needs the
+    !! quantity, and what it should answer for a weight this large is its own question.
+    subroutine test_weight_near_huge_survives_the_lower_levels(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(3), w(3), s, mn, q, med
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64]
+        ! The precondition, read rather than assumed: this weight must be past the square root of
+        ! `huge`, or squaring it does not overflow and the test asserts nothing.
+        w = [1.0e308_real64, 1.0e-300_real64, 1.0e-300_real64]
+        call check(error, w(1) > sqrt(huge(0.0_real64)), &
+            "the weight is not large enough to overflow when squared -- this fixture proves nothing")
+        if (allocated(error)) return
+
+        ! Level 0: the plain sum, and the order tier that shares its compaction.
+        call pf_sum(x, s, weights=w)
+        call check(error, s == w(1) + w(2) + w(3), "pf_sum(weights=) did not answer the weighted total")
+        if (allocated(error)) return
+        call pf_median(x, med, weights=w)
+        call check(error, med >= 1.0_real64 .and. med <= 3.0_real64, "pf_median(weights=) left the population")
+        if (allocated(error)) return
+        call pf_quantile(x, 0.25_real64, q, weights=w)
+        call check(error, q >= 1.0_real64 .and. q <= 3.0_real64, "pf_quantile(weights=) left the population")
+        if (allocated(error)) return
+
+        ! Level 1: the refined mean. The absorbing weight puts it on that element's value.
+        call pf_mean(x, mn, weights=w)
+        call check(error, mn == 1.0_real64, "pf_mean(weights=) did not collapse onto the absorbing weight's value")
+    end subroutine test_weight_near_huge_survives_the_lower_levels
 
     !> No reduction RAISES an IEEE exception on a non-finite population.
     !!

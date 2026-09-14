@@ -496,6 +496,11 @@ it, and nothing silences the rebuild itself.
   `pf_kurtosis` and `pf_corr` each compared a NaN with an ordered operator, and a `pf_stats`
   accumulator fed such a population through `%update` did the same while combining its blocks.
   Under a compiler that unmasks the IEEE traps, nagfor's default among them, that ends the process.
+- `pf_sum`, `pf_mean` and every `parquet_stats` order statistic — `pf_median`, `pf_quantile`,
+  `pf_quantiles`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad` and `pf_mode` —
+  raised `IEEE_OVERFLOW` on a weighted population carrying a weight above about 1.3e154, while
+  answering it correctly. Under a compiler that unmasks the IEEE traps, nagfor's default among
+  them, that ends the process.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

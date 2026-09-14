@@ -287,8 +287,10 @@ contains
         !! * **0** stops after pass one, leaving the counts, `vsum` and the compacted survivors,
         !!   and marking every central moment -- and the extremes, `w_sum` and `w_sq` -- undefined.
         !!   That is what `pf_sum` and an ORDER statistic want.
-        !! * **1** adds the refined mean, and nothing else. `pf_mean`.
-        !! * **2** adds `m2`, so the variance family. `pf_variance`, `pf_stddev`, `pf_sem`.
+        !! * **1** adds the refined mean, and nothing else -- `w_sq` stays undefined here too, as
+        !!   the body below says. `pf_mean`.
+        !! * **2** adds `m2` and `w_sq`, so the variance family. `pf_variance`, `pf_stddev`,
+        !!   `pf_sem`.
         !! * **3** adds `m3`. `pf_skewness`.
         !! * **4** adds `m4`, the full set. `pf_kurtosis`, `pf_moments`, `pf_stats`.
         !!
@@ -614,14 +616,6 @@ contains
         else if (acc%vmin < -huge(0.0_real64)) then
             acc%vsum = acc%vmin
         end if
-        if (weighted) then
-            call pair_reduce(pw, nb)
-            acc%w_sum = pw(1)
-            acc%w_sq = sum_of_squares(wb, m, nb)
-        else
-            acc%w_sum = real(m, real64)
-            acc%w_sq = real(m, real64)
-        end if
         if (nm <= 0) then
             ! Pass one answered everything this caller asked for. `stats_undefine` marks the
             ! central moments NaN rather than leaving them zero, so a caller that reads one anyway
@@ -629,6 +623,30 @@ contains
             call stats_undefine(acc)
             call stats_hand_over(xb, wb, keep_x, keep_w)
             return
+        end if
+        ! **`w_sq` is formed from level 2 up and never below, and THAT is load-bearing.**
+        ! `sum(w**2)` OVERFLOWS for a weight above about 1.3e154, and nagfor's default `-ieee=stop`
+        ! turns an overflow into a dead process -- on a population every level here answers about
+        ! perfectly well. A weight of `1/err**2` over a precise measurement reaches that range, so
+        ! it is an ordinary input rather than a contrived one: forming the total unconditionally
+        ! killed `pf_sum`, `pf_mean` and every ORDER statistic (level 0, through `stats_compact`)
+        ! (`test_weight_near_huge_survives_the_lower_levels`).
+        !
+        ! Nothing below level 2 reads it: `w_sq` is the variance family's alone -- `stats_var`,
+        ! `stats_neff`, and `stats_sem`/`stats_skew`/`stats_kurt` built on them -- and every one of
+        ! those is reached at level 2 or above. Left at the 0 its default initialiser gives it, it
+        ! is the same "undefined" marker `stats_undefine` hands back on the level-0 path.
+        !
+        ! Sitting BELOW the level-0 return is a saving rather than a second guard: `w_sum` is dead
+        ! there too (`stats_undefine` zeroes it), and it is needed from level 1 up, for `mu`. It
+        ! cannot overflow on any population whose `vsum` did not.
+        if (weighted) then
+            call pair_reduce(pw, nb)
+            acc%w_sum = pw(1)
+            if (nm >= 2) acc%w_sq = sum_of_squares(wb, m, nb)
+        else
+            acc%w_sum = real(m, real64)
+            acc%w_sq = real(m, real64)
         end if
         mu = acc%vsum / acc%w_sum
 

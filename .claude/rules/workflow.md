@@ -15,6 +15,20 @@ Rules for how work is done in this repository. Read before any change.
 - **Apply only low-blast-radius renames/refactors directly** (few call sites, no public API or doc
   impact). Anything wider (public API, many call sites, cross-file conventions) is proposed and
   waits for confirmation.
+- **Report the reading you implemented and what you deliberately left out**, in the closing report
+  of any implement/fix request that had more than one reading (`/feature-request`'s "Not in scope",
+  applied without the document). Say it at the end; do not block on it.
+
+## Verifying before reporting
+
+- **Name the checks a change must pass before starting it, and run them before reporting it done**:
+  `fpm test` (`build.md`: the ordinary check), `tools/run_lint_check.sh` (CI's whole lint stage),
+  plus whatever the area adds — `fpm test --profile debug` for allocation or array shapes,
+  `tools/check_doc_anchors.py` for edited headings or anchors, a generator's `--check`,
+  `tools/check_module_footprints.sh` for a new `use` line, `ford --warn docs.md` per-module
+  `Unknown entity` for doc-comment changes. `/feature-request` §4 carries the full list.
+- **Report what was run and what it said.** A check not run is named as not run; a failure is
+  quoted, never summarised away.
 
 ## CI and the CI image
 

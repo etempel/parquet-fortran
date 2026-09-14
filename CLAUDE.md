@@ -55,7 +55,7 @@ addition:
 
 | File | Covers | Loaded |
 |---|---|---|
-| `.claude/rules/workflow.md` | Guardrails: scope of edits, no commits on `main`, report before implementing, CI and the CI image, `feature_*.md` and the `feature_risks.md` register, scripted edits | always |
+| `.claude/rules/workflow.md` | Guardrails: scope of edits, no commits on `main`, report before implementing, verifying before reporting, CI and the CI image, `feature_*.md` and the `feature_risks.md` register, scripted edits | always |
 | `.claude/rules/documentation.md` | Tests + docs + CHANGELOG obligation, CHANGELOG rules, the three doc layers, CONTRIBUTING.md index rule, current-state rule, anchor checking, FORD conventions and config | always |
 | `.claude/rules/code-style.md` | Files and program units, generated files, interface blocks and submodule rules, repository layout | always |
 | `.claude/rules/module-structure.md` | The module tree, entry modules, tiers and footprints, the facades, `parquet_toml`, `parquet_random`/`parquet_sampling`, random word spaces, sorting tiers | always |

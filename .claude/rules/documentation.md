@@ -2,10 +2,12 @@
 
 ## New features require tests, docs and a CHANGELOG entry
 
-For every "implement/add" request, without being asked separately:
+For every "implement/add/fix" request, without being asked separately:
 
 1. **Tests** in the relevant `test/*.f90` suite; abort/error paths via `test/error_scenarios.f90` +
-   `test/test_errors.f90` + `tools/run_error_scenarios.sh` (see `testing.md`).
+   `test/test_errors.f90` + `tools/run_error_scenarios.sh` (see `testing.md`). **A FIX writes its
+   test first and runs it against the unfixed source to see it fail**; a fix whose test was never
+   seen red is a surviving mutation (`testing.md`, Mutation testing).
 2. **Docs**: every new public procedure/type gets a `!>`/`!!` doc-comment (the FORD reference is the
    only per-procedure index); user-facing behaviour goes in the relevant `doc/pages/<group>/*.md`
    page; README.md only when the landing-page story changes; CONTRIBUTING.md only for contributor

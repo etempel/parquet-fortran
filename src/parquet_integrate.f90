@@ -1,5 +1,6 @@
 !> Adaptive numerical integration of a function of one `real64` variable: `pf_integrate`, the
-!> 21-point Gauss-Kronrod rule with adaptive bisection over a finite range.
+!> 21-point Gauss-Kronrod rule with adaptive bisection over a finite range, and an outward walk
+!> over the same rule for an infinite one.
 !!
 !! `parquet_integrate` is an **Arrow-free leaf**: it imports the two INTRINSIC modules
 !! `iso_fortran_env` and `ieee_arithmetic`, and no module of this library. An intrinsic module is
@@ -29,7 +30,8 @@
 !! **What the integrator cannot see**: a feature of the integrand narrower than the spacing of the
 !! 21 points of the first rule application is integrated as zero and reported as converged. That
 !! is a property of the input rather than of the code; `points=` shows where the integrand was
-!! actually sampled, and naming the feature's neighbourhood is what makes it visible.
+!! actually sampled, and `breakpoints=` is what makes such a feature visible -- a cut at each side
+!! of it puts a rule application on the piece that contains it.
 !!
 !! The engine is QUADPACK's, vendored and reworked; `src/parquet_integrate_engine.f90`'s header
 !! carries the attribution and the full list of deviations from the upstream text.
@@ -203,9 +205,9 @@ module parquet_integrate
     !!
     !! ```
     !! res = pf_integrate(f, a, b, rtol, [max_neval], [converged], [info], [points], [context], &
-    !!                    [log_base], [extrapolate], [max_panels])
+    !!                    [log_base], [extrapolate], [max_panels], [breakpoints])
     !! res = pf_integrate(f, a, b, tol,  [max_neval], [converged], [info], [points], [context], &
-    !!                    [log_base], [extrapolate], [max_panels])
+    !!                    [log_base], [extrapolate], [max_panels], [breakpoints])
     !! ```
     !!
     !! Either bound may be an infinity, which is how the four ranges are spelled:
@@ -234,7 +236,8 @@ module parquet_integrate
     !! * `tol` -- a `pf_tolerance` supplying `rtol` and `atol` together, in place of `rtol`.
     !! * `max_neval` -- optional budget on integrand evaluations, default 100000. Reaching it is
     !!   `PF_INT_LIMIT` and `converged = .false.`, not an error. The count never exceeds it on a
-    !!   finite range.
+    !!   finite range, with or without `breakpoints`, provided the budget covers one rule
+    !!   application per piece (21 evaluations each).
     !! * `converged` -- optional `logical`, `intent(out)`: `info%status == PF_INT_OK`.
     !! * `info` -- optional `type(pf_integration_info)`, `intent(out)`: status, error estimate,
     !!   evaluation count, subinterval count and the plain partition sum.
@@ -250,16 +253,27 @@ module parquet_integrate
     !! * `max_panels` -- optional cap on the panels ONE walk may use, default 50, counting the
     !!   first panel the search accepted. Reaching it is `PF_INT_LIMIT`, not an error. Present on
     !!   a finite range aborts; on `(-inf, +inf)`, which is two walks, it caps each of them.
+    !! * `breakpoints` -- optional rank-1 `real64` of interior points at which the range is cut.
+    !!   Each piece is integrated on its own, by the path its own bounds select, and the results,
+    !!   error estimates and records are concatenated in order. This is how a caller NAMES a
+    !!   feature the first rule application would not sample -- the one thing that turns the blind
+    !!   spot below into a right answer. The breakpoints are sorted here, must be finite, distinct
+    !!   and strictly inside the range, and may be given on an infinite range, where the pieces
+    !!   are `(-inf, p1], [p1, p2], ..., [pn, +inf)` and no split at zero is made. Each piece is
+    !!   integrated to `rtol` of itself and to `atol/n_pieces`, so the sum meets both tolerances
+    !!   whenever every piece does; `converged` is the conjunction.
     !!
-    !! There is no optional `real64` argument in the list and there must never be one: an optional
-    !! dummy counts against the margin that distinguishes the `rtol` specifics from the `tol`
-    !! specifics (`fortran-gotchas.md`), so `atol` travels inside `pf_tolerance` and `abserr`
-    !! inside `pf_integration_info`.
+    !! There is no optional SCALAR `real64` argument in the list and there must never be one: an
+    !! optional dummy counts against the margin that distinguishes the `rtol` specifics from the
+    !! `tol` specifics (`fortran-gotchas.md`), so `atol` travels inside `pf_tolerance` and
+    !! `abserr` inside `pf_integration_info`. `breakpoints` is the one real in the list and is
+    !! safe because RANK is part of what distinguishes two specifics: a rank-1 dummy can never be
+    !! mistaken for the scalar `rtol`.
     interface pf_integrate
 
         !> Integrand as an object, tolerance as a bare `rtol`.
         module function integrate_obj_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                           context, log_base, extrapolate, max_panels) result(res)
+                                           context, log_base, extrapolate, max_panels, breakpoints) result(res)
             implicit none
             class(pf_integrand), intent(inout)                  :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -273,12 +287,13 @@ module parquet_integrate
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
             integer, intent(in), optional                       :: max_panels !! walk panel cap
+            real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
             real(real64)                                        :: res        !! the integral
         end function integrate_obj_rtol
 
         !> Integrand as an object, tolerance as a `pf_tolerance`.
         module function integrate_obj_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                          context, log_base, extrapolate, max_panels) result(res)
+                                          context, log_base, extrapolate, max_panels, breakpoints) result(res)
             implicit none
             class(pf_integrand), intent(inout)                  :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -292,12 +307,13 @@ module parquet_integrate
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
             integer, intent(in), optional                       :: max_panels !! walk panel cap
+            real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
             real(real64)                                        :: res        !! the integral
         end function integrate_obj_tol
 
         !> Integrand as a plain function, tolerance as a bare `rtol`.
         module function integrate_func_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                            context, log_base, extrapolate, max_panels) result(res)
+                                            context, log_base, extrapolate, max_panels, breakpoints) result(res)
             implicit none
             procedure(pf_integrand_func)                        :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -311,12 +327,13 @@ module parquet_integrate
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
             integer, intent(in), optional                       :: max_panels !! walk panel cap
+            real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
             real(real64)                                        :: res        !! the integral
         end function integrate_func_rtol
 
         !> Integrand as a plain function, tolerance as a `pf_tolerance`.
         module function integrate_func_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                           context, log_base, extrapolate, max_panels) result(res)
+                                           context, log_base, extrapolate, max_panels, breakpoints) result(res)
             implicit none
             procedure(pf_integrand_func)                        :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
@@ -330,6 +347,7 @@ module parquet_integrate
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
             integer, intent(in), optional                       :: max_panels !! walk panel cap
+            real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
             real(real64)                                        :: res        !! the integral
         end function integrate_func_tol
 

@@ -25,6 +25,21 @@
 #             deterministic to within one rule application across compilers, while the oscillatory
 #             shape would dominate a wall clock without saying anything.
 #
+#   threads   What concurrency buys: N independent integrations of a parameterised object across
+#             a thread ladder 1, 2, 4, ... 64, one object per iteration. Two columns, answering
+#             two different questions -- the wall time and its speedup say what threading is
+#             WORTH, and `mismatches` says whether the answers are the SAME ones. Every result is
+#             compared BIT FOR BIT with the serial arm's, in every round rather than only the
+#             fastest, and the mode EXITS NONZERO when a single one differs. That gate is the
+#             point: `pf_integrate` claims thread safety by construction -- no module variable
+#             that is not a `parameter`, no state outliving a call -- and a claim about absence
+#             cannot be read off the source. Quote `OMP_PLACES=sockets` and the load average when
+#             reporting a figure from here. Set `OMP_NUM_THREADS` to bound the ladder; arms above
+#             what the runtime offers are skipped, and a run offering one thread says so.
+#
+#             The suite `test/test_integrate_omp.f90` asserts the same equality as a test; this
+#             mode is where the ladder and the timing live, which a test may not assert.
+#
 #             The width of one panel is a parameter of the module (`TAIL_STEP`), not an argument,
 #             so sweeping it means recompiling: copy `src/parquet_integrate*.f90` outside the
 #             repository, edit the constant, and build them with a driver -- the module is
@@ -39,13 +54,17 @@
 # Usage:
 #   bench/benchmark_integrate.sh              # every mode
 #   MODE=walk bench/benchmark_integrate.sh    # one of them
+#   MODE=threads OMP_PLACES=sockets bench/benchmark_integrate.sh
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=both      Which mode to run: cost, overhead, walk, or both, which runs all three.
+#   MODE=both      Which mode to run: cost, overhead, walk, threads, or both, which runs all four.
 #   ROUNDS=5       Timed rounds per measurement; the BEST is kept, never the mean, because the
 #                  slow rounds are the machine's other work rather than this code's.
 #   REPEATS=200    Integrations inside one timed round. A single `pf_integrate` of a cheap
-#                  integrand is well under a microsecond, which `cpu_time` cannot resolve.
+#                  integrand is well under a microsecond, which `cpu_time` cannot resolve. In
+#                  `threads` mode this is the number of independent integrations per round, and
+#                  it wants to be large enough that every thread runs many of them: the script
+#                  raises it for that mode alone.
 #
 # Name the machine and the toolchain when reporting a figure from this script
 # (`tools/machine_report.sh` prints both), and quote the load average: this repository's reference
@@ -60,9 +79,12 @@ MODE="${MODE:-both}"
 ROUNDS="${ROUNDS:-5}"
 REPEATS="${REPEATS:-200}"
 
+THREAD_CASES="${THREAD_CASES:-20000}"
+
 case "$MODE" in
-    cost|overhead|walk|both) ;;
-    *) echo "benchmark_integrate.sh: MODE must be cost, overhead, walk or both (got '$MODE')" >&2
+    cost|overhead|walk|threads|both) ;;
+    *) echo "benchmark_integrate.sh: MODE must be cost, overhead, walk, threads or both" \
+            "(got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -102,5 +124,11 @@ fi
 
 if [[ "$MODE" == "walk" || "$MODE" == "both" ]]; then
     fpm run benchmark_integrate --profile release -- --mode=walk
+    echo
+fi
+
+if [[ "$MODE" == "threads" || "$MODE" == "both" ]]; then
+    fpm run benchmark_integrate --profile release -- \
+        --mode=threads --rounds="$ROUNDS" --repeats="$THREAD_CASES"
     echo
 fi

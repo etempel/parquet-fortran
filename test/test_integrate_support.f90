@@ -35,6 +35,7 @@ module test_integrate_support
     public :: tail_exp, tail_neg_exp, tail_pow2, tail_gauss, tail_osc, tail_osc_exact
     public :: rising_exp, exp_over_x, exp_over_x_exact, exp_cos, exp_cos_exact
     public :: narrow_spike, narrow_spike_exact, sliver_bump, sliver_bump_exact
+    public :: full_wave, saw_sqrt, saw_sqrt_exact
     public :: scaled_runge, exp_profile
 
     !> Half-width of `compact_bump`'s support, which is centred on `BUMP_CENTRE`.
@@ -54,6 +55,8 @@ module test_integrate_support
     real(real64), parameter, public :: SLIVER_HALF = 5.0e-4_real64
     !> Centre of `sliver_bump`; its support is `[1.0005, 1.0015]`.
     real(real64), parameter, public :: SLIVER_AT = 1.001_real64
+    !> Width of one tooth of `saw_sqrt`; four of them span `[0, 1]`.
+    real(real64), parameter, public :: SAW_WIDTH = 0.25_real64
 
     !> Runge's function scaled by an amplitude, with a counter, as the guide's object example.
     type, extends(pf_integrand) :: scaled_runge
@@ -214,6 +217,57 @@ contains
         v = 2.0_real64*(lo**(-0.5_real64) - hi**(-0.5_real64))
 
     end function inv_pow15_exact
+
+    !> One full period of a sine over `[0, 1]`, `sin(2 pi x)`: the integral is exactly zero, and
+    !! it is zero by CANCELLATION -- the two halves are `+1/pi` and `-1/pi`.
+    !!
+    !! That is what makes it the fixture for the `atol/n_pieces` split. With breakpoints the sum
+    !! is near zero while its pieces are not, so `rtol` on the sum means nothing and `atol` is the
+    !! whole of the tolerance; a piece integrated to the caller's full `atol` instead of its share
+    !! leaves the sum out of tolerance with every piece reporting convergence.
+    function full_wave(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = sin(2.0_real64*acos(-1.0_real64)*x)
+
+    end function full_wave
+
+    !> `1/sqrt(mod(x, SAW_WIDTH))`: an inverse-square-root singularity at the left end of every
+    !! tooth, and a smooth decay in between.
+    !!
+    !! **The fixture the `atol/n_pieces` split is actually measured on.** Cut at the teeth, every
+    !! piece is an endpoint singularity the bisection resolves SLOWLY, so the engine stops at the
+    !! first partition inside the tolerance and the error estimate it returns sits just under the
+    !! budget it was given rather than far below it. That is what makes the split observable: a
+    !! piece given four times its share stops four times earlier and reports four times the error.
+    !! An integrand one rule application answers exactly -- `full_wave` -- reports the same 1e-15
+    !! whatever tolerance it is handed, and cannot see the difference at all.
+    !!
+    !! Zero at a tooth boundary so that a caller who evaluates one gets a number; the rule never
+    !! evaluates an endpoint, and with the breakpoints at the teeth no abscissa lands on one.
+    function saw_sqrt(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        real(real64) :: t
+
+        t = mod(x, SAW_WIDTH)
+        f = 0.0_real64
+        if (t > 0.0_real64) f = 1.0_real64/sqrt(t)
+
+    end function saw_sqrt
+
+    !> Exact integral of `saw_sqrt` over `[0, 1]`.
+    !!
+    !! One tooth is `integral of t**-0.5 dt` from 0 to `SAW_WIDTH`, which is `2*sqrt(SAW_WIDTH)`,
+    !! and `[0, 1]` holds `1/SAW_WIDTH` teeth: `2*sqrt(SAW_WIDTH)/SAW_WIDTH`, which is 4.
+    pure function saw_sqrt_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = 2.0_real64*sqrt(SAW_WIDTH)/SAW_WIDTH
+
+    end function saw_sqrt_exact
 
     !> Plain `sin(x)`, whose integral is elementary at any bounds.
     function sine(x) result(f)

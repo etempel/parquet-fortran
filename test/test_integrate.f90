@@ -92,7 +92,15 @@ contains
             new_unittest("both caps stop the walk and neither is reported as convergence", &
                          test_max_panels_caps_the_walk), &
             new_unittest("every entry form reaches the walk and the object counts its calls", &
-                         test_infinite_entry_forms) &
+                         test_infinite_entry_forms), &
+            new_unittest("breakpoints find a far feature the unbroken call reports as zero", &
+                         test_breakpoints_find_the_far_bump), &
+            new_unittest("cutting a smooth range changes neither the answer nor the record", &
+                         test_breakpoints_agree_with_the_whole), &
+            new_unittest("a breakpoint on an infinite range leaves the walk to the tail piece", &
+                         test_breakpoints_on_infinite_ranges), &
+            new_unittest("the pieces share the caller's atol instead of each taking all of it", &
+                         test_breakpoints_share_atol) &
             ]
 
     end subroutine collect_tests_integrate
@@ -890,6 +898,16 @@ contains
                          pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
         call check(error, abs(r) <= 1.0e-14_real64 .and. info%converged, &
                    "the same bump on a range of width 1000 is missed and reported as converged")
+        if (allocated(error)) return
+
+        ! The cure, on the same call the first assertion above showed returning zero: the guide
+        ! page prints exactly this, so this assertion is what keeps the page honest.
+        r = pf_integrate(compact_bump, 1.0_real64, 10.0_real64, 1.0e-8_real64, &
+                         breakpoints=[1.0_real64 + 1.0e-6_real64, 1.02_real64], info=info)
+        call check(error, abs(r - compact_bump_exact()) <= 1.0e-9_real64, &
+                   "a cut each side of the bump must find it on the very range that missed it")
+        if (allocated(error)) return
+        call check(error, info%converged, "and the cut call must converge")
 
     end subroutine test_blind_spot_is_documented
 
@@ -948,5 +966,205 @@ contains
                    "only the extrapolated call may report having used the epsilon table")
 
     end subroutine test_extrapolation_earns_its_keep
+
+    ! ---- breakpoints ------------------------------------------------------------------------
+
+    !> Asserts that naming a far feature's neighbourhood is what makes it visible.
+    !!
+    !! This is the positive half of `test_blind_spot_is_documented`, and the two are written to be
+    !! read together: the same integrand, the same range, the same `atol`, one call without
+    !! breakpoints and one with. Without them a unit-width bump at 40 on `[0, 1000]` is below the
+    !! `atol` a first rule application can resolve, so the answer is zero and `converged` is true;
+    !! with a cut each side of the bump, the piece that contains it gets a rule application of its
+    !! own and the bump is found.
+    !!
+    !! **The `atol` is load-bearing.** With `atol = 0` the same unbroken call subdivides -- the
+    !! relative test can never be met by a result of zero -- and finds the bump anyway. The blind
+    !! spot needs a tolerance the wrong answer satisfies, which is what an absolute one is.
+    subroutine test_breakpoints_find_the_far_bump(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: blind, named
+        real(real64)              :: r_blind, r_named
+
+        r_blind = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
+                               pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=blind)
+        call check(error, abs(r_blind) <= 1.0e-14_real64 .and. blind%converged, &
+                   "a bump at 40 on [0, 1000] at atol=1e-14 must come back as zero, converged")
+        if (allocated(error)) return
+        call check(error, blind%neval <= 3*ONE_RULE, &
+                   "and it must come back that way after a handful of rule applications")
+        if (allocated(error)) return
+
+        r_named = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
+                               pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), &
+                               breakpoints=[30.0_real64, 50.0_real64], info=named)
+        call check(error, abs(r_named - far_bump_exact()) <= 1.0e-9_real64, &
+                   "cutting the range at 30 and 50 must find the bump and reproduce sqrt(pi)")
+        if (allocated(error)) return
+        call check(error, named%nsub >= 3, &
+                   "three pieces must leave at least three subintervals in the partition")
+
+    end subroutine test_breakpoints_find_the_far_bump
+
+    !> Asserts that cutting a range the integrand is smooth over changes the answer by nothing.
+    !!
+    !! Breakpoints are a way of spending evaluations where the caller knows they are needed, never
+    !! a change of what is being integrated, so the piecewise sum must agree with the unbroken
+    !! call and with the closed form -- in linear `x` and in `log x` alike. The unsorted case is
+    !! the assertion the sort exists for: a caller who lists the cuts in any order gets the same
+    !! integral, because the driver sorts a copy before it walks them.
+    subroutine test_breakpoints_agree_with_the_whole(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: whole, cut, shuffled
+        type(pf_integration_points) :: pts
+        real(real64)                :: r_whole, r_cut, r_shuffled, want
+        real(real64), parameter     :: LO = 1.0e-3_real64, HI = 1.0e3_real64
+
+        ! Runge on [0, 1], cut into four.
+        r_whole = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=whole)
+        r_cut = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
+                             breakpoints=[0.25_real64, 0.5_real64, 0.75_real64], info=cut, &
+                             points=pts)
+        call check(error, abs(r_cut - r_whole) <= 1.0e-12_real64*abs(r_whole), &
+                   "four pieces of Runge's function must sum to the unbroken integral")
+        if (allocated(error)) return
+        call check(error, abs(r_cut - runge_exact()) <= 1.0e-10_real64*abs(runge_exact()), &
+                   "and they must sum to atan(5)/5")
+        if (allocated(error)) return
+        call check(error, cut%converged, "every piece converged, so the sum must report converged")
+        if (allocated(error)) return
+        call check(error, pts%n == ONE_RULE*cut%nsub, &
+                   "the record over all pieces must hold 21 points per subinterval")
+        if (allocated(error)) return
+
+        ! The same cuts, listed in the wrong order.
+        r_shuffled = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
+                                  breakpoints=[0.75_real64, 0.25_real64, 0.5_real64], &
+                                  info=shuffled)
+        call check(error, r_shuffled == r_cut, &
+                   "breakpoints given unsorted must give bit for bit the sorted answer")
+        if (allocated(error)) return
+        call check(error, shuffled%neval == cut%neval, &
+                   "and must cost exactly what the sorted list cost")
+        if (allocated(error)) return
+
+        ! A power law over six decades in log x, cut at two of them.
+        want = inv_pow15_exact(LO, HI)
+        r_whole = pf_integrate(inv_pow15, LO, HI, 1.0e-10_real64, log_base=.true.)
+        r_cut = pf_integrate(inv_pow15, LO, HI, 1.0e-10_real64, log_base=.true., &
+                             breakpoints=[1.0e-2_real64, 1.0e2_real64], info=cut)
+        call check(error, abs(r_cut - want) <= 1.0e-10_real64*abs(want), &
+                   "breakpoints in log x must still reproduce 2*(lo**-0.5 - hi**-0.5)")
+        if (allocated(error)) return
+        call check(error, abs(r_cut - r_whole) <= 1.0e-10_real64*abs(want), &
+                   "and must agree with the same call without them")
+
+    end subroutine test_breakpoints_agree_with_the_whole
+
+    !> Asserts that a breakpoint on an infinite range cuts the finite part and leaves the walk.
+    !!
+    !! The last piece of `[a, +inf)` reaches the infinity and goes through the outward walk, which
+    !! is what `npanels` reports; dropping that piece would leave the finite pieces summing to
+    !! something short of the integral, which the closed form catches. On the whole line the
+    !! pieces are `(-inf, p1], [p1, p2], [p2, +inf)`, so the split at zero the unbroken call makes
+    !! is never reached -- and the answer must be the same either way.
+    subroutine test_breakpoints_on_infinite_ranges(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: tail, line
+        real(real64)              :: r, inf, sqrt_pi
+
+        inf = pf_infinity()
+        sqrt_pi = far_bump_exact()
+
+        r = pf_integrate(tail_exp, 0.0_real64, inf, 1.0e-10_real64, &
+                         breakpoints=[1.0_real64, 2.0_real64], info=tail)
+        call check(error, abs(r - 1.0_real64) <= 1.0e-10_real64, &
+                   "exp(-x) over [0, inf) cut at 1 and 2 must still integrate to one")
+        if (allocated(error)) return
+        call check(error, tail%converged, "and must converge")
+        if (allocated(error)) return
+        call check(error, tail%npanels >= 1, &
+                   "the piece reaching the infinity must have been walked, so panels were used")
+        if (allocated(error)) return
+
+        r = pf_integrate(tail_gauss, -inf, inf, 1.0e-10_real64, &
+                         breakpoints=[-1.0_real64, 1.0_real64], info=line)
+        call check(error, abs(r - sqrt_pi) <= 1.0e-9_real64*sqrt_pi, &
+                   "exp(-x**2) over the whole line cut at -1 and 1 must reproduce sqrt(pi)")
+        if (allocated(error)) return
+        call check(error, line%converged, "and must converge")
+        if (allocated(error)) return
+        ! Two walks, one outward from each end: the middle piece is finite and is not walked.
+        call check(error, line%npanels >= 3, &
+                   "three pieces, two of them walked, must report at least three panels")
+
+    end subroutine test_breakpoints_on_infinite_ranges
+
+    !> Asserts that the pieces SHARE the caller's `atol` rather than each being given all of it.
+    !!
+    !! With `breakpoints` each piece is integrated to `atol/n_pieces`, so the sum meets `atol`
+    !! whenever every piece meets its share -- and that is a THEOREM rather than a measurement:
+    !! QUADPACK's loop does not exit until its own error estimate is inside the bound it was
+    !! given, so four pieces each inside `atol/4` sum to inside `atol` on any compiler. Giving
+    !! each piece the full `atol` instead leaves every piece reporting `PF_INT_OK`, the sum
+    !! reporting `converged`, and an error estimate up to `n_pieces` times what was asked for.
+    !!
+    !! **Which half of this catches the mutation, and which cannot.** The obvious fixture is an
+    !! integral that is zero by cancellation -- `sin(2 pi x)` over `[0, 1]`, where `rtol` on the
+    !! sum means nothing and `atol` is the whole of the tolerance. It is asserted first, because
+    !! that is the case `atol` exists for. It is also blind to the split: one rule application
+    !! integrates a quarter sine to 1e-15, so every piece reports the same error estimate whatever
+    !! tolerance it is handed, and `atol` replacing `atol/4` changes nothing at all.
+    !!
+    !! What sees the split is a piece whose accuracy is TOLERANCE-limited: `saw_sqrt`, an
+    !! endpoint singularity per tooth, cut at the teeth. There the engine stops at the first
+    !! partition inside the bound, so the estimate it returns sits just under the budget it was
+    !! given -- and four budgets of `atol` instead of `atol/4` come back, measured, at about 3.6
+    !! times the `atol` the caller asked for, with `converged` still true. That is Risk-274's
+    !! silent failure exactly, and the summed `abserr` is what shows it: the ACTUAL error stays
+    !! inside `atol` in both arms, so a test asserting only the answer would pass over it. It is
+    !! also the only half a caller who cannot check the answer has.
+    subroutine test_breakpoints_share_atol(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: info
+        real(real64)              :: r
+        real(real64), parameter   :: WAVE_ATOL = 1.0e-8_real64
+        real(real64), parameter   :: SAW_ATOL = 1.0e-6_real64
+
+        ! The case atol exists for: an integral that is zero by cancellation. Documenting, not
+        ! discriminating -- see the note above.
+        r = pf_integrate(full_wave, 0.0_real64, 1.0_real64, &
+                         pf_tolerance(rtol=0.0_real64, atol=WAVE_ATOL), &
+                         breakpoints=[0.25_real64, 0.5_real64, 0.75_real64], info=info)
+        call check(error, info%converged, &
+                   "an atol-only call over four pieces of a full sine wave must converge")
+        if (allocated(error)) return
+        call check(error, abs(r) <= WAVE_ATOL, &
+                   "the integral of sin(2 pi x) over [0, 1] is zero, to within the atol asked for")
+        if (allocated(error)) return
+        call check(error, info%abserr <= WAVE_ATOL, &
+                   "and its summed error estimate must be inside the atol too")
+        if (allocated(error)) return
+
+        ! The case that can tell the split from its absence.
+        r = pf_integrate(saw_sqrt, 0.0_real64, 1.0_real64, &
+                         pf_tolerance(rtol=0.0_real64, atol=SAW_ATOL), &
+                         breakpoints=[0.25_real64, 0.5_real64, 0.75_real64], info=info)
+        call check(error, info%converged, &
+                   "four endpoint singularities, one per piece, must each reach their share")
+        if (allocated(error)) return
+        call check(error, info%abserr <= SAW_ATOL, &
+                   "the summed error estimate must be inside the atol asked for, not n_pieces " // &
+                   "times it -- every piece converged, so this is what the atol/n_pieces split " // &
+                   "buys and the only thing that reports it")
+        if (allocated(error)) return
+        call check(error, abs(r - saw_sqrt_exact()) <= SAW_ATOL, &
+                   "and the answer itself must be inside the atol asked for")
+
+    end subroutine test_breakpoints_share_atol
 
 end module test_integrate

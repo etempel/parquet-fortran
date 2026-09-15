@@ -24,14 +24,14 @@ contains
 
         call integrate_impl(f, a, b, pf_tolerance(rtol=rtol, atol=0.0_real64), max_neval, &
                             converged, info, points, context, log_base, extrapolate, max_panels, &
-                            res)
+                            breakpoints, res)
 
     end procedure integrate_obj_rtol
 
     module procedure integrate_obj_tol
 
         call integrate_impl(f, a, b, tol, max_neval, converged, info, points, context, &
-                            log_base, extrapolate, max_panels, res)
+                            log_base, extrapolate, max_panels, breakpoints, res)
 
     end procedure integrate_obj_tol
 
@@ -41,7 +41,7 @@ contains
     !! dummy PROCEDURE argument in an abbreviated body has an implicit interface under gfortran 15
     !! (`fortran-gotchas.md`).
     module function integrate_func_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                        context, log_base, extrapolate, max_panels) result(res)
+                                        context, log_base, extrapolate, max_panels, breakpoints) result(res)
         procedure(pf_integrand_func)                       :: f           !! the integrand
         real(real64), intent(in)                           :: a           !! lower bound
         real(real64), intent(in)                           :: b           !! upper bound
@@ -54,6 +54,7 @@ contains
         logical, intent(in), optional                      :: log_base    !! integrate in log x
         logical, intent(in), optional                      :: extrapolate !! epsilon table
         integer, intent(in), optional                      :: max_panels  !! walk panel cap
+        real(real64), intent(in), optional                 :: breakpoints(:) !! interior cuts
         real(real64)                                       :: res         !! the integral
 
         type(func_integrand) :: wrapped
@@ -61,14 +62,14 @@ contains
         wrapped%fp => f
         call integrate_impl(wrapped, a, b, pf_tolerance(rtol=rtol, atol=0.0_real64), max_neval, &
                             converged, info, points, context, log_base, extrapolate, max_panels, &
-                            res)
+                            breakpoints, res)
 
     end function integrate_func_rtol
 
     !> Integrand as a plain function, tolerance as a `pf_tolerance`. Fully restated for the same
     !! reason as `integrate_func_rtol`.
     module function integrate_func_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                       context, log_base, extrapolate, max_panels) result(res)
+                                       context, log_base, extrapolate, max_panels, breakpoints) result(res)
         procedure(pf_integrand_func)                       :: f           !! the integrand
         real(real64), intent(in)                           :: a           !! lower bound
         real(real64), intent(in)                           :: b           !! upper bound
@@ -81,13 +82,14 @@ contains
         logical, intent(in), optional                      :: log_base    !! integrate in log x
         logical, intent(in), optional                      :: extrapolate !! epsilon table
         integer, intent(in), optional                      :: max_panels  !! walk panel cap
+        real(real64), intent(in), optional                 :: breakpoints(:) !! interior cuts
         real(real64)                                       :: res         !! the integral
 
         type(func_integrand) :: wrapped
 
         wrapped%fp => f
         call integrate_impl(wrapped, a, b, tol, max_neval, converged, info, points, context, &
-                            log_base, extrapolate, max_panels, res)
+                            log_base, extrapolate, max_panels, breakpoints, res)
 
     end function integrate_func_tol
 
@@ -203,8 +205,14 @@ contains
     !!
     !! The single place a `pf_integrate` call is carried out; the four specifics differ only in
     !! how they arrive here.
+    !!
+    !! **The record is owned here, not by the path that fills it.** Every path appends its slots
+    !! to one `record` that starts allocated and empty, so a walk of several panels and a
+    !! `breakpoints` sum of several pieces concatenate the same way a single finite range does,
+    !! and a call that recorded nothing still hands back a zero-length record rather than an
+    !! absent one.
     subroutine integrate_impl(f, a, b, tol, max_neval, converged, info, points, context, &
-                              log_base, extrapolate, max_panels, res)
+                              log_base, extrapolate, max_panels, breakpoints, res)
         class(pf_integrand), intent(inout)                 :: f           !! the integrand
         real(real64), intent(in)                           :: a           !! lower bound
         real(real64), intent(in)                           :: b           !! upper bound
@@ -217,82 +225,213 @@ contains
         logical, intent(in), optional                      :: log_base    !! integrate in log x
         logical, intent(in), optional                      :: extrapolate !! epsilon table
         integer, intent(in), optional                      :: max_panels  !! walk panel cap
+        real(real64), intent(in), optional                 :: breakpoints(:) !! interior cuts
         real(real64), intent(out)                          :: res         !! the integral
 
-        type(pf_integration_info) :: outcome
-        type(engine_work)         :: work
-        logical                   :: in_log, use_eps, record
-        integer                   :: budget, panel_cap, neval
+        type(pf_integration_info)   :: outcome
+        type(pf_integration_points) :: record
+        type(engine_work)           :: work
+        logical                     :: in_log, use_eps, record_wanted
+        integer                     :: budget, panel_cap, neval
 
         in_log = .false.
         if (present(log_base)) in_log = log_base
         use_eps = .false.
         if (present(extrapolate)) use_eps = extrapolate
-        record = present(points)
+        record_wanted = present(points)
         budget = DEFAULT_MAX_NEVAL
         if (present(max_neval)) budget = max_neval
         panel_cap = DEFAULT_MAX_PANELS
         if (present(max_panels)) panel_cap = max_panels
 
-        call validate_call(a, b, tol, budget, in_log, present(max_panels), panel_cap, context)
+        call validate_call(a, b, tol, budget, in_log, present(max_panels), panel_cap, &
+                           breakpoints, context)
+
+        record%n = 0
+        allocate (record%x(0), record%w(0), record%f(0))
 
         ! A zero-width range is the one range with no work in it: no evaluation, no partition and
         ! an empty record rather than an absent one.
         if (a == b) then
             res = 0.0_real64
-            if (record) then
-                points%n = 0
-                allocate (points%x(0), points%w(0), points%f(0))
-            end if
+            if (record_wanted) call hand_back_record(record, points)
             if (present(info)) info = outcome
             if (present(converged)) converged = .true.
             return
         end if
 
-        work%record = record
+        work%record = record_wanted
         neval = 0
+        res = 0.0_real64
 
-        if (is_finite(a) .and. is_finite(b)) then
-            call integrate_finite(f, a, b, tol, budget, in_log, use_eps, work, points, res, &
-                                  outcome, neval, context)
+        if (present(breakpoints)) then
+            call integrate_pieces(f, a, b, breakpoints, tol, budget, panel_cap, in_log, use_eps, &
+                                  work, record, res, outcome, neval, context)
         else
-            call integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, points, res, &
-                                    outcome, neval, context)
+            call integrate_range(f, a, b, tol, budget, panel_cap, in_log, use_eps, work, record, &
+                                 res, outcome, neval, context)
         end if
 
         outcome%converged = outcome%status == PF_INT_OK
         outcome%neval = neval
         if (present(info)) info = outcome
         if (present(converged)) converged = outcome%converged
+        if (record_wanted) call hand_back_record(record, points)
 
     end subroutine integrate_impl
+
+    !> Moves an assembled record into the caller's `points`, leaving nothing copied.
+    subroutine hand_back_record(record, points)
+        type(pf_integration_points), intent(inout) :: record !! the assembled record, consumed
+        type(pf_integration_points), intent(out)   :: points !! the caller's record
+
+        points%n = record%n
+        call move_alloc(record%x, points%x)
+        call move_alloc(record%w, points%w)
+        call move_alloc(record%f, points%f)
+
+    end subroutine hand_back_record
+
+    ! ---- the pieces a `breakpoints` call is cut into ------------------------------------------
+
+    !> Integrates `[a, b]` as the sequence of pieces the breakpoints cut it into.
+    !!
+    !! Each piece is integrated on its own, by the path its own bounds select -- a finite piece by
+    !! the adaptive engine, a piece reaching an infinity by the outward walk -- and the results,
+    !! error estimates, records, panels and subintervals are accumulated in ascending order. With
+    !! breakpoints on `(-inf, +inf)` the pieces are `(-inf, p1], [p1, p2], ..., [pn, +inf)`, so
+    !! the split at zero the unbroken whole line takes is simply never reached.
+    !!
+    !! **Each piece is integrated to `atol/n_pieces`** (Q21), not to `atol`. Integrating every
+    !! piece to the caller's full `atol` would leave every piece reporting `PF_INT_OK`, the sum
+    !! reporting `converged`, and the error up to `n_pieces` times what was asked for -- silently,
+    !! and only on the `atol`-dominated call `atol` exists for. `rtol` is NOT divided: each piece
+    !! is integrated to `rtol` of itself, which over-delivers on a piece contributing little
+    !! rather than under-delivering.
+    !!
+    !! **The breakpoints are sorted here**, into a local copy, so the caller's array is untouched
+    !! and an unsorted list answers the same as a sorted one. QUADPACK's `dqagpe` sorts its own
+    !! `points` for the same reason. An insertion sort, because the list is a handful of values a
+    !! person typed.
+    subroutine integrate_pieces(f, a, b, breakpoints, tol, budget, panel_cap, in_log, use_eps, &
+                                work, record, res, outcome, neval, context)
+        class(pf_integrand), intent(inout)         :: f              !! the integrand
+        real(real64), intent(in)                   :: a              !! lower bound
+        real(real64), intent(in)                   :: b              !! upper bound
+        real(real64), intent(in)                   :: breakpoints(:) !! interior cuts, any order
+        type(pf_tolerance), intent(in)             :: tol            !! both tolerances
+        integer, intent(in)                        :: budget         !! resolved `max_neval`
+        integer, intent(in)                        :: panel_cap      !! resolved `max_panels`
+        logical, intent(in)                        :: in_log         !! integrate in `log x`
+        logical, intent(in)                        :: use_eps        !! run the epsilon table
+        type(engine_work), intent(inout)           :: work           !! the engine's work arrays
+        type(pf_integration_points), intent(inout) :: record         !! the record, appended to
+        real(real64), intent(inout)                :: res            !! running result, added to
+        type(pf_integration_info), intent(inout)   :: outcome        !! filled in as it goes
+        integer, intent(inout)                     :: neval          !! evaluation counter
+        character(len=*), intent(in), optional     :: context        !! call-site text
+
+        real(real64), allocatable :: cut(:)
+        type(pf_tolerance)        :: piece_tol
+        real(real64)              :: lo, hi, key
+        integer                   :: npieces, ipiece, i, j
+
+        cut = breakpoints
+        do i = 2, size(cut)
+            key = cut(i)
+            j = i - 1
+            do while (j >= 1)
+                if (cut(j) <= key) exit
+                cut(j + 1) = cut(j)
+                j = j - 1
+            end do
+            cut(j + 1) = key
+        end do
+
+        npieces = size(cut) + 1
+        piece_tol = pf_tolerance(rtol=tol%rtol, atol=tol%atol/real(npieces, real64))
+
+        do ipiece = 1, npieces
+            if (ipiece == 1) then
+                lo = a
+            else
+                lo = cut(ipiece - 1)
+            end if
+            if (ipiece == npieces) then
+                hi = b
+            else
+                hi = cut(ipiece)
+            end if
+            ! The budget is carried from one piece to the next, less the one rule application
+            ! each piece after this one must be able to pay for: without that reserve an early
+            ! piece could spend the whole budget and the pieces beyond it would each still cost
+            ! their unavoidable 21 evaluations, putting the total over `max_neval`.
+            call integrate_range(f, lo, hi, piece_tol, budget - GK_POINTS*(npieces - ipiece), &
+                                 panel_cap, in_log, use_eps, work, record, res, outcome, neval, &
+                                 context)
+        end do
+
+    end subroutine integrate_pieces
+
+    !> Integrates one range -- the whole call's range, or one piece of it -- by the path its own
+    !! bounds select, adding what it finds to the running result.
+    subroutine integrate_range(f, a, b, tol, budget, panel_cap, in_log, use_eps, work, record, &
+                               res, outcome, neval, context)
+        class(pf_integrand), intent(inout)         :: f         !! the integrand
+        real(real64), intent(in)                   :: a         !! lower bound
+        real(real64), intent(in)                   :: b         !! upper bound
+        type(pf_tolerance), intent(in)             :: tol       !! both tolerances
+        integer, intent(in)                        :: budget    !! evaluations this range may use
+        integer, intent(in)                        :: panel_cap !! resolved `max_panels`
+        logical, intent(in)                        :: in_log    !! integrate in `log x`
+        logical, intent(in)                        :: use_eps   !! run the epsilon table
+        type(engine_work), intent(inout)           :: work      !! the engine's work arrays
+        type(pf_integration_points), intent(inout) :: record    !! the record, appended to
+        real(real64), intent(inout)                :: res       !! running result, added to
+        type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
+        integer, intent(inout)                     :: neval     !! evaluation counter
+        character(len=*), intent(in), optional     :: context   !! call-site text
+
+        if (is_finite(a) .and. is_finite(b)) then
+            call integrate_finite(f, a, b, tol, budget, in_log, use_eps, work, record, res, &
+                                  outcome, neval, context)
+        else
+            call integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, record, res, &
+                                    outcome, neval, context)
+        end if
+
+    end subroutine integrate_range
 
     ! ---- the finite range -----------------------------------------------------------------------
 
     !> Integrates a finite range with one application of the adaptive-bisection engine.
-    subroutine integrate_finite(f, a, b, tol, budget, in_log, use_eps, work, points, res, &
+    subroutine integrate_finite(f, a, b, tol, budget, in_log, use_eps, work, record, res, &
                                 outcome, neval, context)
-        class(pf_integrand), intent(inout)                 :: f       !! the integrand
-        real(real64), intent(in)                           :: a       !! lower bound, finite
-        real(real64), intent(in)                           :: b       !! upper bound, finite
-        type(pf_tolerance), intent(in)                     :: tol     !! both tolerances
-        integer, intent(in)                                :: budget  !! resolved `max_neval`
-        logical, intent(in)                                :: in_log  !! integrate in `log x`
-        logical, intent(in)                                :: use_eps !! run the epsilon table
-        type(engine_work), intent(inout)                   :: work    !! the engine's work arrays
-        type(pf_integration_points), intent(out), optional :: points  !! the record
-        real(real64), intent(out)                          :: res     !! the integral
-        type(pf_integration_info), intent(inout)           :: outcome !! filled in as it goes
-        integer, intent(inout)                             :: neval   !! evaluation counter
-        character(len=*), intent(in), optional             :: context !! call-site text
+        class(pf_integrand), intent(inout)         :: f       !! the integrand
+        real(real64), intent(in)                   :: a       !! lower bound, finite
+        real(real64), intent(in)                   :: b       !! upper bound, finite
+        type(pf_tolerance), intent(in)             :: tol     !! both tolerances
+        integer, intent(in)                        :: budget  !! evaluations this range may use
+        logical, intent(in)                        :: in_log  !! integrate in `log x`
+        logical, intent(in)                        :: use_eps !! run the epsilon table
+        type(engine_work), intent(inout)           :: work    !! the engine's work arrays
+        type(pf_integration_points), intent(inout) :: record  !! the record, appended to
+        real(real64), intent(inout)                :: res     !! running result, added to
+        type(pf_integration_info), intent(inout)   :: outcome !! filled in as it goes
+        integer, intent(inout)                     :: neval   !! evaluation counter
+        character(len=*), intent(in), optional     :: context !! call-site text
 
-        integer      :: limit, ier, last
-        real(real64) :: lo, hi, abserr, defabs
+        type(pf_integration_points) :: piece_record
+        integer                     :: limit, ier, last
+        real(real64)                :: lo, hi, res1, abserr, defabs
+        logical                     :: extrapolated
 
         ! The budget sets the subinterval cap, and the cap is what keeps the count inside it:
         ! `neval = 42*limit - 21`, so `limit = (budget + 21)/42` is the largest partition the
-        ! budget pays for. Floored at one, because one rule application always happens.
-        limit = (budget + GK_POINTS)/GK_BISECTION
+        ! budget pays for. What is LEFT of the budget is what counts, so that a second piece of a
+        ! `breakpoints` call cannot spend what the first already did. Floored at one, because one
+        ! rule application always happens.
+        limit = (max(budget - neval, 0) + GK_POINTS)/GK_BISECTION
         if (limit < 1) limit = 1
 
         if (in_log) then
@@ -305,16 +444,21 @@ contains
 
         call grow_work(work, min(limit, WORK_START), limit, 0)
 
-        call qagse(f, lo, hi, tol%atol, tol%rtol, limit, in_log, .false., use_eps, work, res, &
-                   abserr, defabs, neval, ier, last, outcome%extrapolated, context)
+        call qagse(f, lo, hi, tol%atol, tol%rtol, limit, in_log, .false., use_eps, work, res1, &
+                   abserr, defabs, neval, ier, last, extrapolated, context)
 
-        outcome%status = status_from_ier(ier, context)
-        outcome%abserr = abserr
-        outcome%partition_integral = sum(work%rlist(1:last))
-        outcome%nsub = last
-        outcome%npanels = 1
+        res = res + res1
+        outcome%status = worse_status(outcome%status, status_from_ier(ier, context))
+        outcome%extrapolated = outcome%extrapolated .or. extrapolated
+        outcome%abserr = outcome%abserr + abserr
+        outcome%partition_integral = outcome%partition_integral + sum(work%rlist(1:last))
+        outcome%nsub = outcome%nsub + last
+        outcome%npanels = outcome%npanels + 1
 
-        if (present(points)) call gather_points(work, last, points)
+        if (work%record) then
+            call gather_points(work, last, piece_record)
+            call record%append(piece_record)
+        end if
 
     end subroutine integrate_finite
 
@@ -339,31 +483,21 @@ contains
     !! comes back as zero with `converged` true. The outward walk samples 21 points per factor of
     !! e instead, so the same feature is found. What it costs is measured by the benchmark's
     !! `walk` mode.
-    subroutine integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, points, res, &
+    subroutine integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, record, res, &
                                   outcome, neval, context)
-        class(pf_integrand), intent(inout)                 :: f         !! the integrand
-        real(real64), intent(in)                           :: a         !! lower bound
-        real(real64), intent(in)                           :: b         !! upper bound
-        type(pf_tolerance), intent(in)                     :: tol       !! both tolerances
-        integer, intent(in)                                :: budget    !! resolved `max_neval`
-        integer, intent(in)                                :: panel_cap !! resolved `max_panels`
-        logical, intent(in)                                :: use_eps   !! run the epsilon table
-        type(engine_work), intent(inout)                   :: work      !! the engine's work arrays
-        type(pf_integration_points), intent(out), optional :: points    !! the record
-        real(real64), intent(out)                          :: res       !! the integral
-        type(pf_integration_info), intent(inout)           :: outcome   !! filled in as it goes
-        integer, intent(inout)                             :: neval     !! evaluation counter
-        character(len=*), intent(in), optional             :: context   !! call-site text
-
-        type(pf_integration_points) :: record
-
-        ! The record is grown one panel at a time, so it starts allocated and empty: `%append`
-        ! onto an unallocated record is not this type's contract, and a walk that records nothing
-        ! must still hand back a zero-length record rather than an absent one.
-        record%n = 0
-        allocate (record%x(0), record%w(0), record%f(0))
-
-        res = 0.0_real64
+        class(pf_integrand), intent(inout)         :: f         !! the integrand
+        real(real64), intent(in)                   :: a         !! lower bound
+        real(real64), intent(in)                   :: b         !! upper bound
+        type(pf_tolerance), intent(in)             :: tol       !! both tolerances
+        integer, intent(in)                        :: budget    !! evaluations this range may use
+        integer, intent(in)                        :: panel_cap !! resolved `max_panels`
+        logical, intent(in)                        :: use_eps   !! run the epsilon table
+        type(engine_work), intent(inout)           :: work      !! the engine's work arrays
+        type(pf_integration_points), intent(inout) :: record    !! the record, appended to
+        real(real64), intent(inout)                :: res       !! running result, added to
+        type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
+        integer, intent(inout)                     :: neval     !! evaluation counter
+        character(len=*), intent(in), optional     :: context   !! call-site text
 
         if (is_finite(a)) then
             call walk_outward(f, a, .false., tol, budget, panel_cap, use_eps, work, record, res, &
@@ -378,13 +512,6 @@ contains
                               record, res, outcome, neval, context)
             call walk_outward(f, 0.0_real64, .false., tol, budget, panel_cap, use_eps, work, &
                               record, res, outcome, neval, context)
-        end if
-
-        if (present(points)) then
-            points%n = record%n
-            call move_alloc(record%x, points%x)
-            call move_alloc(record%w, points%w)
-            call move_alloc(record%f, points%f)
         end if
 
     end subroutine integrate_infinite
@@ -402,7 +529,7 @@ contains
         real(real64), intent(in)                   :: a         !! lower bound, in the walk's `y`
         logical, intent(in)                        :: negate    !! the caller's `x` is `-y`
         type(pf_tolerance), intent(in)             :: tol       !! both tolerances
-        integer, intent(in)                        :: budget    !! resolved `max_neval`
+        integer, intent(in)                        :: budget    !! evaluations this range may use
         integer, intent(in)                        :: panel_cap !! resolved `max_panels`
         logical, intent(in)                        :: use_eps   !! run the epsilon table
         type(engine_work), intent(inout)           :: work      !! the engine's work arrays
@@ -501,7 +628,7 @@ contains
         class(pf_integrand), intent(inout)     :: f       !! the integrand
         real(real64), intent(in)               :: a       !! lower bound, in the walk's `y`
         logical, intent(in)                    :: negate  !! the caller's `x` is `-y`
-        integer, intent(in)                    :: budget  !! resolved `max_neval`
+        integer, intent(in)                    :: budget  !! evaluations this walk may use
         integer, intent(inout)                 :: neval   !! evaluation counter
         real(real64), intent(out)              :: aa      !! accepted panel's lower bound
         real(real64), intent(out)              :: bb      !! accepted panel's upper bound
@@ -573,7 +700,7 @@ contains
         logical, intent(in)                        :: in_log  !! the bounds are in `log y`
         logical, intent(in)                        :: negate  !! the caller's `x` is `-y`
         type(pf_tolerance), intent(in)             :: tol     !! both tolerances
-        integer, intent(in)                        :: budget  !! resolved `max_neval`
+        integer, intent(in)                        :: budget  !! evaluations this walk may use
         logical, intent(in)                        :: use_eps !! run the epsilon table
         type(engine_work), intent(inout)           :: work    !! the engine's work arrays
         type(pf_integration_points), intent(inout) :: record  !! the record, appended to
@@ -681,7 +808,8 @@ contains
     !> Refuses every call this module cannot answer, in the order the guide page's table lists.
     !!
     !! Impure deliberately: a `pure` guard-only subroutine's call is deleted by ifx at `-O0`.
-    subroutine validate_call(a, b, tol, budget, in_log, panels_given, panel_cap, context)
+    subroutine validate_call(a, b, tol, budget, in_log, panels_given, panel_cap, breakpoints, &
+                             context)
         real(real64), intent(in)               :: a            !! lower bound, as the caller gave it
         real(real64), intent(in)               :: b            !! upper bound, as the caller gave it
         type(pf_tolerance), intent(in)         :: tol          !! both tolerances
@@ -689,7 +817,10 @@ contains
         logical, intent(in)                    :: in_log       !! resolved `log_base`
         logical, intent(in)                    :: panels_given !! `max_panels` was passed
         integer, intent(in)                    :: panel_cap    !! resolved `max_panels`
+        real(real64), intent(in), optional     :: breakpoints(:) !! interior cuts, as they came
         character(len=*), intent(in), optional :: context      !! caller's call-site text
+
+        integer :: i, j
 
         if (.not. is_finite(tol%rtol) .or. tol%rtol < 0.0_real64) &
             call integrate_abort("rtol must be a finite, non-negative number", context)
@@ -725,6 +856,29 @@ contains
             call integrate_abort("log_base applies only to a finite range", context)
         if (in_log .and. a <= 0.0_real64) &
             call integrate_abort("lower bound must be positive when integrating in log x", context)
+
+        ! The breakpoints last, in the table's order: finite, then inside, then distinct. The
+        ! finiteness pass runs first so that no comparison below ever sees a NaN, and "strictly
+        ! inside" is what it says -- a breakpoint ON a bound would make a zero-width piece, and a
+        ! caller who wrote one meant something else. Distinctness is checked pairwise rather than
+        ! after the sort, because the sort belongs to the integration and this is validation:
+        ! the list is a handful of values a person typed, so the pairs cost nothing.
+        if (present(breakpoints)) then
+            do i = 1, size(breakpoints)
+                if (.not. is_finite(breakpoints(i))) &
+                    call integrate_abort("breakpoints must be finite", context)
+            end do
+            do i = 1, size(breakpoints)
+                if (breakpoints(i) <= a .or. breakpoints(i) >= b) &
+                    call integrate_abort("breakpoints must lie strictly inside the range", context)
+            end do
+            do i = 1, size(breakpoints)
+                do j = i + 1, size(breakpoints)
+                    if (breakpoints(i) == breakpoints(j)) &
+                        call integrate_abort("breakpoints must be distinct", context)
+                end do
+            end do
+        end if
 
     end subroutine validate_call
 

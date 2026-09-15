@@ -3621,6 +3621,12 @@ program error_scenarios
         call scenario_integrate_log_base_infinite()
     case ("integrate_log_base_nonpositive")
         call scenario_integrate_log_base_nonpositive()
+    case ("integrate_breakpoints_nan")
+        call scenario_integrate_breakpoints_nan()
+    case ("integrate_breakpoints_outside")
+        call scenario_integrate_breakpoints_outside()
+    case ("integrate_breakpoints_duplicate")
+        call scenario_integrate_breakpoints_duplicate()
     case ("integrate_integrand_nan")
         call scenario_integrate_integrand_nan()
     case ("integrate_context_reported")
@@ -31498,6 +31504,37 @@ contains
         r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, log_base=.true.)
         print '(a, es22.15)', "accepted log_base from a non-positive bound: ", r
     end subroutine scenario_integrate_log_base_nonpositive
+    !
+    !> A breakpoint is a point of the range, and a NaN or an infinity is not one: the sort would
+    !> not order it and the piece it bounds would have no width to integrate over.
+    subroutine scenario_integrate_breakpoints_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, &
+                         breakpoints=[0.5_real64, ieee_value(1.0_real64, ieee_quiet_nan)])
+        print '(a, es22.15)', "accepted a NaN breakpoint: ", r
+    end subroutine scenario_integrate_breakpoints_nan
+    !
+    !> A breakpoint outside the range, or ON a bound, cuts nothing: the piece it would make is
+    !> empty or lies where the caller never asked for an integral.
+    subroutine scenario_integrate_breakpoints_outside()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, &
+                         breakpoints=[1.5_real64])
+        print '(a, es22.15)', "accepted a breakpoint outside the range: ", r
+    end subroutine scenario_integrate_breakpoints_outside
+    !
+    !> Two equal breakpoints make a zero-width piece, which is a call that does not mean what it
+    !> says rather than a range worth integrating.
+    subroutine scenario_integrate_breakpoints_duplicate()
+        real(real64) :: r
+
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, &
+                         breakpoints=[0.5_real64, 0.5_real64])
+        print '(a, es22.15)', "accepted two equal breakpoints: ", r
+    end subroutine scenario_integrate_breakpoints_duplicate
     !
     !> A non-finite integrand value aborts naming the point, rather than propagating a NaN that
     !> nagfor's default traps would turn into an abort with no message at all.

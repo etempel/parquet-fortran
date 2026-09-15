@@ -253,6 +253,16 @@ contains
     !> find nothing -- the hook is read on every hash, on the calling thread. The suite is pure
     !> in-memory work over small fixtures and costs a fraction of a second serially.
     !>
+    !> "integrate_omp" is excluded for the nested-team reason "random_omp" states, with nothing
+    !> process-global about it at all: parquet_integrate holds no variable that is not a parameter,
+    !> and the suite exists to demonstrate that by integrating on several threads at once. Run
+    !> inside test-drive's own `!$omp parallel do`, each of its regions would be NESTED and would
+    !> get a team of ONE -- so "the concurrent answers equal the serial ones" would hold because
+    !> nothing ran concurrently, which is this project's worst failure mode. Its third test asserts
+    !> the team size for exactly that reason, so a collapse is loud rather than silent; this
+    !> exclusion is what keeps it from happening. The suite is pure arithmetic over no fixture and
+    !> costs a fraction of a second serially.
+    !>
     !> "table_join_hash" is excluded because its collector forces the join's pair-list engine
     !> through a process-global hook (parquet_debug_set_join_engine) and every test then asserts,
     !> through the process-global observable parquet_debug_join_engine_used, that the hash engine
@@ -306,6 +316,7 @@ contains
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
+            .or. name == "integrate_omp" &
             .or. name == "stats" .or. name == "table_join_hash")
     end function suite_is_safe_to_parallelize
 

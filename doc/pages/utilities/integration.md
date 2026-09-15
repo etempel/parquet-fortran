@@ -40,9 +40,9 @@ bracket:
 
 ```fortran
 res = pf_integrate(f, a, b, rtol, [max_neval], [converged], [info], [points], [context], &
-                   [log_base], [extrapolate])
+                   [log_base], [extrapolate], [max_panels], [breakpoints])
 res = pf_integrate(f, a, b, tol,  [max_neval], [converged], [info], [points], [context], &
-                   [log_base], [extrapolate])
+                   [log_base], [extrapolate], [max_panels], [breakpoints])
 ```
 
 ## The integrand
@@ -134,6 +134,39 @@ overflowed silently inside a caller's own arithmetic is the other hazard, and it
 `max_panels` on a finite range aborts instead of being ignored: a call that caps the walk of a
 range that has no walk usually meant an infinite bound that did not survive.
 
+### Cutting the range: `breakpoints=`
+
+**`breakpoints=` is how you name a feature rather than hope it is found.** It takes a rank-1
+`real64` of interior points; the range is cut at each of them and every piece is integrated on its
+own, by the path its own bounds select. The results, the error estimates and the records are
+concatenated in order.
+
+```fortran
+r = pf_integrate(bump_at_40, 0.0_real64, 1000.0_real64, &
+                 pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), &
+                 breakpoints=[30.0_real64, 50.0_real64])
+```
+
+Without the cuts that call answers zero and reports convergence, for the reason
+[What the integrator cannot see](#what-the-integrator-cannot-see) gives; with them, the piece
+holding the bump gets a rule application of its own and the answer is right. Nothing else about
+the call changes: the tolerance, the budget and the record contract all mean what they meant.
+
+The breakpoints must be finite, distinct and strictly inside the range; anything else aborts. They
+are sorted for you, so the order you list them in does not matter. They may be given on an
+infinite range too, where the pieces are `(-inf, p1]`, `[p1, p2]`, ..., `[pn, +inf)` and the piece
+that reaches an infinity goes through the walk:
+
+```fortran
+r = pf_integrate(f, 0.0_real64, pf_infinity(), 1.0e-10_real64, breakpoints=[1.0_real64])
+```
+
+**Each piece is integrated to `rtol` of itself and to `atol` divided by the number of pieces**, so
+the sum meets both tolerances whenever every piece meets its own. That division is what makes
+`atol` mean what it says on a piecewise sum; `converged` is true only when every piece converged,
+and `info` totals `neval`, `nsub` and `npanels` over them. The whole evaluation budget is carried
+from one piece to the next, so `max_neval` still bounds the call rather than each piece.
+
 ## Tolerances
 
 Pass either a bare `rtol`, or a `pf_tolerance` carrying `rtol` and `atol` together. At least one
@@ -160,7 +193,9 @@ because no double-precision quadrature can report having met it. The same `rtol`
 `max_neval` bounds the integrand evaluations; it defaults to 100000. **It is a ceiling, not a
 suggestion**: the count never exceeds it on a finite range, and an infinite range may overshoot it
 by at most one rule application, because a panel costs its 21 points even when five of them would
-have been enough. Reaching it is a status, not an error.
+have been enough. Reaching it is a status, not an error. With `breakpoints=` the budget covers the
+whole call and is carried from one piece to the next, each piece reserving one rule application for
+the pieces after it.
 
 `max_panels` bounds the panels ONE walk of an infinite range may use, counting the first panel the
 search accepted; it defaults to 50, and reaching it is `PF_INT_LIMIT` in the same way. It applies
@@ -177,8 +212,8 @@ which is two walks, it caps each of them.
 | `abserr` | the engine's own estimate of the absolute error |
 | `partition_integral` | the plain sum over the final partition |
 | `neval` | integrand evaluations, counted |
-| `nsub` | subintervals in the final partition, summed over the walk's panels |
-| `npanels` | 1 on a finite range; the panels the walk used, both halves counted, on an infinite one |
+| `nsub` | subintervals in the final partition, summed over the walk's panels and the pieces |
+| `npanels` | 1 per finite range or piece; the panels the walk used, both halves counted, on an infinite one |
 
 **Nothing is ever printed.** This module reads no verbosity setting and has no message stream; it
 reports through these values, and speaks only by aborting when a caller contract is broken.
@@ -218,6 +253,9 @@ Two things to know. It is the final partition, not a log of every evaluation —
 was bisected is represented by its two children, never by both itself and them, because summing
 both would count that region twice. And it reproduces `info%partition_integral` exactly; it
 reproduces the returned result too whenever `info%extrapolated` is false, which is the default.
+
+With `breakpoints=` the record covers every piece, concatenated in ascending order, and the
+weighted sum reproduces the whole integral exactly as it does for an unbroken range.
 
 `%append` joins two records, for two adjacent ranges integrated separately:
 
@@ -263,9 +301,19 @@ r = pf_integrate(bump, 1.0_real64, 1.05_real64, 1.0e-8_real64)
 ```
 
 Two things help. **`points=` is the diagnostic**: a record whose abscissae all sit far from where
-you expected the integrand to do something tells you exactly what happened. And **splitting the
-range yourself** at a point near the feature puts a rule application where it is needed — the
-integral of the parts is the integral of the whole, and `%append` joins the records.
+you expected the integrand to do something tells you exactly what happened. And
+**[`breakpoints=`](#cutting-the-range-breakpoints) is the cure**: a cut each side of the feature
+puts a rule application on the piece that contains it, and the same call answers correctly.
+
+```fortran
+r = pf_integrate(bump, 1.0_real64, 10.0_real64, 1.0e-8_real64, &
+                 breakpoints=[1.0_real64 + 1.0e-6_real64, 1.02_real64])
+! r is the right answer, from the same range as the call that returned zero
+```
+
+Splitting the range into separate calls yourself does the same thing — the integral of the parts
+is the integral of the whole, and `%append` joins the records — but it costs you the shared budget
+and the summed `info`.
 
 **An infinite range is the case where this goes better, not worse.** The obvious way to integrate
 to infinity is to map the range onto `(0, 1]` and bisect there, which is what QUADPACK's own
@@ -285,7 +333,9 @@ r = pf_integrate(bump_at_40, 0.0_real64, pf_infinity(), 1.0e-8_real64)
 What remains is the narrower blind spot above: a feature between the samples of one panel. The
 search for the first panel is built around exactly that — when its first, wide probe finds
 nothing it tries a much NARROWER panel before trying wider ones, because an integrand that falls
-off far faster than the first guess assumed lives in a sliver just above the bound.
+off far faster than the first guess assumed lives in a sliver just above the bound. Where you know
+roughly where the feature is, `breakpoints=` settles it on an infinite range as it does on a
+finite one.
 
 ## What aborts
 
@@ -308,6 +358,9 @@ refused rather than answered, because every one of them means the call did not s
 | both bounds the same infinity | `bounds must not both be the same infinity` |
 | `log_base` with a non-finite bound | `log_base applies only to a finite range` |
 | `log_base` with `a <= 0` | `lower bound must be positive when integrating in log x` |
+| a breakpoint NaN or infinite | `breakpoints must be finite` |
+| a breakpoint on or outside a bound | `breakpoints must lie strictly inside the range` |
+| two equal breakpoints | `breakpoints must be distinct` |
 | the integrand returned a NaN or an infinity | `the integrand returned a non-finite value at x = ...` |
 
 **The last one is worth planning for.** An interior singularity that happens to land exactly on an
@@ -345,6 +398,17 @@ about.
 work array is a local of the call, and the only state that outlives a call is your own integrand
 object. Integrate from as many threads as you like, giving each its own `pf_integrand` object; the
 plain-function form shares nothing at all.
+
+That is a claim about absence, so it is backed by running it rather than by reading the source.
+`test/test_integrate_omp.f90` integrates thousands of different objects concurrently, each against
+its own closed form, and integrates one parameterless function thousands of times concurrently
+against a serial answer it must match **bit for bit**. The `threads` mode of
+`bench/benchmark_integrate.sh` does the same across a thread ladder and exits nonzero if a single
+result differs.
+
+One thing is yours to get right: **an integrand object may not be shared between threads**. `eval`
+takes the object `intent(inout)` precisely so it may keep a counter or a cache, and two threads
+evaluating one object race over it. One object per thread.
 
 See [Thread safety](../operating/thread-safety.html) for how this sits beside the rest of the
 library.

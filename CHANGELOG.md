@@ -19,10 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   infinite range is integrated by an outward walk that searches for a first panel the integrand is
   not negligible on and then steps outward a factor of e at a time, so a feature far along the
   range is found rather than stepped over, and `max_panels=` caps the panels one walk may use.
-  `converged=` and `info=` (`pf_integration_info`: status, error estimate, evaluation count,
-  panels) report the outcome and nothing is printed; `points=` (`pf_integration_points`) records
-  every abscissa, weight and value of the final partition, whose weighted sum reproduces the
-  integral. An Arrow-free entry module. `bench/benchmark_integrate.sh` measures it. See
+  `breakpoints=` cuts the range at named interior points and integrates each piece on its own,
+  which is how a feature the first rule application would not sample is named rather than hunted
+  for; the pieces share the evaluation budget and `atol`. `converged=` and `info=`
+  (`pf_integration_info`: status, error estimate, evaluation count, panels) report the outcome and
+  nothing is printed; `points=` (`pf_integration_points`) records every abscissa, weight and value
+  of the final partition, whose weighted sum reproduces the integral. Reentrant: integrate from as
+  many threads as you like, one integrand object per thread. An Arrow-free entry module.
+  `bench/benchmark_integrate.sh` measures it. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).
 
 ## [v2.4.0] - 2026-09-14

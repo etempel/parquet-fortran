@@ -25,6 +25,7 @@ program run_tester_pf
     use test_healpix, only : collect_tests_parquet_healpix
     use test_index, only : collect_tests_index
     use test_integrate, only : collect_tests_integrate
+    use test_integrate_omp, only : collect_tests_integrate_omp
     use test_index_omp, only : collect_tests_index_omp
     use test_index_multimap, only : collect_tests_index_multimap
     use test_index_strings, only : collect_tests_index_strings
@@ -50,6 +51,7 @@ program run_tester_pf
         new_testsuite("utils", collect_tests_utils), &
         new_testsuite("index", collect_tests_index), &
         new_testsuite("integrate", collect_tests_integrate), &
+        new_testsuite("integrate_omp", collect_tests_integrate_omp), &
         new_testsuite("index_omp", collect_tests_index_omp), &
         new_testsuite("index_multimap", collect_tests_index_multimap), &
         new_testsuite("index_strings", collect_tests_index_strings), &

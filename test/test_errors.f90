@@ -3095,6 +3095,12 @@ contains
                 test_integrate_log_base_infinite_aborts), &
             new_unittest("log_base from a non-positive lower bound is refused", &
                 test_integrate_log_base_nonpositive_aborts), &
+            new_unittest("a NaN breakpoint is refused", &
+                test_integrate_breakpoints_nan_aborts), &
+            new_unittest("a breakpoint outside the range is refused", &
+                test_integrate_breakpoints_outside_aborts), &
+            new_unittest("two equal breakpoints are refused", &
+                test_integrate_breakpoints_duplicate_aborts), &
             new_unittest("an integrand returning a non-finite value aborts naming x", &
                 test_integrate_integrand_nan_aborts), &
             new_unittest("a context reaches the abort message", &
@@ -18803,6 +18809,27 @@ contains
             failure_message="log_base from a non-positive bound was expected to abort", &
             required_stderr="lower bound must be positive when integrating in log x")
     end subroutine test_integrate_log_base_nonpositive_aborts
+    !
+    subroutine test_integrate_breakpoints_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_breakpoints_nan", expect_abort=.true., &
+            failure_message="a NaN breakpoint was expected to abort", &
+            required_stderr="breakpoints must be finite")
+    end subroutine test_integrate_breakpoints_nan_aborts
+    !
+    subroutine test_integrate_breakpoints_outside_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_breakpoints_outside", expect_abort=.true., &
+            failure_message="a breakpoint outside the range was expected to abort", &
+            required_stderr="breakpoints must lie strictly inside the range")
+    end subroutine test_integrate_breakpoints_outside_aborts
+    !
+    subroutine test_integrate_breakpoints_duplicate_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "integrate_breakpoints_duplicate", expect_abort=.true., &
+            failure_message="two equal breakpoints were expected to abort", &
+            required_stderr="breakpoints must be distinct")
+    end subroutine test_integrate_breakpoints_duplicate_aborts
     !
     subroutine test_integrate_integrand_nan_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -9,6 +9,7 @@
 module benchmark_integrate_kernels
 
     use iso_fortran_env, only : real64
+    use parquet_integrate, only : pf_integrand
 
     implicit none
     private
@@ -21,6 +22,19 @@ module benchmark_integrate_kernels
     public :: k_gauss, k_gauss_exact
     public :: k_tail_exp, k_tail_pow15, k_tail_pow2, k_tail_gauss, k_tail_osc
     public :: k_spike, k_spike_exact, k_bump, k_bump_exact
+    public :: k_decay_exact
+
+    !> A decaying exponential carrying its own parameters, for the `threads` mode.
+    !!
+    !! The thread mode needs an integrand whose parameters differ per iteration, so that an object
+    !! reaching two threads at once produces a wrong ANSWER rather than only a wrong count -- and
+    !! it needs to carry them as components, because that is the form the guide tells a user to
+    !! write and the only one a `class(pf_integrand)` dummy can receive.
+    type, extends(pf_integrand), public :: k_decay
+        real(real64) :: rate = 1.0_real64 !! the `p` of `exp(-p x)`
+    contains
+        procedure :: eval => k_decay_eval !! Evaluates `exp(-rate*x)`.
+    end type k_decay
 
     !> Terms in `k_heavy`, which exists to make one evaluation expensive enough that the
     !! framework's own cost per evaluation stops dominating the measurement.
@@ -240,21 +254,45 @@ contains
 
     end function k_bump_exact
 
+    !> Evaluates `exp(-rate*x)`, whose integral over `[0, 1]` is `(1 - exp(-rate))/rate`.
+    function k_decay_eval(this, x) result(f)
+        class(k_decay), intent(inout) :: this !! the integrand object
+        real(real64), intent(in)      :: x    !! point at which to evaluate
+        real(real64)                  :: f    !! the integrand value
+
+        f = exp(-this%rate*x)
+
+    end function k_decay_eval
+
+    !> Exact integral of `k_decay` over `[0, 1]`.
+    pure function k_decay_exact(rate) result(v)
+        real(real64), intent(in) :: rate !! the `p` of `exp(-p x)`
+        real(real64)             :: v    !! the exact value
+
+        v = (1.0_real64 - exp(-rate))/rate
+
+    end function k_decay_exact
+
 end module benchmark_integrate_kernels
 
-!> What `pf_integrate` costs: accuracy against evaluations per integrand class (`cost`), and the
-!> per-call floor the work arrays and the record buffer impose (`overhead`).
+!> What `pf_integrate` costs: accuracy against evaluations per integrand class (`cost`), the
+!> per-call floor the work arrays and the record buffer impose (`overhead`), what the outward walk
+!> of an infinite range costs (`walk`), and what concurrency buys (`threads`).
 !!
-!! Both modes report a relative error beside every timing, because the cheapest integrator is
-!! always the one that returns the wrong answer fastest.
+!! The timed modes report a relative error beside every timing, because the cheapest integrator is
+!! always the one that returns the wrong answer fastest; `threads` reports bit equality with the
+!! serial run instead, and exits nonzero when one result differs.
 !!
 !! Usage and configuration are in `bench/benchmark_integrate.sh`, which is how this program is
 !! meant to be run: it is the half that verifies the optimisation flags before believing a number.
 program benchmark_integrate
 
-    use iso_fortran_env, only : real64, error_unit
+    use iso_fortran_env, only : real64, int64, error_unit
     use parquet_integrate
     use benchmark_integrate_kernels
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_wtime, omp_get_max_threads
+#endif
 
     implicit none
 
@@ -270,6 +308,8 @@ program benchmark_integrate
         call run_overhead(rounds, repeats)
     case ("walk")
         call run_walk()
+    case ("threads")
+        call run_threads(rounds, repeats)
     case default
         write (error_unit, '(a)') "benchmark_integrate: unknown mode '"//trim(mode)//"'"
         error stop 1
@@ -310,7 +350,7 @@ contains
                 write (error_unit, '(a)') "benchmark_integrate: unknown option '" &
                     //trim(arg(1:eq - 1))//"'"
                 write (error_unit, '(a)') "Usage: benchmark_integrate " &
-                    //"[--mode=cost|overhead|walk] [--rounds=N] [--repeats=N]"
+                    //"[--mode=cost|overhead|walk|threads] [--rounds=N] [--repeats=N]"
                 error stop 1
             end select
         end do
@@ -532,5 +572,133 @@ contains
         end if
 
     end subroutine walk_row
+
+    !> What concurrency buys, and the gate that says the answers survived it.
+    !!
+    !! `N` independent integrations of a parameterised object, one object per iteration, across a
+    !! thread ladder. Two columns matter and they answer different questions:
+    !!
+    !! * the wall time and its speedup say what threading is WORTH -- `pf_integrate` holds no lock
+    !!   and no shared buffer, so the only ceiling is the machine;
+    !! * `bitmatch` says whether the answers are the SAME ones. Every result is compared bit for
+    !!   bit with the serial arm's, not to a tolerance: a parameterless integration of a fixed
+    !!   integrand is a deterministic computation over the caller's own locals, so any difference
+    !!   at all is shared state. **The mode exits nonzero when a single result differs**, which is
+    !!   what makes it a gate rather than a report.
+    !!
+    !! Quote `OMP_PLACES=sockets` when reporting a figure from here, and the load average: this
+    !! repository's reference machine runs other work beside a benchmark.
+    subroutine run_threads(rounds, cases)
+        integer, intent(in) :: rounds !! timed rounds per thread count; the best is kept
+        integer, intent(in) :: cases  !! integrations inside one timed round
+
+        integer, parameter :: LADDER(7) = [1, 2, 4, 8, 16, 32, 64]
+
+        real(real64), allocatable :: serial(:), got(:)
+        real(real64)              :: best, elapsed, t0, base
+        integer                   :: k, i, r, team, offered, mismatches, total_mismatches
+        integer                   :: comparisons
+
+        allocate (serial(cases), got(cases))
+
+        offered = 1
+#ifdef _OPENMP
+        offered = omp_get_max_threads()
+#endif
+
+        print '(a)', "=== pf_integrate: independent integrations across a thread ladder ==="
+        print '(a,i0,a,i0,a)', "cases ", cases, " per round, best of ", rounds, " rounds"
+        print '(a,i0)', "threads offered by the runtime: ", offered
+        print '(a)', ""
+        print '(a)', "  threads      seconds   speedup   mismatches"
+
+        ! The serial arm first, and it is the oracle: every later arm is compared against it.
+        call integrate_all(1, cases, serial)
+        base = 0.0_real64
+        total_mismatches = 0
+        comparisons = 0
+
+        do k = 1, size(LADDER)
+            team = LADDER(k)
+            if (team > offered) exit
+
+            best = huge(1.0_real64)
+            mismatches = 0
+            do r = 1, rounds
+                t0 = now()
+                call integrate_all(team, cases, got)
+                elapsed = now() - t0
+                if (elapsed < best) best = elapsed
+                ! Every round is checked, not only the fastest: a race that shows up once in five
+                ! runs is exactly the kind this gate exists for.
+                do i = 1, cases
+                    if (got(i) /= serial(i)) mismatches = mismatches + 1
+                end do
+                comparisons = comparisons + cases
+            end do
+            if (k == 1) base = best
+            total_mismatches = total_mismatches + mismatches
+
+            print '(a,i9,f13.4,f10.2,i13)', "  ", team, best, base/best, mismatches
+        end do
+
+        print '(a)', ""
+        if (offered < 2) then
+            print '(a)', "  One thread offered, so every arm above is the serial arm: this run"
+            print '(a)', "  says nothing about concurrency. Raise OMP_NUM_THREADS."
+        end if
+
+        ! The gate. A wrong answer is the failure this mode exists to catch, so it leaves a
+        ! non-zero exit status rather than a line in a report nobody reads.
+        if (total_mismatches > 0) then
+            write (error_unit, '(a,i0,a)') "benchmark_integrate: ", total_mismatches, &
+                " concurrent results differed from the serial ones -- pf_integrate is not"
+            write (error_unit, '(a)') "  reentrant in this build, and no timing above means anything"
+            error stop 1
+        end if
+        ! A mode whose whole point is an equality says how much it compared, rather than only
+        ! staying quiet: a gate that silently checked nothing is the failure mode this project
+        ! treats as worst.
+        print '(a,i0,a)', "  bit equality with the serial arm held over all ", comparisons, &
+            " comparisons."
+
+    end subroutine run_threads
+
+    !> `cases` integrations of `cases` different objects, on a team of `team` threads.
+    !!
+    !! The object is `private`, and every component is assigned as the FIRST statement of the loop
+    !! body: an OpenMP private copy of a derived type is not reliably default-initialised under
+    !! gfortran, so nothing may be inherited from the declaration.
+    subroutine integrate_all(team, cases, out)
+        integer, intent(in)       :: team   !! threads to open
+        integer, intent(in)       :: cases  !! integrations to run
+        real(real64), intent(out) :: out(:) !! one result per case
+
+        type(k_decay) :: prof
+        integer       :: i
+
+        !$omp parallel do default(shared) private(i, prof) schedule(static) num_threads(team)
+        do i = 1, cases
+            prof%rate = 0.5_real64 + real(i, real64)
+            out(i) = pf_integrate(prof, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+        end do
+        !$omp end parallel do
+
+    end subroutine integrate_all
+
+    !> Seconds on an arbitrary origin: the wall clock under OpenMP, `system_clock` without it.
+    function now() result(t)
+        real(real64) :: t !! seconds, on an arbitrary origin
+
+#ifdef _OPENMP
+        t = omp_get_wtime()
+#else
+        integer(int64) :: c, r
+
+        call system_clock(c, r)
+        t = real(c, real64)/real(r, real64)
+#endif
+
+    end function now
 
 end program benchmark_integrate

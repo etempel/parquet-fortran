@@ -69,6 +69,33 @@
 !!     `|f|` over the whole range it was given -- which upstream keeps as a local. The outward
 !!     walk measures its round-off floor against the sum of these, exactly as qfeet measured its
 !!     own against the unrefined rule's `resabs`, and nothing else reads it.
+!!
+!! **What is deliberately NOT vendored: `dqagie` and `dqk15i`.** QUADPACK answers an infinite
+!! range by the change of variable `x = a + (1 - t)/t`, bisecting in `t` over `(0, 1]` with a
+!! 15-point rule. This library answers one by walking outward in `log x` a panel at a time,
+!! applying `qagse` and the 21-point rule above to each panel, and the two infinite-range
+!! routines were weighed against that walk and left upstream.
+!!
+!! The transform cannot be the only method, because of where it puts its points: everything
+!! beyond about `a + 19` lands between the first rule's last two abscissae, so a unit-width
+!! feature at `x = 40` is never sampled, every value read is zero, the error estimate is zero,
+!! nothing is ever bisected, and the answer comes back as zero with `converged` true. The walk
+!! samples 21 points per factor of e the whole way out and finds it.
+!!
+!! The open question was whether to vendor them ANYWAY for the tail beyond the last walked panel
+!! -- a hybrid, walking near the bound and transforming far from it -- which was to be built only
+!! if the walk alone cost more than two and a half times `dqagi` on the tail shapes both methods
+!! handle. Measured at `rtol = 1e-10, atol = 1e-14`, the walk costs a geometric mean of 1.53
+!! times `dqagi`'s count over `exp(-x)`, `x**-1.5` and `exp(-x**2)`, and is CHEAPER than `dqagi`
+!! on two of those three, at 0.78 and 0.75; `x**-1.5` is the one it is dear on, at 6.11. That is
+!! inside the line, so the hybrid was not built and these two routines have no reason to be here.
+!! Vendoring them would mean applying every deviation above a second time -- the
+!! `class(pf_integrand)` dummy, the evaluation counter, the record slots carrying the transform's
+!! `1/t**2` Jacobian in the weight, the non-finite screen and the initialisations -- for roughly
+!! 900 lines, to accelerate the single shape where the walk is expensive.
+!!
+!! The panel width those figures were measured at, and why it is one rather than two, is recorded
+!! at `TAIL_STEP` in `parquet_integrate.f90`.
 submodule (parquet_integrate) parquet_integrate_engine
 
     implicit none

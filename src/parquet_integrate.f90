@@ -97,7 +97,70 @@ module parquet_integrate
     !! `default_max_tail_steps`, kept: the panel count is what the walk's cost is made of.
     integer, parameter :: DEFAULT_MAX_PANELS = 50
     !> Width of one walk panel, in natural-log units of `x`, so each panel spans a factor of e.
-    !! qfeet's `tail_step`. Question Q23 sweeps 1, 2 and 3 in the benchmark's `walk` mode.
+    !!
+    !! qfeet's `tail_step`, and one is where a sweep over 1, 2 and 3 left it. **The cost did not
+    !! decide it.** Beside `dqagi`'s count on the three scored tail shapes, at
+    !! `rtol = 1e-10, atol = 1e-14`:
+    !!
+    !! ```
+    !! ratio against dqagi          width 1   width 2   width 3
+    !! exp(-x)      [1, inf)           0.78      0.93      1.56
+    !! x**-1.5      [1, inf)           6.11      3.18      2.16
+    !! exp(-x**2)   [0, inf)           0.75      0.97      1.18
+    !! geometric mean of the three     1.53      1.42      1.59
+    !! ```
+    !!
+    !! A wider panel covers the same distance in fewer steps, which is cheaper on an algebraic
+    !! tail and dearer on an exponential one, and the three means land within twelve per cent of
+    !! each other -- width 2 being the cheapest of them, by seven per cent.
+    !!
+    !! **What decides it is the narrow feature just above the lower bound**, the blind spot the
+    !! walk exists to cover. A gaussian spike of half-width `1e-3` centred at `x = 1.02`,
+    !! integrated over `[1, infinity)` at `rtol = 1e-10`:
+    !!
+    !! ```
+    !! atol       width 1              width 2              width 3
+    !! 0          609, rel 1.3e-14    1113, rel 1.3e-14     147, rel 1.0
+    !! 1e-14      609, rel 1.3e-14     105, rel 1.0         147, rel 1.0
+    !! 1e-20      609, rel 1.3e-14     105, rel 1.0         147, rel 1.0
+    !! 1e-30      609, rel 1.3e-14    1113, rel 1.3e-14     147, rel 1.0
+    !! ```
+    !!
+    !! A relative error of one is the whole integral missed: `5.4e-23` returned where `1.77e-03`
+    !! was wanted, `converged` TRUE. **Width 3 loses the spike at every tolerance.** Width 2 loses
+    !! it for any `atol` at or above about `1e-22`, which is every setting a caller would
+    !! plausibly pass, and finds it only when `atol` is effectively zero -- and then at 1113
+    !! evaluations against width 1's 609. Width 1 finds it at every setting. A silent wrong answer
+    !! on the shape this walk was built for is not worth seven per cent, so the width stays at one.
+    !!
+    !! **The failure is abrupt rather than gradual, because the protection is exactly one
+    !! bisection deep.** At every width the first rule application over the start panel misses
+    !! the spike completely -- 18 of its 21 abscissae read an exact zero and the other three read
+    !! `1e-21` and smaller -- and QUADPACK does not return on that: `abserr == resabs`, the error
+    !! estimate saturated at the integral of `|f|`, which says the rule learned nothing, and it
+    !! blocks `qagse`'s early exit. That buys one bisection and no more, since the test guards a
+    !! panel's FIRST application only. Below it the loop exits on `errsum <= errbnd`, and
+    !! `errbnd` is `max(atol, rtol*|area|)`: on a panel whose area is `5e-23` the `rtol` term is
+    !! nothing, so `atol` IS the bound, and any ordinary `atol` ends the bisection right there.
+    !! That is the whole of the `atol` column above. At width 1 the one bisection yields `x` in
+    !! `[1, 1.65]`, whose 21 abscissae are close enough together that one lands on the spike:
+    !! `errsum` jumps from `1.1e-22` to `9.1e-05`, far above any bound, and the bisection
+    !! converges onto it. At width 2 it yields `[1, 2.72]` -- width 1's whole panel, read with the
+    !! guard already spent -- where `errsum` stays at `1.1e-22` and only an `atol` below that
+    !! keeps the walk going.
+    !!
+    !! **The suite protects this, but not through the test one would expect.** Setting the width
+    !! to 2 fails `integral_inf_oscillatory`, not `start_panel_search`, even though the latter
+    !! integrates exactly this spike: it uses the bare-`rtol` spelling, so its `atol` is zero and
+    !! width 2 survives it. `start_panel_search` catches width 3. Anyone adding a blind-spot
+    !! fixture should pass a non-zero `atol` if the width is what it means to pin.
+    !!
+    !! **The width is a `parameter` and not an argument**, so re-running the sweep means
+    !! recompiling: copy `src/parquet_integrate*.f90` outside the repository, edit this line and
+    !! build the three files with a driver of your own -- this module imports only
+    !! `iso_fortran_env` and `ieee_arithmetic`, so it needs nothing else. The header of
+    !! `bench/benchmark_integrate.sh` says the same, and that benchmark's `walk` mode is what
+    !! reports the rows above.
     real(real64), parameter :: TAIL_STEP = 1.0_real64
     !> Multiple of `epsilon` below which a panel's contribution is indistinguishable from
     !! accumulated rounding. qfeet's `roundoff_factor`: not a tolerance, and fixed on purpose.

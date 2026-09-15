@@ -491,8 +491,10 @@ contains
     !! first rule's last two abscissae: a unit-width feature at `x = 40` falls between them, every
     !! sampled value is zero, the error estimate is zero, nothing is ever bisected, and the answer
     !! comes back as zero with `converged` true. The outward walk samples 21 points per factor of
-    !! e instead, so the same feature is found. What it costs is measured by the benchmark's
-    !! `walk` mode.
+    !! e instead, so the same feature is found. What that costs was measured: a geometric mean of
+    !! 1.53 times `dqagi`'s count over the three scored tail shapes, and less than `dqagi` on two
+    !! of the three. The benchmark's `walk` mode reports the rows; the engine file's header
+    !! records why `qagie` was weighed against this walk and left upstream.
     subroutine integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, record, res, &
                                   outcome, neval, context)
         class(pf_integrand), intent(inout)         :: f         !! the integrand

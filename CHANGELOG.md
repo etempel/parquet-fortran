@@ -10,9 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Numerical integration: `parquet_integrate` and `pf_integrate`.** Adaptive quadrature of a
   function of one `real64` variable over a finite or infinite range, by the 21-point Gauss-Kronrod
-  rule with adaptive bisection and, for an endpoint singularity, Wynn-epsilon extrapolation
-  (`extrapolate=`). The integrand is an object extending `pf_integrand`, with its parameters as
-  components and an `eval` that may update them, or a plain function; tolerances are `rtol` or a
+  rule with adaptive bisection and Wynn-epsilon extrapolation, which is on unless
+  `extrapolate=.false.` turns it off and which keeps the cost of an integrable endpoint
+  singularity from growing with the tolerance. The integrand is an object extending `pf_integrand`,
+  with its parameters as components and an `eval` that may update them, or a plain function;
+  tolerances are `rtol` or a
   `pf_tolerance` with `atol`; `max_neval` bounds the integrand evaluations and is never exceeded;
   `log_base=` integrates a range spanning many decades in `log x`. Either bound may be
   `pf_infinity()` or its negative, spelling `[a, +inf)`, `(-inf, b]` and `(-inf, +inf)`; an
@@ -24,7 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for; the pieces share the evaluation budget and `atol`. `converged=` and `info=`
   (`pf_integration_info`: status, error estimate, evaluation count, panels) report the outcome and
   nothing is printed; `points=` (`pf_integration_points`) records every abscissa, weight and value
-  of the final partition, whose weighted sum reproduces the integral. Reentrant: integrate from as
+  of the final partition, whose weighted sum reproduces `info%partition_integral`, and the returned
+  result too whenever `info%extrapolated` is false. Reentrant: integrate from as
   many threads as you like, one integrand object per thread. An Arrow-free entry module.
   `bench/benchmark_integrate.sh` measures it. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).

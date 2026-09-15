@@ -419,7 +419,7 @@ contains
             end do
 
             print '(a,a,a,es10.1,i8,es11.2,f12.3)', "  ", &
-                merge("eps on ", "eps off", eps), tag, ladder(n), info%neval, &
+                merge("eps on  ", "eps off ", eps), tag, ladder(n), info%neval, &
                 abs(r - want)/abs(want), 1.0e6_real64*best/real(repeats, real64)
             ! The checksum is read outside every timed region, so that no round's work can be
             ! optimised away and no round pays for the reading.

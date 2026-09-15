@@ -36,6 +36,8 @@ module test_integrate_support
     public :: rising_exp, exp_over_x, exp_over_x_exact, exp_cos, exp_cos_exact
     public :: narrow_spike, narrow_spike_exact, sliver_bump, sliver_bump_exact
     public :: full_wave, saw_sqrt, saw_sqrt_exact
+    public :: inv_sqrt, inv_sqrt_exact, mild_pow, mild_pow_exact
+    public :: divergent_pow, divergent_pow_finite_part
     public :: scaled_runge, exp_profile
 
     !> Half-width of `compact_bump`'s support, which is centred on `BUMP_CENTRE`.
@@ -57,6 +59,9 @@ module test_integrate_support
     real(real64), parameter, public :: SLIVER_AT = 1.001_real64
     !> Width of one tooth of `saw_sqrt`; four of them span `[0, 1]`.
     real(real64), parameter, public :: SAW_WIDTH = 0.25_real64
+
+    !> Exponent of `divergent_pow`: above one, so the integral over `[0, 1]` does not exist.
+    real(real64), parameter, public :: DIVERGENT_EXPONENT = 1.1_real64
 
     !> Runge's function scaled by an amplitude, with a counter, as the guide's object example.
     type, extends(pf_integrand) :: scaled_runge
@@ -268,6 +273,84 @@ contains
         v = 2.0_real64*sqrt(SAW_WIDTH)/SAW_WIDTH
 
     end function saw_sqrt_exact
+
+    !> `1/sqrt(x)`: the plainest integrable endpoint singularity, exactly 2 over `[0, 1]`.
+    !!
+    !! Zero at `x = 0` so that a caller who does evaluate the endpoint gets a number; the rule
+    !! never evaluates an endpoint, so no integration reaches that branch.
+    function inv_sqrt(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = 0.0_real64
+        if (x > 0.0_real64) f = 1.0_real64/sqrt(x)
+
+    end function inv_sqrt
+
+    !> Exact integral of `inv_sqrt` over `[0, 1]`: `[2 sqrt(x)]` from 0 to 1.
+    pure function inv_sqrt_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = 2.0_real64
+
+    end function inv_sqrt_exact
+
+    !> `x**-0.9`: an endpoint singularity mild enough to converge and steep enough to be dear.
+    !!
+    !! The bisection alone pays thousands of evaluations here and more as the tolerance tightens,
+    !! because halving the interval next to the singularity buys a fixed factor rather than a
+    !! fixed number of digits. It is the shape the extrapolation exists for.
+    function mild_pow(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = 0.0_real64
+        if (x > 0.0_real64) f = x**(-0.9_real64)
+
+    end function mild_pow
+
+    !> Exact integral of `mild_pow` over `[0, 1]`: `[x**0.1/0.1]` from 0 to 1.
+    pure function mild_pow_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = 10.0_real64
+
+    end function mild_pow_exact
+
+    !> `x**-1.1`: a DIVERGENT integral over `[0, 1]`, and the fixture for `PF_INT_DIVERGENT`.
+    !!
+    !! **The one fixture here whose integral does not exist.** `integral of x**-p` over `[0, 1]`
+    !! diverges for every `p >= 1`, and this is the shape QUADPACK's divergence test was written
+    !! for: the extrapolation table sees the partial sums running away rather than settling, and
+    !! says so in a couple of hundred evaluations.
+    !!
+    !! It must be integrated WITH the extrapolation, which is the default. The plain bisection
+    !! keeps halving the interval next to zero and takes the abscissae below `1e-280`, where
+    !! `x**-1.1` overflows to an infinity and the engine's non-finite screen aborts the process --
+    !! which is why no arm of any test passes `extrapolate=.false.` to this fixture, and is
+    !! itself part of what the default buys.
+    function divergent_pow(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = 0.0_real64
+        if (x > 0.0_real64) f = x**(-DIVERGENT_EXPONENT)
+
+    end function divergent_pow
+
+    !> What the extrapolation returns for `divergent_pow`, which is NOT its integral.
+    !!
+    !! The epsilon table accelerates the partial sums of a series that does not converge, and
+    !! what it lands on is the analytic continuation of `integral of x**-p from e to 1`, that is
+    !! `(e**(1-p) - 1)/(p - 1)` as `e -> 0` with the divergent half discarded: `-1/(p - 1)`, here
+    !! `-10`. A finite number, of the wrong sign for a positive integrand, and the reason the
+    !! STATUS rather than the result is what tells a caller the integral does not exist.
+    pure function divergent_pow_finite_part() result(v)
+        real(real64) :: v !! the value the table returns
+
+        v = -1.0_real64/(DIVERGENT_EXPONENT - 1.0_real64)
+
+    end function divergent_pow_finite_part
 
     !> Plain `sin(x)`, whose integral is elementary at any bounds.
     function sine(x) result(f)

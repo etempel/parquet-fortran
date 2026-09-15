@@ -1,6 +1,6 @@
 !> Adaptive numerical integration of a function of one `real64` variable: `pf_integrate`, the
-!> 21-point Gauss-Kronrod rule with adaptive bisection over a finite range, and an outward walk
-!> over the same rule for an infinite one.
+!> 21-point Gauss-Kronrod rule with adaptive bisection over a finite range, an outward walk over
+!> the same rule for an infinite one, and the Wynn-epsilon extrapolation over both.
 !!
 !! `parquet_integrate` is an **Arrow-free leaf**: it imports the two INTRINSIC modules
 !! `iso_fortran_env` and `ieee_arithmetic`, and no module of this library. An intrinsic module is
@@ -32,6 +32,14 @@
 !! is a property of the input rather than of the code; `points=` shows where the integrand was
 !! actually sampled, and `breakpoints=` is what makes such a feature visible -- a cut at each side
 !! of it puts a rule application on the piece that contains it.
+!!
+!! **The extrapolation is on unless it is turned off.** `extrapolate=.false.` leaves the plain
+!! bisection, whose result is exactly the sum `points=` reproduces. On by default it costs
+!! essentially nothing on a smooth integrand -- the same answer, and the same count but for the
+!! occasional extra bisection at the tightest tolerances -- and it is what turns an integrable
+!! endpoint singularity from a cost that grows with the tolerance into one that does not, and a
+!! DIVERGENT integral from a long drill towards the singularity into `PF_INT_DIVERGENT` in a
+!! couple of hundred evaluations.
 !!
 !! The engine is QUADPACK's, vendored and reworked; `src/parquet_integrate_engine.f90`'s header
 !! carries the attribution and the full list of deviations from the upstream text.
@@ -247,9 +255,17 @@ module parquet_integrate
     !!   Capped at 100 characters.
     !! * `log_base` -- optional `logical`, default false: integrate in `log x`, for a finite range
     !!   spanning many decades. Requires `a > 0` and two finite bounds.
-    !! * `extrapolate` -- optional `logical`, default false: use the Wynn-epsilon extrapolation,
-    !!   which pays for itself on an endpoint singularity and nowhere else. With it false the
-    !!   result is always the partition sum, which is what `points` reproduces exactly.
+    !! * `extrapolate` -- optional `logical`, DEFAULT TRUE: use the Wynn-epsilon extrapolation.
+    !!   It is what makes an integrable endpoint singularity affordable -- the bisection alone
+    !!   pays more and more as the tolerance tightens, while the table's cost does not grow at
+    !!   all -- and on a smooth integrand, an interior peak or a polynomial it leaves the answer
+    !!   alone and the count all but alone, because the table is not consulted until the
+    !!   bisection has begun dividing the same end of the range over and over. It also earns the two status
+    !!   codes only it can reach: a divergent integral is reported as `PF_INT_DIVERGENT` in a
+    !!   couple of hundred evaluations, where the bisection alone would drill towards the
+    !!   singularity until the integrand overflows. Pass `.false.` when the returned result must
+    !!   BE the partition sum -- the sum `points` reproduces exactly -- rather than an
+    !!   acceleration of it; `info%extrapolated` says which of the two was returned.
     !! * `max_panels` -- optional cap on the panels ONE walk may use, default 50, counting the
     !!   first panel the search accepted. Reaching it is `PF_INT_LIMIT`, not an error. Present on
     !!   a finite range aborts; on `(-inf, +inf)`, which is two walks, it caps each of them.

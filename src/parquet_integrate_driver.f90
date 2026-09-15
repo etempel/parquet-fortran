@@ -236,7 +236,17 @@ contains
 
         in_log = .false.
         if (present(log_base)) in_log = log_base
-        use_eps = .false.
+        ! The extrapolation is ON by default. It is what keeps an integrable endpoint
+        ! singularity from getting dearer with every further digit asked for: `log(x)/sqrt(x)`
+        ! on [0, 1] costs 315 evaluations at every tolerance from 1e-6 to 1e-12 with the table
+        ! and 1995 rising to 3717 without it, and `x**-0.9` costs 231 flat against 8085 rising
+        ! to 16443. On every other shape measured it leaves the answer alone and the count all
+        ! but alone -- the one exception is an interior peak at 1e-12, which costs one bisection
+        ! more (735 against 693) -- because the table is not consulted until the bisection has
+        ! begun dividing the same end of the range over and over. A caller who needs the returned
+        ! result to BE the plain partition sum -- the sum `points` reproduces exactly -- passes
+        ! `extrapolate=.false.`.
+        use_eps = .true.
         if (present(extrapolate)) use_eps = extrapolate
         record_wanted = present(points)
         budget = DEFAULT_MAX_NEVAL

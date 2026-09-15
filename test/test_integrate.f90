@@ -39,6 +39,8 @@ module test_integrate
     integer, parameter :: BISECTION = 42
     !> Evaluations one rule application costs.
     integer, parameter :: ONE_RULE = 21
+    !> `max_neval`'s default, as the module documents it; a walk may overshoot it by one rule.
+    integer, parameter :: DEFAULT_BUDGET = 100000
 
 contains
 
@@ -100,7 +102,11 @@ contains
             new_unittest("a breakpoint on an infinite range leaves the walk to the tail piece", &
                          test_breakpoints_on_infinite_ranges), &
             new_unittest("the pieces share the caller's atol instead of each taking all of it", &
-                         test_breakpoints_share_atol) &
+                         test_breakpoints_share_atol), &
+            new_unittest("an endpoint singularity costs the same at every tolerance", &
+                         test_endpoint_singularities_are_cheap), &
+            new_unittest("a divergent integral is reported as divergent, not integrated", &
+                         test_status_divergent) &
             ]
 
     end subroutine collect_tests_integrate
@@ -181,7 +187,9 @@ contains
 
         call one_reference(error, osc_a, osc_a_exact(), RTOL, 399, "A, 2/(2+sin(10 pi x))")
         if (allocated(error)) return
-        call one_reference(error, log_sqrt, log_sqrt_exact(), RTOL, 1995, "B, log(x)/sqrt(x)")
+        ! B's count is upstream `dqags`' own 315, not the 1995 the bisection alone pays: the
+        ! extrapolation is on by default and this is the integrand it exists for.
+        call one_reference(error, log_sqrt, log_sqrt_exact(), RTOL, 315, "B, log(x)/sqrt(x)")
         if (allocated(error)) return
         call one_reference(error, peak_c, peak_c_exact(), RTOL, 399, "C, an interior peak")
         if (allocated(error)) return
@@ -192,8 +200,40 @@ contains
         if (allocated(error)) return
         call one_reference_inf(error, exp_cos, 0.0_real64, exp_cos_exact(), RTOL, 168, &
                                "E, exp(-x) cos(x) over [0, inf)")
+        if (allocated(error)) return
+
+        ! B down the whole ladder. It is the one row of the six whose cost the tolerance moves at
+        ! all under the plain bisection -- 1995, 2583, 3129, 3717 -- and the one row the table
+        ! flattens: the same 315 at every tolerance, and the same answer, because the table stops
+        ! when the accelerated sequence stops moving rather than when the tolerance is met.
+        call b_down_the_ladder(error, 1.0e-8_real64)
+        if (allocated(error)) return
+        call b_down_the_ladder(error, 1.0e-10_real64)
+        if (allocated(error)) return
+        call b_down_the_ladder(error, 1.0e-12_real64)
 
     end subroutine test_six_reference_integrands
+
+    !> Asserts case B's accuracy and cost at one tolerance of the ladder.
+    subroutine b_down_the_ladder(error, rtol)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64), intent(in)                   :: rtol  !! tolerance to ask for
+
+        type(pf_integration_info) :: info
+        real(real64)              :: r
+        character(len=16)         :: at
+
+        write (at, '(es9.1)') rtol
+        r = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, rtol, info=info)
+        call check(error, info%converged, "case B must converge at rtol "//trim(at))
+        if (allocated(error)) return
+        call check(error, abs(r - log_sqrt_exact()) <= rtol*abs(log_sqrt_exact()), &
+                   "case B must meet the tolerance it was given at rtol "//trim(at))
+        if (allocated(error)) return
+        call check(error, info%neval <= 315 + BISECTION, &
+                   "case B must still cost what dqags costs at rtol "//trim(at))
+
+    end subroutine b_down_the_ladder
 
     !> Integrates one reference integrand over `[a, inf)` and asserts its accuracy and its cost.
     subroutine one_reference_inf(error, fn, a, want, rtol, measured, what)
@@ -479,8 +519,8 @@ contains
     subroutine test_integral_inf_oscillatory(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: loose, tight
-        real(real64)              :: r, want, inf
+        type(pf_integration_info) :: loose, tight, plain
+        real(real64)              :: r, r_plain, want, inf
 
         inf = pf_infinity()
         want = tail_osc_exact()
@@ -491,13 +531,37 @@ contains
         if (allocated(error)) return
         call check(error, loose%converged, "the oscillatory tail must converge at 1e-8")
         if (allocated(error)) return
+        ! A converging walk reaches its answer through the partition, not the table: the
+        ! extrapolation is on here and must have changed neither the answer nor the count.
+        r_plain = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-8_real64, info=plain, &
+                               extrapolate=.false.)
+        call check(error, r_plain == r .and. plain%neval == loose%neval &
+                   .and. .not. loose%extrapolated, &
+                   "the extrapolation must not touch a tail the bisection already converged on")
+        if (allocated(error)) return
 
         ! The same integrand at a tolerance the budget cannot buy.
         r = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-10_real64, info=tight)
-        call check(error, .not. tight%converged .and. tight%status == PF_INT_LIMIT, &
-                   "the oscillatory tail must report PF_INT_LIMIT at 1e-10, not convergence")
+        call check(error, .not. tight%converged, &
+                   "the oscillatory tail must not report convergence at 1e-10")
         if (allocated(error)) return
-        call check(error, abs(r - want) <= 1.0e-5_real64, &
+        call check(error, tight%neval >= DEFAULT_BUDGET, &
+                   "it must not report anything but convergence without having spent the budget")
+        if (allocated(error)) return
+        ! The code differs between the two paths and both are right about what they saw. The
+        ! bisection ran out of evaluations: `PF_INT_LIMIT`. The extrapolation, handed the partial
+        ! sums of an integrand that keeps changing sign, reports QUADPACK's own verdict for a
+        ! series that will not settle: `PF_INT_DIVERGENT`, whose text is "probably divergent, or
+        ! SLOWLY CONVERGENT" -- and a conditionally convergent oscillatory tail is exactly that.
+        call check(error, tight%status == PF_INT_DIVERGENT, &
+                   "an oscillatory tail the budget cannot buy is the extrapolation's slow case")
+        if (allocated(error)) return
+        r_plain = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-10_real64, info=plain, &
+                               extrapolate=.false.)
+        call check(error, plain%status == PF_INT_LIMIT .and. .not. plain%converged, &
+                   "without the table the same call is simply out of budget: PF_INT_LIMIT")
+        if (allocated(error)) return
+        call check(error, abs(r - want) <= 1.0e-5_real64 .and. abs(r_plain - want) <= 1.0e-5_real64, &
                    "a walk that ran out of budget must still return its best estimate")
         if (allocated(error)) return
         call check(error, tight%neval > loose%neval, &
@@ -694,6 +758,31 @@ contains
                    "a negated walk's abscissae must be the caller's x, at or below the bound")
         if (allocated(error)) return
 
+        ! An endpoint singularity, where the returned result is the epsilon table's and NOT the
+        ! partition sum. The record is still exactly the partition, so `sum(w*f)` reproduces
+        ! `partition_integral` as always and `res` no longer -- which is the whole reason
+        ! `info%extrapolated` exists and the one case a caller re-weighting the record must know
+        ! about.
+        r = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info, points=pts)
+        summed = sum(pts%w(1:pts%n)*pts%f(1:pts%n))
+        call check(error, info%extrapolated, &
+                   "log(x)/sqrt(x) must reach its answer through the table, which is the default")
+        if (allocated(error)) return
+        call check(error, abs(summed - info%partition_integral) &
+                   <= 8.0_real64*epsilon(1.0_real64)*abs(info%partition_integral), &
+                   "sum(w*f) must reproduce the partition integral on an extrapolated call too")
+        if (allocated(error)) return
+        call check(error, pts%n == ONE_RULE*info%nsub, &
+                   "an extrapolated call's record must still be 21 points per subinterval")
+        if (allocated(error)) return
+        ! The two differ by the bisection's own remaining error, which is what the table removed.
+        call check(error, info%partition_integral /= r, &
+                   "an extrapolated result must NOT equal the partition sum it was accelerated from")
+        if (allocated(error)) return
+        call check(error, abs(r - log_sqrt_exact()) < abs(info%partition_integral - log_sqrt_exact()), &
+                   "and the accelerated result must be the closer of the two to the closed form")
+        if (allocated(error)) return
+
         ! The whole line, which is both walks at once.
         r = pf_integrate(tail_gauss, -pf_infinity(), pf_infinity(), 1.0e-10_real64, info=info, &
                          points=pts)
@@ -845,8 +934,11 @@ contains
         type(pf_integration_info) :: info
         real(real64)              :: r
 
+        ! The plain bisection's own verdict: it keeps halving towards the jump until QUADPACK's
+        ! "bad behaviour at a point" test fires.
         r = pf_integrate(unit_step, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=1.0e-15_real64, atol=1.0e-16_real64), info=info)
+                         pf_tolerance(rtol=1.0e-15_real64, atol=1.0e-16_real64), info=info, &
+                         extrapolate=.false.)
         call check(error, info%status == PF_INT_BAD_INTEGRAND, &
                    "drilling into a discontinuity must report PF_INT_BAD_INTEGRAND")
         if (allocated(error)) return
@@ -855,6 +947,28 @@ contains
         if (allocated(error)) return
         call check(error, abs(r - unit_step_exact()) <= 1.0e-12_real64, &
                    "the answer must still be right even though the status is not OK")
+        if (allocated(error)) return
+
+        ! The extrapolation's verdict on the same integrand, which is the DEFAULT path. A jump is
+        ! not a singularity the epsilon table can accelerate, so the table itself stops making
+        ! progress and reports it: `PF_INT_NO_CONVERGENCE`, the one code only stage 2 can reach.
+        r = pf_integrate(unit_step, 0.0_real64, 1.0_real64, &
+                         pf_tolerance(rtol=1.0e-15_real64, atol=1.0e-16_real64), info=info)
+        call check(error, info%status == PF_INT_NO_CONVERGENCE, &
+                   "the extrapolation's own failure on a jump must be PF_INT_NO_CONVERGENCE")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, &
+                   "PF_INT_NO_CONVERGENCE must report converged = .false. as well")
+        if (allocated(error)) return
+        call check(error, info%extrapolated, &
+                   "the code is the table's finding, so the table must say it ran")
+        if (allocated(error)) return
+        ! **Read this bound before loosening it.** The extrapolated answer here is WORSE than the
+        ! bisection's -- measured 1.8e-10 against 1.1e-16 -- while `info%abserr` claims 3.6e-15.
+        ! An accelerated sequence that was never converging carries no error estimate worth
+        ! having, and on this integrand the status is the only half of the answer that is honest.
+        call check(error, abs(r - unit_step_exact()) <= 1.0e-8_real64, &
+                   "the extrapolated answer must still be within 1e-8 of the closed form")
 
     end subroutine test_status_on_a_discontinuity
 
@@ -945,13 +1059,14 @@ contains
     subroutine test_extrapolation_earns_its_keep(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: plain, extrapolated
-        real(real64)              :: r_plain, r_extrapolated
+        type(pf_integration_info) :: plain, extrapolated, by_default
+        real(real64)              :: r_plain, r_extrapolated, r_default
 
         r_plain = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
                                extrapolate=.false., info=plain)
         r_extrapolated = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
                                       extrapolate=.true., info=extrapolated)
+        r_default = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=by_default)
 
         call check(error, abs(r_plain - log_sqrt_exact()) <= 1.0e-9_real64, &
                    "the plain bisection must still reach the closed form")
@@ -964,8 +1079,128 @@ contains
         if (allocated(error)) return
         call check(error, extrapolated%extrapolated .and. .not. plain%extrapolated, &
                    "only the extrapolated call may report having used the epsilon table")
+        if (allocated(error)) return
+        ! **What pins the DEFAULT.** Omitting `extrapolate=` must be the same call as passing
+        ! `.true.`, to the last bit; nothing else in this suite would notice the default going
+        ! back to `.false.`, because every other assertion here is about a better answer or a
+        ! smaller count and the plain bisection reaches both eventually.
+        call check(error, r_default == r_extrapolated, &
+                   "a call that omits extrapolate= must return the extrapolated result exactly")
+        if (allocated(error)) return
+        call check(error, by_default%neval == extrapolated%neval &
+                   .and. by_default%extrapolated .and. by_default%status == extrapolated%status, &
+                   "omitting extrapolate= must cost and report what extrapolate=.true. does")
 
     end subroutine test_extrapolation_earns_its_keep
+
+    !> Asserts that the extrapolation costs the same at every tolerance, where the bisection does
+    !! not.
+    !!
+    !! **The assertion that cannot be met by accident.** An endpoint singularity is the one shape
+    !! where the plain bisection's cost grows with the tolerance -- halving the interval next to
+    !! the singularity buys a fixed FACTOR of the remaining error rather than a fixed number of
+    !! digits -- so it pays more and more for each further digit. The epsilon table extrapolates
+    !! that geometric sequence to its limit instead, and reaches full double precision at the
+    !! loosest tolerance asked for, so the count at `1e-12` is the count at `1e-6`. Measured on
+    !! machine B: `log(x)/sqrt(x)` costs 315 evaluations at every tolerance on this ladder where
+    !! the bisection alone costs 1995 rising to 3717; `1/sqrt(x)` costs 231 against 1617 rising
+    !! to 3297; `x**-0.9` costs 231 against 8085 rising to 16443.
+    !!
+    !! The equality of the two counts is what a mutation cannot fake: forcing `noext` true makes
+    !! every count grow again, and the growth is what fails here.
+    subroutine test_endpoint_singularities_are_cheap(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        call one_singularity(error, inv_sqrt, inv_sqrt_exact(), "1/sqrt(x)")
+        if (allocated(error)) return
+        call one_singularity(error, mild_pow, mild_pow_exact(), "x**-0.9")
+        if (allocated(error)) return
+        call one_singularity(error, log_sqrt, log_sqrt_exact(), "log(x)/sqrt(x)")
+
+    end subroutine test_endpoint_singularities_are_cheap
+
+    !> Integrates one endpoint singularity at the loosest and the tightest tolerance of the
+    !! ladder, and asserts that the cost did not move.
+    subroutine one_singularity(error, fn, want, what)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        procedure(pf_integrand_func)               :: fn    !! the integrand
+        real(real64), intent(in)                   :: want  !! its closed form over [0, 1]
+        character(len=*), intent(in)               :: what  !! names the case in a message
+
+        type(pf_integration_info) :: loose, tight
+        real(real64)              :: r_loose, r_tight
+
+        r_loose = pf_integrate(fn, 0.0_real64, 1.0_real64, 1.0e-6_real64, info=loose)
+        r_tight = pf_integrate(fn, 0.0_real64, 1.0_real64, 1.0e-12_real64, info=tight)
+
+        call check(error, loose%converged .and. tight%converged, &
+                   what//" must converge at both ends of the tolerance ladder")
+        if (allocated(error)) return
+        call check(error, loose%extrapolated .and. tight%extrapolated, &
+                   what//" must reach its answer through the epsilon table, which is the default")
+        if (allocated(error)) return
+        ! The loose call is as accurate as the tight one: the table does not stop at the tolerance
+        ! it was given, it stops when the accelerated sequence stops moving.
+        call check(error, abs(r_loose - want) <= 1.0e-12_real64*abs(want), &
+                   what//" at rtol 1e-6 must already be accurate to twelve digits")
+        if (allocated(error)) return
+        call check(error, abs(r_tight - want) <= 1.0e-12_real64*abs(want), &
+                   what//" at rtol 1e-12 must meet the tolerance it was given")
+        if (allocated(error)) return
+        ! THE assertion. Without the extrapolation this count grows by thousands.
+        call check(error, tight%neval <= loose%neval + BISECTION, &
+                   what//" must cost no more at rtol 1e-12 than at 1e-6, to within one bisection")
+        if (allocated(error)) return
+        ! And the absolute level, so that "did not grow" cannot be met by both being enormous.
+        call check(error, tight%neval <= 20*ONE_RULE, &
+                   what//" must cost at most twenty rule applications in all")
+
+    end subroutine one_singularity
+
+    !> Asserts that an integral which does not exist is reported as divergent rather than answered.
+    !!
+    !! **The status is the only honest half of this answer.** `x**-1.1` over `[0, 1]` diverges,
+    !! and the epsilon table, handed the partial sums of a series that runs away, lands on the
+    !! analytic continuation `-1/(p - 1)` -- a finite number, and NEGATIVE for an integrand that
+    !! is positive everywhere. A caller who reads the result and not `converged` gets `-10` for
+    !! an integral that is `+infinity`. That the sign alone gives it away is luck, not a
+    !! guarantee; `converged` is the guarantee.
+    !!
+    !! **`extrapolate=.false.` is not asserted here and must not be**: the plain bisection keeps
+    !! halving the interval next to zero, the abscissae go below `1e-280`, `x**-1.1` overflows to
+    !! an infinity, and the engine's non-finite screen aborts the PROCESS -- which would take the
+    !! whole test binary down with it. That contrast is one of the things the default buys, and
+    !! the abort itself is covered out of process by the `integrate_integrand_nan` scenario.
+    subroutine test_status_divergent(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: info
+        real(real64)              :: r
+
+        r = pf_integrate(divergent_pow, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info)
+
+        call check(error, info%status == PF_INT_DIVERGENT, &
+                   "a divergent integral must report PF_INT_DIVERGENT")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, &
+                   "a divergent integral must not be reported as converged")
+        if (allocated(error)) return
+        ! The NaN screen first and the magnitude second, so neither half reads the other's case.
+        call check(error, r == r .and. abs(r) <= huge(1.0_real64), &
+                   "the returned estimate must still be a finite number")
+        if (allocated(error)) return
+        call check(error, info%extrapolated, &
+                   "the divergence is the extrapolation's finding, so it must say it ran")
+        if (allocated(error)) return
+        ! What the table lands on, to the accuracy it claims: the finite part, not the integral.
+        call check(error, abs(r - divergent_pow_finite_part()) <= 1.0e-8_real64, &
+                   "the table must return the analytic continuation -1/(p-1), which is -10 here")
+        if (allocated(error)) return
+        ! And it must find that out cheaply: the point of the test is that the engine STOPS.
+        call check(error, info%neval <= 20*ONE_RULE, &
+                   "divergence must be found in at most twenty rule applications, not drilled for")
+
+    end subroutine test_status_divergent
 
     ! ---- breakpoints ------------------------------------------------------------------------
 

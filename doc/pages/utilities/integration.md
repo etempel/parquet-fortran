@@ -224,8 +224,8 @@ reports through these values, and speaks only by aborting when a caller contract
 | `PF_INT_LIMIT` | `max_neval` or `max_panels` ran out first | raise the cap, or loosen the tolerance |
 | `PF_INT_ROUNDOFF` | round-off prevents the tolerance being met | loosen the tolerance; the result is as good as the arithmetic allows |
 | `PF_INT_BAD_INTEGRAND` | the integrand behaves extremely badly somewhere | split the range at the offending point |
-| `PF_INT_NO_CONVERGENCE` | round-off in the extrapolation table | loosen the tolerance, or turn `extrapolate` off |
-| `PF_INT_DIVERGENT` | the integral is probably divergent or very slowly convergent | check that the integral exists |
+| `PF_INT_NO_CONVERGENCE` | the extrapolation table stopped making progress | loosen the tolerance, split the range at whatever the table could not accelerate, or pass `extrapolate=.false.` |
+| `PF_INT_DIVERGENT` | the integral is probably divergent or very slowly convergent | check that the integral exists; the returned number is finite but is not an integral |
 
 A non-`PF_INT_OK` status still returns the engine's best estimate, and it is often a good one: a
 discontinuity inside the range reports `PF_INT_BAD_INTEGRAND` while returning an answer accurate
@@ -238,21 +238,27 @@ Pass `points=` and you get back a `pf_integration_points`: every abscissa, weigh
 
 ```fortran
 type(pf_integration_points) :: pts
+type(pf_integration_info) :: info
 real(real64) :: r, again
 
-r = pf_integrate(f, a, b, 1.0e-10_real64, points=pts)
-again = sum(pts%w(1:pts%n)*pts%f(1:pts%n))     ! reproduces r
+r = pf_integrate(f, a, b, 1.0e-10_real64, info=info, points=pts)
+again = sum(pts%w(1:pts%n)*pts%f(1:pts%n))     ! info%partition_integral, exactly
 ```
 
-**The weighted sum reproduces the integral**, because the weights carry everything the rule
-applied: the Kronrod weight, the subinterval's half-length and the Jacobian of `log_base`. The
-record is a quadrature rule for your integrand in your own variable, so you can re-weight it,
-plot it, or integrate a second function sampled at the same points.
+**The weighted sum reproduces the integral over the partition**, because the weights carry
+everything the rule applied: the Kronrod weight, the subinterval's half-length and the Jacobian of
+`log_base`. The record is a quadrature rule for your integrand in your own
+variable, so you can re-weight it, plot it, or integrate a second function sampled at the same
+points.
 
 Two things to know. It is the final partition, not a log of every evaluation — a subinterval that
 was bisected is represented by its two children, never by both itself and them, because summing
-both would count that region twice. And it reproduces `info%partition_integral` exactly; it
-reproduces the returned result too whenever `info%extrapolated` is false, which is the default.
+both would count that region twice. And what it reproduces is `info%partition_integral`, always
+and exactly; it reproduces the RETURNED result only when `info%extrapolated` is false. On a call
+the extrapolation accelerated, the returned result is the better of the two numbers and the
+record is the partition it was accelerated from, so a caller re-weighting the record is working
+with the plain sum — read `info%extrapolated`, or pass `extrapolate=.false.` to be handed the
+number the record reproduces.
 
 With `breakpoints=` the record covers every piece, concatenated in ascending order, and the
 weighted sum reproduces the whole integral exactly as it does for an unbroken range.
@@ -270,14 +276,31 @@ without it allocates no record at all.
 
 ## The extrapolation
 
-`extrapolate=.true.` turns on QUADPACK's Wynn-epsilon extrapolation. It pays for itself on one
-shape — an integrable singularity at an endpoint, such as `log(x)/sqrt(x)` on `[0, 1]` — where it
-cuts the cost by an order of magnitude. On a smooth integrand and on an interior peak it
-contributes nothing, and it is off by default.
+QUADPACK's Wynn-epsilon extrapolation is **on by default**; `extrapolate=.false.` turns it off.
 
-With it off, the result is always the plain partition sum, which is what the record reproduces
-exactly. With it on, `info%extrapolated` tells you when the returned result came from the epsilon
-table instead.
+It exists for one shape: an integrable singularity at an endpoint, such as `log(x)/sqrt(x)` or
+`1/sqrt(x)` on `[0, 1]`. Bisecting towards a singularity buys a fixed FACTOR of the remaining
+error each time rather than a fixed number of digits, so the plain bisection pays more and more
+for each further digit — while the table extrapolates that geometric sequence straight to its
+limit and reaches full precision at the loosest tolerance you would ask for. The practical
+difference is not a constant factor but a shape: **the cost of an endpoint singularity stops
+growing with the tolerance**, and at a tight tolerance that is an order of magnitude or more. On
+a smooth integrand, an interior peak or a polynomial it changes nothing worth noticing: the same
+answer, and the same evaluation count but for the occasional extra bisection at the very tightest
+tolerances.
+
+It also earns two of the status codes. A divergent integral is reported as `PF_INT_DIVERGENT` in
+a couple of hundred evaluations, where the bisection alone would keep drilling towards the
+singularity until the integrand overflows and the non-finite screen aborts. A jump inside the
+range — which the table cannot accelerate, because the sequence it is handed was never
+converging — is reported as `PF_INT_NO_CONVERGENCE`.
+
+Two things to weigh before leaving it on. `info%extrapolated` says whether the returned result
+came from the table; when it did, the result is no longer the partition sum the record
+reproduces. And on an integrand the table cannot help, the error estimate that comes back with a
+non-OK status is an estimate of an acceleration that did not work: trust the status, not
+`abserr`. Passing `extrapolate=.false.` gives you the plain bisection, whose result is always
+exactly `info%partition_integral`.
 
 ## What the integrator cannot see
 
@@ -376,9 +399,10 @@ exit status stays meaningful when the call was inside a parallel region.
 In general terms, and measured by `bench/benchmark_integrate.sh` rather than stated here: a smooth
 integrand costs a few hundred evaluations to reach ten digits, and the cost grows slowly as the
 tolerance tightens, because the underlying rule is exact for polynomials up to degree 31. An
-endpoint singularity is the expensive case, and the one the extrapolation turns from thousands of
-evaluations into hundreds. Integrating a power law in `log x` can be an order of magnitude cheaper
-than in linear `x`.
+endpoint singularity is the expensive case for the bisection alone, and the one the extrapolation
+turns from a cost that grows with every further digit into one that does not grow at all: the
+same few hundred evaluations at the loosest tolerance and at the tightest. Integrating a power
+law in `log x` can be an order of magnitude cheaper than in linear `x`.
 
 **A decaying tail costs a few hundred evaluations** — the walk pays 21 points per factor of e, and
 a few probes for the panel it starts from, so what sets the price is how many factors of e the

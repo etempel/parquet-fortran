@@ -25,6 +25,13 @@
 #             deterministic to within one rule application across compilers, while the oscillatory
 #             shape would dominate a wall clock without saying anything.
 #
+#             It closes with a `breakpoints=` arm over those same two features, cut at round
+#             numbers beside each. The walk finds both WITHOUT a cut -- that is what the rows
+#             above it say -- so the arm is not a rescue: it measures what a cut SAVES a caller
+#             who already knows roughly where the feature is, the one case the guide page
+#             recommends `breakpoints=` for. The cuts are deliberately untuned, since a cut
+#             placed on the feature would measure the tuning instead of the technique.
+#
 #   threads   What concurrency buys: N independent integrations of a parameterised object across
 #             a thread ladder 1, 2, 4, ... 64, one object per iteration. Two columns, answering
 #             two different questions -- the wall time and its speedup say what threading is

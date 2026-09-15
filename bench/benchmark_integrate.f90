@@ -545,6 +545,24 @@ contains
         print '(a)', "  on. The oscillatory row is reported, not scored -- neither method"
         print '(a)', "  converges on it at this tolerance."
 
+        print '(a)', ""
+        print '(a)', "  breakpoints= on the same two features, cut at round numbers beside them"
+        print '(a)', ""
+        print '(a)', "  case                      plain     relerr     cut     relerr   ratio  cvg"
+        call walk_bp_row("spike @1.02  [1, inf)  ", k_spike, 1.0_real64, inf, k_spike_exact(), &
+                         [1.01_real64, 1.03_real64])
+        call walk_bp_row("bump @40     [1, inf)  ", k_bump, 1.0_real64, inf, k_bump_exact(), &
+                         [39.0_real64, 41.0_real64])
+        call walk_bp_row("bump @40     [0.5, inf)", k_bump, 0.5_real64, inf, k_bump_exact(), &
+                         [39.0_real64, 41.0_real64])
+        call walk_bp_row("bump @40     [0, inf)  ", k_bump, 0.0_real64, inf, k_bump_exact(), &
+                         [39.0_real64, 41.0_real64])
+        print '(a)', ""
+        print '(a)', "  The walk finds both features WITHOUT the cuts -- that is the point of"
+        print '(a)', "  the rows above, and of the walk itself. This arm measures what a cut"
+        print '(a)', "  saves a caller who already knows roughly where the feature is, which"
+        print '(a)', "  is the only case the guide page recommends breakpoints= for."
+
     end subroutine run_walk
 
     !> One tail shape: the count, the panels, the error and the ratio against the reference.
@@ -572,6 +590,41 @@ contains
         end if
 
     end subroutine walk_row
+
+    !> One blind-spot shape twice: found the walk's own way, and found with a cut beside it.
+    !!
+    !! This is the `breakpoints=` arm. The walk finds both of these features without help -- that
+    !! is what the rows above say, and it is why the walk exists -- so what is worth measuring is
+    !! not whether a cut RESCUES the answer but what it SAVES when the caller already knows
+    !! roughly where the feature is, which is the case the guide page recommends it for. The cuts
+    !! below are deliberately round numbers a half-width or more off the true centre: a cut tuned
+    !! to the feature would measure the tuning rather than the technique.
+    !!
+    !! The ratio is cut over plain, so below one is a saving. Both arms carry the relative error
+    !! because a cheaper answer that is worse is not a saving.
+    subroutine walk_bp_row(tag, fn, a, b, want, cuts)
+        character(len=*), intent(in) :: tag     !! names the case in the report
+        procedure(pf_integrand_func) :: fn      !! the integrand
+        real(real64), intent(in)     :: a       !! lower bound
+        real(real64), intent(in)     :: b       !! upper bound
+        real(real64), intent(in)     :: want    !! the closed form over [a, b]
+        real(real64), intent(in)     :: cuts(:) !! the breakpoints, bracketing the feature
+
+        type(pf_tolerance)        :: tol
+        type(pf_integration_info) :: plain, cut
+        real(real64)              :: r_plain, r_cut
+
+        tol = pf_tolerance(1.0e-10_real64, 1.0e-14_real64)
+        r_plain = pf_integrate(fn, a, b, tol, info=plain)
+        r_cut = pf_integrate(fn, a, b, tol, breakpoints=cuts, info=cut)
+
+        print '(a,a,i8,es11.2,i8,es11.2,f8.2,a)', "  ", tag, &
+            plain%neval, abs(r_plain - want)/abs(want), &
+            cut%neval, abs(r_cut - want)/abs(want), &
+            real(cut%neval, real64)/real(plain%neval, real64), &
+            merge("  yes", "   no", cut%converged)
+
+    end subroutine walk_bp_row
 
     !> What concurrency buys, and the gate that says the answers survived it.
     !!

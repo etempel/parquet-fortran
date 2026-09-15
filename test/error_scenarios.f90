@@ -28,7 +28,7 @@ program error_scenarios
     use parquet_table_example, only : parquet_table_test
     ! The quadrature scenarios' integrands: module procedures shared with test_integrate.f90,
     ! so a scenario and a test can name the same integrand and neither reaches an internal one.
-    use test_integrate_support, only : runge, nan_at_half
+    use test_integrate_support, only : runge
     use parquet_tables
     ! The grouping scenarios' callbacks: module procedures, since an internal one of this
     ! program cannot be passed as a callback under every supported compiler.
@@ -3627,8 +3627,6 @@ program error_scenarios
         call scenario_integrate_breakpoints_outside()
     case ("integrate_breakpoints_duplicate")
         call scenario_integrate_breakpoints_duplicate()
-    case ("integrate_integrand_nan")
-        call scenario_integrate_integrand_nan()
     case ("integrate_context_reported")
         call scenario_integrate_context_reported()
     case ("integrate_context_capped")
@@ -31535,15 +31533,6 @@ contains
                          breakpoints=[0.5_real64, 0.5_real64])
         print '(a, es22.15)', "accepted two equal breakpoints: ", r
     end subroutine scenario_integrate_breakpoints_duplicate
-    !
-    !> A non-finite integrand value aborts naming the point, rather than propagating a NaN that
-    !> nagfor's default traps would turn into an abort with no message at all.
-    subroutine scenario_integrate_integrand_nan()
-        real(real64) :: r
-
-        r = pf_integrate(nan_at_half, 0.0_real64, 1.0_real64, 1.0e-8_real64)
-        print '(a, es22.15)', "accepted a non-finite integrand value: ", r
-    end subroutine scenario_integrate_integrand_nan
     !
     !> `context=` identifies the call site in the abort message, which is the whole of its job.
     subroutine scenario_integrate_context_reported()

@@ -1643,7 +1643,6 @@ scenarios=(
     "integrate_breakpoints_nan:1"
     "integrate_breakpoints_outside:1"
     "integrate_breakpoints_duplicate:1"
-    "integrate_integrand_nan:1"
     "integrate_context_reported:1"
     "integrate_context_capped:1"
     "index_build_duplicate_hash:1"

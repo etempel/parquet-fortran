@@ -48,7 +48,11 @@
 !!    subinterval it was applied to; `qagse` copies those into the record slot the subinterval
 !!    ends up in, so the slots `1:last` are the final partition. Nothing is copied when the
 !!    caller did not ask for `points`.
-!! 5. Every evaluation is screened for a non-finite value, which aborts naming `x`.
+!! 5. Every evaluation is screened for a non-finite value. The first one is recorded in a
+!!    `bad_value` carried through the rule and the driver in place of upstream's nothing, and the
+!!    routines here stop at their next check rather than letting a NaN into the partition; the
+!!    driver turns it into `PF_INT_BAD_VALUE`. The screen is why `qk21` needs no `context`: it
+!!    reports rather than aborts.
 !! 6. `ier` is returned RAW: QUADPACK's `if (ier > 2) ier = ier - 1` shift is applied once, by the
 !!    driver. The input-validity `ier = 6` cannot occur, because the driver refuses its trigger
 !!    first; reaching it aborts rather than returning a status.
@@ -164,8 +168,9 @@ contains
     !! bounds is what absorbs the `-1` of `dx = -dy`, so a sign on the weight would make the
     !! record's weighted sum the negative of the integral it is supposed to reproduce.
     !!
-    !! Impure: it aborts, and a `pure` guard-only procedure's call is deleted by ifx at `-O0`.
-    subroutine eval_point(f, u, log_base, negate, wgt, neval, xrec, wrec, frec, fval, context)
+    !! Cannot be `pure`: it calls the caller's `eval`, whose passed-object dummy is `intent(inout)`
+    !! so that an integrand may count its own calls.
+    subroutine eval_point(f, u, log_base, negate, wgt, neval, xrec, wrec, frec, fval, bad)
         class(pf_integrand), intent(inout)     :: f        !! the integrand
         real(real64), intent(in)               :: u        !! abscissa, in the engine's variable
         logical, intent(in)                    :: log_base !! the engine's variable is `log x`
@@ -176,10 +181,10 @@ contains
         real(real64), intent(out)              :: wrec     !! recorded weight, with the Jacobian
         real(real64), intent(out)              :: frec     !! recorded value, `f(x)`
         real(real64), intent(out)              :: fval     !! value the RULE consumes
-        character(len=*), intent(in), optional :: context  !! caller's call-site text
+        type(bad_value), intent(inout)         :: bad      !! set on the FIRST non-finite value
 
         real(real64) :: x, y, fx
-        logical      :: bad
+        logical      :: is_bad
 
         if (log_base) then
             y = exp(u)
@@ -198,13 +203,19 @@ contains
         ! The self-comparison rather than ieee_is_nan because this is the innermost loop of the
         ! whole module (fortran-gotchas.md); the magnitude test is reached only for a non-NaN, so
         ! no ordered comparison ever sees a NaN.
-        bad = .false.
+        is_bad = .false.
         if (fx /= fx) then
-            bad = .true.
+            is_bad = .true.
         else if (abs(fx) > OFLOW) then
-            bad = .true.
+            is_bad = .true.
         end if
-        if (bad) call report_non_finite(x, context)
+        ! The FIRST bad point is the one kept: everything evaluated after it may be a consequence
+        ! of whatever went wrong, and the rule goes on filling this point's record entry either
+        ! way so that the record stays a complete account of what was asked of the integrand.
+        if (is_bad .and. .not. bad%seen) then
+            bad%seen = .true.
+            bad%x = x
+        end if
 
         xrec = x
         frec = fx
@@ -219,19 +230,6 @@ contains
         end if
 
     end subroutine eval_point
-
-    !> Aborts because the integrand returned a NaN or an infinity, naming the point.
-    subroutine report_non_finite(x, context)
-        real(real64), intent(in)               :: x       !! point at which the value was returned
-        character(len=*), intent(in), optional :: context !! caller's call-site text
-
-        character(len=64) :: buf
-
-        write (buf, '(es22.15)') x
-        call integrate_abort("the integrand returned a non-finite value at x = " &
-                             // trim(adjustl(buf)), context)
-
-    end subroutine report_non_finite
 
     module procedure qk21
 
@@ -250,7 +248,7 @@ contains
         resg = 0.0_real64
         k = 1
         call eval_point(f, centr, log_base, negate, WGK(11)*hlgth, neval, rx(k), rw(k), rf(k), &
-                        fc, context)
+                        fc, bad)
         resk = WGK(11)*fc
         resabs = abs(resk)
         do j = 1, 5
@@ -258,10 +256,10 @@ contains
             absc = hlgth*XGK(jtw)
             k = k + 1
             call eval_point(f, centr - absc, log_base, negate, WGK(jtw)*hlgth, neval, &
-                            rx(k), rw(k), rf(k), fval1, context)
+                            rx(k), rw(k), rf(k), fval1, bad)
             k = k + 1
             call eval_point(f, centr + absc, log_base, negate, WGK(jtw)*hlgth, neval, &
-                            rx(k), rw(k), rf(k), fval2, context)
+                            rx(k), rw(k), rf(k), fval2, bad)
             fv1(jtw) = fval1
             fv2(jtw) = fval2
             fsum = fval1 + fval2
@@ -274,10 +272,10 @@ contains
             absc = hlgth*XGK(jtwm1)
             k = k + 1
             call eval_point(f, centr - absc, log_base, negate, WGK(jtwm1)*hlgth, neval, &
-                            rx(k), rw(k), rf(k), fval1, context)
+                            rx(k), rw(k), rf(k), fval1, bad)
             k = k + 1
             call eval_point(f, centr + absc, log_base, negate, WGK(jtwm1)*hlgth, neval, &
-                            rx(k), rw(k), rf(k), fval2, context)
+                            rx(k), rw(k), rf(k), fval2, bad)
             fv1(jtwm1) = fval1
             fv2(jtwm1) = fval2
             fsum = fval1 + fval2
@@ -483,7 +481,7 @@ contains
         real(real64) :: area1, a1, b1, defab1, error1
         real(real64) :: area2, a2, b2, defab2, error2
         real(real64) :: rlist2(LIMEXP + 2)
-        integer      :: maxerr, nres, numrl2
+        integer      :: maxerr, nres, numrl2, bad_last
         real(real64) :: errmax, erlast, area, errsum, errbnd, small, erlarg
         logical      :: extrap, noext
         real(real64) :: sx1(GK_POINTS), sw1(GK_POINTS), sf1(GK_POINTS)
@@ -499,6 +497,7 @@ contains
 
         ier = 0
         last = 0
+        bad_last = 0
         res = 0.0_real64
         abserr = 0.0_real64
         extrapolated = .false.
@@ -520,7 +519,7 @@ contains
 
             ierro = 0
             call qk21(f, a, b, log_base, negate, res, abserr, defabs, resabs, neval, &
-                      sx1, sw1, sf1, context)
+                      sx1, sw1, sf1, bad)
 
             ! Test on accuracy.
 
@@ -535,6 +534,13 @@ contains
                 work%rw(:, 1) = sw1
                 work%rf(:, 1) = sf1
             end if
+
+            ! Deviation 5: a non-finite value ends the application here, after the slot it filled
+            ! has been written, so the driver receives a well-formed partition of one subinterval
+            ! beside the status it is about to overwrite. None of the accuracy tests below means
+            ! anything once a value was not a number.
+            if (bad%seen) return
+
             if (abserr <= 100.0_real64*EPMACH*defabs .and. abserr > errbnd) ier = 2
             if (limit == 1) ier = 1
             if (ier /= 0 .or. (abserr <= errbnd .and. abserr /= resabs) .or. &
@@ -575,9 +581,19 @@ contains
                 b2 = work%blist(maxerr)
                 erlast = errmax
                 call qk21(f, a1, b1, log_base, negate, area1, error1, resabs, defab1, neval, &
-                          sx1, sw1, sf1, context)
+                          sx1, sw1, sf1, bad)
                 call qk21(f, a2, b2, log_base, negate, area2, error2, resabs, defab2, neval, &
-                          sx2, sw2, sf2, context)
+                          sx2, sw2, sf2, bad)
+
+                ! Deviation 5: neither child is folded into the partition, so the lists still
+                ! describe it as it stood before this bisection, one subinterval short of the
+                ! loop index. `bad_last` carries that count past the loop, because a DO variable
+                ! may not be redefined inside its own construct; the plain sum below the block is
+                ! then over the partition that really exists.
+                if (bad%seen) then
+                    bad_last = last - 1
+                    exit main
+                end if
 
                 ! Improve previous approximations to the integral and error, and test for
                 ! accuracy.
@@ -741,6 +757,10 @@ contains
 
         ! Compute the global integral sum. This is the whole of the gated-off path: the result is
         ! the plain sum over the final partition, which is what the `points` record reproduces.
+
+        ! Deviation 5: a non-finite value met in the bisection loop left the partition one shorter
+        ! than the loop index reached, and the sum below is over the partition, not the index.
+        if (bad_last > 0) last = bad_last
 
         extrapolated = .false.
         res = sum(work%rlist(1:last))

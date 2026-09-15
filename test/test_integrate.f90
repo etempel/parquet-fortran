@@ -41,6 +41,8 @@ module test_integrate
     integer, parameter :: ONE_RULE = 21
     !> `max_neval`'s default, as the module documents it; a walk may overshoot it by one rule.
     integer, parameter :: DEFAULT_BUDGET = 100000
+    !> `max_panels`'s default, as the module documents it.
+    integer, parameter :: DEFAULT_PANELS = 100
 
 contains
 
@@ -106,7 +108,13 @@ contains
             new_unittest("an endpoint singularity costs the same at every tolerance", &
                          test_endpoint_singularities_are_cheap), &
             new_unittest("a divergent integral is reported as divergent, not integrated", &
-                         test_status_divergent) &
+                         test_status_divergent), &
+            new_unittest("a non-finite integrand value is reported, not aborted on", &
+                         test_non_finite_value_is_reported), &
+            new_unittest("a walk and a piece list both stop at a non-finite value", &
+                         test_non_finite_value_stops_every_path), &
+            new_unittest("the default panel cap clears an algebraic tail at the tightest tolerance", &
+                         test_default_panel_cap_clears_an_algebraic_tail) &
             ]
 
     end subroutine collect_tests_integrate
@@ -1166,11 +1174,12 @@ contains
     !! an integral that is `+infinity`. That the sign alone gives it away is luck, not a
     !! guarantee; `converged` is the guarantee.
     !!
-    !! **`extrapolate=.false.` is not asserted here and must not be**: the plain bisection keeps
-    !! halving the interval next to zero, the abscissae go below `1e-280`, `x**-1.1` overflows to
-    !! an infinity, and the engine's non-finite screen aborts the PROCESS -- which would take the
-    !! whole test binary down with it. That contrast is one of the things the default buys, and
-    !! the abort itself is covered out of process by the `integrate_integrand_nan` scenario.
+    !! **The `extrapolate=.false.` arm is the contrast the default buys.** The plain bisection
+    !! keeps halving the interval next to zero, the abscissae go below `1e-280`, `x**-1.1`
+    !! overflows to an infinity, and the engine's non-finite screen ends the integration with
+    !! `PF_INT_BAD_VALUE` -- a different answer to the same integral, reached by drilling rather
+    !! than by recognising. It is asserted here because it is in process: the screen reports and
+    !! does not abort, so the test binary survives what the drill runs into.
     subroutine test_status_divergent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
@@ -1199,6 +1208,19 @@ contains
         ! And it must find that out cheaply: the point of the test is that the engine STOPS.
         call check(error, info%neval <= 20*ONE_RULE, &
                    "divergence must be found in at most twenty rule applications, not drilled for")
+        if (allocated(error)) return
+
+        ! The contrast: without the table the same integral is drilled into until the integrand
+        ! overflows, and what comes back is the screen's finding rather than the divergence.
+        r = pf_integrate(divergent_pow, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
+                         extrapolate=.false., info=info)
+        call check(error, info%status == PF_INT_BAD_VALUE, &
+                   "without the extrapolation the drill reaches an overflow, which is reported " // &
+                   "as PF_INT_BAD_VALUE rather than ending the process")
+        if (allocated(error)) return
+        call check(error, info%neval > 20*ONE_RULE, &
+                   "and it must cost far more than the extrapolated arm, which is what the " // &
+                   "table is for")
 
     end subroutine test_status_divergent
 
@@ -1401,5 +1423,138 @@ contains
                    "and the answer itself must be inside the atol asked for")
 
     end subroutine test_breakpoints_share_atol
+
+    ! ---- a non-finite integrand value -----------------------------------------------------
+
+    !> Asserts that an integrand returning a NaN ends the INTEGRATION rather than the process.
+    !!
+    !! **This is the one failure that is not the caller's contract.** Every other refusal in this
+    !! module is a bound, a tolerance, a budget or a breakpoint that does not say what it meant,
+    !! and each of those aborts; a NaN out of `eval` is the caller's own function misbehaving on
+    !! the caller's own data, and a caller sweeping a parameter grid has to be able to keep the
+    !! sweep and say which parameter broke. So it is `PF_INT_BAD_VALUE`, `converged = .false.`
+    !! and `info%non_finite_at`.
+    !!
+    !! **The negative control is the whole of the second half.** `non_finite_at` defaults to zero,
+    !! which is a point like any other, so a test asserting only the NaN case would pass against
+    !! an implementation that set the component for every call, or for none. The clean call
+    !! asserts `PF_INT_OK` and a zero, and the two together are what pin it.
+    subroutine test_non_finite_value_is_reported(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: info, clean
+        real(real64)              :: r
+
+        r = pf_integrate(nan_at_half, 0.0_real64, 1.0_real64, 1.0e-8_real64, info=info)
+
+        call check(error, info%status == PF_INT_BAD_VALUE, &
+                   "a non-finite integrand value must report PF_INT_BAD_VALUE")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, &
+                   "a call that met a non-finite value must not be reported as converged")
+        if (allocated(error)) return
+        ! `nan_at_half` is NaN exactly on `|x - 0.5| < 0.05`, so the recorded point must be one
+        ! the fixture really answers a NaN at -- not merely some number the engine had to hand.
+        call check(error, abs(info%non_finite_at - 0.5_real64) < 0.05_real64, &
+                   "non_finite_at must be a point the integrand actually returned a NaN at")
+        if (allocated(error)) return
+        ! The screen has to stop the walk of subintervals rather than let it run to the budget:
+        ! the first rule application already meets the NaN, so nothing beyond a handful of
+        ! applications can be justified.
+        call check(error, info%neval <= 2*ONE_RULE, &
+                   "the integration must stop at the value, not spend the budget on a NaN")
+        if (allocated(error)) return
+
+        ! The negative control.
+        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-8_real64, info=clean)
+        call check(error, clean%status == PF_INT_OK, &
+                   "an integrand that never returns a non-finite value must report PF_INT_OK")
+        if (allocated(error)) return
+        call check(error, clean%non_finite_at == 0.0_real64, &
+                   "non_finite_at must be left alone when no value was non-finite")
+
+    end subroutine test_non_finite_value_is_reported
+
+    !> Asserts that the outward walk and the piece list both stop at a non-finite value.
+    !!
+    !! The finite path above reaches the screen through `qagse`'s first rule application. These
+    !! two reach it through the walk and through `integrate_pieces`, which are separate loops
+    !! with separate exits, and each would otherwise go on asking a broken integrand for values:
+    !! the walk until it ran out of panels or budget, the piece list until it had tried every
+    !! piece. **The piece count is what asserts the second exit.** Cutting `[0, 1]` at `0.25` and
+    !! `0.75` makes three pieces, the NaN lives in the middle one, and a piece list that did not
+    !! stop would report three.
+    subroutine test_non_finite_value_stops_every_path(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: walked, pieced
+        real(real64)              :: r, inf
+
+        inf = pf_infinity()
+
+        r = pf_integrate(nan_at_half, 0.0_real64, inf, 1.0e-8_real64, info=walked)
+        call check(error, walked%status == PF_INT_BAD_VALUE, &
+                   "a walk that meets a non-finite value must report PF_INT_BAD_VALUE")
+        if (allocated(error)) return
+        call check(error, .not. walked%converged, &
+                   "a walk that met a non-finite value must not be reported as converged")
+        if (allocated(error)) return
+        call check(error, abs(walked%non_finite_at - 0.5_real64) < 0.05_real64, &
+                   "the walk must record a point the integrand really answered a NaN at")
+        if (allocated(error)) return
+        call check(error, walked%npanels < DEFAULT_PANELS, &
+                   "the walk must stop at the value rather than run out its panel cap")
+        if (allocated(error)) return
+
+        r = pf_integrate(nan_at_half, 0.0_real64, 1.0_real64, 1.0e-8_real64, &
+                         breakpoints=[0.25_real64, 0.75_real64], info=pieced)
+        call check(error, pieced%status == PF_INT_BAD_VALUE, &
+                   "a piece that meets a non-finite value must report PF_INT_BAD_VALUE")
+        if (allocated(error)) return
+        call check(error, pieced%npanels == 2, &
+                   "the piece list must stop at the piece that met the value, having integrated " // &
+                   "the one before it and not the one after")
+
+    end subroutine test_non_finite_value_stops_every_path
+
+    !> Asserts that the DEFAULT panel cap is high enough for an algebraic tail at `rtol = 1e-12`.
+    !!
+    !! `x**-1.5` over `[1, infinity)` is the dearest tail shape the walk converges on at all, and
+    !! it is the shape `DEFAULT_MAX_PANELS` is set by: it needs more panels than any other scored
+    !! tail, and a cap below what it needs turns an integral the walk can deliver into
+    !! `PF_INT_LIMIT` with an answer short of the tolerance. **The `max_panels=50` arm is the
+    !! control**, and it is what makes this test about the DEFAULT rather than about the walk:
+    !! without it the assertion would pass at any cap the walk happens to clear.
+    subroutine test_default_panel_cap_clears_an_algebraic_tail(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: deflt, capped
+        real(real64)              :: r, want, inf
+
+        inf = pf_infinity()
+        want = inv_pow15_exact(1.0_real64, huge(1.0_real64))
+
+        r = pf_integrate(inv_pow15, 1.0_real64, inf, 1.0e-12_real64, info=deflt)
+        call check(error, deflt%converged, &
+                   "an algebraic tail at rtol 1e-12 must converge at the DEFAULT panel cap")
+        if (allocated(error)) return
+        call check(error, abs(r - want) <= 1.0e-12_real64*abs(want), &
+                   "and it must meet the tolerance it reported converging to")
+        if (allocated(error)) return
+        call check(error, deflt%npanels < DEFAULT_PANELS, &
+                   "it must finish inside the cap rather than by reaching it")
+        if (allocated(error)) return
+
+        ! The control: the same call at a cap below what this tail needs does NOT converge, which
+        ! is what says the assertions above are about the default and not about the shape.
+        r = pf_integrate(inv_pow15, 1.0_real64, inf, 1.0e-12_real64, max_panels=50, info=capped)
+        call check(error, .not. capped%converged, &
+                   "the same tail must NOT converge at a cap below the one the default sets, or " // &
+                   "this test would pass whatever the default were")
+        if (allocated(error)) return
+        call check(error, capped%status == PF_INT_LIMIT, &
+                   "a walk stopped by its panel cap must say so")
+
+    end subroutine test_default_panel_cap_clears_an_algebraic_tail
 
 end module test_integrate

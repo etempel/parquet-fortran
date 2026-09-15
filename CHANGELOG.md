@@ -25,7 +25,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   which is how a feature the first rule application would not sample is named rather than hunted
   for; the pieces share the evaluation budget and `atol`. `converged=` and `info=`
   (`pf_integration_info`: status, error estimate, evaluation count, panels) report the outcome and
-  nothing is printed; `points=` (`pf_integration_points`) records every abscissa, weight and value
+  nothing is printed; an integrand that returns a NaN or an infinity ends the integration rather
+  than the process, reporting `PF_INT_BAD_VALUE` with the offending point in `info%non_finite_at`.
+  `points=` (`pf_integration_points`) records every abscissa, weight and value
   of the final partition, whose weighted sum reproduces `info%partition_integral`, and the returned
   result too whenever `info%extrapolated` is false. Reentrant: integrate from as
   many threads as you like, one integrand object per thread. An Arrow-free entry module.

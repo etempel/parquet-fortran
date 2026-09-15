@@ -10,16 +10,22 @@
 !!
 !! **Nothing in this module prints.** It reads no setting, emits no INFO, NOTE or WARNING, and
 !! re-exports no knob; a caller learns what happened from `converged=`, from `info=` and from the
-!! `PF_INT_*` status codes. The only output path is `error stop`, for a caller contract that was
-!! broken (`pf_integrate: ...` messages, one per row of the guide page's table) and for an
-!! integrand that returned a non-finite value.
+!! `PF_INT_*` status codes. The only output path is `error stop`, and every one of those is a
+!! caller contract that was broken (`pf_integrate: ...` messages, one per row of the guide page's
+!! table): a bound, a tolerance, a budget or a breakpoint that does not say what it meant.
+!!
+!! **What the INTEGRAND does is never a contract violation.** An integrand that returns a NaN or
+!! an infinity is the caller's own function misbehaving on the caller's own data, so it ends the
+!! integration rather than the process: `PF_INT_BAD_VALUE`, `converged = .false.`, and
+!! `info%non_finite_at` carrying the point it happened at. A caller sweeping a parameter grid
+!! keeps the sweep and can say which parameter broke.
 !!
 !! **Thread safety is by construction.** The module has no variable that is not a `parameter`;
 !! every work array is a local of the call, and the only state that outlives a call is the
 !! caller's own integrand object. Give each thread its own `class(pf_integrand)` object and
-!! concurrent integrations are independent. The one `error stop` reachable from inside a parallel
-!! region -- the non-finite integrand value -- is taken under a named `critical` so a single
-!! thread aborts.
+!! concurrent integrations are independent. The `error stop` paths are all reachable from inside
+!! a parallel region -- nothing stops a caller validating badly there -- so each is taken under a
+!! named `critical` and a single thread aborts.
 !!
 !! **The integrand is an object or a plain function.** An object extending `pf_integrand` carries
 !! its parameters as components and may update them from `eval` (a call counter, a cache); a
@@ -55,7 +61,7 @@ module parquet_integrate
     public :: pf_tolerance, pf_integration_points, pf_integration_info
     public :: pf_integrate, pf_infinity
     public :: PF_INT_OK, PF_INT_LIMIT, PF_INT_ROUNDOFF, PF_INT_BAD_INTEGRAND
-    public :: PF_INT_NO_CONVERGENCE, PF_INT_DIVERGENT
+    public :: PF_INT_NO_CONVERGENCE, PF_INT_DIVERGENT, PF_INT_BAD_VALUE
 
     ! ---- status codes, the values of pf_integration_info%status ----------------------------
 
@@ -65,6 +71,7 @@ module parquet_integrate
     integer, parameter :: PF_INT_BAD_INTEGRAND = 3  !! extremely bad behaviour at some point
     integer, parameter :: PF_INT_NO_CONVERGENCE = 4 !! round-off in the extrapolation table
     integer, parameter :: PF_INT_DIVERGENT = 5      !! probably divergent, or slowly convergent
+    integer, parameter :: PF_INT_BAD_VALUE = 6      !! the integrand returned a NaN or an infinity
 
     ! ---- internal parameters, not part of the public surface -------------------------------
 
@@ -93,9 +100,17 @@ module parquet_integrate
 
     ! ---- the outward walk of an infinite range, qfeet's constants ---------------------------
 
-    !> Default cap on the panels one walk may use, `max_panels`'s default. qfeet's
-    !! `default_max_tail_steps`, kept: the panel count is what the walk's cost is made of.
-    integer, parameter :: DEFAULT_MAX_PANELS = 50
+    !> Default cap on the panels one walk may use, `max_panels`'s default.
+    !!
+    !! The panel count is what the walk's cost is made of, so this cap is what a caller meets
+    !! first on a tail the walk would not otherwise finish. It is set by the dearest tail shape
+    !! that DOES finish: an algebraic tail at the tightest tolerance worth asking for --
+    !! `x**-1.5` over `[1, infinity)` at `rtol = 1e-12` -- converges on its 56th panel, and a cap
+    !! below that returns `PF_INT_LIMIT` with a result short of the tolerance asked for, on an
+    !! integral the walk can in fact deliver. Twice qfeet's `default_max_tail_steps`, which clears
+    !! that with room to spare and costs nothing on a shape that finishes earlier: a panel beyond
+    !! the last one walked is never integrated, so the cap is a ceiling and not a price.
+    integer, parameter :: DEFAULT_MAX_PANELS = 100
     !> Width of one walk panel, in natural-log units of `x`, so each panel spans a factor of e.
     !!
     !! qfeet's `tail_step`, and one is where a sweep over 1, 2 and 3 left it. **The cost did not
@@ -259,6 +274,11 @@ module parquet_integrate
     end type pf_integration_points
 
     !> What happened, for a caller who wants more than `converged`.
+    !!
+    !! `non_finite_at` is the one component that means nothing on its own: it is the point the
+    !! integrand returned a NaN or an infinity at, and it is defined only when `status` is
+    !! `PF_INT_BAD_VALUE`. On every other status it stays zero, which is a point like any other
+    !! and so must never be read as "no bad value" -- the status is what says that.
     type :: pf_integration_info
         integer      :: status = PF_INT_OK              !! one of the `PF_INT_*` codes
         logical      :: converged = .true.              !! `status == PF_INT_OK`
@@ -268,7 +288,22 @@ module parquet_integrate
         integer      :: neval = 0                       !! integrand evaluations, counted
         integer      :: nsub = 0                        !! subintervals in the final partition
         integer      :: npanels = 0                     !! walk panels used; 1 for a finite range
+        real(real64) :: non_finite_at = 0.0_real64      !! where the integrand returned a non-finite
+                                                        !! value; read only on `PF_INT_BAD_VALUE`
     end type pf_integration_info
+
+    !> The first non-finite integrand value a call met, carried out of the rule rather than
+    !! aborted on.
+    !!
+    !! Private, and threaded through the engine as one `intent(inout)` argument in place of the
+    !! `context` the screen used to abort with. `seen` false means every evaluation so far
+    !! returned a finite number; once it is true the engine stops at its next check and the driver
+    !! turns it into `PF_INT_BAD_VALUE`. The FIRST such point is kept, not the last: it is the one
+    !! a caller can reason about, since everything after it may be a consequence.
+    type :: bad_value
+        logical      :: seen = .false.  !! an evaluation returned a NaN or an infinity
+        real(real64) :: x = 0.0_real64  !! the first such point, in the caller's `x`
+    end type bad_value
 
     ! ---- the public generic --------------------------------------------------------------------
 
@@ -311,7 +346,8 @@ module parquet_integrate
     !!   application per piece (21 evaluations each).
     !! * `converged` -- optional `logical`, `intent(out)`: `info%status == PF_INT_OK`.
     !! * `info` -- optional `type(pf_integration_info)`, `intent(out)`: status, error estimate,
-    !!   evaluation count, subinterval count and the plain partition sum.
+    !!   evaluation count, subinterval count, the plain partition sum, and -- on
+    !!   `PF_INT_BAD_VALUE` alone -- the point the integrand returned a non-finite value at.
     !! * `points` -- optional `type(pf_integration_points)`, `intent(out)`: every abscissa, weight
     !!   and value of the final partition. Recorded only when this argument is present.
     !! * `context` -- optional text appended to any abort message, to identify the call site.
@@ -329,7 +365,7 @@ module parquet_integrate
     !!   singularity until the integrand overflows. Pass `.false.` when the returned result must
     !!   BE the partition sum -- the sum `points` reproduces exactly -- rather than an
     !!   acceleration of it; `info%extrapolated` says which of the two was returned.
-    !! * `max_panels` -- optional cap on the panels ONE walk may use, default 50, counting the
+    !! * `max_panels` -- optional cap on the panels ONE walk may use, default 100, counting the
     !!   first panel the search accepted. Reaching it is `PF_INT_LIMIT`, not an error. Present on
     !!   a finite range aborts; on `(-inf, +inf)`, which is two walks, it caps each of them.
     !! * `breakpoints` -- optional rank-1 `real64` of interior points at which the range is cut.
@@ -503,7 +539,7 @@ module parquet_integrate
 
         !> One application of the 21-point Gauss-Kronrod rule over `[a, b]`.
         module subroutine qk21(f, a, b, log_base, negate, res, abserr, resabs, resasc, neval, &
-                               rx, rw, rf, context)
+                               rx, rw, rf, bad)
             implicit none
             class(pf_integrand), intent(inout)     :: f        !! the integrand
             real(real64), intent(in)               :: a        !! lower limit, in the engine's
@@ -521,13 +557,14 @@ module parquet_integrate
             real(real64), intent(out)              :: rx(:)    !! the 21 abscissae, caller's `x`
             real(real64), intent(out)              :: rw(:)    !! the 21 weights, with Jacobian
             real(real64), intent(out)              :: rf(:)    !! the 21 integrand values
-            character(len=*), intent(in), optional :: context  !! caller's call-site text
+            type(bad_value), intent(inout)         :: bad      !! set on a non-finite value
         end subroutine qk21
 
         !> Adaptive bisection over the finite range `[a, b]`, optionally with the Wynn-epsilon
         !! extrapolation.
         module subroutine qagse(f, a, b, epsabs, epsrel, limit, log_base, negate, extrapolate, &
-                                work, res, abserr, defabs, neval, ier, last, extrapolated, context)
+                                work, res, abserr, defabs, neval, ier, last, extrapolated, bad, &
+                                context)
             implicit none
             class(pf_integrand), intent(inout)     :: f            !! the integrand
             real(real64), intent(in)               :: a            !! lower limit, engine variable
@@ -550,6 +587,7 @@ module parquet_integrate
             integer, intent(out)                   :: ier          !! QUADPACK's raw status
             integer, intent(out)                   :: last         !! subintervals produced
             logical, intent(out)                   :: extrapolated !! result came from the table
+            type(bad_value), intent(inout)         :: bad          !! set on a non-finite value
             character(len=*), intent(in), optional :: context      !! caller's call-site text
         end subroutine qagse
 

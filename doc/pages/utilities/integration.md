@@ -161,6 +161,17 @@ that reaches an infinity goes through the walk:
 r = pf_integrate(f, 0.0_real64, pf_infinity(), 1.0e-10_real64, breakpoints=[1.0_real64])
 ```
 
+**Reach for `breakpoints=` when a feature would otherwise be MISSED, not merely when it is
+awkward.** The adaptive bisection finds an interior kink, peak or jump on its own, and cutting the
+range there makes the call dearer rather than cheaper: it replaces one integration that was
+already converging with two independent ones, each paying for its own first rule application and
+neither able to use what the other learned. `sqrt(abs(x - 1/3))` on `[0, 1]` costs about twice as
+much cut at `1/3` as left alone. What a cut buys is the case above — a feature the first rule
+application does not sample at all, which on a finite range means one narrower than the spacing of
+its 21 points, and on an infinite range means the shapes
+[What the integrator cannot see](#what-the-integrator-cannot-see) describes. `bench/benchmark_integrate.sh`'s
+`walk` mode measures both sides of this.
+
 **Each piece is integrated to `rtol` of itself and to `atol` divided by the number of pieces**, so
 the sum meets both tolerances whenever every piece meets its own. That division is what makes
 `atol` mean what it says on a piecewise sum; `converged` is true only when every piece converged,
@@ -198,7 +209,7 @@ whole call and is carried from one piece to the next, each piece reserving one r
 the pieces after it.
 
 `max_panels` bounds the panels ONE walk of an infinite range may use, counting the first panel the
-search accepted; it defaults to 50, and reaching it is `PF_INT_LIMIT` in the same way. It applies
+search accepted; it defaults to 100, and reaching it is `PF_INT_LIMIT` in the same way. It applies
 only to an infinite range — passing it with two finite bounds aborts — and on `(-inf, +inf)`,
 which is two walks, it caps each of them.
 
@@ -214,6 +225,10 @@ which is two walks, it caps each of them.
 | `neval` | integrand evaluations, counted |
 | `nsub` | subintervals in the final partition, summed over the walk's panels and the pieces |
 | `npanels` | 1 per finite range or piece; the panels the walk used, both halves counted, on an infinite one |
+| `non_finite_at` | the point the integrand returned a NaN or an infinity at; meaningful only when `status` is `PF_INT_BAD_VALUE` |
+
+`non_finite_at` is zero on every other status, and zero is a point like any other — read it only
+after checking `status`, never as a test for whether anything went wrong.
 
 **Nothing is ever printed.** This module reads no verbosity setting and has no message stream; it
 reports through these values, and speaks only by aborting when a caller contract is broken.
@@ -226,10 +241,17 @@ reports through these values, and speaks only by aborting when a caller contract
 | `PF_INT_BAD_INTEGRAND` | the integrand behaves extremely badly somewhere | split the range at the offending point |
 | `PF_INT_NO_CONVERGENCE` | the extrapolation table stopped making progress | loosen the tolerance, split the range at whatever the table could not accelerate, or pass `extrapolate=.false.` |
 | `PF_INT_DIVERGENT` | the integral is probably divergent or very slowly convergent | check that the integral exists; the returned number is finite but is not an integral |
+| `PF_INT_BAD_VALUE` | your integrand returned a NaN or an infinity | read `info%non_finite_at` for the point, and fix the integrand or keep that point out of the range |
 
 A non-`PF_INT_OK` status still returns the engine's best estimate, and it is often a good one: a
 discontinuity inside the range reports `PF_INT_BAD_INTEGRAND` while returning an answer accurate
 to many digits. Read `abserr` rather than assuming the worst.
+
+`PF_INT_BAD_VALUE` is the exception to that: the partition it stopped on is a partition of
+whatever your integrand answered before it stopped answering numbers, so the returned value and
+`abserr` are both worth nothing. It is also the one outcome here that is about your code rather
+than about the integral, which is why it is a status and not an abort — a sweep over a parameter
+grid survives one bad parameter, and `non_finite_at` says which point to look at.
 
 ## The evaluation record
 
@@ -291,7 +313,7 @@ tolerances.
 
 It also earns two of the status codes. A divergent integral is reported as `PF_INT_DIVERGENT` in
 a couple of hundred evaluations, where the bisection alone would keep drilling towards the
-singularity until the integrand overflows and the non-finite screen aborts. A jump inside the
+singularity until the integrand overflows and the answer becomes `PF_INT_BAD_VALUE` instead. A jump inside the
 range — which the table cannot accelerate, because the sequence it is handed was never
 converging — is reported as `PF_INT_NO_CONVERGENCE`.
 
@@ -384,15 +406,17 @@ refused rather than answered, because every one of them means the call did not s
 | a breakpoint NaN or infinite | `breakpoints must be finite` |
 | a breakpoint on or outside a bound | `breakpoints must lie strictly inside the range` |
 | two equal breakpoints | `breakpoints must be distinct` |
-| the integrand returned a NaN or an infinity | `the integrand returned a non-finite value at x = ...` |
 
-**The last one is worth planning for.** An interior singularity that happens to land exactly on an
-abscissa — `1/sqrt(abs(x - 0.5))` on `[0, 1]` puts the centre point on it — reaches it. Split the
-range at the singularity instead, which is also QUADPACK's own advice; an *endpoint* singularity
-needs nothing, because the rule never evaluates an endpoint.
-
-The abort is taken under a named `critical`, so one thread aborts rather than several, and the
+Every abort is taken under a named `critical`, so one thread aborts rather than several, and the
 exit status stays meaningful when the call was inside a parallel region.
+
+**What your INTEGRAND does is not on this list.** An integrand that returns a NaN or an infinity
+ends the integration, not the process: `PF_INT_BAD_VALUE`, `converged` false, and
+`info%non_finite_at` carrying the point. It is worth planning for — an interior singularity that
+happens to land exactly on an abscissa reaches it, and `1/sqrt(abs(x - 0.5))` on `[0, 1]` puts the
+centre point of the first rule application on one. Split the range at the singularity with
+`breakpoints=`, which is also QUADPACK's own advice; an *endpoint* singularity needs nothing,
+because the rule never evaluates an endpoint.
 
 ## Accuracy against cost
 
@@ -445,5 +469,5 @@ modernised by Jacob Williams under BSD-3-Clause. They were reworked for this lib
 integrand became a `class(pf_integrand)` dummy so parameters travel with it, the evaluation counter
 became real rather than a formula, the work arrays grow instead of being sized up front, every
 diagnostic became a status code or an abort, and every evaluation is screened for a non-finite
-value. The numerical logic — the abscissae, the weights, the round-off tests, the extrapolation
+value, which ends the integration rather than the process. The numerical logic — the abscissae, the weights, the round-off tests, the extrapolation
 table — is transcribed unchanged, and the engine file's header lists every deviation.

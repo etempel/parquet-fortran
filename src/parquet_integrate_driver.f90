@@ -167,6 +167,24 @@ contains
         if (cap < want) cap = want
         if (cap <= work%capacity) return
 
+        ! The FIRST growth of a call has nothing to preserve, and it is the only growth the median
+        ! call makes, so it allocates straight into `work` and never forms `bigger`. The
+        ! `engine_work` temporary is not free: it is a derived type with eight allocatable
+        ! components, which the compiler default-initialises on entry and whose components it must
+        ! test and release on exit, and on this path every one of those tests fails. Keep this arm
+        ! and the general one below in step -- they allocate the same arrays under the same
+        ! `work%record` condition, and only the copying differs.
+        if (last <= 0 .and. .not. allocated(work%alist)) then
+            allocate (work%alist(cap), work%blist(cap), work%rlist(cap), work%elist(cap))
+            allocate (work%iord(cap))
+            if (work%record) then
+                allocate (work%rx(GK_POINTS, cap), work%rw(GK_POINTS, cap))
+                allocate (work%rf(GK_POINTS, cap))
+            end if
+            work%capacity = cap
+            return
+        end if
+
         allocate (bigger%alist(cap), bigger%blist(cap), bigger%rlist(cap), bigger%elist(cap))
         allocate (bigger%iord(cap))
         if (last > 0) then
@@ -231,6 +249,7 @@ contains
         type(pf_integration_info)   :: outcome
         type(pf_integration_points) :: record
         type(engine_work)           :: work
+        type(bad_value)             :: bad
         logical                     :: in_log, use_eps, record_wanted
         integer                     :: budget, panel_cap, neval
 
@@ -276,10 +295,19 @@ contains
 
         if (present(breakpoints)) then
             call integrate_pieces(f, a, b, breakpoints, tol, budget, panel_cap, in_log, use_eps, &
-                                  work, record, res, outcome, neval, context)
+                                  work, record, res, outcome, neval, bad, context)
         else
             call integrate_range(f, a, b, tol, budget, panel_cap, in_log, use_eps, work, record, &
-                                 res, outcome, neval, context)
+                                 res, outcome, neval, bad, context)
+        end if
+
+        ! A non-finite integrand value outranks every status the engine can reach on its own: the
+        ! partition it stopped on is a partition of whatever the integrand answered before it went
+        ! wrong, and no accuracy claim over that means anything. It is the caller's function
+        ! misbehaving rather than the call being malformed, so it is reported and not aborted on.
+        if (bad%seen) then
+            outcome%status = worse_status(outcome%status, PF_INT_BAD_VALUE)
+            outcome%non_finite_at = bad%x
         end if
 
         outcome%converged = outcome%status == PF_INT_OK
@@ -324,7 +352,7 @@ contains
     !! `points` for the same reason. An insertion sort, because the list is a handful of values a
     !! person typed.
     subroutine integrate_pieces(f, a, b, breakpoints, tol, budget, panel_cap, in_log, use_eps, &
-                                work, record, res, outcome, neval, context)
+                                work, record, res, outcome, neval, bad, context)
         class(pf_integrand), intent(inout)         :: f              !! the integrand
         real(real64), intent(in)                   :: a              !! lower bound
         real(real64), intent(in)                   :: b              !! upper bound
@@ -339,6 +367,7 @@ contains
         real(real64), intent(inout)                :: res            !! running result, added to
         type(pf_integration_info), intent(inout)   :: outcome        !! filled in as it goes
         integer, intent(inout)                     :: neval          !! evaluation counter
+        type(bad_value), intent(inout)             :: bad            !! set on a non-finite value
         character(len=*), intent(in), optional     :: context        !! call-site text
 
         real(real64), allocatable :: cut(:)
@@ -378,7 +407,11 @@ contains
             ! their unavoidable 21 evaluations, putting the total over `max_neval`.
             call integrate_range(f, lo, hi, piece_tol, budget - GK_POINTS*(npieces - ipiece), &
                                  panel_cap, in_log, use_eps, work, record, res, outcome, neval, &
-                                 context)
+                                 bad, context)
+            ! The remaining pieces are not attempted once the integrand has stopped answering
+            ! with numbers: the status is already decided, and the record and the piece counts
+            ! stay an account of what was actually integrated.
+            if (bad%seen) exit
         end do
 
     end subroutine integrate_pieces
@@ -386,7 +419,7 @@ contains
     !> Integrates one range -- the whole call's range, or one piece of it -- by the path its own
     !! bounds select, adding what it finds to the running result.
     subroutine integrate_range(f, a, b, tol, budget, panel_cap, in_log, use_eps, work, record, &
-                               res, outcome, neval, context)
+                               res, outcome, neval, bad, context)
         class(pf_integrand), intent(inout)         :: f         !! the integrand
         real(real64), intent(in)                   :: a         !! lower bound
         real(real64), intent(in)                   :: b         !! upper bound
@@ -400,14 +433,15 @@ contains
         real(real64), intent(inout)                :: res       !! running result, added to
         type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
         integer, intent(inout)                     :: neval     !! evaluation counter
+        type(bad_value), intent(inout)             :: bad       !! set on a non-finite value
         character(len=*), intent(in), optional     :: context   !! call-site text
 
         if (is_finite(a) .and. is_finite(b)) then
             call integrate_finite(f, a, b, tol, budget, in_log, use_eps, work, record, res, &
-                                  outcome, neval, context)
+                                  outcome, neval, bad, context)
         else
             call integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, record, res, &
-                                    outcome, neval, context)
+                                    outcome, neval, bad, context)
         end if
 
     end subroutine integrate_range
@@ -416,7 +450,7 @@ contains
 
     !> Integrates a finite range with one application of the adaptive-bisection engine.
     subroutine integrate_finite(f, a, b, tol, budget, in_log, use_eps, work, record, res, &
-                                outcome, neval, context)
+                                outcome, neval, bad, context)
         class(pf_integrand), intent(inout)         :: f       !! the integrand
         real(real64), intent(in)                   :: a       !! lower bound, finite
         real(real64), intent(in)                   :: b       !! upper bound, finite
@@ -429,6 +463,7 @@ contains
         real(real64), intent(inout)                :: res     !! running result, added to
         type(pf_integration_info), intent(inout)   :: outcome !! filled in as it goes
         integer, intent(inout)                     :: neval   !! evaluation counter
+        type(bad_value), intent(inout)             :: bad     !! set on a non-finite value
         character(len=*), intent(in), optional     :: context !! call-site text
 
         type(pf_integration_points) :: piece_record
@@ -455,7 +490,7 @@ contains
         call grow_work(work, min(limit, WORK_START), limit, 0)
 
         call qagse(f, lo, hi, tol%atol, tol%rtol, limit, in_log, .false., use_eps, work, res1, &
-                   abserr, defabs, neval, ier, last, extrapolated, context)
+                   abserr, defabs, neval, ier, last, extrapolated, bad, context)
 
         res = res + res1
         outcome%status = worse_status(outcome%status, status_from_ier(ier, context))
@@ -496,7 +531,7 @@ contains
     !! of the three. The benchmark's `walk` mode reports the rows; the engine file's header
     !! records why `qagie` was weighed against this walk and left upstream.
     subroutine integrate_infinite(f, a, b, tol, budget, panel_cap, use_eps, work, record, res, &
-                                  outcome, neval, context)
+                                  outcome, neval, bad, context)
         class(pf_integrand), intent(inout)         :: f         !! the integrand
         real(real64), intent(in)                   :: a         !! lower bound
         real(real64), intent(in)                   :: b         !! upper bound
@@ -509,21 +544,25 @@ contains
         real(real64), intent(inout)                :: res       !! running result, added to
         type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
         integer, intent(inout)                     :: neval     !! evaluation counter
+        type(bad_value), intent(inout)             :: bad       !! set on a non-finite value
         character(len=*), intent(in), optional     :: context   !! call-site text
 
         if (is_finite(a)) then
             call walk_outward(f, a, .false., tol, budget, panel_cap, use_eps, work, record, res, &
-                              outcome, neval, context)
+                              outcome, neval, bad, context)
         else if (is_finite(b)) then
             call walk_outward(f, -b, .true., tol, budget, panel_cap, use_eps, work, record, res, &
-                              outcome, neval, context)
+                              outcome, neval, bad, context)
         else
             ! Split at zero and walk both ways. Each half gets the panel cap in full; they share
             ! the evaluation budget, in the order they are walked.
             call walk_outward(f, 0.0_real64, .true., tol, budget, panel_cap, use_eps, work, &
-                              record, res, outcome, neval, context)
-            call walk_outward(f, 0.0_real64, .false., tol, budget, panel_cap, use_eps, work, &
-                              record, res, outcome, neval, context)
+                              record, res, outcome, neval, bad, context)
+            ! The second half is skipped once the first met a non-finite value: the status is
+            ! already decided and every further evaluation would be asked of a broken integrand.
+            if (.not. bad%seen) &
+                call walk_outward(f, 0.0_real64, .false., tol, budget, panel_cap, use_eps, work, &
+                                  record, res, outcome, neval, bad, context)
         end if
 
     end subroutine integrate_infinite
@@ -536,7 +575,7 @@ contains
     !! round-off, when the tail estimated from the observed decay ratio is inside the tolerance,
     !! or on one of the two caps.
     subroutine walk_outward(f, a, negate, tol, budget, panel_cap, use_eps, work, record, res, &
-                            outcome, neval, context)
+                            outcome, neval, bad, context)
         class(pf_integrand), intent(inout)         :: f         !! the integrand
         real(real64), intent(in)                   :: a         !! lower bound, in the walk's `y`
         logical, intent(in)                        :: negate    !! the caller's `x` is `-y`
@@ -549,6 +588,7 @@ contains
         real(real64), intent(inout)                :: res       !! running result, added to
         type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
         integer, intent(inout)                     :: neval     !! evaluation counter
+        type(bad_value), intent(inout)             :: bad       !! set on a non-finite value
         character(len=*), intent(in), optional     :: context   !! call-site text
 
         real(real64) :: aa, bb, u, res1, abserr1, defabs1, resabstot, prev, ratio, tailest, floor
@@ -564,11 +604,21 @@ contains
 
         ! The first panel is the one the search accepted, in whichever variable the search worked
         ! in; from there the walk is in `log y` whatever the search did.
-        call find_start_panel(f, a, negate, budget, neval, aa, bb, in_log, context)
+        call find_start_panel(f, a, negate, budget, neval, aa, bb, in_log, bad)
+        if (bad%seen) then
+            ! The search never accepted a panel, because the integrand stopped answering with
+            ! numbers while it was still probing. No panel was integrated, so none is counted:
+            ! `npanels` is what the walk USED, and the probes are not panels.
+            return
+        end if
         call run_panel(f, aa, bb, in_log, negate, tol, budget, use_eps, work, record, res1, &
-                       abserr1, defabs1, res, outcome, neval, context)
+                       abserr1, defabs1, res, outcome, neval, bad, context)
         resabstot = resabstot + defabs1
         outcome%abserr = outcome%abserr + abserr1
+        if (bad%seen) then
+            outcome%npanels = outcome%npanels + panels
+            return
+        end if
         if (in_log) then
             u = bb
         else
@@ -584,10 +634,14 @@ contains
             aa = u
             u = u + TAIL_STEP
             call run_panel(f, aa, u, .true., negate, tol, budget, use_eps, work, record, res1, &
-                           abserr1, defabs1, res, outcome, neval, context)
+                           abserr1, defabs1, res, outcome, neval, bad, context)
             panels = panels + 1
             resabstot = resabstot + defabs1
             outcome%abserr = outcome%abserr + abserr1
+            ! No tail estimate is formed from a panel the integrand did not answer, and the walk
+            ! stops rather than stepping further out with a broken integrand. `finished` stays
+            ! false, but `PF_INT_BAD_VALUE` outranks the `PF_INT_LIMIT` that gives it.
+            if (bad%seen) exit walk
             floor = ROUNDOFF_FACTOR*epsilon(1.0_real64)*resabstot
 
             ! The panel itself has fallen to round-off: nothing further out can contribute, and
@@ -636,7 +690,7 @@ contains
     !! search accepts is integrated again, from scratch, by the adaptive engine. Refining before
     !! the test would let a panel's deeper samples decide the search, which is what made qfeet's
     !! narrow retry nearly unreachable.
-    subroutine find_start_panel(f, a, negate, budget, neval, aa, bb, in_log, context)
+    subroutine find_start_panel(f, a, negate, budget, neval, aa, bb, in_log, bad)
         class(pf_integrand), intent(inout)     :: f       !! the integrand
         real(real64), intent(in)               :: a       !! lower bound, in the walk's `y`
         logical, intent(in)                    :: negate  !! the caller's `x` is `-y`
@@ -645,7 +699,7 @@ contains
         real(real64), intent(out)              :: aa      !! accepted panel's lower bound
         real(real64), intent(out)              :: bb      !! accepted panel's upper bound
         logical, intent(out)                   :: in_log  !! `aa` and `bb` are in `log y`
-        character(len=*), intent(in), optional :: context !! call-site text
+        type(bad_value), intent(inout)         :: bad     !! set on a non-finite value
 
         real(real64) :: res, abserr, resabs, resasc
         real(real64) :: px(GK_POINTS), pw(GK_POINTS), pv(GK_POINTS)
@@ -661,7 +715,8 @@ contains
                 bb = aa + TAIL_STEP
             end if
             call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, pv, &
-                      context)
+                      bad)
+            if (bad%seen) return
 
             if (negligible(res, resabs)) then
                 ! Nothing there. Before widening, try a much NARROWER panel: an integrand that
@@ -672,7 +727,8 @@ contains
                     bb = aa + START_ADD_A
                 end if
                 call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, &
-                          pv, context)
+                          pv, bad)
+                if (bad%seen) return
             end if
 
             do istep = 1, MAX_START_STEPS
@@ -681,7 +737,8 @@ contains
                 if (bb + log(START_WIDEN) > LOG_X_CEILING) exit
                 bb = bb + log(START_WIDEN)
                 call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, &
-                          pv, context)
+                          pv, bad)
+                if (bad%seen) return
             end do
         else
             ! A lower bound at or below zero: the first panel has to be done in linear y, since
@@ -690,14 +747,16 @@ contains
             aa = a
             bb = START_MIN_A/10.0_real64
             call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, pv, &
-                      context)
+                      bad)
+            if (bad%seen) return
 
             do istep = 1, MAX_START_STEPS
                 if (.not. negligible(res, resabs)) exit
                 if (neval >= budget) exit
                 bb = bb*START_WIDEN
                 call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, &
-                          pv, context)
+                          pv, bad)
+                if (bad%seen) return
             end do
         end if
 
@@ -705,7 +764,7 @@ contains
 
     !> Integrates one panel and folds what happened into the running result and outcome.
     subroutine run_panel(f, lo, hi, in_log, negate, tol, budget, use_eps, work, record, res1, &
-                         abserr1, defabs1, res, outcome, neval, context)
+                         abserr1, defabs1, res, outcome, neval, bad, context)
         class(pf_integrand), intent(inout)         :: f       !! the integrand
         real(real64), intent(in)                   :: lo      !! panel's lower bound
         real(real64), intent(in)                   :: hi      !! panel's upper bound
@@ -722,6 +781,7 @@ contains
         real(real64), intent(inout)                :: res     !! running result, added to
         type(pf_integration_info), intent(inout)   :: outcome !! filled in as it goes
         integer, intent(inout)                     :: neval   !! evaluation counter
+        type(bad_value), intent(inout)             :: bad     !! set on a non-finite value
         character(len=*), intent(in), optional     :: context !! call-site text
 
         type(pf_integration_points) :: panel_record
@@ -745,7 +805,8 @@ contains
         ! result makes negligible is never tighter than the caller asked for and never looser than
         ! the tolerance applied to the sum.
         call qagse(f, lo, hi, max(tol%atol, tol%rtol*abs(res)), tol%rtol, limit, in_log, negate, &
-                   use_eps, work, res1, abserr1, defabs1, neval, ier, last, extrapolated, context)
+                   use_eps, work, res1, abserr1, defabs1, neval, ier, last, extrapolated, bad, &
+                   context)
 
         res = res + res1
         outcome%status = worse_status(outcome%status, status_from_ier(ier, context))
@@ -809,6 +870,11 @@ contains
             rank = 3
         case (PF_INT_DIVERGENT)
             rank = 4
+        case (PF_INT_BAD_VALUE)
+            ! Above every code the engine can reach on its own: the others describe how well an
+            ! integral was approximated, while this one says the integrand stopped producing
+            ! numbers, which makes the approximation meaningless rather than merely loose.
+            rank = 6
         case default
             rank = 5
         end select

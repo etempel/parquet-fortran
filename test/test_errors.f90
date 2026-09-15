@@ -3101,8 +3101,6 @@ contains
                 test_integrate_breakpoints_outside_aborts), &
             new_unittest("two equal breakpoints are refused", &
                 test_integrate_breakpoints_duplicate_aborts), &
-            new_unittest("an integrand returning a non-finite value aborts naming x", &
-                test_integrate_integrand_nan_aborts), &
             new_unittest("a context reaches the abort message", &
                 test_integrate_context_reported_aborts), &
             new_unittest("a long context is capped in the abort message", &
@@ -18830,13 +18828,6 @@ contains
             failure_message="two equal breakpoints were expected to abort", &
             required_stderr="breakpoints must be distinct")
     end subroutine test_integrate_breakpoints_duplicate_aborts
-    !
-    subroutine test_integrate_integrand_nan_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "integrate_integrand_nan", expect_abort=.true., &
-            failure_message="a non-finite integrand value was expected to abort", &
-            required_stderr="the integrand returned a non-finite value at x =")
-    end subroutine test_integrate_integrand_nan_aborts
     !
     subroutine test_integrate_context_reported_aborts(error)
         type(error_type), allocatable, intent(out) :: error

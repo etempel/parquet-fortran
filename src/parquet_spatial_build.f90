@@ -548,9 +548,10 @@ contains
             "coordinate that varies"
         self%los_gap = w
         ! The groups are KEPT: the cylinder walk bounds each emitter's radial extent by the spread
-        ! of D over the stored points within its own parallel window, a range minimum and maximum
-        ! over these three arrays (`spatial_pairs_los_worker`). They depend on the (los, D) pairs
-        ! alone, so re-bucketing never stales them, and `%rebuild` remakes them here.
+        ! of D over the stored points within its parallel window, a range minimum and maximum over
+        ! these three arrays -- one pass of monotone deques per pair sweep (`los_group_windows`), a
+        ! scan per single query (`los_window_range`). They depend on the (los, D) pairs alone, so
+        ! re-bucketing never stales them, and `%rebuild` remakes them here.
         allocate (self%los_grp(m), self%los_gmin(m), self%los_gmax(m))
         self%los_grp = lg(1:m)
         self%los_gmin = dmin(1:m)

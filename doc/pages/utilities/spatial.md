@@ -390,7 +390,8 @@ count.
 
 **How the library finds the candidates.** About each point the walk is the cylinder itself: the
 cells along that point's own line of sight, `2 * b_perp` across, and in distance from the observer
-exactly the range the stored points within `b_par` of its `los` occupy — so a survey's far end,
+the range the stored points within `b_par` of its `los` occupy — within the largest `b_par`, when
+`%pairs_within_los` is given one per point — so a survey's far end,
 where a redshift interval spans less distance than at its near end, walks a shorter cylinder.
 Without `los=` that range is `b_par` either side. The walked cylinder is padded by the little a
 partner's own line of sight can carry it outside the point's — a factor `2 D_far / (D + D_far)` on

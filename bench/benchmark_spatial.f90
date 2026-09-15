@@ -32,15 +32,17 @@
 !>   replaces, and the cylinder walk against the covering-ball walk**, on a redshift-like `los=`
 !>   derived from the fixture's distances; `--ratio` sets the cylinders' aspect ratio in distance,
 !>   `--walk`, `--spread` and `--cells` select the library's arm through its test-only hooks. The
-!>   figure is candidates tested per pair kept.
+!>   figure is candidates tested per pair kept; beside it the library arm's five phase timings for
+!>   its best round and how many emitters read a distance window.
 !>
 !> **Every timed figure is a best-of-N**, because a single round swings more than the effects being
 !> measured. Report the noise floor with any result: rebuilding the same source moves untouched
 !> arms by more than re-running one binary does.
 !>
 !> Fixtures match the engine gate's (`feature_pandas_S3.md`) so figures are comparable: `uniform`,
-!> `clustered`, `wedge` (a sparse survey cone), `sphere` (a zero-thickness shell -- the worst case
-!> for a dense cell array) and `flat` (2D).
+!> `clustered`, `wedge` (a sparse survey cone), `fluxlim` (the wedge thinned with distance by
+!> `--ts`, the shape of a magnitude-limited survey), `sphere` (a zero-thickness shell -- the worst
+!> case for a dense cell array) and `flat` (2D).
 program benchmark_spatial
     use parquet_spatial
     use parquet_random, only : pf_random_at
@@ -55,7 +57,7 @@ program benchmark_spatial
     character(len=32) :: mode, dist, walk, spread
     integer(int64) :: np, nq
     integer :: rounds, threads
-    real(real64) :: side, rlo, rhi, skyr, ratio, cells
+    real(real64) :: side, rlo, rhi, skyr, ratio, cells, ts
     real(real64), allocatable :: x(:), y(:), z(:)
 
     mode = "tune"
@@ -72,11 +74,13 @@ program benchmark_spatial
     walk = "auto"
     spread = "local"
     cells = 0.0_real64
+    ts = 0.5_real64
     call read_arguments()
 
     write (output_unit, '(a)') "# benchmark_spatial"
     write (output_unit, '(a,a)') "# mode      : ", trim(mode)
     write (output_unit, '(a,a)') "# fixture   : ", trim(dist)
+    if (trim(dist) == "fluxlim") write (output_unit, '(a,f0.3)') "# ts        : ", ts
     write (output_unit, '(a,i0)') "# points    : ", np
     write (output_unit, '(a,i0)') "# queries   : ", nq
     write (output_unit, '(a,i0)') "# rounds    : ", rounds
@@ -164,6 +168,8 @@ contains
                 spread = arg(eq + 1:)
             case ("--cells")
                 read (arg(eq + 1:), *) cells
+            case ("--ts")
+                read (arg(eq + 1:), *) ts
             case ("--side")
                 read (arg(eq + 1:), *) side
             case ("--rlo")
@@ -181,7 +187,7 @@ contains
     !> unreachable -- the engine gate lost a whole fixture to exactly that and reported the results
     !> of a different cloud under its name.
     subroutine make_cloud()
-        integer(int64) :: i, nc, c
+        integer(int64) :: i, nc, c, tries
         real(real64) :: u1, u2, u3, ra, dec, t, rad, cw
 
         allocate (x(np), y(np), z(np))
@@ -216,6 +222,33 @@ contains
                 t = pf_random_at(11_int64, i, 1_int64) ** (1.0_real64 / 3.0_real64)
                 u2 = pf_random_at(11_int64, i, 2_int64)
                 u3 = pf_random_at(11_int64, i, 3_int64)
+                ra = 0.35_real64 * (u2 - 0.5_real64)
+                dec = 0.35_real64 * (u3 - 0.5_real64)
+                rad = side * t
+                x(i) = rad * cos(dec) * cos(ra)
+                y(i) = rad * cos(dec) * sin(ra)
+                z(i) = rad * sin(dec)
+            end do
+        case ("fluxlim")
+            ! The wedge thinned with distance, the shape of a magnitude-limited survey: each point is
+            ! redrawn until a uniform draw falls below exp(-(D / (ts * side))**2), so the density
+            ! falls off with distance and the count stays `np`. The draws are the wedge's own
+            ! streams, four per attempt, so a point kept at its first attempt is the wedge's point.
+            ! `--ts=0.5` gives a near/far density contrast of about 23 between the nearest and the
+            ! farthest tenth of the points, `--ts=0.25` about 360.
+            if (.not. (ts > 0.0_real64)) then
+                write (output_unit, '(a)') "--ts must be > 0"
+                error stop 2
+            end if
+            do i = 1_int64, np
+                tries = 0_int64
+                do
+                    t = pf_random_at(11_int64, i, 1_int64 + 4_int64 * tries) ** (1.0_real64 / 3.0_real64)
+                    u2 = pf_random_at(11_int64, i, 2_int64 + 4_int64 * tries)
+                    u3 = pf_random_at(11_int64, i, 3_int64 + 4_int64 * tries)
+                    if (pf_random_at(11_int64, i, 4_int64 + 4_int64 * tries) < exp(-(t / ts)**2)) exit
+                    tries = tries + 1_int64
+                end do
                 ra = 0.35_real64 * (u2 - 0.5_real64)
                 dec = 0.35_real64 * (u3 - 0.5_real64)
                 rad = side * t
@@ -801,9 +834,11 @@ contains
         type(pf_spatial_index) :: sx
         real(real64), allocatable :: bp(:), bl(:), los(:), dd(:), walkr(:)
         integer(int64), allocatable :: pi(:), pj(:), bi(:), bj(:), counts(:)
-        real(real64) :: t_lib, t_ball, t_filter, t0, lip, spread_g, gap, l_ana, zmin, u, h_lib, h_ball
+        real(real64) :: t_lib, t_ball, t_filter, t0, dt, lip, spread_g, gap, l_ana, zmin, u, h_lib, h_ball
         real(real64) :: ex, ey, ez, dp, dl, di, dj, rho, vol
         integer(int64) :: i, k, kept, nball, a, b, est, c0, b0, n0, c1, b1, n1, reb0, reb1
+        ! The phase timings and the windows count around each round, and the best round's share.
+        integer(int64) :: ph0(5), ph1(5), phb(5), w0, w1, wb
         integer :: it, walk_mode
         logical :: spread_global
         real(real64), parameter :: ch0 = 2997.9_real64
@@ -868,11 +903,22 @@ contains
         write (output_unit, '(a,f0.2)') "  ratio L*b_par/b_perp  : ", ratio
         reb0 = parquet_debug_spatial_rebuilds()
         t_lib = huge(1.0_real64)
+        phb = 0_int64
+        wb = 0_int64
         do it = 1, rounds
             if (it == rounds) call parquet_debug_spatial_los_walk(c0, b0, n0)
+            call parquet_debug_spatial_los_nanos(ph0(1), ph0(2), ph0(3), ph0(4), ph0(5))
+            call parquet_debug_spatial_los_windows(w0)
             t0 = wtime()
             call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN, threads=team())
-            t_lib = min(t_lib, wtime() - t0)
+            dt = wtime() - t0
+            call parquet_debug_spatial_los_nanos(ph1(1), ph1(2), ph1(3), ph1(4), ph1(5))
+            call parquet_debug_spatial_los_windows(w1)
+            if (dt < t_lib) then
+                t_lib = dt
+                phb = ph1 - ph0
+                wb = w1 - w0
+            end if
         end do
         call parquet_debug_spatial_los_walk(c1, b1, n1)
         reb1 = parquet_debug_spatial_rebuilds()
@@ -882,6 +928,10 @@ contains
         write (output_unit, '(a,f12.4,a,i0,a)') "  library               : ", t_lib, " s   ", kept, " pairs"
         write (output_unit, '(a,i0,a,i0)') "  points walked         : cylinders ", c1 - c0, "   balls ", b1 - b0
         write (output_unit, '(a,i0)') "  candidates tested     : ", n1 - n0
+        write (output_unit, '(a,i0)') "  windows read          : ", wb
+        write (output_unit, '(a,5(a,f8.2),a)') "  phases, best round ms :", " setup", 1.0e-6_real64 * real(phb(1), real64), &
+            "  rank", 1.0e-6_real64 * real(phb(2), real64), "  windows", 1.0e-6_real64 * real(phb(3), real64), &
+            "  sweep", 1.0e-6_real64 * real(phb(4), real64), "  copy", 1.0e-6_real64 * real(phb(5), real64), ""
         write (output_unit, '(a,f10.2)') "  tested per kept pair  : ", &
             real(n1 - n0, kind=real64) / real(max(kept, 1_int64), kind=real64)
         if (reb1 /= reb0) then

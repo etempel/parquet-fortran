@@ -717,14 +717,22 @@ contains
     !>
     !> **The walked cylinder is bounded in DISTANCE by what the parallel window can hold.** For an
     !> emitter with parallel envelope `W` (in `los`'s units) the partners' distances lie within
-    !> `[min D, max D]` over the stored points within `W` of its own `los` -- read off the sorted
-    !> tie groups `%build` kept, a range minimum and maximum per point through two segment trees
-    !> built per call, and only for the emitters whose covering ball under the catalogue-wide bound
-    !> does not already fit a cell -- or, without `los=` (where `los` IS the distance) and under the
-    !> test-only global arm, within `D +- max(L*W, g)`. `los_walk_shape` pads that cylinder into one that
-    !> contains every accepted partner, or picks the covering ball when that is the cheaper walk --
-    !> the cylinder longer than the ball is wide, or the ball no wider than a cell -- and both
-    !> routes count themselves (`parquet_debug_spatial_los_walk`).
+    !> `[min D, max D]` over the stored points within `W` of its own `los`, and within the
+    !> catalogue-wide `D +- max(L*W, g)`. Every emitter starts from the second, which needs no
+    !> structure. The emitters whose covering ball under it does not already fit a cell also read
+    !> the first off the sorted tie groups `%build` kept: a pass of two monotone deques, over one
+    !> block of groups per thread, gives every group the least and greatest distance over the groups
+    !> within `W_max` of it, `W_max` the widest envelope among those emitters (`los_group_windows`),
+    !> and each emitter finds its own group by one search (`los_group_of`) and keeps the tighter of
+    !> the two bounds at each end. A group's window at `W_max` contains the emitter's own at `W`, so
+    !> nothing is lost; with one pair of lengths the envelopes coincide and the window is the
+    !> emitter's own exactly. Without `los=` (where `los` IS the distance) and under the test-only
+    !> global arm the second bound is the only one.
+    !> `los_walk_shape` pads that cylinder into one that contains every accepted partner, or picks
+    !> the covering ball when that is the cheaper walk -- the cylinder longer than the ball is wide,
+    !> or the ball no wider than a cell -- and both routes count themselves
+    !> (`parquet_debug_spatial_los_walk`), as the emitters that read a window do
+    !> (`parquet_debug_spatial_los_windows`).
     !>
     !> **The per-candidate lengths are built in STORED order and always passed**, so the walk has
     !> one shape; with a single pair of lengths every rule is the emitter's own cylinder (doubled
@@ -746,18 +754,24 @@ contains
 #endif
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:), ls(:)
         integer(int64), allocatable :: heads(:), keys(:), coff(:), ccnt(:), cthr(:)
-        real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:), qlo(:), qhi(:), suf(:), tmin(:), tmax(:)
-        real(real64), allocatable :: wpar(:)
+        real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:), qlo(:), qhi(:), suf(:), wpar(:)
+        ! Each tie group's window, its least distance in row 1 and its greatest in row 2: one cache
+        ! line per emitter's read rather than two.
+        real(real64), allocatable :: wb(:, :)
         ! One pair buffer per thread, in a SHARED array allocated before the region; see the sweep.
         type(pair_buf), allocatable :: bufs(:)
         ! As the ball sweep: one kind is filled, the other allocated empty. See `pairs_alloc`.
         integer(int32), allocatable :: a32(:), b32(:)
         integer(int64), allocatable :: a64(:), b64(:)
-        integer(int64) :: n, t, i, u, s0, e0, total, k, ng, a, b, ncyl, nbal, ntest, chunk, nchunk, c
-        real(real64) :: p(3), q(3), r, qq, scale, hcell, rg
+        integer(int64) :: n, t, i, u, s0, e0, total, k, ng, gk, ncyl, nbal, ntest, chunk, nchunk, c, nwin
+        integer(int64) :: nblk, gblk, k0, k1
+        ! The clock at the five phase boundaries, and its counts per second (`los_add_phases`).
+        integer(int64) :: ck(0:5), rate
+        real(real64) :: p(3), q(3), r, qq, scale, hcell, rg, wmax
         integer :: nt, nr, rule, lrule, tid
         logical :: direct, want_sep, ball_all, local, need_local, want32, want_tie
 
+        call system_clock(count=ck(0), count_rate=rate)
         want32 = present(ii32)
         rule = PF_LINK_MAX
         if (present(combine)) rule = combine
@@ -805,6 +819,8 @@ contains
             call pairs_emit(a32, b32, a64, b64, ii32, jj32, ii64, jj64, want32)
             if (present(dperp)) allocate (dperp(0))
             if (present(dpar)) allocate (dpar(0))
+            call system_clock(count=ck(1))
+            call los_add_phases(ck, rate, 1)
             return
         end if
         ! A parallel window spanning the catalogue's whole depth is what a `b_par` given in the
@@ -826,6 +842,7 @@ contains
         ! cylinder walk.
         hcell = min(self%cell(1), self%cell(2), self%cell(3))
         if (dbg_los_walk == 2) hcell = 0.0_real64
+        call system_clock(count=ck(1))
         call pair_order_keys(self, walk, nr, n, nt, rule == PF_LINK_MIN, keys)
         allocate (bps(n), bls(n))
         if (nr > 1) then
@@ -850,6 +867,7 @@ contains
             ls => self%d_s
         end if
         want_sep = present(dperp) .or. present(dpar)
+        call system_clock(count=ck(2))
         ! The range of distances each emitter's partners can occupy, in stored order; empty under
         ! the ball walk, which has no use for it.
         if (ball_all) then
@@ -888,43 +906,70 @@ contains
             ! The catalogue-wide bound first, for every emitter: it needs no structure, and an
             ! emitter whose covering ball under it already fits a cell walks that ball whatever its
             ! own window would say -- the window can only shrink the ball -- so it needs no window at
-            ! all. When no emitter needs one the trees are never built, which is what keeps a sweep
-            ! that walks balls throughout as cheap as the ball sweep it replaces.
+            ! all. The emitters that do need one set the envelope the groups are read at, and when
+            ! there are none the groups are never swept, which is what keeps a sweep that walks
+            ! balls throughout as cheap as the ball sweep it replaces.
             need_local = .false.
+            wmax = 0.0_real64
             !$omp parallel do num_threads(nt) schedule(static) default(shared) private(t, qq, rg) &
-            !$omp     reduction(.or.:need_local)
+            !$omp     reduction(.or.:need_local) reduction(max:wmax)
             do t = 1_int64, n
                 qq = self%lip * wpar(t)
                 if (self%tie_spread > qq) qq = self%tie_spread
                 qlo(t) = self%d_s(t) - qq
                 qhi(t) = self%d_s(t) + qq
                 if (local) then
+                    ! `walk(idx(t))` read in stored order: the same product, `bps` holding `b_perp`.
                     rg = walk(1)
-                    if (nr > 1) rg = walk(self%idx(t))
+                    if (nr > 1) rg = scale * bps(t)
                     rg = sqrt(rg * rg + qq * qq)
-                    if (2.0_real64 * rg > hcell) need_local = .true.
+                    if (2.0_real64 * rg > hcell) then
+                        need_local = .true.
+                        if (wpar(t) > wmax) wmax = wpar(t)
+                    end if
                 end if
             end do
             !$omp end parallel do
             if (local .and. need_local) then
                 ng = size(self%los_grp, kind=int64)
-                call seg_build(self%los_gmin, self%los_gmax, ng, tmin, tmax)
-                !$omp parallel do num_threads(nt) schedule(static) default(shared) private(t, qq, rg, a, b)
+                allocate (wb(2, ng))
+                ! One block of groups per thread, each swept by its own pair of deques: a block's
+                ! windows need only the groups they reach, which its pass enters first, so the
+                ! blocks are independent and their windows are exactly those of a single pass.
+                nblk = min(int(nt, kind=int64), ng)
+                gblk = ng / nblk
+                !$omp parallel do num_threads(nt) schedule(static) default(shared) private(c, k0, k1)
+                do c = 1_int64, nblk
+                    k0 = (c - 1_int64) * gblk + 1_int64
+                    k1 = c * gblk
+                    if (c == nblk) k1 = ng
+                    call los_group_windows(self%los_grp, self%los_gmin, self%los_gmax, ng, wmax, k0, k1, wb(:, k0:k1))
+                end do
+                !$omp end parallel do
+                nwin = 0_int64
+                !$omp parallel do num_threads(nt) schedule(static) default(shared) private(t, qq, rg, gk) &
+                !$omp     reduction(+:nwin)
                 do t = 1_int64, n
                     qq = self%lip * wpar(t)
                     if (self%tie_spread > qq) qq = self%tie_spread
+                    ! `walk(idx(t))` read in stored order: the same product, `bps` holding `b_perp`.
                     rg = walk(1)
-                    if (nr > 1) rg = walk(self%idx(t))
+                    if (nr > 1) rg = scale * bps(t)
                     rg = sqrt(rg * rg + qq * qq)
                     if (2.0_real64 * rg <= hcell) cycle
-                    ! The emitter's own group lies inside its window, so the window is never empty.
-                    call los_window(self%los_grp, ng, ls(t), wpar(t), a, b)
-                    qlo(t) = seg_min(tmin, ng, a, b)
-                    qhi(t) = seg_max(tmax, ng, a, b)
+                    ! The emitter's `los` is its own group's value, and that group's window at the
+                    ! envelope contains the emitter's own; so does the catalogue-wide bound already
+                    ! in `qlo`/`qhi`, and each end keeps the tighter of the two.
+                    gk = los_group_of(self%los_grp, ng, ls(t))
+                    if (wb(1, gk) > qlo(t)) qlo(t) = wb(1, gk)
+                    if (wb(2, gk) < qhi(t)) qhi(t) = wb(2, gk)
+                    nwin = nwin + 1_int64
                 end do
                 !$omp end parallel do
+                dbg_los_windows = dbg_los_windows + nwin
             end if
         end if
+        call system_clock(count=ck(3))
         ! ---- The sweep: chunks of emitters in stored order, a pair list per thread ----
         chunk = spatial_sweep_chunk
         if (dbg_sweep_chunk > 0_int64) chunk = dbg_sweep_chunk
@@ -972,6 +1017,7 @@ contains
         end do
         !$omp end do
         !$omp end parallel
+        call system_clock(count=ck(4))
         heads(1) = 1_int64
         do c = 1_int64, nchunk
             heads(c + 1_int64) = heads(c) + ccnt(c)
@@ -1011,7 +1057,29 @@ contains
         dbg_los_tested = dbg_los_tested + ntest
         if (present(dperp)) call move_alloc(dp, dperp)
         if (present(dpar)) call move_alloc(dl, dpar)
+        call system_clock(count=ck(5))
+        call los_add_phases(ck, rate, 5)
     end procedure spatial_pairs_los_worker
+
+    !> Adds the phases a `%pairs_within_los` sweep has finished to the totals
+    !> `parquet_debug_spatial_los_nanos` reports: phase `k` runs from clock reading `k - 1` to
+    !> reading `k`, converted from the clock's counts to nanoseconds.
+    !>
+    !> The five readings are taken at the worker's phase boundaries and never inside a loop, so the
+    !> clock costs nothing a sweep of any size could see. A processor without a clock reports a rate
+    !> of zero, and then nothing is added.
+    subroutine los_add_phases(ck, rate, last)
+        integer(int64), intent(in) :: ck(0:) !! the clock at each phase boundary, in its own counts.
+        integer(int64), intent(in) :: rate !! the clock's counts per second; 0 when there is no clock.
+        integer, intent(in) :: last !! the last phase the sweep finished, 1 to 5.
+        integer :: k
+
+        if (rate <= 0_int64) return
+        do k = 1, last
+            dbg_los_ns(k) = dbg_los_ns(k) + nint(real(ck(k) - ck(k - 1), kind=real64) * &
+                (1.0e9_real64 / real(rate, kind=real64)), kind=int64)
+        end do
+    end subroutine los_add_phases
 
     !> Gives a thread's buffer its first capacity; called by the owning thread inside the region.
     subroutine pair_buf_init(buf, want_sep)
@@ -1410,83 +1478,100 @@ contains
         end do
     end subroutine los_window_range
 
-    !> Two bottom-up segment trees over the groups' least and greatest distances, for the range
-    !> minimum and maximum every emitter's window needs, in `O(log n)` each after an `O(n)` build.
+    !> The least and greatest distance over the tie groups within `w` of each group in `k0 .. k1`:
+    !> one pass of two monotone deques over those groups in ascending `los`.
     !>
-    !> Node `x` of the usual zero-based layout lives at `t(x + 1)`: element `k` at node `ng + k - 1`,
-    !> node `x`'s children at `2x` and `2x + 1`, node 0 unused.
-    pure subroutine seg_build(gmin, gmax, ng, tmin, tmax)
-        real(real64), intent(in) :: gmin(:) !! each group's least distance.
+    !> Group `k`'s window is the groups whose `los` lies in `[grp(k) - w, grp(k) + w]`, found with
+    !> `los_window`'s own comparisons, so it is the set `los_window` would find about `grp(k)`.
+    !> The pass starts at the first group of `k0`'s window rather than at `k0`, so a block of
+    !> groups needs nothing from the blocks before it and the worker sweeps the blocks in parallel.
+    !> Both ends of the window move only forward as `k` does, so each group enters and leaves each
+    !> deque once: `O(k1 - k0)` plus one window. The maximum deque keeps indices whose `gmax` falls
+    !> from its head and the minimum deque indices whose `gmin` rises, so each head is its window's
+    !> extreme. A deque never empties: the group entered last is always in it, and it lies inside
+    !> the window of every group up to it.
+    pure subroutine los_group_windows(grp, gmin, gmax, ng, w, k0, k1, wb)
+        real(real64), intent(in) :: grp(:) !! the distinct `los` values, ascending.
+        real(real64), intent(in) :: gmin(:) !! each group's least distance from the observer.
         real(real64), intent(in) :: gmax(:) !! each group's greatest distance.
-        integer(int64), intent(in) :: ng !! how many groups.
-        real(real64), allocatable, intent(out) :: tmin(:) !! the minimum tree.
-        real(real64), allocatable, intent(out) :: tmax(:) !! the maximum tree.
-        integer(int64) :: x
+        integer(int64), intent(in) :: ng !! how many groups; at least one.
+        real(real64), intent(in) :: w !! the windows' half-width, in `los`'s units; >= 0.
+        integer(int64), intent(in) :: k0 !! the first group of the block.
+        integer(int64), intent(in) :: k1 !! its last group; `k0 <= k1 <= ng`.
+        !> Each window's least distance in row 1 and greatest in row 2, group `k0` in column 1.
+        real(real64), intent(out) :: wb(:, :)
+        integer(int64), allocatable :: qmin(:), qmax(:)
+        integer(int64) :: k, j, hmin, tmin, hmax, tmax, first, last
+        real(real64) :: lb, ub
 
-        allocate (tmin(2_int64 * ng), tmax(2_int64 * ng))
-        tmin(1) = huge(0.0_real64)
-        tmax(1) = -huge(0.0_real64)
-        do x = 1_int64, ng
-            tmin(ng + x) = gmin(x)
-            tmax(ng + x) = gmax(x)
+        ! The groups the block's windows reach: from the bottom of `k0`'s window to the top of
+        ! `k1`'s. Each search also returns the other end, which is not wanted: `last` is overwritten
+        ! by the second call and `j` is reset before the pass.
+        call los_window(grp, ng, grp(k0), w, first, last)
+        call los_window(grp, ng, grp(k1), w, j, last)
+        allocate (qmin(last - first + 1_int64), qmax(last - first + 1_int64))
+        hmin = 1_int64
+        tmin = 0_int64
+        hmax = 1_int64
+        tmax = 0_int64
+        j = first - 1_int64
+        do k = k0, k1
+            lb = grp(k) - w
+            ub = grp(k) + w
+            ! Every group at or below the upper end enters, in order; `k` itself is among them.
+            do while (j < ng)
+                if (.not. (grp(j + 1_int64) <= ub)) exit
+                j = j + 1_int64
+                do while (tmax >= hmax)
+                    if (gmax(qmax(tmax)) > gmax(j)) exit
+                    tmax = tmax - 1_int64
+                end do
+                tmax = tmax + 1_int64
+                qmax(tmax) = j
+                do while (tmin >= hmin)
+                    if (gmin(qmin(tmin)) < gmin(j)) exit
+                    tmin = tmin - 1_int64
+                end do
+                tmin = tmin + 1_int64
+                qmin(tmin) = j
+            end do
+            ! Every group below the lower end leaves, from the head.
+            do while (grp(qmax(hmax)) < lb)
+                hmax = hmax + 1_int64
+            end do
+            do while (grp(qmin(hmin)) < lb)
+                hmin = hmin + 1_int64
+            end do
+            wb(1, k - k0 + 1_int64) = gmin(qmin(hmin))
+            wb(2, k - k0 + 1_int64) = gmax(qmax(hmax))
         end do
-        do x = ng - 1_int64, 1_int64, -1_int64
-            tmin(x + 1_int64) = min(tmin(2_int64 * x + 1_int64), tmin(2_int64 * x + 2_int64))
-            tmax(x + 1_int64) = max(tmax(2_int64 * x + 1_int64), tmax(2_int64 * x + 2_int64))
+    end subroutine los_group_windows
+
+    !> The tie group whose `los` is `v`: the first group at or above `v`, which is `v`'s own group
+    !> whenever `v` is a stored value, as every emitter's is.
+    !>
+    !> **Branch-free on purpose.** Every emitter that reads a window runs this once, and a textbook
+    !> binary search mispredicts about half of its twenty-odd comparisons at a million groups. Here
+    !> the step count depends on `ng` alone and each step is a conditional move, so the loop's only
+    !> branch is predictable; the result is the same first index.
+    pure function los_group_of(grp, ng, v) result(k)
+        real(real64), intent(in) :: grp(:) !! the distinct `los` values, ascending.
+        integer(int64), intent(in) :: ng !! how many there are; at least one.
+        real(real64), intent(in) :: v !! a stored `los` value.
+        integer(int64) :: k !! its group, `1 .. ng`.
+        integer(int64) :: span, half
+
+        ! The answer lies in `k .. k + span` throughout; the last step settles it.
+        k = 1_int64
+        span = ng
+        do while (span > 1_int64)
+            half = span / 2_int64
+            if (grp(k + half) < v) k = k + half
+            span = span - half
         end do
-    end subroutine seg_build
-
-    !> The least value over elements `a..b` of a tree `seg_build` made.
-    pure function seg_min(tree, ng, a, b) result(v)
-        real(real64), intent(in) :: tree(:) !! the minimum tree.
-        integer(int64), intent(in) :: ng !! how many elements it holds.
-        integer(int64), intent(in) :: a !! the first element; `a <= b`.
-        integer(int64), intent(in) :: b !! the last element.
-        real(real64) :: v !! the minimum.
-        integer(int64) :: l, r
-
-        v = huge(0.0_real64)
-        l = a - 1_int64 + ng
-        r = b + ng
-        do while (l < r)
-            if (iand(l, 1_int64) == 1_int64) then
-                if (tree(l + 1_int64) < v) v = tree(l + 1_int64)
-                l = l + 1_int64
-            end if
-            if (iand(r, 1_int64) == 1_int64) then
-                r = r - 1_int64
-                if (tree(r + 1_int64) < v) v = tree(r + 1_int64)
-            end if
-            l = l / 2_int64
-            r = r / 2_int64
-        end do
-    end function seg_min
-
-    !> The greatest value over elements `a..b` of a tree `seg_build` made.
-    pure function seg_max(tree, ng, a, b) result(v)
-        real(real64), intent(in) :: tree(:) !! the maximum tree.
-        integer(int64), intent(in) :: ng !! how many elements it holds.
-        integer(int64), intent(in) :: a !! the first element; `a <= b`.
-        integer(int64), intent(in) :: b !! the last element.
-        real(real64) :: v !! the maximum.
-        integer(int64) :: l, r
-
-        v = -huge(0.0_real64)
-        l = a - 1_int64 + ng
-        r = b + ng
-        do while (l < r)
-            if (iand(l, 1_int64) == 1_int64) then
-                if (tree(l + 1_int64) > v) v = tree(l + 1_int64)
-                l = l + 1_int64
-            end if
-            if (iand(r, 1_int64) == 1_int64) then
-                r = r - 1_int64
-                if (tree(r + 1_int64) > v) v = tree(r + 1_int64)
-            end if
-            l = l / 2_int64
-            r = r / 2_int64
-        end do
-    end function seg_max
+        if (grp(k) < v) k = k + 1_int64
+        if (k > ng) k = ng
+    end function los_group_of
 
     !> The points inside the cylinder about `p` along `p`'s own line of sight: the query's own
     !> lengths and no combine rule, walked as the padded cylinder `los_walk_shape` gives -- the

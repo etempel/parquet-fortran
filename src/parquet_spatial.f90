@@ -82,6 +82,8 @@ module parquet_spatial
     public :: parquet_debug_set_spatial_los_walk
     public :: parquet_debug_set_spatial_los_spread
     public :: parquet_debug_spatial_los_walk
+    public :: parquet_debug_spatial_los_windows
+    public :: parquet_debug_spatial_los_nanos
     public :: parquet_debug_set_spatial_int32_ceiling
     public :: parquet_debug_set_spatial_sweep_chunk
     public :: parquet_debug_spatial_occupied_cells
@@ -579,7 +581,7 @@ module parquet_spatial
     !! else the library's own choice per point.
     integer, save :: dbg_los_walk = 0
     !> Whether the line-of-sight walk bounds a partner's distance by the catalogue-wide
-    !! `max(L*W, g)` instead of the emitter's own window (`parquet_debug_set_spatial_los_spread`).
+    !! `max(L*W, g)` alone, without the window the tie groups give (`parquet_debug_set_spatial_los_spread`).
     logical, save :: dbg_los_global = .false.
     !> Points the line-of-sight queries walked as a cylinder since the counters were reset.
     integer(int64), save :: dbg_los_cyl = 0_int64
@@ -587,6 +589,12 @@ module parquet_spatial
     integer(int64), save :: dbg_los_balls = 0_int64
     !> Candidates that reached a line-of-sight accept test since the counters were reset.
     integer(int64), save :: dbg_los_tested = 0_int64
+    !> Emitters whose distance window a `%pairs_within_los` sweep read off the tie groups since the
+    !! counters were reset (`parquet_debug_spatial_los_windows`).
+    integer(int64), save :: dbg_los_windows = 0_int64
+    !> Nanoseconds the `%pairs_within_los` sweeps have spent in each phase since the counters were
+    !! reset: setup, rank, windows, sweep and copy, in that order (`parquet_debug_spatial_los_nanos`).
+    integer(int64), save :: dbg_los_ns(5) = 0_int64
     !> Emitters per chunk forced by `parquet_debug_set_spatial_sweep_chunk`; <= 0 means the shipped
     !! `spatial_sweep_chunk`.
     integer(int64), save :: dbg_sweep_chunk = 0_int64
@@ -1309,8 +1317,9 @@ module parquet_spatial
     ! come from the `PF_LINK_*` rule over the two points' lengths, `PF_LINK_MAX` meaning the UNION
     ! of the two cylinders rather than the componentwise maximum. Each emitter walks its OWN
     ! padded cylinder along its line of sight (`los_walk_shape`, through `spatial_scan_axis`),
-    ! bounded in distance by the spread of the stored points within its parallel window -- read
-    ! off the `los`-sorted tie groups kept from `%build` -- or the covering ball
+    ! bounded in distance by the spread of the stored points within its parallel window -- within
+    ! the widest one the sweep holds, for the pair sweep -- read off the `los`-sorted tie groups
+    ! kept from `%build`, or by the covering ball
     ! `sqrt(b_perp**2 + Q**2)` when that is the cheaper walk: a cylinder longer than the ball is
     ! wide, or a ball no wider than a cell. `L` and `g` (`spatial_los_bounds`) bound `Q`
     ! catalogue-wide for the two warnings and the test-only global-spread arm.
@@ -3374,9 +3383,9 @@ contains
         dbg_sweep_chunk = n
     end subroutine parquet_debug_set_spatial_sweep_chunk
 
-    !> Clears the probe, rebuild, pixel, thread and line-of-sight counters, and every forcing:
-    !> the cell size, the resolution, the run buffer, the shell start, the cells-per-point ceiling,
-    !> the sweep chunk and the line-of-sight walk and spread.
+    !> Clears the probe, rebuild, pixel, thread and line-of-sight counters, the line-of-sight phase
+    !> timings, and every forcing: the cell size, the resolution, the run buffer, the shell start,
+    !> the cells-per-point ceiling, the sweep chunk and the line-of-sight walk and spread.
     subroutine parquet_debug_reset_spatial_counters()
 
         dbg_probe_count = 0_int64
@@ -3394,6 +3403,8 @@ contains
         dbg_los_cyl = 0_int64
         dbg_los_balls = 0_int64
         dbg_los_tested = 0_int64
+        dbg_los_windows = 0_int64
+        dbg_los_ns = 0_int64
         dbg_int32_ceiling = 0_int64
         dbg_sweep_chunk = 0_int64
     end subroutine parquet_debug_reset_spatial_counters
@@ -3475,7 +3486,7 @@ contains
     end subroutine parquet_debug_set_spatial_los_walk
 
     !> Forces the line-of-sight walk to bound a partner's distance by the catalogue-wide
-    !> `max(L*W, g)` instead of the spread of the points within the emitter's own parallel window.
+    !> `max(L*W, g)` alone, without the spread of the stored points within the parallel window.
     !>
     !> **Test-and-bench only.** The global bound is the slope at the survey's near edge applied
     !> everywhere, so it overshoots the far end by the ratio of the two slopes; the arm
@@ -3506,5 +3517,46 @@ contains
         balls = dbg_los_balls
         tested = dbg_los_tested
     end subroutine parquet_debug_spatial_los_walk
+
+    !> How many emitters the `%pairs_within_los` sweeps have read a distance window for since the
+    !> counters were reset.
+    !>
+    !> **The "which path ran" observable for the per-emitter window**, written by the sweep itself.
+    !> An emitter whose covering ball under the catalogue-wide bound already fits a cell walks that
+    !> ball whatever its own window would say, so it reads none; on an index built with `los=`,
+    !> every other emitter reads the window its tie group carries. The pairs are the same either
+    !> way, so without this a test could not tell a gate that holds from one that was dropped.
+    !> Nothing is read under the test-only global spread, or without `los=`. Test-only, and public
+    !> for the reason `parquet_debug_set_spatial_cell` is.
+    subroutine parquet_debug_spatial_los_windows(windowed)
+        integer(int64), intent(out) :: windowed !! emitters that took their distance window from the tie groups.
+
+        windowed = dbg_los_windows
+    end subroutine parquet_debug_spatial_los_windows
+
+    !> Nanoseconds the `%pairs_within_los` sweeps have spent in each of their five phases since the
+    !> counters were reset.
+    !>
+    !> **The phase split every measurement of the sweep is read against**, kept in the library so
+    !> that a phase table is a bench run rather than a subtraction between runs
+    !> (`bench/benchmark_spatial.sh MODE=los` prints it for the library arm's best round). The
+    !> clock is `system_clock` at `int64` kinds, read at the five phase boundaries of the worker and
+    !> never inside a loop, so its resolution is the compiler's: gfortran counts nanoseconds, nagfor
+    !> microseconds, and a phase shorter than one count reads 0. Sweeps on several threads at once
+    !> add into the same five totals. Test-and-bench only, and public for the reason
+    !> `parquet_debug_set_spatial_cell` is.
+    subroutine parquet_debug_spatial_los_nanos(setup, rank, windows, sweep, copy)
+        integer(int64), intent(out) :: setup !! the argument checks, the re-tune decision and the team.
+        integer(int64), intent(out) :: rank !! the rank keys and the lengths gathered into stored order.
+        integer(int64), intent(out) :: windows !! each emitter's range of distances from the observer.
+        integer(int64), intent(out) :: sweep !! the walk: the parallel region that finds the pairs.
+        integer(int64), intent(out) :: copy !! the concatenation of the thread buffers into the caller's arrays.
+
+        setup = dbg_los_ns(1)
+        rank = dbg_los_ns(2)
+        windows = dbg_los_ns(3)
+        sweep = dbg_los_ns(4)
+        copy = dbg_los_ns(5)
+    end subroutine parquet_debug_spatial_los_nanos
 
 end module parquet_spatial ! GCOVR_EXCL_LINE

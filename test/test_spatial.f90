@@ -151,6 +151,12 @@ contains
             new_unittest("dperp and dpar travel with their pair through the copy", &
                          test_los_sweep_separations_follow_pairs), &
             new_unittest("a chunk boundary neither drops nor repeats a pair", test_los_sweep_chunk_boundaries), &
+            new_unittest("the envelope-wide window is the tie groups' own spread", &
+                         test_los_window_is_the_groups_spread), &
+            new_unittest("an emitter reads its own group's window", test_los_window_is_the_emitters_own), &
+            new_unittest("windows are read only where the covering ball exceeds the cell", &
+                         test_los_windows_follow_the_cell), &
+            new_unittest("the phase counters account for a sweep and reset to zero", test_los_phase_counters), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
@@ -5707,6 +5713,330 @@ contains
             end do
         end do
     end subroutine test_los_sweep_chunk_boundaries
+
+    ! ---- The per-emitter distance window, and the sweep's phase timings ----
+
+    !> Ladders of line-of-sight partners, for the window tests. On each of `nlad` lines of sight an
+    !> emitter `E` at distance `D_E`, optionally a tie `T` sharing E's parallel coordinate three
+    !> units farther out, then `N` at `D_E - 0.9 reach` and `F` at `D_E + 0.9 reach`, in that row
+    !> order, with the parallel coordinate `D / 1000` everywhere but at `T`. With a parallel length
+    !> of `reach / 1000`, `N` and `F` are E's partners near the two ends of its window and farther
+    !> from it in distance than half the window reaches, and E (then T) has the lowest rows of its
+    !> ladder, so under tied lengths it is the endpoint that emits those pairs. The ladders are 180
+    !> apart in distance and a few degrees apart on the sky, so no two share a window.
+    subroutine make_los_ladders(nlad, reach, tie, ra, dec, d, los)
+        integer(int64), intent(in) :: nlad !! how many lines of sight; at most six keeps them inside 1500.
+        real(real64), intent(in) :: reach !! a window's reach in distance: 1000 times the parallel length.
+        logical, intent(in) :: tie !! whether each ladder carries the tie `T`.
+        real(real64), allocatable, intent(out) :: ra(:) !! right ascension per point, radians.
+        real(real64), allocatable, intent(out) :: dec(:) !! declination per point, radians.
+        real(real64), allocatable, intent(out) :: d(:) !! distance from the observer per point.
+        real(real64), allocatable, intent(out) :: los(:) !! the parallel coordinate per point.
+        integer(int64) :: k, per, i, j
+        real(real64) :: de
+
+        per = 3_int64
+        if (tie) per = 4_int64
+        allocate (ra(nlad * per), dec(nlad * per), d(nlad * per), los(nlad * per))
+        do k = 1_int64, nlad
+            de = 400.0_real64 + 180.0_real64 * real(k, kind=real64)
+            i = (k - 1_int64) * per
+            do j = 1_int64, per
+                ra(i + j) = -0.06_real64 + 0.02_real64 * real(k, kind=real64)
+                dec(i + j) = 0.04_real64 - 0.012_real64 * real(k, kind=real64)
+            end do
+            d(i + 1_int64) = de
+            if (tie) then
+                i = i + 1_int64
+                d(i + 1_int64) = de + 3.0_real64
+            end if
+            d(i + 2_int64) = de - 0.9_real64 * reach
+            d(i + 3_int64) = de + 0.9_real64 * reach
+        end do
+        los = d / 1000.0_real64
+        if (tie) then
+            do k = 1_int64, nlad
+                i = (k - 1_int64) * per
+                los(i + 2_int64) = los(i + 1_int64)
+            end do
+        end if
+    end subroutine make_los_ladders
+
+    !> A survey wedge with six ladders appended (`make_los_ladders`, reach 20), the parallel
+    !> coordinate `D / 1000` everywhere, and the Cartesian coordinates the library sees.
+    subroutine make_laddered_wedge(stream, nb, ra, dec, d, los, x, y, z)
+        integer(int64), intent(in) :: stream !! a draw offset for the wedge, so two fixtures differ.
+        integer(int64), intent(out) :: nb !! how many wedge points come before the ladders.
+        real(real64), allocatable, intent(out) :: ra(:) !! right ascension per point, radians.
+        real(real64), allocatable, intent(out) :: dec(:) !! declination per point, radians.
+        real(real64), allocatable, intent(out) :: d(:) !! distance from the observer per point.
+        real(real64), allocatable, intent(out) :: los(:) !! the parallel coordinate per point.
+        real(real64), allocatable, intent(out) :: x(:) !! x of every point.
+        real(real64), allocatable, intent(out) :: y(:) !! y of every point.
+        real(real64), allocatable, intent(out) :: z(:) !! z of every point.
+        real(real64), allocatable :: lra(:), ldec(:), ld(:), llos(:)
+
+        call make_wedge(200_int64, 10_int64, 300.0_real64, 1500.0_real64, stream, ra, dec, d, x, y, z)
+        nb = size(ra, kind=int64)
+        call make_los_ladders(6_int64, 20.0_real64, .false., lra, ldec, ld, llos)
+        los = [d / 1000.0_real64, llos]
+        ra = [ra, lra]
+        dec = [dec, ldec]
+        d = [d, ld]
+        x = d * cos(dec) * cos(ra)
+        y = d * cos(dec) * sin(ra)
+        z = d * sin(dec)
+    end subroutine make_laddered_wedge
+
+    !> Every emitter's distance window reaches the stored points at both ends of its own parallel
+    !> window: on a survey wedge with per-point lengths, six ladders put two partners of an emitter
+    !> 0.9 of a window's reach below and above it, so a window narrower at either end loses a pair.
+    !> The ladders carry the largest lengths, so the sweep's widest envelope is theirs. Every
+    !> `combine=` rule is held to its brute-force oracle with the cylinder walk forced, which makes
+    !> every emitter read a window -- asserted through the windows counter, since the pairs alone
+    !> cannot show that the window was read. The mutations: a pop comparison of either monotone
+    !> deque inverted, which leaves the wrong end of the window at the deque's head, and the envelope
+    !> halved.
+    subroutine test_los_window_is_the_groups_spread(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), los(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, nb, a, k, e, nwant, w0, w1
+        integer :: rules(4), ri
+
+        rules = [PF_LINK_MIN, PF_LINK_MEAN, PF_LINK_MAX, PF_LINK_SUM]
+        call make_laddered_wedge(74_int64, nb, ra, dec, d, los, x, y, z)
+        n = size(ra, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 5.0_real64
+            bl(a) = 0.02_real64
+            if (a > nb) cycle
+            bp(a) = 3.0_real64 + 2.0_real64 * pf_random_at(fixture_seed, a, 77_int64)
+            bl(a) = 0.005_real64 + 0.015_real64 * pf_random_at(fixture_seed, a, 78_int64)
+        end do
+        call sx%build(x, y, z, radius=5.0_real64, los=los)
+        call parquet_debug_reset_spatial_counters()
+        do ri = 1, 4
+            call brute_los_pairs(ra, dec, d, los, bp, bl, rules(ri), want, nwant)
+            do k = 1_int64, 6_int64
+                e = nb + 3_int64 * (k - 1_int64) + 1_int64
+                call check(error, want(e, e + 1_int64) .and. want(e, e + 2_int64), &
+                    "precondition: each ladder's emitter must pair with both of its partners under every rule")
+                if (allocated(error)) return
+            end do
+            call parquet_debug_set_spatial_los_walk(walk_cyl)
+            call parquet_debug_spatial_los_windows(w0)
+            call sx%pairs_within_los(bp, bl, pi, pj, combine=rules(ri))
+            call parquet_debug_spatial_los_windows(w1)
+            call parquet_debug_set_spatial_los_walk(walk_auto)
+            call check(error, w1 - w0 == n, "with the cylinder forced every emitter must read a window")
+            if (allocated(error)) return
+            call check(error, pairs_equal_set(pi, pj, want, nwant), &
+                "every rule's pairs must be its oracle's, the partners at both ends of a window included")
+            if (allocated(error)) return
+        end do
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_los_window_is_the_groups_spread
+
+    !> An emitter reads the window of its OWN tie group, and a point tied with it reads the same one.
+    !> On ladders alone the groups next to an emitter's are its two partners, 0.9 of a window's reach
+    !> away in the parallel coordinate on either side, so the window of either neighbouring group
+    !> drops one partner; a tie three units farther out gives the emitter's group a spread of its own
+    !> and a second point that must find that group. Both forms of the sweep are held to the oracle
+    !> -- one pair of lengths, and per-point lengths under the mean on a team of four, which splits
+    !> the groups into blocks whose windows reach into the block before -- with the cylinder forced
+    !> so every emitter reads a window. The mutations: the search for the emitter's group off by one,
+    !> and a block's pass that does not first enter the groups below its first group.
+    subroutine test_los_window_is_the_emitters_own(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), los(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, k, e, nwant, w0, w1
+        real(real64), parameter :: bp0 = 5.0_real64, bl0 = 0.02_real64
+
+        call make_los_ladders(6_int64, 20.0_real64, .true., ra, dec, d, los)
+        n = size(ra, kind=int64)
+        x = d * cos(dec) * cos(ra)
+        y = d * cos(dec) * sin(ra)
+        z = d * sin(dec)
+        allocate (bp(n), bl(n), want(n, n))
+        bp = bp0
+        bl = bl0
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MAX, want, nwant)
+        do k = 1_int64, 6_int64
+            e = 4_int64 * (k - 1_int64) + 1_int64
+            call check(error, want(e, e + 2_int64) .and. want(e, e + 3_int64) .and. want(e + 1_int64, e + 2_int64) &
+                .and. want(e + 1_int64, e + 3_int64), &
+                "precondition: the emitter and its tie must each pair with both partners")
+            if (allocated(error)) return
+            call check(error, count(abs(los - los(e)) <= bl0) == 4, &
+                "precondition: the only groups within a window of the emitter's must be its ladder's own")
+            if (allocated(error)) return
+        end do
+        call sx%build(x, y, z, radius=bp0, los=los)
+        call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_los_walk(walk_cyl)
+        call parquet_debug_spatial_los_windows(w0)
+        call sx%pairs_within_los(bp0, bl0, pi, pj)
+        call parquet_debug_spatial_los_windows(w1)
+        call check(error, w1 - w0 == n, "with the cylinder forced every emitter must read a window")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "one pair of lengths: every emitter must find the partners its own group's window reaches")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MEAN, want, nwant)
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN, threads=4)
+        call parquet_debug_reset_spatial_counters()
+        call check(error, pairs_equal_set(pi, pj, want, nwant), &
+            "per-point lengths: every emitter must find the partners its own group's window reaches")
+    end subroutine test_los_window_is_the_emitters_own
+
+    !> A distance window is read only by an emitter whose covering ball under the catalogue-wide
+    !> bound is wider than a cell; the others walk that ball, which a window could only shrink. Three
+    !> builds of one laddered survey: a cell wider than every covering ball reads no window, one
+    !> narrower than every ball reads one per point, and between the two, with parallel lengths of
+    !> two sizes, exactly the points whose ball is wider than the cell read one. The pairs are the
+    !> oracle's every time. The fine cells come through the ceiling override, and the counters are
+    !> read as differences because the reset would clear it. The mutation is the per-emitter gate
+    !> removed, which the mixed build reports as a window for every point.
+    subroutine test_los_windows_follow_the_cell(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), los(:), bp(:), bl(:), diam(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: coarse, fine, mixed
+        integer(int64) :: n, nb, a, nwant, w0, w1, nwide
+        real(real64) :: lip, spread, gap, cx, cy, cz, h
+        real(real64), parameter :: bp0 = 5.0_real64, bl_long = 0.02_real64, bl_short = 0.002_real64
+
+        call make_laddered_wedge(72_int64, nb, ra, dec, d, los, x, y, z)
+        n = size(ra, kind=int64)
+        allocate (bp(n), bl(n), diam(n), want(n, n))
+        bp = bp0
+        bl = bl_long
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MAX, want, nwant)
+        call check(error, nwant > 0_int64, "the fixture must hold accepted pairs")
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        ! ---- one pair of lengths, a cell wider than the covering ball ----
+        call coarse%build(x, y, z, radius=bp0, cell=200.0_real64, los=los)
+        call parquet_debug_spatial_los_bounds(coarse, lip, spread, gap)
+        call check(error, gap > 0.0_real64, "precondition: the index must carry los=, or no window is ever read")
+        if (allocated(error)) return
+        h = 2.0_real64 * sqrt(bp0 * bp0 + max(lip * bl_long, spread)**2)
+        call check(error, h < 200.0_real64 .and. h > 10.0_real64, &
+            "precondition: the covering ball's diameter must lie between the fine and the coarse cell")
+        if (allocated(error)) return
+        call parquet_debug_spatial_los_windows(w0)
+        call coarse%pairs_within_los(bp0, bl_long, pi, pj)
+        call parquet_debug_spatial_los_windows(w1)
+        call check(error, w1 - w0 == 0_int64, "a cell wider than every covering ball must read no window")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the coarse cell's pairs must be the oracle's")
+        if (allocated(error)) return
+        ! ---- one pair of lengths, a cell narrower than the covering ball ----
+        call parquet_debug_set_spatial_max_cells_per_point(3000.0_real64)
+        call fine%build(x, y, z, radius=bp0, cell=10.0_real64, los=los)
+        call fine%cell_sides(cx, cy, cz)
+        call check(error, max(cx, cy, cz) <= 10.0_real64, "precondition: the override must keep the fine cell")
+        if (allocated(error)) return
+        call parquet_debug_spatial_los_windows(w0)
+        call fine%pairs_within_los(bp0, bl_long, pi, pj)
+        call parquet_debug_spatial_los_windows(w1)
+        call check(error, w1 - w0 == n, "a cell narrower than every covering ball must read a window per point")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the fine cell's pairs must be the oracle's")
+        if (allocated(error)) return
+        ! ---- per-point lengths of two sizes, a cell between their two balls ----
+        do a = 1_int64, n
+            bp(a) = 3.0_real64 + 2.0_real64 * pf_random_at(fixture_seed, a, 79_int64)
+            bl(a) = bl_long
+            if (a <= nb .and. mod(a, 2_int64) == 0_int64) bl(a) = bl_short
+        end do
+        call mixed%build(x, y, z, radius=bp0, cell=30.0_real64, los=los)
+        call mixed%cell_sides(cx, cy, cz)
+        h = min(cx, cy, cz)
+        diam = 2.0_real64 * sqrt(bp * bp + max(lip * bl, spread)**2)
+        nwide = count(diam > h)
+        call check(error, all(diam < 0.8_real64 * h .or. diam > 1.2_real64 * h), &
+            "precondition: no covering ball may sit near the cell, where rounding could decide the gate")
+        if (allocated(error)) return
+        call check(error, nwide > 0_int64 .and. nwide < n, "precondition: the cell must split the points' balls")
+        if (allocated(error)) return
+        call brute_los_pairs(ra, dec, d, los, bp, bl, PF_LINK_MAX, want, nwant)
+        call parquet_debug_spatial_los_windows(w0)
+        call mixed%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MAX)
+        call parquet_debug_spatial_los_windows(w1)
+        call parquet_debug_reset_spatial_counters()
+        call check(error, w1 - w0 == nwide, "exactly the points whose covering ball is wider than the cell must read a window")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "the mixed lengths' pairs must be the oracle's")
+    end subroutine test_los_windows_follow_the_cell
+
+    !> Reads the five phase timings into one array, setup first.
+    subroutine read_los_phases(ph)
+        integer(int64), intent(out) :: ph(5) !! setup, rank, windows, sweep and copy, in nanoseconds.
+
+        call parquet_debug_spatial_los_nanos(ph(1), ph(2), ph(3), ph(4), ph(5))
+    end subroutine read_los_phases
+
+    !> The sweep's five phase timings add up: after a sweep every phase is non-negative, the sweep's
+    !> own is positive, and the five together lie between half and all of the time measured around
+    !> the call -- the lower bound is what catches a phase converted in the wrong unit, since the
+    !> readings telescope and nothing else runs inside the call. A second sweep adds to every phase,
+    !> and the reset returns all five to zero. Three thousand points keep the sweep far above the
+    !> clock's resolution on every compiler. The mutation is the sweep's closing reading taken before
+    !> its opening one.
+    subroutine test_los_phase_counters(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, c0, c1, rate, ph0(5), ph1(5), ph2(5)
+        real(real64) :: elapsed
+
+        call make_wedge(3000_int64, 50_int64, 300.0_real64, 1500.0_real64, 73_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n))
+        do a = 1_int64, n
+            bp(a) = 3.0_real64 + 2.0_real64 * pf_random_at(fixture_seed, a, 75_int64)
+            bl(a) = 0.005_real64 + 0.015_real64 * pf_random_at(fixture_seed, a, 76_int64)
+        end do
+        call sx%build(x, y, z, radius=5.0_real64, los=d / 1000.0_real64)
+        call parquet_debug_reset_spatial_counters()
+        call read_los_phases(ph0)
+        call check(error, all(ph0 == 0_int64), "after the reset every phase must read zero")
+        if (allocated(error)) return
+        call system_clock(count=c0, count_rate=rate)
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call system_clock(count=c1)
+        call read_los_phases(ph1)
+        call check(error, rate > 0_int64, "the processor must have a clock for the phases to be measured")
+        if (allocated(error)) return
+        call check(error, all(ph1 >= 0_int64), "no phase may be negative")
+        if (allocated(error)) return
+        call check(error, ph1(4) > 0_int64, "the sweep over three thousand points must take measurable time")
+        if (allocated(error)) return
+        elapsed = real(c1 - c0, kind=real64) * (1.0e9_real64 / real(rate, kind=real64))
+        call check(error, real(sum(ph1), kind=real64) <= elapsed + 5.0_real64, &
+            "the phases cannot add up to more than the time around the call")
+        if (allocated(error)) return
+        call check(error, real(sum(ph1), kind=real64) >= 0.5_real64 * elapsed, &
+            "the phases must account for most of the time around the call")
+        if (allocated(error)) return
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
+        call read_los_phases(ph2)
+        call check(error, all(ph2 >= ph1) .and. ph2(4) > ph1(4), "a second sweep must add to the phases")
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        call read_los_phases(ph0)
+        call check(error, all(ph0 == 0_int64), "the reset must return every phase to zero")
+    end subroutine test_los_phase_counters
 
     ! ---- int32 answers: the same answer in the caller's kind ----
     !

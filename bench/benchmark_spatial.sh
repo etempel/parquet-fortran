@@ -13,13 +13,16 @@
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 WALK=ball bench/benchmark_spatial.sh   # its covering-ball walk
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 WALK=cylinder bench/benchmark_spatial.sh   # the cylinder for every point
 #   MODE=los DIST=wedge SIDE=1500 RLO=0.3 RHI=0.5 CELLS_PER_POINT=30 bench/benchmark_spatial.sh
+#   MODE=los DIST=fluxlim TS=0.25 SIDE=1500 RLO=0.3 RHI=0.5 RATIO=30 bench/benchmark_spatial.sh   # a steep selection
 #   DIST=clustered NP=2000000 bench/benchmark_spatial.sh
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
 #   MODE=tune        tune | ab | build | query | threads | combine | backend | los
-#   DIST=uniform     uniform | clustered | wedge | sphere | flat
+#   DIST=uniform     uniform | clustered | wedge | fluxlim | sphere | flat
 #                    (MODE=backend takes uniform or clustered only, on the SPHERE; MODE=los any
-#                    3D fixture, the wedge being the survey shape it is about)
+#                    3D fixture, the wedge and fluxlim being the survey shapes it is about)
+#   TS=0.5           DIST=fluxlim only: the wedge thinned by exp(-(D / (TS*SIDE))**2), redrawn to keep
+#                    NP points; smaller is steeper (0.5 and 0.25 are the two profiles measured so far).
 #   SKYR=1           MODE=backend only: the build radius in DEGREES.
 #   RATIO=10         MODE=los only: the cylinders' aspect ratio in distance, L*b_par / b_perp.
 #   WALK=auto        MODE=los only: auto (the shipped choice per point: the cylinder unless the covering
@@ -82,10 +85,13 @@
 #           under SPREAD=global -- against %pairs_within at the covering radius plus a serial re-test
 #           of every candidate. Prints CANDIDATES TESTED PER PAIR KEPT for both, read for the library
 #           arm from its own counter, beside the geometric volume ratio, each arm's cell and the peak
-#           list the work-around held. Run at RATIO=10 and RATIO=30 on DIST=wedge with SURVEY
-#           dimensions, SIDE=1500 RLO=0.3 RHI=0.5 (a wedge 1500 deep with sub-Mpc transverse
-#           lengths), once per WALK, once per SPREAD, and with CELLS_PER_POINT relaxed (30) to see
-#           how much of the remaining excess is the ceiling's; SIDE=1800 reaches z = 1, where the
+#           list the work-around held; and for the library arm's best round its five PHASES (setup,
+#           rank, windows, sweep, copy) and how many emitters read a distance window. Run at
+#           RATIO=10 and RATIO=30 on DIST=wedge with SURVEY dimensions, SIDE=1500 RLO=0.3 RHI=0.5
+#           (a wedge 1500 deep with sub-Mpc transverse lengths), once per WALK, once per SPREAD,
+#           and with CELLS_PER_POINT relaxed (30) to see how much of the remaining excess is the
+#           ceiling's; DIST=fluxlim at TS=0.5 and 0.25 for a survey whose density falls with
+#           distance; SIDE=1800 reaches z = 1, where the
 #           global spread overshoots most. At the other modes' defaults, a 100-unit box with radii
 #           1..5, each covering ball is a tenth of the box at RATIO=10 and the work-around's pair
 #           list would not fit in memory; the mode counts first and refuses rather than allocate it.
@@ -119,6 +125,7 @@ RATIO="${RATIO:-10}"
 WALK="${WALK:-auto}"
 SPREAD="${SPREAD:-local}"
 CELLS_PER_POINT="${CELLS_PER_POINT:-0}"
+TS="${TS:-0.5}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -187,7 +194,7 @@ echo "  build tree  : $FPM_BUILD_DIR"
 echo "  fortran     : ${FPM_FC:-gfortran (fpm default)}"
 echo "  flags       : $FLAGS_LINE"
 echo "  uname -m    : $(uname -m)"
-echo "  mode=$MODE dist=$DIST np=$NP nq=$NQ rounds=$ROUNDS side=$SIDE r=$RLO..$RHI threads=$THREADS"
+echo "  mode=$MODE dist=$DIST np=$NP nq=$NQ rounds=$ROUNDS side=$SIDE r=$RLO..$RHI threads=$THREADS ts=$TS"
 echo "  skyr=$SKYR (MODE=backend only)  ratio=$RATIO walk=$WALK spread=$SPREAD cells_per_point=$CELLS_PER_POINT (MODE=los only)"
 echo "=============================================================================="
 echo
@@ -197,7 +204,7 @@ fpm build --profile release >/dev/null
 fpm run benchmark_spatial --profile release -- \
     --mode="$MODE" --dist="$DIST" --np="$NP" --nq="$NQ" --rounds="$ROUNDS" \
     --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS" --skyr="$SKYR" --ratio="$RATIO" \
-    --walk="$WALK" --spread="$SPREAD" --cells="$CELLS_PER_POINT"
+    --walk="$WALK" --spread="$SPREAD" --cells="$CELLS_PER_POINT" --ts="$TS"
 
 echo
 echo "Build tree left at $FPM_BUILD_DIR (rm -rf test_run/spatial-bench-* to clean up)."

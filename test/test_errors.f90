@@ -84,7 +84,8 @@ contains
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
-                                            p22(:), p23(:), p24(:), p25(:), p26(:), p27(:)
+                                            p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
+                                            p28(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3106,8 +3107,37 @@ contains
             new_unittest("a long context is capped in the abort message", &
                 test_integrate_context_capped_aborts) &
             ]
+        ! ---- parquet_optimize: the local engines' abort paths ----
+        p28 = [ &
+            new_unittest("a zero-length start point is refused", &
+                test_optimize_size_zero_aborts), &
+            new_unittest("a zero max_neval is refused by the simplex", &
+                test_optimize_budget_zero_aborts), &
+            new_unittest("a max_neval above huge(1)/2 is refused", &
+                test_optimize_budget_ceiling_aborts), &
+            new_unittest("a NaN tolerance is refused", &
+                test_optimize_tolerance_nonfinite_aborts), &
+            new_unittest("a reversed bracket is refused", &
+                test_optimize_scalar_bad_bracket_aborts), &
+            new_unittest("a non-finite objective value is refused by Brent", &
+                test_optimize_scalar_nonfinite_value_aborts), &
+            new_unittest("Brent refuses a constrained objective", &
+                test_optimize_scalar_constraints_not_honoured_aborts), &
+            new_unittest("a zero step element is refused", &
+                test_optimize_simplex_step_zero_aborts), &
+            new_unittest("a step of the wrong size is refused", &
+                test_optimize_simplex_step_size_aborts), &
+            new_unittest("two zero tolerances are refused by the simplex", &
+                test_optimize_simplex_no_tolerance_aborts), &
+            new_unittest("a NaN start point is refused", &
+                test_optimize_simplex_nan_start_aborts), &
+            new_unittest("a non-finite objective value mid-run is refused by the simplex", &
+                test_optimize_simplex_nonfinite_value_aborts), &
+            new_unittest("the simplex refuses a constrained objective", &
+                test_optimize_simplex_constraints_not_honoured_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27]
+            p19, p21, p23, p24, p25, p26, p27, p28]
     end subroutine collect_tests_parquet_errors
 
 
@@ -18835,6 +18865,98 @@ contains
             failure_message="reversed bounds with a context were expected to abort", &
             required_stderr="context: my_call_site")
     end subroutine test_integrate_context_reported_aborts
+    !
+    !
+    subroutine test_optimize_size_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_size_zero", expect_abort=.true., &
+            failure_message="a zero-length start point was expected to error stop", &
+            required_stderr="at least one variable is required")
+    end subroutine test_optimize_size_zero_aborts
+    !
+    subroutine test_optimize_budget_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_budget_zero", expect_abort=.true., &
+            failure_message="a zero max_neval was expected to error stop", &
+            required_stderr="max_neval must be positive")
+    end subroutine test_optimize_budget_zero_aborts
+    !
+    subroutine test_optimize_budget_ceiling_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_budget_ceiling", expect_abort=.true., &
+            failure_message="a max_neval above huge(1)/2 was expected to error stop", &
+            required_stderr="max_neval must not exceed huge(1)/2")
+    end subroutine test_optimize_budget_ceiling_aborts
+    !
+    subroutine test_optimize_tolerance_nonfinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_tolerance_nonfinite", expect_abort=.true., &
+            failure_message="a NaN ftol was expected to error stop", &
+            required_stderr="ftol must be a finite, non-negative number")
+    end subroutine test_optimize_tolerance_nonfinite_aborts
+    !
+    subroutine test_optimize_scalar_bad_bracket_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_scalar_bad_bracket", expect_abort=.true., &
+            failure_message="a reversed bracket was expected to error stop", &
+            required_stderr="the bracket must satisfy a < b with finite ends")
+    end subroutine test_optimize_scalar_bad_bracket_aborts
+    !
+    subroutine test_optimize_scalar_nonfinite_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_scalar_nonfinite_value", expect_abort=.true., &
+            failure_message="a NaN objective value was expected to error stop", &
+            required_stderr="the objective returned a non-finite value")
+    end subroutine test_optimize_scalar_nonfinite_value_aborts
+    !
+    subroutine test_optimize_scalar_constraints_not_honoured_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_scalar_constraints_not_honoured", expect_abort=.true., &
+            failure_message="a constrained objective in Brent was expected to error stop", &
+            required_stderr="this engine does not honour nonlinear constraints; use pf_minimize_cobyla")
+    end subroutine test_optimize_scalar_constraints_not_honoured_aborts
+    !
+    subroutine test_optimize_simplex_step_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_step_zero", expect_abort=.true., &
+            failure_message="a zero step element was expected to error stop", &
+            required_stderr="step must not contain zero or NaN")
+    end subroutine test_optimize_simplex_step_zero_aborts
+    !
+    subroutine test_optimize_simplex_step_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_step_size", expect_abort=.true., &
+            failure_message="a step of the wrong size was expected to error stop", &
+            required_stderr="step and x must have the same size")
+    end subroutine test_optimize_simplex_step_size_aborts
+    !
+    subroutine test_optimize_simplex_no_tolerance_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_no_tolerance", expect_abort=.true., &
+            failure_message="two zero tolerances were expected to error stop", &
+            required_stderr="at least one of ftol and atol must be positive")
+    end subroutine test_optimize_simplex_no_tolerance_aborts
+    !
+    subroutine test_optimize_simplex_nan_start_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_nan_start", expect_abort=.true., &
+            failure_message="a NaN start point was expected to error stop", &
+            required_stderr="the start point must not contain NaN")
+    end subroutine test_optimize_simplex_nan_start_aborts
+    !
+    subroutine test_optimize_simplex_nonfinite_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_nonfinite_value", expect_abort=.true., &
+            failure_message="a mid-run NaN value was expected to error stop", &
+            required_stderr="the objective returned a non-finite value")
+    end subroutine test_optimize_simplex_nonfinite_value_aborts
+    !
+    subroutine test_optimize_simplex_constraints_not_honoured_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_constraints_not_honoured", expect_abort=.true., &
+            failure_message="a constrained objective in the simplex was expected to error stop", &
+            required_stderr="this engine does not honour nonlinear constraints; use pf_minimize_cobyla")
+    end subroutine test_optimize_simplex_constraints_not_honoured_aborts
     !
     subroutine test_integrate_context_capped_aborts(error)
         type(error_type), allocatable, intent(out) :: error

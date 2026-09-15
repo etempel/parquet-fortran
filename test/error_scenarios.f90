@@ -29,6 +29,11 @@ program error_scenarios
     ! The quadrature scenarios' integrands: module procedures shared with test_integrate.f90,
     ! so a scenario and a test can name the same integrand and neither reaches an internal one.
     use test_integrate_support, only : runge
+    ! The optimisation scenarios' objectives: module procedures and module-level types shared with
+    ! test_optimize.f90, so a scenario and a test name the same objective and neither reaches an
+    ! internal procedure.
+    use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc
+    use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex
     use parquet_tables
     ! The grouping scenarios' callbacks: module procedures, since an internal one of this
     ! program cannot be passed as a callback under every supported compiler.
@@ -3631,6 +3636,32 @@ program error_scenarios
         call scenario_integrate_context_reported()
     case ("integrate_context_capped")
         call scenario_integrate_context_capped()
+    case ("optimize_size_zero")
+        call scenario_optimize_size_zero()
+    case ("optimize_budget_zero")
+        call scenario_optimize_budget_zero()
+    case ("optimize_budget_ceiling")
+        call scenario_optimize_budget_ceiling()
+    case ("optimize_tolerance_nonfinite")
+        call scenario_optimize_tolerance_nonfinite()
+    case ("optimize_scalar_bad_bracket")
+        call scenario_optimize_scalar_bad_bracket()
+    case ("optimize_scalar_nonfinite_value")
+        call scenario_optimize_scalar_nonfinite_value()
+    case ("optimize_scalar_constraints_not_honoured")
+        call scenario_optimize_scalar_constraints_not_honoured()
+    case ("optimize_simplex_step_zero")
+        call scenario_optimize_simplex_step_zero()
+    case ("optimize_simplex_step_size")
+        call scenario_optimize_simplex_step_size()
+    case ("optimize_simplex_no_tolerance")
+        call scenario_optimize_simplex_no_tolerance()
+    case ("optimize_simplex_nan_start")
+        call scenario_optimize_simplex_nan_start()
+    case ("optimize_simplex_nonfinite_value")
+        call scenario_optimize_simplex_nonfinite_value()
+    case ("optimize_simplex_constraints_not_honoured")
+        call scenario_optimize_simplex_constraints_not_honoured()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -31551,5 +31582,128 @@ contains
                          context=repeat("abcdefghij", 15))
         print '(a, es22.15)', "accepted reversed bounds with a long context: ", r
     end subroutine scenario_integrate_context_capped
+    !
+    !> A zero-length start point: the simplex needs at least one variable.
+    subroutine scenario_optimize_size_zero()
+        real(real64) :: x(0), step(0), fmin
+
+        call pf_minimize_simplex(sphere, x, fmin, step, 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a zero-length start point: ", fmin
+    end subroutine scenario_optimize_size_zero
+
+    !> A zero evaluation budget.
+    subroutine scenario_optimize_budget_zero()
+        real(real64) :: x(1), fmin
+
+        x = 5.0_real64
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64], 1.0e-8_real64, max_neval=0)
+        print '(a, es22.15)', "accepted a zero max_neval: ", fmin
+    end subroutine scenario_optimize_budget_zero
+
+    !> A budget above `huge(1)/2`, which would let a count overflow its default integer.
+    subroutine scenario_optimize_budget_ceiling()
+        real(real64) :: x(1), fmin
+
+        x = 5.0_real64
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64], 1.0e-8_real64, max_neval=huge(1))
+        print '(a, es22.15)', "accepted a max_neval above huge(1)/2: ", fmin
+    end subroutine scenario_optimize_budget_ceiling
+
+    !> A NaN tolerance, the case that would otherwise burn the whole budget silently.
+    subroutine scenario_optimize_tolerance_nonfinite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x(1), fmin, bad_ftol
+
+        x = 5.0_real64
+        bad_ftol = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64], bad_ftol)
+        print '(a, es22.15)', "accepted a NaN ftol: ", fmin
+    end subroutine scenario_optimize_tolerance_nonfinite
+
+    !> A bracket whose ends are the wrong way round.
+    subroutine scenario_optimize_scalar_bad_bracket()
+        real(real64) :: x, fmin
+
+        call pf_minimize_scalar(quad1d, 2.0_real64, -2.0_real64, x, fmin)
+        print '(a, 2es22.15)', "accepted a reversed bracket: ", x, fmin
+    end subroutine scenario_optimize_scalar_bad_bracket
+
+    !> An objective that is NaN everywhere, refused by the scalar engine before it compares.
+    subroutine scenario_optimize_scalar_nonfinite_value()
+        real(real64) :: x, fmin
+
+        call pf_minimize_scalar(always_nan, -2.0_real64, 2.0_real64, x, fmin)
+        print '(a, 2es22.15)', "accepted a non-finite objective value: ", x, fmin
+    end subroutine scenario_optimize_scalar_nonfinite_value
+
+    !> A constrained objective handed to Brent, which honours no constraint.
+    subroutine scenario_optimize_scalar_constraints_not_honoured()
+        type(unit_disc) :: obj
+        real(real64) :: x, fmin
+
+        call pf_minimize_scalar(obj, -2.0_real64, 2.0_real64, x, fmin)
+        print '(a, 2es22.15)', "accepted a constrained objective in Brent: ", x, fmin
+    end subroutine scenario_optimize_scalar_constraints_not_honoured
+
+    !> A step with a zero element, which would put two vertices on top of each other.
+    subroutine scenario_optimize_simplex_step_zero()
+        real(real64) :: x(2), fmin
+
+        x = 5.0_real64
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64, 0.0_real64], 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a zero step element: ", fmin
+    end subroutine scenario_optimize_simplex_step_zero
+
+    !> A step of a different length from the start point.
+    subroutine scenario_optimize_simplex_step_size()
+        real(real64) :: x(2), fmin
+
+        x = 5.0_real64
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64], 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a step of the wrong size: ", fmin
+    end subroutine scenario_optimize_simplex_step_size
+
+    !> Both tolerances zero, so no convergence test could ever fire.
+    subroutine scenario_optimize_simplex_no_tolerance()
+        real(real64) :: x(1), fmin
+
+        x = 5.0_real64
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64], 0.0_real64, atol=0.0_real64)
+        print '(a, es22.15)', "accepted two zero tolerances: ", fmin
+    end subroutine scenario_optimize_simplex_no_tolerance
+
+    !> A NaN in the start point, which would make every simplex comparison meaningless.
+    subroutine scenario_optimize_simplex_nan_start()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x(2), fmin
+
+        x(1) = 5.0_real64
+        x(2) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_minimize_simplex(sphere, x, fmin, [0.5_real64, 0.5_real64], 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a NaN start point: ", fmin
+    end subroutine scenario_optimize_simplex_nan_start
+
+    !> An objective that turns NaN only once the simplex steps outside a region.
+    !!
+    !! The starting simplex is well inside it, so this is the MID-RUN abort: a screen that ran
+    !! only over the starting simplex, as qfeet's does, would not see it.
+    subroutine scenario_optimize_simplex_nonfinite_value()
+        real(real64) :: x(2), fmin
+
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_simplex(nan_beyond_two, x, fmin, [0.5_real64, 0.5_real64], 0.0_real64, &
+                                 atol=1.0e-12_real64)
+        print '(a, es22.15)', "accepted a non-finite value mid-run: ", fmin
+    end subroutine scenario_optimize_simplex_nonfinite_value
+
+    !> A constrained objective handed to the simplex, which honours no constraint.
+    subroutine scenario_optimize_simplex_constraints_not_honoured()
+        type(unit_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = 0.0_real64
+        call pf_minimize_simplex(obj, x, fmin, [0.5_real64, 0.5_real64], 1.0e-8_real64)
+        print '(a, es22.15)', "accepted a constrained objective in the simplex: ", fmin
+    end subroutine scenario_optimize_simplex_constraints_not_honoured
     !
 end program error_scenarios

@@ -3,6 +3,7 @@ title: Utilities and code generation
 ordered_subpage: sorting.md
 ordered_subpage: statistics.md
 ordered_subpage: integration.md
+ordered_subpage: optimization.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
@@ -15,7 +16,7 @@ ordered_subpage: embedding-maml-schemas.md
 ---
 
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
-arrays and this library's own column types, statistical reductions over those same arrays,
+arrays and this library's own column types, statistical reductions over those same arrays, minimisation of a function you supply,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
 fast key-to-index lookup and a recycling allocator for index values,
@@ -44,6 +45,12 @@ helpers, and the two generators meant to be copied into your own project.
   printed warning, integration in `log x` for a range spanning many decades, an outward walk
   that finds a feature far along an infinite range rather than stepping over it, and a record of
   every evaluation on request whose weighted sum reproduces the integral. Nothing is printed.
+- [Optimisation: minimising a function of one or many variables](optimization.html) —
+  Brent's method on a bracket for one variable and the Nelder-Mead simplex from a start point
+  and a step for many, with the objective supplied as an object carrying its own parameters or
+  as a plain function. Fractional and absolute tolerances on the value spread, a soft budget
+  reported through a status code rather than a printed warning, a record of every evaluation
+  on request, and what `converged` does and does not promise. Nothing is printed.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

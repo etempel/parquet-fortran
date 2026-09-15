@@ -50,6 +50,10 @@
 !>                          of one real64 variable over a finite or infinite
 !>                          range, with the integrand as an object carrying its
 !>                          own parameters or as a plain function.
+!>   * `parquet_optimize` -- `pf_minimize_scalar` (Brent's method on a bracket)
+!>                          and `pf_minimize_simplex` (Nelder-Mead from a start
+!>                          point and a step), with the objective as an object
+!>                          carrying its own parameters or as a plain function.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -90,6 +94,7 @@ module parquet
     use parquet_toml
     use parquet_utils
     use parquet_integrate
+    use parquet_optimize
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

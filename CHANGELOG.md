@@ -33,6 +33,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   many threads as you like, one integrand object per thread. An Arrow-free entry module.
   `bench/benchmark_integrate.sh` measures it. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).
+- **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
+  on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
+  variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with
+  fractional and absolute tolerances on the value spread. The objective is an object extending
+  `pf_objective`, with its parameters as components and an `eval` that may update them, or a plain
+  function. `max_neval` bounds the evaluations and is soft by one engine step; `info=`
+  (`pf_optimize_info`: status, convergence, counts, the final spread) reports the outcome and
+  nothing is printed, while a caller mistake and a non-finite objective value are `error stop`.
+  `history=` (`pf_optimize_history`) records every evaluation in order, trimmed to the records in
+  use. `pf_simplex_solver` carries the simplex's options as components for a driver to run, and
+  `pf_constrained_objective` is declared here so that every engine which does not honour nonlinear
+  constraints refuses one. An Arrow-free entry module. See
+  [Optimisation](doc/pages/utilities/optimization.md).
 - **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
   pixel's eight neighbours (`-1` at a missing corner). See
   [HEALPix](doc/pages/utilities/healpix.md).

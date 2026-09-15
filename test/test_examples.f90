@@ -234,6 +234,7 @@ contains
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
     !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
+    !> parquet_optimize (pf_minimize_scalar/pf_optimize_info/PF_OPT_OK),
     !> parquet_settings (parquet_get_arrow_threads /
     !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
     !> parquet_get_version.
@@ -450,6 +451,18 @@ contains
             call check(error, abs(quad - 1.0_real64/3.0_real64) <= 1.0e-12_real64 .and. &
                 qinfo%status == PF_INT_OK, &
                 "pf_integrate must be reachable from use parquet alone and integrate x*x to 1/3")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_optimize: the minimisation generic and its outcome record.
+        block
+            type(pf_optimize_info) :: minfo
+            real(real64) :: xmin, fmin
+            call pf_minimize_scalar(facade_offset_square, -3.0_real64, 3.0_real64, xmin, fmin, &
+                                    info=minfo)
+            call check(error, abs(xmin - 2.0_real64) <= 1.0e-6_real64 .and. &
+                minfo%status == PF_OPT_OK, &
+                "pf_minimize_scalar must be reachable from use parquet alone and minimise to x = 2")
             if (allocated(error)) return
         end block
 
@@ -1693,6 +1706,16 @@ contains
             "shows as 3 for its three-row mass column")
     end subroutine test_found_or_abort_example
     !
+    !> `(x - 2)**2`, for the facade test's `pf_minimize_scalar` call: a module procedure, because
+    !! a callback in this library is never an internal one. Minimiser `2`, by inspection.
+    function facade_offset_square(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+
+    end function facade_offset_square
+
     !> `x*x`, for the facade test's `pf_integrate` call: a module procedure, because a callback
     !> in this library is never an internal one (flang cannot pass one at all).
     function facade_square(x) result(f)

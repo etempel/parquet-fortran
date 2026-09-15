@@ -33,6 +33,7 @@ program run_tester_pf
     use test_healpix_reference, only : collect_tests_healpix_reference
     use test_healpix_tier_b, only : collect_tests_healpix_tier_b
     use test_logging, only : collect_tests_logging
+    use test_optimize, only : collect_tests_optimize
     use test_random, only : collect_tests_parquet_random, collect_tests_parquet_random_perm
     use test_random_dist, only : collect_tests_parquet_random_dist
     use test_random_omp, only : collect_tests_parquet_random_omp
@@ -52,6 +53,7 @@ program run_tester_pf
         new_testsuite("index", collect_tests_index), &
         new_testsuite("integrate", collect_tests_integrate), &
         new_testsuite("integrate_omp", collect_tests_integrate_omp), &
+        new_testsuite("optimize", collect_tests_optimize), &
         new_testsuite("index_omp", collect_tests_index_omp), &
         new_testsuite("index_multimap", collect_tests_index_multimap), &
         new_testsuite("index_strings", collect_tests_index_strings), &

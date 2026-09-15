@@ -1378,6 +1378,97 @@ contains
 
 end module test_module_surface_integrate
 
+module test_module_surface_optimize
+    use parquet_optimize                 ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_optimize_surface
+
+    !> An objective object, so `pf_objective` itself is extended through this import alone.
+    type, extends(pf_objective) :: surface_objective
+        integer :: calls = 0 !! evaluations, so the caller can see `eval` ran
+    contains
+        procedure :: eval => surface_objective_eval !! `(x - 2)**2`, counting the call.
+    end type surface_objective
+
+contains
+
+    !> `(x - 2)**2`, counting the call.
+    function surface_objective_eval(this, x) result(f)
+        class(surface_objective), intent(inout) :: this !! the objective
+        real(real64), intent(in)                :: x(:) !! the point
+        real(real64)                            :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+        this%calls = this%calls + 1
+
+    end function surface_objective_eval
+
+    !> Exercises one entry point from each family through `use parquet_optimize` alone.
+    subroutine check_optimize_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_optimize_info)    :: info
+        type(pf_optimize_history) :: record
+        type(pf_simplex_solver)   :: solver
+        type(surface_objective)   :: obj
+        real(real64)              :: xs, fs, x(1), fmin, lower(1), upper(1)
+
+        what = ""
+
+        ! Brent on a bracket, with both records.
+        call pf_minimize_scalar(offset_square, -3.0_real64, 3.0_real64, xs, fs, info=info, &
+                                history=record)
+        if (abs(xs - 2.0_real64) > 1.0e-6_real64) what = "pf_minimize_scalar"
+        if (what == "" .and. .not. info%converged) what = "pf_optimize_info%converged"
+        if (what == "" .and. info%status /= PF_OPT_OK) what = "PF_OPT_OK"
+        if (what == "" .and. record%n /= info%neval) what = "pf_optimize_history%n"
+
+        ! The simplex, from a start point and a step.
+        if (what == "") then
+            x = [5.0_real64]
+            call pf_minimize_simplex(offset_square, x, fmin, [0.5_real64], 0.0_real64, &
+                                     atol=1.0e-12_real64, info=info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-5_real64) what = "pf_minimize_simplex"
+            if (what == "" .and. info%spread < 0.0_real64) what = "pf_optimize_info%spread"
+        end if
+
+        ! The local-solver object, which the multistart driver will run.
+        if (what == "") then
+            lower = [-4.0_real64]
+            upper = [6.0_real64]
+            x = [5.0_real64]
+            obj%calls = 0
+            ! An explicit step_fraction, so the vertices do not land symmetrically either side of
+            ! the minimiser: the default 0.1 over this box gives a step of exactly 1 from a start
+            ! of 5, which is the straddle `test_optimize.f90` covers on purpose -- correct, and
+            ! not what a reachability check wants to assert.
+            solver%step_fraction = 0.037_real64
+            call solver%run(obj, x, fmin, lower, upper, info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-3_real64) what = "pf_simplex_solver%run"
+            if (what == "" .and. obj%calls /= info%neval) what = "pf_objective%eval"
+        end if
+
+        ! The remaining status codes are reachable by name through this import alone.
+        if (what == "" .and. PF_OPT_LIMIT == PF_OPT_TARGET) what = "PF_OPT_LIMIT"
+        if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDING) what = "PF_OPT_NONFINITE"
+        if (what == "" .and. PF_OPT_INFEASIBLE == PF_OPT_OK) what = "PF_OPT_INFEASIBLE"
+
+    end subroutine check_optimize_surface
+
+    !> `(x - 2)**2` in one variable, whose minimiser is `2`. A module procedure, because a
+    !! callback in this library is never an internal one.
+    function offset_square(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+
+    end function offset_square
+
+end module test_module_surface_optimize
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -1388,6 +1479,7 @@ module test_module_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_utils, only : check_utils_surface
     use test_module_surface_integrate, only : check_integrate_surface
+    use test_module_surface_optimize, only : check_optimize_surface
     use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
@@ -1508,6 +1600,8 @@ contains
                          test_utils_surface), &
             new_unittest("parquet_integrate alone integrates and hands back its record", &
                          test_integrate_surface), &
+            new_unittest("parquet_optimize alone minimises through both engines and a solver", &
+                         test_optimize_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
             new_unittest("parquet_toml alone reads a whole configuration", &
@@ -1621,6 +1715,16 @@ contains
         call check(error, what == "", &
             "quadrature was not usable through `use parquet_integrate` alone: " // what)
     end subroutine test_integrate_surface
+
+    !> The test-drive wrapper over check_optimize_surface.
+    subroutine test_optimize_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_optimize_surface(what)
+        call check(error, what == "", &
+            "minimisation was not usable through `use parquet_optimize` alone: " // what)
+    end subroutine test_optimize_surface
 
     !> The test-drive wrapper over check_logging_surface.
     subroutine test_logging_surface(error)

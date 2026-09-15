@@ -228,6 +228,13 @@ parquet_integrate_driver.f90
 parquet_integrate_engine.f90
 parquet_wrapper.cpp
 
+[parquet_optimize]
+parquet_optimize.f90
+parquet_optimize_scalar.f90
+parquet_optimize_simplex.f90
+parquet_optimize_support.f90
+parquet_wrapper.cpp
+
 [parquet_logging]
 parquet_logging.f90
 parquet_wrapper.cpp
@@ -452,6 +459,10 @@ parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
 parquet_metadata_maml.f90
+parquet_optimize.f90
+parquet_optimize_scalar.f90
+parquet_optimize_simplex.f90
+parquet_optimize_support.f90
 parquet_random.f90
 parquet_read.f90
 parquet_read_eval.f90

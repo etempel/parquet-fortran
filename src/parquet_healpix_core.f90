@@ -855,6 +855,103 @@ contains
         ipnest = int(p, int32)
     end procedure hpx_ring2nest_i32
 
+    ! ---- Neighbours ----
+
+    module procedure hpx_neighbours_nest_i64
+        integer(int64) :: nside2, face, raw, ix, iy, x, y, f, t, fpix, px0, py0, pxp, pyp, pxm, pym
+        integer :: m, nbnum, bits
+
+        nside2 = nside * nside
+        face = ipix / nside2
+        raw = ipix - face * nside2
+        ix = hpx_compact_bits(raw)
+        iy = hpx_compact_bits(ishft(raw, -1))
+        if (ix > 0_int64 .and. ix < nside - 1_int64 .and. iy > 0_int64 .and. iy < nside - 1_int64) then
+            ! Interior, which is every pixel but a fraction `4/nside`: the eight lie on this face,
+            ! one Morton code each, assembled from six half-codes rather than eight full ones.
+            fpix = face * nside2
+            px0 = hpx_spread_bits(ix)
+            py0 = ishft(hpx_spread_bits(iy), 1)
+            pxp = hpx_spread_bits(ix + 1_int64)
+            pyp = ishft(hpx_spread_bits(iy + 1_int64), 1)
+            pxm = hpx_spread_bits(ix - 1_int64)
+            pym = ishft(hpx_spread_bits(iy - 1_int64), 1)
+            nb(1) = fpix + ior(pxm, py0)
+            nb(2) = fpix + ior(pxm, pyp)
+            nb(3) = fpix + ior(px0, pyp)
+            nb(4) = fpix + ior(pxp, pyp)
+            nb(5) = fpix + ior(pxp, py0)
+            nb(6) = fpix + ior(pxp, pym)
+            nb(7) = fpix + ior(px0, pym)
+            nb(8) = fpix + ior(pxm, pym)
+            return
+        end if
+        ! A boundary pixel: each step that leaves the face is wrapped back into it and classed by
+        ! the direction it left in, and the tables say which face lies across and how the wrapped
+        ! coordinates map onto that face's own. A step that stays on the face is class 4, which
+        ! the tables map to the face itself with no transform.
+        do m = 1, 8
+            x = ix + hpx_nb_dx(m)
+            y = iy + hpx_nb_dy(m)
+            nbnum = 4
+            if (x < 0_int64) then
+                x = x + nside
+                nbnum = nbnum - 1
+            else if (x >= nside) then
+                x = x - nside
+                nbnum = nbnum + 1
+            end if
+            if (y < 0_int64) then
+                y = y + nside
+                nbnum = nbnum - 3
+            else if (y >= nside) then
+                y = y - nside
+                nbnum = nbnum + 3
+            end if
+            f = int(hpx_nb_face(int(face), nbnum), int64)
+            if (f < 0_int64) then
+                nb(m) = -1_int64
+                cycle
+            end if
+            bits = hpx_nb_swap(int(face / 4_int64), nbnum)
+            if (iand(bits, 1) /= 0) x = nside - x - 1_int64
+            if (iand(bits, 2) /= 0) y = nside - y - 1_int64
+            if (iand(bits, 4) /= 0) then
+                t = x
+                x = y
+                y = t
+            end if
+            nb(m) = f * nside2 + ior(hpx_spread_bits(x), ishft(hpx_spread_bits(y), 1))
+        end do
+    end procedure hpx_neighbours_nest_i64
+
+    module procedure hpx_neighbours_nest_i32
+        integer(int64) :: nb64(8)
+
+        call hpx_neighbours_nest_i64(int(nside, int64), int(ipix, int64), nb64)
+        nb = int(nb64, int32)
+    end procedure hpx_neighbours_nest_i32
+
+    module procedure hpx_neighbours_ring_i64
+        integer(int64) :: pn, q
+        integer :: m
+
+        call hpx_ring2nest_i64(nside, ipix, pn)
+        call hpx_neighbours_nest_i64(nside, pn, nb)
+        do m = 1, 8
+            if (nb(m) < 0_int64) cycle
+            call hpx_nest2ring_i64(nside, nb(m), q)
+            nb(m) = q
+        end do
+    end procedure hpx_neighbours_ring_i64
+
+    module procedure hpx_neighbours_ring_i32
+        integer(int64) :: nb64(8)
+
+        call hpx_neighbours_ring_i64(int(nside, int64), int(ipix, int64), nb64)
+        nb = int(nb64, int32)
+    end procedure hpx_neighbours_ring_i32
+
     ! ---- Pixel -> position ----
 
     module procedure hpx_pix2ang_ring_i64

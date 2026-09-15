@@ -118,7 +118,7 @@ contains
     end procedure hpx_check_disc_args
 
     module procedure hpx_query_disc_core
-        real(real64) :: v0(3), vnorm, scale, z0, st0, phi0, r, cosr, theta0
+        real(real64) :: v0(3), vnorm, scale, z0, st0, phi0, r, cosr, sinr
         real(real64) :: zmax, zmin, zr, strr, denom, num, a, dphi, w, winv, half
         integer(int64) :: irmin, irmax, i, first, nr, shifted, jlo, jhi, cnt, tail, nr_prev
         integer(int64) :: runs_cap
@@ -171,9 +171,25 @@ contains
         cosr = cos(r)
 
         ! ---- The band of rings the disc can reach ----
-        theta0 = acos(z0)
-        zmax = cos(max(theta0 - r, 0.0_real64))
-        zmin = cos(min(theta0 + r, hpx_pi))
+        !
+        ! `cos(theta0 -+ r)` by the angle-addition identity, `z0 cos r +- st0 sin r`, with the two
+        ! clamps as comparisons of `z0` against `+-cos r`: `theta0 <= r`, the disc holding the
+        ! north pole, is `z0 >= cos r`, and `theta0 + r >= pi` is `z0 <= -cos r`. One `sin` where
+        ! the direct form took an `acos` and two `cos`, and no worse: the band is widened by a ring
+        ! on each side below, so a last-ulp difference from `cos(acos(z0) - r)` cannot change which
+        ! pixels come back (verified identical on 16 000 discs at four resolutions,
+        ! `feature_spatial_phase0.md`).
+        sinr = sin(r)
+        if (z0 >= cosr) then
+            zmax = 1.0_real64
+        else
+            zmax = z0 * cosr + st0 * sinr
+        end if
+        if (z0 <= -cosr) then
+            zmin = -1.0_real64
+        else
+            zmin = z0 * cosr - st0 * sinr
+        end if
         irmin = max(1_int64, hpx_ring_above(nside, zmax) - 1_int64)
         irmax = min(4_int64 * nside - 1_int64, hpx_ring_above(nside, zmin) + 1_int64)
 

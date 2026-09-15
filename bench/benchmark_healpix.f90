@@ -385,6 +385,8 @@ contains
         call conv_row(n, sweep, 'pix2vec_n64')
         call conv_row(n, sweep, 'ring2nest64')
         call conv_row(n, sweep, 'nest2ring64')
+        call conv_row(n, sweep, 'nbr_nest64 ')
+        call conv_row(n, sweep, 'nbr_ring64 ')
         call conv_row(n, sweep, 'ang2vec    ')
         call conv_row(n, sweep, 'vec2ang    ')
         call conv_row(n, sweep, 'angdist    ')
@@ -683,7 +685,7 @@ contains
         integer, intent(in) :: ns_in !! the resolution.
         integer(int64), intent(in) :: n !! elements per pass.
         real(real64), intent(out) :: out_ns !! nanoseconds per call.
-        integer(int64) :: k, ns64, npix
+        integer(int64) :: k, ns64, npix, nb8(8)
         integer(int32) :: ns32
         real(real64) :: t0, t, best, v(3), d
         integer :: rep
@@ -754,6 +756,16 @@ contains
             case ('nest2ring64')
                 do k = 1_int64, n
                     call pf_nest2ring(ns64, pin64(k), o64(k))
+                end do
+            case ('nbr_nest64 ')
+                do k = 1_int64, n
+                    call pf_neighbours_nest(ns64, pin64(k), nb8)
+                    o64(k) = nb8(1)
+                end do
+            case ('nbr_ring64 ')
+                do k = 1_int64, n
+                    call pf_neighbours_ring(ns64, pin64(k), nb8)
+                    o64(k) = nb8(1)
                 end do
             case ('ang2vec    ')
                 do k = 1_int64, n

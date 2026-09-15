@@ -33,6 +33,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   many threads as you like, one integrand object per thread. An Arrow-free entry module.
   `bench/benchmark_integrate.sh` measures it. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).
+- **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
+  pixel's eight neighbours (`-1` at a missing corner). See
+  [HEALPix](doc/pages/utilities/healpix.md).
+
+### Changed
+
+- **`%pairs_within_los` sweeps in one pass** and returns the same pairs in the same order, several
+  times faster. **A 3D index whose points fill part of their bounding box gets a finer grid**: the
+  cells-per-point ceiling counts occupied cells (0.3 per point), with 4 cells of the bounding box
+  per point as the bound.
 
 ## [v2.4.0] - 2026-09-14
 

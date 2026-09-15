@@ -6,15 +6,33 @@
 !! than a wrong number. The prevention is a design rule and not a mechanism, which is exactly why
 !! "let single queries rebuild too" must not be added later without one.
 !!
-!! **Each family is two passes over the same walk**: count, prefix-sum, fill. That is what allocates
-!! the result exactly once at exactly the right size, and it is why `%count_all_within` is not a
-!! special case but simply the first pass on its own.
+!! **Each ball family is two passes over the same walk**: count, prefix-sum, fill. That is what
+!! allocates the result exactly once at exactly the right size, and it is why `%count_all_within`
+!! is not a special case but simply the first pass on its own. The one exception is the
+!! line-of-sight pair sweep, which is one pass into per-thread buffers concatenated afterwards
+!! (`spatial_pairs_los_worker`): its list is small by construction, and the second pass was most
+!! of its cost.
 !!
 !! The sweep runs in STORED order rather than the caller's row order and writes each answer to the
 !! row it belongs to. Stored order means consecutive query points sit in the same or neighbouring
 !! cells, so the cells a query walks are usually already in cache from the previous one.
 submodule (parquet_spatial) parquet_spatial_bulk
     implicit none
+
+    !> One thread's pair list for the line-of-sight sweep: grown by doubling, concatenated after
+    !> the sweep. A plain type with allocatable components, so one slot per thread lives in a
+    !> SHARED array allocated before the parallel region, never in a `block` inside it -- the
+    !> recorded ifx segfault (`fortran-gotchas.md`).
+    type :: pair_buf
+        integer(int64), allocatable :: a(:) !! the lower row of each pair.
+        integer(int64), allocatable :: b(:) !! the higher row.
+        real(real64), allocatable :: dp(:) !! the transverse separation, when the caller asked for either.
+        real(real64), allocatable :: dl(:) !! the parallel separation, likewise.
+        integer(int64) :: n = 0_int64 !! pairs held.
+    end type pair_buf
+
+    !> Pairs a thread's buffer starts with; it doubles from there.
+    integer(int64), parameter :: pair_buf_first = 2048_int64
 
 contains
 
@@ -579,16 +597,23 @@ contains
         end if
         call pf_argsort(radii, ord, descending=.not. ascending, threads=nt)
         allocate (rank_row(n))
+        ! A scatter through a permutation: every element is written once, so the threads never
+        ! meet. Measured at a third of the line-of-sight sweep's whole call when serial, with the
+        ! gather below (`feature_spatial_phase0.md`).
+        !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k)
         do k = 1_int64, n
             rank_row(ord(k)) = k
         end do
+        !$omp end parallel do
         deallocate (ord)
         ! Into STORED order, so the sweep reads a key with the same locality as a coordinate
         ! instead of gathering one per candidate. Freeing `ord` first keeps the peak at two of
         ! these arrays rather than three.
+        !$omp parallel do num_threads(nt) schedule(static) default(shared) private(t)
         do t = 1_int64, n
             keys(t) = rank_row(self%idx(t))
         end do
+        !$omp end parallel do
     end subroutine pair_order_keys
 
     !> Validates a bulk call's radius list, rebuilds if it disagrees badly with the build, and
@@ -701,21 +726,37 @@ contains
     !> the cylinder longer than the ball is wide, or the ball no wider than a cell -- and both
     !> routes count themselves (`parquet_debug_spatial_los_walk`).
     !>
-    !> **The per-candidate lengths are built in STORED order and always passed**, so the scan has
+    !> **The per-candidate lengths are built in STORED order and always passed**, so the walk has
     !> one shape; with a single pair of lengths every rule is the emitter's own cylinder (doubled
     !> for the sum), the arrays hold that, and rule 0 never reads them.
+    !>
+    !> **One pass, not two.** The emitters are swept in chunks of `spatial_sweep_chunk` in stored
+    !> order, one chunk at a time per thread under dynamic scheduling, each thread appending the
+    !> pairs it finds to a buffer of its own (`los_sweep_lean`, `pair_buf`); the chunks are then
+    !> concatenated in chunk order, which is stored order, so the list is the one a serial sweep
+    !> produces whatever the team size. The peak memory is the pair list once in the buffers (each
+    !> buffer at most twice its share, from the doubling) and once in the output: up to three lists,
+    !! against one plus 16 bytes per point for the count-then-fill shape the ball sweeps keep.
+    !> Accepted because a line-of-sight list is small by construction -- the linking lengths are a
+    !> fraction of the mean separation -- and the second pass was most of the sweep's cost
+    !> (`feature_spatial_phase0.md`).
     module procedure spatial_pairs_los_worker
+#ifdef _OPENMP
+        use omp_lib, only: omp_get_thread_num
+#endif
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:), ls(:)
-        integer(int64), allocatable :: counts(:), heads(:), keys(:)
+        integer(int64), allocatable :: heads(:), keys(:), coff(:), ccnt(:), cthr(:)
         real(real64), allocatable :: walk(:), bps(:), bls(:), dp(:), dl(:), qlo(:), qhi(:), suf(:), tmin(:), tmax(:)
         real(real64), allocatable :: wpar(:)
+        ! One pair buffer per thread, in a SHARED array allocated before the region; see the sweep.
+        type(pair_buf), allocatable :: bufs(:)
         ! As the ball sweep: one kind is filled, the other allocated empty. See `pairs_alloc`.
         integer(int32), allocatable :: a32(:), b32(:)
         integer(int64), allocatable :: a64(:), b64(:)
-        integer(int64) :: n, t, i, u, m, s0, e0, total, k, ng, a, b, ncyl, nbal, ntest
+        integer(int64) :: n, t, i, u, s0, e0, total, k, ng, a, b, ncyl, nbal, ntest, chunk, nchunk, c
         real(real64) :: p(3), q(3), r, qq, scale, hcell, rg
-        integer :: nt, nr, rule, lrule
-        logical :: direct, want_sep, ball_all, local, need_local, want32
+        integer :: nt, nr, rule, lrule, tid
+        logical :: direct, want_sep, ball_all, local, need_local, want32, want_tie
 
         want32 = present(ii32)
         rule = PF_LINK_MAX
@@ -788,10 +829,12 @@ contains
         call pair_order_keys(self, walk, nr, n, nt, rule == PF_LINK_MIN, keys)
         allocate (bps(n), bls(n))
         if (nr > 1) then
+            !$omp parallel do num_threads(nt) schedule(static) default(shared) private(t)
             do t = 1_int64, n
                 bps(t) = b_perp(self%idx(t))
                 bls(t) = b_par(self%idx(t))
             end do
+            !$omp end parallel do
             lrule = rule
         else
             bps = scale * b_perp(1)
@@ -882,85 +925,82 @@ contains
                 !$omp end parallel do
             end if
         end if
+        ! ---- The sweep: chunks of emitters in stored order, a pair list per thread ----
+        chunk = spatial_sweep_chunk
+        if (dbg_sweep_chunk > 0_int64) chunk = dbg_sweep_chunk
+        nchunk = (n + chunk - 1_int64) / chunk
+        allocate (coff(nchunk), ccnt(nchunk), cthr(nchunk), heads(nchunk + 1_int64))
+        ! One slot per thread, allocated BEFORE the region and indexed by the thread number, each
+        ! thread then growing its own slot and no other. The separations travel in the buffers
+        ! whenever either is wanted; what the caller did not ask for is dropped after the copy.
+        allocate (bufs(0:nt - 1))
+        ! The union's emit-once tiebreak, exactly as the general scan switches it on: every walk
+        ! but the forced covering ball passes it, and it means something under `PF_LINK_MAX` only.
+        want_tie = lrule == PF_LINK_MAX .and. .not. ball_all
         ncyl = 0_int64
         nbal = 0_int64
         ntest = 0_int64
-        allocate (counts(n), heads(n + 1_int64))
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, q, r)
-        do t = 1_int64, n
-            i = self%idx(t)
-            u = t
-            if (.not. direct) u = i
-            p(1) = xs(u)
-            p(2) = ys(u)
-            p(3) = zs(u)
-            q = p - self%obs
-            r = walk(1)
-            if (nr > 1) r = walk(i)
-            call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m)
-            counts(t) = m
+        !$omp parallel num_threads(nt) default(shared) private(tid, c, t, i, u, p, q, r) &
+        !$omp     reduction(+:ncyl, nbal, ntest)
+        tid = 0
+#ifdef _OPENMP
+        tid = omp_get_thread_num()
+#endif
+        call pair_buf_init(bufs(tid), want_sep)
+        ! Dynamic over chunks: a survey's emitters are far from uniform in cost, and a chunk is
+        ! small enough for the team to balance on. Each chunk records which thread swept it, where
+        ! its pairs start in that thread's buffer and how many there are, which is all the
+        ! concatenation below needs to put them back in stored order.
+        !$omp do schedule(dynamic, 1)
+        do c = 1_int64, nchunk
+            coff(c) = bufs(tid)%n
+            cthr(c) = tid
+            do t = (c - 1_int64) * chunk + 1_int64, min(n, c * chunk)
+                i = self%idx(t)
+                u = t
+                if (.not. direct) u = i
+                p(1) = xs(u)
+                p(2) = ys(u)
+                p(3) = zs(u)
+                q = p - self%obs
+                r = walk(1)
+                if (nr > 1) r = walk(i)
+                call los_sweep_lean(self, xs, ys, zs, direct, t, i, p, q, r, hcell, keys, lrule, want_tie, ls, &
+                    bps, bls, ball_all, qlo, qhi, want_sep, bufs(tid), ncyl, nbal, ntest)
+            end do
+            ccnt(c) = bufs(tid)%n - coff(c)
         end do
-        !$omp end parallel do
+        !$omp end do
+        !$omp end parallel
         heads(1) = 1_int64
-        do t = 1_int64, n
-            heads(t + 1_int64) = heads(t) + counts(t)
+        do c = 1_int64, nchunk
+            heads(c + 1_int64) = heads(c) + ccnt(c)
         end do
-        total = heads(n + 1_int64) - 1_int64
+        total = heads(nchunk + 1_int64) - 1_int64
         call pairs_alloc(a32, b32, a64, b64, want32, total)
-        ! Both separations are gathered whenever either is wanted, into locals that always exist
-        ! inside the region: an optional allocatable dummy passed into a parallel region is the
-        ! recorded ifx segfault, and the two calls are written out for the reason the ball sweep's
-        ! are. What the caller did not ask for is dropped after the region. The walk counters are
-        ! taken on this pass only, so a sweep adds one per point.
         if (want_sep) allocate (dp(total), dl(total))
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) &
-        !$omp     private(t, i, u, m, p, q, r, s0, e0, k) reduction(+:ncyl, nbal, ntest)
-        do t = 1_int64, n
-            i = self%idx(t)
-            s0 = heads(t)
-            e0 = heads(t + 1_int64) - 1_int64
-            u = t
-            if (.not. direct) u = i
-            p(1) = xs(u)
-            p(2) = ys(u)
-            p(3) = zs(u)
-            q = p - self%obs
-            r = walk(1)
-            if (nr > 1) r = walk(i)
-            ! `i` is the endpoint that did the searching, not necessarily the lower row. The
-            ! kinds are written out for the reason the ball sweep's are: a slice of an ABSENT
-            ! optional cannot be formed, and both branches are loop-invariant.
+        ! The concatenation, chunk by chunk in stored order. Each pair already has its lower row
+        ! first (`pair_buf_push`). The kinds are written out for the reason the ball sweep's are;
+        ! both branches are loop-invariant.
+        !$omp parallel do num_threads(nt) schedule(static) default(shared) private(c, k, s0, e0)
+        do c = 1_int64, nchunk
+            s0 = heads(c) - 1_int64
+            e0 = coff(c)
             if (want32) then
-                if (want_sep) then
-                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
-                        m, ncyl, nbal, ntest, out32=b32(s0:e0), dperp=dp(s0:e0), dpar=dl(s0:e0))
-                else
-                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
-                        m, ncyl, nbal, ntest, out32=b32(s0:e0))
-                end if
-                do k = s0, e0
-                    if (int(b32(k), kind=int64) > i) then
-                        a32(k) = int(i, kind=int32)
-                    else
-                        a32(k) = b32(k)
-                        b32(k) = int(i, kind=int32)
-                    end if
+                do k = 1_int64, ccnt(c)
+                    a32(s0 + k) = int(bufs(cthr(c))%a(e0 + k), kind=int32)
+                    b32(s0 + k) = int(bufs(cthr(c))%b(e0 + k), kind=int32)
                 end do
             else
-                if (want_sep) then
-                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
-                        m, ncyl, nbal, ntest, out64=b64(s0:e0), dperp=dp(s0:e0), dpar=dl(s0:e0))
-                else
-                    call los_sweep_point(self, what, t, p, q, r, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, &
-                        m, ncyl, nbal, ntest, out64=b64(s0:e0))
-                end if
-                do k = s0, e0
-                    if (b64(k) > i) then
-                        a64(k) = i
-                    else
-                        a64(k) = b64(k)
-                        b64(k) = i
-                    end if
+                do k = 1_int64, ccnt(c)
+                    a64(s0 + k) = bufs(cthr(c))%a(e0 + k)
+                    b64(s0 + k) = bufs(cthr(c))%b(e0 + k)
+                end do
+            end if
+            if (want_sep) then
+                do k = 1_int64, ccnt(c)
+                    dp(s0 + k) = bufs(cthr(c))%dp(e0 + k)
+                    dl(s0 + k) = bufs(cthr(c))%dl(e0 + k)
                 end do
             end if
         end do
@@ -973,66 +1013,296 @@ contains
         if (present(dpar)) call move_alloc(dl, dpar)
     end procedure spatial_pairs_los_worker
 
-    !> One emitter's line-of-sight walk: the covering ball when the whole sweep is forced onto it
-    !> (test-only), else the padded cylinder of its own line of sight, or the ball when that is the
-    !> cheaper walk. Every route counts itself here, in its own body, so a test can tell which one
-    !> ran.
-    subroutine los_sweep_point(self, what, t, p, q, rwalk, hcell, keys, lrule, ls, bps, bls, ball_all, qlo, qhi, m, &
-                               ncyl, nbal, ntest, out32, out64, dperp, dpar)
+    !> Gives a thread's buffer its first capacity; called by the owning thread inside the region.
+    subroutine pair_buf_init(buf, want_sep)
+        type(pair_buf), intent(inout) :: buf !! the thread's buffer.
+        logical, intent(in) :: want_sep !! whether the separations travel with the pairs.
+
+        buf%n = 0_int64
+        allocate (buf%a(pair_buf_first), buf%b(pair_buf_first))
+        if (want_sep) allocate (buf%dp(pair_buf_first), buf%dl(pair_buf_first))
+    end subroutine pair_buf_init
+
+    !> Appends one pair, the lower row first, growing the buffer by doubling when it is full.
+    subroutine pair_buf_push(buf, i, j, dpv, dlv, want_sep)
+        type(pair_buf), intent(inout) :: buf !! the thread's buffer.
+        integer(int64), intent(in) :: i !! the emitter's row.
+        integer(int64), intent(in) :: j !! the partner's row.
+        real(real64), intent(in) :: dpv !! their transverse separation.
+        real(real64), intent(in) :: dlv !! their parallel separation.
+        logical, intent(in) :: want_sep !! whether the separations are kept.
+        integer(int64), allocatable :: ta(:), tb(:)
+        real(real64), allocatable :: tp(:), tl(:)
+        integer(int64) :: n, cap
+
+        n = buf%n
+        cap = size(buf%a, kind=int64)
+        if (n == cap) then
+            ! Doubling keeps the total copied under twice the final size, and leaves each buffer at
+            ! most twice its share -- the bound the sweep's peak-memory statement rests on.
+            allocate (ta(2_int64 * cap), tb(2_int64 * cap))
+            ta(1:n) = buf%a(1:n)
+            tb(1:n) = buf%b(1:n)
+            call move_alloc(ta, buf%a)
+            call move_alloc(tb, buf%b)
+            if (want_sep) then
+                allocate (tp(2_int64 * cap), tl(2_int64 * cap))
+                tp(1:n) = buf%dp(1:n)
+                tl(1:n) = buf%dl(1:n)
+                call move_alloc(tp, buf%dp)
+                call move_alloc(tl, buf%dl)
+            end if
+        end if
+        n = n + 1_int64
+        ! `i` is the endpoint that did the searching, not necessarily the lower row.
+        if (j > i) then
+            buf%a(n) = i
+            buf%b(n) = j
+        else
+            buf%a(n) = j
+            buf%b(n) = i
+        end if
+        if (want_sep) then
+            buf%dp(n) = dpv
+            buf%dl(n) = dlv
+        end if
+        buf%n = n
+    end subroutine pair_buf_push
+
+    !> One emitter's line-of-sight sweep, the lean form: the walk decided as `los_walk_shape`
+    !> decides it -- the covering ball when the whole sweep is forced onto it (test-only), else the
+    !> padded cylinder of its own line of sight, or the ball when that is the cheaper walk -- then
+    !> the ball walk or the slab walk written out with the pre-filter inline, the accept through
+    !> `los_accept`, and every accepted partner appended to the thread's buffer.
+    !>
+    !> It is `spatial_scan`'s free-box walk and `spatial_scan_axis`'s slab walk with everything the
+    !> sweep never uses removed -- the optional-argument cascade, the buffer caps, the annulus, the
+    !> per-pair bound, the sort -- which is where the per-emitter time went
+    !> (`feature_spatial_phase0.md`, section 4). The cells are visited in the order those two walks
+    !> visit them, and the direct/borrowed fork sits at the run as it does there, so the pairs come
+    !> out in the order they would. Every route counts itself here, in its own body, so a test can
+    !> tell which one ran.
+    subroutine los_sweep_lean(self, xs, ys, zs, direct, t, irow, p, q, rwalk, hcell, keys, lrule, want_tie, ls, &
+                              bps, bls, ball_all, qlo, qhi, want_sep, buf, ncyl, nbal, ntest)
         type(pf_spatial_index), intent(in), target :: self !! the index being swept.
-        character(len=*), intent(in) :: what !! the calling binding, for any message.
+        ! `contiguous` is load-bearing here for the reason `scan_healpix` gives: the distance loop
+        ! below is the hottest one in the sweep.
+        real(real64), intent(in), contiguous :: xs(:) !! stored x, in bucket order or the caller's.
+        real(real64), intent(in), contiguous :: ys(:) !! stored y.
+        real(real64), intent(in), contiguous :: zs(:) !! stored z.
+        logical, intent(in) :: direct !! whether the coordinates are in bucket order.
         integer(int64), intent(in) :: t !! the emitter's stored position.
+        integer(int64), intent(in) :: irow !! the emitter's row.
         real(real64), intent(in) :: p(3) !! the emitter's position.
         real(real64), intent(in) :: q(3) !! `p` relative to the observer.
         real(real64), intent(in) :: rwalk !! the emitter's cross-section, or its covering ball under `ball_all`.
         real(real64), intent(in) :: hcell !! the cell side a ball must exceed to be walked as a cylinder; 0 never.
         integer(int64), intent(in) :: keys(:) !! the rank per stored position.
         integer, intent(in) :: lrule !! the rule the accept applies; 0 for the emitter's own cylinder.
+        logical, intent(in) :: want_tie !! whether the union's emit-once tiebreak is in force.
         real(real64), intent(in) :: ls(:) !! the parallel coordinate per stored position.
         real(real64), intent(in) :: bps(:) !! transverse length per stored position.
         real(real64), intent(in) :: bls(:) !! parallel length per stored position.
         logical, intent(in) :: ball_all !! .true. walks the covering ball for every emitter (test-only).
         real(real64), intent(in) :: qlo(:) !! the least distance a partner can have, per stored position; empty under `ball_all`.
         real(real64), intent(in) :: qhi(:) !! the greatest such distance; empty under `ball_all`.
-        integer(int64), intent(out) :: m !! how many partners qualified.
-        integer(int64), intent(inout), optional :: ncyl !! incremented when the cylinder was walked.
-        integer(int64), intent(inout), optional :: nbal !! incremented when a ball was walked.
-        integer(int64), intent(inout), optional :: ntest !! incremented per candidate the accept test saw.
-        integer(int32), intent(inout), optional :: out32(:) !! the partners' rows in int32, if wanted.
-        integer(int64), intent(inout), optional :: out64(:) !! the partners' rows, if wanted.
-        real(real64), intent(inout), optional :: dperp(:) !! their transverse separations, if wanted.
-        real(real64), intent(inout), optional :: dpar(:) !! their parallel separations, if wanted.
-        real(real64) :: pa(3), pb(3), rw, r, dself, lself, bpself, blself
-        logical :: use_ball
+        logical, intent(in) :: want_sep !! whether the separations travel with the pairs.
+        type(pair_buf), intent(inout) :: buf !! the thread's pair list.
+        integer(int64), intent(inout) :: ncyl !! incremented when the cylinder was walked.
+        integer(int64), intent(inout) :: nbal !! incremented when a ball was walked.
+        integer(int64), intent(inout) :: ntest !! incremented per candidate the accept test saw.
+        integer(int64) :: nc(3), a(3), cnt(3), sa(3), sc(3), ilo, ihi, jj, kk, base, s0, e0, v, row, kself
+        integer(int64) :: ia, alo, acnt
+        real(real64) :: pa(3), pb(3), dv(3), c0(3), c1(3), rw, r, r2, dself, lself, bpself, blself
+        real(real64) :: p1, p2, p3, q1, q2, q3, dx, dy, dz, d2, dpv, dlv
+        real(real64) :: dd, ddinv, vx, vy, vz, b1, b2, b3, qx, qy, qz, tp, wx, wy, wz, sx, sy, sz, s2
+        real(real64) :: w0, w1, ta, tb, tlo, thi, ctr, half
+        logical :: use_ball, screen, ok
+        integer :: d, da
 
-        ! Locals, so that no call below names `self` beside one of its own components.
+        nc = self%grid_n
         dself = self%d_s(t)
         lself = ls(t)
         bpself = bps(t)
         blself = bls(t)
+        kself = keys(t)
+        ! Under the tiebreak the rank does not screen the candidates; it is read inside the accept.
+        screen = .not. want_tie
+        p1 = p(1)
+        p2 = p(2)
+        p3 = p(3)
+        q1 = q(1)
+        q2 = q(2)
+        q3 = q(3)
         if (ball_all) then
-            call spatial_scan(self, p, rwalk, m, out32=out32, out64=out64, min_key=keys(t), keys=keys, &
-                los_rule=lrule, los_q=q, &
-                los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls, &
-                dperp=dperp, dpar=dpar, ntested=ntest)
-            if (present(nbal)) nbal = nbal + 1_int64
+            use_ball = .true.
+            r = rwalk
+        else
+            call los_walk_shape(self%obs, q, dself, rwalk, hcell, qlo(t), qhi(t), use_ball, r, pa, pb, rw)
+        end if
+
+        ! ---- The ball: `spatial_scan`'s free-box walk ----
+        if (use_ball) then
+            nbal = nbal + 1_int64
+            do d = 1, 3
+                call axis_span_free(p(d), r, self%lo(d), self%cell_inv(d), nc(d), a(d), cnt(d))
+                if (cnt(d) == 0_int64) return
+            end do
+            r2 = r * r
+            ilo = a(1)
+            ihi = a(1) + cnt(1) - 1_int64
+            do kk = a(3), a(3) + cnt(3) - 1_int64
+                do jj = a(2), a(2) + cnt(2) - 1_int64
+                    base = 1_int64 + nc(1) * (jj + nc(2) * kk)
+                    s0 = self%start(base + ilo)
+                    e0 = self%start(base + ihi + 1_int64) - 1_int64
+                    if (direct) then
+                        do v = s0, e0
+                            dx = xs(v) - p1
+                            dy = ys(v) - p2
+                            dz = zs(v) - p3
+                            d2 = dx * dx + dy * dy + dz * dz
+                            if (d2 <= r2) then
+                                if (screen) then
+                                    if (keys(v) <= kself) cycle
+                                end if
+                                ntest = ntest + 1_int64
+                                call los_accept(dx, dy, dz, d2, q1, q2, q3, dself, self%d_s(v), lself, ls(v), lrule, &
+                                    want_tie, keys(v), kself, bpself, blself, bps(v), bls(v), ok, dpv, dlv)
+                                if (.not. ok) cycle
+                                call pair_buf_push(buf, irow, self%idx(v), dpv, dlv, want_sep)
+                            end if
+                        end do
+                    else
+                        do v = s0, e0
+                            row = self%idx(v)
+                            dx = xs(row) - p1
+                            dy = ys(row) - p2
+                            dz = zs(row) - p3
+                            d2 = dx * dx + dy * dy + dz * dz
+                            if (d2 <= r2) then
+                                if (screen) then
+                                    if (keys(v) <= kself) cycle
+                                end if
+                                ntest = ntest + 1_int64
+                                call los_accept(dx, dy, dz, d2, q1, q2, q3, dself, self%d_s(v), lself, ls(v), lrule, &
+                                    want_tie, keys(v), kself, bpself, blself, bps(v), bls(v), ok, dpv, dlv)
+                                if (.not. ok) cycle
+                                call pair_buf_push(buf, irow, row, dpv, dlv, want_sep)
+                            end if
+                        end do
+                    end if
+                end do
+            end do
             return
         end if
-        call los_walk_shape(self%obs, q, dself, rwalk, hcell, qlo(t), qhi(t), use_ball, r, pa, pb, rw)
-        if (use_ball) then
-            call spatial_scan(self, p, r, m, out32=out32, out64=out64, min_key=keys(t), keys=keys, &
-                los_rule=lrule, los_q=q, &
-                los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, los_ls=ls, los_bps=bps, los_bls=bls, &
-                dperp=dperp, dpar=dpar, los_tiebreak=.true., ntested=ntest)
-            if (present(nbal)) nbal = nbal + 1_int64
-        else
-            call spatial_scan_axis(self, pa, pb, rw, rw, .false., what, m, out32=out32, out64=out64, &
-                min_key=keys(t), keys=keys, &
-                los_rule=lrule, los_q=q, los_p=p, los_d=dself, los_l=lself, los_bp=bpself, los_bl=blself, &
-                los_ls=ls, los_bps=bps, los_bls=bls, dperp=dperp, dpar=dpar, los_tiebreak=.true., ntested=ntest)
-            if (present(ncyl)) ncyl = ncyl + 1_int64
-        end if
-    end subroutine los_sweep_point
+
+        ! ---- The padded cylinder: `spatial_scan_axis`'s slab walk, flat ends, one radius ----
+        ncyl = ncyl + 1_int64
+        dv = pb - pa
+        dd = dv(1) * dv(1) + dv(2) * dv(2) + dv(3) * dv(3)
+        ! Unreachable: `los_walk_shape` pads the axis by a positive slack, so it always has length. ! GCOVR_EXCL_LINE
+        if (.not. (dd > 0.0_real64)) error stop & ! GCOVR_EXCL_LINE
+            "pf_spatial_index%pairs_within_los: a line-of-sight axis must have positive length" ! GCOVR_EXCL_LINE
+        ddinv = 1.0_real64 / dd
+        vx = dv(1)
+        vy = dv(2)
+        vz = dv(3)
+        b1 = pa(1)
+        b2 = pa(2)
+        b3 = pa(3)
+        da = 1
+        if (abs(dv(2)) > abs(dv(da))) da = 2
+        if (abs(dv(3)) > abs(dv(da))) da = 3
+        ctr = 0.5_real64 * (pa(da) + pb(da))
+        half = 0.5_real64 * abs(dv(da)) + rw
+        call axis_span_free(ctr, half, self%lo(da), self%cell_inv(da), nc(da), alo, acnt)
+        if (acnt == 0_int64) return
+        r2 = rw * rw
+        do ia = alo, alo + acnt - 1_int64
+            w0 = self%lo(da) + real(ia, kind=real64) * self%cell(da)
+            w1 = w0 + self%cell(da)
+            ta = (w0 - rw - pa(da)) / dv(da)
+            tb = (w1 + rw - pa(da)) / dv(da)
+            tlo = min(max(min(ta, tb), 0.0_real64), 1.0_real64)
+            thi = min(max(max(ta, tb), 0.0_real64), 1.0_real64)
+            c0 = pa + tlo * dv
+            c1 = pa + thi * dv
+            sa(da) = ia
+            sc(da) = 1_int64
+            do d = 1, 3
+                if (d == da) cycle
+                ctr = 0.5_real64 * (c0(d) + c1(d))
+                half = 0.5_real64 * abs(c1(d) - c0(d)) + rw
+                call axis_span_free(ctr, half, self%lo(d), self%cell_inv(d), nc(d), sa(d), sc(d))
+            end do
+            if (sc(1) == 0_int64 .or. sc(2) == 0_int64 .or. sc(3) == 0_int64) cycle
+            ilo = sa(1)
+            ihi = sa(1) + sc(1) - 1_int64
+            do kk = sa(3), sa(3) + sc(3) - 1_int64
+                do jj = sa(2), sa(2) + sc(2) - 1_int64
+                    base = 1_int64 + nc(1) * (jj + nc(2) * kk)
+                    s0 = self%start(base + ilo)
+                    e0 = self%start(base + ihi + 1_int64) - 1_int64
+                    if (direct) then
+                        do v = s0, e0
+                            qx = xs(v) - b1
+                            qy = ys(v) - b2
+                            qz = zs(v) - b3
+                            tp = (qx * vx + qy * vy + qz * vz) * ddinv
+                            if (tp < 0.0_real64 .or. tp > 1.0_real64) cycle
+                            wx = qx - tp * vx
+                            wy = qy - tp * vy
+                            wz = qz - tp * vz
+                            d2 = wx * wx + wy * wy + wz * wz
+                            if (d2 <= r2) then
+                                if (screen) then
+                                    if (keys(v) <= kself) cycle
+                                end if
+                                ntest = ntest + 1_int64
+                                ! Separations from the EMITTER, never from the axis's near end.
+                                sx = xs(v) - p1
+                                sy = ys(v) - p2
+                                sz = zs(v) - p3
+                                s2 = sx * sx + sy * sy + sz * sz
+                                call los_accept(sx, sy, sz, s2, q1, q2, q3, dself, self%d_s(v), lself, ls(v), lrule, &
+                                    want_tie, keys(v), kself, bpself, blself, bps(v), bls(v), ok, dpv, dlv)
+                                if (.not. ok) cycle
+                                call pair_buf_push(buf, irow, self%idx(v), dpv, dlv, want_sep)
+                            end if
+                        end do
+                    else
+                        do v = s0, e0
+                            row = self%idx(v)
+                            qx = xs(row) - b1
+                            qy = ys(row) - b2
+                            qz = zs(row) - b3
+                            tp = (qx * vx + qy * vy + qz * vz) * ddinv
+                            if (tp < 0.0_real64 .or. tp > 1.0_real64) cycle
+                            wx = qx - tp * vx
+                            wy = qy - tp * vy
+                            wz = qz - tp * vz
+                            d2 = wx * wx + wy * wy + wz * wz
+                            if (d2 <= r2) then
+                                if (screen) then
+                                    if (keys(v) <= kself) cycle
+                                end if
+                                ntest = ntest + 1_int64
+                                sx = xs(row) - p1
+                                sy = ys(row) - p2
+                                sz = zs(row) - p3
+                                s2 = sx * sx + sy * sy + sz * sz
+                                call los_accept(sx, sy, sz, s2, q1, q2, q3, dself, self%d_s(v), lself, ls(v), lrule, &
+                                    want_tie, keys(v), kself, bpself, blself, bps(v), bls(v), ok, dpv, dlv)
+                                if (.not. ok) cycle
+                                call pair_buf_push(buf, irow, row, dpv, dlv, want_sep)
+                            end if
+                        end do
+                    end if
+                end do
+            end do
+        end do
+    end subroutine los_sweep_lean
 
     !> The region one emitter walks, from the range of distances `[qlo, qhi]` its partners can
     !> occupy.

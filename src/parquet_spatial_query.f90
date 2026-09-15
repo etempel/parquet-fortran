@@ -17,15 +17,8 @@ contains
     !> The cell range a ball of radius `r` reaches along one FREE axis, as a start and a count.
     !>
     !> Reports `cnt = 0` when the ball misses the grid entirely, which is what lets the caller
-    !> return without walking anything.
-    subroutine axis_span_free(pd, r, lod, inv, nc, a, cnt)
-        real(real64), intent(in) :: pd !! the query point's coordinate on this axis.
-        real(real64), intent(in) :: r !! the search radius.
-        real(real64), intent(in) :: lod !! the grid origin on this axis.
-        real(real64), intent(in) :: inv !! 1/cell on this axis.
-        integer(int64), intent(in) :: nc !! cells along this axis.
-        integer(int64), intent(out) :: a !! first cell index, 0-based.
-        integer(int64), intent(out) :: cnt !! how many cells; 0 when the ball misses the grid.
+    !> return without walking anything. See the interface in `src/parquet_spatial.f90`.
+    module procedure axis_span_free
         real(real64) :: t0, t1
         integer(int64) :: b
 
@@ -50,7 +43,52 @@ contains
         if (b > nc - 1_int64) b = nc - 1_int64
         if (a > b) return
         cnt = b - a + 1_int64
-    end subroutine axis_span_free
+    end procedure axis_span_free
+
+    !> The exact line-of-sight criterion for one candidate, and the ONE body of it.
+    !>
+    !> Every walk that accepts a line-of-sight partner -- `spatial_scan`'s two loops,
+    !> `spatial_scan_axis`'s two, and the sweep in `parquet_spatial_bulk.f90` -- calls this, so the
+    !> criterion is written once; it runs about once per emitter (only the walk's pre-filter
+    !> survivors reach it), so the call costs nothing the bench can see.
+    !>
+    !> Formed without cancellation: `D_j - D_i` is `(2 q.s + |s|^2) / (D_i + D_j)` rather than the
+    !> difference of two thousand-unit distances, and the unit vectors' difference is
+    !> `(s D_i - q (D_j - D_i)) / (D_i D_j)`, never `2 - 2 cos`.
+    !>
+    !> `want_tie` is the union's emit-once tiebreak (`spatial_scan`'s interface): under it a pair
+    !> lying in both cylinders is emitted by the endpoint whose rank is the higher, and a pair in
+    !> one cylinder only by that endpoint whatever its rank.
+    module procedure los_accept
+        real(real64) :: sd, ddif, ex, ey, ez
+        logical :: own, oth
+
+        sd = dself + dj
+        ddif = (2.0_real64 * (q1 * sx + q2 * sy + q3 * sz) + s2) / sd
+        ex = sx * dself - q1 * ddif
+        ey = sy * dself - q2 * ddif
+        ez = sz * dself - q3 * ddif
+        dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
+        dlv = abs(lj - lself)
+        select case (lrule)
+        case (0)
+            ok = dpv <= bpself .and. dlv <= blself
+        case (PF_LINK_MAX)
+            own = dpv <= bpself .and. dlv <= blself
+            oth = dpv <= bpj .and. dlv <= blj
+            if (want_tie) then
+                ok = own .and. (.not. oth .or. key > minkey)
+            else
+                ok = own .or. oth
+            end if
+        case (PF_LINK_MIN)
+            ok = dpv <= bpself .and. dlv <= blself .and. dpv <= bpj .and. dlv <= blj
+        case (PF_LINK_MEAN)
+            ok = 2.0_real64 * dpv <= bpself + bpj .and. 2.0_real64 * dlv <= blself + blj
+        case default
+            ok = dpv <= bpself + bpj .and. dlv <= blself + blj
+        end select
+    end procedure los_accept
 
     !> The cell range a ball reaches along one PERIODIC axis, as an unwrapped start and a count.
     !>
@@ -255,11 +293,12 @@ contains
         real(real64) :: r2, r2in, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3
         real(real64) :: bnd, uslf, vslf
-        real(real64) :: q1, q2, q3, dself, lself, bpself, blself, dj, sd, ddif, ex, ey, ez, dpv, dlv, dv
+        real(real64) :: q1, q2, q3, dself, lself, bpself, blself, bpj, blj, dpv, dlv, dv
         real(real64), allocatable :: dwork(:)
         logical :: has32, has64, hasd, want_min, direct, want_sort, usework, want_bnd
-        logical :: want_los, hasdp, hasdl, ok, want_tie, own, oth
+        logical :: want_los, hasdp, hasdl, ok, want_tie
         integer :: d, nrun, ir, lrule
+        integer(int64) :: kj
 
         m = 0_int64
         ! Defensive: every route in screens this first -- the single-point bindings through
@@ -436,40 +475,22 @@ contains
                                     if (d2 > bnd * bnd) cycle
                                 end if
                                 if (want_los) then
-                                    ! The cylinder test, formed without cancellation: `D_j - D_i`
-                                    ! is `(2 q.s + |s|^2) / (D_i + D_j)` rather than the difference
-                                    ! of two thousand-unit distances, and the unit vectors' difference
-                                    ! is `(s D_i - q (D_j - D_i)) / (D_i D_j)`, never `2 - 2 cos`.
-                                    ! Keep the two copies of this block in step.
+                                    ! The exact cylinder criterion is `los_accept`, one body for
+                                    ! every walk. The candidate's terms are read here, by stored
+                                    ! position, and only the ones its rule needs: `los_bps`,
+                                    ! `los_bls` and `keys` may be ABSENT under rule 0 or without the
+                                    ! tiebreak, and an absent optional may not be indexed.
                                     ntest = ntest + 1_int64
-                                    dj = self%d_s(t)
-                                    sd = dself + dj
-                                    ddif = (2.0_real64 * (q1 * dx + q2 * dy + q3 * dz) + d2) / sd
-                                    ex = dx * dself - q1 * ddif
-                                    ey = dy * dself - q2 * ddif
-                                    ez = dz * dself - q3 * ddif
-                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
-                                    dlv = abs(los_ls(t) - lself)
-                                    select case (lrule)
-                                    case (0)
-                                        ok = dpv <= bpself .and. dlv <= blself
-                                    case (PF_LINK_MAX)
-                                        own = dpv <= bpself .and. dlv <= blself
-                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                        if (want_tie) then
-                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
-                                        else
-                                            ok = own .or. oth
-                                        end if
-                                    case (PF_LINK_MIN)
-                                        ok = dpv <= bpself .and. dlv <= blself .and. &
-                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                    case (PF_LINK_MEAN)
-                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
-                                             2.0_real64 * dlv <= blself + los_bls(t)
-                                    case default
-                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
-                                    end select
+                                    bpj = 0.0_real64
+                                    blj = 0.0_real64
+                                    if (lrule /= 0) then
+                                        bpj = los_bps(t)
+                                        blj = los_bls(t)
+                                    end if
+                                    kj = 0_int64
+                                    if (want_tie) kj = keys(t)
+                                    call los_accept(dx, dy, dz, d2, q1, q2, q3, dself, self%d_s(t), lself, los_ls(t), &
+                                        lrule, want_tie, kj, minkey, bpself, blself, bpj, blj, ok, dpv, dlv)
                                     if (.not. ok) cycle
                                 end if
                                 row = self%idx(t)
@@ -510,36 +531,18 @@ contains
                                     if (d2 > bnd * bnd) cycle
                                 end if
                                 if (want_los) then
-                                    ! The same block as the direct loop's; see the comment there.
+                                    ! The same call as the direct loop's; see the comment there.
                                     ntest = ntest + 1_int64
-                                    dj = self%d_s(t)
-                                    sd = dself + dj
-                                    ddif = (2.0_real64 * (q1 * dx + q2 * dy + q3 * dz) + d2) / sd
-                                    ex = dx * dself - q1 * ddif
-                                    ey = dy * dself - q2 * ddif
-                                    ez = dz * dself - q3 * ddif
-                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
-                                    dlv = abs(los_ls(t) - lself)
-                                    select case (lrule)
-                                    case (0)
-                                        ok = dpv <= bpself .and. dlv <= blself
-                                    case (PF_LINK_MAX)
-                                        own = dpv <= bpself .and. dlv <= blself
-                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                        if (want_tie) then
-                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
-                                        else
-                                            ok = own .or. oth
-                                        end if
-                                    case (PF_LINK_MIN)
-                                        ok = dpv <= bpself .and. dlv <= blself .and. &
-                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                    case (PF_LINK_MEAN)
-                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
-                                             2.0_real64 * dlv <= blself + los_bls(t)
-                                    case default
-                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
-                                    end select
+                                    bpj = 0.0_real64
+                                    blj = 0.0_real64
+                                    if (lrule /= 0) then
+                                        bpj = los_bps(t)
+                                        blj = los_bls(t)
+                                    end if
+                                    kj = 0_int64
+                                    if (want_tie) kj = keys(t)
+                                    call los_accept(dx, dy, dz, d2, q1, q2, q3, dself, self%d_s(t), lself, los_ls(t), &
+                                        lrule, want_tie, kj, minkey, bpself, blself, bpj, blj, ok, dpv, dlv)
                                     if (.not. ok) cycle
                                 end if
                                 m = m + 1_int64
@@ -723,12 +726,13 @@ contains
         real(real64) :: dv(3), c0(3), c1(3)
         real(real64) :: dd, ddinv, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
         real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
-        real(real64) :: q1, q2, q3, e1, e2, e3, dself, lself, bpself, blself, dj, sd, ddif, sx, sy, sz, s2
-        real(real64) :: ex, ey, ez, dpv, dlv, dm
+        real(real64) :: q1, q2, q3, e1, e2, e3, dself, lself, bpself, blself, bpj, blj, sx, sy, sz, s2
+        real(real64) :: dpv, dlv, dm
         real(real64), allocatable :: dwork(:)
         logical :: has32, has64, hasd, direct, hasap, hasat, want_sort, usework
-        logical :: want_min, want_los, want_tie, hasdp, hasdl, ok, own, oth
+        logical :: want_min, want_los, want_tie, hasdp, hasdl, ok
         integer :: k, da, nd, lrule
+        integer(int64) :: kj
 
         m = 0_int64
         ! Defensive, exactly as `spatial_scan`'s: the three axis bindings screen through
@@ -937,51 +941,25 @@ contains
                                 end if
                                 if (want_los) then
                                     ! The exact cylinder criterion, the geometric test above being
-                                    ! only the pre-filter: the same block as `spatial_scan`'s, on
-                                    ! separations from the EMITTER, never from the axis's near end.
-                                    ! Keep the three copies in step.
+                                    ! only the pre-filter: `los_accept`, on separations from the
+                                    ! EMITTER, never from the axis's near end. The candidate's
+                                    ! terms are read as `spatial_scan` reads them -- only the ones
+                                    ! its rule needs, since an absent optional may not be indexed.
                                     ntest = ntest + 1_int64
                                     sx = xs(t) - e1
                                     sy = ys(t) - e2
                                     sz = zs(t) - e3
                                     s2 = sx * sx + sy * sy + sz * sz
-                                    dj = self%d_s(t)
-                                    sd = dself + dj
-                                    ddif = (2.0_real64 * (q1 * sx + q2 * sy + q3 * sz) + s2) / sd
-                                    ex = sx * dself - q1 * ddif
-                                    ey = sy * dself - q2 * ddif
-                                    ez = sz * dself - q3 * ddif
-                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
-                                    dlv = abs(los_ls(t) - lself)
-                                    select case (lrule)
-                                    case (0)
-                                        ok = dpv <= bpself .and. dlv <= blself
-                                    case (PF_LINK_MAX)
-                                        own = dpv <= bpself .and. dlv <= blself
-                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                        if (want_tie) then
-                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
-                                        ! Unreachable HERE, unlike the ball walk's copy of this
-                                        ! block: every caller reaching the AXIS walk with a
-                                        ! `los_rule` passes `los_tiebreak` and a `min_key` with
-                                        ! it, so `want_tie` holds whenever `lrule` is
-                                        ! `PF_LINK_MAX`. The ball walk has one caller -- the
-                                        ! forced-ball sweep -- that passes neither, which is why
-                                        ! its `else` runs and this one cannot.
-                                        ! GCOVR_EXCL_START -- see above
-                                        else
-                                            ok = own .or. oth
-                                        end if
-                                        ! GCOVR_EXCL_STOP
-                                    case (PF_LINK_MIN)
-                                        ok = dpv <= bpself .and. dlv <= blself .and. &
-                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                    case (PF_LINK_MEAN)
-                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
-                                             2.0_real64 * dlv <= blself + los_bls(t)
-                                    case default
-                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
-                                    end select
+                                    bpj = 0.0_real64
+                                    blj = 0.0_real64
+                                    if (lrule /= 0) then
+                                        bpj = los_bps(t)
+                                        blj = los_bls(t)
+                                    end if
+                                    kj = 0_int64
+                                    if (want_tie) kj = keys(t)
+                                    call los_accept(sx, sy, sz, s2, q1, q2, q3, dself, self%d_s(t), lself, los_ls(t), &
+                                        lrule, want_tie, kj, minkey, bpself, blself, bpj, blj, ok, dpv, dlv)
                                     if (.not. ok) cycle
                                 end if
                                 row = self%idx(t)
@@ -1029,49 +1007,22 @@ contains
                                     if (keys(t) <= minkey) cycle
                                 end if
                                 if (want_los) then
-                                    ! The same block as the direct loop's; see the comment there.
+                                    ! The same call as the direct loop's; see the comment there.
                                     ntest = ntest + 1_int64
                                     sx = xs(row) - e1
                                     sy = ys(row) - e2
                                     sz = zs(row) - e3
                                     s2 = sx * sx + sy * sy + sz * sz
-                                    dj = self%d_s(t)
-                                    sd = dself + dj
-                                    ddif = (2.0_real64 * (q1 * sx + q2 * sy + q3 * sz) + s2) / sd
-                                    ex = sx * dself - q1 * ddif
-                                    ey = sy * dself - q2 * ddif
-                                    ez = sz * dself - q3 * ddif
-                                    dpv = sqrt(ex * ex + ey * ey + ez * ez) * (0.5_real64 * sd / (dself * dj))
-                                    dlv = abs(los_ls(t) - lself)
-                                    select case (lrule)
-                                    case (0)
-                                        ok = dpv <= bpself .and. dlv <= blself
-                                    case (PF_LINK_MAX)
-                                        own = dpv <= bpself .and. dlv <= blself
-                                        oth = dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                        if (want_tie) then
-                                            ok = own .and. (.not. oth .or. keys(t) > minkey)
-                                        ! Unreachable HERE, unlike the ball walk's copy of this
-                                        ! block: every caller reaching the AXIS walk with a
-                                        ! `los_rule` passes `los_tiebreak` and a `min_key` with
-                                        ! it, so `want_tie` holds whenever `lrule` is
-                                        ! `PF_LINK_MAX`. The ball walk has one caller -- the
-                                        ! forced-ball sweep -- that passes neither, which is why
-                                        ! its `else` runs and this one cannot.
-                                        ! GCOVR_EXCL_START -- see above
-                                        else
-                                            ok = own .or. oth
-                                        end if
-                                        ! GCOVR_EXCL_STOP
-                                    case (PF_LINK_MIN)
-                                        ok = dpv <= bpself .and. dlv <= blself .and. &
-                                             dpv <= los_bps(t) .and. dlv <= los_bls(t)
-                                    case (PF_LINK_MEAN)
-                                        ok = 2.0_real64 * dpv <= bpself + los_bps(t) .and. &
-                                             2.0_real64 * dlv <= blself + los_bls(t)
-                                    case default
-                                        ok = dpv <= bpself + los_bps(t) .and. dlv <= blself + los_bls(t)
-                                    end select
+                                    bpj = 0.0_real64
+                                    blj = 0.0_real64
+                                    if (lrule /= 0) then
+                                        bpj = los_bps(t)
+                                        blj = los_bls(t)
+                                    end if
+                                    kj = 0_int64
+                                    if (want_tie) kj = keys(t)
+                                    call los_accept(sx, sy, sz, s2, q1, q2, q3, dself, self%d_s(t), lself, los_ls(t), &
+                                        lrule, want_tie, kj, minkey, bpself, blself, bpj, blj, ok, dpv, dlv)
                                     if (.not. ok) cycle
                                 end if
                                 m = m + 1_int64

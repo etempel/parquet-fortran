@@ -145,6 +145,12 @@ contains
                          test_cells_per_point_override_relaxes_the_ceiling), &
             new_unittest("the line-of-sight walk is the ball when it fits a cell and the cylinder otherwise", &
                          test_los_walk_choice_follows_the_cell), &
+            new_unittest("pairs_within_los emits the same list in the same order under any team", &
+                         test_los_sweep_order_is_team_invariant), &
+            new_unittest("the sweep's buffers grow and lose nothing", test_los_sweep_buffers_grow), &
+            new_unittest("dperp and dpar travel with their pair through the copy", &
+                         test_los_sweep_separations_follow_pairs), &
+            new_unittest("a chunk boundary neither drops nor repeats a pair", test_los_sweep_chunk_boundaries), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
@@ -230,7 +236,7 @@ contains
             new_unittest("the same points give the same cell twice", test_probe_is_deterministic), &
             new_unittest("every cell size gives the same answers", test_answers_survive_any_cell), &
             new_unittest("an explicit cell is honoured", test_explicit_cell_is_honoured), &
-            new_unittest("the cell count stays under the counting-path ceiling", test_cell_count_clamped), &
+            new_unittest("the two ceilings bind where they should", test_two_ceilings_bind), &
             new_unittest("a radius list collapses to its moment ratio", test_effective_radius_moment_ratio), &
             new_unittest("rebuild is a no-op on unchanged data and rebuilds on changed", test_rebuild_detects_change), &
             new_unittest("rebuild_for re-tunes without the caller's arrays", test_rebuild_for_retunes), &
@@ -3232,20 +3238,36 @@ contains
             "a cell taken from one index must reproduce itself when passed to another")
     end subroutine test_explicit_cell_is_honoured
 
-    !> The cell count is clamped so the bucketing keeps `pf_argsort`'s counting fast path.
-    subroutine test_cell_count_clamped(error)
+    !> The grid obeys two ceilings, and each binds where it should: at most 0.3 OCCUPIED cells per
+    !> point, and at most 4 cells of the bounding box per point (`spatial_max_cells_per_point`,
+    !> `spatial_max_box_cells_per_point`). On a cloud filling its box nearly every cell is occupied,
+    !> so the occupied ceiling binds and holds the box count near 0.3 per point. On a cone filling
+    !> a third of its box the occupied ceiling lets the box count past 0.3 per point, which is what
+    !> tells this rule from one counting box cells. On a clustered cloud, whose clumps occupy a few
+    !> per cent of the box's cells, the box cap binds first. A `cell=` fine enough to ask for a
+    !> million cells is coarsened under both, and one that needs no coarsening is left exactly as
+    !> given. The mutations: either comparison reverted, or box cells counted where occupied cells
+    !> are meant.
+    subroutine test_two_ceilings_bind(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:), d(:)
         type(pf_spatial_index) :: sx
-        integer(int64) :: n
+        integer(int64) :: n, occ, box, gx, gy, gz
 
+        ! ---- a cloud filling its box ----
         n = 2000_int64
         call make_cloud(n, 1.0_real64, .false., x, y, z)
-        ! A cell this fine asks for a million cells for two thousand points; the clamp must
-        ! coarsen it rather than build a grid whose bucketing loses the O(n) path.
+        ! A cell this fine asks for a million cells for two thousand points.
         call sx%build(x, y, z, radius=0.1_real64, cell=0.01_real64)
-        call check(error, sx%cells() <= (3_int64 * n) / 10_int64, &
-            "the cell count must be clamped to at most 0.3 cells per point")
+        call parquet_debug_spatial_occupied_cells(sx, occ)
+        call sx%grid(gx, gy, gz)
+        box = gx * gy * gz
+        call check(error, occ <= (3_int64 * n) / 10_int64, "occupied cells must be clamped to at most 0.3 per point")
+        if (allocated(error)) return
+        call check(error, box <= 4_int64 * n, "cells of the bounding box must be clamped to at most 4 per point")
+        if (allocated(error)) return
+        call check(error, box <= (4_int64 * n) / 10_int64, &
+            "on a full box the occupied ceiling must bind, holding the box count near 0.3 per point")
         if (allocated(error)) return
         call check(error, sx%cell_size() > 0.01_real64, &
             "a clamped build must report the coarsened cell, not the one that was asked for")
@@ -3254,7 +3276,34 @@ contains
         call sx%build(x, y, z, radius=0.1_real64, cell=0.25_real64)
         call check(error, abs(sx%cell_size() - 0.25_real64) <= 1.0e-12_real64, &
             "a cell that needs no clamping must be left exactly as given")
-    end subroutine test_cell_count_clamped
+        if (allocated(error)) return
+        ! ---- a cone filling a third of its box: the occupied ceiling binds, past 0.3 box cells ----
+        call make_wedge(1500_int64, 100_int64, 500.0_real64, 1500.0_real64, 33_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        call sx%build(x, y, z, radius=2.0_real64)
+        call parquet_debug_spatial_occupied_cells(sx, occ)
+        call sx%grid(gx, gy, gz)
+        box = gx * gy * gz
+        call check(error, occ <= (3_int64 * n) / 10_int64, "on a cone the occupied cells must stay under 0.3 per point")
+        if (allocated(error)) return
+        call check(error, box <= 4_int64 * n, "on a cone the box cells must stay under 4 per point")
+        if (allocated(error)) return
+        call check(error, box > (3_int64 * n) / 10_int64, &
+            "on a cone the box count must pass 0.3 per point: the ceiling counts occupied cells, not box cells")
+        if (allocated(error)) return
+        ! ---- a clustered cloud: the box cap binds, with the occupied count well under its ceiling ----
+        call make_clustered_cloud(2000_int64, x, y, z)
+        n = 2000_int64
+        call sx%build(x, y, z, radius=0.01_real64)
+        call parquet_debug_spatial_occupied_cells(sx, occ)
+        call sx%grid(gx, gy, gz)
+        box = gx * gy * gz
+        call check(error, box <= 4_int64 * n .and. box > 2_int64 * n, &
+            "on a clustered cloud the box cap must bind, leaving the box count just under 4 per point")
+        if (allocated(error)) return
+        call check(error, occ < (3_int64 * n) / 10_int64, &
+            "on a clustered cloud the occupied count must sit under its ceiling when the box cap binds")
+    end subroutine test_two_ceilings_bind
 
     !> A radius list collapses to `sum(r^3)/sum(r^2)`, and a single radius to itself.
     subroutine test_effective_radius_moment_ratio(error)
@@ -5352,7 +5401,7 @@ contains
         integer(int64), allocatable :: pi(:), pj(:), qi(:), qj(:)
         logical, allocatable :: want(:, :)
         type(pf_spatial_index) :: sx
-        integer(int64) :: n, nwant, ncells1, ncells2, ncells3, gx, gy, gz
+        integer(int64) :: n, nwant, ncells1, ncells2, ncells3, gx, gy, gz, occ1
         real(real64) :: h1, h2, h3
 
         call make_wedge(360_int64, 10_int64, 500.0_real64, 1500.0_real64, 25_int64, ra, dec, d, x, y, z)
@@ -5362,9 +5411,11 @@ contains
         h1 = sx%cell_size()
         call sx%grid(gx, gy, gz)
         ncells1 = gx * gy * gz
+        call parquet_debug_spatial_occupied_cells(sx, occ1)
         ! The precondition: the ceiling, not the radius, chose this cell.
-        call check(error, ncells1 <= max(1_int64, int(0.3_real64 * real(n, kind=real64), kind=int64)) .and. &
-            h1 > 4.0_real64 * 5.0_real64, "on a sparse wedge the shipped ceiling must coarsen the cell far above the radius")
+        call check(error, occ1 <= max(1_int64, int(0.3_real64 * real(n, kind=real64), kind=int64)) .and. &
+            ncells1 <= 4_int64 * n .and. h1 > 4.0_real64 * 5.0_real64, &
+            "on a sparse wedge the shipped ceiling must coarsen the cell far above the radius")
         if (allocated(error)) return
         call sx%pairs_within_los(5.0_real64, 40.0_real64, pi, pj)
         call check(error, pairs_to_set(pi, pj, n, want, nwant) .and. nwant > 0_int64, "the reference list must be a non-empty set")
@@ -5482,6 +5533,180 @@ contains
         call parquet_debug_set_spatial_los_walk(walk_auto)
         call parquet_debug_reset_spatial_counters()
     end subroutine test_los_walk_choice_follows_the_cell
+
+    ! ---- The one-pass line-of-sight sweep: chunks, buffers and the concatenation ----
+
+    !> The sweep concatenates its threads' pair lists chunk by chunk in stored order, so the list
+    !> is identical, entry for entry, whatever the team size. The chunk is lowered to seven
+    !> emitters so a few hundred points span dozens of chunks and the boundaries are crossed by
+    !> more than one thread. The mutation this catches is a concatenation in THREAD order, which
+    !> keeps the set and scrambles the order; the serial arm is held to the oracle so the
+    !> equality cannot hold for a wrong list.
+    subroutine test_los_sweep_order_is_team_invariant(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        real(real64), allocatable :: dp1(:), dl1(:), dp4(:), dl4(:)
+        integer(int64), allocatable :: i1(:), j1(:), i4(:), j4(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, nwant
+        integer :: used4
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without a team both arms run the same serial sweep, so " // &
+            "the equality below would hold for the wrong reason")
+        return
+#endif
+        call make_wedge(300_int64, 40_int64, 500.0_real64, 1500.0_real64, 1_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 10.0_real64 * pf_random_at(fixture_seed, a, 31_int64)
+            bl(a) = bp(a) * (5.0_real64 + 25.0_real64 * pf_random_at(fixture_seed, a, 32_int64))
+        end do
+        call sx%build(x, y, z, radius=sqrt(bp**2 + bl**2))
+        call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_sweep_chunk(7_int64)
+        call sx%pairs_within_los(bp, bl, i1, j1, combine=PF_LINK_MEAN, dperp=dp1, dpar=dl1, threads=1)
+        call sx%pairs_within_los(bp, bl, i4, j4, combine=PF_LINK_MEAN, dperp=dp4, dpar=dl4, threads=4)
+        used4 = parquet_debug_spatial_threads_used()
+        call parquet_debug_reset_spatial_counters()
+        if (used4 < 2) then
+            call skip_test(error, "needs at least two processors: the affinity clamp resolved the " // &
+                "four-thread arm to a team of one, so both arms ran serially")
+            return
+        end if
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, nwant > 0_int64, "the fixture must hold pairs")
+        if (allocated(error)) return
+        call check(error, pairs_equal_set(i1, j1, want, nwant), "the serial sweep's list must be the oracle's set")
+        if (allocated(error)) return
+        call check(error, size(i4, kind=int64) == nwant, "the four-thread sweep must return as many pairs as the serial one")
+        if (allocated(error)) return
+        call check(error, all(i4 == i1) .and. all(j4 == j1), &
+            "the four-thread sweep must return the serial sweep's pairs in the serial sweep's order")
+        if (allocated(error)) return
+        call check(error, all(dp4 == dp1) .and. all(dl4 == dl1), &
+            "the separations must travel with their pairs whatever the team size")
+    end subroutine test_los_sweep_order_is_team_invariant
+
+    !> A thread's buffer starts at `pair_buf_first` pairs (`src/parquet_spatial_bulk.f90`) and
+    !> doubles; the doubling copy must carry every pair. A clump of 120 galaxies within a few units
+    !> of one another gives 7140 pairs that all qualify -- several doublings on one thread -- and
+    !> every one of them is checked against the oracle. The mutation is a growth copy one element
+    !> short.
+    subroutine test_los_sweep_buffers_grow(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, nwant
+        integer(int64), parameter :: nclump = 120_int64
+
+        n = nclump
+        allocate (ra(n), dec(n), d(n), x(n), y(n), z(n), bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            ra(a) = 0.05_real64 + 0.002_real64 * (pf_random_at(fixture_seed + 61_int64, a, 1_int64) - 0.5_real64)
+            dec(a) = -0.02_real64 + 0.002_real64 * (pf_random_at(fixture_seed + 61_int64, a, 2_int64) - 0.5_real64)
+            d(a) = 1000.0_real64 + 4.0_real64 * (pf_random_at(fixture_seed + 61_int64, a, 3_int64) - 0.5_real64)
+        end do
+        x = d * cos(dec) * cos(ra)
+        y = d * cos(dec) * sin(ra)
+        z = d * sin(dec)
+        bp = 5.0_real64
+        bl = 20.0_real64
+        call brute_los_pairs(ra, dec, d, d, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, nwant == n * (n - 1_int64) / 2_int64, "precondition: every pair of the clump must qualify")
+        if (allocated(error)) return
+        call check(error, nwant > 4096_int64, "precondition: the clump must overflow the first buffer at least twice")
+        if (allocated(error)) return
+        call sx%build(x, y, z, radius=5.0_real64)
+        call parquet_debug_set_spatial_sweep_chunk(7_int64)
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN, threads=1)
+        call parquet_debug_reset_spatial_counters()
+        call check(error, pairs_equal_set(pi, pj, want, nwant), "every pair must survive the buffer's growth")
+    end subroutine test_los_sweep_buffers_grow
+
+    !> The separations are appended beside their pair and copied out beside it, chunk by chunk and
+    !> thread by thread; the mutation is the two arrays swapped, or offset by one, in the copy.
+    !> Judged against the fixture's own geometry rather than against `%within_los`, so the copy is
+    !> held to an oracle that never saw a buffer.
+    subroutine test_los_sweep_separations_follow_pairs(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), zred(:), d(:), x(:), y(:), z(:), bp(:), bl(:), dp(:), dl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, k, nwant
+        real(real64) :: ref
+
+        call make_redshift_survey(200_int64, 40_int64, 0.02_real64, 0.2_real64, 7_int64, ra, dec, zred, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 20.0_real64 * pf_random_at(fixture_seed, a, 39_int64)
+            bl(a) = 0.003_real64 + 0.01_real64 * pf_random_at(fixture_seed, a, 40_int64)
+        end do
+        call sx%build(x, y, z, radius=30.0_real64, los=zred)
+        call parquet_debug_set_spatial_sweep_chunk(7_int64)
+        call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN, dperp=dp, dpar=dl, threads=4)
+        call parquet_debug_reset_spatial_counters()
+        call brute_los_pairs(ra, dec, d, zred, bp, bl, PF_LINK_MEAN, want, nwant)
+        call check(error, nwant > 0_int64 .and. pairs_equal_set(pi, pj, want, nwant), &
+            "the chunked, threaded sweep's list must be the oracle's set")
+        if (allocated(error)) return
+        call check(error, size(dp, kind=int64) == nwant .and. size(dl, kind=int64) == nwant, &
+            "one transverse and one parallel separation per pair")
+        if (allocated(error)) return
+        do k = 1_int64, nwant
+            ref = los_dperp(ra(pi(k)), dec(pi(k)), d(pi(k)), ra(pj(k)), dec(pj(k)), d(pj(k)))
+            call check(error, abs(dp(k) - ref) <= 1.0e-9_real64 * ref + 1.0e-10_real64, &
+                "dperp must be its own pair's transverse separation after the copy")
+            if (allocated(error)) return
+            call check(error, dl(k) == abs(zred(pi(k)) - zred(pj(k))), &
+                "dpar must be its own pair's parallel separation after the copy")
+            if (allocated(error)) return
+        end do
+    end subroutine test_los_sweep_separations_follow_pairs
+
+    !> A chunk boundary is where an emitter can be dropped or swept twice; with the chunk at 1, 2,
+    !> 3 and 7, under the union (whose tiebreak reads the rank inside the accept) and the mean
+    !> (whose rank screens before it), every emitter is a boundary in one run or another. The set
+    !> against the oracle, and the count against the set, so a repeated pair shows as well as a
+    !> missing one; the mutation is an off-by-one in a chunk's last emitter.
+    subroutine test_los_sweep_chunk_boundaries(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), d(:), x(:), y(:), z(:), bp(:), bl(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, nwant
+        integer(int64), parameter :: chunks(4) = [1_int64, 2_int64, 3_int64, 7_int64]
+        integer, parameter :: rules(2) = [PF_LINK_MAX, PF_LINK_MEAN]
+        integer :: ci, ri
+
+        call make_wedge(300_int64, 40_int64, 500.0_real64, 1500.0_real64, 1_int64, ra, dec, d, x, y, z)
+        n = size(x, kind=int64)
+        allocate (bp(n), bl(n), want(n, n))
+        do a = 1_int64, n
+            bp(a) = 10.0_real64 + 10.0_real64 * pf_random_at(fixture_seed, a, 31_int64)
+            bl(a) = bp(a) * (5.0_real64 + 25.0_real64 * pf_random_at(fixture_seed, a, 32_int64))
+        end do
+        call sx%build(x, y, z, radius=sqrt(bp**2 + bl**2))
+        do ri = 1, 2
+            call brute_los_pairs(ra, dec, d, d, bp, bl, rules(ri), want, nwant)
+            call check(error, nwant > 0_int64, "the fixture must hold pairs under each rule")
+            if (allocated(error)) return
+            do ci = 1, 4
+                call parquet_debug_set_spatial_sweep_chunk(chunks(ci))
+                call sx%pairs_within_los(bp, bl, pi, pj, combine=rules(ri))
+                call parquet_debug_reset_spatial_counters()
+                call check(error, pairs_equal_set(pi, pj, want, nwant), &
+                    "the pair list must be the oracle's set at every chunk size, under every rule")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_los_sweep_chunk_boundaries
 
     ! ---- int32 answers: the same answer in the caller's kind ----
     !

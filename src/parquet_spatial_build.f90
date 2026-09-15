@@ -11,6 +11,7 @@
 !! "wrap silently" holds by construction rather than by mutating the caller's data -- which is also
 !! what lets `copy=.false.` and periodic boundaries be used together.
 submodule (parquet_spatial) parquet_spatial_build
+    use, intrinsic :: iso_fortran_env, only: int8
     implicit none
 
 contains
@@ -80,7 +81,7 @@ contains
         end do
     end procedure spatial_grid_dims
 
-    !> The ceiling on the bucket count. See the interface in `src/parquet_spatial.f90`.
+    !> The ceiling on the occupied count. See the interface in `src/parquet_spatial.f90`.
     module procedure spatial_cells_ceiling
         real(real64) :: frac
 
@@ -89,29 +90,187 @@ contains
         maxc = max(1_int64, int(frac * real(self%npts, kind=real64), kind=int64))
     end procedure spatial_cells_ceiling
 
-    !> Fixes the grid for cell side `h`, coarsening when the cell count would leave the counting path.
-    module procedure spatial_set_grid
-        real(real64) :: hh, rc, ratio, cellv(3), inv(3)
-        integer(int64) :: nc(3), maxc
-        integer :: it
+    !> The ceiling on the bounding box's cell count. See the interface in `src/parquet_spatial.f90`.
+    module procedure spatial_box_cells_ceiling
+        real(real64) :: frac
 
-        if (present(coarsened)) coarsened = .false.
-        hh = h
-        if (.not. (hh > 0.0_real64)) error stop "pf_spatial_index: the cell side must be > 0"
-        ! The ceiling is points-per-cell, not a copy of cubesort's cells-per-point budget: below
-        ! 0.3*n cells the bucketing keeps pf_argsort's serial counting fast path, and cubesort's
-        ! own rule (8*n cells) is 27x past that and would never see it.
-        maxc = spatial_cells_ceiling(self)
-        do it = 1, 64
-            call spatial_grid_dims(self%lo, self%hi, self%wrap, hh, nc, cellv, inv)
-            ! Multiplied in real64 first: three axes of up to 10^15 cells overflow int64, and the
-            ! overflow would be a NEGATIVE cell count that passes every comparison below it.
-            rc = real(nc(1), kind=real64) * real(nc(2), kind=real64) * real(nc(3), kind=real64)
-            if (rc <= real(maxc, kind=real64)) exit
-            ratio = (rc / real(maxc, kind=real64)) ** (1.0_real64 / 3.0_real64)
-            hh = hh * max(1.001_real64, ratio)
-            if (present(coarsened)) coarsened = .true.
+        frac = spatial_max_box_cells_per_point
+        if (dbg_max_cells > 0.0_real64) frac = dbg_max_cells
+        maxb = max(1_int64, int(frac * real(self%npts, kind=real64), kind=int64))
+    end procedure spatial_box_cells_ceiling
+
+    !> How many cells of a candidate grid hold at least one point, through a byte per cell rather
+    !> than a count per cell: the clamp asks this once per rung it tries, and a byte map of four
+    !> million cells stays in cache where the counts do not. The cell arithmetic is
+    !> `spatial_cell_of`'s, written out here and in `count_cells` -- keep the three in step.
+    function occupied_cells(self, nc, inv) result(occupied)
+        type(pf_spatial_index), intent(in), target :: self !! the index whose points are counted.
+        integer(int64), intent(in) :: nc(3) !! cells along each axis.
+        real(real64), intent(in) :: inv(3) !! 1/cell per axis.
+        integer(int64) :: occupied !! cells holding at least one point.
+        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        integer(int8), allocatable :: seen(:)
+        integer(int64) :: i, c, ii(3)
+        integer :: d
+
+        allocate (seen(nc(1) * nc(2) * nc(3)))
+        seen = 0_int8
+        call spatial_storage(self, xs, ys, zs)
+        do i = 1_int64, self%npts
+            ii(1) = floor((xs(i) - self%lo(1)) * inv(1), kind=int64)
+            ii(2) = floor((ys(i) - self%lo(2)) * inv(2), kind=int64)
+            ii(3) = floor((zs(i) - self%lo(3)) * inv(3), kind=int64)
+            do d = 1, 3
+                if (self%wrap(d) > 0.0_real64) then
+                    ii(d) = modulo(ii(d), nc(d))
+                else
+                    ii(d) = min(max(ii(d), 0_int64), nc(d) - 1_int64)
+                end if
+            end do
+            c = 1_int64 + ii(1) + nc(1) * (ii(2) + nc(2) * ii(3))
+            seen(c) = 1_int8
         end do
+        occupied = count(seen /= 0_int8, kind=int64)
+    end function occupied_cells
+
+    !> Counts the points into a candidate grid, one count per cell: what the probe builds its
+    !> prefix sums from. See `occupied_cells` for the arithmetic it shares.
+    subroutine count_cells(self, nc, inv, cnt)
+        type(pf_spatial_index), intent(in), target :: self !! the index whose points are counted.
+        integer(int64), intent(in) :: nc(3) !! cells along each axis.
+        real(real64), intent(in) :: inv(3) !! 1/cell per axis.
+        integer(int64), allocatable, intent(out) :: cnt(:) !! points in each cell.
+        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        integer(int64) :: i, c, ii(3)
+        integer :: d
+
+        allocate (cnt(nc(1) * nc(2) * nc(3)))
+        cnt = 0_int64
+        call spatial_storage(self, xs, ys, zs)
+        do i = 1_int64, self%npts
+            ii(1) = floor((xs(i) - self%lo(1)) * inv(1), kind=int64)
+            ii(2) = floor((ys(i) - self%lo(2)) * inv(2), kind=int64)
+            ii(3) = floor((zs(i) - self%lo(3)) * inv(3), kind=int64)
+            do d = 1, 3
+                if (self%wrap(d) > 0.0_real64) then
+                    ii(d) = modulo(ii(d), nc(d))
+                else
+                    ii(d) = min(max(ii(d), 0_int64), nc(d) - 1_int64)
+                end if
+            end do
+            c = 1_int64 + ii(1) + nc(1) * (ii(2) + nc(2) * ii(3))
+            cnt(c) = cnt(c) + 1_int64
+        end do
+    end subroutine count_cells
+
+    !> The number of cells in a grid of these dimensions, in `real64` so that three axes of up to
+    !> `10^15` cells cannot overflow into a NEGATIVE count that passes every comparison.
+    pure function box_cells(nc) result(rc)
+        integer(int64), intent(in) :: nc(3) !! cells along each axis.
+        real(real64) :: rc !! their product.
+
+        rc = real(nc(1), kind=real64) * real(nc(2), kind=real64) * real(nc(3), kind=real64)
+    end function box_cells
+
+    !> The clamp both ceilings apply to a candidate cell. See the interface in
+    !> `src/parquet_spatial.f90`.
+    !>
+    !> **A cell the ceilings coarsen lands on a fixed ladder of rungs, `spatial_clamp_rung**k`,
+    !> and on the lowest rung that satisfies both** -- so the grid a ceiling gives is a function
+    !> of the points and the ceilings, never of the candidate that was asked for. That is what
+    !> lets the probe rank two over-fine candidates as the same grid, and what makes a `%build`
+    !> and a later `%rebuild_for` under the same ceiling agree to the bit although the probe
+    !> samples the points in a different stored order. A cell that needs no coarsening is left
+    !> exactly as given.
+    !>
+    !> The box cap first, from the grid dimensions alone; then the occupied ceiling, which needs
+    !> the points counted into the candidate grid. Each is met by a jump to the rung a first
+    !> estimate names -- for the occupied ceiling the fill fraction `occupied / box cells`, which
+    !> can only rise as the cell grows, aimed fifteen per cent past the ceiling -- then a step
+    !> up per rung until the ceiling holds, then a step down per rung while it still holds. An
+    !> occupancy pass (`occupied_cells`, a byte per cell) per rung tried, so three or four in all
+    !> where creeping up on the ceiling by the measured excess alone took many; the full counts
+    !> are taken once, at the end, for the caller that wants them.
+    module procedure spatial_clamp_grid
+        integer(int64) :: maxc, maxb, occ, occ_b, nc_b(3)
+        real(real64) :: h_b, cell_b(3), inv_b(3)
+        integer :: k, it
+
+        coarsened = .false.
+        h_eff = h
+        maxb = spatial_box_cells_ceiling(self)
+        maxc = spatial_cells_ceiling(self)
+        ! ---- The box cap, from the dimensions alone ----
+        call spatial_grid_dims(self%lo, self%hi, self%wrap, h_eff, nc, cell, cell_inv)
+        if (box_cells(nc) > real(maxb, kind=real64)) then
+            coarsened = .true.
+            k = rung_above(h_eff * (box_cells(nc) / real(maxb, kind=real64)) ** (1.0_real64 / 3.0_real64))
+            do it = 1, 64
+                h_eff = spatial_clamp_rung ** k
+                call spatial_grid_dims(self%lo, self%hi, self%wrap, h_eff, nc, cell, cell_inv)
+                if (box_cells(nc) <= real(maxb, kind=real64)) exit
+                k = k + 1
+            end do
+            do it = 1, 64
+                h_b = spatial_clamp_rung ** (k - 1)
+                call spatial_grid_dims(self%lo, self%hi, self%wrap, h_b, nc_b, cell_b, inv_b)
+                if (box_cells(nc_b) > real(maxb, kind=real64)) exit
+                k = k - 1
+                h_eff = h_b
+                nc = nc_b
+                cell = cell_b
+                cell_inv = inv_b
+            end do
+        end if
+        ! ---- The occupied ceiling, from the points ----
+        occ = occupied_cells(self, nc, cell_inv)
+        if (occ > maxc) then
+            coarsened = .true.
+            k = rung_above(h_eff * (1.15_real64 * real(occ, kind=real64) / real(maxc, kind=real64)) ** (1.0_real64 / 3.0_real64))
+            do it = 1, 64
+                h_eff = spatial_clamp_rung ** k
+                call spatial_grid_dims(self%lo, self%hi, self%wrap, h_eff, nc, cell, cell_inv)
+                occ = occupied_cells(self, nc, cell_inv)
+                if (occ <= maxc) exit
+                k = k + 1
+            end do
+            do it = 1, 64
+                h_b = spatial_clamp_rung ** (k - 1)
+                call spatial_grid_dims(self%lo, self%hi, self%wrap, h_b, nc_b, cell_b, inv_b)
+                if (box_cells(nc_b) > real(maxb, kind=real64)) exit
+                occ_b = occupied_cells(self, nc_b, inv_b)
+                if (occ_b > maxc) exit
+                k = k - 1
+                h_eff = h_b
+                nc = nc_b
+                cell = cell_b
+                cell_inv = inv_b
+                occ = occ_b
+            end do
+        end if
+        if (present(cnt)) call count_cells(self, nc, cell_inv, cnt)
+
+    contains
+
+        !> The lowest rung of the ladder at or above `x`.
+        pure function rung_above(x) result(kk)
+            real(real64), intent(in) :: x !! a cell side; > 0.
+            integer :: kk !! the rung's exponent.
+
+            kk = ceiling(log(x) / log(spatial_clamp_rung))
+        end function rung_above
+
+    end procedure spatial_clamp_grid
+
+    !> Fixes the grid for cell side `h`, coarsening it under both ceilings.
+    module procedure spatial_set_grid
+        real(real64) :: hh, cellv(3), inv(3)
+        integer(int64) :: nc(3)
+        logical :: raised
+
+        if (.not. (h > 0.0_real64)) error stop "pf_spatial_index: the cell side must be > 0"
+        call spatial_clamp_grid(self, h, hh, nc, cellv, inv, raised)
+        if (present(coarsened)) coarsened = raised
         self%cell_side = hh
         self%grid_n = nc
         self%cell = cellv
@@ -124,15 +283,16 @@ contains
         integer(int64) :: ns, ns_cap, maxc
 
         if (present(coarsened)) coarsened = .false.
-        ! The same buckets-per-point ceiling the 3D grid obeys, and for the same reason: the bucket
-        ! index IS the bucketing sort's key, so it is a KEY RANGE that keeps `pf_argsort` on its
-        ! counting fast path, not a memory budget. `npix = 12*nside**2 <= 0.3*npts` therefore caps
-        ! nside at `sqrt(0.025*npts)`, rounded DOWN to a power of two.
+        ! The occupied ceiling's figure, applied to the whole pixel count: every pixel is a bucket
+        ! whether or not a point falls in it, and the count is known from `nside` alone, so there
+        ! is no counting pass here. `npix = 12*nside**2 <= 0.3*npts` caps nside at
+        ! `sqrt(0.025*npts)`, rounded DOWN to a power of two.
         !
-        ! **The cap costs HEALPix far less than it costs the 3D grid**, which is the whole reason
-        ! this backend exists: a sphere occupies a zero-thickness shell of the grid's bounding
-        ! cube, so around 95% of its cells can never hold a point and 0.3 cells per point buys
-        ! about 0.014 OCCUPIED ones. Every HEALPix pixel is on the sphere, so 0.3 buys 0.3.
+        ! **The cap costs HEALPix far less than it costs the 3D grid on the sky**, which is the
+        ! whole reason this backend exists: a sphere occupies a zero-thickness shell of the grid's
+        ! bounding cube, so most of the cube's cells can never hold a point; every HEALPix pixel
+        ! is on the sphere. On a catalogue covering a part of the sky the same cap counts the
+        ! empty pixels too (`feature_spatial_phase0.md`, question 11).
         maxc = spatial_cells_ceiling(self)
         ! Written as a loop with the test INSIDE, because `.and.` does not short-circuit in
         ! Fortran: with the ceiling test as a second operand, `12*(2*nside)**2` would still be
@@ -808,7 +968,7 @@ contains
             if (present(cell) .and. coarsened) then
                 call parquet_emit_advice("pf_spatial_index%build: cell= was coarsened from " // &
                     real_text(cell) // " to " // real_text(self%cell_side) // " to keep the grid under " // &
-                    "0.3 cells per point, which is what keeps the bucketing on the counting fast path")
+                    "0.3 occupied cells and 4 cells of the bounding box per point")
             end if
         end if
         call spatial_bucket(self)

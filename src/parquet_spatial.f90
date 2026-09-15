@@ -83,6 +83,8 @@ module parquet_spatial
     public :: parquet_debug_set_spatial_los_spread
     public :: parquet_debug_spatial_los_walk
     public :: parquet_debug_set_spatial_int32_ceiling
+    public :: parquet_debug_set_spatial_sweep_chunk
+    public :: parquet_debug_spatial_occupied_cells
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -244,13 +246,34 @@ module parquet_spatial
     !! AVX-512.
     real(real64), parameter :: spatial_work_a = 2.0_real64
     real(real64), parameter :: spatial_work_b = 1.0_real64 !! see spatial_work_a.
-    !> Ceiling on cells per point.
+    !> Ceiling on OCCUPIED cells per point.
     !!
-    !! **Not a tuning preference: below this the bucketing keeps `pf_argsort`'s counting fast path.**
-    !! That path needs a key range under `0.3 * n` when serial (`0.01 * n` at two threads), and it is
-    !! that gate -- not the 2^22 bucket limit -- that binds first. cubesort's own budget rule admits
-    !! `8 * n` cells, which is 27x past this and would never see the counting path; do not copy it.
+    !! **Counted over the cells that hold a point, not over the bounding box**, so that a cloud
+    !! filling a part of its box -- a survey cone, a shell -- gets the cell its footprint earns
+    !! rather than one coarsened for the empty cells around it. On a cloud filling its box nearly
+    !! every cell is occupied and this is the 0.3 cells per point that keeps the bucketing on
+    !! `pf_argsort`'s counting fast path; on a partial footprint the box count passes that and the
+    !! bucketing takes the radix path, measured to cost the same at a million points
+    !! (`feature_spatial_phase0.md`). What bounds the box count, and with it the memory of the
+    !! dense `start` array, is `spatial_max_box_cells_per_point`. cubesort's own budget rule admits
+    !! `8 * n` cells; do not copy it. A HEALPix sky index applies this figure to its pixel count,
+    !! every pixel of the sphere counted (`spatial_set_nside`).
     real(real64), parameter :: spatial_max_cells_per_point = 0.3_real64
+    !> Ceiling on cells of the BOUNDING BOX per point: the memory bound on the dense `start` array,
+    !! eight bytes per box cell, so at most 32 bytes per point.
+    !!
+    !! The one of the two ceilings that binds on a very thin footprint, where the occupied count
+    !! alone would allow a grid whose empty cells outweigh the points. Every site applying either
+    !! ceiling reads it through `spatial_cells_ceiling` or `spatial_box_cells_ceiling`, and the
+    !! test-only override `parquet_debug_set_spatial_max_cells_per_point` forces both.
+    real(real64), parameter :: spatial_max_box_cells_per_point = 4.0_real64
+    !> The ladder a coarsened cell lands on: `spatial_clamp_rung**k` for integer `k`.
+    !!
+    !! What makes the clamp CANONICAL (`spatial_clamp_grid`): a cell either ceiling coarsens is
+    !! the lowest rung satisfying both, whatever cell was asked for, so two over-fine candidates
+    !! are the same grid and a rebuild reproduces a build to the bit. Five per cent between rungs
+    !! is within the probe's own granularity, and costs nothing a query can see.
+    real(real64), parameter :: spatial_clamp_rung = 1.05_real64
     !> Relative slack on the padded line-of-sight cylinder a `%pairs_within_los` emitter walks.
     !!
     !! The cylinder's radius and ends are analytic bounds on where an accepted partner can sit
@@ -259,6 +282,17 @@ module parquet_spatial
     !! distances involved. At a thousand units that is a millionth: nothing against a cell, and far
     !! above the rounding it guards against. The accept test is exact whatever the walk covers.
     real(real64), parameter :: spatial_los_slack = 1.0e-9_real64
+    !> Emitters per chunk of the `%pairs_within_los` sweep.
+    !!
+    !! The sweep takes its emitters in chunks of this many, in stored order, one chunk at a time
+    !! per thread under dynamic scheduling, each thread appending the pairs it finds to a buffer
+    !! of its own; the chunks are concatenated in chunk order afterwards, which is what makes the
+    !! pair list the same whatever the team size. At a few hundred nanoseconds per emitter a chunk
+    !! is a fraction of a millisecond of work -- enough to amortise the scheduling, and small enough
+    !! that a million points give a large team hundreds of chunks to balance over. Not a setting:
+    !! nothing a caller can observe distinguishes one value from another.
+    !! `parquet_debug_set_spatial_sweep_chunk` lowers it so a test-sized fixture spans many chunks.
+    integer(int64), parameter :: spatial_sweep_chunk = 2048_int64
     !> Ratio of the refinement step, applied once around the bracket's winner.
     !!
     !! **The bracket alone leaves a granularity error, and it was measured rather than predicted.**
@@ -553,6 +587,9 @@ module parquet_spatial
     integer(int64), save :: dbg_los_balls = 0_int64
     !> Candidates that reached a line-of-sight accept test since the counters were reset.
     integer(int64), save :: dbg_los_tested = 0_int64
+    !> Emitters per chunk forced by `parquet_debug_set_spatial_sweep_chunk`; <= 0 means the shipped
+    !! `spatial_sweep_chunk`.
+    integer(int64), save :: dbg_sweep_chunk = 0_int64
 
     ! ---- Shared argument checks (parquet_spatial_build.f90) ----
 
@@ -672,22 +709,49 @@ module parquet_spatial
         !! increasing in `theta` over [0, 180 degrees], so a Euclidean ball of that radius in
         !! unit-vector space selects exactly the points within `theta` on the sky -- with no pole
         !! special case and no wrap at 0h, because the sphere has neither.
-        !> The most cells (or pixels) this index may bucket into: `spatial_max_cells_per_point`
-        !> times the point count, at least one -- or the fraction `parquet_debug_set_spatial_max_cells_per_point`
-        !> forced. Every site that applies the ceiling reads it from here, so the test-only override
-        !> cannot reach one of them and miss another.
+        !> The most OCCUPIED cells a 3D grid may have, and the most pixels a sky index may bucket
+        !> into: `spatial_max_cells_per_point` times the point count, at least one -- or the fraction
+        !> `parquet_debug_set_spatial_max_cells_per_point` forced. Every site that applies the
+        !> ceiling reads it from here, so the test-only override cannot reach one of them and miss
+        !> another.
         module function spatial_cells_ceiling(self) result(maxc)
             type(pf_spatial_index), intent(in) :: self !! the index being bucketed.
-            integer(int64) :: maxc !! the ceiling on the bucket count.
+            integer(int64) :: maxc !! the ceiling on the occupied count.
         end function spatial_cells_ceiling
 
-        !> Fixes the HEALPix resolution for a query chord, coarsening to keep the counting path.
+        !> The most cells a 3D grid's bounding box may have: `spatial_max_box_cells_per_point`
+        !> times the point count, at least one -- or the forced fraction, which overrides both
+        !> ceilings alike.
+        module function spatial_box_cells_ceiling(self) result(maxb)
+            type(pf_spatial_index), intent(in) :: self !! the index being bucketed.
+            integer(int64) :: maxb !! the ceiling on the box's cell count.
+        end function spatial_box_cells_ceiling
+
+        !> Applies both ceilings to a candidate cell side: the box cap from the grid dimensions
+        !> alone, then the occupied ceiling from the points' occupancy of the candidate grid,
+        !> coarsening and recounting until it holds. The one clamp the build and the probe share,
+        !> so a candidate the probe ranks is the grid the build would make of it. Counts the
+        !> points into the final grid only when asked to, which the probe is.
+        module subroutine spatial_clamp_grid(self, h, h_eff, nc, cell, cell_inv, coarsened, cnt)
+            type(pf_spatial_index), intent(in), target :: self !! the index whose points are counted.
+            real(real64), intent(in) :: h !! the candidate cell side.
+            real(real64), intent(out) :: h_eff !! the side actually used, after both ceilings.
+            integer(int64), intent(out) :: nc(3) !! cells along each axis, after any clamp.
+            real(real64), intent(out) :: cell(3) !! cell side per axis, for the grid the counts describe.
+            real(real64), intent(out) :: cell_inv(3) !! 1/cell per axis.
+            logical, intent(out) :: coarsened !! .true. when either ceiling raised the side.
+            integer(int64), allocatable, intent(out), optional :: cnt(:) !! points in each cell of the final grid.
+        end subroutine spatial_clamp_grid
+
+        !> Fixes the HEALPix resolution for a query chord, coarsening to keep the pixel count under
+        !> the ceiling.
         !>
         !> The pixel counterpart of `spatial_set_grid`, and it answers the same question: what
         !> bucket size serves a query of this size, subject to the bucket count staying under
-        !> `spatial_max_cells_per_point * npts` so the bucketing sort keeps `pf_argsort`'s counting
-        !> fast path. Sets `nside_v`, `npix_v` and `n_cells`, and zeroes the 3D grid's own fields
-        !> so that `%cell_size`, `%cell_sides` and `%grid` report a value no valid grid ever has.
+        !> `spatial_max_cells_per_point * npts`. Every pixel of the sphere is counted, occupied or
+        !> not, where the grid counts only its occupied cells. Sets `nside_v`, `npix_v` and
+        !> `n_cells`, and zeroes the 3D grid's own fields so that `%cell_size`, `%cell_sides` and
+        !> `%grid` report a value no valid grid ever has.
         module subroutine spatial_set_nside(self, want, coarsened)
             type(pf_spatial_index), intent(inout) :: self !! the index whose resolution is being set.
             integer(int64), intent(in) :: want !! the resolution asked for; clamped by the cap.
@@ -727,12 +791,13 @@ module parquet_spatial
             type(pf_spatial_index), intent(inout) :: self !! the index to empty.
         end subroutine spatial_clear_worker
 
-        !> Fixes the grid dimensions for cell side `h`, coarsening it when the cell count would
-        !! exceed what keeps the bucketing on `pf_argsort`'s counting path.
+        !> Fixes the grid dimensions for cell side `h`, coarsening it under the two ceilings:
+        !! `spatial_max_cells_per_point` occupied cells per point and
+        !! `spatial_max_box_cells_per_point` cells of the bounding box per point.
         module subroutine spatial_set_grid(self, h, coarsened)
-            type(pf_spatial_index), intent(inout) :: self !! the index whose grid is being fixed.
+            type(pf_spatial_index), intent(inout), target :: self !! the index whose grid is being fixed.
             real(real64), intent(in) :: h !! the requested cell side.
-            logical, intent(out), optional :: coarsened !! .true. when the clamp raised it.
+            logical, intent(out), optional :: coarsened !! .true. when either ceiling raised it.
         end subroutine spatial_set_grid
 
         !> Cells per axis, the per-axis cell side and its reciprocal, for one candidate cell size.
@@ -877,6 +942,57 @@ module parquet_spatial
     ! ---- Ball search (parquet_spatial_query.f90) ----
 
     interface
+        !> The cell range a ball of radius `r` reaches along one FREE axis, as a start and a count.
+        !!
+        !! Reports `cnt = 0` when the ball misses the grid entirely, which is what lets the caller
+        !! return without walking anything. A module procedure rather than a helper contained in
+        !! the query submodule because the line-of-sight sweep (`parquet_spatial_bulk.f90`) walks
+        !! the same cells.
+        pure module subroutine axis_span_free(pd, r, lod, inv, nc, a, cnt)
+            real(real64), intent(in) :: pd !! the query point's coordinate on this axis.
+            real(real64), intent(in) :: r !! the search radius.
+            real(real64), intent(in) :: lod !! the grid origin on this axis.
+            real(real64), intent(in) :: inv !! 1/cell on this axis.
+            integer(int64), intent(in) :: nc !! cells along this axis.
+            integer(int64), intent(out) :: a !! first cell index, 0-based.
+            integer(int64), intent(out) :: cnt !! how many cells; 0 when the ball misses the grid.
+        end subroutine axis_span_free
+
+        !> The exact line-of-sight criterion for one candidate: the ONE body every walk calls.
+        !!
+        !! `spatial_scan`'s two loops, `spatial_scan_axis`'s two and the sweep in
+        !! `parquet_spatial_bulk.f90` all accept a partner through this, so the criterion is written
+        !! once. It runs about once per emitter -- only the walk's pre-filter survivors reach it --
+        !! so the call costs nothing the bench can see. `s2` is passed in rather than recomputed so
+        !! the arithmetic is the caller's pre-filter's to the bit. `key` and `minkey` are read only
+        !! under `want_tie`, and `bpj`/`blj` only under a rule other than 0, so a caller may pass
+        !! zeros where it has no value.
+        pure module subroutine los_accept(sx, sy, sz, s2, q1, q2, q3, dself, dj, lself, lj, lrule, want_tie, &
+                                          key, minkey, bpself, blself, bpj, blj, ok, dpv, dlv)
+            real(real64), intent(in) :: sx !! the candidate's offset from the emitter, x.
+            real(real64), intent(in) :: sy !! the same, y.
+            real(real64), intent(in) :: sz !! the same, z.
+            real(real64), intent(in) :: s2 !! `sx**2 + sy**2 + sz**2`, as the caller's pre-filter formed it.
+            real(real64), intent(in) :: q1 !! the emitter relative to the observer, x.
+            real(real64), intent(in) :: q2 !! the same, y.
+            real(real64), intent(in) :: q3 !! the same, z.
+            real(real64), intent(in) :: dself !! the emitter's distance from the observer, > 0.
+            real(real64), intent(in) :: dj !! the candidate's distance from the observer, > 0.
+            real(real64), intent(in) :: lself !! the emitter's parallel coordinate.
+            real(real64), intent(in) :: lj !! the candidate's parallel coordinate.
+            integer, intent(in) :: lrule !! 0 for the emitter's own cylinder, else a `PF_LINK_*` rule.
+            logical, intent(in) :: want_tie !! whether the union's emit-once tiebreak is in force.
+            integer(int64), intent(in) :: key !! the candidate's order key; read under `want_tie` only.
+            integer(int64), intent(in) :: minkey !! the emitter's order key; read under `want_tie` only.
+            real(real64), intent(in) :: bpself !! the emitter's transverse length.
+            real(real64), intent(in) :: blself !! the emitter's parallel length.
+            real(real64), intent(in) :: bpj !! the candidate's transverse length; rules other than 0.
+            real(real64), intent(in) :: blj !! the candidate's parallel length; rules other than 0.
+            logical, intent(out) :: ok !! whether the candidate is accepted.
+            real(real64), intent(out) :: dpv !! the transverse separation.
+            real(real64), intent(out) :: dlv !! the parallel separation.
+        end subroutine los_accept
+
         !> Walks the cells a ball of radius `r` about `p` can reach and reports what it finds.
         !!
         !! The one scan every query family goes through. `out32`/`out64`/`dist` are filled only as
@@ -3243,9 +3359,24 @@ contains
         n = dbg_pixels_visited
     end function parquet_debug_spatial_pixels_visited
 
+    !> Forces how many emitters one chunk of the `%pairs_within_los` sweep holds.
+    !>
+    !> **Test-only, and required rather than convenient.** The sweep concatenates its threads'
+    !> pair lists chunk by chunk, and a wrong boundary -- a chunk's last emitter dropped or swept
+    !> twice, the chunks joined in thread order -- is a silently wrong list. The shipped chunk
+    !> (`spatial_sweep_chunk`) is far larger than any test fixture, so without this every test
+    !> sweeps one chunk on one thread and sees none of it. Public for the reason
+    !> `parquet_debug_set_spatial_cell` is; reset by `parquet_debug_reset_spatial_counters`. No
+    !> library code calls it.
+    subroutine parquet_debug_set_spatial_sweep_chunk(n)
+        integer(int64), intent(in) :: n !! emitters per chunk; <= 0 restores the shipped chunk.
+
+        dbg_sweep_chunk = n
+    end subroutine parquet_debug_set_spatial_sweep_chunk
+
     !> Clears the probe, rebuild, pixel, thread and line-of-sight counters, and every forcing:
-    !> the cell size, the resolution, the run buffer, the shell start, the cells-per-point ceiling
-    !> and the line-of-sight walk and spread.
+    !> the cell size, the resolution, the run buffer, the shell start, the cells-per-point ceiling,
+    !> the sweep chunk and the line-of-sight walk and spread.
     subroutine parquet_debug_reset_spatial_counters()
 
         dbg_probe_count = 0_int64
@@ -3264,6 +3395,7 @@ contains
         dbg_los_balls = 0_int64
         dbg_los_tested = 0_int64
         dbg_int32_ceiling = 0_int64
+        dbg_sweep_chunk = 0_int64
     end subroutine parquet_debug_reset_spatial_counters
 
     !> The bounds a line-of-sight walk rests on, as `%build` (or the last `%rebuild`) measured them.
@@ -3287,20 +3419,40 @@ contains
     end subroutine parquet_debug_spatial_los_bounds
 
     !> Forces the ceiling on cells per point that every later `%build`, `%rebuild_for` and re-tune
-    !> obeys, on the 3D grid and as a pixel count on a HEALPix index alike.
+    !> obeys: both the occupied and the box ceiling of the 3D grid, and the pixel count of a
+    !> HEALPix index.
     !>
     !> **Test-and-bench only, and public for the reason `parquet_debug_set_spatial_cell` is.** The
-    !> shipped ceiling (`spatial_max_cells_per_point`) is where the bucketing keeps `pf_argsort`'s
-    !> counting fast path, so it is not a tuning preference and this is deliberately not a setting:
-    !> it exists so that `bench/benchmark_spatial.sh` (`MODE=los CELLS_PER_POINT=`) can measure what
-    !> a survey's line-of-sight sweep would gain from a finer grid before anyone decides whether a
-    !> knob is warranted, and so a test can show that the ceiling binds and that relaxing it changes
-    !> the cell and nothing else. No library code calls it.
+    !> two shipped ceilings (`spatial_max_cells_per_point`, `spatial_max_box_cells_per_point`) are
+    !> a measured trade of memory against the cell a small radius wants, not a tuning preference,
+    !> so this is deliberately not a setting: it exists so that `bench/benchmark_spatial.sh`
+    !> (`MODE=los CELLS_PER_POINT=`) can measure what a survey's sweep would gain from a finer grid
+    !> before anyone decides whether a knob is warranted, and so a test can show that a ceiling
+    !> binds and that relaxing it changes the cell and nothing else. No library code calls it.
     subroutine parquet_debug_set_spatial_max_cells_per_point(c)
-        real(real64), intent(in) :: c !! cells per point to allow; <= 0 restores the shipped ceiling.
+        real(real64), intent(in) :: c !! cells per point to allow, for both ceilings; <= 0 restores the shipped ones.
 
         dbg_max_cells = c
     end subroutine parquet_debug_set_spatial_max_cells_per_point
+
+    !> How many cells of a built 3D grid hold at least one point; the pixel count with a point on a
+    !> HEALPix index.
+    !>
+    !> **Test-only, and public for the reason `parquet_debug_spatial_los_bounds` is.** The occupied
+    !> count is what the cells-per-point ceiling is counted over, and nothing public reports it --
+    !> `%cells()` is the bounding box's count -- so without it a test cannot tell the occupied
+    !> ceiling binding from the box cap binding. No library code calls it.
+    subroutine parquet_debug_spatial_occupied_cells(index, occupied)
+        type(pf_spatial_index), intent(in) :: index !! a built index.
+        integer(int64), intent(out) :: occupied !! cells holding at least one point; 0 before `%build`.
+        integer(int64) :: c
+
+        occupied = 0_int64
+        if (.not. index%built_ok) return
+        do c = 1_int64, index%n_cells
+            if (index%start(c + 1_int64) > index%start(c)) occupied = occupied + 1_int64
+        end do
+    end subroutine parquet_debug_spatial_occupied_cells
 
     !> Forces the walk every line-of-sight query uses, overriding the per-point choice.
     !>

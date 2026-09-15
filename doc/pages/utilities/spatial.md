@@ -801,15 +801,15 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
   180, but past a hemisphere the ball covers most of the catalogue and the grid has nothing left to
   prune — that is not a neighbour search, and refusing says so where returning everything slowly
   would not.
-- **The number of cells is capped** at 0.3 per point — the figure the coarsening warning names when
-  it fires. A very small `cell=` is
-  coarsened to stay under it, with a warning: below that ceiling the bucketing keeps a fast path
-  that a finer grid would lose, which costs more than the finer cells save. **The same cap applies
-  to a HEALPix sky index as a pixel count**, so `nside` is bounded by the catalogue size and an
-  explicit `nside=` is coarsened the same way, with the same warning. It costs a pixelisation far
-  less than it costs the grid, because every pixel is on the sphere while most of the grid's cells
-  are not — but on a small catalogue it still floors the resolution well above what a small query
-  radius would want.
+- **The number of cells is capped**: at 0.3 occupied cells per point, and at 4 cells of the
+  bounding box per point — the figures the coarsening warning names when it fires. A very small
+  `cell=` is coarsened to stay under both, with a warning. Counting the first over the cells that
+  hold a point is what lets a survey cone or a shell, which fills a fraction of its bounding box,
+  keep a cell matched to its own footprint; the second bounds the memory of the cell table on a
+  footprint thinner still. **A HEALPix sky index caps its pixel count** at 0.3 per point, counting
+  every pixel of the sphere, so `nside` is bounded by the catalogue size and an explicit `nside=`
+  is coarsened the same way, with the same warning — which on a small catalogue floors the
+  resolution well above what a small query radius would want.
 - **`combine=PF_LINK_SUM` on the sky needs every angular radius to be at most 45 degrees.** The
   rule's searcher walks twice its own radius, and 90 degrees is the ceiling every sky query has, so
   the halved limit is that ceiling seen from the other end rather than a second policy. The

@@ -81,6 +81,7 @@ module parquet_healpix
     ! ---- Added after the three tiers ----
     !
     public :: pf_angdist_deg
+    public :: pf_neighbours_nest, pf_neighbours_ring
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -234,6 +235,46 @@ module parquet_healpix
     !> Longitude offset of each face centre, in units of a ring's quarter width.
     integer(int64), parameter :: hpx_jpll(0:11) = [1_int64, 3_int64, 5_int64, 7_int64, &
         0_int64, 2_int64, 4_int64, 6_int64, 1_int64, 3_int64, 5_int64, 7_int64]
+
+    ! ---- Face neighbours ----
+    !
+    ! The two tables `pf_neighbours_nest` steps across a face boundary with. A step by `(dx, dy)`
+    ! from a pixel at within-face coordinates `(x, y)` falls in one of nine classes once each
+    ! coordinate is wrapped back into the face, `4 + dx + 3*dy` with 4 meaning "stays on the face";
+    ! `hpx_nb_face` names the face across each class and `hpx_nb_swap` says how the wrapped
+    ! coordinates map onto that face's own.
+    !
+    ! **Derived from the pixelisation itself, not copied from any implementation** -- the module's
+    ! provenance rule. For every boundary pixel of every face the pixel across the edge was found
+    ! at a 64x finer resolution: the sub-pixel at the middle of the crossed edge, extrapolated one
+    ! sub-pixel step outward through `pf_pix2vec_nest` and named by `pf_vec2pix_nest`, with the
+    ! transform mapping the wrapped coordinates onto it read off and required to agree along the
+    ! whole edge; the corner entries from the point reflected through the vertex, which lands in
+    ! an edge neighbour exactly where three faces meet and no corner neighbour exists.
+    ! `test/test_healpix.f90` repeats that derivation against these constants for every pixel at
+    ! two resolutions (`the neighbour tables match the pixelisation`), so an entry cannot drift
+    ! from the geometry.
+
+    !> The face across each step class (second index) from each face (first); -1 at a corner
+    !! where three faces meet.
+    integer, parameter :: hpx_nb_face(0:11, 0:8) = reshape([ &
+        8, 9, 10, 11, -1, -1, -1, -1, 10, 11, 8, 9, &
+        5, 6, 7, 4, 8, 9, 10, 11, 9, 10, 11, 8, &
+        -1, -1, -1, -1, 5, 6, 7, 4, -1, -1, -1, -1, &
+        4, 5, 6, 7, 11, 8, 9, 10, 11, 8, 9, 10, &
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, &
+        1, 2, 3, 0, 0, 1, 2, 3, 5, 6, 7, 4, &
+        -1, -1, -1, -1, 7, 4, 5, 6, -1, -1, -1, -1, &
+        3, 0, 1, 2, 3, 0, 1, 2, 4, 5, 6, 7, &
+        2, 3, 0, 1, -1, -1, -1, -1, 0, 1, 2, 3], [12, 9])
+    !> Which of flip-x (1), flip-y (2) and swap (4) map the wrapped coordinates onto the face
+    !! across, per face group (north, equatorial, south: first index) and step class (second).
+    integer, parameter :: hpx_nb_swap(0:2, 0:8) = reshape([ &
+        0, 0, 3, 0, 0, 6, 0, 0, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 0, 0, 6, 0, 0, 3, 0, 0], [3, 9])
+    !> The step across each of the eight neighbours, in the order `pf_neighbours_nest` returns
+    !! them: `x` then `y`, in the face's own coordinates.
+    integer, parameter :: hpx_nb_dx(8) = [-1, -1, 0, 1, 1, 1, 0, -1]
+    integer, parameter :: hpx_nb_dy(8) = [0, 1, 1, 1, 0, -1, -1, -1] !! see `hpx_nb_dx`.
 
     ! ---- The grid object ----
 
@@ -535,6 +576,35 @@ module parquet_healpix
         module procedure hpx_nest2ring_i64
     end interface pf_nest2ring
 
+    !> The eight neighbours of a NEST pixel.
+    !!
+    !! `nb(8)` receives, in the same kind as `nside` and `ipix`, the pixels across the eight steps
+    !! from `ipix` in its face's `(x, y)` coordinates -- the two within-face coordinates whose bits a
+    !! NEST index interleaves, `x` on the even bits and `y` on the odd -- in the order `(-1, 0)`,
+    !! `(-1, +1)`, `(0, +1)`, `(+1, +1)`, `(+1, 0)`, `(+1, -1)`, `(0, -1)`, `(-1, -1)`: the four
+    !! across an edge at the odd positions, the four across a corner between them. Every pixel has
+    !! its four edge neighbours; a corner neighbour is missing, and reported as **-1**, at the eight
+    !! vertices where three faces meet, so exactly 24 entries over the whole sphere are -1 at any
+    !! resolution.
+    !!
+    !! **Total and `pure`, on the conversions' rule: it validates nothing and never aborts.** An
+    !! `nside` that is not a positive power of two, or an `ipix` outside `0 .. 12*nside**2 - 1`,
+    !! gives a meaningless answer rather than an error. Not `elemental`, because `nb` is an array.
+    !! A lookup costs a small fraction of a disc query: an interior pixel is eight Morton codes
+    !! from six half-codes, a boundary pixel goes through the two face tables.
+    interface pf_neighbours_nest
+        module procedure hpx_neighbours_nest_i32
+        module procedure hpx_neighbours_nest_i64
+    end interface pf_neighbours_nest
+
+    !> The eight neighbours of a RING pixel: `pf_neighbours_nest` with the index converted in and
+    !! every neighbour converted out, so the same pixels in the same order as RING indices, with
+    !! the same -1 at a missing corner. Same kinds, same total contract.
+    interface pf_neighbours_ring
+        module procedure hpx_neighbours_ring_i32
+        module procedure hpx_neighbours_ring_i64
+    end interface pf_neighbours_ring
+
     !> Largest angular distance from a pixel centre to one of its own corners, in radians.
     !!
     !! **The margin `pf_query_disc`'s `inclusive = .true.` mode enlarges its radius by, and the
@@ -806,6 +876,34 @@ module parquet_healpix
             integer(int64), intent(in) :: ipnest !! NEST pixel index, 0-based.
             integer(int64), intent(out) :: ipring !! the same pixel's RING index.
         end subroutine hpx_nest2ring_i64
+
+        !> The eight neighbours of a NEST pixel, int32 kinds. See the `pf_neighbours_nest` generic.
+        pure module subroutine hpx_neighbours_nest_i32(nside, ipix, nb)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int32), intent(in) :: ipix !! NEST pixel index, 0-based.
+            integer(int32), intent(out) :: nb(8) !! its neighbours in step order; -1 at a missing corner.
+        end subroutine hpx_neighbours_nest_i32
+
+        !> The eight neighbours of a NEST pixel, int64 kinds. See the `pf_neighbours_nest` generic.
+        pure module subroutine hpx_neighbours_nest_i64(nside, ipix, nb)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix !! NEST pixel index, 0-based.
+            integer(int64), intent(out) :: nb(8) !! its neighbours in step order; -1 at a missing corner.
+        end subroutine hpx_neighbours_nest_i64
+
+        !> The eight neighbours of a RING pixel, int32 kinds. See the `pf_neighbours_ring` generic.
+        pure module subroutine hpx_neighbours_ring_i32(nside, ipix, nb)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int32), intent(in) :: ipix !! RING pixel index, 0-based.
+            integer(int32), intent(out) :: nb(8) !! its neighbours as RING indices; -1 at a missing corner.
+        end subroutine hpx_neighbours_ring_i32
+
+        !> The eight neighbours of a RING pixel, int64 kinds. See the `pf_neighbours_ring` generic.
+        pure module subroutine hpx_neighbours_ring_i64(nside, ipix, nb)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix !! RING pixel index, 0-based.
+            integer(int64), intent(out) :: nb(8) !! its neighbours as RING indices; -1 at a missing corner.
+        end subroutine hpx_neighbours_ring_i64
     end interface
 
     ! ---- Interfaces: ring geometry and the Morton codec ----

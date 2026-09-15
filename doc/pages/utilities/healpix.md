@@ -206,6 +206,33 @@ makes it the right scheme for hierarchical work and for keeping nearby pixels ne
 arithmetic — no direction is computed and nothing rounds — so a round trip is the identity, and at
 `nside = 1` the two schemes coincide.
 
+## The neighbours of a pixel
+
+```fortran
+call pf_neighbours_nest(nside, ipix, nb)
+call pf_neighbours_ring(nside, ipix, nb)
+```
+
+`nb` is an integer array of eight, in the kind of `nside` and `ipix`, holding the pixels across
+the eight steps from `ipix` in its face's `(x, y)` coordinates — the two within-face coordinates
+whose bits a NEST index interleaves, `x` on the even bits and `y` on the odd — in the order
+`(-1, 0)`, `(-1, +1)`, `(0, +1)`, `(+1, +1)`, `(+1, 0)`, `(+1, -1)`, `(0, -1)`, `(-1, -1)`: the
+four across an edge at `nb(1)`, `nb(3)`, `nb(5)` and `nb(7)`, the four across a corner between
+them. Every pixel has its four edge neighbours. A corner neighbour is missing at the eight
+vertices where three faces meet, and is reported as **-1** there, so exactly 24 entries over the
+whole sphere are -1 at any resolution. The `_ring` form takes and returns RING indices and names
+the same pixels.
+
+Both are `pure` and total, on the conversions' rule: nothing is validated, and an `ipix` outside
+`0 .. 12*nside**2 - 1` gives a meaningless answer rather than an error. Neither is `elemental`,
+because `nb` is an array.
+
+A neighbour lookup costs a small fraction of a disc query (`bench/benchmark_healpix.sh --mode=conv`
+measures it beside the conversions), so it is the tool for a search that reaches only the pixels
+adjacent to a known one. For a disc of any size `pf_query_disc` walks the rings directly and is the
+cheaper route: a disc built by stepping through neighbours tests each pixel's centre and visits
+several pixels for every one it keeps.
+
 ## Resolution, kinds and limits
 
 `nside` must be a positive power of two. Every procedure is generic over `integer(int32)` and

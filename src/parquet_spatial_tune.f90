@@ -139,8 +139,8 @@ contains
 #ifdef _OPENMP
         use omp_lib, only: omp_in_parallel
 #endif
-        real(real64) :: cand(max_candidates), work(max_candidates)
-        real(real64) :: rho, r_eff, hm
+        real(real64) :: cand(max_candidates), work(max_candidates), heff(max_candidates)
+        real(real64) :: rho, r_eff, hm, h_bind, w_bind
         integer :: ndim, k, best, ncand, widened_lo, widened_hi
         logical :: in_region
 
@@ -162,12 +162,15 @@ contains
         if (in_region) return
         if (self%npts < 2_int64) return
 
+        ! Zero until a candidate is coarsened: no candidate is finer than a grid nobody has made.
+        h_bind = 0.0_real64
+        w_bind = 0.0_real64
         ncand = 3
         cand(1) = hm / spatial_probe_step
         cand(2) = hm
         cand(3) = hm * spatial_probe_step
         do k = 1, ncand
-            work(k) = spatial_probe_cost(self, cand(k), radii)
+            call probe(k)
         end do
         widened_lo = 0
         widened_hi = 0
@@ -179,14 +182,15 @@ contains
                 widened_lo = widened_lo + 1
                 cand(2:ncand + 1) = cand(1:ncand)
                 work(2:ncand + 1) = work(1:ncand)
+                heff(2:ncand + 1) = heff(1:ncand)
                 ncand = ncand + 1
                 cand(1) = cand(2) / spatial_probe_step
-                work(1) = spatial_probe_cost(self, cand(1), radii)
+                call probe(1)
             else if (best == ncand .and. widened_hi < spatial_probe_widen) then
                 widened_hi = widened_hi + 1
                 ncand = ncand + 1
                 cand(ncand) = cand(ncand - 1) * spatial_probe_step
-                work(ncand) = spatial_probe_cost(self, cand(ncand), radii)
+                call probe(ncand)
             else
                 exit
             end if
@@ -200,41 +204,66 @@ contains
         hm = cand(best)
         ncand = ncand + 1
         cand(ncand) = hm / spatial_refine_step
-        work(ncand) = spatial_probe_cost(self, cand(ncand), radii)
+        call probe(ncand)
         ncand = ncand + 1
         cand(ncand) = hm * spatial_refine_step
-        work(ncand) = spatial_probe_cost(self, cand(ncand), radii)
+        call probe(ncand)
         best = minloc(work(1:ncand), dim=1)
-        h = cand(best)
+        ! The winner's CLAMPED side, so that `spatial_set_grid` finds a cell both ceilings already
+        ! accept and counts once rather than walking the ladder again.
+        h = heff(best)
         dbg_probe_count = int(ncand, kind=int64)
+
+    contains
+
+        !> Ranks candidate `k`, reusing the clamped grid once one candidate has been coarsened:
+        !> the clamp is canonical (`spatial_clamp_grid`), so every finer candidate is that same
+        !> grid at that same cost, and probing it again would only pay the counting passes.
+        subroutine probe(k)
+            integer, intent(in) :: k !! the candidate to rank.
+
+            if (cand(k) < h_bind) then
+                heff(k) = h_bind
+                work(k) = w_bind
+                return
+            end if
+            work(k) = spatial_probe_cost(self, cand(k), radii, heff(k))
+            if (heff(k) > cand(k)) then
+                h_bind = heff(k)
+                w_bind = work(k)
+            end if
+        end subroutine probe
+
     end procedure spatial_choose_cell
 
     !> The proxy cost of one candidate cell size: `A*cells_visited + B*points_tested`, summed over
     !> a deterministic draw of probe queries.
     !>
     !> Needs only the counting half of a build, so it is far cheaper than building the candidate.
-    function spatial_probe_cost(self, h, radii) result(w)
+    function spatial_probe_cost(self, h, radii, h_eff) result(w)
         type(pf_spatial_index), intent(in), target :: self !! the index whose points are probed.
         real(real64), intent(in) :: h !! the candidate cell side.
         real(real64), intent(in) :: radii(:) !! the radii probe queries are drawn from.
+        real(real64), intent(out) :: h_eff !! the side the candidate was clamped to; `h` when it needed none.
         real(real64) :: w !! the proxy cost; larger is worse.
         integer(int64) :: cells, pts
 
-        call spatial_probe_counts(self, h, radii, cells, pts)
+        call spatial_probe_counts(self, h, radii, cells, pts, h_eff)
         w = spatial_work_a * real(cells, kind=real64) + spatial_work_b * real(pts, kind=real64)
     end function spatial_probe_cost
 
     !> Counts the cells and points a deterministic draw of probe queries would touch at cell `h`.
-    subroutine spatial_probe_counts(self, h, radii, cells, pts)
+    subroutine spatial_probe_counts(self, h, radii, cells, pts, h_eff)
         type(pf_spatial_index), intent(in), target :: self !! the index whose points are probed.
         real(real64), intent(in) :: h !! the candidate cell side.
         real(real64), intent(in) :: radii(:) !! the radii probe queries are drawn from.
         integer(int64), intent(out) :: cells !! cells the probe queries would visit in total.
         integer(int64), intent(out) :: pts !! points they would distance-test in total.
+        real(real64), intent(out) :: h_eff !! the side the candidate was clamped to; `h` when it needed none.
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64), allocatable :: cnt(:), start(:)
         integer(int64) :: nc(3), ncells, i, c, pos, stride
-        real(real64) :: inv(3), p(3), r, h_eff
+        real(real64) :: inv(3), p(3), r
         integer :: t, nq, nr
 
         call spatial_bucket_counts(self, h, h_eff, nc, inv, cnt)
@@ -414,56 +443,29 @@ contains
 
     !> The two counts the probe ranks by, for any cell size, exposed for re-fitting `A/B`.
     module procedure parquet_debug_spatial_work
+        real(real64) :: h_eff
 
         cells = 0_int64
         points = 0_int64
         if (.not. index%built_ok) return
         if (size(radius) < 1) error stop "parquet_debug_spatial_work: name at least one radius"
-        call spatial_probe_counts(index, h, radius, cells, points)
+        call spatial_probe_counts(index, h, radius, cells, points, h_eff)
     end procedure parquet_debug_spatial_work
 
-    !> Counts how many points fall in each cell of a candidate grid, applying the same cell-count
-    !> clamp `%build` would.
+    !> Counts how many points fall in each cell of a candidate grid, applying the same two
+    !> ceilings `%build` would: the counting pass is `spatial_clamp_grid`'s own, which is what
+    !> keeps a candidate the probe ranks the grid the build would make of it.
     subroutine spatial_bucket_counts(self, h, h_eff, nc, inv, cnt)
         type(pf_spatial_index), intent(in), target :: self !! the index whose points are counted.
         real(real64), intent(in) :: h !! the candidate cell side.
-        real(real64), intent(out) :: h_eff !! the side actually used, after the cell-count clamp.
+        real(real64), intent(out) :: h_eff !! the side actually used, after both ceilings.
         integer(int64), intent(out) :: nc(3) !! cells along each axis, after any clamp.
         real(real64), intent(out) :: inv(3) !! 1/cell per axis, for the grid the counts describe.
         integer(int64), allocatable, intent(out) :: cnt(:) !! points in each cell.
-        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
-        real(real64) :: hh, cellv(3), rc, ratio
-        integer(int64) :: ncells, maxc, i, c, ii(3)
-        integer :: d, it
+        real(real64) :: cellv(3)
+        logical :: raised
 
-        hh = h
-        maxc = spatial_cells_ceiling(self)
-        do it = 1, 64
-            call spatial_grid_dims(self%lo, self%hi, self%wrap, hh, nc, cellv, inv)
-            rc = real(nc(1), kind=real64) * real(nc(2), kind=real64) * real(nc(3), kind=real64)
-            if (rc <= real(maxc, kind=real64)) exit
-            ratio = (rc / real(maxc, kind=real64)) ** (1.0_real64 / 3.0_real64)
-            hh = hh * max(1.001_real64, ratio)
-        end do
-        h_eff = hh
-        ncells = nc(1) * nc(2) * nc(3)
-        allocate (cnt(ncells))
-        cnt = 0_int64
-        call spatial_storage(self, xs, ys, zs)
-        do i = 1_int64, self%npts
-            ii(1) = floor((xs(i) - self%lo(1)) * inv(1), kind=int64)
-            ii(2) = floor((ys(i) - self%lo(2)) * inv(2), kind=int64)
-            ii(3) = floor((zs(i) - self%lo(3)) * inv(3), kind=int64)
-            do d = 1, 3
-                if (self%wrap(d) > 0.0_real64) then
-                    ii(d) = modulo(ii(d), nc(d))
-                else
-                    ii(d) = min(max(ii(d), 0_int64), nc(d) - 1_int64)
-                end if
-            end do
-            c = 1_int64 + ii(1) + nc(1) * (ii(2) + nc(2) * ii(3))
-            cnt(c) = cnt(c) + 1_int64
-        end do
+        call spatial_clamp_grid(self, h, h_eff, nc, cellv, inv, raised, cnt)
     end subroutine spatial_bucket_counts
 
 end submodule parquet_spatial_tune ! GCOVR_EXCL_LINE

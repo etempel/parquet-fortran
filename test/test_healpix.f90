@@ -56,6 +56,11 @@ module test_healpix
     !> disc contains, and the tests fail on it.
     real(real64), parameter :: rim_tol = 1.0e-12_real64
 
+    !> The step across each of the eight neighbours, in the order `pf_neighbours_nest` returns
+    !> them: `x` then `y` in the face's own coordinates.
+    integer, parameter :: nb_dx(8) = [-1, -1, 0, 1, 1, 1, 0, -1]
+    integer, parameter :: nb_dy(8) = [0, 1, 1, 1, 0, -1, -1, -1] !! see `nb_dx`.
+
 contains
 
     !> Registers every test in this suite.
@@ -123,7 +128,16 @@ contains
             new_unittest("every bulk entry point accepts a zero-length input", &
                          test_bulk_empty_input_is_a_no_op), &
             new_unittest("query_disc_count and query_disc_alloc agree in the int32 kind", &
-                         test_query_disc_int32_kind) &
+                         test_query_disc_int32_kind), &
+            new_unittest("neighbours are symmetric over every pixel", test_neighbours_symmetric), &
+            new_unittest("exactly 24 corners are missing, at the 3-face vertices", &
+                         test_neighbours_missing_corners), &
+            new_unittest("the neighbour tables match the pixelisation", &
+                         test_neighbour_tables_match_the_pixelisation), &
+            new_unittest("a neighbour-based disc walk returns query_disc's inclusive set", &
+                         test_neighbour_disc_matches_query_disc), &
+            new_unittest("neighbours agree across the two kinds, and ring is the nest2ring image", &
+                         test_neighbours_kinds_and_ring) &
             ]
     end subroutine collect_tests_parquet_healpix
 
@@ -2163,5 +2177,580 @@ contains
         end do
         call check(error, ok, "the whole-sphere disc did not come back in ascending pixel order")
     end subroutine test_disc_alloc_run_overflow
+
+    ! ---- Neighbours ----
+    !
+    ! The Morton codec and the face-neighbour tables are derived here again, from the pixelisation
+    ! itself at a finer resolution, so that the oracle shares nothing with the module's own tables.
+
+    !> Spreads the bits of a within-face coordinate to the even positions: the test's own copy of
+    !> the Morton codec, so that nothing below reaches the module's.
+    pure function nb_spread(v) result(s)
+        integer(int64), intent(in) :: v !! a within-face coordinate.
+        integer(int64) :: s !! its bits, spread to the even positions.
+
+        s = iand(v, int(z'00000000FFFFFFFF', int64))
+        s = iand(ior(s, ishft(s, 16)), int(z'0000FFFF0000FFFF', int64))
+        s = iand(ior(s, ishft(s, 8)), int(z'00FF00FF00FF00FF', int64))
+        s = iand(ior(s, ishft(s, 4)), int(z'0F0F0F0F0F0F0F0F', int64))
+        s = iand(ior(s, ishft(s, 2)), int(z'3333333333333333', int64))
+        s = iand(ior(s, ishft(s, 1)), int(z'5555555555555555', int64))
+    end function nb_spread
+
+    !> Gathers the even bits back into a coordinate; the inverse of `nb_spread`.
+    pure function nb_compact(v) result(c)
+        integer(int64), intent(in) :: v !! a Morton code, or one shifted right by one for `y`.
+        integer(int64) :: c !! the coordinate.
+
+        c = iand(v, int(z'5555555555555555', int64))
+        c = iand(ior(c, ishft(c, -1)), int(z'3333333333333333', int64))
+        c = iand(ior(c, ishft(c, -2)), int(z'0F0F0F0F0F0F0F0F', int64))
+        c = iand(ior(c, ishft(c, -4)), int(z'00FF00FF00FF00FF', int64))
+        c = iand(ior(c, ishft(c, -8)), int(z'0000FFFF0000FFFF', int64))
+        c = iand(ior(c, ishft(c, -16)), int(z'00000000FFFFFFFF', int64))
+    end function nb_compact
+
+    !> A NEST pixel's face and within-face coordinates.
+    pure subroutine nb_nest2xyf(nside, ipix, ix, iy, face)
+        integer(int64), intent(in) :: nside !! resolution parameter.
+        integer(int64), intent(in) :: ipix !! a NEST pixel.
+        integer(int64), intent(out) :: ix !! its `x` within the face.
+        integer(int64), intent(out) :: iy !! its `y` within the face.
+        integer(int64), intent(out) :: face !! its face, 0 .. 11.
+        integer(int64) :: raw
+
+        face = ipix / (nside * nside)
+        raw = ipix - face * nside * nside
+        ix = nb_compact(raw)
+        iy = nb_compact(ishft(raw, -1))
+    end subroutine nb_nest2xyf
+
+    !> The NEST pixel at within-face coordinates `(ix, iy)` of `face`.
+    pure function nb_xyf2nest(nside, ix, iy, face) result(ipix)
+        integer(int64), intent(in) :: nside !! resolution parameter.
+        integer(int64), intent(in) :: ix !! `x` within the face.
+        integer(int64), intent(in) :: iy !! `y` within the face.
+        integer(int64), intent(in) :: face !! the face, 0 .. 11.
+        integer(int64) :: ipix !! the NEST pixel.
+
+        ipix = face * nside * nside + ior(nb_spread(ix), ishft(nb_spread(iy), 1))
+    end function nb_xyf2nest
+
+    !> Which of flip-x (1), flip-y (2) and swap (4) map the wrapped `(x, y)` onto `(xq, yq)`,
+    !> preferring `prefer` when it fits; -1 when no combination does.
+    pure function nb_match_bits(nside, x, y, xq, yq, prefer) result(okbits)
+        integer(int64), intent(in) :: nside !! resolution parameter.
+        integer(int64), intent(in) :: x !! the wrapped `x`.
+        integer(int64), intent(in) :: y !! the wrapped `y`.
+        integer(int64), intent(in) :: xq !! `x` of the pixel actually found across the edge.
+        integer(int64), intent(in) :: yq !! its `y`.
+        integer, intent(in) :: prefer !! the bits already recorded for this entry, or a negative value.
+        integer :: okbits !! the transform bits, or -1.
+        integer(int64) :: xt, yt, tt
+        integer :: bits
+
+        okbits = -1
+        do bits = 0, 7
+            xt = x
+            yt = y
+            if (iand(bits, 1) /= 0) xt = nside - xt - 1_int64
+            if (iand(bits, 2) /= 0) yt = nside - yt - 1_int64
+            if (iand(bits, 4) /= 0) then
+                tt = xt
+                xt = yt
+                yt = tt
+            end if
+            if (xt == xq .and. yt == yq) then
+                if (okbits < 0 .or. bits == prefer) okbits = bits
+            end if
+        end do
+    end function nb_match_bits
+
+    !> Records one derived table entry, counting a lookup that disagrees with an earlier one.
+    subroutine nb_record(fa, sw, nseen, nbad, f, nbn, face_found, bits_found)
+        integer, intent(inout) :: fa(0:11, 0:8) !! the face across each step class, being derived.
+        integer, intent(inout) :: sw(0:11, 0:8) !! the transform bits, being derived.
+        integer, intent(inout) :: nseen(0:11, 0:8) !! lookups recorded per entry.
+        integer, intent(inout) :: nbad(0:11, 0:8) !! lookups that disagreed per entry.
+        integer(int64), intent(in) :: f !! the face stepped from.
+        integer, intent(in) :: nbn !! the step class, `4 + dx + 3*dy`.
+        integer, intent(in) :: face_found !! the face the step landed on, or -1.
+        integer, intent(in) :: bits_found !! the transform bits that fitted, or -1.
+
+        if (bits_found < 0 .and. face_found >= 0) then
+            nbad(f, nbn) = nbad(f, nbn) + 1
+        else if (nseen(f, nbn) == 0) then
+            fa(f, nbn) = face_found
+            sw(f, nbn) = bits_found
+        else if (fa(f, nbn) /= face_found .or. sw(f, nbn) /= bits_found) then
+            nbad(f, nbn) = nbad(f, nbn) + 1
+        end if
+        nseen(f, nbn) = nseen(f, nbn) + 1
+    end subroutine nb_record
+
+    !> The eight neighbours of `(face, ix, iy)` through a given pair of tables, in the order
+    !> `pf_neighbours_nest` returns them.
+    pure subroutine nb_from_tables(nside, face, ix, iy, fa, sw, nb)
+        integer(int64), intent(in) :: nside !! resolution parameter.
+        integer(int64), intent(in) :: face !! the pixel's face.
+        integer(int64), intent(in) :: ix !! its `x` within the face.
+        integer(int64), intent(in) :: iy !! its `y`.
+        integer, intent(in) :: fa(0:11, 0:8) !! the face across each step class.
+        integer, intent(in) :: sw(0:11, 0:8) !! the transform bits per entry.
+        integer(int64), intent(out) :: nb(8) !! the neighbours, -1 where the table says none.
+        integer(int64) :: x, y, f, t
+        integer :: m, nbnum, bits
+
+        do m = 1, 8
+            x = ix + nb_dx(m)
+            y = iy + nb_dy(m)
+            nbnum = 4
+            if (x < 0_int64) then
+                x = x + nside
+                nbnum = nbnum - 1
+            else if (x >= nside) then
+                x = x - nside
+                nbnum = nbnum + 1
+            end if
+            if (y < 0_int64) then
+                y = y + nside
+                nbnum = nbnum - 3
+            else if (y >= nside) then
+                y = y - nside
+                nbnum = nbnum + 3
+            end if
+            if (nbnum == 4) then
+                nb(m) = nb_xyf2nest(nside, x, y, face)
+                cycle
+            end if
+            f = int(fa(int(face), nbnum), int64)
+            if (f < 0_int64) then
+                nb(m) = -1_int64
+                cycle
+            end if
+            bits = sw(int(face), nbnum)
+            if (iand(bits, 1) /= 0) x = nside - x - 1_int64
+            if (iand(bits, 2) /= 0) y = nside - y - 1_int64
+            if (iand(bits, 4) /= 0) then
+                t = x
+                x = y
+                y = t
+            end if
+            nb(m) = nb_xyf2nest(nside, x, y, f)
+        end do
+    end subroutine nb_from_tables
+
+    !> Derives the face-neighbour tables from the pixelisation itself.
+    !>
+    !> Edge entries: for every non-corner boundary pixel of every face, the pixel across the edge
+    !> is found at a 64x finer resolution -- the sub-pixel at the middle of the crossed edge is
+    !> extrapolated one sub-pixel step outward through `pf_pix2vec_nest`, `pf_vec2pix_nest` names
+    !> the pixel there, and dropping the six finest bits of its coordinates gives the coarse pixel;
+    !> the face and the transform mapping the wrapped `(x, y)` onto it are read off and required to
+    !> agree along the whole edge. Corner entries: from the corner pixel, the point reflected
+    !> through the vertex; when it lands in one of the two edge neighbours, or in the pixel itself,
+    !> the vertex is one where three faces meet and the entry is -1.
+    subroutine nb_derive_tables(nside, fa, sw, nbad, nseen)
+        integer(int64), intent(in) :: nside !! the coarse resolution the tables are derived at.
+        integer, intent(out) :: fa(0:11, 0:8) !! the face across each step class; -1 none, -2 never reached.
+        integer, intent(out) :: sw(0:11, 0:8) !! the transform bits per entry.
+        integer, intent(out) :: nbad(0:11, 0:8) !! lookups that disagreed with an earlier one.
+        integer, intent(out) :: nseen(0:11, 0:8) !! lookups recorded per entry.
+        integer(int64), parameter :: sub = 64_int64
+        integer(int64) :: f, ix, iy, x, y, q, fq, xq, yq, nsub, sx, sy, qs, xs, ys, k, e1, e2, nbtmp(8)
+        integer :: m, nbnum, okbits, dx, dy
+        real(real64) :: c0(3), cm(3), cx(3), cy(3), qv(3), vtx(3)
+
+        nsub = nside * sub
+        fa = -2
+        sw = -2
+        nseen = 0
+        nbad = 0
+        ! ---- edge entries ----
+        do f = 0_int64, 11_int64
+            do m = 1, 7, 2
+                dx = nb_dx(m)
+                dy = nb_dy(m)
+                do k = 1_int64, nside - 2_int64
+                    if (dx /= 0) then
+                        ix = merge(nside - 1_int64, 0_int64, dx > 0)
+                        iy = k
+                    else
+                        ix = k
+                        iy = merge(nside - 1_int64, 0_int64, dy > 0)
+                    end if
+                    sx = sub * ix + sub / 2_int64
+                    sy = sub * iy + sub / 2_int64
+                    if (dx > 0) sx = sub * ix + sub - 1_int64
+                    if (dx < 0) sx = sub * ix
+                    if (dy > 0) sy = sub * iy + sub - 1_int64
+                    if (dy < 0) sy = sub * iy
+                    call pf_pix2vec_nest(nsub, nb_xyf2nest(nsub, sx, sy, f), c0)
+                    call pf_pix2vec_nest(nsub, nb_xyf2nest(nsub, sx - dx, sy - dy, f), cm)
+                    qv = 2.0_real64 * c0 - cm
+                    qv = qv / sqrt(sum(qv * qv))
+                    call pf_vec2pix_nest(nsub, qv, qs)
+                    call nb_nest2xyf(nsub, qs, xs, ys, fq)
+                    xq = xs / sub
+                    yq = ys / sub
+                    x = ix + dx
+                    y = iy + dy
+                    nbnum = 4
+                    if (x < 0_int64) then
+                        x = x + nside
+                        nbnum = nbnum - 1
+                    else if (x >= nside) then
+                        x = x - nside
+                        nbnum = nbnum + 1
+                    end if
+                    if (y < 0_int64) then
+                        y = y + nside
+                        nbnum = nbnum - 3
+                    else if (y >= nside) then
+                        y = y - nside
+                        nbnum = nbnum + 3
+                    end if
+                    okbits = nb_match_bits(nside, x, y, xq, yq, sw(f, nbnum))
+                    call nb_record(fa, sw, nseen, nbad, f, nbnum, int(fq), okbits)
+                end do
+            end do
+        end do
+        ! ---- corner entries ----
+        do f = 0_int64, 11_int64
+            do m = 2, 8, 2
+                dx = nb_dx(m)
+                dy = nb_dy(m)
+                ix = merge(nside - 1_int64, 0_int64, dx > 0)
+                iy = merge(nside - 1_int64, 0_int64, dy > 0)
+                sx = merge(sub * ix + sub - 1_int64, sub * ix, dx > 0)
+                sy = merge(sub * iy + sub - 1_int64, sub * iy, dy > 0)
+                call pf_pix2vec_nest(nsub, nb_xyf2nest(nsub, sx, sy, f), c0)
+                call pf_pix2vec_nest(nsub, nb_xyf2nest(nsub, sx - dx, sy, f), cx)
+                call pf_pix2vec_nest(nsub, nb_xyf2nest(nsub, sx, sy - dy, f), cy)
+                ! The vertex is half a sub-step beyond the corner sub-pixel in both directions.
+                vtx = c0 + 0.5_real64 * ((c0 - cx) + (c0 - cy))
+                qv = 2.0_real64 * vtx - c0
+                qv = qv / sqrt(sum(qv * qv))
+                call pf_vec2pix_nest(nsub, qv, qs)
+                call nb_nest2xyf(nsub, qs, xs, ys, fq)
+                xq = xs / sub
+                yq = ys / sub
+                q = nb_xyf2nest(nside, xq, yq, fq)
+                ! The two edge neighbours of the corner pixel, from the entries derived above.
+                call nb_from_tables(nside, f, ix, iy, fa, sw, nbtmp)
+                e1 = nbtmp(m - 1)
+                e2 = nbtmp(mod(m, 8) + 1)
+                nbnum = 4 + dx + 3 * dy
+                x = modulo(ix + dx, nside)
+                y = modulo(iy + dy, nside)
+                if (q == e1 .or. q == e2 .or. q == nb_xyf2nest(nside, ix, iy, f)) then
+                    call nb_record(fa, sw, nseen, nbad, f, nbnum, -1, 0)
+                else
+                    okbits = nb_match_bits(nside, x, y, xq, yq, -2)
+                    call nb_record(fa, sw, nseen, nbad, f, nbnum, int(fq), okbits)
+                end if
+            end do
+        end do
+    end subroutine nb_derive_tables
+
+    !> A disc by breadth-first search over neighbours from the containing pixel, accepting a pixel
+    !> when its centre lies within `radius + pf_max_pixrad` of `vec`: the inclusive-by-centre rule
+    !> `pf_query_disc` publishes, reached through nothing but neighbour steps.
+    subroutine nb_disc_bfs(nside, vec, radius, list, n)
+        integer(int64), intent(in) :: nside !! resolution parameter.
+        real(real64), intent(in) :: vec(3) !! the disc centre, a unit vector.
+        real(real64), intent(in) :: radius !! the disc radius, radians.
+        integer(int64), intent(inout) :: list(:) !! the pixels found, in the order found.
+        integer(int64), intent(out) :: n !! how many.
+        integer(int64) :: p0, head, nb(8), q, j
+        real(real64) :: cosr, c(3)
+        integer :: m
+        logical :: seen
+
+        cosr = cos(min(radius + pf_max_pixrad(nside), pi))
+        call pf_vec2pix_nest(nside, vec, p0)
+        n = 1_int64
+        list(1) = p0
+        head = 1_int64
+        do while (head <= n)
+            call pf_neighbours_nest(nside, list(head), nb)
+            head = head + 1_int64
+            do m = 1, 8
+                q = nb(m)
+                if (q < 0_int64) cycle
+                seen = .false.
+                do j = 1_int64, n
+                    if (list(j) == q) seen = .true.
+                end do
+                if (seen) cycle
+                call pf_pix2vec_nest(nside, q, c)
+                if (c(1) * vec(1) + c(2) * vec(2) + c(3) * vec(3) >= cosr) then
+                    n = n + 1_int64
+                    if (n > size(list, kind=int64)) error stop "nb_disc_bfs: the list overflowed"
+                    list(n) = q
+                end if
+            end do
+        end do
+    end subroutine nb_disc_bfs
+
+    !> Sorts the first `n` entries of `a` ascending, in place: an insertion sort, for short lists.
+    pure subroutine nb_sort(a, n)
+        integer(int64), intent(inout) :: a(:) !! the list.
+        integer(int64), intent(in) :: n !! how many leading entries to sort.
+        integer(int64) :: i, j, key
+
+        do i = 2_int64, n
+            key = a(i)
+            j = i - 1_int64
+            do while (j >= 1_int64)
+                if (a(j) <= key) exit
+                a(j + 1_int64) = a(j)
+                j = j - 1_int64
+            end do
+            a(j + 1_int64) = key
+        end do
+    end subroutine nb_sort
+
+    !> Every neighbour relation is symmetric -- `q` is among `p`'s eight exactly when `p` is among
+    !> `q`'s -- and the eight are distinct pixels other than `p` itself. Exhaustive over every
+    !> pixel at each resolution; a mutation of any table entry breaks it somewhere along that
+    !> face's edge.
+    subroutine test_neighbours_symmetric(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first asymmetric entry.
+        integer(int64), parameter :: sides(5) = [1_int64, 2_int64, 4_int64, 16_int64, 64_int64]
+        integer(int64) :: nside, npix, p, q, nb(8), nb2(8)
+        integer :: k, m, m2, nbad, nchecked
+        logical :: found
+        character(len=160) :: detail
+
+        nbad = 0
+        nchecked = 0
+        detail = ""
+        do k = 1, size(sides)
+            nside = sides(k)
+            npix = 12_int64 * nside * nside
+            do p = 0_int64, npix - 1_int64
+                call pf_neighbours_nest(nside, p, nb)
+                do m = 1, 8
+                    q = nb(m)
+                    if (q < 0_int64) cycle
+                    nchecked = nchecked + 1
+                    found = q < npix .and. q /= p
+                    if (found) then
+                        call pf_neighbours_nest(nside, q, nb2)
+                        found = .false.
+                        do m2 = 1, 8
+                            if (nb2(m2) == p) found = .true.
+                        end do
+                    end if
+                    do m2 = 1, 8
+                        if (m2 /= m .and. nb(m2) == q) found = .false.
+                    end do
+                    if (.not. found) then
+                        nbad = nbad + 1
+                        if (nbad == 1) write (detail, '(a,i0,a,i0,a,i0,a,i0)') &
+                            "nside=", nside, " pixel=", p, " step=", m, " neighbour=", q
+                    end if
+                end do
+            end do
+        end do
+        call check(error, nchecked > 0, "no neighbour was checked -- the assertion did nothing")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "a neighbour relation was not symmetric, or an entry repeated: " // trim(detail))
+    end subroutine test_neighbours_symmetric
+
+    !> Exactly 24 corner neighbours are missing over the whole sphere at any resolution -- three at
+    !> each of the eight vertices where three faces meet -- and nowhere else: every -1 sits at a
+    !> corner step of a face-corner pixel whose two edge neighbours across that corner exist and lie
+    !> on two other, distinct faces. A -1 replaced by a face, or a face by a -1, moves the count.
+    subroutine test_neighbours_missing_corners(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first fault.
+        integer(int64), parameter :: sides(5) = [1_int64, 2_int64, 4_int64, 16_int64, 64_int64]
+        integer(int64) :: nside, npix, p, nb(8), ix, iy, face, e1, e2, f1, f2
+        integer :: k, m, nmissing, nbad
+        character(len=160) :: detail
+
+        detail = ""
+        do k = 1, size(sides)
+            nside = sides(k)
+            npix = 12_int64 * nside * nside
+            nmissing = 0
+            nbad = 0
+            do p = 0_int64, npix - 1_int64
+                call pf_neighbours_nest(nside, p, nb)
+                do m = 1, 8
+                    if (nb(m) >= 0_int64) cycle
+                    nmissing = nmissing + 1
+                    call nb_nest2xyf(nside, p, ix, iy, face)
+                    if (nb_dx(m) == 0 .or. nb_dy(m) == 0) then
+                        nbad = nbad + 1
+                    else if (ix /= merge(nside - 1_int64, 0_int64, nb_dx(m) > 0) .or. &
+                             iy /= merge(nside - 1_int64, 0_int64, nb_dy(m) > 0)) then
+                        nbad = nbad + 1
+                    else
+                        e1 = nb(m - 1)
+                        e2 = nb(mod(m, 8) + 1)
+                        f1 = e1 / (nside * nside)
+                        f2 = e2 / (nside * nside)
+                        if (e1 < 0_int64 .or. e2 < 0_int64 .or. f1 == face .or. f2 == face .or. f1 == f2) &
+                            nbad = nbad + 1
+                    end if
+                    if (nbad == 1 .and. len_trim(detail) == 0) write (detail, '(a,i0,a,i0,a,i0)') &
+                        "nside=", nside, " pixel=", p, " step=", m
+                end do
+            end do
+            call check(error, nmissing, 24, "the number of missing corner neighbours over the sphere is not 24")
+            if (allocated(error)) return
+            call check(error, nbad, 0, "a missing neighbour was not at a corner where three faces meet: " // &
+                trim(detail))
+            if (allocated(error)) return
+        end do
+    end subroutine test_neighbours_missing_corners
+
+    !> The module's face tables agree with tables derived from the pixelisation itself: at
+    !> `nside` 8 and 16 the derivation of `nb_derive_tables` is self-consistent along every edge,
+    !> reaches every entry, and reproduces `pf_neighbours_nest` for every pixel -- interior fast
+    !> path and boundary tables alike, through the test's own Morton codec. Any table entry or
+    !> transform bit changed, or any interior step, breaks it.
+    subroutine test_neighbour_tables_match_the_pixelisation(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: sides(2) = [8_int64, 16_int64]
+        integer :: fa(0:11, 0:8), sw(0:11, 0:8), nbad(0:11, 0:8), nseen(0:11, 0:8)
+        integer(int64) :: nside, npix, p, ix, iy, face, want(8), got(8)
+        integer :: k, ndiff
+        character(len=160) :: detail
+
+        detail = ""
+        do k = 1, size(sides)
+            nside = sides(k)
+            npix = 12_int64 * nside * nside
+            call nb_derive_tables(nside, fa, sw, nbad, nseen)
+            call check(error, sum(nbad), 0, "the derivation disagreed with itself along an edge")
+            if (allocated(error)) return
+            ! Every entry but the twelve of the stay-on-face class, which no crossing step records.
+            call check(error, count(nseen > 0), 12 * 8, "the derivation did not reach every crossing entry")
+            if (allocated(error)) return
+            ndiff = 0
+            do p = 0_int64, npix - 1_int64
+                call nb_nest2xyf(nside, p, ix, iy, face)
+                call nb_from_tables(nside, face, ix, iy, fa, sw, want)
+                call pf_neighbours_nest(nside, p, got)
+                if (any(got /= want)) then
+                    ndiff = ndiff + 1
+                    if (ndiff == 1) write (detail, '(a,i0,a,i0,a,8(1x,i0),a,8(1x,i0))') &
+                        "nside=", nside, " pixel=", p, " got", got, " derived", want
+                end if
+            end do
+            call check(error, ndiff, 0, "pf_neighbours_nest disagrees with the derived tables: " // trim(detail))
+            if (allocated(error)) return
+        end do
+    end subroutine test_neighbour_tables_match_the_pixelisation
+
+    !> A disc grown from the containing pixel by neighbour steps, under the inclusive-by-centre
+    !> rule, is exactly the set `pf_query_disc` returns for `inclusive=.true.` in the NEST scheme
+    !> -- so the neighbours connect every pixel of the sphere to every other, and an interior
+    !> Morton step that lands one pixel off shows as a missing or a spurious pixel. Disagreements
+    !> on a centre within rounding of the rim are not counted, as in the disc tests above.
+    subroutine test_neighbour_disc_matches_query_disc(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first real disagreement.
+        integer(int64), parameter :: sides(3) = [8_int64, 64_int64, 1024_int64]
+        real(real64), parameter :: rfrac(4) = [0.2_real64, 0.5_real64, 1.0_real64, 3.0_real64]
+        integer(int64) :: nside, lib(2048), bfs(2048), nlib, nbfs, i, j, q
+        real(real64) :: v0(3), c(3), z, ph, radius, resol, cosr, dot
+        integer :: k, cc, ir, nbad, nchecked
+        logical :: same, inlib, inbfs
+        character(len=160) :: detail
+
+        nbad = 0
+        nchecked = 0
+        detail = ""
+        do k = 1, size(sides)
+            nside = sides(k)
+            resol = pf_nside2resol(nside)
+            do cc = 1, 40
+                z = -1.0_real64 + 2.0_real64 * (real(cc, real64) - 0.5_real64) / 40.0_real64
+                ph = 2.399963229728653_real64 * real(cc, real64)
+                v0 = [sqrt(1.0_real64 - z * z) * cos(ph), sqrt(1.0_real64 - z * z) * sin(ph), z]
+                do ir = 1, size(rfrac)
+                    radius = rfrac(ir) * resol
+                    call pf_query_disc(nside, v0, radius, lib, nlib, scheme=PF_HP_NEST, inclusive=.true.)
+                    call nb_disc_bfs(nside, v0, radius, bfs, nbfs)
+                    call nb_sort(lib, nlib)
+                    call nb_sort(bfs, nbfs)
+                    nchecked = nchecked + 1
+                    same = nlib == nbfs
+                    if (same) same = all(lib(1:nlib) == bfs(1:nbfs))
+                    if (same) cycle
+                    ! Every pixel in one list and not the other must be a rim case.
+                    cosr = cos(min(radius + pf_max_pixrad(nside), pi))
+                    do i = 1_int64, nlib + nbfs
+                        if (i <= nlib) then
+                            q = lib(i)
+                        else
+                            q = bfs(i - nlib)
+                        end if
+                        inlib = .false.
+                        inbfs = .false.
+                        do j = 1_int64, nlib
+                            if (lib(j) == q) inlib = .true.
+                        end do
+                        do j = 1_int64, nbfs
+                            if (bfs(j) == q) inbfs = .true.
+                        end do
+                        if (inlib .eqv. inbfs) cycle
+                        call pf_pix2vec_nest(nside, q, c)
+                        dot = c(1) * v0(1) + c(2) * v0(2) + c(3) * v0(3)
+                        if (abs(dot - cosr) <= rim_tol) cycle
+                        nbad = nbad + 1
+                        if (nbad == 1) write (detail, '(a,i0,a,i0,a,i0,a,l1,a,l1)') &
+                            "nside=", nside, " case=", cc, " pixel=", q, " walk=", inlib, " bfs=", inbfs
+                    end do
+                end do
+            end do
+        end do
+        call check(error, nchecked > 0, "no disc was compared -- the assertion did nothing")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "the neighbour walk and the ring walk disagree away from the rim: " // trim(detail))
+    end subroutine test_neighbour_disc_matches_query_disc
+
+    !> The int32 specifics answer as the int64 ones, and the RING form names the same pixels as the
+    !> NEST form mapped through `pf_nest2ring`, missing corners included. A kind conversion
+    !> dropped, or a ring conversion skipped on one entry, shows here.
+    subroutine test_neighbours_kinds_and_ring(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: sides(2) = [4_int64, 64_int64]
+        integer(int64), parameter :: steps(2) = [1_int64, 7_int64]
+        integer(int64) :: nside, npix, p, pr, want, nb64(8), rb64(8)
+        integer(int32) :: nb32(8), rb32(8)
+        integer :: k, m, nbad, nchecked
+        character(len=160) :: detail
+
+        nbad = 0
+        nchecked = 0
+        detail = ""
+        do k = 1, size(sides)
+            nside = sides(k)
+            npix = 12_int64 * nside * nside
+            do p = 0_int64, npix - 1_int64, steps(k)
+                call pf_neighbours_nest(nside, p, nb64)
+                call pf_neighbours_nest(int(nside, int32), int(p, int32), nb32)
+                call pf_nest2ring(nside, p, pr)
+                call pf_neighbours_ring(nside, pr, rb64)
+                call pf_neighbours_ring(int(nside, int32), int(pr, int32), rb32)
+                nchecked = nchecked + 1
+                do m = 1, 8
+                    want = -1_int64
+                    if (nb64(m) >= 0_int64) call pf_nest2ring(nside, nb64(m), want)
+                    if (int(nb32(m), int64) /= nb64(m) .or. rb64(m) /= want .or. int(rb32(m), int64) /= want) then
+                        nbad = nbad + 1
+                        if (nbad == 1) write (detail, '(a,i0,a,i0,a,i0)') "nside=", nside, " pixel=", p, " step=", m
+                    end if
+                end do
+            end do
+        end do
+        call check(error, nchecked > 0, "no pixel was checked -- the assertion did nothing")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "the kinds or the schemes disagree about a neighbour: " // trim(detail))
+    end subroutine test_neighbours_kinds_and_ring
 
 end module test_healpix

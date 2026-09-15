@@ -324,11 +324,11 @@ contains
     !! for: the extrapolation table sees the partial sums running away rather than settling, and
     !! says so in a couple of hundred evaluations.
     !!
-    !! It must be integrated WITH the extrapolation, which is the default. The plain bisection
+    !! The divergence is found WITH the extrapolation, which is the default. The plain bisection
     !! keeps halving the interval next to zero and takes the abscissae below `1e-280`, where
-    !! `x**-1.1` overflows to an infinity and the engine's non-finite screen aborts the process --
-    !! which is why no arm of any test passes `extrapolate=.false.` to this fixture, and is
-    !! itself part of what the default buys.
+    !! `x**-1.1` overflows to an infinity and the engine's non-finite screen ends the integration
+    !! with `PF_INT_BAD_VALUE` -- the contrast `test_status_divergent` asserts, and itself part of
+    !! what the default buys.
     function divergent_pow(x) result(f)
         real(real64), intent(in) :: x !! point at which to evaluate
         real(real64)             :: f !! the integrand value

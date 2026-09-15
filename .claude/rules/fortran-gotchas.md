@@ -84,7 +84,9 @@ in `code-style.md`.
   `test/test_random.f90`).
 - **A `huge()` sentinel standing for "unbounded" is a NUMBER: centring, scaling or differencing it
   OVERFLOWS.** The overflow delivers the infinity that was meant, so gfortran and ifx look correct
-  and nagfor's `-ieee=stop` aborts on the documented call; a quiet build is no evidence. Produce
+  and nagfor's `-ieee=stop` aborts on the documented call; a quiet build is no evidence. Under
+  nagfor even a power that shrinks it overflows (`huge()**(-0.5)` aborts inside the runtime's
+  `**`), so a closed form at an infinite bound is written out, not evaluated at `huge()`. Produce
   the infinity with `ieee_value` instead, behind a guard formed so it cannot itself overflow
   (`huge() + ctr` before a subtraction, `huge()*scl` before a division by an `scl` below one),
   each NESTED inside the sign test that makes its own threshold safe to form -- `tn_standardise`

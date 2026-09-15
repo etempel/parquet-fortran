@@ -29,6 +29,8 @@ module test_integrate
     use parquet_integrate
     use test_integrate_support
     use iso_fortran_env, only : real64
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, &
+        ieee_invalid
 
     implicit none
     private
@@ -1180,11 +1182,17 @@ contains
     !! `PF_INT_BAD_VALUE` -- a different answer to the same integral, reached by drilling rather
     !! than by recognising. It is asserted here because it is in process: the screen reports and
     !! does not abort, so the test binary survives what the drill runs into.
+    !!
+    !! **Surviving it takes more than a status, which is what the `IEEE_INVALID` flag asserts.**
+    !! A rule that went on doing arithmetic with the screened infinity forms `Inf - Inf` in its
+    !! error estimate: under nagfor's default traps that raise IS the abort the status exists to
+    !! replace, and on every other compiler it is only this flag.
     subroutine test_status_divergent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(pf_integration_info) :: info
         real(real64)              :: r
+        logical                   :: can_test, saved, raised
 
         r = pf_integrate(divergent_pow, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info)
 
@@ -1211,9 +1219,27 @@ contains
         if (allocated(error)) return
 
         ! The contrast: without the table the same integral is drilled into until the integrand
-        ! overflows, and what comes back is the screen's finding rather than the divergence.
+        ! overflows, and what comes back is the screen's finding rather than the divergence. The
+        ! flag is cleared around this call alone and restored as `saved .or. raised`, so a flag
+        ! raised elsewhere is neither hidden nor blamed on it; only INVALID is read, because the
+        ! fixture's own `x**-1.1` legitimately raises OVERFLOW on the way to the infinity.
+        can_test = ieee_support_flag(ieee_invalid, 0.0_real64)
+        saved = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
         r = pf_integrate(divergent_pow, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
                          extrapolate=.false., info=info)
+        raised = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, saved .or. raised)
+        end if
+        call check(error, .not. raised, &
+                   "the drilled integral raised IEEE_INVALID: the engine did arithmetic with the " // &
+                   "infinity it screened, which aborts a caller whose traps are unmasked")
+        if (allocated(error)) return
         call check(error, info%status == PF_INT_BAD_VALUE, &
                    "without the extrapolation the drill reaches an overflow, which is reported " // &
                    "as PF_INT_BAD_VALUE rather than ending the process")
@@ -1444,8 +1470,27 @@ contains
 
         type(pf_integration_info) :: info, clean
         real(real64)              :: r
+        logical                   :: can_test, saved, raised
 
+        ! The NaN must not reach the rule's arithmetic either: an ordered comparison or a `min`
+        ! over it raises IEEE_INVALID, which ends the process after all under unmasked traps
+        ! (`test_status_divergent` asserts the infinity's half, and says why the flag is read).
+        can_test = ieee_support_flag(ieee_invalid, 0.0_real64)
+        saved = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
         r = pf_integrate(nan_at_half, 0.0_real64, 1.0_real64, 1.0e-8_real64, info=info)
+        raised = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, saved .or. raised)
+        end if
+        call check(error, .not. raised, &
+                   "a NaN integrand raised IEEE_INVALID inside the engine, which aborts a caller " // &
+                   "whose traps are unmasked")
+        if (allocated(error)) return
 
         call check(error, info%status == PF_INT_BAD_VALUE, &
                    "a non-finite integrand value must report PF_INT_BAD_VALUE")
@@ -1532,7 +1577,10 @@ contains
         real(real64)              :: r, want, inf
 
         inf = pf_infinity()
-        want = inv_pow15_exact(1.0_real64, huge(1.0_real64))
+        ! `2*(1**-0.5 - 0)`: the closed form's upper term vanishes at infinity. Never
+        ! `inv_pow15_exact(1.0_real64, huge(1.0_real64))` -- `huge()` is a number, and nagfor's
+        ! `**` overflows on it and aborts the runner (fortran-gotchas.md, the `huge()` sentinel).
+        want = 2.0_real64
 
         r = pf_integrate(inv_pow15, 1.0_real64, inf, 1.0e-12_real64, info=deflt)
         call check(error, deflt%converged, &

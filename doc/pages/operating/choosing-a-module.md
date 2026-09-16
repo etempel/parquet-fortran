@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **125** of this library's Fortran files.
+also the largest: a project that imports it compiles **131** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -60,10 +60,11 @@ in every one of them.
 | `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
 | `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
+| `parquet_prima` | 20 | no | `pf_minimize_bobyqa`: Powell's BOBYQA, vendored from PRIMA — a smooth function of several variables, with bounds, without derivatives |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 125 | **yes** | everything above, through one `use` |
+| `parquet` | 131 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -146,6 +147,7 @@ anything else.
 | `parquet_sorting` | the same six as `parquet_argsort` |
 | `parquet_stats` | `verbosity` and `message_stream` — `pf_stats%print` writes solicited output |
 | `parquet_integrate` | none — it reads none, and prints nothing at all |
+| `parquet_prima` | none — it reads none, and prints nothing at all. The one emitter it can reach is the thread clamp inside `pf_minimize_multistart`, which a caller reaches through `parquet_optimize` and silences there |
 | `parquet_optimize` | `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |
 

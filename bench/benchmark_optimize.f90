@@ -1,6 +1,6 @@
-!> What `parquet_optimize` costs: evaluations per engine per function, what threading `threads=`
-!> buys and whether the answer survives it, how DE's three tuning knobs trade against each other,
-!> and how many starts the multistart driver needs to find how many basins.
+!> What `parquet_optimize` and `parquet_prima` cost: evaluations per engine per function, what
+!> threading `threads=` buys and whether the answer survives it, how DE's three tuning knobs trade
+!> against each other, and how many starts the multistart driver needs to find how many basins.
 !!
 !! **The `threads` mode is a benchmark that also proves the property it measures.** Every arm of the
 !! ladder is compared BIT FOR BIT with the serial arm's answer, and the mode exits nonzero when a
@@ -16,6 +16,7 @@
 program benchmark_optimize
 
     use parquet_optimize
+    use parquet_prima, only : pf_minimize_bobyqa, pf_bobyqa_solver
     use iso_fortran_env, only : real64, int64, error_unit
 
     implicit none
@@ -194,7 +195,7 @@ contains
 
     end subroutine run_evals
 
-    !> One function's row of the `evals` table: the simplex, DE and the multistart driver.
+    !> One function's row of the `evals` table: the simplex, BOBYQA, DE and the multistart driver.
     subroutine evals_row(name, n, lo1, hi1, seeds)
         character(len=*), intent(in) :: name  !! which objective
         integer, intent(in)          :: n     !! how many variables
@@ -203,6 +204,7 @@ contains
         integer, intent(in)          :: seeds !! seeds averaged over
 
         type(pf_optimize_info) :: info
+        type(pf_bobyqa_solver) :: bobyqa_solver
         real(real64) :: x(n), lower(n), upper(n), fmin, best
         integer :: ev(seeds), s, np
 
@@ -214,6 +216,27 @@ contains
         call pf_minimize_simplex(pick(name), x, fmin, spread(0.5_real64, 1, n), 0.0_real64, &
                                  atol=1.0e-10_real64, max_neval=200000, info=info)
         print '(a12,i4,2x,a16,i12,a17,es11.3)', name, n, "simplex", info%neval, "  (one start)  ", fmin
+
+        ! BOBYQA from the same start, with the same box as its bounds. The point of the row is the
+        ! ORDER OF MAGNITUDE against the simplex on a smooth function; on a rugged one it stops in
+        ! the first basin it meets, which is the other half of what the table shows.
+        x = lo1 + 0.3_real64*(hi1 - lo1)
+        call pf_minimize_bobyqa(pick(name), x, fmin, lower=lower, upper=upper, &
+                                rhobeg=0.1_real64*(hi1 - lo1), rhoend=1.0e-8_real64, &
+                                max_neval=200000, info=info)
+        print '(a12,i4,2x,a16,i12,a17,es11.3)', name, n, "bobyqa", info%neval, "  (one start)  ", fmin
+
+        ! BOBYQA under the multistart driver, which is how a local model-based engine is used on a
+        ! function with more than one basin.
+        best = huge(1.0_real64)
+        do s = 1, seeds
+            call pf_minimize_multistart(pick(name), lower, upper, int(s, int64), x, fmin, &
+                                        nstart=10*n, solver=bobyqa_solver, info=info)
+            ev(s) = info%neval
+            best = min(best, fmin)
+        end do
+        print '(a12,i4,2x,a16,i12,i8,a1,i8,es11.3)', name, n, "multistart+bobyqa", sum(ev)/seeds, &
+            minval(ev), "-", maxval(ev), best
 
         np = max(20, 10*n)
         best = huge(1.0_real64)

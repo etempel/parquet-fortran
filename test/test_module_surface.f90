@@ -1509,6 +1509,151 @@ contains
 
 end module test_module_surface_optimize
 
+module test_module_surface_prima
+    use parquet_prima                    ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_prima_surface
+
+    !> An objective object, so `pf_objective` itself is extended through this import alone --
+    !! which is what proves `parquet_prima` re-exports it rather than merely naming it.
+    type, extends(pf_objective) :: prima_surface_objective
+        integer :: calls = 0 !! evaluations, so the caller can see `eval` ran
+    contains
+        procedure :: eval => prima_surface_objective_eval !! `(x - 2)**2`, counting the call.
+    end type prima_surface_objective
+
+    !> A CONSTRAINED objective, reached through this import alone: `pf_constrained_objective` and
+    !! both its deferred bindings are re-exported too, and phase 4's `pf_minimize_cobyla` needs
+    !! them to be.
+    type, extends(pf_constrained_objective) :: prima_surface_constrained
+        integer :: calls = 0 !! evaluations, unused but for keeping the type honest
+    contains
+        procedure :: eval => prima_surface_constrained_eval  !! `(x - 2)**2`.
+        procedure :: n_constraints => prima_surface_count    !! one constraint.
+        procedure :: constraints => prima_surface_constr     !! `x - 1 <= 0`.
+    end type prima_surface_constrained
+
+contains
+
+    !> `(x - 2)**2`, counting the call.
+    function prima_surface_objective_eval(this, x) result(f)
+        class(prima_surface_objective), intent(inout) :: this !! the objective
+        real(real64), intent(in)                      :: x(:) !! the point
+        real(real64)                                  :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+        this%calls = this%calls + 1
+
+    end function prima_surface_objective_eval
+
+    !> `(x - 2)**2` again, for the constrained type.
+    function prima_surface_constrained_eval(this, x) result(f)
+        class(prima_surface_constrained), intent(inout) :: this !! the objective
+        real(real64), intent(in)                        :: x(:) !! the point
+        real(real64)                                    :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+        this%calls = this%calls + 1
+
+    end function prima_surface_constrained_eval
+
+    !> How many constraint values `constraints` fills.
+    function prima_surface_count(this) result(m)
+        class(prima_surface_constrained), intent(in) :: this !! the objective
+        integer                                      :: m    !! the number of constraints
+
+        m = 1
+
+    end function prima_surface_count
+
+    !> `x - 1 <= 0`.
+    subroutine prima_surface_constr(this, x, c)
+        class(prima_surface_constrained), intent(inout) :: this !! the objective
+        real(real64), intent(in)                        :: x(:) !! the point
+        real(real64), intent(out)                       :: c(:) !! the constraint values
+
+        this%calls = this%calls + 0
+        c(1) = x(1) - 1.0_real64
+
+    end subroutine prima_surface_constr
+
+    !> Exercises `pf_minimize_bobyqa` and the solver object through `use parquet_prima` alone.
+    !!
+    !! Phase 4 adds the `pf_minimize_lincoa` and `pf_minimize_cobyla` calls, as those generics
+    !! reach the spec: a generic declared here with no implementation would link until something
+    !! called it, and this is the test that calls every one.
+    subroutine check_prima_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_optimize_info)          :: info
+        type(pf_optimize_history)       :: record
+        type(pf_bobyqa_solver)          :: solver
+        type(prima_surface_objective)   :: obj
+        type(prima_surface_constrained) :: constrained
+        real(real64)                    :: x(1), fmin, lower(1), upper(1), c(1)
+
+        what = ""
+
+        ! BOBYQA with a plain function, with both records.
+        x = [5.0_real64]
+        lower = [-3.0_real64]
+        upper = [8.0_real64]
+        call pf_minimize_bobyqa(prima_offset_square, x, fmin, lower=lower, upper=upper, &
+                                rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=info, &
+                                history=record)
+        if (abs(x(1) - 2.0_real64) > 1.0e-6_real64) what = "pf_minimize_bobyqa"
+        if (what == "" .and. .not. info%converged) what = "pf_optimize_info%converged"
+        if (what == "" .and. info%status /= PF_OPT_OK) what = "PF_OPT_OK"
+        if (what == "" .and. record%n /= info%neval) what = "pf_optimize_history%n"
+        if (what == "" .and. info%rho > 1.0e-7_real64) what = "pf_optimize_info%rho"
+
+        ! BOBYQA with an objective OBJECT, which is the re-exported `pf_objective`.
+        if (what == "") then
+            x = [5.0_real64]
+            call pf_minimize_bobyqa(obj, x, fmin, lower=lower, upper=upper, rhobeg=0.5_real64, &
+                                    rhoend=1.0e-8_real64, scale=[1.0_real64], info=info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-6_real64) what = "pf_objective through parquet_prima"
+            if (what == "" .and. obj%calls /= info%neval) what = "the caller's own object"
+        end if
+
+        ! The solver object, which `pf_minimize_multistart` takes as a `pf_local_solver`.
+        if (what == "") then
+            solver%rhoend = 1.0e-8_real64
+            x = [5.0_real64]
+            call solver%run(obj, x, fmin, lower, upper, info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-5_real64) what = "pf_bobyqa_solver%run"
+        end if
+
+        ! The constrained type, reached through this import alone.
+        if (what == "") then
+            if (constrained%n_constraints() /= 1) what = "pf_constrained_objective%n_constraints"
+            if (what == "") then
+                call constrained%constraints([0.5_real64], c)
+                if (c(1) > 0.0_real64) what = "pf_constrained_objective%constraints"
+            end if
+        end if
+
+        ! The remaining status codes are reachable by name through this import alone.
+        if (what == "" .and. PF_OPT_LIMIT == PF_OPT_TARGET) what = "PF_OPT_LIMIT"
+        if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDING) what = "PF_OPT_NONFINITE"
+        if (what == "" .and. PF_OPT_INFEASIBLE == PF_OPT_OK) what = "PF_OPT_INFEASIBLE"
+
+    end subroutine check_prima_surface
+
+    !> `(x - 2)**2` in one variable, whose minimiser is `2`. A module procedure, because a
+    !! callback in this library is never an internal one.
+    function prima_offset_square(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+
+    end function prima_offset_square
+
+end module test_module_surface_prima
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -1520,6 +1665,7 @@ module test_module_surface
     use test_module_surface_utils, only : check_utils_surface
     use test_module_surface_integrate, only : check_integrate_surface
     use test_module_surface_optimize, only : check_optimize_surface
+    use test_module_surface_prima, only : check_prima_surface
     use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
@@ -1642,6 +1788,8 @@ contains
                          test_integrate_surface), &
             new_unittest("parquet_optimize alone minimises through both engines and a solver", &
                          test_optimize_surface), &
+            new_unittest("parquet_prima alone minimises with BOBYQA and hands back its record", &
+                         test_prima_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
             new_unittest("parquet_toml alone reads a whole configuration", &
@@ -1765,6 +1913,16 @@ contains
         call check(error, what == "", &
             "minimisation was not usable through `use parquet_optimize` alone: " // what)
     end subroutine test_optimize_surface
+
+    !> The test-drive wrapper over check_prima_surface.
+    subroutine test_prima_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_prima_surface(what)
+        call check(error, what == "", &
+            "BOBYQA was not usable through `use parquet_prima` alone: " // what)
+    end subroutine test_prima_surface
 
     !> The test-drive wrapper over check_logging_surface.
     subroutine test_logging_surface(error)

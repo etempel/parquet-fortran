@@ -388,6 +388,17 @@ said about it.
   the check reads the table's generation counter, which a row-structural change on another
   thread would be moving — and that is the shared-table rule above, not a new one. See
   [Threading](../utilities/index-maps.html#threading).
+- **Minimisation: the objective is yours, and under `threads=` each thread gets a clone.** Every
+  entry point of `parquet_optimize` and `parquet_prima` holds nothing between calls, so separate
+  minimisations may run at once, including from inside your own parallel region — at
+  `threads = 1` each, since a team opened inside yours collapses to one thread with nesting off.
+  At `threads = 1` the objective you passed is the one evaluated, so a counter or cache it keeps
+  is what you read back afterwards. At `threads > 1` the driver allocates one clone of it per
+  thread by sourced allocation and discards them at the end: an `allocatable` component is
+  deep-copied per thread, a `pointer` component is shared (which is fine for data nobody writes),
+  and **whatever the objective accumulates is not visible to you afterwards** — `info%neval` is
+  the count. The answer does not depend on the thread count in either module. See
+  [The objective under threads](../utilities/optimization.html#threads-and-what-each-thread-sees).
 - **`pf_toml`: every public procedure is safe inside a parallel region**, because each takes one
   module-wide lock on entry. What that does not cover is a document's lifetime: closing one while
   another thread still holds a handle taken from it is yours to prevent. See

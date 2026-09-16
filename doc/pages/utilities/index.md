@@ -4,6 +4,7 @@ ordered_subpage: sorting.md
 ordered_subpage: statistics.md
 ordered_subpage: integration.md
 ordered_subpage: optimization.md
+ordered_subpage: prima.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
@@ -53,6 +54,13 @@ helpers, and the two generators meant to be copied into your own project.
   soft budget reported through a status code rather than a printed warning, a record of the search
   on request, `threads=` with one clone of the objective per thread and the same answer at every
   count, and what `converged` does and does not promise. Nothing is printed.
+- [Powell's derivative-free solvers with `parquet_prima`](prima.html) — `pf_minimize_bobyqa`,
+  vendored from PRIMA: a quadratic model interpolating a set of points, minimised inside a trust
+  region and inside the bounds, which on a smooth objective costs a fraction of what a
+  direct-search method costs. Bounds honoured at every evaluation rather than only at the end, a
+  start that is never moved, the two trust-region radii and what each is for, `scale=` for
+  coordinates of different magnitudes, and `pf_bobyqa_solver` to drive the multistart driver with
+  it. Where PRIMA adjusts an invalid argument and warns, this refuses. Nothing is printed.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

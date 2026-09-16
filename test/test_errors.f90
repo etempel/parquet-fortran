@@ -85,7 +85,7 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:), p29(:)
+                                            p28(:), p29(:), p30(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3163,8 +3163,37 @@ contains
             new_unittest("the multistart driver refuses a constrained objective by name", &
                 test_optimize_multistart_constraints_not_honoured_aborts) &
             ]
+        ! ---- parquet_prima: BOBYQA's abort paths ----
+        p30 = [ &
+            new_unittest("BOBYQA refuses a zero-length start", &
+                test_prima_size_zero_aborts), &
+            new_unittest("BOBYQA refuses a NaN in the start point", &
+                test_prima_start_nan_aborts), &
+            new_unittest("BOBYQA refuses bounds of the wrong length", &
+                test_prima_bounds_size_aborts), &
+            new_unittest("a bound pair with no room between them is refused", &
+                test_prima_no_space_between_bounds_aborts), &
+            new_unittest("a start outside the bounds is refused rather than moved", &
+                test_prima_start_outside_bounds_aborts), &
+            new_unittest("rhoend above rhobeg is refused rather than swapped", &
+                test_prima_rho_order_aborts), &
+            new_unittest("an npt outside its range is refused rather than clamped", &
+                test_prima_npt_range_aborts), &
+            new_unittest("a scale of the wrong length is refused", &
+                test_prima_scale_size_aborts), &
+            new_unittest("a zero or negative scale is refused", &
+                test_prima_scale_nonpositive_aborts), &
+            new_unittest("BOBYQA refuses a zero budget", &
+                test_prima_budget_zero_aborts), &
+            new_unittest("BOBYQA refuses a budget above the ceiling", &
+                test_prima_budget_ceiling_aborts), &
+            new_unittest("a non-finite objective value is refused rather than moderated", &
+                test_prima_nonfinite_value_aborts), &
+            new_unittest("BOBYQA refuses a constrained objective by name", &
+                test_prima_bobyqa_constraints_not_honoured_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19072,6 +19101,97 @@ contains
             failure_message="a constrained objective in the multistart driver was expected to error stop", &
             required_stderr="pf_minimize_multistart: this engine does not honour nonlinear constraints")
     end subroutine test_optimize_multistart_constraints_not_honoured_aborts
+    !
+    subroutine test_prima_size_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_size_zero", expect_abort=.true., &
+            failure_message="a zero-length start was expected to error stop", &
+            required_stderr="at least one variable is required")
+    end subroutine test_prima_size_zero_aborts
+    !
+    subroutine test_prima_start_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_start_nan", expect_abort=.true., &
+            failure_message="a NaN start was expected to error stop", &
+            required_stderr="the start point must not contain NaN")
+    end subroutine test_prima_start_nan_aborts
+    !
+    subroutine test_prima_bounds_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_bounds_size", expect_abort=.true., &
+            failure_message="bounds of the wrong length were expected to error stop", &
+            required_stderr="lower, upper and x must have the same size")
+    end subroutine test_prima_bounds_size_aborts
+    !
+    subroutine test_prima_no_space_between_bounds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_no_space_between_bounds", expect_abort=.true., &
+            failure_message="a bound pair with no room was expected to error stop", &
+            required_stderr="every upper bound must exceed its lower bound by more than 2*epsilon")
+    end subroutine test_prima_no_space_between_bounds_aborts
+    !
+    subroutine test_prima_start_outside_bounds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_start_outside_bounds", expect_abort=.true., &
+            failure_message="a start outside the bounds was expected to error stop", &
+            required_stderr="the start point must lie within the bounds")
+    end subroutine test_prima_start_outside_bounds_aborts
+    !
+    subroutine test_prima_rho_order_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_rho_order", expect_abort=.true., &
+            failure_message="rhoend above rhobeg was expected to error stop", &
+            required_stderr="rhobeg and rhoend must be finite and positive with rhoend <= rhobeg")
+    end subroutine test_prima_rho_order_aborts
+    !
+    subroutine test_prima_npt_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_npt_range", expect_abort=.true., &
+            failure_message="an npt below n+2 was expected to error stop", &
+            required_stderr="npt must be in [n+2, (n+1)(n+2)/2]")
+    end subroutine test_prima_npt_range_aborts
+    !
+    subroutine test_prima_scale_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_scale_size", expect_abort=.true., &
+            failure_message="a scale of the wrong length was expected to error stop", &
+            required_stderr="scale and x must have the same size")
+    end subroutine test_prima_scale_size_aborts
+    !
+    subroutine test_prima_scale_nonpositive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_scale_nonpositive", expect_abort=.true., &
+            failure_message="a zero scale was expected to error stop", &
+            required_stderr="scale must be finite and positive")
+    end subroutine test_prima_scale_nonpositive_aborts
+    !
+    subroutine test_prima_budget_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_budget_zero", expect_abort=.true., &
+            failure_message="a zero budget was expected to error stop", &
+            required_stderr="max_neval must be positive")
+    end subroutine test_prima_budget_zero_aborts
+    !
+    subroutine test_prima_budget_ceiling_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_budget_ceiling", expect_abort=.true., &
+            failure_message="a budget above the ceiling was expected to error stop", &
+            required_stderr="max_neval must not exceed huge(1)/2")
+    end subroutine test_prima_budget_ceiling_aborts
+    !
+    subroutine test_prima_nonfinite_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_nonfinite_value", expect_abort=.true., &
+            failure_message="a NaN objective value was expected to error stop", &
+            required_stderr="the objective returned a non-finite value")
+    end subroutine test_prima_nonfinite_value_aborts
+    !
+    subroutine test_prima_bobyqa_constraints_not_honoured_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_bobyqa_constraints_not_honoured", expect_abort=.true., &
+            failure_message="a constrained objective in BOBYQA was expected to error stop", &
+            required_stderr="pf_minimize_bobyqa: this engine does not honour nonlinear constraints")
+    end subroutine test_prima_bobyqa_constraints_not_honoured_aborts
     !
     subroutine test_integrate_context_capped_aborts(error)
         type(error_type), allocatable, intent(out) :: error

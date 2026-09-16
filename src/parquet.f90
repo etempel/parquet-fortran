@@ -58,6 +58,10 @@
 !>                          Latin hypercube of starts), with the objective as an
 !>                          object carrying its own parameters or as a plain
 !>                          function.
+!>   * `parquet_prima`   -- `pf_minimize_bobyqa` (Powell's BOBYQA, vendored from
+!>                          PRIMA): a quadratic model interpolating `npt` points,
+!>                          minimised in a trust region inside the bounds, with a
+!>                          `scale=` for coordinates of different magnitudes.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -99,6 +103,7 @@ module parquet
     use parquet_utils
     use parquet_integrate
     use parquet_optimize
+    use parquet_prima
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

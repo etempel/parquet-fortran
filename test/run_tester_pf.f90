@@ -35,6 +35,8 @@ program run_tester_pf
     use test_logging, only : collect_tests_logging
     use test_optimize, only : collect_tests_optimize
     use test_optimize_omp, only : collect_tests_optimize_omp
+    use test_prima, only : collect_tests_prima
+    use test_prima_omp, only : collect_tests_prima_omp
     use test_random, only : collect_tests_parquet_random, collect_tests_parquet_random_perm
     use test_random_dist, only : collect_tests_parquet_random_dist
     use test_random_omp, only : collect_tests_parquet_random_omp
@@ -56,6 +58,8 @@ program run_tester_pf
         new_testsuite("integrate_omp", collect_tests_integrate_omp), &
         new_testsuite("optimize", collect_tests_optimize), &
         new_testsuite("optimize_omp", collect_tests_optimize_omp), &
+        new_testsuite("prima", collect_tests_prima), &
+        new_testsuite("prima_omp", collect_tests_prima_omp), &
         new_testsuite("index_omp", collect_tests_index_omp), &
         new_testsuite("index_multimap", collect_tests_index_multimap), &
         new_testsuite("index_strings", collect_tests_index_strings), &

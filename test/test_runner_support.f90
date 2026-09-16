@@ -317,6 +317,7 @@ contains
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "integrate_omp" .or. name == "optimize_omp" &
+            .or. name == "prima_omp" &
             .or. name == "stats" .or. name == "table_join_hash")
     end function suite_is_safe_to_parallelize
 

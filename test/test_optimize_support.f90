@@ -26,6 +26,7 @@ module test_optimize_support
     public :: constant_one, shifted_norm, quartic, quartic_derivative
     public :: always_nan, always_inf, nan_beyond_two
     public :: rastrigin, rastrigin_gradient, twin_wells, nan_corner
+    public :: bad_scaling, bad_scaling_unit, BAD_SCALING_SCALE, BAD_SCALING_MIN
 
     !> Sum of squares about `1` plus a shift, counting its own evaluations.
     !!
@@ -79,6 +80,12 @@ module test_optimize_support
     contains
         procedure :: eval => table_sphere_eval !! Squared distance from `centre`.
     end type table_sphere
+
+    !> The characteristic magnitude of each coordinate of `bad_scaling`, its `scale=` argument.
+    real(real64), parameter :: BAD_SCALING_SCALE(2) = [1.0e-3_real64, 1.0e3_real64]
+
+    !> The minimiser of `bad_scaling`, by construction: each term vanishes there.
+    real(real64), parameter :: BAD_SCALING_MIN(2) = BAD_SCALING_SCALE
 
     !> `2 pi`, shared by `rastrigin` and its gradient so the two cannot drift apart.
     real(real64), parameter :: RASTRIGIN_TWO_PI = 2.0_real64*acos(-1.0_real64)
@@ -340,6 +347,36 @@ contains
         end if
 
     end function nan_corner
+
+    !> A quadratic whose two coordinates differ by six orders of magnitude.
+    !!
+    !! `((x(1) - 1e-3)/1e-3)**2 + ((x(2) - 1e3)/1e3)**2`: the minimum is `0` at
+    !! `BAD_SCALING_MIN = (1e-3, 1e3)`, and in the SCALED variable `y = x/BAD_SCALING_SCALE` it is
+    !! the unit-conditioned `(y(1) - 1)**2 + (y(2) - 1)**2`. One trust-region radius has to serve
+    !! both coordinates, so this is the shape `scale=` exists for: without it a radius small
+    !! enough to resolve `x(1)` cannot move `x(2)` at all.
+    function bad_scaling(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = ((x(1) - BAD_SCALING_MIN(1))/BAD_SCALING_SCALE(1))**2 &
+            + ((x(2) - BAD_SCALING_MIN(2))/BAD_SCALING_SCALE(2))**2
+
+    end function bad_scaling
+
+    !> `bad_scaling` composed with its own scaling: `g(y) = bad_scaling(BAD_SCALING_SCALE*y)`.
+    !!
+    !! Written as the composition rather than as the algebraically equal `(y(1)-1)**2 +
+    !! (y(2)-1)**2`, because the test that uses it asserts BIT equality between a `scale=` run of
+    !! `bad_scaling` and a plain run of this: a hand-simplified form would differ in the last bits
+    !! and the test would then be measuring the simplification instead of the scaling.
+    function bad_scaling_unit(y) result(f)
+        real(real64), intent(in) :: y(:) !! the point, in scaled units
+        real(real64)             :: f    !! `bad_scaling` at `BAD_SCALING_SCALE*y`
+
+        f = bad_scaling(BAD_SCALING_SCALE*y)
+
+    end function bad_scaling_unit
 
     !> The minimiser of `quad1d`.
     pure function quad1d_min() result(x)

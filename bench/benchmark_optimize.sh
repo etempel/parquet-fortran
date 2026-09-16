@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# What `parquet_optimize` costs: evaluations per engine per function, what `threads=` buys and
+# What `parquet_optimize` and `parquet_prima` cost: evaluations per engine per function, what
+# `threads=` buys and
 # whether the answer survives it, how differential evolution's knobs trade against each other, and
 # how many starts the multistart driver needs to find how many basins.
 #
@@ -10,8 +11,10 @@
 #             with the seeded engines averaged over several seeds and their spread printed beside
 #             the mean. The spread is not decoration: one seed is one sample of a stochastic
 #             search, and a mean quoted without it says nothing about what a caller will see.
-#             The simplex row is one run from one start and reports no spread, which is the
-#             honest answer for an engine that takes no seed.
+#             The simplex and BOBYQA rows are one run from one start each and report no spread,
+#             which is the honest answer for an engine that takes no seed. BOBYQA appears twice:
+#             alone, and under the multistart driver as a `pf_bobyqa_solver`, which is how a local
+#             model-based engine is used on a function with more than one basin.
 #
 #             It is the table the guide page's "which engine to reach for" section rests on, in
 #             orders of magnitude only. A local engine's row on Rastrigin is expected to be

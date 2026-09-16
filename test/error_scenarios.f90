@@ -33,6 +33,7 @@ program error_scenarios
     ! test_optimize.f90, so a scenario and a test name the same objective and neither reaches an
     ! internal procedure.
     use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc
+    use parquet_prima, only : pf_minimize_bobyqa
     use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex, pf_minimize_de, &
         pf_minimize_multistart
     use parquet_tables
@@ -3689,6 +3690,32 @@ program error_scenarios
         call scenario_optimize_multistart_constraints_not_honoured()
     case ("optimize_multistart_nonfinite_threaded")
         call scenario_optimize_multistart_nonfinite_threaded()
+    case ("prima_size_zero")
+        call scenario_prima_size_zero()
+    case ("prima_start_nan")
+        call scenario_prima_start_nan()
+    case ("prima_bounds_size")
+        call scenario_prima_bounds_size()
+    case ("prima_no_space_between_bounds")
+        call scenario_prima_no_space_between_bounds()
+    case ("prima_start_outside_bounds")
+        call scenario_prima_start_outside_bounds()
+    case ("prima_rho_order")
+        call scenario_prima_rho_order()
+    case ("prima_npt_range")
+        call scenario_prima_npt_range()
+    case ("prima_scale_size")
+        call scenario_prima_scale_size()
+    case ("prima_scale_nonpositive")
+        call scenario_prima_scale_nonpositive()
+    case ("prima_budget_zero")
+        call scenario_prima_budget_zero()
+    case ("prima_budget_ceiling")
+        call scenario_prima_budget_ceiling()
+    case ("prima_nonfinite_value")
+        call scenario_prima_nonfinite_value()
+    case ("prima_bobyqa_constraints_not_honoured")
+        call scenario_prima_bobyqa_constraints_not_honoured()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -31876,5 +31903,138 @@ contains
         call pf_minimize_multistart(always_nan, lo, hi, 1_int64, x, fmin, nstart=64, threads=4)
         print '(a, es22.15)', "accepted a NaN objective under threads: ", fmin
     end subroutine scenario_optimize_multistart_nonfinite_threaded
+
+    !> No variables at all: `pf_minimize_bobyqa` with a zero-length start.
+    subroutine scenario_prima_size_zero()
+        real(real64) :: x(0), fmin
+
+        call pf_minimize_bobyqa(sphere, x, fmin)
+        print '(a, es22.15)', "accepted a zero-length start in BOBYQA: ", fmin
+    end subroutine scenario_prima_size_zero
+
+    !> A NaN coordinate in the start point, which PRIMA would replace by zero and carry on.
+    subroutine scenario_prima_start_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x(2), fmin
+
+        x(1) = 0.5_real64
+        x(2) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_minimize_bobyqa(sphere, x, fmin)
+        print '(a, es22.15)', "accepted a NaN start in BOBYQA: ", fmin
+    end subroutine scenario_prima_start_nan
+
+    !> Bounds of a different length from the start point.
+    subroutine scenario_prima_bounds_size()
+        real(real64) :: x(2), fmin, lo(3), hi(3)
+
+        x = 0.5_real64
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi)
+        print '(a, es22.15)', "accepted bounds of the wrong length in BOBYQA: ", fmin
+    end subroutine scenario_prima_bounds_size
+
+    !> A bound pair with no room between them, PRIMA's `NO_SPACE_BETWEEN_BOUNDS`.
+    !!
+    !! PRIMA returns that code and leaves the start untouched; here it is refused, because a
+    !! status nobody reads looks exactly like a minimisation that found nothing to improve.
+    subroutine scenario_prima_no_space_between_bounds()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        x = 0.0_real64
+        lo = 0.0_real64
+        hi = [2.0_real64, epsilon(1.0_real64)]
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi)
+        print '(a, es22.15)', "accepted a bound pair with no room between them: ", fmin
+    end subroutine scenario_prima_no_space_between_bounds
+
+    !> A start point outside the bounds, which PRIMA would move onto them.
+    subroutine scenario_prima_start_outside_bounds()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        x = [0.5_real64, 3.0_real64]
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi)
+        print '(a, es22.15)', "accepted a start outside the bounds: ", fmin
+    end subroutine scenario_prima_start_outside_bounds
+
+    !> A final trust-region radius above the initial one, which PRIMA would swap.
+    subroutine scenario_prima_rho_order()
+        real(real64) :: x(2), fmin
+
+        x = 0.5_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, rhobeg=1.0e-6_real64, rhoend=1.0_real64)
+        print '(a, es22.15)', "accepted rhoend above rhobeg: ", fmin
+    end subroutine scenario_prima_rho_order
+
+    !> An interpolation-set size outside `[n+2, (n+1)(n+2)/2]`, which PRIMA would clamp.
+    subroutine scenario_prima_npt_range()
+        real(real64) :: x(3), fmin
+
+        x = 0.5_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, npt=3)
+        print '(a, es22.15)', "accepted an npt below n+2: ", fmin
+    end subroutine scenario_prima_npt_range
+
+    !> A `scale` of a different length from the start point.
+    subroutine scenario_prima_scale_size()
+        real(real64) :: x(2), fmin, sc(3)
+
+        x = 0.5_real64
+        sc = 1.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, scale=sc)
+        print '(a, es22.15)', "accepted a scale of the wrong length: ", fmin
+    end subroutine scenario_prima_scale_size
+
+    !> A zero element in `scale`, which would divide the start by zero.
+    subroutine scenario_prima_scale_nonpositive()
+        real(real64) :: x(2), fmin, sc(2)
+
+        x = 0.5_real64
+        sc = [1.0_real64, 0.0_real64]
+        call pf_minimize_bobyqa(sphere, x, fmin, scale=sc)
+        print '(a, es22.15)', "accepted a zero scale: ", fmin
+    end subroutine scenario_prima_scale_nonpositive
+
+    !> A zero evaluation budget for BOBYQA.
+    subroutine scenario_prima_budget_zero()
+        real(real64) :: x(2), fmin
+
+        x = 0.5_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, max_neval=0)
+        print '(a, es22.15)', "accepted a zero budget in BOBYQA: ", fmin
+    end subroutine scenario_prima_budget_zero
+
+    !> An evaluation budget above the ceiling every count in this tier is bounded by.
+    subroutine scenario_prima_budget_ceiling()
+        real(real64) :: x(2), fmin
+
+        x = 0.5_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, max_neval=huge(1))
+        print '(a, es22.15)', "accepted a budget above huge(1)/2 in BOBYQA: ", fmin
+    end subroutine scenario_prima_budget_ceiling
+
+    !> A NaN from the objective, which PRIMA's moderated extreme barrier would absorb.
+    !!
+    !! Upstream replaces the value by a large finite one and carries on, so the search continues
+    !! against a value the objective never returned; here it aborts (`feature_optimizer.md` Q7).
+    subroutine scenario_prima_nonfinite_value()
+        real(real64) :: x(2), fmin
+
+        x = 0.5_real64
+        call pf_minimize_bobyqa(always_nan, x, fmin)
+        print '(a, es22.15)', "accepted a NaN objective value in BOBYQA: ", fmin
+    end subroutine scenario_prima_nonfinite_value
+
+    !> A constrained objective handed to BOBYQA, which honours bounds but not `c(x) <= 0`.
+    subroutine scenario_prima_bobyqa_constraints_not_honoured()
+        type(unit_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = 0.5_real64
+        call pf_minimize_bobyqa(obj, x, fmin)
+        print '(a, 2es22.15)', "accepted a constrained objective in BOBYQA: ", x(1), fmin
+    end subroutine scenario_prima_bobyqa_constraints_not_honoured
     !
 end program error_scenarios

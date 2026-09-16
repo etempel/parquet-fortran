@@ -236,6 +236,7 @@ contains
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
+    !> parquet_prima (pf_minimize_bobyqa/pf_bobyqa_solver),
     !> parquet_settings (parquet_get_arrow_threads /
     !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
     !> parquet_get_version.
@@ -478,6 +479,28 @@ contains
                                         info=minfo)
             call check(error, abs(xv(1) - 2.0_real64) <= 1.0e-3_real64 .and. minfo%nminima >= 1, &
                 "pf_minimize_multistart must be reachable from use parquet alone and count a minimum")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_prima: BOBYQA and its local-solver object.
+        block
+            type(pf_optimize_info) :: binfo
+            type(pf_bobyqa_solver) :: bsolver
+            real(real64) :: xv(1), fmin, lo(1), hi(1)
+            lo = [-3.0_real64]
+            hi = [6.0_real64]
+            xv = [5.0_real64]
+            call pf_minimize_bobyqa(facade_offset_square, xv, fmin, lower=lo, upper=hi, &
+                                    rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=binfo)
+            call check(error, abs(xv(1) - 2.0_real64) <= 1.0e-6_real64 .and. &
+                binfo%status == PF_OPT_OK, &
+                "pf_minimize_bobyqa must be reachable from use parquet alone and minimise to x = 2")
+            if (allocated(error)) return
+            bsolver%rhoend = 1.0e-8_real64
+            call pf_minimize_multistart(facade_offset_square, lo, hi, 5_int64, xv, fmin, &
+                                        nstart=4, solver=bsolver, info=binfo)
+            call check(error, abs(xv(1) - 2.0_real64) <= 1.0e-6_real64 .and. binfo%nlimit == 0, &
+                "pf_bobyqa_solver must be reachable from use parquet alone and drive the driver")
             if (allocated(error)) return
         end block
 

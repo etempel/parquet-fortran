@@ -2621,6 +2621,23 @@ def check_parquet_optimize_stays_arrow_free():
         "Minimising a function of one or many variables must not require the Arrow stack.")
 
 
+def check_parquet_prima_stays_arrow_free():
+    """`use parquet_prima` must not reach parquet_bindings.
+
+    The vendored PRIMA engines import `iso_fortran_env` and `ieee_arithmetic` and, through
+    `parquet_optimize`, `parquet_sampling` and the argsort tier -- all Arrow-free. PRIMA's own
+    tree reaches nothing at all: no reader, no writer, no setting, not even a print, because its
+    `iprint` layer is not vendored. The import that would break it is the same one that would
+    break `parquet_optimize`: `parquet_settings`, for a knob to quieten something. There is
+    nothing to quieten.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_prima",
+        "Powell's derivative-free methods must not require the Arrow stack.")
+
+
 def check_parquet_utils_is_total():
     """Every `parquet_utils` procedure is `pure`, and the module contains no `error stop`.
 
@@ -7617,6 +7634,7 @@ CHECKS = (
     ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),
     ("parquet_integrate stays Arrow-free", check_parquet_integrate_stays_arrow_free),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
+    ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",
      check_facade_inventory_matches_its_use_lines),

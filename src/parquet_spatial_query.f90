@@ -723,7 +723,7 @@ contains
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64) :: nc(3), sa(3), sc(3), ia, alo, acnt, jj, kk, base, s0, e0, t, cap, row, minkey
         integer(int64) :: ilo, ihi, nfill, ntest
-        real(real64) :: dv(3), c0(3), c1(3)
+        real(real64) :: dv(3), ds(3), c0(3), c1(3)
         real(real64) :: dd, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
         real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
         real(real64) :: q1, q2, q3, e1, e2, e3, dself, lself, bpself, blself, bpj, blj, sx, sy, sz, s2
@@ -837,7 +837,23 @@ contains
         if (usework) allocate (dwork(cap))
 
         dv = p2 - p1
-        dd = dv(1) * dv(1) + dv(2) * dv(2) + dv(3) * dv(3)
+        ! An axis longer than `sqrt(huge())` -- about 1.3e154 -- has no representable squared length,
+        ! and every parameter along it would come out zero, so the shape would silently answer as a
+        ! ball about `p1`. Refused rather than approximated, for the reason the non-finite screens
+        ! above refuse: there is nothing to answer. The square is never FORMED to find that out: the
+        ! overflow aborts under nagfor's `-ieee=stop` before the refusal is reached. Below `2**511`
+        ! three squares cannot overflow; at or above it the axis is measured in units of `2**512`,
+        ! which is exact, so the squared length fits exactly when the scaled one is below one, and it
+        ! is scaled back in two steps that are each representable.
+        if (maxval(abs(dv)) < scale(1.0_real64, 511)) then
+            dd = dv(1) * dv(1) + dv(2) * dv(2) + dv(3) * dv(3)
+        else
+            ds = scale(dv, -512)
+            dd = ds(1) * ds(1) + ds(2) * ds(2) + ds(3) * ds(3)
+            if (.not. (dd < 1.0_real64)) error stop "pf_spatial_index%" // what // &
+                ": the axis is too long for its squared length to be formed; scale the coordinates"
+            dd = scale(scale(dd, 512), 512)
+        end if
         rmax = max(r1, r2)
         ! A zero-length axis has no direction to project onto, so all three shapes collapse to the
         ! same ball. Documented on each binding rather than left to be discovered.
@@ -859,12 +875,6 @@ contains
             if (hasat) axis_t(1:int(min(m, size(axis_t, kind=int64)))) = 0.0_real64
             return
         end if
-        ! The other end of the same guard. An axis longer than `sqrt(huge())` -- about 1.3e154 --
-        ! has no representable squared length, and every parameter along it would come out zero, so
-        ! the shape would silently answer as a ball about `p1`. Refused rather than approximated,
-        ! for the reason the non-finite screens above refuse: there is nothing to answer.
-        if (.not. (dd < huge(0.0_real64))) error stop "pf_spatial_index%" // what // &
-            ": the axis is too long for its squared length to be formed; scale the coordinates"
         dr = r2 - r1
         nc = self%grid_n
         direct = self%owns

@@ -6577,6 +6577,10 @@ contains
         call check_scenario_exit_status_and_stderr(error, "spatial_axis_length_overflows", expect_abort=.true., &
             failure_message="an axis whose squared length overflows was expected to be refused", &
             required_stderr="the axis is too long for its squared length to be formed")
+        if (allocated(error)) return
+        ! The control past `2**511` must be answered, or a guard refusing every long axis passes too.
+        call check_scenario_streams(error, "spatial_axis_length_overflows", "a 1e154-long axis was answered", &
+            expect_on="stdout", failure_message="an axis whose squared length fits was expected to be answered")
     end subroutine test_spatial_axis_length_overflows_aborts
 
     subroutine test_spatial_nearest_nan_point_aborts(error)

@@ -23260,6 +23260,10 @@ contains
         m = sx%within_segment([0.0_real64, 0.5_real64, 0.5_real64], &
             [1.0e150_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)
         print '(a,i0)', "a 1e150-long axis was answered, m=", m
+        ! And one past `2**511`, whose squared length is formed at a power-of-two scale and fits.
+        m = sx%within_segment([0.0_real64, 0.5_real64, 0.5_real64], &
+            [1.0e154_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)
+        print '(a,i0)', "a 1e154-long axis was answered, m=", m
         m = sx%within_segment([0.0_real64, 0.5_real64, 0.5_real64], &
             [1.0e200_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)   ! -> aborts
         print '(a,i0)', "unexpectedly searched about an axis whose squared length overflows, m=", m

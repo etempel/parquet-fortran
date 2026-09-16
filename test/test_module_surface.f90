@@ -1397,7 +1397,7 @@ contains
     subroutine check_interpolate_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
 
-        type(pf_interp_1d) :: line, spline
+        type(pf_interp_1d) :: line, spline, knot, clamped, shape
         real(real64)       :: x(4), y(4), v(2)
         logical            :: was_uniform
 
@@ -1417,6 +1417,26 @@ contains
             if (abs(spline%eval(4.0_real64) - 9.0_real64) > 1.0e-12_real64) what = "pf_interp_1d%init"
         end if
         if (what == "" .and. .not. spline%is_initialised()) what = "pf_interp_1d%is_initialised"
+
+        ! The derivative of either order and the integral, on a scalar and on an array.
+        if (what == "") then
+            v = line%derivative([0.5_real64, 2.5_real64])
+            if (v(1) /= 2.0_real64 .or. v(2) /= 2.0_real64 .or. line%derivative(1.5_real64, 2) /= 0.0_real64) &
+                what = "pf_interp_1d%derivative"
+        end if
+        if (what == "") then
+            if (line%integral(0.0_real64, 2.0_real64) /= 6.0_real64) what = "pf_interp_1d%integral"
+        end if
+
+        ! Every other end condition, and the shape-preserving method.
+        if (what == "") then
+            call knot%init(x, y, bc="not_a_knot")
+            call clamped%init(x, y, bc="clamped", slopes=[2.0_real64, 2.0_real64])
+            call shape%init(x, y, method="pchip")
+            if (abs(knot%eval(1.5_real64) - 4.0_real64) > 1.0e-12_real64 .or. &
+                abs(clamped%eval(1.5_real64) - 4.0_real64) > 1.0e-12_real64 .or. &
+                abs(shape%eval(1.5_real64) - 4.0_real64) > 1.0e-12_real64) what = "pf_interp_1d%init (bc, pchip)"
+        end if
         if (what == "") then
             call spline%clear()
             if (spline%is_initialised()) what = "pf_interp_1d%clear"

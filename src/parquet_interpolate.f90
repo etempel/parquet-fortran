@@ -1,5 +1,6 @@
 !> Interpolation of tabulated `real64` data: `pf_interp_1d`, an interpolant built once over a table
-!> of abscissae and ordinates and evaluated anywhere, and `pf_interp`, the one-shot form.
+!> of abscissae and ordinates and evaluated, differentiated and integrated anywhere, and `pf_interp`,
+!> the one-shot form.
 !!
 !! `parquet_interpolate` is an **Arrow-free leaf**: it imports the two INTRINSIC modules
 !! `iso_fortran_env` and `ieee_arithmetic`, and no module of this library. An intrinsic module is
@@ -13,26 +14,28 @@
 !! know, or an evaluation of an object that was never built. The guide page lists every message.
 !!
 !! **Sharing is by construction.** The module has no variable that is not a `parameter`. `%init`
-!! and `%clear` are the only bindings that write an object; `%eval` is `pure elemental` and only
-!! reads it, so one object nobody writes may be evaluated from any number of threads at once, and
-!! two objects never share anything. The aborts of `%init` are each taken under a named
-!! `critical`, so a caller building objects inside a parallel region aborts once.
+!! and `%clear` are the only bindings that write an object; `%eval`, `%derivative` and `%integral`
+!! are `pure` and only read it, so one object nobody writes may be evaluated from any number of
+!! threads at once, and two objects never share anything. The aborts of `%init` are each taken
+!! under a named `critical`, so a caller building objects inside a parallel region aborts once.
 !!
 !! **A NaN query answers NaN, quietly, under every policy.** Each evaluator screens it with
 !! `xq /= xq` before any other comparison: the clamp a `min`/`max` pair would compile to raises
 !! IEEE_INVALID on a NaN, which aborts a program running under nagfor's default `-ieee=stop`.
 !!
 !! **Outside the table, the object's `outside=` policy decides**, fixed when it is built:
-!! `"clamp"` (the default) answers the value at the nearest end, `"extrapolate"` continues the end
-!! segment's polynomial, and `"nan"` answers a quiet NaN.
+!! `"clamp"` (the default) answers the value at the nearest end, a derivative of zero and an
+!! integral that is flat beyond the table; `"extrapolate"` continues the end segment's polynomial
+!! for all three; and `"nan"` answers a quiet NaN for a point beyond the table and for an integral
+!! with a limit there.
 !!
 !! A table may be given ascending or descending; it is stored ascending, which is the only order the
-!! workers see. The `"pchip"` method and the `"not_a_knot"` and `"clamped"` end conditions are
-!! recognised and refused with a message saying they are not available yet.
+!! workers see, and the end slopes of `bc="clamped"` are swapped with it.
 module parquet_interpolate
 
     use iso_fortran_env, only : real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_finite, ieee_is_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf, ieee_is_finite, &
+        ieee_is_nan
 
     implicit none
     private
@@ -44,13 +47,13 @@ module parquet_interpolate
 
     integer, parameter :: M_LINEAR = 1       !! `method="linear"`
     integer, parameter :: M_CUBIC = 2        !! `method="cubic"`
-    integer, parameter :: M_PCHIP = 3        !! `method="pchip"`, not available yet
+    integer, parameter :: M_PCHIP = 3        !! `method="pchip"`
     integer, parameter :: O_CLAMP = 1        !! `outside="clamp"`
     integer, parameter :: O_EXTRAPOLATE = 2  !! `outside="extrapolate"`
     integer, parameter :: O_NAN = 3          !! `outside="nan"`
     integer, parameter :: B_NATURAL = 1      !! `bc="natural"`
-    integer, parameter :: B_NOT_A_KNOT = 2   !! `bc="not_a_knot"`, not available yet
-    integer, parameter :: B_CLAMPED = 3      !! `bc="clamped"`, not available yet
+    integer, parameter :: B_NOT_A_KNOT = 2   !! `bc="not_a_knot"`
+    integer, parameter :: B_CLAMPED = 3      !! `bc="clamped"`
 
     ! ---- internal parameters, not part of the public surface -------------------------------
 
@@ -69,8 +72,8 @@ module parquet_interpolate
 
     ! ---- the one-dimensional interpolant -----------------------------------------------------
 
-    !> A one-dimensional interpolant over tabulated data: build it once with `%init`, evaluate it
-    !! anywhere with `%eval`.
+    !> A one-dimensional interpolant over tabulated data: build it once with `%init`, then evaluate,
+    !! differentiate and integrate it anywhere.
     !!
     !! Every component is private. An object holds its own copy of the table, stored ascending, and
     !! the per-knot coefficients its method needs. Intrinsic assignment copies it deeply; there is no
@@ -80,11 +83,11 @@ module parquet_interpolate
         real(real64), allocatable :: x(:)   !! abscissae, stored strictly increasing
         real(real64), allocatable :: y(:)   !! ordinates, in the same order
         real(real64), allocatable :: d(:)   !! per-knot coefficients: second derivatives for a cubic
-                                            !! spline; unallocated for `linear`
+                                            !! spline, slopes for `pchip`; unallocated for `linear`
         integer      :: n = 0               !! points in the table; 0 until `%init`. A default integer:
                                             !! a table longer than `huge(1)` points is not an input
                                             !! this module is for
-        integer      :: method = 0          !! `M_LINEAR` or `M_CUBIC`
+        integer      :: method = 0          !! `M_LINEAR`, `M_CUBIC` or `M_PCHIP`
         integer      :: outside = 0         !! `O_CLAMP`, `O_EXTRAPOLATE` or `O_NAN`
         logical      :: reversed = .false.  !! the caller's table was descending
         logical      :: uniform = .false.   !! evenly spaced: the bracket is guessed by arithmetic
@@ -92,6 +95,8 @@ module parquet_interpolate
     contains
         procedure :: init => interp_1d_init          !! Stores the table and builds the coefficients.
         procedure :: eval => interp_1d_eval          !! Value at a point; `pure elemental`.
+        procedure :: derivative => interp_1d_derivative !! First or second derivative; `pure elemental`.
+        procedure :: integral => interp_1d_integral  !! Definite integral over `[a, b]`; `pure`.
         procedure :: is_initialised => interp_1d_ready !! `.true.` once built; never aborts.
         procedure :: clear => interp_1d_clear        !! Releases the table; the object may be rebuilt.
     end type pf_interp_1d
@@ -108,20 +113,23 @@ module parquet_interpolate
         !!
         !! `x` must be strictly increasing or strictly decreasing and finite, `y` finite and the same
         !! size; `is_valid`, when given, drops the points it marks `.false.` first, and the survivors
-        !! must still number at least two. `method` is `"linear"` or `"cubic"` (the default: a C2
-        !! cubic spline), `bc` the spline's end condition, `"natural"` (the default), and `outside`
-        !! what a point beyond the table answers: `"clamp"` (the default), `"extrapolate"` or `"nan"`.
-        !! Tokens are matched without regard to case. `slopes` belongs to the `"clamped"` end
-        !! condition, which is not available yet, and is refused. `context` is appended to any abort
-        !! message. A second `%init` on a built object replaces its table.
+        !! must still number at least two, or four for `bc="not_a_knot"`. `method` is `"linear"`,
+        !! `"cubic"` (the default: a C2 cubic spline) or `"pchip"` (a C1 cubic that keeps monotone
+        !! data monotone). `bc` is the cubic spline's end condition: `"natural"` (the default, zero
+        !! curvature at both ends), `"not_a_knot"` (a continuous third derivative at the second and
+        !! the second-to-last point) or `"clamped"`, whose first derivatives at the ends are
+        !! `slopes(1)` at the table's first point and `slopes(2)` at its last, in the order given.
+        !! `outside` says what a point beyond the table answers: `"clamp"` (the default),
+        !! `"extrapolate"` or `"nan"`. Tokens are matched without regard to case. `context` is
+        !! appended to any abort message. A second `%init` on a built object replaces its table.
         module subroutine interp_1d_init(this, x, y, method, bc, slopes, outside, is_valid, context)
             implicit none
             class(pf_interp_1d), intent(out)       :: this       !! the interpolant to build
             real(real64), intent(in)               :: x(:)       !! abscissae, strictly monotonic
             real(real64), intent(in)               :: y(:)       !! ordinates, one per abscissa
-            character(len=*), intent(in), optional :: method     !! `"linear"` or `"cubic"`
+            character(len=*), intent(in), optional :: method     !! `"linear"`, `"cubic"` or `"pchip"`
             character(len=*), intent(in), optional :: bc         !! the spline's end condition
-            real(real64), intent(in), optional     :: slopes(:)  !! end slopes for `bc="clamped"`
+            real(real64), intent(in), optional     :: slopes(:)  !! the two end slopes for `bc="clamped"`
             character(len=*), intent(in), optional :: outside    !! `"clamp"`, `"extrapolate"` or `"nan"`
             logical, intent(in), optional          :: is_valid(:) !! `.false.` drops that point
             character(len=*), intent(in), optional :: context    !! call-site text for abort messages
@@ -138,6 +146,43 @@ module parquet_interpolate
             real(real64), intent(in)        :: xq   !! the query point
             real(real64)                    :: v    !! the interpolated value
         end function interp_1d_eval
+
+        !> The interpolant's first or second derivative at `xq`: `pure elemental`.
+        !!
+        !! ```
+        !! dv = c%derivative(xq, [order])
+        !! ```
+        !!
+        !! `order` is 1 (the default) or 2. The derivative is taken on the segment `%eval` evaluates
+        !! `xq` on, so at an interior knot it is the right-hand segment's, and at the last knot the
+        !! last segment's: the difference shows where the interpolant is not smooth enough to have
+        !! that derivative -- a `"linear"` slope everywhere, a `"pchip"` curvature. A NaN query
+        !! answers NaN. Beyond the table `"clamp"` answers zero, `"extrapolate"` the end segment's
+        !! derivative and `"nan"` a NaN. Aborts on an object that was never built, and on an `order`
+        !! other than 1 or 2.
+        pure elemental module function interp_1d_derivative(this, xq, order) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this  !! the interpolant
+            real(real64), intent(in)        :: xq    !! the query point
+            integer, intent(in), optional   :: order !! 1 (the default) or 2
+            real(real64)                    :: v     !! the derivative there
+        end function interp_1d_derivative
+
+        !> The definite integral of the interpolant from `a` to `b`: `pure`.
+        !!
+        !! Exact for the interpolant, which is a polynomial on every segment. `b < a` negates, and
+        !! `a == b` answers zero. A NaN limit answers NaN. A limit beyond the table follows the
+        !! object's policy: `"clamp"` integrates the end value as a constant beyond each end,
+        !! `"extrapolate"` the end segment's polynomial continued, and `"nan"` answers a NaN. The work
+        !! grows with the number of knots between the limits. Aborts on an object that was never
+        !! built.
+        pure module function interp_1d_integral(this, a, b) result(s)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this !! the interpolant
+            real(real64), intent(in)        :: a    !! the lower limit
+            real(real64), intent(in)        :: b    !! the upper limit
+            real(real64)                    :: s    !! the integral
+        end function interp_1d_integral
 
         !> `.true.` once `%init` has built the object and `%clear` has not released it since.
         pure module function interp_1d_ready(this) result(ok)
@@ -170,9 +215,12 @@ module parquet_interpolate
     !!   decreasing and finite, `y` finite.
     !! * `xq` -- the query: a scalar, answered by a scalar, or a rank-1 array, answered by an array of
     !!   its size.
-    !! * `method` -- `"linear"`, or `"cubic"` (the default), a C2 cubic spline.
-    !! * `bc` -- the cubic spline's end condition, `"natural"` (the default). Refused with `"linear"`.
-    !! * `slopes` -- end slopes for the `"clamped"` end condition, which is not available yet; refused.
+    !! * `method` -- `"linear"`; `"cubic"` (the default), a C2 cubic spline; or `"pchip"`, a C1 cubic
+    !!   that keeps monotone data monotone.
+    !! * `bc` -- the cubic spline's end condition: `"natural"` (the default), `"not_a_knot"` or
+    !!   `"clamped"`. Refused with any other method.
+    !! * `slopes` -- rank-1 `real64` of two elements, the first derivatives at the table's first and
+    !!   last point for `bc="clamped"`; required with it and refused without it.
     !! * `outside` -- what a query beyond the table answers: `"clamp"` (the default, the end value),
     !!   `"extrapolate"` (the end segment continued) or `"nan"`.
     !! * `is_valid` -- rank-1 `logical` of the table's size; a point marked `.false.` is dropped.
@@ -191,7 +239,7 @@ module parquet_interpolate
             real(real64), intent(in)               :: x(:)        !! abscissae, strictly monotonic
             real(real64), intent(in)               :: y(:)        !! ordinates, one per abscissa
             real(real64), intent(in)               :: xq          !! the query point
-            character(len=*), intent(in), optional :: method      !! `"linear"` or `"cubic"`
+            character(len=*), intent(in), optional :: method      !! `"linear"`, `"cubic"` or `"pchip"`
             character(len=*), intent(in), optional :: bc          !! the spline's end condition
             real(real64), intent(in), optional     :: slopes(:)   !! end slopes for `bc="clamped"`
             character(len=*), intent(in), optional :: outside     !! the out-of-range policy
@@ -207,7 +255,7 @@ module parquet_interpolate
             real(real64), intent(in)               :: x(:)        !! abscissae, strictly monotonic
             real(real64), intent(in)               :: y(:)        !! ordinates, one per abscissa
             real(real64), intent(in)               :: xq(:)       !! the query points
-            character(len=*), intent(in), optional :: method      !! `"linear"` or `"cubic"`
+            character(len=*), intent(in), optional :: method      !! `"linear"`, `"cubic"` or `"pchip"`
             character(len=*), intent(in), optional :: bc          !! the spline's end condition
             real(real64), intent(in), optional     :: slopes(:)   !! end slopes for `bc="clamped"`
             character(len=*), intent(in), optional :: outside     !! the out-of-range policy
@@ -332,7 +380,7 @@ module parquet_interpolate
 
     end interface
 
-    ! ---- the tridiagonal solver and the spline, implemented in parquet_interpolate_core.f90 ---
+    ! ---- the tridiagonal solver and the per-knot coefficients, in parquet_interpolate_core.f90 --
 
     interface
 
@@ -352,13 +400,29 @@ module parquet_interpolate
 
         !> The second derivatives `m` of the cubic spline through `(x, y)` under the end condition
         !! `bc`.
-        pure module subroutine interp_spline_coeffs(x, y, bc, m)
+        !!
+        !! `s1` and `sn` are the first derivatives at `x(1)` and `x(n)` that `B_CLAMPED` imposes, in
+        !! the stored ascending order; the other end conditions do not read them. `B_NOT_A_KNOT`
+        !! needs at least four points, the others two.
+        pure module subroutine interp_spline_coeffs(x, y, bc, s1, sn, m)
+            implicit none
+            real(real64), intent(in)  :: x(:) !! abscissae, strictly increasing
+            real(real64), intent(in)  :: y(:) !! ordinates
+            integer, intent(in)       :: bc   !! `B_NATURAL`, `B_NOT_A_KNOT` or `B_CLAMPED`
+            real(real64), intent(in)  :: s1   !! the slope at `x(1)`, for `B_CLAMPED`
+            real(real64), intent(in)  :: sn   !! the slope at `x(n)`, for `B_CLAMPED`
+            real(real64), intent(out) :: m(:) !! second derivatives at the knots
+        end subroutine interp_spline_coeffs
+
+        !> The slopes `d` at the knots of the shape-preserving piecewise cubic Hermite interpolant
+        !! through `(x, y)`: Fritsch and Carlson's monotone slopes with Butland's weighted harmonic
+        !! mean inside, and a three-point estimate held to the data's shape at each end.
+        pure module subroutine interp_pchip_slopes(x, y, d)
             implicit none
             real(real64), intent(in)  :: x(:) !! abscissae, strictly increasing, at least two
             real(real64), intent(in)  :: y(:) !! ordinates
-            integer, intent(in)       :: bc   !! `B_NATURAL`
-            real(real64), intent(out) :: m(:) !! second derivatives at the knots
-        end subroutine interp_spline_coeffs
+            real(real64), intent(out) :: d(:) !! first derivatives at the knots
+        end subroutine interp_pchip_slopes
 
     end interface
 
@@ -377,6 +441,29 @@ module parquet_interpolate
             real(real64)             :: v  !! the line's value there
         end function interp_linear_seg_value
 
+        !> The slope (`order` 1) or the curvature (`order` 2, zero) of the straight line through
+        !! `(x0, y0)` and `(x1, y1)`.
+        pure module function interp_linear_seg_derivative(x0, x1, y0, y1, order) result(v)
+            implicit none
+            real(real64), intent(in) :: x0    !! the segment's left knot
+            real(real64), intent(in) :: x1    !! the segment's right knot
+            real(real64), intent(in) :: y0    !! the ordinate at `x0`
+            real(real64), intent(in) :: y1    !! the ordinate at `x1`
+            integer, intent(in)      :: order !! 1 or 2
+            real(real64)             :: v     !! the derivative
+        end function interp_linear_seg_derivative
+
+        !> The integral from `x0` to `xq` of the straight line through `(x0, y0)` and `(x1, y1)`.
+        pure module function interp_linear_seg_integral(x0, x1, y0, y1, xq) result(v)
+            implicit none
+            real(real64), intent(in) :: x0 !! the segment's left knot, the lower limit
+            real(real64), intent(in) :: x1 !! the segment's right knot
+            real(real64), intent(in) :: y0 !! the ordinate at `x0`
+            real(real64), intent(in) :: y1 !! the ordinate at `x1`
+            real(real64), intent(in) :: xq !! the upper limit, which may lie beyond the segment
+            real(real64)             :: v  !! the integral
+        end function interp_linear_seg_integral
+
         !> One cubic-spline segment, in second-derivative form, at `xq`, which may lie beyond it.
         pure module function interp_cubic_seg_value(x0, x1, y0, y1, m0, m1, xq) result(v)
             implicit none
@@ -389,6 +476,76 @@ module parquet_interpolate
             real(real64), intent(in) :: xq !! the point
             real(real64)             :: v  !! the cubic's value there
         end function interp_cubic_seg_value
+
+        !> The first (`order` 1) or second (`order` 2) derivative of one cubic-spline segment at `xq`,
+        !! which may lie beyond it.
+        pure module function interp_cubic_seg_derivative(x0, x1, y0, y1, m0, m1, xq, order) result(v)
+            implicit none
+            real(real64), intent(in) :: x0    !! the segment's left knot
+            real(real64), intent(in) :: x1    !! the segment's right knot
+            real(real64), intent(in) :: y0    !! the ordinate at `x0`
+            real(real64), intent(in) :: y1    !! the ordinate at `x1`
+            real(real64), intent(in) :: m0    !! the second derivative at `x0`
+            real(real64), intent(in) :: m1    !! the second derivative at `x1`
+            real(real64), intent(in) :: xq    !! the point
+            integer, intent(in)      :: order !! 1 or 2
+            real(real64)             :: v     !! the derivative there
+        end function interp_cubic_seg_derivative
+
+        !> The integral from `x0` to `xq` of one cubic-spline segment, `xq` possibly beyond it.
+        pure module function interp_cubic_seg_integral(x0, x1, y0, y1, m0, m1, xq) result(v)
+            implicit none
+            real(real64), intent(in) :: x0 !! the segment's left knot, the lower limit
+            real(real64), intent(in) :: x1 !! the segment's right knot
+            real(real64), intent(in) :: y0 !! the ordinate at `x0`
+            real(real64), intent(in) :: y1 !! the ordinate at `x1`
+            real(real64), intent(in) :: m0 !! the second derivative at `x0`
+            real(real64), intent(in) :: m1 !! the second derivative at `x1`
+            real(real64), intent(in) :: xq !! the upper limit
+            real(real64)             :: v  !! the integral
+        end function interp_cubic_seg_integral
+
+        !> One cubic Hermite segment, given its end ordinates and end slopes, at `xq`, which may lie
+        !! beyond it.
+        pure module function interp_hermite_seg_value(x0, x1, y0, y1, d0, d1, xq) result(v)
+            implicit none
+            real(real64), intent(in) :: x0 !! the segment's left knot
+            real(real64), intent(in) :: x1 !! the segment's right knot
+            real(real64), intent(in) :: y0 !! the ordinate at `x0`
+            real(real64), intent(in) :: y1 !! the ordinate at `x1`
+            real(real64), intent(in) :: d0 !! the slope at `x0`
+            real(real64), intent(in) :: d1 !! the slope at `x1`
+            real(real64), intent(in) :: xq !! the point
+            real(real64)             :: v  !! the cubic's value there
+        end function interp_hermite_seg_value
+
+        !> The first (`order` 1) or second (`order` 2) derivative of one cubic Hermite segment at
+        !! `xq`, which may lie beyond it.
+        pure module function interp_hermite_seg_derivative(x0, x1, y0, y1, d0, d1, xq, order) result(v)
+            implicit none
+            real(real64), intent(in) :: x0    !! the segment's left knot
+            real(real64), intent(in) :: x1    !! the segment's right knot
+            real(real64), intent(in) :: y0    !! the ordinate at `x0`
+            real(real64), intent(in) :: y1    !! the ordinate at `x1`
+            real(real64), intent(in) :: d0    !! the slope at `x0`
+            real(real64), intent(in) :: d1    !! the slope at `x1`
+            real(real64), intent(in) :: xq    !! the point
+            integer, intent(in)      :: order !! 1 or 2
+            real(real64)             :: v     !! the derivative there
+        end function interp_hermite_seg_derivative
+
+        !> The integral from `x0` to `xq` of one cubic Hermite segment, `xq` possibly beyond it.
+        pure module function interp_hermite_seg_integral(x0, x1, y0, y1, d0, d1, xq) result(v)
+            implicit none
+            real(real64), intent(in) :: x0 !! the segment's left knot, the lower limit
+            real(real64), intent(in) :: x1 !! the segment's right knot
+            real(real64), intent(in) :: y0 !! the ordinate at `x0`
+            real(real64), intent(in) :: y1 !! the ordinate at `x1`
+            real(real64), intent(in) :: d0 !! the slope at `x0`
+            real(real64), intent(in) :: d1 !! the slope at `x1`
+            real(real64), intent(in) :: xq !! the upper limit
+            real(real64)             :: v  !! the integral
+        end function interp_hermite_seg_integral
 
     end interface
 

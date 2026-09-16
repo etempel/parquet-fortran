@@ -1,5 +1,5 @@
 !> The tables `test_interpolate.f90`, `test_interpolate_omp.f90` and `test/error_scenarios.f90`
-!> share, with the closed form of each beside it.
+!> share, with the closed form of each beside it, and the golden fixtures gathered one per object.
 !!
 !! **No expected value here is read off a run.** A table is either a golden fixture, whose
 !! expectations `tools/generate_interpolate_vectors.py` derives exactly over rationals, or a
@@ -18,20 +18,47 @@ module test_interpolate_support
     implicit none
     private
 
-    public :: golden_table, GOLDEN_TABLES
+    public :: golden_fixture, golden_fixture_get, GOLDEN_TABLES
+    public :: VARIANT_NAMES, POLICIES
     public :: sine_table, SINE_LINEAR_BOUND, SINE_CUBIC_BOUND
     public :: bent_grid, BENT_AMPLITUDE
     public :: line_2x1
     public :: nan_value, positive_infinity
-    public :: METHODS, POLICIES
 
-    !> The golden fixtures `golden_table` hands out, numbered 1 to this.
-    integer, parameter :: GOLDEN_TABLES = 3
+    !> The golden fixtures `golden_fixture_get` hands out, numbered 1 to this.
+    integer, parameter :: GOLDEN_TABLES = 5
 
-    !> The two methods a one-dimensional interpolant offers, as their tokens.
-    character(len=6), parameter :: METHODS(2) = [character(len=6) :: "linear", "cubic"]
+    !> The variants a one-dimensional interpolant offers, one per column of every golden expectation
+    !! array and in the same order: `method="linear"`; `method="cubic"` under `bc="natural"`,
+    !! `bc="not_a_knot"` and `bc="clamped"`; and `method="pchip"`.
+    character(len=10), parameter :: VARIANT_NAMES(GI_NV) = [character(len=10) :: "linear", "natural", "not_a_knot", &
+                                                            "clamped", "pchip"]
     !> The three out-of-range policies, as their tokens.
     character(len=11), parameter :: POLICIES(3) = [character(len=11) :: "clamp", "extrapolate", "nan"]
+
+    !> One golden fixture of `test_interpolate_golden`: its table, queries and limits, and every
+    !! expectation, one column per variant of `VARIANT_NAMES`.
+    type :: golden_fixture
+        character(len=3)          :: name = ""                        !! its name in the golden file
+        real(real64), allocatable :: x(:)                             !! abscissae, strictly increasing
+        real(real64), allocatable :: y(:)                             !! ordinates
+        real(real64) :: slopes(2) = 0.0_real64                        !! end slopes for `bc="clamped"`
+        real(real64) :: q(GI_NQ) = 0.0_real64                         !! interior queries
+        real(real64) :: o(GI_NO) = 0.0_real64                         !! outside queries
+        real(real64) :: a(GI_NI) = 0.0_real64                         !! lower limits inside the table
+        real(real64) :: b(GI_NI) = 0.0_real64                         !! upper limits inside the table
+        real(real64) :: oa(GI_NJ) = 0.0_real64                        !! lower limits reaching beyond it
+        real(real64) :: ob(GI_NJ) = 0.0_real64                        !! upper limits reaching beyond it
+        real(real64) :: value(GI_NQ, GI_NV) = 0.0_real64              !! the value at each of `q`
+        real(real64) :: value_out(GI_NO, GI_NV) = 0.0_real64          !! extrapolated, at each of `o`
+        real(real64) :: d1(GI_NQ, GI_NV) = 0.0_real64                 !! the first derivative at `q`
+        real(real64) :: d2(GI_NQ, GI_NV) = 0.0_real64                 !! the second derivative at `q`
+        real(real64) :: d1_out(GI_NO, GI_NV) = 0.0_real64             !! extrapolated, at `o`
+        real(real64) :: d2_out(GI_NO, GI_NV) = 0.0_real64             !! extrapolated, at `o`
+        real(real64) :: integral(GI_NI, GI_NV) = 0.0_real64           !! over each `(a, b)`
+        real(real64) :: integral_out(GI_NJ, GI_NV) = 0.0_real64       !! extrapolated, over `(oa, ob)`
+        real(real64) :: integral_clamp(GI_NJ, GI_NV) = 0.0_real64     !! clamped, over `(oa, ob)`
+    end type golden_fixture
 
     !> How far the linear interpolant of `sin` on unit-spaced knots may stray from `sin`: the
     !! piecewise-linear error bound `h**2/8 * max|f''|`, with `h = 1` and `max|sin''| = 1`.
@@ -56,56 +83,35 @@ module test_interpolate_support
 
 contains
 
-    !> One of the golden fixtures of `test_interpolate_golden`, with its queries and expectations.
-    !!
-    !! `which` runs from 1 to `GOLDEN_TABLES`. `linear` and `natural` are the expectations at `q`;
-    !! `linear_out` and `natural_out` those at `o` under `outside="extrapolate"`.
-    subroutine golden_table(which, name, x, y, q, o, linear, linear_out, natural, natural_out)
-        integer, intent(in)                    :: which       !! the fixture, 1 to GOLDEN_TABLES
-        character(len=3), intent(out)          :: name        !! its name in the golden file
-        real(real64), allocatable, intent(out) :: x(:)        !! abscissae, strictly increasing
-        real(real64), allocatable, intent(out) :: y(:)        !! ordinates
-        real(real64), intent(out)              :: q(GI_NQ)    !! interior queries
-        real(real64), intent(out)              :: o(GI_NO)    !! outside queries
-        real(real64), intent(out)              :: linear(GI_NQ)      !! linear at `q`
-        real(real64), intent(out)              :: linear_out(GI_NO)  !! linear extrapolated at `o`
-        real(real64), intent(out)              :: natural(GI_NQ)     !! natural spline at `q`
-        real(real64), intent(out)              :: natural_out(GI_NO) !! natural spline extrapolated at `o`
+    !> Golden fixture `which` of `test_interpolate_golden`, numbered 1 to `GOLDEN_TABLES`.
+    subroutine golden_fixture_get(which, f)
+        integer, intent(in)               :: which !! the fixture, 1 to `GOLDEN_TABLES`
+        type(golden_fixture), intent(out) :: f     !! receives it
 
         select case (which)
         case (1)
-            name = "U9"
-            x = U9_X
-            y = U9_Y
-            q = U9_Q
-            o = U9_O
-            linear = U9_LINEAR
-            linear_out = U9_LINEAR_OUT
-            natural = U9_NATURAL
-            natural_out = U9_NATURAL_OUT
+            f = golden_fixture("U9", U9_X, U9_Y, U9_SLOPES, U9_Q, U9_O, U9_A, U9_B, U9_OA, U9_OB, U9_VALUE, &
+                               U9_VALUE_OUT, U9_D1, U9_D2, U9_D1_OUT, U9_D2_OUT, U9_INTEGRAL, U9_INTEGRAL_OUT, &
+                               U9_INTEGRAL_CLAMP)
         case (2)
-            name = "G16"
-            x = G16_X
-            y = G16_Y
-            q = G16_Q
-            o = G16_O
-            linear = G16_LINEAR
-            linear_out = G16_LINEAR_OUT
-            natural = G16_NATURAL
-            natural_out = G16_NATURAL_OUT
+            f = golden_fixture("G16", G16_X, G16_Y, G16_SLOPES, G16_Q, G16_O, G16_A, G16_B, G16_OA, G16_OB, G16_VALUE, &
+                               G16_VALUE_OUT, G16_D1, G16_D2, G16_D1_OUT, G16_D2_OUT, G16_INTEGRAL, G16_INTEGRAL_OUT, &
+                               G16_INTEGRAL_CLAMP)
+        case (3)
+            f = golden_fixture("R33", R33_X, R33_Y, R33_SLOPES, R33_Q, R33_O, R33_A, R33_B, R33_OA, R33_OB, R33_VALUE, &
+                               R33_VALUE_OUT, R33_D1, R33_D2, R33_D1_OUT, R33_D2_OUT, R33_INTEGRAL, R33_INTEGRAL_OUT, &
+                               R33_INTEGRAL_CLAMP)
+        case (4)
+            f = golden_fixture("M12", M12_X, M12_Y, M12_SLOPES, M12_Q, M12_O, M12_A, M12_B, M12_OA, M12_OB, M12_VALUE, &
+                               M12_VALUE_OUT, M12_D1, M12_D2, M12_D1_OUT, M12_D2_OUT, M12_INTEGRAL, M12_INTEGRAL_OUT, &
+                               M12_INTEGRAL_CLAMP)
         case default
-            name = "R33"
-            x = R33_X
-            y = R33_Y
-            q = R33_Q
-            o = R33_O
-            linear = R33_LINEAR
-            linear_out = R33_LINEAR_OUT
-            natural = R33_NATURAL
-            natural_out = R33_NATURAL_OUT
+            f = golden_fixture("K4", K4_X, K4_Y, K4_SLOPES, K4_Q, K4_O, K4_A, K4_B, K4_OA, K4_OB, K4_VALUE, &
+                               K4_VALUE_OUT, K4_D1, K4_D2, K4_D1_OUT, K4_D2_OUT, K4_INTEGRAL, K4_INTEGRAL_OUT, &
+                               K4_INTEGRAL_CLAMP)
         end select
 
-    end subroutine golden_table
+    end subroutine golden_fixture_get
 
     !> `sin` tabulated at the integers `0..30`, qfeet's own spline fixture.
     subroutine sine_table(x, y)

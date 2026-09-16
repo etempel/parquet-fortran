@@ -3676,6 +3676,28 @@ program error_scenarios
         call scenario_interpolate_context_capped()
     case ("interpolate_one_shot_size_mismatch")
         call scenario_interpolate_one_shot_size_mismatch()
+    case ("interpolate_bc_with_linear")
+        call scenario_interpolate_bc_with_linear()
+    case ("interpolate_unknown_bc")
+        call scenario_interpolate_unknown_bc()
+    case ("interpolate_clamped_without_slopes")
+        call scenario_interpolate_clamped_without_slopes()
+    case ("interpolate_slopes_without_clamped")
+        call scenario_interpolate_slopes_without_clamped()
+    case ("interpolate_slopes_size")
+        call scenario_interpolate_slopes_size()
+    case ("interpolate_slopes_nan")
+        call scenario_interpolate_slopes_nan()
+    case ("interpolate_slopes_inf")
+        call scenario_interpolate_slopes_inf()
+    case ("interpolate_not_a_knot_too_few")
+        call scenario_interpolate_not_a_knot_too_few()
+    case ("interpolate_derivative_before_init")
+        call scenario_interpolate_derivative_before_init()
+    case ("interpolate_integral_before_init")
+        call scenario_interpolate_integral_before_init()
+    case ("interpolate_bad_order")
+        call scenario_interpolate_bad_order()
     case ("optimize_size_zero")
         call scenario_optimize_size_zero()
     case ("optimize_budget_zero")
@@ -31867,6 +31889,111 @@ contains
         v = pf_interp([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64], 1.5_real64)
         print '(a, es22.15)', "accepted x and y of different sizes in one shot: ", v
     end subroutine scenario_interpolate_one_shot_size_mismatch
+    !
+    !> An end condition given with a method that has none: straight lines have no end rows.
+    subroutine scenario_interpolate_bc_with_linear()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], &
+                    method="linear", bc="natural")
+        print '(a, l1)', "accepted an end condition for linear interpolation, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_bc_with_linear
+    !
+    !> An end-condition token the module does not know.
+    subroutine scenario_interpolate_unknown_bc()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="periodic")
+        print '(a, l1)', "accepted an unknown end condition, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_unknown_bc
+    !
+    !> The clamped end condition with no slopes to clamp to.
+    subroutine scenario_interpolate_clamped_without_slopes()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="clamped")
+        print '(a, l1)', "accepted bc=""clamped"" without slopes, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_clamped_without_slopes
+    !
+    !> End slopes given with the natural end condition, which would silently ignore them.
+    subroutine scenario_interpolate_slopes_without_clamped()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="natural", &
+                    slopes=[0.0_real64, 0.0_real64])
+        print '(a, l1)', "accepted slopes with bc=""natural"", built: ", c%is_initialised()
+    end subroutine scenario_interpolate_slopes_without_clamped
+    !
+    !> One slope for two ends: the second would be read past the end of the array.
+    subroutine scenario_interpolate_slopes_size()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="clamped", &
+                    slopes=[2.0_real64])
+        print '(a, l1)', "accepted one slope for two ends, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_slopes_size
+    !
+    !> A NaN end slope, which would reach the spline solve and every later evaluation.
+    subroutine scenario_interpolate_slopes_nan()
+        type(pf_interp_1d) :: c
+        real(real64) :: slopes(2)
+
+        slopes = [0.0_real64, 0.0_real64]
+        slopes(1) = nan_value()
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="clamped", &
+                    slopes=slopes)
+        print '(a, l1)', "accepted a NaN end slope, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_slopes_nan
+    !
+    !> An infinite end slope, refused by the same check as a NaN one.
+    subroutine scenario_interpolate_slopes_inf()
+        type(pf_interp_1d) :: c
+        real(real64) :: slopes(2)
+
+        slopes = [0.0_real64, 0.0_real64]
+        slopes(2) = positive_infinity()
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="clamped", &
+                    slopes=slopes)
+        print '(a, l1)', "accepted an infinite end slope, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_slopes_inf
+    !
+    !> Three points for a not-a-knot spline, whose two end conditions are distinct rows only from four.
+    subroutine scenario_interpolate_not_a_knot_too_few()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="not_a_knot")
+        print '(a, l1)', "accepted three points for bc=""not_a_knot"", built: ", c%is_initialised()
+    end subroutine scenario_interpolate_not_a_knot_too_few
+    !
+    !> Differentiating an object that was never built. `%derivative` is `pure`, so its result is
+    !> printed: an unused pure call may be deleted, and the abort with it.
+    subroutine scenario_interpolate_derivative_before_init()
+        type(pf_interp_1d) :: c
+        real(real64) :: v
+
+        v = c%derivative(1.0_real64)
+        print '(a, es22.15)', "differentiated an interpolant that was never built: ", v
+    end subroutine scenario_interpolate_derivative_before_init
+    !
+    !> Integrating an object that was never built. `%integral` is `pure`, so its result is printed.
+    subroutine scenario_interpolate_integral_before_init()
+        type(pf_interp_1d) :: c
+        real(real64) :: v
+
+        v = c%integral(0.0_real64, 1.0_real64)
+        print '(a, es22.15)', "integrated an interpolant that was never built: ", v
+    end subroutine scenario_interpolate_integral_before_init
+    !
+    !> A third derivative, which no interpolant here offers. `%derivative` is `pure`, so its result is
+    !> printed.
+    subroutine scenario_interpolate_bad_order()
+        type(pf_interp_1d) :: c
+        real(real64) :: v
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64])
+        v = c%derivative(1.5_real64, order=3)
+        print '(a, es22.15)', "accepted a third derivative: ", v
+    end subroutine scenario_interpolate_bad_order
     !
     !> A zero-length start point: the simplex needs at least one variable.
     subroutine scenario_optimize_size_zero()

@@ -3244,7 +3244,29 @@ contains
             new_unittest("a long context is capped in the interpolation abort message", &
                 test_interpolate_context_capped_aborts), &
             new_unittest("pf_interp refuses x and y of different sizes under its own name", &
-                test_interpolate_one_shot_size_mismatch_aborts) &
+                test_interpolate_one_shot_size_mismatch_aborts), &
+            new_unittest("an end condition for linear interpolation is refused", &
+                test_interpolate_bc_with_linear_aborts), &
+            new_unittest("an unknown interpolation end condition is refused", &
+                test_interpolate_unknown_bc_aborts), &
+            new_unittest("a clamped spline without slopes is refused", &
+                test_interpolate_clamped_without_slopes_aborts), &
+            new_unittest("slopes without a clamped spline are refused", &
+                test_interpolate_slopes_without_clamped_aborts), &
+            new_unittest("a clamped spline given one slope is refused", &
+                test_interpolate_slopes_size_aborts), &
+            new_unittest("a NaN end slope is refused", &
+                test_interpolate_slopes_nan_aborts), &
+            new_unittest("an infinite end slope is refused", &
+                test_interpolate_slopes_inf_aborts), &
+            new_unittest("a not-a-knot spline over three points is refused", &
+                test_interpolate_not_a_knot_too_few_aborts), &
+            new_unittest("differentiating an interpolant that was never built aborts", &
+                test_interpolate_derivative_before_init_aborts), &
+            new_unittest("integrating an interpolant that was never built aborts", &
+                test_interpolate_integral_before_init_aborts), &
+            new_unittest("a third derivative of an interpolant aborts", &
+                test_interpolate_bad_order_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]
@@ -19426,5 +19448,82 @@ contains
             failure_message="a one-shot call with x and y of different sizes was expected to error stop", &
             required_stderr="pf_interp: x and y differ in size: 3 and 2")
     end subroutine test_interpolate_one_shot_size_mismatch_aborts
+    !
+    subroutine test_interpolate_bc_with_linear_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_bc_with_linear", expect_abort=.true., &
+            failure_message="an end condition for linear interpolation was expected to error stop", &
+            required_stderr="pf_interp_1d%init: bc applies only to method ""cubic""")
+    end subroutine test_interpolate_bc_with_linear_aborts
+    !
+    subroutine test_interpolate_unknown_bc_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_unknown_bc", expect_abort=.true., &
+            failure_message="an unknown end-condition token was expected to error stop", &
+            required_stderr="pf_interp_1d%init: unknown bc ""periodic""; expected ""natural"", ""not_a_knot"" or ""clamped""")
+    end subroutine test_interpolate_unknown_bc_aborts
+    !
+    subroutine test_interpolate_clamped_without_slopes_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_clamped_without_slopes", expect_abort=.true., &
+            failure_message="bc=""clamped"" without slopes was expected to error stop", &
+            required_stderr="pf_interp_1d%init: bc ""clamped"" needs slopes")
+    end subroutine test_interpolate_clamped_without_slopes_aborts
+    !
+    subroutine test_interpolate_slopes_without_clamped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_slopes_without_clamped", expect_abort=.true., &
+            failure_message="slopes with bc=""natural"" were expected to error stop", &
+            required_stderr="pf_interp_1d%init: slopes apply only to bc ""clamped""")
+    end subroutine test_interpolate_slopes_without_clamped_aborts
+    !
+    subroutine test_interpolate_slopes_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_slopes_size", expect_abort=.true., &
+            failure_message="one slope for a clamped spline was expected to error stop", &
+            required_stderr="pf_interp_1d%init: slopes must hold exactly 2 values, one per end; got 1")
+    end subroutine test_interpolate_slopes_size_aborts
+    !
+    subroutine test_interpolate_slopes_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_slopes_nan", expect_abort=.true., &
+            failure_message="a NaN end slope was expected to error stop", &
+            required_stderr="pf_interp_1d%init: slopes must be finite")
+    end subroutine test_interpolate_slopes_nan_aborts
+    !
+    subroutine test_interpolate_slopes_inf_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_slopes_inf", expect_abort=.true., &
+            failure_message="an infinite end slope was expected to error stop", &
+            required_stderr="pf_interp_1d%init: slopes must be finite")
+    end subroutine test_interpolate_slopes_inf_aborts
+    !
+    subroutine test_interpolate_not_a_knot_too_few_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_not_a_knot_too_few", expect_abort=.true., &
+            failure_message="a not-a-knot spline over three points was expected to error stop", &
+            required_stderr="pf_interp_1d%init: at least 4 points are needed for method ""cubic"" with bc ""not_a_knot""; got 3")
+    end subroutine test_interpolate_not_a_knot_too_few_aborts
+    !
+    subroutine test_interpolate_derivative_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_derivative_before_init", expect_abort=.true., &
+            failure_message="differentiating an unbuilt interpolant was expected to error stop", &
+            required_stderr="pf_interp_1d%derivative: the interpolant is not initialised")
+    end subroutine test_interpolate_derivative_before_init_aborts
+    !
+    subroutine test_interpolate_integral_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_integral_before_init", expect_abort=.true., &
+            failure_message="integrating an unbuilt interpolant was expected to error stop", &
+            required_stderr="pf_interp_1d%integral: the interpolant is not initialised")
+    end subroutine test_interpolate_integral_before_init_aborts
+    !
+    subroutine test_interpolate_bad_order_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_bad_order", expect_abort=.true., &
+            failure_message="a third derivative was expected to error stop", &
+            required_stderr="pf_interp_1d%derivative: order must be 1 or 2")
+    end subroutine test_interpolate_bad_order_aborts
     !
 end module test_errors

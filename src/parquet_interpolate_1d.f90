@@ -6,9 +6,15 @@
 !! means changing that scenario in the same commit. `%init` and both one-shot specifics validate
 !! through one body, `interp_1d_build`, and differ only in the entry name their messages carry.
 !!
-!! **The evaluator is `pure elemental` and aborts in one case only**, an object that was never built;
-!! a `pure` procedure cannot reach the named `critical` the other aborts take, so that message is the
-!! literal alone. Everything else it meets -- a NaN query, a query beyond the table -- is answered.
+!! **The evaluators are `pure` and abort in two cases only**, an object that was never built and a
+!! derivative order that does not exist; a `pure` procedure cannot reach the named `critical` the
+!! other aborts take, so those messages are the literal alone. Everything else they meet -- a NaN
+!! query or limit, a point beyond the table -- is answered.
+!!
+!! **Every evaluator decides a point beyond the table the same way, before it brackets**: `"clamp"`
+!! and `"nan"` answer there and then, and `"extrapolate"` takes the end segment. The one exception is
+!! `%eval` at the last knot, which answers `y(n)` directly, so that a knot's value never depends on a
+!! segment formula at its right end.
 submodule (parquet_interpolate) parquet_interpolate_1d
 
     implicit none
@@ -66,12 +72,153 @@ contains
         select case (this%method)
         case (M_LINEAR)
             v = interp_linear_seg_value(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), xq)
-        case default
+        case (M_CUBIC)
             v = interp_cubic_seg_value(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
                                        this%d(k), this%d(k + 1), xq)
+        case default
+            v = interp_hermite_seg_value(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
+                                         this%d(k), this%d(k + 1), xq)
         end select
 
     end procedure interp_1d_eval
+
+    module procedure interp_1d_derivative
+
+        integer :: k, n, ord
+
+        if (this%n == 0) error stop "pf_interp_1d%derivative: the interpolant is not initialised"
+        ord = 1
+        if (present(order)) ord = order
+        if (ord /= 1 .and. ord /= 2) error stop "pf_interp_1d%derivative: order must be 1 or 2"
+
+        ! As in `%eval`: the NaN first, by self-comparison.
+        if (xq /= xq) then
+            v = xq
+            return
+        end if
+
+        n = this%n
+        if (xq < this%x(1)) then
+            select case (this%outside)
+            case (O_CLAMP)
+                ! Clamped, the interpolant is constant beyond the table.
+                v = 0.0_real64
+                return
+            case (O_NAN)
+                v = ieee_value(1.0_real64, ieee_quiet_nan)
+                return
+            end select
+            k = 1
+        else if (xq > this%x(n)) then
+            select case (this%outside)
+            case (O_CLAMP)
+                v = 0.0_real64
+                return
+            case (O_NAN)
+                v = ieee_value(1.0_real64, ieee_quiet_nan)
+                return
+            end select
+            k = n - 1
+        else
+            k = interp_bracket(this%x, n, this%uniform, this%step, xq)
+        end if
+
+        select case (this%method)
+        case (M_LINEAR)
+            v = interp_linear_seg_derivative(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), ord)
+        case (M_CUBIC)
+            v = interp_cubic_seg_derivative(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
+                                            this%d(k), this%d(k + 1), xq, ord)
+        case default
+            v = interp_hermite_seg_derivative(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
+                                              this%d(k), this%d(k + 1), xq, ord)
+        end select
+
+    end procedure interp_1d_derivative
+
+    module procedure interp_1d_integral
+
+        real(real64) :: lo, hi, below, above, inner
+        integer      :: n, k, klo, khi
+        logical      :: flipped
+
+        if (this%n == 0) error stop "pf_interp_1d%integral: the interpolant is not initialised"
+
+        ! A NaN limit answers itself, before any comparison.
+        if (a /= a) then
+            s = a
+            return
+        end if
+        if (b /= b) then
+            s = b
+            return
+        end if
+        if (a == b) then
+            s = 0.0_real64
+            return
+        end if
+
+        ! Integrate upwards, and negate at the end when the limits came the other way round.
+        flipped = b < a
+        if (flipped) then
+            lo = b
+            hi = a
+        else
+            lo = a
+            hi = b
+        end if
+
+        n = this%n
+        below = 0.0_real64
+        above = 0.0_real64
+        if (lo < this%x(1) .or. hi > this%x(n)) then
+            select case (this%outside)
+            case (O_NAN)
+                s = ieee_value(1.0_real64, ieee_quiet_nan)
+                return
+            case (O_CLAMP)
+                ! Clamped, the interpolant is the end ordinate beyond each end, so what lies outside
+                ! contributes its width times that ordinate, and the rest is integrated inside.
+                if (hi <= this%x(1)) then
+                    s = interp_1d_flat(hi - lo, this%y(1))
+                    if (flipped) s = -s
+                    return
+                end if
+                if (lo >= this%x(n)) then
+                    s = interp_1d_flat(hi - lo, this%y(n))
+                    if (flipped) s = -s
+                    return
+                end if
+                if (lo < this%x(1)) then
+                    below = interp_1d_flat(this%x(1) - lo, this%y(1))
+                    lo = this%x(1)
+                end if
+                if (hi > this%x(n)) then
+                    above = interp_1d_flat(hi - this%x(n), this%y(n))
+                    hi = this%x(n)
+                end if
+            end select
+        end if
+
+        ! The segments of the two limits, the end segments standing for everything beyond the table,
+        ! then the partial segment of each limit and every whole segment between them. Each piece is
+        ! integrated from its segment's left knot, so a limit on a knot contributes an exact zero.
+        klo = interp_1d_segment_of(this, lo)
+        khi = interp_1d_segment_of(this, hi)
+        if (klo == khi) then
+            inner = interp_1d_piece(this, khi, hi) - interp_1d_piece(this, klo, lo)
+        else
+            inner = interp_1d_piece(this, klo, this%x(klo + 1)) - interp_1d_piece(this, klo, lo)
+            do k = klo + 1, khi - 1
+                inner = inner + interp_1d_piece(this, k, this%x(k + 1))
+            end do
+            inner = inner + interp_1d_piece(this, khi, hi)
+        end if
+
+        s = below + inner + above
+        if (flipped) s = -s
+
+    end procedure interp_1d_integral
 
     module procedure interp_1d_ready
 
@@ -147,9 +294,10 @@ contains
         character(len=*), intent(in), optional :: context     !! call-site text
 
         real(real64), allocatable     :: xs(:), ys(:)
+        real(real64)                  :: s1, sn
         character(len=TOKEN_CAP + 1)  :: tok
         character(len=:), allocatable :: quoted
-        integer                       :: n, bc_code
+        integer                       :: n, bc_code, need
         logical                       :: ascending
 
         ! Row 1: the two halves of the table pair up.
@@ -176,7 +324,7 @@ contains
             case ("cubic")
                 this%method = M_CUBIC
             case ("pchip")
-                call interp_abort(entry, 'method "pchip" is not available yet', context)
+                this%method = M_PCHIP
             case default
                 call interp_quote(method, quoted)
                 call interp_abort(entry, "unknown method "//quoted//'; expected "linear", "cubic" or "pchip"', &
@@ -196,8 +344,10 @@ contains
             select case (trim(tok))
             case ("natural")
                 bc_code = B_NATURAL
-            case ("not_a_knot", "clamped")
-                call interp_abort(entry, 'bc "'//trim(tok)//'" is not available yet', context)
+            case ("not_a_knot")
+                bc_code = B_NOT_A_KNOT
+            case ("clamped")
+                bc_code = B_CLAMPED
             case default
                 call interp_quote(bc, quoted)
                 call interp_abort(entry, "unknown bc "//quoted//'; expected "natural", "not_a_knot" or "clamped"', &
@@ -205,8 +355,26 @@ contains
             end select
         end if
 
-        ! Row 9: no end condition available yet reads slopes.
-        if (present(slopes)) call interp_abort(entry, 'slopes apply only to bc "clamped"', context)
+        ! Row 8: the clamped end condition is its slopes.
+        if (bc_code == B_CLAMPED .and. .not. present(slopes)) then
+            call interp_abort(entry, 'bc "clamped" needs slopes', context)
+        end if
+
+        s1 = 0.0_real64
+        sn = 0.0_real64
+        if (present(slopes)) then
+            ! Row 9: slopes belong to the clamped end condition alone.
+            if (bc_code /= B_CLAMPED) call interp_abort(entry, 'slopes apply only to bc "clamped"', context)
+            ! Row 9a: one slope per end.
+            if (size(slopes) /= 2) then
+                call interp_abort(entry, "slopes must hold exactly 2 values, one per end; got "// &
+                                  trim(interp_i2s(size(slopes))), context)
+            end if
+            ! Row 10: finite slopes.
+            if (.not. all(ieee_is_finite(slopes))) call interp_abort(entry, "slopes must be finite", context)
+            s1 = slopes(1)
+            sn = slopes(2)
+        end if
 
         ! Row 11: the out-of-range policy.
         this%outside = O_CLAMP
@@ -226,7 +394,8 @@ contains
             end select
         end if
 
-        ! Row 12: enough points survive the mask for the method.
+        ! Row 12: enough points survive the mask for the method. A not-a-knot spline needs four: its
+        ! end conditions are two distinct rows only then.
         if (present(is_valid)) then
             xs = pack(x, is_valid)
             ys = pack(y, is_valid)
@@ -235,14 +404,23 @@ contains
             ys = y
         end if
         n = size(xs)
-        if (n < 2) then
-            if (this%method == M_LINEAR) then
+        need = 2
+        if (bc_code == B_NOT_A_KNOT) need = 4
+        if (n < need) then
+            select case (this%method)
+            case (M_LINEAR)
                 quoted = '"linear"'
-            else
-                quoted = '"cubic"'
-            end if
-            call interp_abort(entry, "at least 2 points are needed for method "//quoted//"; got "// &
-                              trim(interp_i2s(n)), context)
+            case (M_PCHIP)
+                quoted = '"pchip"'
+            case default
+                if (bc_code == B_NOT_A_KNOT) then
+                    quoted = '"cubic" with bc "not_a_knot"'
+                else
+                    quoted = '"cubic"'
+                end if
+            end select
+            call interp_abort(entry, "at least "//trim(interp_i2s(need))//" points are needed for method "// &
+                              quoted//"; got "//trim(interp_i2s(n)), context)
         end if
 
         ! Row 13: strictly monotonic, which a NaN and a repeated value both fail.
@@ -257,7 +435,8 @@ contains
         ! Row 14: finite ordinates.
         if (.not. all(ieee_is_finite(ys))) call interp_abort(entry, "y must be finite", context)
 
-        ! Stored ascending: the workers see one order only.
+        ! Stored ascending: the workers see one order only. A slope is a derivative in `x`, which
+        ! reversing the table leaves alone, so the two end slopes change places and not sign.
         this%n = n
         this%reversed = .not. ascending
         if (ascending) then
@@ -266,14 +445,99 @@ contains
         else
             this%x = xs(n:1:-1)
             this%y = ys(n:1:-1)
+            call interp_swap(s1, sn)
         end if
 
         call interp_uniform_step(this%x, this%uniform, this%step)
-        if (this%method == M_CUBIC) then
+        select case (this%method)
+        case (M_CUBIC)
             allocate (this%d(n))
-            call interp_spline_coeffs(this%x, this%y, bc_code, this%d)
-        end if
+            call interp_spline_coeffs(this%x, this%y, bc_code, s1, sn, this%d)
+        case (M_PCHIP)
+            allocate (this%d(n))
+            call interp_pchip_slopes(this%x, this%y, this%d)
+        end select
 
     end subroutine interp_1d_build
+
+    ! ---- helpers private to this submodule -------------------------------------------------------
+
+    !> Exchanges two values.
+    pure subroutine interp_swap(a, b)
+        real(real64), intent(inout) :: a !! one value
+        real(real64), intent(inout) :: b !! the other
+
+        real(real64) :: t
+
+        t = a
+        a = b
+        b = t
+
+    end subroutine interp_swap
+
+    !> The segment an integration limit is integrated on: the one its bracket names inside the table,
+    !! and the end segment beyond either end, whose polynomial `"extrapolate"` continues.
+    pure function interp_1d_segment_of(this, q) result(k)
+        type(pf_interp_1d), intent(in) :: this !! a built interpolant
+        real(real64), intent(in)       :: q    !! the limit, not a NaN
+        integer                        :: k    !! the segment's left knot
+
+        if (q < this%x(1)) then
+            k = 1
+        else if (q > this%x(this%n)) then
+            k = this%n - 1
+        else
+            k = interp_bracket(this%x, this%n, this%uniform, this%step, q)
+        end if
+
+    end function interp_1d_segment_of
+
+    !> The integral of segment `k`'s polynomial from its left knot to `q`, which may lie beyond it.
+    pure function interp_1d_piece(this, k, q) result(v)
+        type(pf_interp_1d), intent(in) :: this !! a built interpolant
+        integer, intent(in)            :: k    !! the segment's left knot
+        real(real64), intent(in)       :: q    !! the upper limit
+        real(real64)                   :: v    !! the integral
+
+        select case (this%method)
+        case (M_LINEAR)
+            v = interp_linear_seg_integral(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), q)
+        case (M_CUBIC)
+            v = interp_cubic_seg_integral(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
+                                          this%d(k), this%d(k + 1), q)
+        case default
+            v = interp_hermite_seg_integral(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
+                                            this%d(k), this%d(k + 1), q)
+        end select
+
+    end function interp_1d_piece
+
+    !> A constant's integral over a width: an infinity of the constant's sign over an infinite width, and
+    !! zero for a zero constant whatever the width -- never `Infinity*0`, which is a NaN and raises
+    !! IEEE_INVALID.
+    !!
+    !! No product with an infinite width is formed at all, not even one that would be discarded: ifx
+    !! compiles `if (value == 0) then; v = 0; else; v = width*value; end if` without a branch, forming the
+    !! product first and selecting afterwards, so that form raises IEEE_INVALID while answering zero. The
+    !! width is replaced by 1 before the product wherever it is infinite.
+    pure function interp_1d_flat(width, value) result(v)
+        real(real64), intent(in) :: width !! the width, positive, possibly infinite
+        real(real64), intent(in) :: value !! the constant
+        real(real64)             :: v     !! the integral
+
+        real(real64) :: finite_width
+
+        finite_width = merge(width, 1.0_real64, width <= huge(width))
+        if (width <= huge(width)) then
+            v = finite_width*value
+        else if (value > 0.0_real64) then
+            v = ieee_value(1.0_real64, ieee_positive_inf)
+        else if (value < 0.0_real64) then
+            v = ieee_value(1.0_real64, ieee_negative_inf)
+        else
+            v = 0.0_real64
+        end if
+
+    end function interp_1d_flat
 
 end submodule parquet_interpolate_1d

@@ -3,14 +3,16 @@ title: Interpolation of tabulated data with parquet_interpolate
 ---
 
 `parquet_interpolate` reads a value off a table of numbers at any point: build an interpolant from
-a table of abscissae and ordinates once, then evaluate it wherever you need. It reaches no reader,
-no writer and no setting: `use parquet_interpolate` compiles three Fortran files and nothing of the
-Arrow stack. `use parquet` brings it in too, so nothing here needs a second import. See
-[Choosing a module](../operating/choosing-a-module.html) for what each entry module costs.
+a table of abscissae and ordinates once, then evaluate, differentiate or integrate it wherever you
+need. It reaches no reader, no writer and no setting: `use parquet_interpolate` compiles three
+Fortran files and nothing of the Arrow stack. `use parquet` brings it in too, so nothing here needs
+a second import. See [Choosing a module](../operating/choosing-a-module.html) for what each entry
+module costs.
 
-Two methods: straight lines between neighbouring points, and a cubic spline — a smooth curve whose
-slope and curvature are continuous across every point. The table is `real64`, ascending or
-descending, and what a query beyond its ends answers is a choice you make once, when you build.
+Three methods: straight lines between neighbouring points; a cubic spline — a smooth curve whose
+slope and curvature are continuous across every point; and PCHIP, a cubic that keeps monotone data
+monotone and never overshoots it. The table is `real64`, ascending or descending, and what a query
+beyond its ends answers is a choice you make once, when you build.
 
 ## Quick example
 
@@ -20,7 +22,7 @@ program interpolation_example
     use iso_fortran_env, only : real64
     implicit none
 
-    type(pf_interp_1d) :: curve, line
+    type(pf_interp_1d) :: curve, cubic, shape, line
     real(real64) :: x(6), y(6)
     integer :: i
 
@@ -28,13 +30,21 @@ program interpolation_example
     x = [(real(i, real64), i = 1, 6)]
     y = x*x
 
-    call curve%init(x, y)                    ! a natural cubic spline, the default
+    call curve%init(x, y)                        ! a natural cubic spline, the default
+    call cubic%init(x, y, bc="not_a_knot")       ! a cubic spline that reproduces any cubic
+    call shape%init(x, y, method="pchip")        ! a cubic that never overshoots the data
     call line%init(x, y, method="linear")
 
-    print *, curve%eval(2.5_real64)          ! 6.2237 -- not the parabola's 6.25; see below
-    print *, line%eval(2.5_real64)           ! 6.5
+    print *, curve%eval(2.5_real64)              ! 6.2237 -- not the parabola's 6.25; see below
+    print *, cubic%eval(2.5_real64)              ! 6.25
+    print *, shape%eval(2.5_real64)              ! 6.2396
+    print *, line%eval(2.5_real64)               ! 6.5
     print *, curve%eval([1.5_real64, 5.5_real64])   ! 2.3421 and 30.3421, in one call
-    print *, curve%eval(99.0_real64)         ! 36.0: beyond the table, the last ordinate
+    print *, curve%eval(99.0_real64)             ! 36.0: beyond the table, the last ordinate
+
+    print *, cubic%derivative(2.5_real64)        ! 5.0, the slope
+    print *, cubic%derivative(2.5_real64, 2)     ! 2.0, the curvature
+    print *, cubic%integral(1.0_real64, 6.0_real64)   ! 71.667, the area under the curve
 
     ! One call, no object.
     print *, pf_interp(x, y, 2.5_real64, method="linear")   ! 6.5
@@ -47,6 +57,8 @@ bracket:
 ```fortran
 call c%init(x, y, [method], [bc], [slopes], [outside], [is_valid], [context])
 v  = c%eval(xq)
+dv = c%derivative(xq, [order])
+s  = c%integral(a, b)
 ok = c%is_initialised()
 call c%clear()
 yq = pf_interp(x, y, xq, [method], [bc], [slopes], [outside], [is_valid], [context])
@@ -61,7 +73,7 @@ away afterwards.
 The table has to be one that can be interpolated, and `%init` checks that it is:
 
 - `x` and `y` are the same size;
-- there are at least two points;
+- there are at least two points, or four for `bc="not_a_knot"`;
 - `x` is strictly increasing or strictly decreasing — no repeated value, and no NaN;
 - every `x` and every `y` is finite.
 
@@ -86,25 +98,65 @@ evaluated. Evaluating one that cannot is a fatal error, not a defined value.
 
 Tokens are matched without regard to case: `method="Linear"` is `method="linear"`.
 
-## Linear or a cubic spline
+## Choosing a method
 
 **`method="linear"`** joins neighbouring points with straight lines. It reproduces a straight line
 exactly and never overshoots the data, which makes it the right choice for a coarse or noisy table,
-where a curve through the points would invent structure between them.
+where a curve through the points would invent structure between them. Its slope jumps at every
+point.
 
 **`method="cubic"`**, the default, is a cubic spline: one cubic per segment, joined so that the
 value, the slope and the curvature are all continuous across every point. On smooth data it is far
 more accurate than straight lines through the same table. On data that turn sharply between widely
-or unevenly spaced points it can overshoot, where straight lines would not.
+or unevenly spaced points it overshoots, where straight lines would not. How it behaves at the two
+ends of the table is its end condition, the next section.
 
-**The end condition, `bc="natural"`**, is the default and the one on offer: the spline's curvature
-is zero at both ends of the table. It reproduces a straight line exactly, and it does **not**
-reproduce a parabola — on `y = x**2` at `x = 1..6` it answers `6.2237` at `x = 2.5` rather than
-`6.25`, because a parabola's curvature is not zero at the ends and the difference spreads inward
-from them. Where that matters, tabulate beyond the range you care about.
+**`method="pchip"`** is a piecewise cubic Hermite interpolant whose slopes are chosen to preserve the
+data's shape: between two points where the data rise, it rises; where two neighbouring ordinates
+are equal, it is flat; and on every segment it stays between that segment's two ordinates, so it
+never overshoots a peak or a trough. Its slope is continuous; its curvature is not. It is the
+method for a relation known to be monotone — a cumulative distribution, distance against redshift
+— where a spline's overshoot would break the ordering. Each slope depends only on the points
+beside it, so a change to one ordinate moves the interpolant only from the second point before it
+to the second point after it.
 
-The tokens `method="pchip"`, `bc="not_a_knot"` and `bc="clamped"` (with `slopes=`) are reserved:
-`%init` recognises each and refuses it with a message.
+The same step, `y = 0, 0, 0, 1, 1, 1` at `x = 1, 2, ..., 6`, read off under each:
+
+| `x` | `"linear"` | `"cubic"` | `"pchip"` |
+|---|---|---|---|
+| 2.5 | 0 | -0.1023 | 0 |
+| 3.25 | 0.25 | 0.2159 | 0.1562 |
+| 3.5 | 0.5 | 0.5 | 0.5 |
+| 3.75 | 0.75 | 0.7841 | 0.8438 |
+| 4.5 | 1 | 1.1023 | 1 |
+
+The spline dips below the first step and rises above the second; PCHIP stays between them, and
+flat where the data are.
+
+## End conditions
+
+A cubic spline's system has two equations fewer than it has unknowns, and `bc=` supplies them, one
+at each end. It is accepted with `method="cubic"` only.
+
+**`bc="natural"`**, the default, sets the spline's curvature to zero at both ends. It reproduces a
+straight line exactly, and it does **not** reproduce a parabola — on `y = x**2` at `x = 1..6` it
+answers `6.2237` at `x = 2.5` rather than `6.25`, because a parabola's curvature is not zero at the
+ends and the difference spreads inward from them.
+
+**`bc="not_a_knot"`** makes the third derivative continuous across the second point and the
+second-to-last, so the first two segments are one cubic and so are the last two. It reproduces any
+cubic exactly — the quick example's `6.25` — and is the default of scipy's `CubicSpline`. It needs
+at least four points: with four, it is the one cubic through all of them.
+
+**`bc="clamped"`** sets the first derivative at each end to a value you give, as
+`slopes=[s_first, s_last]`: `slopes(1)` at the first point of the table as you pass it and
+`slopes(2)` at its last — for a descending table, the first point is the largest `x` — and after
+`is_valid` has dropped what it drops. It reproduces any cubic whose end slopes you give exactly.
+`slopes` is required with `bc="clamped"` and refused with anything else.
+
+Where the table's own ends matter less than its middle, tabulate beyond the range you care about:
+on an evenly spaced table, an end condition's influence falls off by a factor of about four with
+each point into the table.
 
 ## Evaluating
 
@@ -114,6 +166,16 @@ may be called from your own `pure` procedures.
 
 **A query on a point of the table answers that point's ordinate exactly**, under every method and
 every policy, the last point included.
+
+**`c%derivative(xq, [order])`** is the interpolant's own first derivative (`order=1`, the default)
+or second (`order=2`), `pure` and `elemental` in the same way. It is the derivative of the piece
+`%eval` evaluates, so on a point of the table it is the next segment's, and on the last point the
+last segment's. That only shows where the interpolant has no such derivative across the point: the
+slope of `"linear"` and the curvature of `"pchip"`.
+
+**`c%integral(a, b)`** is the interpolant's definite integral from `a` to `b`, exact for the
+interpolant, since it is a polynomial on every segment. It is `pure`, not `elemental`; `b < a`
+negates it and `a == b` answers zero. Its work grows with the number of points between the limits.
 
 **Finding the segment** a query falls in is a bisection, except on an evenly spaced table, where it
 is arithmetic and cheaper. `%init` detects an even table by itself; there is nothing to declare.
@@ -125,25 +187,28 @@ segment.
 
 `outside=` decides what a query beyond either end answers. It is fixed when the object is built:
 
-| `outside=` | A query beyond the table answers |
-|---|---|
-| `"clamp"` (the default) | the ordinate at the nearer end |
-| `"extrapolate"` | the end segment's line or cubic, continued |
-| `"nan"` | a quiet NaN |
+| `outside=` | `%eval` beyond the table | `%derivative` there | `%integral` with a limit there |
+|---|---|---|---|
+| `"clamp"` (the default) | the ordinate at the nearer end | zero | the end ordinate, integrated as a constant beyond the end |
+| `"extrapolate"` | the end segment's polynomial, continued | the end segment's, continued | the end segment's polynomial, integrated |
+| `"nan"` | a quiet NaN | a quiet NaN | a quiet NaN |
 
 Clamping is the default because a cubic leaves the data fast. On the quick example's table,
-extrapolating to `x = 99` answers about `-3.4e5` where the parabola is `9801` — the wrong sign, not
-merely an inaccurate value. Extrapolate when you mean to, and only a little beyond the table.
-`"nan"` is for a pipeline that filters its results afterwards: an out-of-range answer then cannot
-pass for data.
+extrapolating the natural spline to `x = 99` answers about `-3.4e5` where the parabola is `9801` —
+the wrong sign, not merely an inaccurate value. Extrapolate when you mean to, and only a little
+beyond the table. `"nan"` is for a pipeline that filters its results afterwards: an out-of-range
+answer then cannot pass for data.
 
-**A NaN query answers NaN** under every policy, and raises no IEEE flag, so a column holding NaNs
-can be interpolated as it stands.
+**A NaN query answers NaN** from `%eval` and `%derivative`, and a NaN limit from `%integral`, under
+every policy and raising no IEEE flag, so a column holding NaNs can be interpolated as it stands.
 
-**An infinite query is beyond the table in the direction of its sign.** `"clamp"` and `"nan"`
-answer it as they answer any other such query. `"extrapolate"` answers whatever the end polynomial
-gives at an infinity, which is an infinity or a NaN — and a NaN made that way raises IEEE_INVALID,
-which ends a program built with that trap enabled, as nagfor builds are by default.
+**An infinite query or limit is beyond the table in the direction of its sign.** `"clamp"` answers
+the end ordinate and a zero derivative, and integrates the end ordinate out to the infinity, which
+is an infinity of that ordinate's sign, or zero where the ordinate is zero. `"nan"` answers a NaN.
+`"extrapolate"` answers whatever the end polynomial gives at an infinity, which is an infinity or a
+NaN. A NaN made by arithmetic on an infinity — that one, or an integral from one infinity to the
+other whose two ends extend with opposite signs — raises IEEE_INVALID, which ends a program built
+with that trap enabled, as nagfor builds are by default.
 
 ## One call, no object
 
@@ -155,12 +220,14 @@ yq = pf_interp(x, y, xq, method="linear")
 discards it. It takes the same optional arguments as `%init` and answers exactly what the object
 answers, bit for bit, because that is how it computes; its abort messages begin `pf_interp:`
 instead of `pf_interp_1d%init:`. The build is the expensive half, and this form repeats it on every
-call, so a table queried more than a handful of times wants an object instead.
+call, so a table queried more than a handful of times wants an object instead. There is no
+one-shot derivative or integral: build an object.
 
 ## Threads
 
-Only `%init` and `%clear` write an object. `%eval` only reads one, so a built object may be
-evaluated by every thread of a parallel region at once, and two objects never share anything.
+Only `%init` and `%clear` write an object. `%eval`, `%derivative` and `%integral` only read one, so
+a built object may be used by every thread of a parallel region at once, and two objects never
+share anything.
 
 **Build one object before the region and share it** — the usual case:
 
@@ -204,21 +271,24 @@ program with `error stop` and a message that begins with the entry point, `pf_in
 | `x` and `y` of different sizes | `x and y differ in size: <nx> and <ny>` |
 | an `is_valid` of a different size | `is_valid has <m> elements for <n> points` |
 | an unknown `method` | `unknown method "<token>"; expected "linear", "cubic" or "pchip"` |
-| `method="pchip"` | `method "pchip" is not available yet` |
-| `bc` with `method="linear"` | `bc applies only to method "cubic"` |
+| `bc` with `method="linear"` or `method="pchip"` | `bc applies only to method "cubic"` |
 | an unknown `bc` | `unknown bc "<token>"; expected "natural", "not_a_knot" or "clamped"` |
-| `bc="not_a_knot"` or `bc="clamped"` | `bc "<name>" is not available yet` |
-| `slopes` | `slopes apply only to bc "clamped"` |
+| `bc="clamped"` without `slopes` | `bc "clamped" needs slopes` |
+| `slopes` without `bc="clamped"` | `slopes apply only to bc "clamped"` |
+| `slopes` of a size other than two | `slopes must hold exactly 2 values, one per end; got <m>` |
+| a NaN or an infinite slope | `slopes must be finite` |
 | an unknown `outside` | `unknown outside "<token>"; expected "clamp", "extrapolate" or "nan"` |
-| fewer than two points left after `is_valid` | `at least 2 points are needed for method "<method>"; got <n>` |
+| fewer than two points left after `is_valid`, or four for `bc="not_a_knot"` | `at least <k> points are needed for method "<method>"; got <n>`, the method followed by ` with bc "not_a_knot"` where that is the reason |
 | an `x` not strictly monotonic, or holding a NaN | `x must be strictly increasing or strictly decreasing` |
 | an infinite `x` | `x must be finite` |
 | a NaN or an infinite `y` | `y must be finite` |
 
-Evaluating an object that was never built aborts with
-`pf_interp_1d%eval: the interpolant is not initialised`. `%eval` is `pure`, so that message carries
-no context. Nothing a query can be — a NaN, an infinity, a point far outside the table — is an
-error.
+Evaluating, differentiating or integrating an object that was never built aborts with
+`pf_interp_1d%eval: the interpolant is not initialised`, or the same with `%derivative` or
+`%integral`, and a derivative of any order but 1 or 2 with
+`pf_interp_1d%derivative: order must be 1 or 2`. Those three are `pure`, so their messages carry no
+context. Nothing a query or a limit can be — a NaN, an infinity, a point far outside the table — is
+an error.
 
 ## Moving from qfeet's `spline_type`
 

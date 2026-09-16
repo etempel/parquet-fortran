@@ -59,7 +59,7 @@ in every one of them.
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
-| `parquet_interpolate` | 3 | no | `pf_interp_1d` and `pf_interp`: linear and cubic-spline interpolation of tabulated data |
+| `parquet_interpolate` | 3 | no | `pf_interp_1d` and `pf_interp`: linear, cubic-spline and shape-preserving interpolation of tabulated data |
 | `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
 | `parquet_prima` | 24 | no | `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla`: Powell's derivative-free solvers, vendored from PRIMA — a function of several variables with bounds, linear constraints or nonlinear ones |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |

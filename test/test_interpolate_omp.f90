@@ -1,6 +1,6 @@
-!> Threading tests for `parquet_interpolate`: that one object nobody writes may be evaluated from a
-!> whole team at once, that objects built concurrently on different threads stay independent, and
-!> that the team these tests rely on is really opened.
+!> Threading tests for `parquet_interpolate`: that one object nobody writes may be evaluated,
+!> differentiated and integrated from a whole team at once, that objects built concurrently on
+!> different threads stay independent, and that the team these tests rely on is really opened.
 !!
 !! **The claim under test is the module's own header sentence** -- "one object nobody writes may be
 !! evaluated from any number of threads at once, and two objects never share anything" -- and it is
@@ -60,21 +60,26 @@ contains
 
     end subroutine collect_tests_interpolate_omp
 
-    !> One cubic object over `sin` on `[0, 2*pi]`, evaluated at 200 000 queries from a parallel loop.
+    !> One cubic object over `sin` on `[0, 2*pi]`, evaluated at 200 000 queries from a parallel loop,
+    !! differentiated at each of them and integrated up to every hundredth.
     !!
-    !! Two assertions. Bit equality with a serial pass over the same queries, since `%eval` of a
-    !! built object is a deterministic computation over it; and, because both arms share the object,
-    !! every concurrent answer against `sin` itself. The natural spline of `sin` over one period has
-    !! the right second derivative at both ends, so its error is the interior bound
-    !! `5/384 * h**4 * max|sin''''|` with `h = 2*pi/4096`, about `7e-14`; `1e-10` leaves room for the
-    !! libm `sin` the oracle calls.
+    !! Two assertions on each binding. Bit equality with a serial pass over the same queries, since a
+    !! reading binding of a built object is a deterministic computation over it; and, because both
+    !! arms share the object, every concurrent answer against its closed form. The natural spline of
+    !! `sin` over one period has the right second derivative at both ends, so its errors are the
+    !! interior bounds with `h = 2*pi/4096`: `5/384 * h**4 * max|sin''''|` for the value, about
+    !! `7e-14`, and `h**3/24 * max|sin''''|` for the slope, about `2e-10`; `1e-10` and `1e-8` leave room
+    !! for the libm `sin` and `cos` the oracles call. The integral from 0 is `1 - cos(q)`, within the
+    !! value's bound times the width, and is asserted to `1e-9`.
     subroutine test_shared_object_is_read_only(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         real(real64), parameter :: PI = 4.0_real64*atan(1.0_real64)
+        integer, parameter      :: EVERY = 100
 
         type(pf_interp_1d)        :: curve
-        real(real64), allocatable :: x(:), y(:), q(:), serial(:), shared(:)
+        real(real64), allocatable :: x(:), y(:), q(:), serial(:), shared(:), slope(:), slope_shared(:)
+        real(real64), allocatable :: area(:), area_shared(:)
         integer                   :: i, differ, far
 
 #ifndef _OPENMP
@@ -93,20 +98,37 @@ contains
             ! `QUERIES*7919` stays below `huge(1)`.
             q(i) = 2.0_real64*PI*real(mod(i*7919, QUERIES), real64)/real(QUERIES, real64)
         end do
+        allocate (slope_shared(QUERIES), area(QUERIES/EVERY), area_shared(QUERIES/EVERY))
         call curve%init(x, y)
         serial = curve%eval(q)
+        slope = curve%derivative(q)
+        do i = 1, QUERIES/EVERY
+            area(i) = curve%integral(0.0_real64, q(i*EVERY))
+        end do
 
         !$omp parallel do default(shared) private(i) schedule(static)
         do i = 1, QUERIES
             shared(i) = curve%eval(q(i))
+            slope_shared(i) = curve%derivative(q(i))
+        end do
+        !$omp end parallel do
+        !$omp parallel do default(shared) private(i) schedule(dynamic, 8)
+        do i = 1, QUERIES/EVERY
+            area_shared(i) = curve%integral(0.0_real64, q(i*EVERY))
         end do
         !$omp end parallel do
 
-        differ = count(shared /= serial)
+        differ = count(shared /= serial) + count(slope_shared /= slope) + count(area_shared /= area)
         call check(error, differ == 0, "a concurrent evaluation of one object differed from the serial one")
         if (allocated(error)) return
         far = count(abs(shared - sin(q)) > 1.0e-10_real64)
         call check(error, far == 0, "a concurrent evaluation strayed from sin beyond the spline's error bound")
+        if (allocated(error)) return
+        far = count(abs(slope_shared - cos(q)) > 1.0e-8_real64)
+        call check(error, far == 0, "a concurrent derivative strayed from cos beyond the spline's error bound")
+        if (allocated(error)) return
+        far = count(abs(area_shared - (1.0_real64 - cos(q(EVERY::EVERY)))) > 1.0e-9_real64)
+        call check(error, far == 0, "a concurrent integral strayed from 1 - cos beyond the spline's error bound")
 
     end subroutine test_shared_object_is_read_only
 

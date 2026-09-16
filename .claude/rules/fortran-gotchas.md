@@ -281,6 +281,18 @@ done | sort | uniq -c | sort -rn
   argument reduction). A procedure meant to propagate a NaN quietly returns every NaN argument
   before any transcendental (`pf_angdist_deg`). Reproduce against the built library, not a copy of
   the formula, which vectorises differently.
+- **A guard does not keep ifx from forming what it guards: a short guarded arithmetic branch is
+  compiled without a branch -- if-converted, or vectorised under a mask -- the result formed first
+  and selected afterwards**, at `-O2` under the default `-fp-model=fast` and under
+  `-fp-model=precise` alike. `if (value == 0) then; v = 0; else; v = width*value; end if` became
+  `mulsd` then a `cmpeqsd`/`andnpd` mask, raising IEEE_INVALID for an infinite `width` while
+  answering zero, and a loop dividing only where two values shared a sign became `divpd` in every
+  lane then an `andpd` mask, raising IEEE_DIVIDE_BY_ZERO. The answer is right and the flag ends a
+  program under nagfor's `-ieee=stop`. Make the OPERANDS harmless where the result is not taken,
+  then select (`merge(width, 1.0, width <= huge(width))` in `interp_1d_flat`,
+  `src/parquet_interpolate_1d.f90`; the PCHIP mean in `interp_pchip_slopes`,
+  `src/parquet_interpolate_core.f90`), and read the flags around the call in a test
+  (`check_golden_rows`, `test/test_interpolate.f90`). `--profile debug` is `-O0` and cannot show it.
 - **The same transcendental expression can differ by 1–2 ulp between a bulk loop and a scalar
   evaluation at `-O0`** (identical at `-O2`); assert a re-derived value at a tolerance above the
   round-trip error, never at zero (`test_count_within_sky`, 1e-9 degrees).

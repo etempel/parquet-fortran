@@ -32,6 +32,9 @@ of the toolchains wherever they are installed.
   gate change appears not to take effect, when a mutation's symptom persists after the source was
   restored (fpm misses a RESTORED file, Fortran and C++ alike), and after building with more than
   one `FPM_FFLAGS` value in a session.
+- **`fpm clean` ignores `FPM_BUILD_DIR`** (fpm 0.13.0): it removes every `build/<compiler>_<hash>/`
+  tree, of every compiler and profile, and leaves the tree `FPM_BUILD_DIR` names as it was. Clear
+  a named tree with `rm -rf` on it instead.
 - Several `build/<compiler>_<hash>/` trees exist after builds with different flags.
   `tools/run_error_scenarios.sh` resolves its binary with `find … -name error_scenarios | head -n 1`,
   so a green run there is meaningful only when `find build -type f -name error_scenarios | wc -l`

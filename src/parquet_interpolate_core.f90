@@ -1,22 +1,50 @@
 !> The workers every interpolant shares: the abort and its message helpers, the token folding, the
-!> monotonicity and uniformity tests, the bracket search, the tridiagonal solver, the spline
-!> coefficients and the segment polynomials.
+!> monotonicity and uniformity tests, the bracket search, the tridiagonal solver, the per-knot
+!> coefficients of the cubic spline and of PCHIP, and every segment polynomial's value, derivatives
+!> and integral.
 !!
 !! The linear and natural-cubic arithmetic is taken over from qfeet's `interpolation` module, by the
 !! same author, and reworked to this library's rules: `real64` only, no logging, every abort an
 !! `error stop` naming the entry point, a NaN screened before any comparison, and a bracket that is
 !! guessed by arithmetic on an evenly spaced table but always walked to the segment its inequality
-!! names.
+!! names. The not-a-knot and clamped end conditions, PCHIP, and every derivative and integral are
+!! written here. PCHIP's slopes are those of F. N. Fritsch and R. E. Carlson, "Monotone Piecewise
+!! Cubic Interpolation", SIAM J. Numer. Anal. 17 (1980), with the weighted harmonic mean of
+!! F. N. Fritsch and J. Butland, "A Method for Constructing Local Monotone Piecewise Cubic
+!! Interpolants", SIAM J. Sci. Stat. Comput. 5 (1984), in the form SLATEC's `dpchim` computes it and
+!! with the end rule scipy's `PchipInterpolator` applies; they are cited as references, and no text
+!! of either is copied.
 !!
 !! **Why the solver carries no pivoting and no singularity check.** Every entry point refuses a
 !! table whose abscissae are not strictly monotonic, and the table is stored ascending, so every
 !! spacing `h(i) = x(i+1) - x(i)` is positive. The interior rows of the spline system,
 !! `h(i-1)*m(i-1) + 2*(h(i-1) + h(i))*m(i) + h(i)*m(i+1) = 6*(delta(i) - delta(i-1))`, then have a
-!! diagonal exactly twice the sum of the off-diagonal magnitudes, and the natural end rows are unit
-!! rows with no off-diagonal at all. A strictly diagonally dominant matrix is non-singular, and the
-!! Thomas sweep over one meets no zero pivot and needs no pivoting: each pivot stays above the
-!! magnitude of the row's super-diagonal. If the monotonicity screen is ever loosened, that
-!! guarantee goes with it.
+!! diagonal exactly twice the sum of the off-diagonal magnitudes. The end rows keep that dominance
+!! under every end condition:
+!!
+!! * natural: unit rows, `m(1) = 0` and `m(n) = 0`, with no off-diagonal at all;
+!! * clamped: `2*h(1)*m(1) + h(1)*m(2) = 6*(delta(1) - s1)` and its mirror, a diagonal twice its one
+!!   off-diagonal;
+!! * not-a-knot: the third derivative continuous at `x(2)`, `h(2)*m(1) - (h(1) + h(2))*m(2) +
+!!   h(1)*m(3) = 0`, reaches one knot beyond the band, so it is solved for `m(1)` and substituted
+!!   into row 2, which becomes `m(2)*(h(1) + h(2))*(h(1) + 2*h(2))/h(2) +
+!!   m(3)*(h(2)**2 - h(1)**2)/h(2) = 6*(delta(2) - delta(1))`, and mirrored at `x(n-1)`. The
+!!   reduced system in `m(2) .. m(n-1)` is tridiagonal. Its first row's diagonal exceeds its
+!!   off-diagonal's magnitude by `(h(1) + h(2))*(2*h(1) + h(2))/h(2)` when `h(2) >= h(1)` and by
+!!   `3*(h(1) + h(2))` otherwise, positive either way, and the last row likewise. `m(1)` and `m(n)`
+!!   are recovered afterwards. With four points both substitutions land on the only two rows, which
+!!   is why four is the minimum.
+!!
+!! A strictly diagonally dominant matrix is non-singular, and the Thomas sweep over one meets no zero
+!! pivot and needs no pivoting: each pivot stays above the magnitude of the row's super-diagonal. If
+!! the monotonicity screen is ever loosened, that guarantee goes with it.
+!!
+!! **Why PCHIP's interior slope cannot overflow.** Where the secants on both sides of a knot share a
+!! sign, the slope is Butland's weighted harmonic mean, `(w1 + w2)/(w1/delta(k-1) + w2/delta(k))`.
+!! Written that way a tiny secant makes a quotient overflow; `dpchim`'s form divides the smaller
+!! secant's magnitude by a weighted sum of the two secants scaled by the larger, whose magnitude is
+!! at least a third, and is the same number. The sign tests compare with zero rather than calling
+!! `sign()`, whose answer for a zero argument is processor-dependent.
 !!
 !! **Why an evenly spaced table cannot choose a different segment from bisection.** The arithmetic
 !! bracket `1 + floor((xq - x(1))/step)` is exact only on a table whose knots sit exactly on
@@ -28,10 +56,10 @@
 !! at most one, and the two paths agree for every query.
 !!
 !! **Why a query on a knot answers that knot's ordinate exactly.** The walk makes every interior
-!! knot the LEFT end of its segment, where the segment formulas multiply the right-hand ordinate by
-!! an exact zero; and the evaluators answer `y(n)` for `x(n)` directly. Neither depends on how a
-!! compiler rounds a division, which under a value-unsafe floating-point model is not guaranteed to
-!! give `h/h == 1`.
+!! knot the LEFT end of its segment, where every segment formula here multiplies what it adds to the
+!! left ordinate by an exact zero; and the evaluators answer `y(n)` for `x(n)` directly. Neither
+!! depends on how a compiler rounds a division, which under a value-unsafe floating-point model is
+!! not guaranteed to give `h/h == 1`.
 submodule (parquet_interpolate) parquet_interpolate_core
 
     implicit none
@@ -170,7 +198,7 @@ contains
 
     end procedure interp_bracket
 
-    ! ---- the tridiagonal solver and the spline ---------------------------------------------------
+    ! ---- the tridiagonal solver and the per-knot coefficients ------------------------------------
 
     module procedure interp_thomas
 
@@ -202,37 +230,112 @@ contains
         integer                   :: i, n
 
         n = size(x)
+        allocate (sub(n), diag(n), sup(n), rhs(n))
+        ! The interior rows every end condition shares: the first derivative continuous at `x(i)`.
+        do i = 2, n - 1
+            h0 = x(i) - x(i - 1)
+            h1 = x(i + 1) - x(i)
+            sub(i) = h0
+            diag(i) = 2.0_real64*(h0 + h1)
+            sup(i) = h1
+            rhs(i) = 6.0_real64*((y(i + 1) - y(i))/h1 - (y(i) - y(i - 1))/h0)
+        end do
+
         select case (bc)
         case (B_NATURAL)
-            allocate (sub(n), diag(n), sup(n), rhs(n))
-            ! The natural end rows: `m(1) = 0` and `m(n) = 0`.
+            ! `m(1) = 0` and `m(n) = 0`.
             sub(1) = 0.0_real64
             diag(1) = 1.0_real64
             sup(1) = 0.0_real64
             rhs(1) = 0.0_real64
-            do i = 2, n - 1
-                h0 = x(i) - x(i - 1)
-                h1 = x(i + 1) - x(i)
-                sub(i) = h0
-                diag(i) = 2.0_real64*(h0 + h1)
-                sup(i) = h1
-                rhs(i) = 6.0_real64*((y(i + 1) - y(i))/h1 - (y(i) - y(i - 1))/h0)
-            end do
             sub(n) = 0.0_real64
             diag(n) = 1.0_real64
             sup(n) = 0.0_real64
             rhs(n) = 0.0_real64
             call interp_thomas(sub, diag, sup, rhs, m)
+        case (B_CLAMPED)
+            ! The first derivative of the first segment at `x(1)` is `s1`, and of the last at `x(n)`
+            ! is `sn`.
+            h0 = x(2) - x(1)
+            sub(1) = 0.0_real64
+            diag(1) = 2.0_real64*h0
+            sup(1) = h0
+            rhs(1) = 6.0_real64*((y(2) - y(1))/h0 - s1)
+            h1 = x(n) - x(n - 1)
+            sub(n) = h1
+            diag(n) = 2.0_real64*h1
+            sup(n) = 0.0_real64
+            rhs(n) = 6.0_real64*(sn - (y(n) - y(n - 1))/h1)
+            call interp_thomas(sub, diag, sup, rhs, m)
         case default
-            ! Unreachable: every entry point refuses the end conditions that are not available yet
-            ! before it builds anything. Kept so that a token wired up without its rows aborts here
-            ! rather than being solved as a natural spline.
-            ! GCOVR_EXCL_START
-            error stop "parquet_interpolate: this end condition is not available yet"
-            ! GCOVR_EXCL_STOP
+            ! `B_NOT_A_KNOT`, the only other code an entry point stores. Rows 2 and n-1 absorb `m(1)`
+            ! and `m(n)` (the header derives the coefficients), the reduced system is swept, and the
+            ! two ends are recovered from the not-a-knot conditions themselves. The differences of
+            ! squares are factored, so a spacing equal on both sides gives an exact zero.
+            h0 = x(2) - x(1)
+            h1 = x(3) - x(2)
+            diag(2) = (h0 + h1)*(h0 + 2.0_real64*h1)/h1
+            sup(2) = (h1 - h0)*(h1 + h0)/h1
+            h0 = x(n - 1) - x(n - 2)
+            h1 = x(n) - x(n - 1)
+            sub(n - 1) = (h0 - h1)*(h0 + h1)/h0
+            diag(n - 1) = (h0 + h1)*(2.0_real64*h0 + h1)/h0
+            call interp_thomas(sub(2:n - 1), diag(2:n - 1), sup(2:n - 1), rhs(2:n - 1), m(2:n - 1))
+            h0 = x(2) - x(1)
+            h1 = x(3) - x(2)
+            m(1) = ((h0 + h1)*m(2) - h0*m(3))/h1
+            h0 = x(n - 1) - x(n - 2)
+            h1 = x(n) - x(n - 1)
+            m(n) = ((h0 + h1)*m(n - 1) - h1*m(n - 2))/h0
         end select
 
     end procedure interp_spline_coeffs
+
+    module procedure interp_pchip_slopes
+
+        real(real64) :: h0, h1, left, right, hsum, left_used, right_used, big, small, mean
+        integer      :: k, n
+        logical      :: same
+
+        n = size(x)
+        if (n == 2) then
+            ! One segment: the straight line.
+            d(1) = (y(2) - y(1))/(x(2) - x(1))
+            d(2) = d(1)
+            return
+        end if
+
+        do k = 2, n - 1
+            h0 = x(k) - x(k - 1)
+            h1 = x(k + 1) - x(k)
+            hsum = h0 + h1
+            left = (y(k) - y(k - 1))/h0
+            right = (y(k + 1) - y(k))/h1
+            ! Where the secants share a sign, the slope is Butland's weighted harmonic mean in `dpchim`'s
+            ! overflow-free form, the weight `(hsum + h0)/(3*hsum)` belonging to the left secant and
+            ! `(hsum + h1)/(3*hsum)` to the right. A flat secant on either side, or a change of
+            ! direction, is a plateau or a local extremum, where the slope is zero -- which is what
+            ! keeps the curve from overshooting.
+            !
+            ! The mean is formed branch-free, over secants replaced by 1 wherever it is not taken. ifx
+            ! evaluates a guarded quotient whether or not its guard holds, so a mean formed only inside
+            ! an `if` still divides `0/0` at a plateau and by zero at a symmetric peak, raising
+            ! IEEE_INVALID or IEEE_DIVIDE_BY_ZERO from a `%init` whose slopes are right -- which ends a
+            ! program running under nagfor's default `-ieee=stop`.
+            same = (left > 0.0_real64 .and. right > 0.0_real64) .or. (left < 0.0_real64 .and. right < 0.0_real64)
+            left_used = merge(left, 1.0_real64, same)
+            right_used = merge(right, 1.0_real64, same)
+            big = max(abs(left_used), abs(right_used))
+            small = min(abs(left_used), abs(right_used))
+            mean = small/(((hsum + h0)/(3.0_real64*hsum))*(left_used/big) + ((hsum + h1)/(3.0_real64*hsum))*(right_used/big))
+            d(k) = merge(mean, 0.0_real64, same)
+        end do
+
+        d(1) = interp_pchip_end_slope(x(2) - x(1), x(3) - x(2), (y(2) - y(1))/(x(2) - x(1)), (y(3) - y(2))/(x(3) - x(2)))
+        d(n) = interp_pchip_end_slope(x(n) - x(n - 1), x(n - 1) - x(n - 2), (y(n) - y(n - 1))/(x(n) - x(n - 1)), &
+                               (y(n - 1) - y(n - 2))/(x(n - 1) - x(n - 2)))
+
+    end procedure interp_pchip_slopes
 
     ! ---- the segment polynomials -----------------------------------------------------------------
 
@@ -244,6 +347,27 @@ contains
         v = y0 + t*(y1 - y0)
 
     end procedure interp_linear_seg_value
+
+    module procedure interp_linear_seg_derivative
+
+        if (order == 1) then
+            v = (y1 - y0)/(x1 - x0)
+        else
+            v = 0.0_real64
+        end if
+
+    end procedure interp_linear_seg_derivative
+
+    module procedure interp_linear_seg_integral
+
+        real(real64) :: t
+
+        ! The width times the mean of the two ends of the piece, the second end being the line's
+        ! value at `xq`.
+        t = (xq - x0)/(x1 - x0)
+        v = (xq - x0)*(y0 + 0.5_real64*t*(y1 - y0))
+
+    end procedure interp_linear_seg_integral
 
     module procedure interp_cubic_seg_value
 
@@ -258,5 +382,111 @@ contains
         v = a*y0 + b*y1 + ((a*a*a - a)*m0 + (b*b*b - b)*m1)*(h*h)/6.0_real64
 
     end procedure interp_cubic_seg_value
+
+    module procedure interp_cubic_seg_derivative
+
+        real(real64) :: h, a, b
+
+        h = x1 - x0
+        b = (xq - x0)/h
+        a = 1.0_real64 - b
+        if (order == 1) then
+            v = (y1 - y0)/h + ((3.0_real64*b*b - 1.0_real64)*m1 - (3.0_real64*a*a - 1.0_real64)*m0)*h/6.0_real64
+        else
+            v = a*m0 + b*m1
+        end if
+
+    end procedure interp_cubic_seg_derivative
+
+    module procedure interp_cubic_seg_integral
+
+        real(real64) :: h, a, b, c
+
+        h = x1 - x0
+        b = (xq - x0)/h
+        a = 1.0_real64 - b
+        ! The antiderivative of the segment formula that vanishes at `x0`, as a polynomial in `b`:
+        ! `h*(b*y0 + b**2*(y1 - y0)/2 - h**2*((b*(2 - b))**2*m0 + b**2*(2 - b**2)*m1)/24)`. Every
+        ! coefficient is a product, so nothing cancels near the left knot; `c` is `b*(2 - b)`.
+        c = b*(1.0_real64 + a)
+        v = h*(b*y0 + 0.5_real64*b*b*(y1 - y0) - (h*h)*(c*c*m0 + b*b*(2.0_real64 - b*b)*m1)/24.0_real64)
+
+    end procedure interp_cubic_seg_integral
+
+    module procedure interp_hermite_seg_value
+
+        real(real64) :: h, t, s
+
+        h = x1 - x0
+        t = (xq - x0)/h
+        s = 1.0_real64 - t
+        ! The Hermite basis with `y0` taken out: `h00 = 1 - h01`, so the value is `y0` plus the rise
+        ! times `h01 = t**2*(3 - 2*t)`, plus the slope terms `h10 = t*s**2` and `h11 = -t**2*s`. At the
+        ! left knot every added term carries a factor `t` that is an exact zero, and on a flat segment
+        ! with zero slopes the value is `y0` itself.
+        v = y0 + t*t*(3.0_real64 - 2.0_real64*t)*(y1 - y0) + h*t*s*(s*d0 - t*d1)
+
+    end procedure interp_hermite_seg_value
+
+    module procedure interp_hermite_seg_derivative
+
+        real(real64) :: h, t, s
+
+        h = x1 - x0
+        t = (xq - x0)/h
+        s = 1.0_real64 - t
+        if (order == 1) then
+            v = 6.0_real64*t*s*(y1 - y0)/h + s*(1.0_real64 - 3.0_real64*t)*d0 + t*(3.0_real64*t - 2.0_real64)*d1
+        else
+            v = (6.0_real64*(1.0_real64 - 2.0_real64*t)*(y1 - y0)/h + (6.0_real64*t - 4.0_real64)*d0 + &
+                 (6.0_real64*t - 2.0_real64)*d1)/h
+        end if
+
+    end procedure interp_hermite_seg_derivative
+
+    module procedure interp_hermite_seg_integral
+
+        real(real64) :: h, t
+
+        h = x1 - x0
+        t = (xq - x0)/h
+        ! `h` times the integral over `[0, t]` of the basis: `t*y0 + t**3*(2 - t)*(y1 - y0)/2 +
+        ! h*(t**2*(6 - 8*t + 3*t**2)*d0 + t**3*(3*t - 4)*d1)/12`.
+        v = h*(t*y0 + 0.5_real64*t*t*t*(2.0_real64 - t)*(y1 - y0) + &
+               h*(t*t*(6.0_real64 + t*(3.0_real64*t - 8.0_real64))*d0 + t*t*t*(3.0_real64*t - 4.0_real64)*d1)/12.0_real64)
+
+    end procedure interp_hermite_seg_integral
+
+    ! ---- helpers private to this submodule -------------------------------------------------------
+
+    !> PCHIP's slope at an end of the table: the three-point estimate from the two end secants, set to
+    !! zero where it points against the end secant, and held to three times that secant where the data
+    !! turn at the second knot.
+    pure function interp_pchip_end_slope(h0, h1, m0, m1) result(d)
+        real(real64), intent(in) :: h0 !! the width of the end segment
+        real(real64), intent(in) :: h1 !! the width of the segment beside it
+        real(real64), intent(in) :: m0 !! the end segment's secant
+        real(real64), intent(in) :: m1 !! the secant beside it
+        real(real64)             :: d  !! the slope at the end knot
+
+        d = ((2.0_real64*h0 + h1)*m0 - h0*m1)/(h0 + h1)
+        if (interp_sign_of(d) /= interp_sign_of(m0)) then
+            d = 0.0_real64
+        else if (interp_sign_of(m0) /= interp_sign_of(m1)) then
+            if (abs(d) > 3.0_real64*abs(m0)) d = 3.0_real64*m0
+        end if
+
+    end function interp_pchip_end_slope
+
+    !> -1, 0 or +1 by comparison with zero, so that a negative zero counts as zero on every processor.
+    pure elemental function interp_sign_of(v) result(s)
+        real(real64), intent(in) :: v !! the value, never a NaN here
+        integer                  :: s !! its sign
+
+        s = 0
+        if (v > 0.0_real64) s = 1
+        if (v < 0.0_real64) s = -1
+
+    end function interp_sign_of
 
 end submodule parquet_interpolate_core

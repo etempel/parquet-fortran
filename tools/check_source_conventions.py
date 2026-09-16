@@ -5395,8 +5395,22 @@ def check_threads_are_forwarded():
 
     Forwarding positionally counts: `resolve_thread_count(threads, n, nth)` is how every extractor
     does it. Passing a LITERAL (`threads=1`) does not -- that is the mutation this exists to catch.
+
+    **Not only the sorting tier.** `parquet_optimize`'s population engines take `threads` and hand
+    it to one shared resolver, which is the single place either clamps or validates a count; a drop
+    between the entry point and that resolver leaves the engine serial with every answer unchanged,
+    since both engines are designed to answer identically at any team size. The spec list is what
+    widens the check to a module; everything else is matched by shape.
+
+    Two shapes are read rather than one. Interface declarations are joined across `&` continuations
+    before the dummy lists are read -- a multi-line declaration is how every entry point of
+    `parquet_optimize` is written, and reading only single-line ones would silently leave them out
+    of the set. Bodies are matched in both the abbreviated `module procedure` form and the fully
+    restated `module subroutine` form, which is what a body taking a `procedure(...)` dummy must
+    use (`fortran-gotchas.md`, gfortran): those bodies are exactly the plain-function specifics
+    that forward to their object twins.
     """
-    specs = [SRC / "parquet_sorting.f90", SRC / "parquet_argsort.f90"]
+    specs = [SRC / "parquet_sorting.f90", SRC / "parquet_argsort.f90", SRC / "parquet_optimize.f90"]
     missing = [s for s in specs if not s.is_file()]
     if missing:
         return ["tools/check_source_conventions.py: %s not found -- this check has gone stale and "
@@ -5404,7 +5418,11 @@ def check_threads_are_forwarded():
     takes = set()
     for spec in specs:
         text = spec.read_text(encoding="utf-8", errors="replace")
-        for m in re.finditer(r"^\s*module subroutine (\w+)\((.*?)\)\s*$", text, re.M):
+        # Join `&` continuations first: an interface declaration spread over three lines is not a
+        # different declaration, and reading only the single-line ones would drop a whole module's
+        # entry points out of the set without failing anything.
+        joined = re.sub(r"&[ \t]*\n[ \t]*", " ", text)
+        for m in re.finditer(r"^\s*module subroutine (\w+)\((.*?)\)\s*$", joined, re.M):
             if re.search(r"\bthreads\b", m.group(2)):
                 takes.add(m.group(1))
     problems = []
@@ -5412,14 +5430,17 @@ def check_threads_are_forwarded():
         return ["no sorting procedure declaring a `threads` dummy was found at all -- either the "
                 "argument was removed library-wide or this check's pattern has gone stale; either "
                 "way it must not report success"]
-    bodies = sorted(SRC.glob("parquet_sorting_*.f90")) + [SRC / "parquet_argsort_kernel.f90"]
+    bodies = (sorted(SRC.glob("parquet_sorting_*.f90"))
+              + sorted(SRC.glob("parquet_optimize_*.f90"))
+              + [SRC / "parquet_argsort_kernel.f90"])
+    forms = [r"^    module procedure (\w+)\s*$(.*?)^    end procedure \1\s*$",
+             r"^    module subroutine (\w+)\b(.*?)^    end subroutine \1\s*$"]
     checked = 0
     for path in bodies:
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        for m in re.finditer(r"^    module procedure (\w+)\s*$(.*?)^    end procedure \1\s*$",
-                             text, re.M | re.S):
+        for m in [m for form in forms for m in re.finditer(form, text, re.M | re.S)]:
             name, body = m.group(1), m.group(2)
             if name not in takes:
                 continue
@@ -5429,7 +5450,11 @@ def check_threads_are_forwarded():
                 if callee not in takes or callee == name:
                     continue
                 checked += 1
-                flat = " ".join(args.split())
+                # The continuation `&` is dropped, not merely collapsed with the whitespace around
+                # it: an argument list broken across lines just before `threads=threads` otherwise
+                # flattens to a parameter spelled `& threads=threads`, which matches neither
+                # accepted spelling. Fortran has no `&` operator, so nothing else can be losing.
+                flat = " ".join(args.replace("&", " ").split())
                 parts = [a.strip() for a in re.split(r",(?![^()]*\))", flat)]
                 if not any(a == "threads" or a == "threads=threads" for a in parts):
                     problems.append(

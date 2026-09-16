@@ -18,7 +18,9 @@ module test_optimize
     use parquet_optimize
     use test_optimize_support
     use testdrive, only : new_unittest, unittest_type, error_type, check
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : real64, int64
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_nan, ieee_get_flag, ieee_set_flag, &
+                                             ieee_support_flag, ieee_invalid
 
     implicit none
     private
@@ -59,7 +61,33 @@ contains
             new_unittest("a record comes back trimmed to the records in use", &
                          test_history_is_trimmed), &
             new_unittest("pf_simplex_solver runs the simplex inside the driver's box", &
-                         test_simplex_solver_object) &
+                         test_simplex_solver_object), &
+            new_unittest("DE reaches every one of the four reference minima", &
+                         test_de_reference_functions), &
+            new_unittest("DE converges on the spread test with no target given", &
+                         test_de_spread_alone), &
+            new_unittest("a small generation budget stops DE at PF_OPT_LIMIT", &
+                         test_de_generation_budget), &
+            new_unittest("DE crosses a NaN region and still finds the minimum outside it", &
+                         test_de_nan_region), &
+            new_unittest("an objective with an allocatable component is cloned per thread", &
+                         test_de_clones_the_objective), &
+            new_unittest("DE is a function of its seed and of nothing else", &
+                         test_de_seed_decides_the_run), &
+            new_unittest("the final population has np individuals, all inside the box", &
+                         test_de_population), &
+            new_unittest("polish lowers the value and adds its evaluations to the count", &
+                         test_de_polish), &
+            new_unittest("no finite value anywhere is PF_OPT_NONFINITE, the box centre and +Inf", &
+                         test_de_nothing_finite), &
+            new_unittest("the multistart driver ends every start on a stationary point", &
+                         test_multistart_basins), &
+            new_unittest("the lowest start index wins, whatever the thread count", &
+                         test_multistart_tie_rule), &
+            new_unittest("xtol decides how many minima count as distinct", &
+                         test_multistart_xtol), &
+            new_unittest("the solver object's own budget reaches every local run", &
+                         test_multistart_solver_options) &
             ]
 
     end subroutine collect_tests_optimize
@@ -523,5 +551,452 @@ contains
         call check(error, info%neval <= 8, "the budget is soft by at most one engine step")
 
     end subroutine test_simplex_solver_object
+
+    !> DE reaches the reference minimum of each of the four functions the design was measured on.
+    !!
+    !! Every bound below is an UPPER BOUND on the evaluation count, generous by a factor of about
+    !! two, never a measurement: a floating-point model that reassociates `a + F*(b - c)` flips one
+    !! selection and moves the whole path, so an exact count would pin one toolchain. What a real
+    !! regression moves is the order of magnitude, and that is what these catch. The minimum
+    !! actually reached is asserted beside each, which is the half a loose bound cannot fake.
+    subroutine test_de_reference_functions(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x2(2), x5(5), x10(10), fmin
+        real(real64) :: lo2(2), hi2(2), lo5(5), hi5(5), lo10(10), hi10(10)
+        real(real64), parameter :: target = 1.0e-8_real64
+
+        lo2 = -5.0_real64
+        hi2 = 5.0_real64
+        call pf_minimize_de(rosenbrock, lo2, hi2, 42_int64, x2, fmin, ftarget=target, info=info)
+        call check(error, info%status, PF_OPT_TARGET, "Rosenbrock in 2 variables should reach the target")
+        if (allocated(error)) return
+        call check(error, fmin <= target, "the target is a bound on the value, not a suggestion")
+        if (allocated(error)) return
+        call check(error, info%neval <= 4000, "Rosenbrock-2 should cost a few thousand evaluations")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x2 - 1.0_real64)) < 1.0e-3_real64, &
+            "Rosenbrock's minimiser is (1, 1), by inspection of its two squares")
+        if (allocated(error)) return
+
+        lo10 = -5.0_real64
+        hi10 = 5.0_real64
+        call pf_minimize_de(sphere, lo10, hi10, 42_int64, x10, fmin, np=100, ftarget=target, &
+                            max_gen=20000, info=info)
+        call check(error, info%status, PF_OPT_TARGET, "the 10-variable sphere should reach the target")
+        if (allocated(error)) return
+        call check(error, info%neval <= 200000, "the sphere in 10 variables should cost under 2e5 evaluations")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x10 - 1.0_real64)) < 1.0e-3_real64, &
+            "the sphere's minimiser is 1 in every coordinate")
+        if (allocated(error)) return
+
+        call pf_minimize_de(rosenbrock, lo10, hi10, 42_int64, x10, fmin, np=100, ftarget=target, &
+                            max_gen=20000, info=info)
+        call check(error, info%status, PF_OPT_TARGET, "Rosenbrock in 10 variables should reach the target")
+        if (allocated(error)) return
+        call check(error, info%neval <= 400000, "Rosenbrock-10 should cost under 4e5 evaluations")
+        if (allocated(error)) return
+
+        ! Rastrigin in five variables has about 11**5 local minima, so this is the case a local
+        ! engine and a multistart driver both fail; a low CR is what gets DE through it (3.2).
+        lo5 = -5.12_real64
+        hi5 = 5.12_real64
+        call pf_minimize_de(rastrigin, lo5, hi5, 42_int64, x5, fmin, np=50, cr=0.2_real64, &
+                            ftarget=target, max_gen=20000, info=info)
+        call check(error, info%status, PF_OPT_TARGET, "Rastrigin in 5 variables should reach the target")
+        if (allocated(error)) return
+        call check(error, info%neval <= 40000, "Rastrigin-5 should cost tens of thousands of evaluations")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x5)) < 1.0e-3_real64, &
+            "Rastrigin's global minimiser is the origin, where every cosine is 1")
+
+    end subroutine test_de_reference_functions
+
+    !> With no target the run ends on the population's value spread, and says so.
+    !!
+    !! The objective is SHIFTED away from zero on purpose: the fractional test compares the spread
+    !! with the size of the values themselves, and on an objective whose minimum is zero it can
+    !! never fire, however tight the population gets. That is the same trap the simplex page
+    !! states, and this is the case it does work on.
+    subroutine test_de_spread_alone(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(shifted_quadratic) :: obj
+        real(real64) :: x(3), fmin, lo(3), hi(3)
+
+        obj%shift = 10.0_real64
+        lo = -4.0_real64
+        hi = 6.0_real64
+        call pf_minimize_de(obj, lo, hi, 5_int64, x, fmin, info=info)
+
+        call check(error, info%status, PF_OPT_OK, "the spread test should be what ends this run")
+        if (allocated(error)) return
+        call check(error, info%converged, "PF_OPT_OK is a converged run")
+        if (allocated(error)) return
+        call check(error, fmin, 10.0_real64, thr=1.0e-4_real64)
+        if (allocated(error)) return
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-2_real64, &
+            "the shifted quadratic's minimiser is 1 in every coordinate")
+        if (allocated(error)) return
+        call check(error, obj%ncall, info%neval, &
+            "at threads = 1 the caller's own object is what gets evaluated, so its counter must agree")
+
+    end subroutine test_de_spread_alone
+
+    !> A generation budget too small to converge is PF_OPT_LIMIT, not an error.
+    subroutine test_de_generation_budget(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+        call pf_minimize_de(rosenbrock, lo, hi, 42_int64, x, fmin, max_gen=3, info=info)
+
+        call check(error, info%status, PF_OPT_LIMIT, "three generations cannot converge on Rosenbrock")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "running out of budget is not convergence")
+        if (allocated(error)) return
+        call check(error, info%niter, 3, "the run should have spent exactly its three generations")
+        if (allocated(error)) return
+        ! The starting population plus three generations of one trial each.
+        call check(error, info%neval, 4*20, "np = max(20, 10n) here, and each generation costs np")
+        if (allocated(error)) return
+        call check(error, fmin < 1.0e30_real64, "the best point so far still comes back")
+
+    end subroutine test_de_generation_budget
+
+    !> A NaN region inside the box is "outside my domain", counted, never selected, and never
+    !! carried into an ordered comparison.
+    !!
+    !! **This is the behaviour that separates the population tier from the local one.** The same
+    !! objective aborts `pf_minimize_simplex`, because every simplex decision is a comparison of
+    !! values; here a non-finite trial simply loses its selection. The vacuity guard is
+    !! `info%nonfinite`: without it the test would pass just as well on an objective the population
+    !! never left the finite part of.
+    !!
+    !! **The IEEE_INVALID assertion is what makes the two NaN guards testable at all.** Deleting
+    !! either of them -- the `ieee_is_finite` screen on the selection, or the `+Infinity`
+    !! substitution that keeps a non-finite incumbent out of `minloc` and `maxval` -- changes no
+    !! answer this test could otherwise see, because IEEE makes every ordered comparison against a
+    !! NaN false and the right individual wins anyway. What changes is that `<=`, `minsd` and
+    !! `maxsd` then SIGNAL on a NaN operand: invisible under gfortran and ifx, fatal under nagfor's
+    !! default `-ieee=stop`, which would abort the whole runner on a build this machine cannot run.
+    !! Reading the flag turns that into an ordinary assertion here. Both mutations were confirmed
+    !! to fail this test and nothing else.
+    subroutine test_de_nan_region(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+        logical :: flags_work, was_raised, raised
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+
+        ! Restoring the saved value cannot itself abort under nagfor: with halting on, which is its
+        ! default, the process would already have gone down when the flag was first raised, so
+        ! `was_raised` can only be true on a build that does not halt.
+        flags_work = ieee_support_flag(ieee_invalid, 0.0_real64)
+        was_raised = .false.
+        if (flags_work) then
+            call ieee_get_flag(ieee_invalid, was_raised)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+
+        call pf_minimize_de(nan_corner, lo, hi, 3_int64, x, fmin, ftarget=1.0e-10_real64, info=info)
+
+        raised = .false.
+        if (flags_work) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, was_raised)
+        end if
+
+        call check(error, info%nonfinite > 0, &
+            "vacuity guard: the population never reached the NaN region, so nothing was screened")
+        if (allocated(error)) return
+        call check(error, info%status, PF_OPT_TARGET, "the minimum outside the region is reachable")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x)) < 1.0e-4_real64, &
+            "nan_corner's minimiser is the origin, by inspection of its sum of squares")
+        if (allocated(error)) return
+        call check(error, .not. raised, &
+            "a NaN reached an ordered comparison: IEEE_INVALID was raised, which is a silent flag " // &
+            "under this compiler and a fatal trap under nagfor's default -ieee=stop")
+
+    end subroutine test_de_nan_region
+
+    !> An objective whose parameters live in an allocatable component survives being cloned.
+    !!
+    !! The clone is `allocate(slot%obj, source=f)`, which must DEEP-copy `centre` into every
+    !! thread's own object. A shallow clone either crashes or -- much worse -- leaves a thread
+    !! reading an unallocated or shared centre and returning a confident wrong minimum, which is
+    !! why the component is the thing the answer depends on. The threaded answer is compared with
+    !! the serial one bit for bit, and the caller's own object is checked afterwards.
+    subroutine test_de_clones_the_objective(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: serial_info, threaded_info
+        type(table_sphere) :: obj
+        real(real64) :: xs(3), xt(3), fs, ft, lo(3), hi(3)
+
+        obj%centre = [0.25_real64, -1.5_real64, 2.75_real64]
+        lo = -4.0_real64
+        hi = 4.0_real64
+
+        call pf_minimize_de(obj, lo, hi, 9_int64, xs, fs, max_gen=200, atol=1.0e-12_real64, &
+                            info=serial_info)
+        call pf_minimize_de(obj, lo, hi, 9_int64, xt, ft, max_gen=200, atol=1.0e-12_real64, &
+                            threads=4, info=threaded_info)
+
+        call check(error, all(xt == xs), "four threads must give the serial point, bit for bit")
+        if (allocated(error)) return
+        call check(error, ft == fs, "four threads must give the serial value, bit for bit")
+        if (allocated(error)) return
+        call check(error, threaded_info%neval, serial_info%neval, &
+            "the thread count must not change how many evaluations the run needs")
+        if (allocated(error)) return
+        call check(error, serial_info%status, PF_OPT_OK, "the run should end on its own tolerance")
+        if (allocated(error)) return
+        call check(error, maxval(abs(xs - obj%centre)) < 1.0e-5_real64, &
+            "the minimiser is the centre the allocatable component holds")
+        if (allocated(error)) return
+        call check(error, allocated(obj%centre), "the caller's own object must come back intact")
+        if (allocated(error)) return
+        call check(error, size(obj%centre), 3, "and with its component the size it went in at")
+
+    end subroutine test_de_clones_the_objective
+
+    !> The same seed repeats a run exactly; a different seed gives a different one.
+    subroutine test_de_seed_decides_the_run(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: xa(2), xb(2), xc(2), fa, fb, fc, lo(2), hi(2)
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+        call pf_minimize_de(rosenbrock, lo, hi, 1_int64, xa, fa, max_gen=12, info=info)
+        call pf_minimize_de(rosenbrock, lo, hi, 1_int64, xb, fb, max_gen=12, info=info)
+        call pf_minimize_de(rosenbrock, lo, hi, 2_int64, xc, fc, max_gen=12, info=info)
+
+        call check(error, all(xb == xa), "one seed must repeat its run bit for bit")
+        if (allocated(error)) return
+        call check(error, fb == fa, "and its value with it")
+        if (allocated(error)) return
+        call check(error, any(xc /= xa), &
+            "vacuity guard: two seeds gave the same point, so the seed reaches nothing")
+
+    end subroutine test_de_seed_decides_the_run
+
+    !> The final population comes back with `np` individuals, every one inside the box.
+    subroutine test_de_population(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+        real(real64), allocatable :: pop(:,:)
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+        integer :: j
+
+        lo = [-5.0_real64, -3.0_real64]
+        hi = [4.0_real64, 6.0_real64]
+        call pf_minimize_de(rosenbrock, lo, hi, 42_int64, x, fmin, np=17, max_gen=25, &
+                            population=pop, history=record, info=info)
+
+        call check(error, size(pop, 1), 2, "one row per variable")
+        if (allocated(error)) return
+        call check(error, size(pop, 2), 17, "one column per individual, and np was asked for")
+        if (allocated(error)) return
+        do j = 1, 2
+            call check(error, all(pop(j,:) >= lo(j)) .and. all(pop(j,:) <= hi(j)), &
+                "every trial point is clipped to the box, so the population never leaves it")
+            if (allocated(error)) return
+        end do
+
+        ! The record is one entry per generation plus the starting population's own best.
+        call check(error, record%n, info%niter + 1, &
+            "DE records the best of each generation, and of the population it started from")
+        if (allocated(error)) return
+        call check(error, record%f(record%n), fmin, &
+            "the last record is the best point the run ended on")
+
+    end subroutine test_de_population
+
+    !> `polish` runs the simplex from the best individual: a lower value, more evaluations.
+    subroutine test_de_polish(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: plain, polished
+        real(real64) :: xa(2), xb(2), fa, fb, lo(2), hi(2)
+
+        ! Few enough generations that DE is still some way off, so the simplex has work to do.
+        lo = -5.0_real64
+        hi = 5.0_real64
+        call pf_minimize_de(rosenbrock, lo, hi, 42_int64, xa, fa, max_gen=6, info=plain)
+        call pf_minimize_de(rosenbrock, lo, hi, 42_int64, xb, fb, max_gen=6, polish=.true., &
+                            info=polished)
+
+        call check(error, fb < fa, "polishing from the best individual must not make it worse")
+        if (allocated(error)) return
+        call check(error, polished%neval > plain%neval, &
+            "the simplex's own evaluations are counted in the total")
+        if (allocated(error)) return
+        call check(error, polished%niter, plain%niter, &
+            "polishing adds no generation: niter counts DE's own")
+
+    end subroutine test_de_polish
+
+    !> An objective that is NaN everywhere ends the run without a point to report.
+    subroutine test_de_nothing_finite(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = [-5.0_real64, -3.0_real64]
+        hi = [4.0_real64, 6.0_real64]
+        call pf_minimize_de(always_nan, lo, hi, 42_int64, x, fmin, np=8, info=info)
+
+        call check(error, info%status, PF_OPT_NONFINITE, "not one finite value is its own status")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "and it is not convergence")
+        if (allocated(error)) return
+        call check(error, info%nonfinite, 8, "every individual of the starting population counted")
+        if (allocated(error)) return
+        call check(error, .not. ieee_is_nan(fmin), &
+            "the value must be +Infinity, never a NaN a caller's comparison would trap on")
+        if (allocated(error)) return
+        call check(error, fmin > huge(1.0_real64), "and it must be +Infinity, not merely large")
+        if (allocated(error)) return
+        call check(error, all(x == 0.5_real64*(lo + hi)), "the point reported is the box's centre")
+
+    end subroutine test_de_nothing_finite
+
+    !> Every start of a multistart run ends on a stationary point, and several basins are found.
+    !!
+    !! **The reference is Rastrigin's own gradient**, `2x + 20 pi sin(2 pi x)`, evaluated at each
+    !! start's answer -- not a list of locations read off a run. Its minima are near the integer
+    !! points but NOT at them (`test_optimize_support.f90` derives the displacement), so a test
+    !! asserting integer coordinates would be asserting something false.
+    subroutine test_multistart_basins(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+        integer :: k
+
+        lo = -5.12_real64
+        hi = 5.12_real64
+        call pf_minimize_multistart(rastrigin, lo, hi, 11_int64, x, fmin, nstart=20, info=info, &
+                                    history=record)
+
+        call check(error, record%n, 20, "the record holds every start's own minimum, before merging")
+        if (allocated(error)) return
+        do k = 1, record%n
+            call check(error, maxval(abs(rastrigin_gradient(record%x(:,k)))) < 1.0e-3_real64, &
+                "every local run should end on a zero of the gradient, not part way down a slope")
+            if (allocated(error)) return
+        end do
+
+        call check(error, info%nminima >= 3, &
+            "vacuity guard: twenty starts over this box all landed in one basin, so nothing was counted")
+        if (allocated(error)) return
+        call check(error, info%nminima <= 20, "no more distinct minima than there were starts")
+        if (allocated(error)) return
+        call check(error, info%nlimit, 0, "every local run had budget enough to converge")
+        if (allocated(error)) return
+        call check(error, info%niter, 20, "niter is the number of starts")
+        if (allocated(error)) return
+
+        ! Rastrigin's global minimum is exactly 0 at the origin: every cosine is 1 there and the
+        ! -10 cos terms cancel the 10n.
+        call check(error, maxval(abs(x)) < 1.0e-5_real64, "the best start should reach the origin")
+        if (allocated(error)) return
+        call check(error, fmin, 0.0_real64, thr=1.0e-9_real64)
+
+    end subroutine test_multistart_basins
+
+    !> The winning start is the lowest-valued one, and on a tie the lowest INDEX.
+    !!
+    !! Asserted against the record rather than against a location: `x` must be, bit for bit, the
+    !! record entry `minloc` picks. That is the rule a "first thread to find a better value wins"
+    !! implementation breaks, and it breaks it invisibly -- every such answer is a valid local
+    !! minimum of the double well, so only this comparison can tell.
+    subroutine test_multistart_tie_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+        integer :: kbest
+
+        lo = -3.0_real64
+        hi = 3.0_real64
+        call pf_minimize_multistart(twin_wells, lo, hi, 5_int64, x, fmin, nstart=16, info=info, &
+                                    history=record)
+
+        kbest = minloc(record%f, 1)
+        call check(error, all(x == record%x(:,kbest)), &
+            "the point returned must be the record entry with the lowest value and lowest index")
+        if (allocated(error)) return
+        call check(error, fmin == record%f(kbest), "and its value")
+        if (allocated(error)) return
+
+        ! The double well's two minima are at x(1) = -1 and x(1) = +1, equal by symmetry; the
+        ! vacuity guard is that the starts really did find both, or there would be no tie to break.
+        call check(error, any(record%x(1,:) < 0.0_real64) .and. any(record%x(1,:) > 0.0_real64), &
+            "vacuity guard: every start landed in the same well, so no tie was ever in play")
+        if (allocated(error)) return
+        call check(error, maxval(abs(abs(record%x(1,:)) - 1.0_real64)) < 1.0e-4_real64, &
+            "both wells sit at x(1) = +/-1, by inspection of (x(1)**2 - 1)**2")
+        if (allocated(error)) return
+        call check(error, fmin < 1.0e-8_real64, "and the value there is zero")
+
+    end subroutine test_multistart_tie_rule
+
+    !> `xtol` is what decides whether two starts in one basin count once or twice.
+    subroutine test_multistart_xtol(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: merged, separate
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        ! One basin, twelve starts: every run ends within about 1e-5 of the same point.
+        lo = -3.0_real64
+        hi = 3.0_real64
+        call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, &
+                                    xtol=1.0e-2_real64, info=merged)
+        call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, &
+                                    xtol=0.0_real64, info=separate)
+
+        call check(error, merged%nminima, 1, &
+            "a merge radius wider than the spread of the answers makes them one minimum")
+        if (allocated(error)) return
+        call check(error, separate%nminima > merged%nminima, &
+            "vacuity guard: with xtol = 0 the same runs must count separately, or xtol reaches nothing")
+        if (allocated(error)) return
+        call check(error, separate%neval, merged%neval, &
+            "xtol decides only the counting; the runs themselves are the same")
+
+    end subroutine test_multistart_xtol
+
+    !> The solver object's options reach every local run, `max_neval` included.
+    subroutine test_multistart_solver_options(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(pf_simplex_solver) :: solver
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        solver%max_neval = 5
+        lo = -3.0_real64
+        hi = 3.0_real64
+        call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, solver=solver, &
+                                    info=info)
+
+        call check(error, info%nlimit, 12, "a budget of five cannot converge, so every start runs out")
+        if (allocated(error)) return
+        call check(error, info%status, PF_OPT_LIMIT, "and the driver says so when no start converged")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "which is not convergence")
+        if (allocated(error)) return
+        ! Three starting vertices, then at most one more engine step before the budget is tested.
+        call check(error, info%neval <= 12*8, &
+            "the solver's own budget must reach the runs, or they would each cost thousands")
+
+    end subroutine test_multistart_solver_options
 
 end module test_optimize

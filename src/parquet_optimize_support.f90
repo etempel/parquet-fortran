@@ -14,6 +14,16 @@ submodule (parquet_optimize) parquet_optimize_support
 
     implicit none
 
+    !> Team size the last threaded region of this module opened; read by
+    !! `parquet_debug_optimize_threads_used` and by nothing else.
+    !!
+    !! **The one saved variable in either module**, and it is test-only: no engine reads it and no
+    !! answer depends on it. It lives here, in the submodule that owns both the setter and the
+    !! getter, so the DE and multistart submodules can only reach it by calling `record_team_size`.
+    !! Written by one thread of each region (`CLAUDE.md`'s NAG `-thread_safe` note enumerates the
+    !! library's non-knob module variables).
+    integer, save :: dbg_optimize_threads_used = 1
+
 contains
 
     module procedure optimize_abort
@@ -144,5 +154,81 @@ contains
         f = this%fun(x)
 
     end procedure func_objective_eval
+
+    module procedure validate_box
+
+        if (size(lower) /= n .or. size(upper) /= n) call optimize_abort(entry_point, &
+            "lower, upper and x must have the same size", context)
+
+        ! Finiteness first, and through `ieee_is_finite` rather than a comparison: `<`, `<=`, `>`
+        ! and `>=` signal IEEE invalid on a NaN operand, which is fatal under nagfor's default
+        ! `-ieee=stop` -- on exactly the input this exists to reject.
+        if (any(.not. ieee_is_finite(lower)) .or. any(.not. ieee_is_finite(upper))) &
+            call optimize_abort(entry_point, "bounds must be finite", context)
+
+        ! Only reached with every bound finite, so this comparison cannot see a NaN.
+        if (any(lower >= upper)) call optimize_abort(entry_point, &
+            "every lower bound must be below its upper bound", context)
+
+    end procedure validate_box
+
+    module procedure resolve_threads
+
+        nt = 1
+        if (.not. present(threads)) return
+
+        if (threads < 1) call optimize_abort(entry_point, "threads must be positive", context)
+
+        ! The clamp is skipped at 1 rather than called with it: `parquet_clamp_to_affinity` can
+        ! only lower a count, so a request of one is already its own answer, and calling it there
+        ! would put a serial run through the one procedure in this module that can print.
+        !
+        ! The area name is written out as a LITERAL, never as a named constant.
+        ! `check_affinity_areas_documented` reads the quoted arguments of every
+        ! `parquet_clamp_to_affinity` call in `src/` and compares them with the enumeration on
+        ! `doc/pages/operating/performance.md`; a `parameter` here is invisible to it, so the check
+        ! passes in both directions while testing nothing.
+        nt = threads
+        if (nt > 1) nt = parquet_clamp_to_affinity(nt, "optimisation")
+
+    end procedure resolve_threads
+
+    module procedure latin_hypercube
+
+        integer(int64) :: key0 !! the design's own key, one step away from the caller's seed
+        integer(int64) :: keyj !! this coordinate's key; each coordinate is permuted independently
+        real(real64) :: u      !! the position inside the stratum
+        integer :: npar        !! number of coordinates
+        integer :: m           !! number of points
+        integer :: i, j        !! point and coordinate
+        integer :: s           !! this point's stratum in this coordinate
+
+        npar = size(lower)
+        m = size(design, 2)
+
+        key0 = pf_random_key(seed, 0_int64)
+        do j = 1, npar
+            keyj = pf_random_key(key0, int(j, int64))
+            do i = 1, m
+                s = pf_random_perm_at(keyj, m, i)
+                u = pf_random_at(keyj, i, 1_int64)
+                design(j, i) = lower(j) &
+                    + (upper(j) - lower(j))*(real(s - 1, real64) + u)/real(m, real64)
+            end do
+        end do
+
+    end procedure latin_hypercube
+
+    module procedure record_team_size
+
+        dbg_optimize_threads_used = n
+
+    end procedure record_team_size
+
+    module procedure parquet_debug_optimize_threads_used
+
+        n = dbg_optimize_threads_used
+
+    end procedure parquet_debug_optimize_threads_used
 
 end submodule parquet_optimize_support

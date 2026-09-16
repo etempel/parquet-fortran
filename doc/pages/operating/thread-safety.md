@@ -335,12 +335,12 @@ interaction with other threads, and it is handled internally.
 
 Everything above is about the reader, the writer and `parquet_table`. The tiers that never touch a
 Parquet file and have a rule of their own — sorting, statistics, strings, spatial indexing,
-HEALPix, index maps and TOML configuration — are below, and they are short. **One of them has
+HEALPix, minimisation, index maps and TOML configuration — are below, and they are short. **One of them has
 teeth**; the rest are here so that "what may I do concurrently" has one answer rather than seven.
 
 **A tier not listed here needs no rule**, which is why the list is shorter than the set of
 Arrow-free modules. `parquet_temporal`, `parquet_columns`, `parquet_list`, `parquet_map`,
-`parquet_struct`, `parquet_utils`, `parquet_integrate` and `parquet_optimize` share no state
+`parquet_struct`, `parquet_utils` and `parquet_integrate` share no state
 between calls and hold nothing a second thread
 can see: one object per thread, or one shared object nobody writes, is safe without anything being
 said about it.

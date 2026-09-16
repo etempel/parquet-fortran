@@ -189,7 +189,7 @@ outside the library. That class goes quiet one level earlier than a warning does
 
 The word after that prefix names whichever subsystem noticed — `sorting`, `table prefetching`,
 `table rewriting`, `column gathering`, `string operations`, `random draws`, `spatial`, `healpix`,
-`index` or `grouping`. There is
+`index`, `grouping` or `optimisation`. There is
 one line per process, not one per subsystem: they all have the same cause and the same fix.
 
 The message fires only when the clamp actually reduced the thread count, so a job deliberately

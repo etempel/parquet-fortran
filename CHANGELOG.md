@@ -36,16 +36,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
   on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
   variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with
-  fractional and absolute tolerances on the value spread. The objective is an object extending
-  `pf_objective`, with its parameters as components and an `eval` that may update them, or a plain
-  function. `max_neval` bounds the evaluations and is soft by one engine step; `info=`
-  (`pf_optimize_info`: status, convergence, counts, the final spread) reports the outcome and
-  nothing is printed, while a caller mistake and a non-finite objective value are `error stop`.
-  `history=` (`pf_optimize_history`) records every evaluation in order, trimmed to the records in
-  use. `pf_simplex_solver` carries the simplex's options as components for a driver to run, and
-  `pf_constrained_objective` is declared here so that every engine which does not honour nonlinear
-  constraints refuses one. An Arrow-free entry module. See
-  [Optimisation](doc/pages/utilities/optimization.md).
+  fractional and absolute tolerances on the value spread. `pf_minimize_de` searches a whole box by
+  differential evolution from a seed rather than a start point, with a Latin-hypercube initial
+  population, `ftarget=`, an optional final simplex (`polish=`) and the final population on
+  request; `pf_minimize_multistart` runs a local solver (`pf_simplex_solver`, or one a caller
+  supplies) from a Latin hypercube of starts and counts the distinct minima. Both take `threads=`,
+  evaluate through one clone of the objective per thread, and give the same answer at every thread
+  count. The objective is an object extending `pf_objective`, with its parameters as components and
+  an `eval` that may update them, or a plain function. `max_neval` bounds the evaluations and is
+  soft by one engine step; `info=` (`pf_optimize_info`: status, convergence, counts, the final
+  spread, the non-finite count, the distinct-minimum count) reports the outcome and nothing is
+  printed, while a caller mistake and a non-finite objective value in a local engine are
+  `error stop`; the population engines treat a non-finite value as a point outside the domain.
+  `history=` (`pf_optimize_history`) records every evaluation, every generation's best, or every
+  start's minimum, trimmed to the records in use. `pf_constrained_objective` is declared here so
+  that every engine which does not honour nonlinear constraints refuses one. An Arrow-free entry
+  module. See [Optimisation](doc/pages/utilities/optimization.md).
 - **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
   pixel's eight neighbours (`-1` at a missing corner). See
   [HEALPix](doc/pages/utilities/healpix.md).

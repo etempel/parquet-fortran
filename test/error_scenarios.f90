@@ -33,7 +33,8 @@ program error_scenarios
     ! test_optimize.f90, so a scenario and a test name the same objective and neither reaches an
     ! internal procedure.
     use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc
-    use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex
+    use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex, pf_minimize_de, &
+        pf_minimize_multistart
     use parquet_tables
     ! The grouping scenarios' callbacks: module procedures, since an internal one of this
     ! program cannot be passed as a callback under every supported compiler.
@@ -3662,6 +3663,32 @@ program error_scenarios
         call scenario_optimize_simplex_nonfinite_value()
     case ("optimize_simplex_constraints_not_honoured")
         call scenario_optimize_simplex_constraints_not_honoured()
+    case ("optimize_threads_zero")
+        call scenario_optimize_threads_zero()
+    case ("optimize_de_bounds_size")
+        call scenario_optimize_de_bounds_size()
+    case ("optimize_de_bounds_order")
+        call scenario_optimize_de_bounds_order()
+    case ("optimize_de_bounds_nonfinite")
+        call scenario_optimize_de_bounds_nonfinite()
+    case ("optimize_de_np_small")
+        call scenario_optimize_de_np_small()
+    case ("optimize_de_f_weight_range")
+        call scenario_optimize_de_f_weight_range()
+    case ("optimize_de_cr_range")
+        call scenario_optimize_de_cr_range()
+    case ("optimize_de_max_gen_zero")
+        call scenario_optimize_de_max_gen_zero()
+    case ("optimize_de_constraints_not_honoured")
+        call scenario_optimize_de_constraints_not_honoured()
+    case ("optimize_multistart_nstart_zero")
+        call scenario_optimize_multistart_nstart_zero()
+    case ("optimize_multistart_xtol_negative")
+        call scenario_optimize_multistart_xtol_negative()
+    case ("optimize_multistart_constraints_not_honoured")
+        call scenario_optimize_multistart_constraints_not_honoured()
+    case ("optimize_multistart_nonfinite_threaded")
+        call scenario_optimize_multistart_nonfinite_threaded()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -31705,5 +31732,149 @@ contains
         call pf_minimize_simplex(obj, x, fmin, [0.5_real64, 0.5_real64], 1.0e-8_real64)
         print '(a, es22.15)', "accepted a constrained objective in the simplex: ", fmin
     end subroutine scenario_optimize_simplex_constraints_not_honoured
+
+    !> A zero `threads=` request, which asks for no team at all.
+    subroutine scenario_optimize_threads_zero()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, threads=0)
+        print '(a, es22.15)', "accepted threads = 0: ", fmin
+    end subroutine scenario_optimize_threads_zero
+
+    !> A box whose corners are a different length from the point.
+    subroutine scenario_optimize_de_bounds_size()
+        real(real64) :: x(3), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin)
+        print '(a, es22.15)', "accepted a box of the wrong size: ", fmin
+    end subroutine scenario_optimize_de_bounds_size
+
+    !> A box with a lower bound at or above its upper bound, which has no interior.
+    subroutine scenario_optimize_de_bounds_order()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = [-2.0_real64, 3.0_real64]
+        hi = [2.0_real64, 3.0_real64]
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin)
+        print '(a, es22.15)', "accepted a lower bound not below its upper bound: ", fmin
+    end subroutine scenario_optimize_de_bounds_order
+
+    !> An infinite bound, which no Latin hypercube can be laid out over.
+    subroutine scenario_optimize_de_bounds_nonfinite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi(1) = 2.0_real64
+        hi(2) = ieee_value(1.0_real64, ieee_positive_inf)
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin)
+        print '(a, es22.15)', "accepted an infinite bound: ", fmin
+    end subroutine scenario_optimize_de_bounds_nonfinite
+
+    !> A population too small for DE/rand/1, which needs three donors distinct from the target.
+    subroutine scenario_optimize_de_np_small()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, np=3)
+        print '(a, es22.15)', "accepted a population of three: ", fmin
+    end subroutine scenario_optimize_de_np_small
+
+    !> A differential weight outside `(0, 2]`, where the mutation would be no mutation at all.
+    subroutine scenario_optimize_de_f_weight_range()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, f_weight=0.0_real64)
+        print '(a, es22.15)', "accepted a zero differential weight: ", fmin
+    end subroutine scenario_optimize_de_f_weight_range
+
+    !> A crossover probability outside `[0, 1]`.
+    subroutine scenario_optimize_de_cr_range()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, cr=1.5_real64)
+        print '(a, es22.15)', "accepted a crossover probability above one: ", fmin
+    end subroutine scenario_optimize_de_cr_range
+
+    !> A generation budget of zero, which is not a run.
+    subroutine scenario_optimize_de_max_gen_zero()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, max_gen=0)
+        print '(a, es22.15)', "accepted a zero generation budget: ", fmin
+    end subroutine scenario_optimize_de_max_gen_zero
+
+    !> A constrained objective handed to DE, which honours no constraint.
+    subroutine scenario_optimize_de_constraints_not_honoured()
+        type(unit_disc) :: obj
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(obj, lo, hi, 1_int64, x, fmin, max_gen=2)
+        print '(a, 2es22.15)', "accepted a constrained objective in DE: ", x(1), fmin
+    end subroutine scenario_optimize_de_constraints_not_honoured
+
+    !> A multistart run with no starts.
+    subroutine scenario_optimize_multistart_nstart_zero()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=0)
+        print '(a, es22.15)', "accepted zero starts: ", fmin
+    end subroutine scenario_optimize_multistart_nstart_zero
+
+    !> A negative merge radius, which no pair of minima could be within.
+    subroutine scenario_optimize_multistart_xtol_negative()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=4, xtol=-1.0e-6_real64)
+        print '(a, es22.15)', "accepted a negative xtol: ", fmin
+    end subroutine scenario_optimize_multistart_xtol_negative
+
+    !> A constrained objective handed to the multistart driver, which honours no constraint.
+    !!
+    !! **The driver's OWN refusal is what this proves**, which is why its wrapper asserts the
+    !! entry point's name: without it the local solver would refuse the same objective a moment
+    !! later, the process would still abort, and a scenario keyed on the exit status alone would
+    !! pass with the guard deleted.
+    subroutine scenario_optimize_multistart_constraints_not_honoured()
+        type(unit_disc) :: obj
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_multistart(obj, lo, hi, 1_int64, x, fmin, nstart=2)
+        print '(a, 2es22.15)', "accepted a constrained objective in the multistart driver: ", x(1), fmin
+    end subroutine scenario_optimize_multistart_constraints_not_honoured
+
+    !> A NaN from the objective inside the multistart driver's own team.
+    !!
+    !! **The abort happens on a worker thread**, which is what `optimize_abort`'s named `critical`
+    !! exists for: two threads reaching `ERROR STOP` at once leave the exit status
+    !! nondeterministic, including 0, under ifx. Needs a real OpenMP build to reach more than one
+    !! thread, so it lives in the `concurrency_scenarios` bucket.
+    subroutine scenario_optimize_multistart_nonfinite_threaded()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_multistart(always_nan, lo, hi, 1_int64, x, fmin, nstart=64, threads=4)
+        print '(a, es22.15)', "accepted a NaN objective under threads: ", fmin
+    end subroutine scenario_optimize_multistart_nonfinite_threaded
     !
 end program error_scenarios

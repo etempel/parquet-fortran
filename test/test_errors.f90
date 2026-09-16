@@ -85,7 +85,7 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:)
+                                            p28(:), p29(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3136,8 +3136,35 @@ contains
             new_unittest("the simplex refuses a constrained objective", &
                 test_optimize_simplex_constraints_not_honoured_aborts) &
             ]
+        ! ---- parquet_optimize: the population tier's abort paths ----
+        p29 = [ &
+            new_unittest("a zero threads= is refused", &
+                test_optimize_threads_zero_aborts), &
+            new_unittest("a box of the wrong size is refused", &
+                test_optimize_de_bounds_size_aborts), &
+            new_unittest("a lower bound not below its upper bound is refused", &
+                test_optimize_de_bounds_order_aborts), &
+            new_unittest("an infinite bound is refused", &
+                test_optimize_de_bounds_nonfinite_aborts), &
+            new_unittest("a population below four is refused", &
+                test_optimize_de_np_small_aborts), &
+            new_unittest("a differential weight outside its range is refused", &
+                test_optimize_de_f_weight_range_aborts), &
+            new_unittest("a crossover probability outside its range is refused", &
+                test_optimize_de_cr_range_aborts), &
+            new_unittest("a zero generation budget is refused", &
+                test_optimize_de_max_gen_zero_aborts), &
+            new_unittest("DE refuses a constrained objective", &
+                test_optimize_de_constraints_not_honoured_aborts), &
+            new_unittest("zero starts are refused", &
+                test_optimize_multistart_nstart_zero_aborts), &
+            new_unittest("a negative xtol is refused", &
+                test_optimize_multistart_xtol_negative_aborts), &
+            new_unittest("the multistart driver refuses a constrained objective by name", &
+                test_optimize_multistart_constraints_not_honoured_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29]
     end subroutine collect_tests_parquet_errors
 
 
@@ -18957,6 +18984,94 @@ contains
             failure_message="a constrained objective in the simplex was expected to error stop", &
             required_stderr="this engine does not honour nonlinear constraints; use pf_minimize_cobyla")
     end subroutine test_optimize_simplex_constraints_not_honoured_aborts
+    !
+    subroutine test_optimize_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_threads_zero", expect_abort=.true., &
+            failure_message="a zero threads= was expected to error stop", &
+            required_stderr="threads must be positive")
+    end subroutine test_optimize_threads_zero_aborts
+    !
+    subroutine test_optimize_de_bounds_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_bounds_size", expect_abort=.true., &
+            failure_message="a box of the wrong size was expected to error stop", &
+            required_stderr="lower, upper and x must have the same size")
+    end subroutine test_optimize_de_bounds_size_aborts
+    !
+    subroutine test_optimize_de_bounds_order_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_bounds_order", expect_abort=.true., &
+            failure_message="a box with no interior was expected to error stop", &
+            required_stderr="every lower bound must be below its upper bound")
+    end subroutine test_optimize_de_bounds_order_aborts
+    !
+    subroutine test_optimize_de_bounds_nonfinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_bounds_nonfinite", expect_abort=.true., &
+            failure_message="an infinite bound was expected to error stop", &
+            required_stderr="bounds must be finite")
+    end subroutine test_optimize_de_bounds_nonfinite_aborts
+    !
+    subroutine test_optimize_de_np_small_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_np_small", expect_abort=.true., &
+            failure_message="a population of three was expected to error stop", &
+            required_stderr="np must be at least 4")
+    end subroutine test_optimize_de_np_small_aborts
+    !
+    subroutine test_optimize_de_f_weight_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_f_weight_range", expect_abort=.true., &
+            failure_message="a zero differential weight was expected to error stop", &
+            required_stderr="f_weight must be in (0, 2]")
+    end subroutine test_optimize_de_f_weight_range_aborts
+    !
+    subroutine test_optimize_de_cr_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_cr_range", expect_abort=.true., &
+            failure_message="a crossover probability above one was expected to error stop", &
+            required_stderr="cr must be in [0, 1]")
+    end subroutine test_optimize_de_cr_range_aborts
+    !
+    subroutine test_optimize_de_max_gen_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_max_gen_zero", expect_abort=.true., &
+            failure_message="a zero generation budget was expected to error stop", &
+            required_stderr="max_gen must be positive")
+    end subroutine test_optimize_de_max_gen_zero_aborts
+    !
+    subroutine test_optimize_de_constraints_not_honoured_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_constraints_not_honoured", expect_abort=.true., &
+            failure_message="a constrained objective in DE was expected to error stop", &
+            required_stderr="pf_minimize_de: this engine does not honour nonlinear constraints")
+    end subroutine test_optimize_de_constraints_not_honoured_aborts
+    !
+    subroutine test_optimize_multistart_nstart_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_multistart_nstart_zero", expect_abort=.true., &
+            failure_message="zero starts were expected to error stop", &
+            required_stderr="nstart must be positive")
+    end subroutine test_optimize_multistart_nstart_zero_aborts
+    !
+    subroutine test_optimize_multistart_xtol_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_multistart_xtol_negative", expect_abort=.true., &
+            failure_message="a negative xtol was expected to error stop", &
+            required_stderr="xtol must be a finite, non-negative number")
+    end subroutine test_optimize_multistart_xtol_negative_aborts
+    !
+    ! The entry point's OWN name is asserted, not only the refusal text: the local solver refuses
+    ! the same objective a moment later, so a scenario keyed on the exit status alone -- or on the
+    ! message text alone -- would pass with the driver's own guard deleted.
+    subroutine test_optimize_multistart_constraints_not_honoured_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_multistart_constraints_not_honoured", &
+            expect_abort=.true., &
+            failure_message="a constrained objective in the multistart driver was expected to error stop", &
+            required_stderr="pf_minimize_multistart: this engine does not honour nonlinear constraints")
+    end subroutine test_optimize_multistart_constraints_not_honoured_aborts
     !
     subroutine test_integrate_context_capped_aborts(error)
         type(error_type), allocatable, intent(out) :: error

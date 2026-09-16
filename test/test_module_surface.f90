@@ -1380,7 +1380,7 @@ end module test_module_surface_integrate
 
 module test_module_surface_optimize
     use parquet_optimize                 ! THE ONLY library import.
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : real64, int64
     implicit none
     private
     public :: check_optimize_surface
@@ -1414,6 +1414,8 @@ contains
         type(pf_simplex_solver)   :: solver
         type(surface_objective)   :: obj
         real(real64)              :: xs, fs, x(1), fmin, lower(1), upper(1)
+        real(real64), allocatable :: population(:,:)
+        character(len=:), allocatable :: verbosity, stream
 
         what = ""
 
@@ -1448,6 +1450,44 @@ contains
             call solver%run(obj, x, fmin, lower, upper, info)
             if (abs(x(1) - 2.0_real64) > 1.0e-3_real64) what = "pf_simplex_solver%run"
             if (what == "" .and. obj%calls /= info%neval) what = "pf_objective%eval"
+        end if
+
+        ! Differential evolution over a box, with its own record and its final population.
+        if (what == "") then
+            lower = [-4.0_real64]
+            upper = [6.0_real64]
+            call pf_minimize_de(offset_square, lower, upper, 7_int64, x, fmin, np=8, &
+                                ftarget=1.0e-10_real64, max_gen=400, info=info, &
+                                population=population)
+            if (abs(x(1) - 2.0_real64) > 1.0e-4_real64) what = "pf_minimize_de"
+            if (what == "" .and. size(population, 2) /= 8) what = "pf_minimize_de population="
+            if (what == "" .and. info%nonfinite /= 0) what = "pf_optimize_info%nonfinite"
+        end if
+
+        ! The multistart driver, with the solver object above and the threads the clamp allows.
+        if (what == "") then
+            x = [0.0_real64]
+            call pf_minimize_multistart(offset_square, lower, upper, 7_int64, x, fmin, nstart=4, &
+                                        solver=solver, xtol=1.0e-3_real64, threads=2, info=info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-3_real64) what = "pf_minimize_multistart"
+            if (what == "" .and. info%nminima < 1) what = "pf_optimize_info%nminima"
+            if (what == "" .and. info%nlimit < 0) what = "pf_optimize_info%nlimit"
+        end if
+
+        ! The team counter: public, and reachable from no other surface test. It is 1 without
+        ! OpenMP and after a `threads = 1` run, so the only thing assertable here is that the name
+        ! resolves and answers a team size at all.
+        if (what == "" .and. parquet_debug_optimize_threads_used() < 1) then
+            what = "parquet_debug_optimize_threads_used"
+        end if
+
+        ! The output pair, re-exported because the thread clamp can warn once per process.
+        if (what == "") then
+            call parquet_get_verbosity(verbosity)
+            call parquet_set_verbosity(verbosity)
+            call parquet_get_message_stream(stream)
+            call parquet_set_message_stream(stream)
+            if (len_trim(verbosity) == 0) what = "parquet_get_verbosity"
         end if
 
         ! The remaining status codes are reachable by name through this import alone.

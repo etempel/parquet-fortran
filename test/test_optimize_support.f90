@@ -21,10 +21,11 @@ module test_optimize_support
     implicit none
     private
 
-    public :: shifted_quadratic, line_fit, unit_disc
+    public :: shifted_quadratic, line_fit, unit_disc, table_sphere
     public :: rosenbrock, sphere, quad1d, quad1d_min, one_dim, one_dim_min
     public :: constant_one, shifted_norm, quartic, quartic_derivative
     public :: always_nan, always_inf, nan_beyond_two
+    public :: rastrigin, rastrigin_gradient, twin_wells, nan_corner
 
     !> Sum of squares about `1` plus a shift, counting its own evaluations.
     !!
@@ -65,6 +66,22 @@ module test_optimize_support
         procedure :: n_constraints => unit_disc_count         !! One constraint.
         procedure :: constraints => unit_disc_constraints     !! The disc, as `c(x) <= 0`.
     end type unit_disc
+
+    !> A sphere whose centre lives in an ALLOCATABLE component, for the per-thread clone test.
+    !!
+    !! The clone the population engines make is `allocate(slot%obj, source=f)`, a sourced
+    !! allocation: an allocatable component must be DEEP-copied into every clone, not shared and
+    !! not left unallocated. A shallow clone segfaults or, worse, reads another thread's centre and
+    !! returns a plausible wrong minimum -- which is why the component is what the answer depends
+    !! on rather than a counter nobody checks.
+    type, extends(pf_objective) :: table_sphere
+        real(real64), allocatable :: centre(:) !! the minimiser; deep-copied into every clone
+    contains
+        procedure :: eval => table_sphere_eval !! Squared distance from `centre`.
+    end type table_sphere
+
+    !> `2 pi`, shared by `rastrigin` and its gradient so the two cannot drift apart.
+    real(real64), parameter :: RASTRIGIN_TWO_PI = 2.0_real64*acos(-1.0_real64)
 
     !> Slope of the exact least-squares line through `line_fit`'s five points.
     !!
@@ -249,6 +266,80 @@ contains
         end if
 
     end function nan_beyond_two
+
+    !> Squared distance from a centre held in an allocatable component.
+    function table_sphere_eval(this, x) result(f)
+        class(table_sphere), intent(inout) :: this !! the objective and its centre
+        real(real64), intent(in)           :: x(:) !! the point
+        real(real64)                       :: f    !! squared distance from `this%centre`
+
+        f = sum((x - this%centre)**2)
+
+    end function table_sphere_eval
+
+    !> Rastrigin's function, `10n + sum(x**2 - 10 cos(2 pi x))`.
+    !!
+    !! The global minimum is `0` at the ORIGIN, exactly, and `[-5.12, 5.12]**n` holds `11**n` local
+    !! minima -- which is what makes it the function a multistart driver cannot exhaust and a
+    !! population engine can.
+    !!
+    !! **Its other minima are NEAR the integer points, not at them**, so "the value there is
+    !! `sum(k**2)`" is false and no test may assert it: the stationarity condition
+    !! `2x + 20 pi sin(2 pi x) = 0` has its root near `k` displaced by about `-k/(1 + 20 pi**2)`,
+    !! which puts the minimum beside `k = 1` at `0.99496` rather than at `1`. The derived reference
+    !! a test CAN assert is that condition itself, which `rastrigin_gradient` returns.
+    function rastrigin(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = 10.0_real64*size(x) + sum(x**2 - 10.0_real64*cos(RASTRIGIN_TWO_PI*x))
+
+    end function rastrigin
+
+    !> The exact gradient of `rastrigin`: `2x + 20 pi sin(2 pi x)`, coordinate by coordinate.
+    !!
+    !! Every local minimum of `rastrigin` is a zero of this, so a test asserting that a run ended
+    !! on one is asserting a derived property of the function rather than a location read off a
+    !! previous run.
+    pure function rastrigin_gradient(x) result(g)
+        real(real64), intent(in) :: x(:)     !! the point
+        real(real64)             :: g(size(x)) !! the gradient at `x`
+
+        g = 2.0_real64*x + 10.0_real64*RASTRIGIN_TWO_PI*sin(RASTRIGIN_TWO_PI*x)
+
+    end function rastrigin_gradient
+
+    !> A double well, `(x(1)**2 - 1)**2 + x(2)**2`, with TWO minima of exactly equal value.
+    !!
+    !! `0` at `(-1, 0)` and at `(1, 0)`, by inspection: both terms are non-negative and both vanish
+    !! there. The two are equal by the function's own symmetry in `x(1)`, not by arithmetic that
+    !! happens to agree, which is what a test of the tie rule needs.
+    function twin_wells(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = (x(1)**2 - 1.0_real64)**2 + x(2)**2
+
+    end function twin_wells
+
+    !> Squares about the origin, NaN wherever any coordinate exceeds 2.
+    !!
+    !! The minimum `0` at the origin is well away from the NaN region, so a population engine that
+    !! treats a non-finite value as "outside my domain" finds it while still meeting the region:
+    !! over `[-5, 5]` more than half of each coordinate's range is inside the NaN half-space, so a
+    !! spread population cannot avoid it. A local engine would abort here instead, which is the
+    !! difference the guide page draws between the two tiers.
+    function nan_corner(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! squares about the origin, or NaN
+
+        if (any(x > 2.0_real64)) then
+            f = ieee_value(1.0_real64, ieee_quiet_nan)
+        else
+            f = sum(x**2)
+        end if
+
+    end function nan_corner
 
     !> The minimiser of `quad1d`.
     pure function quad1d_min() result(x)

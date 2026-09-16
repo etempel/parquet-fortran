@@ -50,10 +50,14 @@
 !>                          of one real64 variable over a finite or infinite
 !>                          range, with the integrand as an object carrying its
 !>                          own parameters or as a plain function.
-!>   * `parquet_optimize` -- `pf_minimize_scalar` (Brent's method on a bracket)
-!>                          and `pf_minimize_simplex` (Nelder-Mead from a start
-!>                          point and a step), with the objective as an object
-!>                          carrying its own parameters or as a plain function.
+!>   * `parquet_optimize` -- `pf_minimize_scalar` (Brent's method on a bracket),
+!>                          `pf_minimize_simplex` (Nelder-Mead from a start
+!>                          point and a step), `pf_minimize_de` (differential
+!>                          evolution over a box, seeded and threadable) and
+!>                          `pf_minimize_multistart` (a local solver from a
+!>                          Latin hypercube of starts), with the objective as an
+!>                          object carrying its own parameters or as a plain
+!>                          function.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.

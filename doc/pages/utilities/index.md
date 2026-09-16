@@ -46,11 +46,13 @@ helpers, and the two generators meant to be copied into your own project.
   that finds a feature far along an infinite range rather than stepping over it, and a record of
   every evaluation on request whose weighted sum reproduces the integral. Nothing is printed.
 - [Optimisation: minimising a function of one or many variables](optimization.html) —
-  Brent's method on a bracket for one variable and the Nelder-Mead simplex from a start point
-  and a step for many, with the objective supplied as an object carrying its own parameters or
-  as a plain function. Fractional and absolute tolerances on the value spread, a soft budget
-  reported through a status code rather than a printed warning, a record of every evaluation
-  on request, and what `converged` does and does not promise. Nothing is printed.
+  four engines in two tiers: Brent's method on a bracket and the Nelder-Mead simplex from a start
+  point for a local minimum, differential evolution over a whole box and a multistart driver over
+  a spread of starts for a global one. The objective is supplied as an object carrying its own
+  parameters or as a plain function. Fractional and absolute tolerances on the value spread, a
+  soft budget reported through a status code rather than a printed warning, a record of the search
+  on request, `threads=` with one clone of the objective per thread and the same answer at every
+  count, and what `converged` does and does not promise. Nothing is printed.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

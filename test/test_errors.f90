@@ -85,7 +85,7 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:), p29(:), p30(:), p31(:)
+                                            p28(:), p29(:), p30(:), p31(:), p32(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3211,8 +3211,43 @@ contains
             new_unittest("a non-finite constraint value is refused rather than moderated", &
                 test_prima_constraint_nonfinite_aborts) &
             ]
+        ! ---- parquet_interpolate: the one-dimensional interpolant's abort paths ----
+        p32 = [ &
+            new_unittest("x and y of different sizes are refused", &
+                test_interpolate_size_mismatch_aborts), &
+            new_unittest("a mask of the wrong size is refused", &
+                test_interpolate_is_valid_size_aborts), &
+            new_unittest("an unknown interpolation method is refused", &
+                test_interpolate_unknown_method_aborts), &
+            new_unittest("an unknown out-of-range policy is refused", &
+                test_interpolate_unknown_outside_aborts), &
+            new_unittest("a single-point table is refused", &
+                test_interpolate_too_few_points_aborts), &
+            new_unittest("a table the mask leaves one point of is refused", &
+                test_interpolate_too_few_after_is_valid_aborts), &
+            new_unittest("a repeated abscissa is refused", &
+                test_interpolate_repeated_x_aborts), &
+            new_unittest("unsorted abscissae are refused", &
+                test_interpolate_unsorted_x_aborts), &
+            new_unittest("a NaN abscissa is refused by the ordering check", &
+                test_interpolate_nan_in_x_aborts), &
+            new_unittest("an infinite abscissa is refused", &
+                test_interpolate_inf_in_x_aborts), &
+            new_unittest("a NaN ordinate is refused", &
+                test_interpolate_nan_in_y_aborts), &
+            new_unittest("an infinite ordinate is refused", &
+                test_interpolate_inf_in_y_aborts), &
+            new_unittest("evaluating an interpolant that was never built aborts", &
+                test_interpolate_eval_before_init_aborts), &
+            new_unittest("a context reaches the interpolation abort message", &
+                test_interpolate_context_reported_aborts), &
+            new_unittest("a long context is capped in the interpolation abort message", &
+                test_interpolate_context_capped_aborts), &
+            new_unittest("pf_interp refuses x and y of different sizes under its own name", &
+                test_interpolate_one_shot_size_mismatch_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19279,5 +19314,117 @@ contains
             failure_message="a 150-character context was expected to abort with a capped message", &
             required_stderr="abcdefghij...")
     end subroutine test_integrate_context_capped_aborts
+    !
+    subroutine test_interpolate_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_size_mismatch", expect_abort=.true., &
+            failure_message="x and y of different sizes were expected to error stop", &
+            required_stderr="pf_interp_1d%init: x and y differ in size: 5 and 4")
+    end subroutine test_interpolate_size_mismatch_aborts
+    !
+    subroutine test_interpolate_is_valid_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_is_valid_size", expect_abort=.true., &
+            failure_message="an is_valid mask of the wrong size was expected to error stop", &
+            required_stderr="pf_interp_1d%init: is_valid has 4 elements for 5 points")
+    end subroutine test_interpolate_is_valid_size_aborts
+    !
+    subroutine test_interpolate_unknown_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_unknown_method", expect_abort=.true., &
+            failure_message="an unknown method token was expected to error stop", &
+            required_stderr="pf_interp_1d%init: unknown method ""quadratic""; expected ""linear"", ""cubic"" or ""pchip""")
+    end subroutine test_interpolate_unknown_method_aborts
+    !
+    subroutine test_interpolate_unknown_outside_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_unknown_outside", expect_abort=.true., &
+            failure_message="an unknown outside token was expected to error stop", &
+            required_stderr="pf_interp_1d%init: unknown outside ""wrap""; expected ""clamp"", ""extrapolate"" or ""nan""")
+    end subroutine test_interpolate_unknown_outside_aborts
+    !
+    subroutine test_interpolate_too_few_points_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_too_few_points", expect_abort=.true., &
+            failure_message="a one-point table was expected to error stop", &
+            required_stderr="pf_interp_1d%init: at least 2 points are needed for method ""cubic""; got 1")
+    end subroutine test_interpolate_too_few_points_aborts
+    !
+    subroutine test_interpolate_too_few_after_is_valid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_too_few_after_is_valid", expect_abort=.true., &
+            failure_message="a table with one point surviving its mask was expected to error stop", &
+            required_stderr="pf_interp_1d%init: at least 2 points are needed for method ""cubic""; got 1")
+    end subroutine test_interpolate_too_few_after_is_valid_aborts
+    !
+    subroutine test_interpolate_repeated_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_repeated_x", expect_abort=.true., &
+            failure_message="a repeated abscissa was expected to error stop", &
+            required_stderr="pf_interp_1d%init: x must be strictly increasing or strictly decreasing")
+    end subroutine test_interpolate_repeated_x_aborts
+    !
+    subroutine test_interpolate_unsorted_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_unsorted_x", expect_abort=.true., &
+            failure_message="unsorted abscissae were expected to error stop", &
+            required_stderr="pf_interp_1d%init: x must be strictly increasing or strictly decreasing")
+    end subroutine test_interpolate_unsorted_x_aborts
+    !
+    subroutine test_interpolate_nan_in_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_nan_in_x", expect_abort=.true., &
+            failure_message="a NaN abscissa was expected to error stop", &
+            required_stderr="pf_interp_1d%init: x must be strictly increasing or strictly decreasing")
+    end subroutine test_interpolate_nan_in_x_aborts
+    !
+    subroutine test_interpolate_inf_in_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_inf_in_x", expect_abort=.true., &
+            failure_message="an infinite abscissa was expected to error stop", &
+            required_stderr="pf_interp_1d%init: x must be finite")
+    end subroutine test_interpolate_inf_in_x_aborts
+    !
+    subroutine test_interpolate_nan_in_y_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_nan_in_y", expect_abort=.true., &
+            failure_message="a NaN ordinate was expected to error stop", &
+            required_stderr="pf_interp_1d%init: y must be finite")
+    end subroutine test_interpolate_nan_in_y_aborts
+    !
+    subroutine test_interpolate_inf_in_y_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_inf_in_y", expect_abort=.true., &
+            failure_message="an infinite ordinate was expected to error stop", &
+            required_stderr="pf_interp_1d%init: y must be finite")
+    end subroutine test_interpolate_inf_in_y_aborts
+    !
+    subroutine test_interpolate_eval_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_eval_before_init", expect_abort=.true., &
+            failure_message="evaluating an unbuilt interpolant was expected to error stop", &
+            required_stderr="pf_interp_1d%eval: the interpolant is not initialised")
+    end subroutine test_interpolate_eval_before_init_aborts
+    !
+    subroutine test_interpolate_context_reported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_context_reported", expect_abort=.true., &
+            failure_message="a size mismatch with a context was expected to abort", &
+            required_stderr="x and y differ in size: 3 and 2 (context: my_call_site)")
+    end subroutine test_interpolate_context_reported_aborts
+    !
+    subroutine test_interpolate_context_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_context_capped", expect_abort=.true., &
+            failure_message="a 150-character context was expected to abort with a capped message", &
+            required_stderr="(context: " // repeat("abcdefghij", 10) // "...)")
+    end subroutine test_interpolate_context_capped_aborts
+    !
+    subroutine test_interpolate_one_shot_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_one_shot_size_mismatch", expect_abort=.true., &
+            failure_message="a one-shot call with x and y of different sizes was expected to error stop", &
+            required_stderr="pf_interp: x and y differ in size: 3 and 2")
+    end subroutine test_interpolate_one_shot_size_mismatch_aborts
     !
 end module test_errors

@@ -270,6 +270,7 @@ GENERATED_FILES = [
     # reference table that has quietly stopped being generated is a table nothing checks, and
     # an edited value in one is a lie the implementation is then written to match.
     TEST / "test_path_vectors.f90",
+    TEST / "test_interpolate_golden.f90",
     # test/test_healpix_vectors.f90 BELONGS here and is deliberately not listed yet. Adding it
     # fails immediately on a real gap -- its `end module` line carries no `! GCOVR_EXCL_LINE`,
     # which is fixed in tools/generate_healpix_reference.py but only reaches the file when
@@ -2601,6 +2602,22 @@ def check_parquet_integrate_stays_arrow_free():
     return _check_stays_arrow_free(
         "parquet_integrate",
         "Integrating a function of one variable must not require the Arrow stack.")
+
+
+def check_parquet_interpolate_stays_arrow_free():
+    """`use parquet_interpolate` must not reach parquet_bindings.
+
+    Interpolation reaches no reader, no writer and no setting: the module imports the INTRINSIC
+    modules `iso_fortran_env` and `ieee_arithmetic` and nothing else, which is what makes
+    `use parquet_interpolate` cost three Fortran files. The obvious import to add is
+    `parquet_settings`, for a verbosity knob -- and the module has nothing to print, by design
+    (every caller mistake is an `error stop`, and every answer a value), so it needs none.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_interpolate",
+        "Interpolating a table of numbers must not require the Arrow stack.")
 
 
 def check_parquet_optimize_stays_arrow_free():
@@ -7633,6 +7650,7 @@ CHECKS = (
      check_parquet_utils_is_total),
     ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),
     ("parquet_integrate stays Arrow-free", check_parquet_integrate_stays_arrow_free),
+    ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),

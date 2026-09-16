@@ -29,6 +29,9 @@ program error_scenarios
     ! The quadrature scenarios' integrands: module procedures shared with test_integrate.f90,
     ! so a scenario and a test can name the same integrand and neither reaches an internal one.
     use test_integrate_support, only : runge
+    ! The interpolation scenarios' non-finite fixtures, built with `ieee_value` so no fixture's own
+    ! arithmetic raises the flag the library is being asked about.
+    use test_interpolate_support, only : nan_value, positive_infinity
     ! The optimisation scenarios' objectives: module procedures and module-level types shared with
     ! test_optimize.f90, so a scenario and a test name the same objective and neither reaches an
     ! internal procedure.
@@ -3641,6 +3644,38 @@ program error_scenarios
         call scenario_integrate_context_reported()
     case ("integrate_context_capped")
         call scenario_integrate_context_capped()
+    case ("interpolate_size_mismatch")
+        call scenario_interpolate_size_mismatch()
+    case ("interpolate_is_valid_size")
+        call scenario_interpolate_is_valid_size()
+    case ("interpolate_unknown_method")
+        call scenario_interpolate_unknown_method()
+    case ("interpolate_unknown_outside")
+        call scenario_interpolate_unknown_outside()
+    case ("interpolate_too_few_points")
+        call scenario_interpolate_too_few_points()
+    case ("interpolate_too_few_after_is_valid")
+        call scenario_interpolate_too_few_after_is_valid()
+    case ("interpolate_repeated_x")
+        call scenario_interpolate_repeated_x()
+    case ("interpolate_unsorted_x")
+        call scenario_interpolate_unsorted_x()
+    case ("interpolate_nan_in_x")
+        call scenario_interpolate_nan_in_x()
+    case ("interpolate_inf_in_x")
+        call scenario_interpolate_inf_in_x()
+    case ("interpolate_nan_in_y")
+        call scenario_interpolate_nan_in_y()
+    case ("interpolate_inf_in_y")
+        call scenario_interpolate_inf_in_y()
+    case ("interpolate_eval_before_init")
+        call scenario_interpolate_eval_before_init()
+    case ("interpolate_context_reported")
+        call scenario_interpolate_context_reported()
+    case ("interpolate_context_capped")
+        call scenario_interpolate_context_capped()
+    case ("interpolate_one_shot_size_mismatch")
+        call scenario_interpolate_one_shot_size_mismatch()
     case ("optimize_size_zero")
         call scenario_optimize_size_zero()
     case ("optimize_budget_zero")
@@ -31678,6 +31713,160 @@ contains
                          context=repeat("abcdefghij", 15))
         print '(a, es22.15)', "accepted reversed bounds with a long context: ", r
     end subroutine scenario_integrate_context_capped
+    !
+    !> A table whose two halves differ in length: five abscissae, four ordinates. qfeet's module once
+    !> sized its storage from one and assigned the other, and answered from the mismatch.
+    subroutine scenario_interpolate_size_mismatch()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], &
+                    [1.0_real64, 4.0_real64, 9.0_real64, 16.0_real64])
+        print '(a, l1)', "accepted x and y of different sizes, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_size_mismatch
+    !
+    !> A mask shorter than the table it masks.
+    subroutine scenario_interpolate_is_valid_size()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], &
+                    [1.0_real64, 4.0_real64, 9.0_real64, 16.0_real64, 25.0_real64], &
+                    is_valid=[.true., .true., .false., .true.])
+        print '(a, l1)', "accepted a mask of the wrong size, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_is_valid_size
+    !
+    !> A method token the module does not know.
+    subroutine scenario_interpolate_unknown_method()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], &
+                    method="quadratic")
+        print '(a, l1)', "accepted an unknown method, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_unknown_method
+    !
+    !> An out-of-range policy token the module does not know.
+    subroutine scenario_interpolate_unknown_outside()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], &
+                    outside="wrap")
+        print '(a, l1)', "accepted an unknown outside policy, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_unknown_outside
+    !
+    !> A single point, which has no segment. qfeet's module once read past it and divided by zero.
+    subroutine scenario_interpolate_too_few_points()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64], [5.0_real64])
+        print '(a, l1)', "accepted a single point, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_too_few_points
+    !
+    !> Three points, two of them masked out: the count is judged after the mask, not before it.
+    subroutine scenario_interpolate_too_few_after_is_valid()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], &
+                    is_valid=[.false., .true., .false.])
+        print '(a, l1)', "accepted one surviving point, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_too_few_after_is_valid
+    !
+    !> A repeated abscissa: a segment of zero width. qfeet's module once built this without complaint
+    !> and then answered NaN from every evaluation.
+    subroutine scenario_interpolate_repeated_x()
+        type(pf_interp_1d) :: c
+
+        call c%init([0.0_real64, 1.0_real64, 1.0_real64, 2.0_real64, 3.0_real64], &
+                    [0.0_real64, 1.0_real64, 1.0_real64, 4.0_real64, 9.0_real64])
+        print '(a, l1)', "accepted a repeated abscissa, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_repeated_x
+    !
+    !> Abscissae that are neither increasing nor decreasing.
+    subroutine scenario_interpolate_unsorted_x()
+        type(pf_interp_1d) :: c
+
+        call c%init([0.0_real64, 2.0_real64, 1.0_real64, 3.0_real64], &
+                    [0.0_real64, 4.0_real64, 1.0_real64, 9.0_real64])
+        print '(a, l1)', "accepted unsorted abscissae, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_unsorted_x
+    !
+    !> A NaN abscissa, which compares false both ways and so fails the ordering; refused by that
+    !> check's message, and before any ordered comparison is made against it.
+    subroutine scenario_interpolate_nan_in_x()
+        type(pf_interp_1d) :: c
+        real(real64) :: x(5)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+        x(3) = nan_value()
+        call c%init(x, [1.0_real64, 4.0_real64, 9.0_real64, 16.0_real64, 25.0_real64])
+        print '(a, l1)', "accepted a NaN abscissa, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_nan_in_x
+    !
+    !> An infinite end knot, which passes the ordering and would make its segment infinitely wide.
+    subroutine scenario_interpolate_inf_in_x()
+        type(pf_interp_1d) :: c
+        real(real64) :: x(5)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+        x(5) = positive_infinity()
+        call c%init(x, [1.0_real64, 4.0_real64, 9.0_real64, 16.0_real64, 25.0_real64])
+        print '(a, l1)', "accepted an infinite abscissa, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_inf_in_x
+    !
+    !> A NaN ordinate, which would reach the spline solve and every later evaluation.
+    subroutine scenario_interpolate_nan_in_y()
+        type(pf_interp_1d) :: c
+        real(real64) :: y(5)
+
+        y = [1.0_real64, 4.0_real64, 9.0_real64, 16.0_real64, 25.0_real64]
+        y(3) = nan_value()
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], y)
+        print '(a, l1)', "accepted a NaN ordinate, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_nan_in_y
+    !
+    !> An infinite ordinate, refused by the same check as a NaN one.
+    subroutine scenario_interpolate_inf_in_y()
+        type(pf_interp_1d) :: c
+        real(real64) :: y(5)
+
+        y = [1.0_real64, 4.0_real64, 9.0_real64, 16.0_real64, 25.0_real64]
+        y(3) = positive_infinity()
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], y)
+        print '(a, l1)', "accepted an infinite ordinate, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_inf_in_y
+    !
+    !> Evaluating an object that was never built. `%eval` is `pure`, so its result is printed: an
+    !> unused pure call may be deleted, and the abort with it.
+    subroutine scenario_interpolate_eval_before_init()
+        type(pf_interp_1d) :: c
+        real(real64) :: v
+
+        v = c%eval(1.0_real64)
+        print '(a, es22.15)', "evaluated an interpolant that was never built: ", v
+    end subroutine scenario_interpolate_eval_before_init
+    !
+    !> `context=` identifies the call site in the abort message.
+    subroutine scenario_interpolate_context_reported()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64], context="my_call_site")
+        print '(a, l1)', "accepted x and y of different sizes with a context, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_context_reported
+    !
+    !> A 150-character context is reproduced to its first 100 characters and elided.
+    subroutine scenario_interpolate_context_capped()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64], &
+                    context=repeat("abcdefghij", 15))
+        print '(a, l1)', "accepted x and y of different sizes with a long context, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_context_capped
+    !
+    !> The one-shot form validates through the same body under its own name.
+    subroutine scenario_interpolate_one_shot_size_mismatch()
+        real(real64) :: v
+
+        v = pf_interp([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64], 1.5_real64)
+        print '(a, es22.15)', "accepted x and y of different sizes in one shot: ", v
+    end subroutine scenario_interpolate_one_shot_size_mismatch
     !
     !> A zero-length start point: the simplex needs at least one variable.
     subroutine scenario_optimize_size_zero()

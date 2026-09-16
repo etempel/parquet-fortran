@@ -50,6 +50,9 @@
 !>                          of one real64 variable over a finite or infinite
 !>                          range, with the integrand as an object carrying its
 !>                          own parameters or as a plain function.
+!>   * `parquet_interpolate` -- `pf_interp_1d` and `pf_interp`: linear and
+!>                          cubic-spline interpolation of a real64 table, as an
+!>                          object built once or in one call.
 !>   * `parquet_optimize` -- `pf_minimize_scalar` (Brent's method on a bracket),
 !>                          `pf_minimize_simplex` (Nelder-Mead from a start
 !>                          point and a step), `pf_minimize_de` (differential
@@ -104,6 +107,7 @@ module parquet
     use parquet_toml
     use parquet_utils
     use parquet_integrate
+    use parquet_interpolate
     use parquet_optimize
     use parquet_prima
     ! Only the test hook: the transform itself and its contract check are internal.

@@ -3,6 +3,7 @@ title: Utilities and code generation
 ordered_subpage: sorting.md
 ordered_subpage: statistics.md
 ordered_subpage: integration.md
+ordered_subpage: interpolation.md
 ordered_subpage: optimization.md
 ordered_subpage: prima.md
 ordered_subpage: random.md
@@ -18,6 +19,7 @@ ordered_subpage: embedding-maml-schemas.md
 
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
 arrays and this library's own column types, statistical reductions over those same arrays, minimisation of a function you supply,
+interpolation of tabulated data,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
 fast key-to-index lookup and a recycling allocator for index values,
@@ -46,6 +48,12 @@ helpers, and the two generators meant to be copied into your own project.
   printed warning, integration in `log x` for a range spanning many decades, an outward walk
   that finds a feature far along an infinite range rather than stepping over it, and a record of
   every evaluation on request whose weighted sum reproduces the integral. Nothing is printed.
+- [Interpolation of tabulated data with parquet_interpolate](interpolation.html) — an interpolant
+  built once over a table of abscissae and ordinates, ascending or descending, and evaluated
+  anywhere: straight lines between the points or a natural cubic spline, a policy for queries
+  beyond the table (the end value, the end segment continued, or NaN), a mask that drops points
+  before building, and a one-shot form for a table queried only a few times. Evaluation is `pure`
+  and `elemental`, so one object serves a whole team of threads. Nothing is printed.
 - [Optimisation: minimising a function of one or many variables](optimization.html) —
   four engines in two tiers: Brent's method on a bracket and the Nelder-Mead simplex from a start
   point for a local minimum, differential evolution over a whole box and a multistart driver over

@@ -86,6 +86,7 @@ CHECKS=(
     "python3 tools/generate_parquet_stats.py --self-test"
     "python3 tools/generate_parquet_stats.py --check"
     "python3 tools/generate_stats_vectors.py --check"
+    "python3 tools/generate_interpolate_vectors.py --check"
     "bash tools/generate_parquet_maml.sh base --check"
     "python3 tools/generate_user_table_code.py --self-test"
     "python3 tools/generate_user_table_code.py --check"

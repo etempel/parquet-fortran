@@ -78,6 +78,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
   pixel's eight neighbours (`-1` at a missing corner). See
   [HEALPix](doc/pages/utilities/healpix.md).
+- **Interpolation of tabulated data: `parquet_interpolate`.** `pf_interp_1d` builds an interpolant
+  over a table of `real64` abscissae and ordinates, ascending or descending, with `method=`
+  `"linear"` or `"cubic"` (a natural cubic spline), and answers `%eval` anywhere; `outside=` says
+  whether a point beyond the table is clamped to the end value, extrapolated or answered as NaN,
+  and `is_valid=` drops points before building. `pf_interp` is the one-shot form. Evaluation is
+  elemental and pure, so one object may be shared read-only by any number of threads. Nothing is
+  printed. An Arrow-free entry module. See
+  [Interpolation of tabulated data](doc/pages/utilities/interpolation.md).
 
 ### Changed
 

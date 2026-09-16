@@ -247,6 +247,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `check_healpix_fptrap.sh` | Runs `parquet_healpix` in a build where an FP exception is fatal. |
 | `generate_random_perm_vectors.py` | The same for the permutation contract. |
 | `generate_stats_vectors.py` | `parquet_stats`' golden expectations, from a 50-digit `mpmath` oracle. |
+| `generate_interpolate_vectors.py` | `parquet_interpolate`'s golden expectations, from an exact-rational model. |
 | `generate_fixtures.cpp` | The hand-built Arrow fixtures — see [above](#regenerating-the-test-fixtures). |
 | `generate_pandas_fixture.py` | The one fixture pandas itself writes — see [above](#regenerating-the-test-fixtures). |
 | `run_generate_fixtures.sh` | Builds and runs that generator. |

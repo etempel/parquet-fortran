@@ -22,7 +22,7 @@ path helpers, and the process-global settings. Every page below assumes that sin
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
-`parquet_argsort`, `parquet_stats`, `parquet_integrate`, `parquet_optimize`,
+`parquet_argsort`, `parquet_stats`, `parquet_integrate`, `parquet_interpolate`, `parquet_optimize`,
 `parquet_prima`,
 `parquet_sampling`, `parquet_spatial`,
 `parquet_healpix`,
@@ -59,7 +59,8 @@ point in the library.
   touched — or built in memory and written out; then changed in place, joined against another table
   on one or more key columns, and grouped by key columns for one answer per group.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
-  statistics, numerical integration, function minimisation, Powell's derivative-free solvers,
+  statistics, numerical integration, interpolation of tabulated data, function minimisation,
+  Powell's derivative-free solvers,
   reproducible random numbers and the sampling built on them,
   spatial neighbour search,
   sphere pixelisation, key-to-index lookup, logging for your own program, TOML configuration files,
@@ -71,7 +72,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 40 pages, in reading order. (This list, each group's own page list and the
+All 41 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -112,6 +113,7 @@ All 40 pages, in reading order. (This list, each group's own page list and the
 - [Sorting, ranking and selection](utilities/sorting.html)
 - [Array statistics with the `pf_` reduction family](utilities/statistics.html)
 - [Numerical integration with pf_integrate](utilities/integration.html)
+- [Interpolation of tabulated data with parquet_interpolate](utilities/interpolation.html)
 - [Optimisation: minimising a function of one or many variables](utilities/optimization.html)
 - [Powell's derivative-free solvers with `parquet_prima`](utilities/prima.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)

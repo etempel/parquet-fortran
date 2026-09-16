@@ -1378,6 +1378,69 @@ contains
 
 end module test_module_surface_integrate
 
+!> `parquet_interpolate` alone: the interpolant object and every binding it has, the one-shot generic
+!! in both ranks, the test-only hook, and no settings knob at all.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! claims that `use parquet_interpolate` compiles three Fortran files and re-exports no setting --
+!! interpolation reads none and prints nothing, so there is no knob for it to re-export.
+module test_module_surface_interpolate
+    use parquet_interpolate              ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_interpolate_surface
+
+contains
+
+    !> Exercises every binding and generic through `use parquet_interpolate` alone.
+    subroutine check_interpolate_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_interp_1d) :: line, spline
+        real(real64)       :: x(4), y(4), v(2)
+        logical            :: was_uniform
+
+        what = ""
+        x = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64]
+        y = 2.0_real64*x + 1.0_real64
+
+        ! Both methods, evaluated on a scalar and on an array.
+        call line%init(x, y, method="linear")
+        if (line%eval(1.5_real64) /= 4.0_real64) what = "pf_interp_1d%eval"
+        if (what == "") then
+            v = line%eval([0.5_real64, 2.5_real64])
+            if (v(1) /= 2.0_real64 .or. v(2) /= 6.0_real64) what = "pf_interp_1d%eval (elemental)"
+        end if
+        if (what == "") then
+            call spline%init(x, y, bc="natural", outside="extrapolate")
+            if (abs(spline%eval(4.0_real64) - 9.0_real64) > 1.0e-12_real64) what = "pf_interp_1d%init"
+        end if
+        if (what == "" .and. .not. spline%is_initialised()) what = "pf_interp_1d%is_initialised"
+        if (what == "") then
+            call spline%clear()
+            if (spline%is_initialised()) what = "pf_interp_1d%clear"
+        end if
+
+        ! The one-shot generic, in both ranks.
+        if (what == "") then
+            if (pf_interp(x, y, 0.5_real64, method="linear") /= 2.0_real64) what = "pf_interp (scalar)"
+        end if
+        if (what == "") then
+            v = pf_interp(x, y, [0.5_real64, 2.5_real64], method="linear")
+            if (v(1) /= 2.0_real64 .or. v(2) /= 6.0_real64) what = "pf_interp (array)"
+        end if
+
+        ! The test-only hook: an evenly spaced table was bracketed by arithmetic.
+        if (what == "") then
+            call parquet_debug_interp_force_search(line, was_uniform)
+            if (.not. was_uniform) what = "parquet_debug_interp_force_search"
+        end if
+
+    end subroutine check_interpolate_surface
+
+end module test_module_surface_interpolate
+
 module test_module_surface_optimize
     use parquet_optimize                 ! THE ONLY library import.
     use iso_fortran_env, only : real64, int64
@@ -1694,6 +1757,7 @@ module test_module_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_utils, only : check_utils_surface
     use test_module_surface_integrate, only : check_integrate_surface
+    use test_module_surface_interpolate, only : check_interpolate_surface
     use test_module_surface_optimize, only : check_optimize_surface
     use test_module_surface_prima, only : check_prima_surface
     use test_module_surface_logging, only : check_logging_surface
@@ -1816,6 +1880,8 @@ contains
                          test_utils_surface), &
             new_unittest("parquet_integrate alone integrates and hands back its record", &
                          test_integrate_surface), &
+            new_unittest("parquet_interpolate alone builds an interpolant and evaluates it", &
+                         test_interpolate_surface), &
             new_unittest("parquet_optimize alone minimises through both engines and a solver", &
                          test_optimize_surface), &
             new_unittest("parquet_prima alone minimises with BOBYQA and hands back its record", &
@@ -1933,6 +1999,16 @@ contains
         call check(error, what == "", &
             "quadrature was not usable through `use parquet_integrate` alone: " // what)
     end subroutine test_integrate_surface
+
+    !> The test-drive wrapper over check_interpolate_surface.
+    subroutine test_interpolate_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_interpolate_surface(what)
+        call check(error, what == "", &
+            "interpolation was not usable through `use parquet_interpolate` alone: " // what)
+    end subroutine test_interpolate_surface
 
     !> The test-drive wrapper over check_optimize_surface.
     subroutine test_optimize_surface(error)

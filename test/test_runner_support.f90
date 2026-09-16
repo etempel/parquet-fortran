@@ -263,6 +263,12 @@ contains
     !> exclusion is what keeps it from happening. The suite is pure arithmetic over no fixture and
     !> costs a fraction of a second serially.
     !>
+    !> "interpolate_omp" is excluded for the same nested-team reason: parquet_interpolate holds no
+    !> variable that is not a parameter, and the suite demonstrates that by evaluating one object and
+    !> building many on a whole team at once. Its third test asserts the team size, so a region that
+    !> collapsed to a team of one would be reported rather than pass. Serially it costs well under a
+    !> second.
+    !>
     !> "table_join_hash" is excluded because its collector forces the join's pair-list engine
     !> through a process-global hook (parquet_debug_set_join_engine) and every test then asserts,
     !> through the process-global observable parquet_debug_join_engine_used, that the hash engine
@@ -316,7 +322,7 @@ contains
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
-            .or. name == "integrate_omp" .or. name == "optimize_omp" &
+            .or. name == "integrate_omp" .or. name == "interpolate_omp" .or. name == "optimize_omp" &
             .or. name == "prima_omp" &
             .or. name == "stats" .or. name == "table_join_hash")
     end function suite_is_safe_to_parallelize

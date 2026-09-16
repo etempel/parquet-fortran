@@ -228,6 +228,12 @@ parquet_integrate_driver.f90
 parquet_integrate_engine.f90
 parquet_wrapper.cpp
 
+[parquet_interpolate]
+parquet_interpolate.f90
+parquet_interpolate_1d.f90
+parquet_interpolate_core.f90
+parquet_wrapper.cpp
+
 [parquet_optimize]
 parquet_argsort.f90
 parquet_argsort_engine.f90
@@ -486,6 +492,9 @@ parquet_index_str.f90
 parquet_integrate.f90
 parquet_integrate_driver.f90
 parquet_integrate_engine.f90
+parquet_interpolate.f90
+parquet_interpolate_1d.f90
+parquet_interpolate_core.f90
 parquet_io.f90
 parquet_list.f90
 parquet_logging.f90

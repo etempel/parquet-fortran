@@ -90,7 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `pf_spatial_index%within_segment`, `%within_cylinder` and `%within_cone` find the points lying
   exactly on their axis when the radius is zero, and refuse an axis whose squared length overflows
-  rather than answering as a ball about its first endpoint.
+  rather than answering as a ball about its first endpoint. The zero-radius answer holds under a
+  value-unsafe floating-point model too: ifx's default `-fp-model=fast`, which a FLAGLESS
+  `fpm build` selects, rewrote the projection's division into a multiply by the reciprocal and
+  dropped the on-axis points whose parameter is not representable (19 of 21 on a lattice row).
 
 ## [v2.4.0] - 2026-09-14
 

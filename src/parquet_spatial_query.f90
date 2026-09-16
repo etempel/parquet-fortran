@@ -733,6 +733,18 @@ contains
         logical :: want_min, want_los, want_tie, hasdp, hasdl, ok
         integer :: k, da, nd, lrule
         integer(int64) :: kj
+        ! `dd` is the projection parameter's divisor below, and it is `volatile` for that one
+        ! reason. Writing the division rather than a stored reciprocal is not enough on its own:
+        ! under a value-unsafe floating-point model -- ifx's default `-fp-model=fast`, which a
+        ! FLAGLESS `fpm build` selects, the debug and release profiles both passing `-O0` or
+        ! `-fp-model=precise` instead -- the compiler rewrites a division by a loop-invariant
+        ! denominator back into a multiply by its reciprocal, which is the exact formulation
+        ! this kernel was moved AWAY from (feature_spatial_report.md 13.1). `volatile` removes
+        ! the premise of that rewrite rather than arguing with it: the value may change between
+        ! references, so no reciprocal can be hoisted out of the candidate loop. The cost is an
+        ! L1 load per candidate. Pinned by `test_axis_zero_radius_finds_the_axis`, which reports
+        ! 19 of 21 on-axis points without this line and 21 with it.
+        volatile :: dd
 
         m = 0_int64
         ! Defensive, exactly as `spatial_scan`'s: the three axis bindings screen through
@@ -946,6 +958,8 @@ contains
                             ! ulp or two, which `r = 0` -- "the points lying on this axis" -- then
                             ! rejects. The cost is a division per candidate; it is what makes the
                             ! zero-radius query answerable at all (`test_axis_zero_radius_finds_the_axis`).
+                            ! The operator alone does not settle it -- `dd` is declared `volatile`
+                            ! above so that no compiler folds this back into a reciprocal.
                             tp = (qx * vx + qy * vy + qz * vz) / dd
                             if (clamp) then
                                 tp = min(max(tp, 0.0_real64), 1.0_real64)
@@ -1013,7 +1027,8 @@ contains
                             qx = xs(row) - b1
                             qy = ys(row) - b2
                             qz = zs(row) - b3
-                            ! Divided rather than multiplied by a reciprocal; see the direct loop.
+                            ! Divided rather than multiplied by a reciprocal, and `dd` is
+                            ! `volatile` so that it stays that way; see the direct loop.
                             tp = (qx * vx + qy * vy + qz * vz) / dd
                             if (clamp) then
                                 tp = min(max(tp, 0.0_real64), 1.0_real64)

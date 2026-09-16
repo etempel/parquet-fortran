@@ -300,6 +300,31 @@ done | sort | uniq -c | sort -rn
   `mu = acc%vsum / acc%w_sum` (two in `stats_engine`) are the same division of the same
   bit-identical operands and came out **one ulp apart**, because the substitution is worth it in
   one procedure and not the other. Nothing in either source says so.
+- **Writing `a / b` instead of `a * (1/b)` does not survive the rewrite -- the SOURCE FORM is
+  not the fix, `volatile` on the denominator is.** `spatial_scan_axis` divides the axis dot
+  product by the squared axis length so that a point ON the axis recovers its parameter exactly
+  and `q - tp*v` cancels to zero; ifx's default `-fp-model=fast` hoists `1/dd` out of the
+  candidate loop anyway and puts back the very formulation the kernel was changed away from
+  (`test_axis_zero_radius_finds_the_axis` reports 19 of 21 on-axis points, missing `x = 7` and
+  `x = 14`, whose parameters `0.35` and `0.7` are not representable). Declaring the divisor
+  `volatile` removes the rewrite's premise rather than arguing with it: the value may change
+  between references, so no reciprocal can be hoisted. Cost is an L1 load per candidate, below
+  this harness's noise end to end.
+- **The profile matters more than the optimisation level, and the DEFAULT profile is the
+  dangerous one.** fpm passes ifx NO flags at all without `--profile` (`-fpp -fPIC -qopenmp
+  -free`), so ifx's own defaults -- `-O2 -fp-model=fast` -- apply; `--profile debug` passes
+  `-O0` and `--profile release` passes `-fp-model=precise`, and BOTH of those are value-safe.
+  So a flagless `fpm test` is the arm that catches this class, and reproducing a failure under
+  `--profile debug` will quietly fail to reproduce it. Check `build/compile_commands.json`, or
+  `fpm build --verbose | grep 'ifx -c'`, before concluding a flag is present.
+- **FMA contraction is a SECOND, independent way to lose the same exactness, and no source form
+  closes it.** Under `-xHost` (FMA available) `wx = qx - tp * vx` contracts to a fused
+  multiply-add, which does NOT round the product first, so the residue is nonzero for every
+  non-representable parameter and the same test reports 5 of 21. Parenthesising the product
+  helps only with `-assume protect_parens`; ifx does not honour parentheses against contraction
+  by default. No profile this project builds passes `-xHost`, so this is a limit on what a
+  consumer may add, not a defect here -- and the general lesson is that an exact-cancellation
+  guarantee is a property of the FP MODEL, not of the arithmetic as written.
 - **`-fp-model=fast` also folds an algebraic identity out of an expression, which can turn a test's
   own PRECONDITION into a lie.** `total = a + b + c` followed by `total - a == 0.0` — the check
   that two tiny weights vanished into a huge one — is rewritten to `b + c`, so the fixture reports

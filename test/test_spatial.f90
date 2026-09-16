@@ -33,7 +33,7 @@ module test_spatial
     use parquet_spatial
     use parquet_random
     use parquet_sorting
-    use iso_fortran_env, only : int32, int64, real64
+    use iso_fortran_env, only : int32, int64, real64, real128
     use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_invalid
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
@@ -158,6 +158,11 @@ contains
                          test_los_windows_follow_the_cell), &
             new_unittest("the phase counters account for a sweep and reset to zero", test_los_phase_counters), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
+            new_unittest("an axis shape is exactly the ball that contains it, filtered", &
+                         test_axis_is_the_covering_ball_filtered), &
+            new_unittest("a zero-radius axis finds the points lying on it", test_axis_zero_radius_finds_the_axis), &
+            new_unittest("the accept tests agree with exact geometry to a rounding", &
+                         test_accept_tests_match_exact_geometry), &
             new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
             new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
             new_unittest("a zero-length axis is exactly the ball", test_axis_degenerate_is_a_ball), &
@@ -379,6 +384,23 @@ contains
         call pf_sort(b(1:nb), q)
         same = all(p == q)
     end function same_rows
+
+    !> Whether every row of `a` also appears in `b`.
+    logical function rows_are_contained(a, na, b, nb) result(inside)
+        integer(int64), intent(in) :: a(:) !! the rows that must be contained.
+        integer(int64), intent(in) :: na !! how many entries of `a` count.
+        integer(int64), intent(in) :: b(:) !! the rows they must be contained in.
+        integer(int64), intent(in) :: nb !! how many entries of `b` count.
+        integer(int64) :: i
+
+        inside = .true.
+        do i = 1_int64, na
+            if (.not. any(b(1:nb) == a(i))) then
+                inside = .false.
+                return
+            end if
+        end do
+    end function rows_are_contained
 
     !> Every row inside an axis-shaped region, found by scanning every point.
     !>
@@ -1491,6 +1513,294 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_axis_matches_brute_force
+
+    !> Every axis shape is the SMALLEST BALL that contains it, filtered by the shape's own test.
+    !>
+    !> **This is the cross-check between the two walks.** `brute_axis` scans every row, so it
+    !> cannot tell a defect in the slab walk from one in the ball walk; here the candidates come
+    !> from `%within` over the ball centred on the axis's midpoint with radius
+    !> `|p2 - p1|/2 + max(r1, r2)`, which provably contains all three shapes, and the shape's own
+    !> predicate then selects from them. The direct answer must equal that, and must lie inside the
+    !> ball's answer -- so a walk that visits too few cells fails on whichever of the two it is in.
+    subroutine test_axis_is_the_covering_ball_filtered(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: got(:), cand(:), keep(:), want(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, mg, mb, mk, mw, k, c, tot_rows, tot_cand, empties
+        real(real64) :: p1(3), p2(3), r1, r2, ctr(3), ballr, dv(3), q(3), w(3), dd, tp, rad, d2
+        logical :: clamp
+
+        n = 12000_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.1_real64)
+        allocate (got(n), cand(n), keep(n))
+        tot_rows = 0_int64
+        tot_cand = 0_int64
+        empties = 0_int64
+        do c = 1, 15
+            ! Five geometries, each in all three shapes: a short interior axis; a STUBBY one whose
+            ! radius is several cells, so most of the capsule is the round caps and a walk that
+            ! widens the end slabs by too little loses them; one crossing the whole cloud; one with
+            ! an end far outside it; and one lying wholly outside.
+            select case (mod(c - 1, 5))
+            case (0)
+                p1 = [0.3_real64, 0.35_real64, 0.6_real64]
+                p2 = [0.55_real64, 0.5_real64, 0.45_real64]
+            case (1)
+                p1 = [0.4_real64, 0.45_real64, 0.5_real64]
+                p2 = [0.46_real64, 0.47_real64, 0.52_real64]
+            case (2)
+                p1 = [-0.2_real64, -0.2_real64, -0.2_real64]
+                p2 = [1.2_real64, 1.2_real64, 1.2_real64]
+            case (3)
+                p1 = [0.5_real64, 0.5_real64, 0.5_real64]
+                p2 = [2.5_real64, 0.5_real64, 0.5_real64]
+            case default
+                p1 = [1.4_real64, 0.2_real64, 0.7_real64]
+                p2 = [1.9_real64, 0.8_real64, 0.3_real64]
+            end select
+            r1 = 0.28_real64
+            r2 = 0.28_real64
+            clamp = .false.
+            select case ((c - 1) / 5)
+            case (0)
+                clamp = .true.
+                mg = sx%within_segment(p1, p2, r1, got)
+            case (1)
+                mg = sx%within_cylinder(p1, p2, r1, got)
+            case default
+                r1 = 0.06_real64
+                r2 = 0.3_real64
+                mg = sx%within_cone(p1, p2, r1, r2, got)
+            end select
+
+            ! The covering ball, and the shape's predicate applied to what it returned.
+            dv = p2 - p1
+            dd = dot_product(dv, dv)
+            ctr = 0.5_real64 * (p1 + p2)
+            ballr = 0.5_real64 * sqrt(dd) + max(r1, r2)
+            mb = sx%within(ctr, ballr, cand)
+            mk = 0_int64
+            do k = 1_int64, mb
+                q = [x(cand(k)), y(cand(k)), z(cand(k))] - p1
+                tp = dot_product(q, dv) / dd
+                if (clamp) then
+                    tp = min(max(tp, 0.0_real64), 1.0_real64)
+                else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
+                    cycle
+                end if
+                rad = r1 + tp * (r2 - r1)
+                w = q - tp * dv
+                d2 = dot_product(w, w)
+                if (d2 <= rad * rad) then
+                    mk = mk + 1_int64
+                    keep(mk) = cand(k)
+                end if
+            end do
+
+            call check(error, same_rows(got, mg, keep(1:max(mk, 1_int64)), mk), &
+                "an axis shape must be exactly the covering ball filtered by the shape's own test")
+            if (allocated(error)) return
+            call check(error, rows_are_contained(got, mg, cand, mb), &
+                "every row an axis shape returns must lie inside the ball that contains the shape")
+            if (allocated(error)) return
+            ! and the full scan agrees with both, so neither walk is being graded against itself
+            call brute_axis(x, y, z, p1, p2, r1, r2, clamp, want, mw)
+            call check(error, same_rows(got, mg, want, mw), &
+                "the covering-ball route and the full scan must agree")
+            if (allocated(error)) return
+            deallocate (want)
+            tot_rows = tot_rows + mg
+            tot_cand = tot_cand + mb
+            if (mg == 0_int64) empties = empties + 1_int64
+        end do
+        ! Vacuity guards: a fixture that found nothing would pass every assertion above.
+        call check(error, tot_rows > 0_int64, &
+            "the covering-ball comparison must have had rows to compare")
+        if (allocated(error)) return
+        call check(error, tot_cand > tot_rows, &
+            "the covering ball must have held candidates the shape then rejected")
+        if (allocated(error)) return
+        call check(error, empties > 0_int64, &
+            "the geometry lying outside the cloud must have returned nothing")
+    end subroutine test_axis_is_the_covering_ball_filtered
+
+    !> `r = 0` on an axis shape finds exactly the points lying ON the axis.
+    !>
+    !> **A regression test on the projection parameter, not on the walk.** Every point of the row
+    !> below lies on the axis, so the perpendicular offset `q - t*(p2 - p1)` has to come out
+    !> exactly zero for all of them; it does so only because `t` is formed by dividing by
+    !> `|p2 - p1|**2` rather than by multiplying by its reciprocal, which rounds twice and leaves
+    !> a residue of an ulp or two at the points whose `t` is not representable.
+    subroutine test_axis_zero_radius_finds_the_axis(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(64), m, i1, i2, i3, k
+        type(pf_spatial_index) :: sx
+        real(real64), parameter :: p1(3) = [0.0_real64, 5.0_real64, 7.0_real64]
+        real(real64), parameter :: p2(3) = [20.0_real64, 5.0_real64, 7.0_real64]
+        real(real64), parameter :: obl1(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: obl2(3) = [12.0_real64, 8.0_real64, 4.0_real64]
+
+        ! A 21 x 21 x 21 integer lattice: the row y = 5, z = 7 holds 21 points ON the axis, and
+        ! the diagonal from the origin through (12, 8, 4) passes through (3, 2, 1) and (6, 4, 2).
+        allocate (x(9261), y(9261), z(9261))
+        k = 0_int64
+        do i3 = 0_int64, 20_int64
+            do i2 = 0_int64, 20_int64
+                do i1 = 0_int64, 20_int64
+                    k = k + 1_int64
+                    x(k) = real(i1, kind=real64)
+                    y(k) = real(i2, kind=real64)
+                    z(k) = real(i3, kind=real64)
+                end do
+            end do
+        end do
+        call sx%build(x, y, z, radius=2.0_real64)
+
+        m = sx%within_segment(p1, p2, 0.0_real64, got)
+        call check(error, m == 21_int64, "a zero-radius capsule must find every point on its axis")
+        if (allocated(error)) return
+        m = sx%within_cylinder(p1, p2, 0.0_real64, got)
+        call check(error, m == 21_int64, "a zero-radius cylinder must find every point on its axis")
+        if (allocated(error)) return
+        m = sx%within_cone(p1, p2, 0.0_real64, 0.0_real64, got)
+        call check(error, m == 21_int64, "a zero-radius cone must find every point on its axis")
+        if (allocated(error)) return
+        ! An oblique axis, where the on-axis points are the integer multiples of (3, 2, 1)
+        m = sx%within_segment(obl1, obl2, 0.0_real64, got)
+        call check(error, m == 5_int64, &
+            "a zero-radius capsule on an oblique axis must find the lattice points on it")
+        if (allocated(error)) return
+        ! and an end that stops between lattice points drops the one beyond it
+        m = sx%within_cylinder(p1, [19.5_real64, 5.0_real64, 7.0_real64], 0.0_real64, got)
+        call check(error, m == 20_int64, "a cylinder ending between lattice points must drop the last")
+    end subroutine test_axis_zero_radius_finds_the_axis
+
+    !> The ball's and the axis shapes' accept tests, against the same predicates in a 128-bit real.
+    !>
+    !> **What this adds over `brute_axis` and `brute_within`**: those two share the accept test with
+    !> the implementation, so they grade the cell walk and nothing else. Here the predicate is
+    !> re-evaluated over the SAME `real64` inputs in quad, which is the exact geometric answer to
+    !> within 2**-113 -- so a disagreement is the double-precision arithmetic itself, and this
+    !> asserts how large one may be: a point has to sit within a rounding of the surface. A quarter
+    !> of the radii are set to a stored point's own distance, so the ties are deliberate rather
+    !> than waited for.
+    !>
+    !> Skipped where the compiler has no 128-bit real (flang 22.1.8 has none): the reference would
+    !> then be `real64` against itself and would report a perfect match whatever the kernel did.
+    subroutine test_accept_tests_match_exact_geometry(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        integer, parameter :: rq = merge(real128, real64, real128 > 0)
+        logical, parameter :: have_quad = (real128 > 0)
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: got(:)
+        logical, allocatable :: inside(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, k, c, rows, ties, diffs
+        real(real64) :: p1(3), p2(3), r, r2v, worst, marg
+        real(rq) :: qx, qy, qz, dq, rqq, vq(3), ddq, tpq, wq(3), radq
+        logical :: clamp, want
+
+        if (.not. have_quad) then
+            call skip_test(error, "needs a 128-bit real kind: the reference would be real64 " // &
+                "against itself, which reports a perfect match whatever the accept test does")
+            return
+        end if
+        n = 1200_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.1_real64)
+        allocate (got(n), inside(n))
+        rows = 0_int64
+        ties = 0_int64
+        diffs = 0_int64
+        worst = 0.0_real64
+
+        do c = 1, 16
+            p1 = [0.2_real64 + 0.05_real64 * real(c, real64), 0.3_real64, 0.6_real64]
+            p2 = [0.7_real64, 0.25_real64 + 0.03_real64 * real(c, real64), 0.4_real64]
+            select case (mod(c, 4))
+            case (0)
+                ! a radius that lands EXACTLY on a stored point's distance: a deliberate tie
+                k = 1_int64 + int(mod(int(c, int64) * 137_int64, n - 1_int64), int64)
+                r = sqrt((x(k) - p1(1))**2 + (y(k) - p1(2))**2 + (z(k) - p1(3))**2)
+                ties = ties + 1_int64
+            case (1)
+                r = 0.05_real64
+            case (2)
+                r = 0.12_real64
+            case default
+                r = 0.3_real64
+            end select
+            r2v = r
+            clamp = .false.
+            select case ((c - 1) / 4)
+            case (0)
+                m = sx%within(p1, r, got)
+            case (1)
+                clamp = .true.
+                m = sx%within_segment(p1, p2, r, got)
+            case (2)
+                m = sx%within_cylinder(p1, p2, r, got)
+            case default
+                r2v = 2.0_real64 * r
+                m = sx%within_cone(p1, p2, r, r2v, got)
+            end select
+            rows = rows + m
+            inside = .false.
+            do k = 1_int64, m
+                inside(got(k)) = .true.
+            end do
+
+            vq = real(p2, rq) - real(p1, rq)
+            ddq = vq(1) * vq(1) + vq(2) * vq(2) + vq(3) * vq(3)
+            rqq = real(r, rq)
+            do k = 1_int64, n
+                qx = real(x(k), rq) - real(p1(1), rq)
+                qy = real(y(k), rq) - real(p1(2), rq)
+                qz = real(z(k), rq) - real(p1(3), rq)
+                if (c <= 4) then
+                    dq = sqrt(qx * qx + qy * qy + qz * qz)
+                    radq = rqq
+                    want = dq <= rqq
+                else
+                    tpq = (qx * vq(1) + qy * vq(2) + qz * vq(3)) / ddq
+                    if (clamp) then
+                        tpq = min(max(tpq, 0.0_rq), 1.0_rq)
+                    else if (tpq < 0.0_rq .or. tpq > 1.0_rq) then
+                        ! outside the end planes: the flat-ended shapes reject it whatever its
+                        ! distance, and the two must agree on that without a margin
+                        if (inside(k)) then
+                            call check(error, .false., &
+                                "a flat-ended shape returned a point outside its end planes")
+                            return
+                        end if
+                        cycle
+                    end if
+                    wq(1) = qx - tpq * vq(1)
+                    wq(2) = qy - tpq * vq(2)
+                    wq(3) = qz - tpq * vq(3)
+                    dq = sqrt(wq(1) * wq(1) + wq(2) * wq(2) + wq(3) * wq(3))
+                    radq = rqq + tpq * (real(r2v, rq) - rqq)
+                    want = dq <= radq
+                end if
+                if (want .neqv. inside(k)) then
+                    diffs = diffs + 1_int64
+                    marg = real(abs(dq - radq), real64) / max(real(radq, real64), tiny(1.0_real64))
+                    worst = max(worst, marg)
+                end if
+            end do
+        end do
+
+        ! Vacuity first: a fixture that returned nothing would satisfy every assertion below.
+        call check(error, rows > 0_int64, "the exact-geometry comparison must have had rows to compare")
+        if (allocated(error)) return
+        call check(error, ties == 4_int64, "four of the radii must have been set to a stored point's distance")
+        if (allocated(error)) return
+        call check(error, worst < 1.0e-14_real64, &
+            "a point the accept test and exact geometry disagree on must sit within a rounding of the surface")
+    end subroutine test_accept_tests_match_exact_geometry
 
     !> The three shapes accept the points they should, at offsets worked out by hand.
     !>

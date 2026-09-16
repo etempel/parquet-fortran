@@ -1931,6 +1931,8 @@ contains
                 test_spatial_query_nan_point_aborts), &
             new_unittest("a NaN axis endpoint is refused by %within_segment", &
                 test_spatial_segment_nan_endpoint_aborts), &
+            new_unittest("an axis whose squared length overflows is refused", &
+                test_spatial_axis_length_overflows_aborts), &
             new_unittest("a NaN query point is refused by %nearest", &
                 test_spatial_nearest_nan_point_aborts), &
             new_unittest("a NaN dec is refused by %within_sky", &
@@ -6569,6 +6571,13 @@ contains
             failure_message="a NaN axis endpoint was expected to be refused by %within_segment", &
             required_stderr="%within_segment: every axis endpoint coordinate must be a finite number")
     end subroutine test_spatial_segment_nan_endpoint_aborts
+
+    subroutine test_spatial_axis_length_overflows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_axis_length_overflows", expect_abort=.true., &
+            failure_message="an axis whose squared length overflows was expected to be refused", &
+            required_stderr="the axis is too long for its squared length to be formed")
+    end subroutine test_spatial_axis_length_overflows_aborts
 
     subroutine test_spatial_nearest_nan_point_aborts(error)
         type(error_type), allocatable, intent(out) :: error

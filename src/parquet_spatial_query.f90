@@ -724,7 +724,7 @@ contains
         integer(int64) :: nc(3), sa(3), sc(3), ia, alo, acnt, jj, kk, base, s0, e0, t, cap, row, minkey
         integer(int64) :: ilo, ihi, nfill, ntest
         real(real64) :: dv(3), c0(3), c1(3)
-        real(real64) :: dd, ddinv, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
+        real(real64) :: dd, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
         real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
         real(real64) :: q1, q2, q3, e1, e2, e3, dself, lself, bpself, blself, bpj, blj, sx, sy, sz, s2
         real(real64) :: dpv, dlv, dm
@@ -859,7 +859,12 @@ contains
             if (hasat) axis_t(1:int(min(m, size(axis_t, kind=int64)))) = 0.0_real64
             return
         end if
-        ddinv = 1.0_real64 / dd
+        ! The other end of the same guard. An axis longer than `sqrt(huge())` -- about 1.3e154 --
+        ! has no representable squared length, and every parameter along it would come out zero, so
+        ! the shape would silently answer as a ball about `p1`. Refused rather than approximated,
+        ! for the reason the non-finite screens above refuse: there is nothing to answer.
+        if (.not. (dd < huge(0.0_real64))) error stop "pf_spatial_index%" // what // &
+            ": the axis is too long for its squared length to be formed; scale the coordinates"
         dr = r2 - r1
         nc = self%grid_n
         direct = self%owns
@@ -924,7 +929,14 @@ contains
                             qx = xs(t) - b1
                             qy = ys(t) - b2
                             qz = zs(t) - b3
-                            tp = (qx * vx + qy * vy + qz * vz) * ddinv
+                            ! **Divided, never multiplied by a stored reciprocal**, and that is not
+                            ! a detail: for a point ON the axis the division recovers the parameter
+                            ! exactly, so `tp * v` reproduces `q` bit for bit and the perpendicular
+                            ! offset below is exactly zero. A reciprocal rounds twice and leaves an
+                            ! ulp or two, which `r = 0` -- "the points lying on this axis" -- then
+                            ! rejects. The cost is a division per candidate; it is what makes the
+                            ! zero-radius query answerable at all (`test_axis_zero_radius_finds_the_axis`).
+                            tp = (qx * vx + qy * vy + qz * vz) / dd
                             if (clamp) then
                                 tp = min(max(tp, 0.0_real64), 1.0_real64)
                             else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
@@ -991,7 +1003,8 @@ contains
                             qx = xs(row) - b1
                             qy = ys(row) - b2
                             qz = zs(row) - b3
-                            tp = (qx * vx + qy * vy + qz * vz) * ddinv
+                            ! Divided rather than multiplied by a reciprocal; see the direct loop.
+                            tp = (qx * vx + qy * vy + qz * vz) / dd
                             if (clamp) then
                                 tp = min(max(tp, 0.0_real64), 1.0_real64)
                             else if (tp < 0.0_real64 .or. tp > 1.0_real64) then

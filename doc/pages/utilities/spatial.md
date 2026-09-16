@@ -292,6 +292,15 @@ rather than a cylinder.
 A zero-length axis (`p1 == p2`) reduces to a ball — of radius `r`, or of `max(r1, r2)` for the
 cone. That is the documented answer rather than an error.
 
+**A zero radius asks for the points lying ON the axis, and gets them.** The parameter along the
+axis is formed by dividing by the axis's squared length, which recovers it exactly for a point on
+the axis, so the perpendicular offset of such a point is exactly zero and `r = 0` selects it. A
+point that is *nearly* on the axis is a different question: the perpendicular distance is a
+computed quantity, accurate to about the machine epsilon times the larger of the coordinate
+magnitude and the axis length, so a radius below that is a knife edge in the ordinary way. Ask for
+a radius above it — `1e-12` of the coordinate scale is four orders of magnitude clear — whenever
+"on the axis" means "within the width of my coordinates' own precision" rather than exactly on it.
+
 ### Where on the axis each point sits
 
 All three take two further outputs, and `sorted=`:
@@ -621,6 +630,17 @@ expansion converges in one or two rounds.
 The query point need not be one of the catalogue's own: a point coincident with a stored row simply
 finds it at distance zero.
 
+**The starting radius is the catalogue's MEAN density, which a strongly clustered field is not.**
+A query in a void then starts far too small and pays several expansions before the ball holds `k`
+points, and one landing in a clump converges at once but sorts everything the ball held before
+keeping `k` — so on a field of dense clumps in mostly empty space, `%nearest` costs several times
+what it costs on a uniform catalogue of the same size, and more as `k` grows. The answer is exact
+either way. Two things avoid it: `%kth_distance` below, whose sweep carries each point's converged
+radius into the next and so does not re-derive it from the mean; and a `%within` at a radius you
+already know, where a fixed radius is what you actually want.
+`bench/benchmark_spatial_crosslib.sh` times `%nearest` on a uniform and on a clumped catalogue
+side by side.
+
 ### Every point's k-th neighbour distance
 
 ```fortran
@@ -832,6 +852,9 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
   is refused too — at `%build` when `los=` is given, at the query otherwise — as are a constant
   `los=` and a NaN in it. A `los=` that is not a function of the distance from the observer is
   accepted with a warning, and the walk is then wide.
+- **An axis longer than the square root of `huge()` is refused**, about `1.3e154`: its squared
+  length is what the parameter along it is divided by, and without that there is no parameter to
+  compute. Scale the coordinates. A zero-length axis is the documented ball instead, not an error.
 - **The index does not know its coordinates have moved.** Nothing detects a mutated array behind a
   `copy=.false.` index, and with `copy=.true.` only `%rebuild` looks. A stale index returns wrong
   answers silently, so call `%rebuild` after anything that may have changed the data.

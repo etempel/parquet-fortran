@@ -1944,6 +1944,12 @@ contains
     !> `p1 == p2` degenerates to a ball of radius `r` about `p1` -- the right answer rather than a
     !> special case, and the same reduction `%within_cone` makes.
     !>
+    !> **`r = 0` asks for the points lying ON the segment and gets them**: the parameter along the
+    !> axis is formed by division, which recovers it exactly for such a point, so its perpendicular
+    !> offset is exactly zero. A point merely NEAR the axis is a knife edge at that radius, the
+    !> perpendicular distance being accurate to about `epsilon` times the larger of the coordinate
+    !> magnitude and the axis length.
+    !>
     !> **`axis_point=` is the point `dist` was measured FROM**, which for a capsule is the closest
     !> point on the SEGMENT and not the projection onto the infinite line: a point beyond `p2` has
     !> its distance measured from `p2` itself. `axis_t=` says where that point sits along the axis,

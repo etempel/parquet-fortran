@@ -2755,6 +2755,8 @@ program error_scenarios
         call scenario_spatial_query_nan_point()
     case ("spatial_segment_nan_endpoint")
         call scenario_spatial_segment_nan_endpoint()
+    case ("spatial_axis_length_overflows")
+        call scenario_spatial_axis_length_overflows()
     case ("spatial_nearest_nan_point")
         call scenario_spatial_nearest_nan_point()
     case ("spatial_sky_query_nan_dec")
@@ -23241,6 +23243,27 @@ contains
             [0.9_real64, 0.9_real64, nan], 0.2_real64, got)   ! -> aborts
         print '(a,i0)', "unexpectedly searched about a NaN axis endpoint, m=", m
     end subroutine scenario_spatial_segment_nan_endpoint
+
+    !> An axis so long that its squared length is not representable.
+    !>
+    !> Both endpoints are finite, so the finite screens pass; `|p2 - p1|**2` is what overflows.
+    !> Without the guard every parameter along the axis comes out zero and the capsule answers as
+    !> a ball about `p1` -- a wrong answer with nothing to show for it.
+    subroutine scenario_spatial_axis_length_overflows()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        ! The negative control: an axis long enough to be unusual but whose square still fits.
+        m = sx%within_segment([0.0_real64, 0.5_real64, 0.5_real64], &
+            [1.0e150_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)
+        print '(a,i0)', "a 1e150-long axis was answered, m=", m
+        m = sx%within_segment([0.0_real64, 0.5_real64, 0.5_real64], &
+            [1.0e200_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly searched about an axis whose squared length overflows, m=", m
+    end subroutine scenario_spatial_axis_length_overflows
 
     !> %nearest with a NaN query point: the expanding-ball search is the third choke point.
     subroutine scenario_spatial_nearest_nan_point()

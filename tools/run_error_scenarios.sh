@@ -1417,6 +1417,7 @@ scenarios=(
     "spatial_rebuild_nan_coord:1"
     "spatial_query_nan_point:1"
     "spatial_segment_nan_endpoint:1"
+    "spatial_axis_length_overflows:1"
     "spatial_nearest_nan_point:1"
     "spatial_sky_query_nan_dec:1"
     "spatial_box_needs_both:1"

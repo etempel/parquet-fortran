@@ -86,6 +86,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cells-per-point ceiling counts occupied cells (0.3 per point), with 4 cells of the bounding box
   per point as the bound.
 
+### Fixed
+
+- `pf_spatial_index%within_segment`, `%within_cylinder` and `%within_cone` find the points lying
+  exactly on their axis when the radius is zero, and refuse an axis whose squared length overflows
+  rather than answering as a ball about its first endpoint.
+
 ## [v2.4.0] - 2026-09-14
 
 **Compatibility:** parquet files written by earlier 2.x releases are read unchanged. Library 

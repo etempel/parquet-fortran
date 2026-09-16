@@ -85,7 +85,7 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:), p29(:), p30(:)
+                                            p28(:), p29(:), p30(:), p31(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3192,8 +3192,25 @@ contains
             new_unittest("BOBYQA refuses a constrained objective by name", &
                 test_prima_bobyqa_constraints_not_honoured_aborts) &
             ]
+        ! ---- parquet_prima: LINCOA's and COBYLA's abort paths ----
+        p31 = [ &
+            new_unittest("LINCOA refuses a constrained objective by name", &
+                test_prima_lincoa_constraints_not_honoured_aborts), &
+            new_unittest("a constraint matrix of the wrong shape is refused", &
+                test_prima_lincoa_shape_aborts), &
+            new_unittest("an all-zero constraint row is refused rather than dropped", &
+                test_prima_zero_constraint_row_aborts), &
+            new_unittest("an infeasible start is refused rather than admitted by relaxation", &
+                test_prima_lincoa_infeasible_start_aborts), &
+            new_unittest("a negative ctol is refused", &
+                test_prima_ctol_negative_aborts), &
+            new_unittest("a negative n_constraints is refused", &
+                test_prima_cobyla_negative_count_aborts), &
+            new_unittest("a non-finite constraint value is refused rather than moderated", &
+                test_prima_constraint_nonfinite_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19192,6 +19209,56 @@ contains
             failure_message="a constrained objective in BOBYQA was expected to error stop", &
             required_stderr="pf_minimize_bobyqa: this engine does not honour nonlinear constraints")
     end subroutine test_prima_bobyqa_constraints_not_honoured_aborts
+    !
+    subroutine test_prima_lincoa_constraints_not_honoured_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_lincoa_constraints_not_honoured", &
+            expect_abort=.true., &
+            failure_message="a constrained objective in LINCOA was expected to error stop", &
+            required_stderr="pf_minimize_lincoa: this engine does not honour nonlinear constraints")
+    end subroutine test_prima_lincoa_constraints_not_honoured_aborts
+    !
+    subroutine test_prima_lincoa_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_lincoa_shape", expect_abort=.true., &
+            failure_message="a constraint matrix of the wrong shape was expected to error stop", &
+            required_stderr="a_ineq must have size(x) columns and size(b_ineq) rows")
+    end subroutine test_prima_lincoa_shape_aborts
+    !
+    subroutine test_prima_zero_constraint_row_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_zero_constraint_row", expect_abort=.true., &
+            failure_message="an all-zero constraint row was expected to error stop", &
+            required_stderr="a linear constraint must not have an all-zero row")
+    end subroutine test_prima_zero_constraint_row_aborts
+    !
+    subroutine test_prima_lincoa_infeasible_start_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_lincoa_infeasible_start", expect_abort=.true., &
+            failure_message="an infeasible start in LINCOA was expected to error stop", &
+            required_stderr="the start point must satisfy the linear constraints")
+    end subroutine test_prima_lincoa_infeasible_start_aborts
+    !
+    subroutine test_prima_ctol_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_ctol_negative", expect_abort=.true., &
+            failure_message="a negative ctol was expected to error stop", &
+            required_stderr="ctol must be a finite, non-negative number")
+    end subroutine test_prima_ctol_negative_aborts
+    !
+    subroutine test_prima_cobyla_negative_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_cobyla_negative_count", expect_abort=.true., &
+            failure_message="a negative n_constraints was expected to error stop", &
+            required_stderr="n_constraints must be non-negative")
+    end subroutine test_prima_cobyla_negative_count_aborts
+    !
+    subroutine test_prima_constraint_nonfinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_constraint_nonfinite", expect_abort=.true., &
+            failure_message="a NaN constraint value was expected to error stop", &
+            required_stderr="a constraint returned a non-finite value")
+    end subroutine test_prima_constraint_nonfinite_aborts
     !
     subroutine test_integrate_context_capped_aborts(error)
         type(error_type), allocatable, intent(out) :: error

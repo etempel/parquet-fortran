@@ -1,3 +1,168 @@
+!> The objectives `benchmark_optimize` minimises, and the wrapper that hands one to COBYLA.
+!!
+!! A module rather than a set of program-contained procedures, for two reasons the language
+!! imposes: a type-bound procedure's target must be a module or external procedure, so the
+!! constrained wrapper below cannot live inside the program; and a callback in this project is
+!! never an internal procedure (`.claude/rules/fortran-gotchas.md`, flang). The same shape as
+!! `bench/benchmark_integrate.f90`'s `benchmark_integrate_kernels`.
+module benchmark_optimize_kernels
+
+    use parquet_optimize, only : pf_objective_func, pf_constrained_objective
+    use iso_fortran_env, only : real64, error_unit
+
+    implicit none
+    private
+
+    public :: rosenbrock, sphere, rastrigin, camel, spin_sphere, pick
+    public :: boxed_objective, cost_units
+
+    !> How costly one `spin` evaluation is, in arbitrary work units; set by `--cost`.
+    integer, save :: cost_units = 0
+
+    !> `2 pi`, for Rastrigin.
+    real(real64), parameter :: TWO_PI = 2.0_real64*acos(-1.0_real64)
+
+    !> One of the objectives above, wrapped as a constrained objective with NO constraints.
+    !!
+    !! `pf_minimize_cobyla` takes a `pf_constrained_objective` and nothing else, because a plain
+    !! function has nowhere to carry constraints. The `evals` table compares the engines on the
+    !! same boxed problems, where the only constraints are the bounds and those are arguments, so
+    !! `n_constraints` answers zero and `constraints` is never called.
+    type, extends(pf_constrained_objective) :: boxed_objective
+        procedure(pf_objective_func), nopass, pointer :: fun => null() !! the wrapped objective
+    contains
+        procedure :: eval => boxed_eval                 !! Calls the wrapped objective.
+        procedure :: n_constraints => boxed_count       !! None: the bounds are arguments.
+        procedure :: constraints => boxed_constraints   !! Never called.
+    end type boxed_objective
+
+contains
+
+    !> Calls the wrapped objective.
+    function boxed_eval(this, x) result(f)
+        class(boxed_objective), intent(inout) :: this !! the wrapper
+        real(real64), intent(in)              :: x(:) !! the point
+        real(real64)                          :: f    !! objective value at `x`
+
+        f = this%fun(x)
+
+    end function boxed_eval
+
+    !> How many constraint values `constraints` fills: none.
+    function boxed_count(this) result(m)
+        class(boxed_objective), intent(in) :: this !! the wrapper
+        integer                            :: m    !! zero
+
+        m = 0
+
+    end function boxed_count
+
+    !> Never called, because `n_constraints` answers zero.
+    subroutine boxed_constraints(this, x, c)
+        class(boxed_objective), intent(inout) :: this !! the wrapper
+        real(real64), intent(in)              :: x(:) !! the point
+        real(real64), intent(out)             :: c(:) !! a zero-length array
+
+        c = 0.0_real64
+
+    end subroutine boxed_constraints
+
+
+    !> Rosenbrock's function in any number of variables; minimum `0` at `x = 1`.
+    function rosenbrock(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        integer :: i
+
+        f = 0.0_real64
+        do i = 1, size(x) - 1
+            f = f + (1.0_real64 - x(i))**2 + 100.0_real64*(x(i+1) - x(i)**2)**2
+        end do
+
+    end function rosenbrock
+
+    !> Sum of squares about `1`; minimum `0` at `x = 1`.
+    function sphere(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = sum((x - 1.0_real64)**2)
+
+    end function sphere
+
+    !> Rastrigin's function; minimum `0` at the origin, with about `11**n` local minima.
+    function rastrigin(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = 10.0_real64*size(x) + sum(x**2 - 10.0_real64*cos(TWO_PI*x))
+
+    end function rastrigin
+
+    !> A three-basin function in two variables, for the `starts` mode.
+    !!
+    !! The six-hump camel: six local minima over `[-3, 3] x [-2, 2]`, two of them global.
+    function camel(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = (4.0_real64 - 2.1_real64*x(1)**2 + x(1)**4/3.0_real64)*x(1)**2 + x(1)*x(2) &
+            + (-4.0_real64 + 4.0_real64*x(2)**2)*x(2)**2
+
+    end function camel
+
+    !> The sphere, made deliberately expensive per evaluation by `cost_units` of arithmetic.
+    !!
+    !! The spin is a chain of transcendentals with a data dependence, so no compiler may hoist or
+    !! vectorise it away, and its result is FOLDED INTO the answer rather than discarded -- a spin
+    !! whose value nothing reads is deleted at `-O2` and the ladder then measures an empty loop.
+    !! Folding it in changes the objective, not its minimiser: the added term vanishes at `x = 1`.
+    function spin_sphere(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        real(real64) :: burn
+        integer :: k
+
+        f = sum((x - 1.0_real64)**2)
+        burn = 1.0_real64
+        do k = 1, cost_units
+            burn = burn + sin(burn)*cos(burn)
+        end do
+        f = f + f*1.0e-300_real64*burn
+
+    end function spin_sphere
+
+    !> Selects one of the module's objectives by name, as a procedure pointer.
+    !!
+    !! A `select case` returning a pointer rather than four copies of each measurement loop. Every
+    !! callback in this library is a module procedure, never an internal one, so these are the
+    !! program's own contained procedures reached through a pointer rather than passed directly --
+    !! which is the same thing at the call site and keeps the tables to one loop each.
+    function pick(name) result(f)
+        character(len=*), intent(in) :: name !! the objective's name
+
+        procedure(pf_objective_func), pointer :: f !! the objective
+
+        select case (name)
+        case ("rosenbrock")
+            f => rosenbrock
+        case ("sphere")
+            f => sphere
+        case ("rastrigin")
+            f => rastrigin
+        case ("camel")
+            f => camel
+        case default
+            write (error_unit, '(a)') "benchmark_optimize: no objective named '"//name//"'"
+            error stop 1
+        end select
+
+    end function pick
+
+end module benchmark_optimize_kernels
+
 !> What `parquet_optimize` and `parquet_prima` cost: evaluations per engine per function, what
 !> threading `threads=` buys and whether the answer survives it, how DE's three tuning knobs trade
 !> against each other, and how many starts the multistart driver needs to find how many basins.
@@ -16,16 +181,13 @@
 program benchmark_optimize
 
     use parquet_optimize
-    use parquet_prima, only : pf_minimize_bobyqa, pf_bobyqa_solver
+    use parquet_prima, only : pf_minimize_bobyqa, pf_minimize_lincoa, pf_minimize_cobyla, &
+        pf_bobyqa_solver
+    use benchmark_optimize_kernels, only : rosenbrock, sphere, rastrigin, camel, spin_sphere, &
+        pick, boxed_objective, cost_units
     use iso_fortran_env, only : real64, int64, error_unit
 
     implicit none
-
-    !> How costly one `spin` evaluation is, in arbitrary work units; set by `--cost`.
-    integer, save :: cost_units = 0
-
-    !> `2 pi`, for Rastrigin.
-    real(real64), parameter :: TWO_PI = 2.0_real64*acos(-1.0_real64)
 
     character(len=32) :: mode
     integer           :: rounds, nstart_max, seeds
@@ -102,74 +264,6 @@ contains
 
     end subroutine parse_arguments
 
-    ! ---- the objectives ---------------------------------------------------------------------
-
-    !> Rosenbrock's function in any number of variables; minimum `0` at `x = 1`.
-    function rosenbrock(x) result(f)
-        real(real64), intent(in) :: x(:) !! the point
-        real(real64)             :: f    !! objective value at `x`
-
-        integer :: i
-
-        f = 0.0_real64
-        do i = 1, size(x) - 1
-            f = f + (1.0_real64 - x(i))**2 + 100.0_real64*(x(i+1) - x(i)**2)**2
-        end do
-
-    end function rosenbrock
-
-    !> Sum of squares about `1`; minimum `0` at `x = 1`.
-    function sphere(x) result(f)
-        real(real64), intent(in) :: x(:) !! the point
-        real(real64)             :: f    !! objective value at `x`
-
-        f = sum((x - 1.0_real64)**2)
-
-    end function sphere
-
-    !> Rastrigin's function; minimum `0` at the origin, with about `11**n` local minima.
-    function rastrigin(x) result(f)
-        real(real64), intent(in) :: x(:) !! the point
-        real(real64)             :: f    !! objective value at `x`
-
-        f = 10.0_real64*size(x) + sum(x**2 - 10.0_real64*cos(TWO_PI*x))
-
-    end function rastrigin
-
-    !> A three-basin function in two variables, for the `starts` mode.
-    !!
-    !! The six-hump camel: six local minima over `[-3, 3] x [-2, 2]`, two of them global.
-    function camel(x) result(f)
-        real(real64), intent(in) :: x(:) !! the point
-        real(real64)             :: f    !! objective value at `x`
-
-        f = (4.0_real64 - 2.1_real64*x(1)**2 + x(1)**4/3.0_real64)*x(1)**2 + x(1)*x(2) &
-            + (-4.0_real64 + 4.0_real64*x(2)**2)*x(2)**2
-
-    end function camel
-
-    !> The sphere, made deliberately expensive per evaluation by `cost_units` of arithmetic.
-    !!
-    !! The spin is a chain of transcendentals with a data dependence, so no compiler may hoist or
-    !! vectorise it away, and its result is FOLDED INTO the answer rather than discarded -- a spin
-    !! whose value nothing reads is deleted at `-O2` and the ladder then measures an empty loop.
-    !! Folding it in changes the objective, not its minimiser: the added term vanishes at `x = 1`.
-    function spin_sphere(x) result(f)
-        real(real64), intent(in) :: x(:) !! the point
-        real(real64)             :: f    !! objective value at `x`
-
-        real(real64) :: burn
-        integer :: k
-
-        f = sum((x - 1.0_real64)**2)
-        burn = 1.0_real64
-        do k = 1, cost_units
-            burn = burn + sin(burn)*cos(burn)
-        end do
-        f = f + f*1.0e-300_real64*burn
-
-    end function spin_sphere
-
     ! ---- evals ------------------------------------------------------------------------------
 
     !> Evaluations each engine spends reaching each function's known minimum.
@@ -195,7 +289,8 @@ contains
 
     end subroutine run_evals
 
-    !> One function's row of the `evals` table: the simplex, BOBYQA, DE and the multistart driver.
+    !> One function's row of the `evals` table: the simplex, the three PRIMA engines, DE and the
+    !! multistart driver.
     subroutine evals_row(name, n, lo1, hi1, seeds)
         character(len=*), intent(in) :: name  !! which objective
         integer, intent(in)          :: n     !! how many variables
@@ -205,15 +300,21 @@ contains
 
         type(pf_optimize_info) :: info
         type(pf_bobyqa_solver) :: bobyqa_solver
+        type(boxed_objective)  :: boxed
         real(real64) :: x(n), lower(n), upper(n), fmin, best
         integer :: ev(seeds), s, np
+        !> The objective, bound to a local pointer rather than passed as `pick(name)` directly:
+        !! a pointer-valued function result used straight as an actual argument is rejected by ifx
+        !! (`error #6637`) and miscompiled by nagfor (`.claude/rules/fortran-gotchas.md`).
+        procedure(pf_objective_func), pointer :: fobj
 
+        fobj => pick(name)
         lower = lo1
         upper = hi1
 
         ! The simplex, from the box's own corner-ish start: one run, no seed.
         x = lo1 + 0.3_real64*(hi1 - lo1)
-        call pf_minimize_simplex(pick(name), x, fmin, spread(0.5_real64, 1, n), 0.0_real64, &
+        call pf_minimize_simplex(fobj, x, fmin, spread(0.5_real64, 1, n), 0.0_real64, &
                                  atol=1.0e-10_real64, max_neval=200000, info=info)
         print '(a12,i4,2x,a16,i12,a17,es11.3)', name, n, "simplex", info%neval, "  (one start)  ", fmin
 
@@ -221,16 +322,35 @@ contains
         ! ORDER OF MAGNITUDE against the simplex on a smooth function; on a rugged one it stops in
         ! the first basin it meets, which is the other half of what the table shows.
         x = lo1 + 0.3_real64*(hi1 - lo1)
-        call pf_minimize_bobyqa(pick(name), x, fmin, lower=lower, upper=upper, &
+        call pf_minimize_bobyqa(fobj, x, fmin, lower=lower, upper=upper, &
                                 rhobeg=0.1_real64*(hi1 - lo1), rhoend=1.0e-8_real64, &
                                 max_neval=200000, info=info)
         print '(a12,i4,2x,a16,i12,a17,es11.3)', name, n, "bobyqa", info%neval, "  (one start)  ", fmin
+
+        ! LINCOA on the same problem with the same box, which it takes as two linear constraints
+        ! per coordinate rather than as a box it stays inside. The row's point is that it is in
+        ! BOBYQA's class rather than COBYLA's: the same quadratic model, a more expensive step.
+        x = lo1 + 0.3_real64*(hi1 - lo1)
+        call pf_minimize_lincoa(fobj, x, fmin, lower=lower, upper=upper, &
+                                rhobeg=0.1_real64*(hi1 - lo1), rhoend=1.0e-8_real64, &
+                                max_neval=200000, info=info)
+        print '(a12,i4,2x,a16,i12,a17,es11.3)', name, n, "lincoa", info%neval, "  (one start)  ", fmin
+
+        ! COBYLA on the same problem, with no nonlinear constraint at all: the row exists to show
+        ! what a LINEAR model costs on a smooth objective the other two fit a quadratic to, which
+        ! is the reason the guide says to reach for it only when a constraint leaves no choice.
+        boxed%fun => fobj
+        x = lo1 + 0.3_real64*(hi1 - lo1)
+        call pf_minimize_cobyla(boxed, x, fmin, lower=lower, upper=upper, &
+                                rhobeg=0.1_real64*(hi1 - lo1), rhoend=1.0e-8_real64, &
+                                max_neval=200000, info=info)
+        print '(a12,i4,2x,a16,i12,a17,es11.3)', name, n, "cobyla", info%neval, "  (one start)  ", fmin
 
         ! BOBYQA under the multistart driver, which is how a local model-based engine is used on a
         ! function with more than one basin.
         best = huge(1.0_real64)
         do s = 1, seeds
-            call pf_minimize_multistart(pick(name), lower, upper, int(s, int64), x, fmin, &
+            call pf_minimize_multistart(fobj, lower, upper, int(s, int64), x, fmin, &
                                         nstart=10*n, solver=bobyqa_solver, info=info)
             ev(s) = info%neval
             best = min(best, fmin)
@@ -241,7 +361,7 @@ contains
         np = max(20, 10*n)
         best = huge(1.0_real64)
         do s = 1, seeds
-            call pf_minimize_de(pick(name), lower, upper, int(s, int64), x, fmin, np=np, &
+            call pf_minimize_de(fobj, lower, upper, int(s, int64), x, fmin, np=np, &
                                 ftarget=1.0e-8_real64, max_gen=40000, info=info)
             ev(s) = info%neval
             best = min(best, fmin)
@@ -251,7 +371,7 @@ contains
 
         best = huge(1.0_real64)
         do s = 1, seeds
-            call pf_minimize_multistart(pick(name), lower, upper, int(s, int64), x, fmin, &
+            call pf_minimize_multistart(fobj, lower, upper, int(s, int64), x, fmin, &
                                         nstart=10*n, info=info)
             ev(s) = info%neval
             best = min(best, fmin)
@@ -429,31 +549,5 @@ contains
 
     end subroutine cpu_clock
 
-    !> Selects one of the module's objectives by name, as a procedure pointer.
-    !!
-    !! A `select case` returning a pointer rather than four copies of each measurement loop. Every
-    !! callback in this library is a module procedure, never an internal one, so these are the
-    !! program's own contained procedures reached through a pointer rather than passed directly --
-    !! which is the same thing at the call site and keeps the tables to one loop each.
-    function pick(name) result(f)
-        character(len=*), intent(in) :: name !! the objective's name
-
-        procedure(pf_objective_func), pointer :: f !! the objective
-
-        select case (name)
-        case ("rosenbrock")
-            f => rosenbrock
-        case ("sphere")
-            f => sphere
-        case ("rastrigin")
-            f => rastrigin
-        case ("camel")
-            f => camel
-        case default
-            write (error_unit, '(a)') "benchmark_optimize: no objective named '"//name//"'"
-            error stop 1
-        end select
-
-    end function pick
 
 end program benchmark_optimize

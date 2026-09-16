@@ -200,6 +200,16 @@ module parquet_optimize
         !! The binding must fill exactly `n_constraints()` values. Filling fewer leaves the tail of
         !! `c` undefined and the engine reads it as a violation or a satisfaction at random, which
         !! the language cannot detect.
+        !!
+        !! **`c(x) <= 0` where feasible is PRIMA's convention and Powell's**, and SciPy's COBYLA
+        !! uses the opposite one, `c(x) >= 0`. A caller who writes SciPy's sign gets no
+        !! diagnostic: the solver minimises over the complement of the region they meant and
+        !! returns a confident answer from the wrong side of the boundary.
+        !!
+        !! WHAT THIS FORBIDS: changing the convention without renaming this binding. The test
+        !! `COBYLA answers on the constraint boundary, and the sign decides which side`
+        !! (`test/test_prima.f90`) minimises over the OUTSIDE of a disc, where the two conventions
+        !! give answers of `1` and `0` rather than answers a tolerance could confuse.
         subroutine pf_constraint_eval(this, x, c)
             import :: pf_constrained_objective, real64
             implicit none

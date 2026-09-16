@@ -52,21 +52,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   start's minimum, trimmed to the records in use. `pf_constrained_objective` is declared here so
   that every engine which does not honour nonlinear constraints refuses one. An Arrow-free entry
   module. See [Optimisation](doc/pages/utilities/optimization.md).
-- **Powell's derivative-free solvers: `parquet_prima`.** `pf_minimize_bobyqa` minimises a smooth
-  function of several variables subject to bounds, without derivatives, by Powell's BOBYQA: a
-  quadratic model interpolating `npt` points, minimised in a trust region whose radius falls from
-  `rhobeg` to `rhoend`. The engines are vendored from
+- **Powell's derivative-free solvers: `parquet_prima`.** `pf_minimize_bobyqa` (bounds),
+  `pf_minimize_lincoa` (linear equality and inequality constraints as arrays) and
+  `pf_minimize_cobyla` (nonlinear constraints from an objective extending
+  `pf_constrained_objective`) minimise a function of several variables without derivatives.
+  BOBYQA and LINCOA fit a quadratic model to `npt` interpolation points and minimise it in a trust
+  region whose radius falls from `rhobeg` to `rhoend`; COBYLA fits linear models of the objective
+  and of every constraint over a simplex. The engines are vendored from
   [PRIMA](https://github.com/libprima/prima) (Zaikun Zhang, BSD-3-Clause) at commit `43863c69`,
   reworked to this library's rules: fixed kinds, no printing layer, `pf_objective` in place of the
   procedure interface, `ieee_arithmetic` in place of the hand-rolled predicates, and a refusal in
-  place of upstream's moderated extreme barrier. Bounds are honoured at every evaluation, not only
-  at the end, and the start point is never moved — where PRIMA would move it, `rhobeg` shrinks
-  instead and the radius reached comes back in `info%rho`. `scale=` gives each coordinate its
-  characteristic magnitude, so one pair of trust-region radii serves a problem whose variables
-  differ by orders of magnitude. `pf_bobyqa_solver` drives `pf_minimize_multistart` with BOBYQA
-  from each start. Where PRIMA adjusts an invalid argument and warns, this refuses with a message.
-  Shares `pf_objective`, `pf_optimize_info` and `pf_optimize_history` with `parquet_optimize` and
-  re-exports them. An Arrow-free entry module. See
+  place of upstream's moderated extreme barrier. BOBYQA's bounds are honoured at every evaluation,
+  not only at the end, and its start point is never moved — where PRIMA would move it, `rhobeg`
+  shrinks instead and the radius reached comes back in `info%rho`. Constraint values follow
+  PRIMA's convention, `c(x) <= 0` where feasible; `info%cstrv` is the violation at the returned
+  point, measured in the caller's units, and `info%status` is `PF_OPT_INFEASIBLE` exactly when it
+  exceeds `ctol`. `scale=` gives each coordinate its characteristic magnitude, so one pair of
+  trust-region radii serves a problem whose variables differ by orders of magnitude, and the
+  bounds and constraint matrices are transformed with it. `pf_bobyqa_solver` drives
+  `pf_minimize_multistart` with BOBYQA from each start. Where PRIMA adjusts an invalid argument
+  and warns, this refuses with a message. Shares `pf_objective`, `pf_constrained_objective`,
+  `pf_optimize_info` and `pf_optimize_history` with `parquet_optimize` and re-exports them. An
+  Arrow-free entry module. See
   [Powell's derivative-free solvers](doc/pages/utilities/prima.md).
 - **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
   pixel's eight neighbours (`-1` at a missing corner). See

@@ -27,6 +27,8 @@ module test_optimize_support
     public :: always_nan, always_inf, nan_beyond_two
     public :: rastrigin, rastrigin_gradient, twin_wells, nan_corner
     public :: bad_scaling, bad_scaling_unit, BAD_SCALING_SCALE, BAD_SCALING_MIN
+    public :: disc_fit, outside_disc, dist12, sphere123, SPHERE123_CENTRE
+    public :: negative_count_disc, nan_constraint_disc
 
     !> Sum of squares about `1` plus a shift, counting its own evaluations.
     !!
@@ -67,6 +69,56 @@ module test_optimize_support
         procedure :: n_constraints => unit_disc_count         !! One constraint.
         procedure :: constraints => unit_disc_constraints     !! The disc, as `c(x) <= 0`.
     end type unit_disc
+
+    !> `feature_optimizer.md` 5.9's constrained objective: squared distance from `(1, 2)`,
+    !! restricted to the unit disc.
+    !!
+    !! Two variables exactly, unlike `unit_disc`: this one exists to reproduce the guide's own
+    !! examples, whose answers are worked out on the page in two dimensions. The constrained
+    !! minimum is the point of the unit circle nearest `(1, 2)`, which is `(1, 2)/sqrt(5)`.
+    type, extends(pf_constrained_objective) :: disc_fit
+    contains
+        procedure :: eval => disc_fit_eval               !! Squared distance from `(1, 2)`.
+        procedure :: n_constraints => disc_fit_count     !! One constraint.
+        procedure :: constraints => disc_fit_constraints !! The unit disc, as `c(x) <= 0`.
+    end type disc_fit
+
+    !> Squared distance from the origin, restricted to the OUTSIDE of the unit disc.
+    !!
+    !! The constraint-sign test (`feature_optimizer.md` 8). `c(x) = 1 - |x|^2 <= 0` keeps the
+    !! search OUT of the disc, which is the harder side: the unconstrained minimum, the origin,
+    !! is infeasible, so the answer is on the circle with value `1`. Write the constraint the
+    !! other way round -- SciPy's convention, `c(x) >= 0` feasible -- and the same solver returns
+    !! the origin with value `0`, which is what the test asserts against.
+    type, extends(pf_constrained_objective) :: outside_disc
+    contains
+        procedure :: eval => outside_disc_eval               !! Squared distance from the origin.
+        procedure :: n_constraints => outside_disc_count     !! One constraint.
+        procedure :: constraints => outside_disc_constraints !! Outside the unit disc, `c <= 0`.
+    end type outside_disc
+
+    !> A constrained objective whose `n_constraints` answers a negative number.
+    !!
+    !! Exists only so `pf_minimize_cobyla`'s refusal has something to refuse. A negative count
+    !! would either make `allocate(c(m))` fail or silently produce a zero-length array, and the
+    !! caller would never learn which.
+    type, extends(outside_disc) :: negative_count_disc
+    contains
+        procedure :: n_constraints => negative_count              !! A negative number, on purpose.
+    end type negative_count_disc
+
+    !> A constrained objective whose `constraints` returns a NaN.
+    !!
+    !! Exists only so the constraint screen has something to catch. Upstream's `moderatec` would
+    !! clamp the value and carry on, and the NaN would then decide which point COBYLA's filter
+    !! keeps (`feature_optimizer.md` Q7).
+    type, extends(outside_disc) :: nan_constraint_disc
+    contains
+        procedure :: constraints => nan_constraint                !! Returns a NaN.
+    end type nan_constraint_disc
+
+    !> The centre of `sphere123`, and its unconstrained minimiser.
+    real(real64), parameter :: SPHERE123_CENTRE(3) = [1.0_real64, 2.0_real64, 3.0_real64]
 
     !> A sphere whose centre lives in an ALLOCATABLE component, for the per-thread clone test.
     !!
@@ -156,6 +208,103 @@ contains
         c(1) = sum(x**2) - 1.0_real64
 
     end subroutine unit_disc_constraints
+
+    !> Squared distance from `(1, 2)`.
+    function disc_fit_eval(this, x) result(f)
+        class(disc_fit), intent(inout) :: this !! the objective
+        real(real64), intent(in)       :: x(:) !! the point
+        real(real64)                   :: f    !! squared distance from `(1, 2)`
+
+        f = dist12(x)
+
+    end function disc_fit_eval
+
+    !> How many constraint values `constraints` fills.
+    function disc_fit_count(this) result(m)
+        class(disc_fit), intent(in) :: this !! the objective
+        integer                     :: m    !! one
+
+        m = 1
+
+    end function disc_fit_count
+
+    !> The unit disc as `c(x) <= 0`.
+    subroutine disc_fit_constraints(this, x, c)
+        class(disc_fit), intent(inout) :: this !! the objective
+        real(real64), intent(in)       :: x(:) !! the point
+        real(real64), intent(out)      :: c(:) !! exactly `n_constraints()` values
+
+        c(1) = x(1)**2 + x(2)**2 - 1.0_real64
+
+    end subroutine disc_fit_constraints
+
+    !> Squared distance from `(1, 2)`, as a plain function: the same objective for LINCOA, which
+    !! refuses a constrained object.
+    function dist12(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! squared distance from `(1, 2)`
+
+        f = (x(1) - 1.0_real64)**2 + (x(2) - 2.0_real64)**2
+
+    end function dist12
+
+    !> Squared distance from the origin.
+    function outside_disc_eval(this, x) result(f)
+        class(outside_disc), intent(inout) :: this !! the objective
+        real(real64), intent(in)           :: x(:) !! the point
+        real(real64)                       :: f    !! squared distance from the origin
+
+        f = sum(x**2)
+
+    end function outside_disc_eval
+
+    !> How many constraint values `constraints` fills.
+    function outside_disc_count(this) result(m)
+        class(outside_disc), intent(in) :: this !! the objective
+        integer                         :: m    !! one
+
+        m = 1
+
+    end function outside_disc_count
+
+    !> The OUTSIDE of the unit disc as `c(x) <= 0`: feasible where `|x| >= 1`.
+    subroutine outside_disc_constraints(this, x, c)
+        class(outside_disc), intent(inout) :: this !! the objective
+        real(real64), intent(in)           :: x(:) !! the point
+        real(real64), intent(out)          :: c(:) !! exactly `n_constraints()` values
+
+        c(1) = 1.0_real64 - sum(x**2)
+
+    end subroutine outside_disc_constraints
+
+    !> A negative constraint count, which no engine may accept.
+    function negative_count(this) result(m)
+        class(negative_count_disc), intent(in) :: this !! the objective
+        integer                                :: m    !! a negative number, on purpose
+
+        m = -1
+
+    end function negative_count
+
+    !> A constraint value that is a NaN.
+    subroutine nan_constraint(this, x, c)
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        class(nan_constraint_disc), intent(inout) :: this !! the objective
+        real(real64), intent(in)                  :: x(:) !! the point
+        real(real64), intent(out)                 :: c(:) !! one NaN
+
+        c(1) = ieee_value(1.0_real64, ieee_quiet_nan) + sum(x)*0.0_real64
+
+    end subroutine nan_constraint
+
+    !> Squared distance from `SPHERE123_CENTRE`, for the linearly constrained KKT test.
+    function sphere123(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! squared distance from `(1, 2, 3)`
+
+        f = sum((x - SPHERE123_CENTRE)**2)
+
+    end function sphere123
 
     !> Rosenbrock's function; minimum `0` at `(1, 1)`, by inspection of its two squares.
     function rosenbrock(x) result(f)

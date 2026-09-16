@@ -216,6 +216,14 @@ done | sort | uniq -c | sort -rn
   LHS** (`out%cache%x = self%cache%x` reports a spurious bound mismatch), and the same shape with a
   deferred-length character array segfaults on CI's gfortran while running clean locally. Use an
   explicit `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop.
+- **Never pass a POINTER-VALUED FUNCTION RESULT straight to a procedure dummy**; bind it to a
+  local pointer and pass that. `call sub(pick(name))` where `pick` returns
+  `procedure(iface), pointer` is rejected outright by ifx (`error #6637: When a dummy argument is
+  a function, the corresponding actual argument must also be a function`) and miscompiled by
+  nagfor, which generates invalid C from it; gfortran accepts it, and ifx accepts it while the
+  function is HOST-associated and rejects it once the same function is use-associated — so a
+  refactor that moves the selector into a module is what surfaces it. The same binding rule covers
+  a written `ASSOCIATE` name over such a result under nagfor.
 - **A procedure POINTER passed to a generic whose specifics differ by a dummy procedure against a
   `character` dummy resolves to the CHARACTER specific under gfortran 15**, which then reads an
   empty string (`parquet_grouping%agg` and `%add_agg`: `grp%agg(name, colf, out)` with `colf` a
@@ -413,8 +421,6 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
 - **A written `ASSOCIATE` name whose selector is a pointer-valued function reference panics the
   compiler at `-O1`+** (`find_node_sym -- invalid tree`); bind the result to a local pointer and
   associate on that, for every such construct.
-- **A pointer-valued function result used directly as an actual argument generates invalid C**;
-  bind it to a local pointer first.
 - **A parent-type component read through a `class(...)` pointer in a `select type`'s
   `class default` arm generates invalid C** (`no member named 'addr'`); write the concrete
   `type is (...)` arms out (`key_origin`, `src/parquet_toml.f90`; do not fold it back).

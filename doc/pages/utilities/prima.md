@@ -9,28 +9,39 @@ program with an objective in hand can `use parquet_prima` and minimise it, compi
 Fortran files and nothing of the Arrow stack. `use parquet` brings it in too. See
 [Choosing a module](../operating/choosing-a-module.html) for what each entry module costs.
 
-**One engine so far: `pf_minimize_bobyqa`**, for a problem with bounds. `pf_minimize_lincoa`
-(linear constraints) and `pf_minimize_cobyla` (nonlinear constraints) are being added; until they
-are, this page describes what is here.
+**Three engines, and the constraints decide which.**
+
+| Your problem | Engine |
+|---|---|
+| no constraints, or bounds only | `pf_minimize_bobyqa` |
+| linear constraints as well: `a*x <= b`, `a*x = b` | `pf_minimize_lincoa` |
+| a constraint that is not linear in `x` | `pf_minimize_cobyla` |
 
 ## Which engine to reach for
 
-The methods here are **local** and **model-based**. They build a quadratic that interpolates the
+BOBYQA and LINCOA are **local** and **model-based**. They build a quadratic that interpolates the
 objective at a set of points, minimise that quadratic inside a trust region, evaluate the
 objective at the result, and update the model with what they learn. On a smooth function that
 buys a great deal: the model carries curvature that a direct-search method has to rediscover with
-every step.
+every step. COBYLA is local too, but its models — of the objective AND of every constraint — are
+LINEAR, which is what lets it handle a constraint of any shape and also why it converges slowly.
 
 - **A smooth objective in a handful of variables, with bounds** — `pf_minimize_bobyqa`. On smooth
   test problems it costs of the order of a tenth to a twentieth of what the Nelder-Mead simplex
   costs and a hundredth to a thousandth of what differential evolution costs, and the gap widens
   with the number of variables. Reach for it first when each evaluation is expensive.
+- **The same, with linear constraints** — `pf_minimize_lincoa`, which is the same quadratic model
+  with an active-set trust-region step. It costs a little more per iteration than BOBYQA and is in
+  the same class.
+- **A constraint that is not linear** — `pf_minimize_cobyla`, and only then. A linear model has no
+  curvature, so it needs many more evaluations than the other two on the same objective; give it
+  the work no other engine here can do.
 - **A rugged objective with many minima** — not this page.
   [`pf_minimize_de`](optimization.html) searches a whole box and is not confined to one basin.
 - **A few basins** — [`pf_minimize_multistart`](optimization.html) with a `pf_bobyqa_solver`,
   described below: BOBYQA from each of a spread of starts.
 - **One variable** — [`pf_minimize_scalar`](optimization.html), Brent's method on a bracket.
-- **A noisy or discontinuous objective** — neither of these. A quadratic model fitted to noise is
+- **A noisy or discontinuous objective** — none of these. A quadratic model fitted to noise is
   a model of the noise; the simplex or differential evolution degrade more gracefully.
 
 **"Converged" means the engine's own stopping rule fired, not that the minimum is global.** It is
@@ -73,7 +84,15 @@ bracket:
 ```fortran
 call pf_minimize_bobyqa(f, x, fmin, [lower], [upper], [rhobeg], [rhoend], [npt], [scale], &
                         [ftarget], [max_neval], [info], [history], [context])
+call pf_minimize_lincoa(f, x, fmin, [a_ineq], [b_ineq], [a_eq], [b_eq], [lower], [upper], &
+                        [rhobeg], [rhoend], [npt], [scale], [ctol], [ftarget], [max_neval], &
+                        [info], [history], [context])
+call pf_minimize_cobyla(f, x, fmin, [a_ineq], [b_ineq], [a_eq], [b_eq], [lower], [upper], &
+                        [rhobeg], [rhoend], [scale], [ctol], [ftarget], [max_neval], [info], &
+                        [history], [context])
 ```
+
+Every argument the three share means the same thing in each.
 
 ## Supplying the objective
 
@@ -81,8 +100,13 @@ Exactly as for [`parquet_optimize`](optimization.html), and with the same types:
 plain module procedure matching `pf_objective_func`, or an object extending `pf_objective` with an
 `eval` binding, which is how an objective carries its own parameters — a data table, a model, a
 counter. Both reach the same engine through one generic. `parquet_prima` re-exports `pf_objective`,
-`pf_optimize_info` and `pf_optimize_history`, so a program that minimises and nothing else needs
-only this one import.
+`pf_constrained_objective`, `pf_optimize_info` and `pf_optimize_history`, so a program that
+minimises and nothing else needs only this one import.
+
+**`pf_minimize_cobyla` is the exception: its objective is an object and only an object**, because
+a plain function has nowhere to carry constraints. It extends `pf_constrained_objective` rather
+than `pf_objective`, adding the two bindings described under
+[Nonlinear constraints](#nonlinear-constraints-pf_minimize_cobyla) below.
 
 **The objective must return a finite value at every point the engine asks about.** A NaN or an
 infinity is a fatal error here, not a hint that the point is out of bounds:
@@ -114,6 +138,120 @@ does the other thing PRIMA offers: it reduces `rhobeg` to the room actually avai
 `info%rho` than the `rhoend` asked for — which is the only visible sign, and the reason `info%rho`
 is worth reading.
 
+**LINCOA and COBYLA treat a bound as one more linear constraint**, not as a box they stay inside.
+For LINCOA that is nearly the same thing — its iterates are feasible by construction — but for
+COBYLA it is not: it drives towards feasibility rather than starting there, so it may evaluate the
+objective outside the bounds on the way. An objective that is undefined outside its box therefore
+wants `pf_minimize_bobyqa`, or a reformulation that is defined everywhere.
+
+## Linear constraints: `pf_minimize_lincoa`
+
+The constraints are ARRAYS, one ROW per constraint and one column per variable:
+
+```fortran
+real(real64) :: a_ineq(1, 2), b_ineq(1), a_eq(1, 2), b_eq(1)
+
+a_ineq(1, :) = [1.0_real64, 1.0_real64]   ! x1 + x2 <= 1
+b_ineq       = 1.0_real64
+a_eq(1, :)   = [1.0_real64, -1.0_real64]  ! x1 - x2 = 0
+b_eq         = 0.0_real64
+
+x = 0.0_real64
+call pf_minimize_lincoa(dist_from_1_2, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                        a_eq=a_eq, b_eq=b_eq, rhoend=1.0e-8_real64, info=info)
+```
+
+Each matrix goes with its right-hand side: give one without the other and the call is refused.
+`lower` and `upper` may be given beside them and are folded in as two more inequalities each.
+An all-zero row is refused too — it is either no constraint at all or an infeasible problem
+written by accident, and neither is what anyone means to write.
+
+**The start point must be feasible**, and a start that is not is refused. LINCOA's iterates are
+feasible by construction, which is what makes it worth using: the objective is never asked for a
+value at a point the constraints forbid. PRIMA admits an infeasible start by RELAXING the
+right-hand sides to include it, and warns; this library refuses instead, because a relaxed `b` is
+a different problem and every violation reported afterwards would be measured against it. `x = 0`
+satisfies any system with a non-negative `b_ineq` and a zero `b_eq`, which is why the examples
+start there.
+
+**A quadratic with both kinds of constraint active** shows what the engine is doing. Minimising
+`|x - (1, 2, 3)|**2` subject to `x1 + x2 + x3 = 3` and `x1 >= 1`:
+
+```fortran
+a_eq(1, :)   = [1.0_real64, 1.0_real64, 1.0_real64]
+b_eq         = 3.0_real64
+a_ineq(1, :) = [-1.0_real64, 0.0_real64, 0.0_real64]   ! -x1 <= -1 is x1 >= 1
+b_ineq       = -1.0_real64
+x            = 1.0_real64                              ! feasible: sums to 3, x1 is on its bound
+```
+
+The answer is `(1, 0.5, 1.5)`: the equality pulls the free minimiser `(1, 2, 3)` onto the plane at
+`(0, 1, 2)`, the inequality pushes the first coordinate back up to `1`, and the remaining two
+share what is left.
+
+## Nonlinear constraints: `pf_minimize_cobyla`
+
+The nonlinear constraints come from the objective object, which extends `pf_constrained_objective`
+and adds two bindings to `eval`:
+
+```fortran
+type, extends(pf_constrained_objective) :: disc_fit
+contains
+    procedure :: eval          => disc_eval          ! the objective
+    procedure :: n_constraints => disc_count         ! how many values `constraints` fills
+    procedure :: constraints   => disc_constraints   ! the values themselves
+end type disc_fit
+```
+
+```fortran
+subroutine disc_constraints(this, x, c)
+    class(disc_fit), intent(inout) :: this
+    real(real64), intent(in)  :: x(:)
+    real(real64), intent(out) :: c(:)   ! exactly n_constraints() values
+    c(1) = x(1)**2 + x(2)**2 - 1.0_real64    ! feasible inside the unit disc
+end subroutine disc_constraints
+```
+
+**A point is feasible where every `c(i) <= 0`.** That is PRIMA's convention and Powell's.
+
+**SciPy's COBYLA uses the opposite convention**, `c(x) >= 0` feasible. A program ported from
+`scipy.optimize.minimize(method="COBYLA")` must negate each constraint function exactly once. This
+is worth checking twice, because getting it wrong does not raise anything: the solver minimises
+happily over the complement of the region you meant and returns a confident answer from the wrong
+side of the boundary.
+
+`n_constraints()` is read once per call and `c` is allocated to it; **the binding must fill
+exactly that many values.** Filling fewer leaves the rest undefined, and the engine will read
+whatever is there as a violation or a satisfaction at random. The language cannot check this.
+
+Linear constraints may be given as arrays beside the nonlinear ones, in the form
+`pf_minimize_lincoa` takes, and bounds beside those. There is no `npt`: COBYLA's simplex has
+`n + 1` vertices and no choice about it.
+
+**An infeasible start is normal here.** COBYLA drives towards feasibility rather than requiring
+it, which is the whole difference between its trust-region subproblem and LINCOA's.
+
+## Feasibility, `ctol` and an infeasible answer
+
+`ctol` is the violation at or below which a point counts as feasible; the default is
+`sqrt(epsilon)`, about `1.5e-8`. It applies to `pf_minimize_lincoa` and `pf_minimize_cobyla`.
+
+`info%cstrv` is the largest violation at the point returned — the largest of the bound violations,
+the inequality violations, the absolute equality residuals and the nonlinear constraint values,
+measured against **your** constraints in **your** units even when `scale=` had the engine working
+in others. `info%status` is `PF_OPT_INFEASIBLE` exactly when `info%cstrv` exceeds `ctol`, so the
+two never disagree.
+
+**An infeasible problem is not an error.** Hand COBYLA the unit disc and `x1 >= 2` together and it
+returns the least-violating point it found, with `PF_OPT_INFEASIBLE`, `converged` false, a
+positive `info%cstrv` — and nothing printed:
+
+```fortran
+if (info%status == PF_OPT_INFEASIBLE) then
+    print '(a, es9.2)', 'no feasible point; least violation found ', info%cstrv
+end if
+```
+
 ## The two radii
 
 `rhobeg` and `rhoend` are the trust region's initial and final radii, and they are the two
@@ -131,7 +269,8 @@ reversed pair is refused rather than swapped.
 
 `npt` is the number of interpolation points, from `n+2` to `(n+1)(n+2)/2`, default `2n+1`. The
 default is the usual choice: a fuller model is more accurate per step and costs more evaluations
-to maintain, and on most problems that trade does not pay.
+to maintain, and on most problems that trade does not pay. `pf_minimize_bobyqa` and
+`pf_minimize_lincoa` take it; `pf_minimize_cobyla` does not.
 
 ## `scale=`: coordinates of different magnitudes
 
@@ -157,6 +296,12 @@ Every element must be finite and positive. `rhobeg`, `rhoend` and `info%rho` are
 engine's units. On a badly conditioned quadratic the difference is stark: with the same radii and
 the same budget, the scaled run converges where the unscaled one is still two coordinate
 magnitudes away.
+
+**Constraints are transformed with it, and `info%cstrv` is not.** Give `scale=` to
+`pf_minimize_lincoa` or `pf_minimize_cobyla` and the bounds and the COLUMNS of each constraint
+matrix are rescaled to match, so the feasible region is the one you wrote. What comes back is
+measured again in your own units, against your own constraints, so `info%cstrv` and the
+`PF_OPT_INFEASIBLE` verdict taken from it mean what they would have meant without `scale=`.
 
 ## BOBYQA under the multistart driver
 
@@ -205,7 +350,7 @@ the same bits. The engines hold no state between calls.
 | `neval` | objective evaluations |
 | `niter` | trust-region iterations |
 | `rho` | the trust-region radius the run ended at, in the engine's units |
-| `cstrv` | constraint violation; `0` here, since bounds are never violated |
+| `cstrv` | constraint violation at the returned point, in your units; `0` from `pf_minimize_bobyqa`, which never violates its bounds |
 
 The status codes, and what PRIMA reported to produce each:
 
@@ -215,6 +360,7 @@ The status codes, and what PRIMA reported to produce each:
 | `PF_OPT_TARGET` | a value at or below `ftarget` was found |
 | `PF_OPT_LIMIT` | `max_neval` ran out, or the iteration cap did |
 | `PF_OPT_ROUNDING` | rounding errors left the model unimprovable, or the trust-region subproblem failed |
+| `PF_OPT_INFEASIBLE` | the run ended with `cstrv` above `ctol` (the two constrained engines only) |
 
 `history`, when present, holds every point evaluated and its value, in order, in your units.
 
@@ -229,11 +375,18 @@ Every one of these is an `error stop` carrying the entry point, the reason and y
 - a `scale` of the wrong length, or with an element that is not finite and positive;
 - a `max_neval` below one or above `huge(1)/2`;
 - an objective returning a non-finite value;
-- an objective extending `pf_constrained_objective`, which this engine cannot honour.
+- an objective extending `pf_constrained_objective` handed to anything but `pf_minimize_cobyla`,
+  which is the only engine here that reads its constraints;
+- a constraint matrix without its right-hand side, or with the wrong number of rows or columns;
+- an all-zero row in a constraint matrix;
+- a start point that violates the linear constraints (`pf_minimize_lincoa` only);
+- a negative or non-finite `ctol`;
+- an `n_constraints()` below zero;
+- a `constraints` binding returning a non-finite value.
 
 **PRIMA adjusts where this refuses.** Upstream swaps a reversed pair of radii, clamps an `npt`
-out of range, moves a start and treats a bound wider than a threshold as absent, warning each
-time. Each of those is a good decision for a library that can warn. This tier prints nothing by
+out of range, moves a start, drops a zero constraint row, relaxes the constraints to admit an
+infeasible start and treats a bound wider than a threshold as absent, warning each time. Each of those is a good decision for a library that can warn. This tier prints nothing by
 design, so an adjustment would be silent, and a silently adjusted argument is how a caller comes
 to believe they asked for something they did not.
 
@@ -241,8 +394,16 @@ to believe they asked for something they did not.
 
 The engines here are derived from [PRIMA](https://github.com/libprima/prima) (Reference
 Implementation for Powell's methods with Modernization and Amelioration, Zaikun Zhang), BSD-3-
-Clause, at commit `43863c69`. The algorithm is M. J. D. Powell's: *The BOBYQA algorithm for bound
-constrained optimization without derivatives*, DAMTP 2009/NA06, University of Cambridge.
+Clause, at commit `43863c69`. The algorithms are M. J. D. Powell's:
+
+- BOBYQA — *The BOBYQA algorithm for bound constrained optimization without derivatives*, DAMTP
+  2009/NA06, University of Cambridge.
+- LINCOA — no paper of its own; its model algebra is NEWUOA's (*The NEWUOA software for
+  unconstrained optimization without derivatives*, 2006) and its active-set step follows *On fast
+  trust region methods for quadratic models with linear constraints*, 2015.
+- COBYLA — *A direct search optimization method that models the objective and constraint functions
+  by linear interpolation*, 1994. SciPy 1.16 replaced its own Fortran 77 COBYLA with a translation
+  of this same PRIMA code.
 
 Each `src/parquet_prima_*.f90` file opens with PRIMA's licence text and a numbered list of what
 was changed in vendoring it — fixed kinds in place of the preprocessor, the printing layer

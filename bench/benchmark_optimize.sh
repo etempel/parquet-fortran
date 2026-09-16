@@ -11,10 +11,13 @@
 #             with the seeded engines averaged over several seeds and their spread printed beside
 #             the mean. The spread is not decoration: one seed is one sample of a stochastic
 #             search, and a mean quoted without it says nothing about what a caller will see.
-#             The simplex and BOBYQA rows are one run from one start each and report no spread,
-#             which is the honest answer for an engine that takes no seed. BOBYQA appears twice:
-#             alone, and under the multistart driver as a `pf_bobyqa_solver`, which is how a local
-#             model-based engine is used on a function with more than one basin.
+#             The simplex and the three PRIMA rows are one run from one start each and report no
+#             spread, which is the honest answer for an engine that takes no seed. BOBYQA appears
+#             twice: alone, and under the multistart driver as a `pf_bobyqa_solver`, which is how a
+#             local model-based engine is used on a function with more than one basin. LINCOA and
+#             COBYLA take the same box, LINCOA as linear constraints and COBYLA with no nonlinear
+#             constraint at all, so their rows measure the engines rather than the problem: the
+#             quadratic-model pair against the linear-model one.
 #
 #             It is the table the guide page's "which engine to reach for" section rests on, in
 #             orders of magnitude only. A local engine's row on Rastrigin is expected to be

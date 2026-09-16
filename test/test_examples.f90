@@ -21,8 +21,48 @@ module test_examples
     implicit none
     private
     public :: collect_tests_parquet_examples
+
+    !> `(x - 2)**2` capped at `x <= 1`, for the facade test's `pf_minimize_cobyla` call.
+    !!
+    !! `pf_constrained_objective` is reached through `use parquet` alone here, which is what
+    !! proves the facade re-exports it: without it this type would not compile.
+    type, extends(pf_constrained_objective) :: facade_capped_square
+    contains
+        procedure :: eval => facade_capped_eval             !! `(x - 2)**2`.
+        procedure :: n_constraints => facade_capped_count   !! one constraint.
+        procedure :: constraints => facade_capped_constr    !! `x - 1 <= 0`.
+    end type facade_capped_square
     !
 contains
+    !
+    !> `(x - 2)**2`.
+    function facade_capped_eval(this, x) result(f)
+        class(facade_capped_square), intent(inout) :: this !! the objective
+        real(real64), intent(in)                   :: x(:) !! the point
+        real(real64)                               :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+
+    end function facade_capped_eval
+    !
+    !> How many constraint values `constraints` fills.
+    function facade_capped_count(this) result(m)
+        class(facade_capped_square), intent(in) :: this !! the objective
+        integer                                 :: m    !! one
+
+        m = 1
+
+    end function facade_capped_count
+    !
+    !> `x - 1 <= 0`.
+    subroutine facade_capped_constr(this, x, c)
+        class(facade_capped_square), intent(inout) :: this !! the objective
+        real(real64), intent(in)                   :: x(:) !! the point
+        real(real64), intent(out)                  :: c(:) !! exactly `n_constraints()` values
+
+        c(1) = x(1) - 1.0_real64
+
+    end subroutine facade_capped_constr
     !
     subroutine collect_tests_parquet_examples(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
@@ -236,7 +276,8 @@ contains
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
-    !> parquet_prima (pf_minimize_bobyqa/pf_bobyqa_solver),
+    !> parquet_prima (pf_minimize_bobyqa/pf_minimize_lincoa/pf_minimize_cobyla/
+    !> pf_bobyqa_solver/pf_constrained_objective),
     !> parquet_settings (parquet_get_arrow_threads /
     !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
     !> parquet_get_version.
@@ -482,7 +523,7 @@ contains
             if (allocated(error)) return
         end block
 
-        ! parquet_prima: BOBYQA and its local-solver object.
+        ! parquet_prima: the three engines and the local-solver object.
         block
             type(pf_optimize_info) :: binfo
             type(pf_bobyqa_solver) :: bsolver
@@ -501,6 +542,32 @@ contains
                                         nstart=4, solver=bsolver, info=binfo)
             call check(error, abs(xv(1) - 2.0_real64) <= 1.0e-6_real64 .and. binfo%nlimit == 0, &
                 "pf_bobyqa_solver must be reachable from use parquet alone and drive the driver")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_prima: the two constrained engines, and `pf_constrained_objective` with them.
+        ! The constraint `x <= 1` cuts off the free minimiser at 2, so both must answer 1.
+        block
+            type(pf_optimize_info) :: cinfo
+            type(facade_capped_square) :: capped
+            real(real64) :: xv(1), fmin, a_ineq(1, 1), b_ineq(1)
+            a_ineq(1, 1) = 1.0_real64
+            b_ineq = 1.0_real64
+            xv = [0.0_real64]
+            call pf_minimize_lincoa(facade_offset_square, xv, fmin, a_ineq=a_ineq, &
+                                    b_ineq=b_ineq, rhobeg=0.5_real64, rhoend=1.0e-8_real64, &
+                                    info=cinfo)
+            call check(error, abs(xv(1) - 1.0_real64) <= 1.0e-6_real64 .and. &
+                cinfo%status == PF_OPT_OK, &
+                "pf_minimize_lincoa must be reachable from use parquet alone and honour x <= 1")
+            if (allocated(error)) return
+            xv = [0.0_real64]
+            call pf_minimize_cobyla(capped, xv, fmin, rhobeg=0.5_real64, rhoend=1.0e-8_real64, &
+                                    info=cinfo)
+            call check(error, abs(xv(1) - 1.0_real64) <= 1.0e-5_real64 .and. &
+                cinfo%status /= PF_OPT_INFEASIBLE, &
+                "pf_minimize_cobyla must be reachable from use parquet alone and honour its " // &
+                "own constraint")
             if (allocated(error)) return
         end block
 

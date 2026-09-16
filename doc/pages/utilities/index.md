@@ -55,12 +55,15 @@ helpers, and the two generators meant to be copied into your own project.
   on request, `threads=` with one clone of the objective per thread and the same answer at every
   count, and what `converged` does and does not promise. Nothing is printed.
 - [Powell's derivative-free solvers with `parquet_prima`](prima.html) — `pf_minimize_bobyqa`,
-  vendored from PRIMA: a quadratic model interpolating a set of points, minimised inside a trust
-  region and inside the bounds, which on a smooth objective costs a fraction of what a
-  direct-search method costs. Bounds honoured at every evaluation rather than only at the end, a
-  start that is never moved, the two trust-region radii and what each is for, `scale=` for
+  `pf_minimize_lincoa` and `pf_minimize_cobyla`, vendored from PRIMA: a quadratic model
+  interpolating a set of points and minimised inside a trust region, which on a smooth objective
+  costs a fraction of what a direct-search method costs, and a linear-model simplex method for
+  constraints of any shape. Which engine the constraints choose for you, bounds honoured at every
+  evaluation rather than only at the end, a start that is never moved, linear constraints as
+  arrays and nonlinear ones from the objective with PRIMA's sign convention, the two trust-region
+  radii and what each is for, `ctol` and what an infeasible answer looks like, `scale=` for
   coordinates of different magnitudes, and `pf_bobyqa_solver` to drive the multistart driver with
-  it. Where PRIMA adjusts an invalid argument and warns, this refuses. Nothing is printed.
+  BOBYQA.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

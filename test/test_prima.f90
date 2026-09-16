@@ -1,10 +1,12 @@
-!> Tests for `parquet_prima`: BOBYQA, its bounds, its `scale=` argument and its use as a local
-!! solver under `pf_minimize_multistart`.
+!> Tests for `parquet_prima`: BOBYQA, LINCOA and COBYLA, their bounds and constraints, their
+!! `scale=` argument and BOBYQA's use as a local solver under `pf_minimize_multistart`.
 !!
 !! **Every expected location is the objective's own algebra**, never a location read off a
 !! previous run: the sphere's minimum is its centre, Rosenbrock's is `(1, 1)`, `bad_scaling`'s is
 !! `BAD_SCALING_MIN` by construction, and where the minimum lies outside the box the answer is the
-!! nearest point of the box, which is again algebra rather than a recorded output.
+!! nearest point of the box, which is again algebra rather than a recorded output. The constrained
+!! answers are worked out the same way -- each is a KKT point whose multipliers are written into
+!! the test's own comment, or the projection of a centre onto a circle.
 !!
 !! **No test asserts an exact evaluation count.** A count is a whole-search-path quantity and a
 !! reassociated floating-point model moves it by a few; every count assertion here is an upper
@@ -65,7 +67,23 @@ contains
             new_unittest("pf_bobyqa_solver finds both wells under the multistart driver", &
                          test_bobyqa_solver_multistart), &
             new_unittest("pf_bobyqa_solver's options reach the runs it drives", &
-                         test_bobyqa_solver_options)]
+                         test_bobyqa_solver_options), &
+            new_unittest("LINCOA reaches the KKT point of a quadratic with both kinds of " // &
+                         "constraint active", test_lincoa_kkt_point), &
+            new_unittest("LINCOA returns the best FEASIBLE point it evaluated, not its last", &
+                         test_lincoa_returns_the_filtered_best), &
+            new_unittest("LINCOA's plain-function and object forms evaluate identically", &
+                         test_lincoa_forms_agree), &
+            new_unittest("COBYLA answers on the constraint boundary, and the sign decides which " // &
+                         "side", test_cobyla_sign_of_the_constraint), &
+            new_unittest("COBYLA honours a linear constraint beside the nonlinear one", &
+                         test_cobyla_linear_and_nonlinear), &
+            new_unittest("contradictory constraints give PF_OPT_INFEASIBLE and the least " // &
+                         "violating point", test_cobyla_infeasible), &
+            new_unittest("info%cstrv is measured in the caller's units, feasible or not", &
+                         test_cstrv_is_in_the_callers_units), &
+            new_unittest("the six calls of the guide's worked example reproduce their answers", &
+                         test_guide_examples)]
 
     end subroutine collect_tests_prima
 
@@ -513,5 +531,406 @@ contains
                    "the driver's total cannot exceed five budgets, soft by one step each")
 
     end subroutine test_bobyqa_solver_options
+
+    !> LINCOA on a quadratic with one equality and one inequality, both active at the answer.
+    !!
+    !! Minimise `|x - (1, 2, 3)|^2` subject to `x1 + x2 + x3 = 3` and `x1 >= 1`, written as
+    !! `-x1 <= -1`. The KKT point is derived here rather than recorded:
+    !!
+    !! The unconstrained minimiser `(1, 2, 3)` has coordinate sum `6`, so the equality binds.
+    !! Projecting onto the plane gives `(0, 1, 2)`, whose first coordinate is below `1`, so the
+    !! inequality binds too. With `x1 = 1` fixed, minimising `(x2-2)^2 + (x3-3)^2` on
+    !! `x2 + x3 = 2` projects `(2, 3)` onto that line and gives `(0.5, 1.5)`. So
+    !! `x* = (1, 0.5, 1.5)` and `f* = 0 + 2.25 + 2.25 = 4.5`.
+    !!
+    !! Stationarity confirms both multipliers are non-zero, which is what makes this a test of the
+    !! active set rather than of a projection: `grad f = (0, -3, -3)`, and
+    !! `(0, -3, -3) + lambda*(1, 1, 1) + mu*(-1, 0, 0) = 0` gives `lambda = 3` and `mu = 3 >= 0`.
+    subroutine test_lincoa_kkt_point(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(3), fmin, a_ineq(1, 3), b_ineq(1), a_eq(1, 3), b_eq(1)
+        real(real64), parameter :: EXPECTED(3) = [1.0_real64, 0.5_real64, 1.5_real64]
+        type(pf_optimize_info) :: info
+
+        a_eq(1, :) = 1.0_real64
+        b_eq = 3.0_real64
+        a_ineq(1, :) = [-1.0_real64, 0.0_real64, 0.0_real64]
+        b_ineq = -1.0_real64
+        ! A feasible start: the coordinates sum to 3 and the first is exactly on its bound.
+        x = 1.0_real64
+        call pf_minimize_lincoa(sphere123, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, a_eq=a_eq, &
+                                b_eq=b_eq, rhobeg=0.5_real64, rhoend=1.0e-9_real64, info=info)
+
+        call check(error, maxval(abs(x - EXPECTED)) < 1.0e-6_real64, &
+                   "LINCOA stopped away from the KKT point (1, 0.5, 1.5) derived above")
+        if (allocated(error)) return
+        ! The tolerance is the accuracy the run was asked for, propagated: `x` is right to about
+        ! `rhoend`, the gradient there has length `|(0, -3, -3)| = 4.24`, and the equality is
+        ! satisfied to about `ctol`, so a few times `1e-8` is the size of the error to expect.
+        call check(error, abs(fmin - 4.5_real64) < 1.0e-6_real64, &
+                   "the value at the KKT point is 4.5")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= sqrt(epsilon(1.0_real64)), &
+                   "the answer must be feasible; info%cstrv says it is not")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_OK .and. info%converged, &
+                   "a feasible converged run is PF_OPT_OK")
+        if (allocated(error)) return
+        call check(error, info%neval < 400, "LINCOA needed far more evaluations than expected")
+
+    end subroutine test_lincoa_kkt_point
+
+    !> The point LINCOA returns is the best FEASIBLE point in its record, not its last iterate.
+    !!
+    !! **LINCOA evaluates infeasible points**, which is upstream's design and worth knowing: the
+    !! initial interpolation set is `x0` displaced by `+/-rhobeg` along each coordinate whether
+    !! that leaves the region or not, and a geometry-improving step need not be feasible either.
+    !! Only the trust-region iterates are feasible by construction. What makes the answer sound is
+    !! therefore not the search but the FILTER: every evaluated point is offered to `savefilt`,
+    !! and `selectx` chooses from it at the end.
+    !!
+    !! WHAT THIS FORBIDS: returning the last iterate, or the lowest value regardless of
+    !! feasibility. Both are cheaper and both are wrong; the vacuity guards below fail the test if
+    !! the record holds no infeasible point with a lower value than the answer, which is exactly
+    !! the case that separates the three rules.
+    subroutine test_lincoa_returns_the_filtered_best(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, a_ineq(2, 2), b_ineq(2)
+        real(real64) :: viol, best_feasible, lowest_infeasible
+        real(real64), parameter :: CTOL = sqrt(epsilon(1.0_real64))
+        integer :: k, nfeasible, ninfeasible
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+
+        ! x1 + x2 <= 1 and -x1 + x2 <= 1: a wedge whose corner is at (0, 1). The minimum of
+        ! |x - (1, 2)|^2 over it is that corner -- moving along either edge away from it increases
+        ! the distance to (1, 2), which lies beyond the corner in the direction the wedge closes.
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        a_ineq(2, :) = [-1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+        x = [0.0_real64, 0.95_real64]
+        call pf_minimize_lincoa(dist12, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.5_real64, rhoend=1.0e-9_real64, info=info, &
+                                history=record)
+
+        call check(error, maxval(abs(x - [0.0_real64, 1.0_real64])) < 1.0e-6_real64, &
+                   "the constrained minimum is the corner (0, 1)")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= CTOL, "the answer must be feasible")
+        if (allocated(error)) return
+
+        nfeasible = 0
+        ninfeasible = 0
+        best_feasible = huge(1.0_real64)
+        lowest_infeasible = huge(1.0_real64)
+        do k = 1, record%n
+            viol = max(0.0_real64, maxval(matmul(a_ineq, record%x(:, k)) - b_ineq))
+            if (viol <= CTOL) then
+                nfeasible = nfeasible + 1
+                best_feasible = min(best_feasible, record%f(k))
+            else
+                ninfeasible = ninfeasible + 1
+                lowest_infeasible = min(lowest_infeasible, record%f(k))
+            end if
+        end do
+
+        ! Vacuity guards: without an infeasible point that beats the answer, "best feasible" and
+        ! "lowest of all" are the same rule and the test would pass either way.
+        call check(error, nfeasible >= 2 .and. ninfeasible >= 1, &
+                   "the record must hold feasible AND infeasible points for this test to mean " // &
+                   "anything")
+        if (allocated(error)) return
+        call check(error, lowest_infeasible < best_feasible, &
+                   "an infeasible point must beat every feasible one on value, or returning " // &
+                   "the lowest value outright would pass this test")
+        if (allocated(error)) return
+        call check(error, abs(fmin - best_feasible) < 1.0e-12_real64, &
+                   "the value returned is not the lowest among the feasible points evaluated")
+
+    end subroutine test_lincoa_returns_the_filtered_best
+
+    !> The object form and the plain-function form of LINCOA run the same search.
+    subroutine test_lincoa_forms_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: xf(2), xo(2), fminf, fmino, a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: infof, infoo
+        type(shifted_quadratic) :: obj
+
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+        ! `sphere` and `shifted_quadratic` are the same function: the sum of squares about 1.
+        xf = 0.0_real64
+        call pf_minimize_lincoa(sphere, xf, fminf, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.3_real64, rhoend=1.0e-9_real64, info=infof)
+        xo = 0.0_real64
+        call pf_minimize_lincoa(obj, xo, fmino, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.3_real64, rhoend=1.0e-9_real64, info=infoo)
+
+        call check(error, all(xf == xo), "the two forms answered different points")
+        if (allocated(error)) return
+        call check(error, fminf == fmino, "the two forms answered different values")
+        if (allocated(error)) return
+        call check(error, infof%neval == infoo%neval .and. obj%ncall == infoo%neval, &
+                   "the two forms spent different numbers of evaluations")
+        if (allocated(error)) return
+        ! The minimum of |x - (1, 1)|^2 on x1 + x2 <= 1 is the projection of (1, 1) onto the line,
+        ! namely (0.5, 0.5), where the value is 0.5.
+        call check(error, maxval(abs(xo - 0.5_real64)) < 1.0e-6_real64 .and. &
+                   abs(fmino - 0.5_real64) < 1.0e-6_real64, &
+                   "the constrained minimum is (0.5, 0.5) with value 0.5")
+
+    end subroutine test_lincoa_forms_agree
+
+    !> COBYLA on a constraint whose FEASIBLE side is the one the objective dislikes.
+    !!
+    !! `outside_disc` minimises `|x|^2` subject to `1 - |x|^2 <= 0`, so the feasible region is
+    !! everything OUTSIDE the unit circle and the answer sits on the circle with value `1`. Under
+    !! SciPy's opposite convention the same constraint function would mean "inside", and the
+    !! answer would be the origin with value `0`.
+    !!
+    !! WHAT THIS FORBIDS: changing the sign convention without renaming the binding
+    !! (`feature_optimizer.md` 8). The two answers are `1` and `0`, so a flipped sign cannot pass
+    !! this by a tolerance.
+    subroutine test_cobyla_sign_of_the_constraint(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin
+        type(pf_optimize_info) :: info
+        type(outside_disc) :: obj
+
+        x = [2.0_real64, 0.5_real64]
+        call pf_minimize_cobyla(obj, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-9_real64, info=info)
+
+        call check(error, abs(sum(x**2) - 1.0_real64) < 1.0e-6_real64, &
+                   "the answer must lie ON the unit circle; a flipped constraint sign puts it " // &
+                   "at the origin instead")
+        if (allocated(error)) return
+        call check(error, abs(fmin - 1.0_real64) < 1.0e-6_real64, &
+                   "the constrained minimum value is 1, not 0")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= sqrt(epsilon(1.0_real64)), &
+                   "the answer must be feasible")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_OK .and. info%converged, &
+                   "a feasible converged run is PF_OPT_OK")
+
+    end subroutine test_cobyla_sign_of_the_constraint
+
+    !> COBYLA with a linear constraint beside the nonlinear one, both active at the answer.
+    !!
+    !! `disc_fit` minimises `|x - (1, 2)|^2` inside the unit disc; the disc alone would answer
+    !! `(1, 2)/sqrt(5)`, whose first coordinate is about `0.447`. Adding `x1 <= 0.3` cuts that off,
+    !! so `x1 = 0.3` and, since `2` is above the top of the disc at that abscissa,
+    !! `x2 = sqrt(1 - 0.09) = sqrt(0.91)`. Both constraints are active.
+    subroutine test_cobyla_linear_and_nonlinear(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, a_ineq(1, 2), b_ineq(1)
+        real(real64) :: expected(2)
+        type(pf_optimize_info) :: info
+        type(disc_fit) :: obj
+
+        expected = [0.3_real64, sqrt(0.91_real64)]
+        a_ineq(1, :) = [1.0_real64, 0.0_real64]
+        b_ineq = 0.3_real64
+        x = 0.0_real64
+        call pf_minimize_cobyla(obj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, rhobeg=0.5_real64, &
+                                rhoend=1.0e-9_real64, info=info)
+
+        call check(error, maxval(abs(x - expected)) < 1.0e-6_real64, &
+                   "the answer is where the disc meets x1 = 0.3")
+        if (allocated(error)) return
+        call check(error, abs(fmin - sum((expected - [1.0_real64, 2.0_real64])**2)) < 1.0e-8_real64, &
+                   "the value is the squared distance from (1, 2) at that point")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= sqrt(epsilon(1.0_real64)) .and. info%converged, &
+                   "the answer must be feasible and the run converged")
+
+    end subroutine test_cobyla_linear_and_nonlinear
+
+    !> Contradictory constraints are not an error: the run returns the least violating point.
+    !!
+    !! The unit disc and `x1 >= 2` have no point in common. Nothing is printed, `info%status` is
+    !! `PF_OPT_INFEASIBLE`, `converged` is false, and `info%cstrv` is the violation at the point
+    !! returned -- which must be no worse than the violation at the start, or the run gave back
+    !! something worse than it was handed.
+    subroutine test_cobyla_infeasible(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, a_ineq(1, 2), b_ineq(1), start_violation
+        type(pf_optimize_info) :: info
+        type(disc_fit) :: obj
+
+        a_ineq(1, :) = [-1.0_real64, 0.0_real64]
+        b_ineq = -2.0_real64
+        x = 0.0_real64
+        ! At the start the disc is satisfied and `-x1 <= -2` is violated by 2.
+        start_violation = 2.0_real64
+        call pf_minimize_cobyla(obj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, info=info)
+
+        call check(error, info%status == PF_OPT_INFEASIBLE, &
+                   "contradictory constraints must report PF_OPT_INFEASIBLE")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "an infeasible answer never counts as converged")
+        if (allocated(error)) return
+        call check(error, info%cstrv > sqrt(epsilon(1.0_real64)), &
+                   "PF_OPT_INFEASIBLE and a feasible cstrv would contradict each other")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= start_violation, &
+                   "the point returned violates the constraints more than the start did")
+
+    end subroutine test_cobyla_infeasible
+
+    !> `info%cstrv` is the violation at the returned point in the CALLER's units, both when the
+    !> answer is feasible and when it is not.
+    !!
+    !! Two arms, because the property has two halves and only the second can fail by a factor.
+    !!
+    !! **Feasible**: `bad_scaling`'s minimiser is `(1e-3, 1e3)`; an upper bound of `5e-4` on the
+    !! first coordinate cuts it off, so the answer sits on that bound, and a bound-active answer
+    !! must not be reported as infeasible.
+    !!
+    !! **Infeasible**: the unit disc and `x1 >= 2` have no point in common, so COBYLA returns the
+    !! least-violating point it found and the violation is a real number rather than a rounding
+    !! residue. Under `scale = (10, 1)` the bound rows reach the engine divided by `scale`, so the
+    !! engine's own violation is a TENTH of the caller's -- and the test computes the caller's
+    !! itself, from the returned `x` and the constraints as written, and demands that
+    !! `info%cstrv` equal it.
+    !!
+    !! WHAT THIS FORBIDS: taking `info%cstrv` or the `PF_OPT_INFEASIBLE` verdict from the engine's
+    !! own violation rather than recomputing it (`feature_optimizer.md` 8, last entry). The two
+    !! differ by `scale` on every bound row, and by each row's gradient length in LINCOA, which
+    !! normalises them. The vacuity guard is the third assertion: the bound's violation must be
+    !! the largest one, since it is the only one `scale=` rescales.
+    subroutine test_cstrv_is_in_the_callers_units(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+        real(real64) :: bound_violation, disc_violation
+        real(real64), parameter :: CTOL = sqrt(epsilon(1.0_real64))
+        real(real64), parameter :: SCALED(2) = [10.0_real64, 1.0_real64]
+        type(pf_optimize_info) :: info
+        type(disc_fit) :: disc
+
+        ! ---- feasible: the answer sits on a bound, under an extreme scale --------------------
+        lo = [0.0_real64, 0.0_real64]
+        hi = [5.0e-4_real64, 1.0e4_real64]
+        x = [2.0e-4_real64, 500.0_real64]
+        call pf_minimize_lincoa(bad_scaling, x, fmin, lower=lo, upper=hi, &
+                                scale=BAD_SCALING_SCALE, rhobeg=0.1_real64, &
+                                rhoend=1.0e-10_real64, info=info)
+
+        ! The bound binds: the free minimiser's first coordinate is 1e-3, twice the bound.
+        call check(error, abs(x(1) - hi(1)) < 1.0e-9_real64, &
+                   "the first coordinate must sit on its upper bound")
+        if (allocated(error)) return
+        call check(error, abs(x(2) - BAD_SCALING_MIN(2)) < 1.0e-3_real64, &
+                   "the second coordinate is unbounded here and must reach its own minimiser")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= CTOL .and. info%status /= PF_OPT_INFEASIBLE, &
+                   "a feasible point must not be reported as infeasible")
+        if (allocated(error)) return
+
+        ! ---- infeasible: the violation is a number, and it is the caller's number ------------
+        lo = [2.0_real64, -10.0_real64]
+        hi = [50.0_real64, 10.0_real64]
+        x = [2.0_real64, 0.0_real64]
+        call pf_minimize_cobyla(disc, x, fmin, lower=lo, upper=hi, scale=SCALED, &
+                                rhobeg=0.2_real64, rhoend=1.0e-9_real64, info=info)
+
+        bound_violation = max(0.0_real64, maxval(lo - x), maxval(x - hi))
+        disc_violation = max(0.0_real64, x(1)**2 + x(2)**2 - 1.0_real64)
+
+        call check(error, info%status == PF_OPT_INFEASIBLE, &
+                   "the disc and x1 >= 2 have no point in common")
+        if (allocated(error)) return
+        ! Vacuity guard: `scale=` rescales the BOUND rows and nothing else, so unless the bound is
+        ! the binding violation the two units agree and this arm tests nothing.
+        call check(error, bound_violation > disc_violation, &
+                   "the bound must be the largest violation, or the engine's units and the " // &
+                   "caller's would agree and this test would pass either way")
+        if (allocated(error)) return
+        call check(error, abs(info%cstrv - bound_violation) <= 1.0e-12_real64*bound_violation, &
+                   "info%cstrv must equal the violation computed from the returned x and the " // &
+                   "constraints as the caller wrote them")
+
+    end subroutine test_cstrv_is_in_the_callers_units
+
+    !> The six calls of `feature_optimizer.md` 5.9, which the guide page prints.
+    !!
+    !! Structural figures, not measurements (Q13): each answer is the analytic one worked out on
+    !! the page, so the page and the code cannot drift apart without this failing.
+    subroutine test_guide_examples(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, lower(2), upper(2)
+        real(real64) :: a_ineq(1, 2), b_ineq(1), a_eq(1, 2), b_eq(1)
+        real(real64), parameter :: ROOT5 = sqrt(5.0_real64)
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+        type(disc_fit) :: disc
+
+        ! 1. unconstrained BOBYQA on Rosenbrock, from the classic start.
+        x = [-1.2_real64, 1.0_real64]
+        call pf_minimize_bobyqa(rosenbrock, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-8_real64, &
+                                info=info, history=record)
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-6_real64 .and. record%n == info%neval, &
+                   "call 1 must reach (1, 1) and record every evaluation")
+        if (allocated(error)) return
+
+        ! 2. the same with x1 <= 0.5, where the free minimum is out of reach. On the bound the
+        !    inner square vanishes at x2 = x1**2 = 0.25, leaving (1 - 0.5)**2 = 0.25.
+        x = [-1.2_real64, 1.0_real64]
+        lower = -2.0_real64
+        upper = [0.5_real64, 2.0_real64]
+        call pf_minimize_bobyqa(rosenbrock, x, fmin, lower=lower, upper=upper, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=info)
+        call check(error, maxval(abs(x - [0.5_real64, 0.25_real64])) < 1.0e-6_real64 .and. &
+                   info%converged, "call 2 must stop at (0.5, 0.25) with converged true")
+        if (allocated(error)) return
+
+        ! 3. LINCOA with x1 + x2 <= 1 and x1 = x2: the equality puts the answer on the diagonal
+        !    and the inequality caps it at (0.5, 0.5).
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+        a_eq(1, :) = [1.0_real64, -1.0_real64]
+        b_eq = 0.0_real64
+        x = 0.0_real64
+        call pf_minimize_lincoa(dist12, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, a_eq=a_eq, &
+                                b_eq=b_eq, rhoend=1.0e-8_real64, info=info)
+        call check(error, maxval(abs(x - 0.5_real64)) < 1.0e-6_real64, &
+                   "call 3 must stop at (0.5, 0.5)")
+        if (allocated(error)) return
+
+        ! 4. COBYLA on the same distance inside the unit disc: the nearest point of the circle
+        !    to (1, 2) is (1, 2)/sqrt(5).
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=info)
+        call check(error, maxval(abs(x - [1.0_real64/ROOT5, 2.0_real64/ROOT5])) < 1.0e-6_real64, &
+                   "call 4 must stop at (1, 2)/sqrt(5)")
+        if (allocated(error)) return
+
+        ! 5. the disc and x1 <= 0.3 together.
+        a_ineq(1, :) = [1.0_real64, 0.0_real64]
+        b_ineq = 0.3_real64
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=info)
+        call check(error, maxval(abs(x - [0.3_real64, sqrt(0.91_real64)])) < 1.0e-6_real64, &
+                   "call 5 must stop where the disc meets x1 = 0.3")
+        if (allocated(error)) return
+
+        ! 6. the disc and x1 >= 2, which have no point in common.
+        a_ineq(1, :) = [-1.0_real64, 0.0_real64]
+        b_ineq = -2.0_real64
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, info=info)
+        call check(error, info%status == PF_OPT_INFEASIBLE .and. info%cstrv > 0.0_real64, &
+                   "call 6 must report PF_OPT_INFEASIBLE with a positive violation")
+
+    end subroutine test_guide_examples
 
 end module test_prima

@@ -58,10 +58,12 @@
 !>                          Latin hypercube of starts), with the objective as an
 !>                          object carrying its own parameters or as a plain
 !>                          function.
-!>   * `parquet_prima`   -- `pf_minimize_bobyqa` (Powell's BOBYQA, vendored from
-!>                          PRIMA): a quadratic model interpolating `npt` points,
-!>                          minimised in a trust region inside the bounds, with a
-!>                          `scale=` for coordinates of different magnitudes.
+!>   * `parquet_prima`   -- Powell's derivative-free solvers, vendored from
+!>                          PRIMA: `pf_minimize_bobyqa` (bounds),
+!>                          `pf_minimize_lincoa` (linear constraints) and
+!>                          `pf_minimize_cobyla` (nonlinear constraints from a
+!>                          `pf_constrained_objective`), each with a `scale=` for
+!>                          coordinates of different magnitudes.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.

@@ -11,21 +11,27 @@
 !! too; they are what makes this file checkable against the papers rather than only against the
 !! code.
 !!
-!! **What is not vendored here.** `qradd` and `qrexc` (LINCOA's QR updates), `updateh` and `errh`
-!! (NEWUOA's and LINCOA's factorisation update -- BOBYQA has its own, in `parquet_prima_bobyqb`),
-!! `errquad`, `omega_col`, `omega_inprod`, `calvlag_qint` and `quadinc_ghv` (UOBYQA's, or reached
-!! only from upstream's `assert`s). `setij` loses its optional `sorting_direction`: BOBYQA never
-!! passes one, and the sort it would need went with it.
+!! **What is not vendored here.** `errh`, `errquad`, `omega_inprod`, `calvlag_qint` and
+!! `quadinc_ghv`: UOBYQA's, or reached only from upstream's `assert`s. `setij` loses its optional
+!! `sorting_direction`: no solver here passes one, and the sort it would need went with it.
+!!
+!! **Two `updateh`s exist in this tier, and they are not the same procedure.** The one below is
+!! NEWUOA's and LINCOA's, which carries `idz` -- the sign split of the `ZMAT` factorisation. BOBYQA
+!! has its own in `parquet_prima_bobyqb`, without `idz`, because the RESCUE method of section 5 of
+!! the BOBYQA paper removes the need for it (equivalently, `idz = 1` throughout). Upstream keeps
+!! them apart the same way, in `powalg.f90` and `bobyqa/update.f90`.
 module parquet_prima_powalg
 
     use, intrinsic :: iso_fortran_env, only : real64
     use parquet_prima_linalg, only : ZERO, HALF, ONE, EPS, REALMAX, inprod, matprod, outprod, &
-        trueloc, is_finite, DAMAGING_ROUNDING, INFO_DFT
+        trueloc, is_finite, DAMAGING_ROUNDING, INFO_DFT, &
+        diag, planerot, symmetrize, hypotenuse, isminor, norm
 
     implicit none
     private
 
-    public :: quadinc, hess_mul, omega_mul, calvlag, calbeta, calden, setij
+    public :: quadinc, hess_mul, omega_mul, omega_col, calvlag, calbeta, calden, setij
+    public :: qradd, qrexc, updateh
 
     interface quadinc
         module procedure quadinc_d0
@@ -34,6 +40,14 @@ module parquet_prima_powalg
     interface calvlag
         module procedure calvlag_lfqint
     end interface calvlag
+
+    interface qradd
+        module procedure qradd_Rdiag, qradd_Rfull
+    end interface qradd
+
+    interface qrexc
+        module procedure qrexc_Rdiag, qrexc_Rfull
+    end interface qrexc
 
 contains
 
@@ -348,5 +362,531 @@ contains
         ! end
 
     end function setij
+
+    ! ---- What LINCOA and COBYLA add: the QR updates and the factorisation update ---------------
+    !
+    ! Everything above is what BOBYQA reaches (`feature_optimizer.md` 12.1 allows a phase to extend
+    ! what an earlier one built).
+
+    !> Column `k` of `OMEGA`, upstream's `omega_col`.
+    !!
+    !! `OMEGA` is the leading `npt`-by-`npt` block of the matrix `H` of equation (3.12) of the
+    !! NEWUOA paper, held as `ZMAT*Diag(S)*ZMAT^T` with `S(1:idz-1) = -1` and the rest `+1`.
+    function omega_col(idz, zmat, k) result(y)
+        integer, intent(in) :: idz                !! the factorisation's sign split
+        integer, intent(in) :: k                  !! which column
+        real(real64), intent(in) :: zmat(:, :)    !! the factorisation's Z
+
+        real(real64) :: y(size(zmat, 1))          !! that column of `OMEGA`
+
+        real(real64) :: zk(size(zmat, 2))
+
+        zk = zmat(k, :)
+        zk(1:idz - 1) = -zk(1:idz - 1)
+        y = matprod(zmat, zk)
+
+    end function omega_col
+
+    !> Appends a column to a QR factorisation held as `Q` and the diagonal of `R`; upstream's
+    !> `qradd_Rdiag`, COBYLA's form.
+    !!
+    !! The new column is added while full column rank is kept: if `c` is outside the range of `A`
+    !! the matrix becomes `[A, c]` and `n` grows by one; if it is inside, `c` replaces the last
+    !! column instead and `n` is unchanged. Upstream's comment records that Powell's own code always
+    !! drops the LAST column in that second case, and that a snippet meant for the general case can
+    !! never be reached -- kept as upstream has it.
+    subroutine qradd_Rdiag(c, Q, Rdiag, n)  ! Used in COBYLA
+        real(real64), intent(in) :: c(:)           !! the column to append, of length m
+
+        integer, intent(inout) :: n                !! columns in the factorisation; may be increased by one
+        real(real64), intent(inout) :: Q(:, :)     !! the orthonormal columns, updated in place
+        real(real64), intent(inout) :: Rdiag(:)    !! the diagonal of R, updated in place
+
+        integer :: k
+        integer :: m
+        integer :: nsave
+        real(real64) :: cq(size(Q, 2))
+        real(real64) :: cqa(size(Q, 2))
+        real(real64) :: G(2, 2)
+        !------------------------------------------------------------!
+        !------------------------------------------------------------!
+
+        m = int(size(Q, 2))
+
+        nsave = n  ! Needed for debugging (only).
+
+        ! As in Powell's COBYLA, CQ is set to 0 at the positions with CQ being negligible as per ISMINOR.
+        ! This may not be the best choice if the subroutine is used in other contexts, e.g., LINCOA.
+        cq = matprod(c, Q)
+        cqa = matprod(abs(c), abs(Q))
+        cq(trueloc(isminor(cq, cqa))) = ZERO  ! MATLAB: cq(isminor(cq, cqa)) = zero
+
+        ! Update Q so that the columns of Q(:, N+2:M) are orthogonal to C. This is done by applying a 2D
+        ! Givens rotation to Q(:, [K, K+1]) from the right to zero C'*Q(:, K+1) out for K = N+1, ..., M-1
+        ! in the reverse order. Nothing will be done if N >= M-1.
+        do k = m - 1, n + 1, -1
+            if (abs(cq(k + 1)) > 0) then
+                ! Powell wrote CQ(K+1) /= 0 instead of ABS(CQ(K+1)) > 0. The two differ if CQ(K+1) is NaN.
+                ! If we apply the rotation below when CQ(K+1) = 0, then CQ(K) will get updated to |CQ(K)|.
+                G = planerot(cq([k, k + 1]))
+                Q(:, [k, k + 1]) = matprod(Q(:, [k, k + 1]), transpose(G))
+                cq(k) = hypotenuse(cq(k), cq(k + 1))  !cq(k) = sqrt(cq(k)**2 + cq(k + 1)**2)
+            end if
+        end do
+
+        ! Augment N by 1 if C is not in range(A).
+        ! The two IFs cannot be merged as Fortran may evaluate CQ(N+1) even if N>=M, leading to a SEGFAULT.
+        if (n < m) then
+            ! Powell's condition for the following IF: CQ(N+1) /= 0.
+            if (abs(cq(n + 1)) > EPS**2 .and. .not. isminor(cq(n + 1), cqa(n + 1))) then
+                n = n + 1
+            end if
+        end if
+
+        ! Update RDIAG so that RDIAG(N) = CQ(N) = INPROD(C, Q(:, N)). Note that N may have been augmented.
+        ! Zaikun 20230903: Different from QRADD_RFULL, Powell did not maintain the positiveness of RDIAG.
+        if (n >= 1 .and. n <= m) then  ! Indeed, N > M should not happen unless the input is wrong.
+            Rdiag(n) = cq(n)  ! Indeed, RDIAG(N) = INPROD(C, Q(:, N))
+        end if
+
+    end subroutine qradd_Rdiag
+
+    !> Appends a column to a QR factorisation held as `Q` and the full `R`; upstream's
+    !> `qradd_Rfull`, LINCOA's form.
+    !!
+    !! Unlike `qradd_Rdiag` this always appends and always increases `n` by one: in LINCOA `c` is
+    !! known not to lie in the column space of `A`.
+    subroutine qradd_Rfull(c, Q, R, n)  ! Used in LINCOA
+        real(real64), intent(in) :: c(:)          !! the column to append, of length m
+
+        integer, intent(inout) :: n               !! columns in the factorisation, increased by one
+        real(real64), intent(inout) :: Q(:, :)    !! the orthonormal columns, updated in place
+        real(real64), intent(inout) :: R(:, :)    !! the upper triangle, updated in place
+
+        integer :: k
+        integer :: m
+        real(real64) :: cq(size(Q, 2))
+        real(real64) :: G(2, 2)
+        !------------------------------------------------------------!
+        !------------------------------------------------------------!
+
+        m = int(size(Q, 1))
+
+        cq = matprod(c, Q)
+
+        ! Update Q so that the columns of Q(:, N+2:M) are orthogonal to C. This is done by applying a 2D
+        ! Givens rotation to Q(:, [K, K+1]) from the right to zero C'*Q(:, K+1) out for K = N+1, ..., M-1.
+        ! Nothing will be done if N >= M-1.
+        do k = m - 1, n + 1, -1
+            if (abs(cq(k + 1)) > 0) then  ! Powell: IF (ABS(CQ(K + 1)) > 1.0D-20 * ABS(CQ(K))) THEN
+                G = planerot(cq([k, k + 1]))
+                Q(:, [k, k + 1]) = matprod(Q(:, [k, k + 1]), transpose(G))
+                cq(k) = sqrt(cq(k)**2 + cq(k + 1)**2)
+            end if
+        end do
+
+        R(1:n, n + 1) = matprod(c, Q(:, 1:n))
+
+        ! Maintain the positiveness of the diagonal entries of R.
+        if (cq(n + 1) < 0) then
+            Q(:, n + 1) = -Q(:, n + 1)
+        end if
+        R(n + 1, n + 1) = abs(cq(n + 1))
+
+        n = n + 1
+
+    end subroutine qradd_Rfull
+
+    !> Moves column `i` of a QR factorisation to the end; upstream's `qrexc_Rdiag`, COBYLA's form.
+    !!
+    !! The factorisation is updated to one of the matrix whose columns `i` to `n` have been
+    !! rearranged to `i+1, ..., n, i`. This is how the constrained solvers drop a constraint from
+    !! the active set without refactorising.
+    subroutine qrexc_Rdiag(A, Q, Rdiag, i)  ! Used in COBYLA
+        real(real64), intent(in) :: A(:, :)        !! the matrix the factorisation belongs to, m by n
+
+        real(real64), intent(inout) :: Q(:, :)     !! the orthonormal columns, updated in place
+        real(real64), intent(inout) :: Rdiag(:)    !! the diagonal of R, updated in place
+        integer, intent(in) :: i                   !! the column to move to the end
+
+        integer :: k
+        integer :: m
+        integer :: n
+        real(real64) :: G(2, 2)
+        !------------------------------------------------------------!
+        !------------------------------------------------------------!
+
+        m = int(size(A, 1))
+        n = int(size(A, 2))
+
+        if (i <= 0 .or. i >= n) then
+            ! Only I == N is really needed, as 1 <= I <= N unless the input is wrong.
+            return
+        end if
+
+        ! Let R be the upper triangular matrix in the QR factorization, namely R = Q^T*A.
+        ! For each K, find the Givens rotation G with G*R([K, K+1], :) = [HYPT, 0], and update Q(:, [K,K+1])
+        ! to Q(:, [K, K+1])*G^T. Then R = Q^T*A is an upper triangular matrix as long as A(:, [K, K+1]) is
+        ! updated to A(:, [K+1, K]). Indeed, this new upper triangular matrix can be obtained by first
+        ! updating R([K, K+1], :) to G*R([K, K+1], :) and then exchanging its columns K and K+1; at the same
+        ! time, entries K and K+1 of R's diagonal RDIAG become [HYPT, -(RDIAG(K+1) / HYPT) * RDIAG(K)].
+        ! After this is done for each K = 1, ..., N-1, we obtain the QR factorization of the matrix that
+        ! rearranges columns [I, I+1, ..., N] of A as [I+1, ..., N, I].
+        ! Powell's code, however, is slightly different: before everything, he first exchanged columns K and
+        ! K+1 of Q (as well as rows K and K+1 of R). This makes sure that the entires of the update RDIAG
+        ! are all positive if it is the case for the original RDIAG.
+        ! Zaikun 20230903: It turns out that Powell's code does not ensure that the original RDIAG is
+        ! positive (see QRADD_RDIAG), and hence the updated RDIAG may contain negative values.
+        do k = i, n - 1
+            G = planerot([Rdiag(k + 1), inprod(Q(:, k), A(:, k + 1))])
+            Q(:, [k, k + 1]) = matprod(Q(:, [k + 1, k]), transpose(G))
+            ! Powell's code updates RDIAG in the following way:
+            ! !HYPT = SQRT(RDIAG(K + 1)**2 + INPROD(Q(:, K), A(:, K + 1))**2)
+            ! !RDIAG([K, K + 1]) = [HYPT, (RDIAG(K + 1) / HYPT) * RDIAG(K)]
+            ! Note that RDIAG(N) inherits all rounding in RDIAG(I:N-1) and Q(:, I:N-1) and hence contain
+            ! significant errors. Thus we may modify Powell's code to set only RDIAG(K) = HYPT here and then
+            ! calculate RDIAG(N) by an inner product after the loop. Nevertheless, we simply calculate RDIAG
+            ! from scratch we do below.
+        end do
+
+        ! Calculate RDIAG(I:N) from scratch.
+        Rdiag(i:n - 1) = [(inprod(Q(:, k), A(:, k + 1)), k=i, n - 1)]
+        ! MATLAB: Rdiag(i:n-1) = sum(Q(:, i:n-1) .* A(:, i+1:n), 1);  % Row vector
+        Rdiag(n) = inprod(Q(:, n), A(:, i))  ! Calculate RDIAG(N) from scratch. See the comments above.
+
+    end subroutine qrexc_Rdiag
+
+    !> Moves column `i` of a QR factorisation to the end; upstream's `qrexc_Rfull`, LINCOA's form.
+    !!
+    !! As `qrexc_Rdiag`, but with the full upper triangle rather than its diagonal, and without
+    !! needing the matrix itself.
+    subroutine qrexc_Rfull(Q, R, i)  ! Used in LINCOA
+        integer, intent(in) :: i                  !! the column to move to the end
+
+        real(real64), intent(inout) :: Q(:, :)    !! the orthonormal columns, updated in place
+        real(real64), intent(inout) :: R(:, :)    !! the upper triangle, updated in place
+
+        integer :: k
+        integer :: m
+        integer :: n
+        real(real64) :: G(2, 2)
+        real(real64) :: hypt
+        !------------------------------------------------------------!
+        !------------------------------------------------------------!
+
+        m = int(size(Q, 1))
+        n = int(size(R, 2))
+
+        if (i <= 0 .or. i >= n) then
+            ! Only I == N is really needed, as 1 <= I <= N unless the input is wrong.
+            return
+        end if
+
+        ! For each K, find the Givens rotation G with G*R([K, K+1], K+1) = [HYPT, 0]. Then make two updates.
+        ! First, update Q(:, [K, K+1]) to Q(:, [K, K+1])*G^T, and R([K, K+1], :) to G*R[K+1, K], :), which
+        ! keeps Q*R unchanged and maintains the orthogonality of Q's columns. Second, exchange columns K and
+        ! K+1 of R. Then R becomes upper triangular, and the new product Q*R exchanges columns K and K+1 of
+        ! the original one. After this is done for each K = 1, ..., N-1, we obtain the QR factorization of
+        ! the matrix that rearranges columns [I, I+1, ..., N] of A as [I+1, ..., N, I].
+        ! Powell's code, however, is slightly different: before everything, he first exchanged columns K and
+        ! K+1 of Q as well as rows K and K+1 of R. This makes sure that the diagonal entries of the updated
+        ! R are all positive if it is the case for the original R.
+        do k = i, n - 1
+            G = planerot(R([k + 1, k], k + 1))
+            ! HYPT must be calculated before R is updated.
+            hypt = hypotenuse(R(k + 1, k + 1), R(k, k + 1)) !hypt = sqrt(R(k, k + 1)**2 + R(k + 1, k + 1)**2)
+
+            ! Update Q(:, [K, K+1]).
+            Q(:, [k, k + 1]) = matprod(Q(:, [k + 1, k]), transpose(G))
+
+            ! Update R([K, K+1], :).
+            R([k, k + 1], k:n) = matprod(G, R([k + 1, k], k:n))
+            R(1:k + 1, [k, k + 1]) = R(1:k + 1, [k + 1, k])
+            ! N.B.: The above two lines implement the following while noting that R is upper triangular.
+            ! !R([K, K + 1], :) = MATPROD(G, R([K + 1, K], :))  ! No need for R([K, K+1], 1:K-1) = 0
+            ! !R(:, [K, K + 1]) = R(:, [K + 1, K])  ! No need for R(K+2:, [K, K+1]) = 0
+
+            ! Revise R([K, K+1], K). Changes nothing in theory but seems good for the practical performance.
+            R([k, k + 1], k) = [hypt, ZERO]
+
+            !----------------------------------------------------------------------------------------------!
+            ! The following code performs the update without exchanging columns K and K+1 of Q or rows K and
+            ! K+1 of R beforehand. If the diagonal entries of the original R are positive, then all the
+            ! updated ones become negative.
+            !
+            ! !G = planerot(R([k, k + 1], k + 1))
+            ! !hypt = hypotenuse(R(k + 1, k + 1), R(k, k + 1)) !hypt = sqrt(R(k, k + 1)**2 + R(k + 1, k + 1)**2)
+            ! !
+            ! !Q(:, [k, k + 1]) = matprod(Q(:, [k, k + 1]), transpose(G))
+            ! !
+            ! !R([k, k + 1], k:n) = matprod(G, R([k, k + 1], k:n))
+            ! !R(1:k + 1, [k, k + 1]) = R(1:k + 1, [k + 1, k])
+            ! !R([k, k + 1], k) = [hypt, ZERO]
+            !----------------------------------------------------------------------------------------------!
+        end do
+
+    end subroutine qrexc_Rfull
+
+    !> Replaces one interpolation point in the factorisation `[bmat, zmat, idz]`; upstream's
+    !> `updateh`, NEWUOA's and LINCOA's form.
+    !!
+    !! Section 4 of the NEWUOA paper. `xpt(:, knew)` is replaced by `xpt(:, kref) + d`, and `H` --
+    !! the inverse of the KKT system of the least-Frobenius-norm interpolation problem, equation
+    !! (3.12) -- is updated with it. `zmat` factorises the leading `npt`-by-`npt` block as
+    !! `ZMAT*Diag(S)*ZMAT^T`, `S` negative below `idz`; `bmat` holds the last `n` rows of `H` less
+    !! its `(npt+1)`-th column.
+    !!
+    !! BOBYQA's own `updateh` in `parquet_prima_bobyqb` is a different procedure: it has no `idz`.
+    !!
+    !! Upstream's note on `kref` is worth keeping: in exact arithmetic the update does not depend on
+    !! it, but computing `vlag` and `beta` from `xpt(:, knew)` instead was observed on 2022-04-12 to
+    !! put significant error into `H`.
+    subroutine updateh(knew, kref, d, xpt, idz, bmat, zmat, info)
+        ! Common modules
+
+        integer, intent(in) :: knew                  !! index in `xpt` of the point being replaced
+        integer, intent(in) :: kref                  !! the reference point the step is taken from, normally the best one
+        real(real64), intent(in) :: d(:)             !! the step from `xpt(:, kref)` to the new point
+        real(real64), intent(in) :: xpt(:, :)        !! the interpolation set, one point per column
+
+        integer, intent(inout) :: idz                !! the factorisation's sign split, updated
+        real(real64), intent(inout) :: bmat(:, :)    !! the factorisation's B, updated in place
+        real(real64), intent(inout) :: zmat(:, :)    !! the factorisation's Z, updated in place
+
+        integer, intent(out), optional :: info  !! `DAMAGING_ROUNDING` when the update went non-finite; absent means do not report
+
+        integer :: j
+        integer :: ja
+        integer :: jb
+        integer :: jl
+        integer :: n
+        integer :: npt
+        real(real64) :: alpha
+        real(real64) :: beta
+        real(real64) :: denom
+        real(real64) :: grot(2, 2)
+        real(real64) :: hcol(size(bmat, 2))
+        real(real64) :: scala
+        real(real64) :: scalb
+        real(real64) :: sqrtdn
+        real(real64) :: tau
+        real(real64) :: temp
+        real(real64) :: tempa
+        real(real64) :: tempb
+        real(real64) :: v1(size(bmat, 1))
+        real(real64) :: v2(size(bmat, 1))
+        real(real64) :: vlag(size(bmat, 2))
+
+        ! Debugging variables
+        !real(real64) :: beta_test
+        !real(real64) :: tol
+        !real(real64), allocatable :: vlag_test(:)
+        !real(real64), allocatable :: xpt_test(:, :)
+
+        n = int(size(xpt, 1))
+        npt = int(size(xpt, 2))
+
+        if (present(info)) then
+            info = INFO_DFT
+        end if
+
+        ! We must not do anything if KNEW is 0. This can only happen sometimes after a trust-region step.
+        if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
+            return
+        end if
+
+        ! Set the first NPT components of HCOL to the leading elements of the KNEW-th column of H. Powell's
+        ! code does this after ZMAT is rotated blow, which saves flops but also introduces rounding errors.
+        hcol(1:npt) = omega_col(idz, zmat, knew)
+        hcol(npt + 1:npt + n) = bmat(:, knew)
+
+        ! Calculate VLAG and BETA according to D.
+        ! VLAG contains the components of the vector H*w of the updating formula (4.11) in the NEWUOA paper,
+        ! and BETA holds the value of the parameter that has this name.
+        ! N.B.: Powell's original comments mention that VLAG is "the vector THETA*WCHECK + e_b of the
+        ! updating formula (6.11)", which does not match the published version of the NEWUOA paper.
+        vlag = calvlag(kref, bmat, d, xpt, zmat, idz)
+        beta = calbeta(kref, bmat, d, xpt, zmat, idz)  ! Nonnegative in precise arithmetic.
+
+        ! Calculate the parameters of the updating formula (4.18)--(4.20) in the NEWUOA paper.
+        alpha = hcol(knew)  ! Nonnegative in precise arithmetic.
+        tau = vlag(knew)  ! Nonzero due to the definition of KNEW.
+        denom = alpha * beta + tau**2  ! Positive in precise arithmetic.
+
+        ! After the following line, VLAG = H*w - e_KNEW in the NEWUOA paper (where t = KNEW).
+        vlag(knew) = vlag(knew) - ONE
+
+        ! Quite rarely, due to rounding errors, VLAG or BETA may not be finite, and ABS(DENOM) may not be
+        ! positive. In such cases, [BMAT, ZMAT] would be destroyed by the update, and hence we would rather
+        ! not update them at all. Or should we simply terminate the algorithm?
+        if (.not. (is_finite(sum(abs(hcol)) + sum(abs(vlag)) + abs(beta)) .and. abs(denom) > 0)) then
+            if (present(info)) then
+                info = DAMAGING_ROUNDING
+            end if
+            return
+        end if
+
+        ! Update the matrix BMAT. It implements the last N rows of (4.11) in the NEWUOA paper.
+        v1 = (alpha * vlag(npt + 1:npt + n) - tau * hcol(npt + 1:npt + n)) / denom
+        v2 = (-beta * hcol(npt + 1:npt + n) - tau * vlag(npt + 1:npt + n)) / denom
+        bmat = bmat + outprod(v1, vlag) + outprod(v2, hcol) !call r2update(bmat, ONE, v1, vlag, ONE, v2, hcol)
+        ! N.B.: The use of OUTPROD is expensive memory-wise, but it is not our concern in this implementation.
+        ! Numerically, the update above does not guarantee BMAT(:, NPT+1 : NPT+N) to be symmetric.
+        call symmetrize(bmat(:, npt + 1:npt + n))
+
+        ! Apply Givens rotations to put zeros in the KNEW-th row of ZMAT and set JL. After this,
+        ! ZMAT(KNEW, :) contains at most two nonzero entries ZMAT(KNEW, 1) and ZMAT(KNEW, JL), one
+        ! corresponding to all the columns of ZMAT that has a coefficient -1 in the factorization of
+        ! OMEGA (if any), and the other corresponding to all the columns with +1. In specific,
+        ! 1. If IDZ = 1 (all coefficients are +1 for the columns of ZMAT in the factorization of OMEGA ) or
+        ! NPT - N (all the coefficients are -1), then JL = 1, and ZMAT(KNEW, 1) is L2-norm of ZMAT(KNEW, :);
+        ! 2. If 2 <= IDZ <= NPT - N -1, then JL = IDZ, and ZMAT(KNEW, 1) is L2-norm of ZMAT(KNEW, 1 : IDZ-1),
+        ! while ZMAT(KNEW, JL) is L2 norm of ZMAT(KNEW, IDZ : NPT-N-1).
+        ! See (4.15)--(4.17) of the NEWUOA paper and the elaboration around them.
+        jl = 1  ! In the loop below, if 2 <= J < IDZ, then JL = 1; if IDZ < J <= NPT-N-1, then JL = IDZ.
+        do j = 2, npt - n - 1
+            if (j == idz) then
+                jl = idz  ! Do nothing but changing JL from 1 to IDZ. It occurs at most once along the loop.
+                cycle
+            end if
+
+            ! Powell's condition in NEWUOA/LINCOA for the IF ... THEN below: IF (ZMAT(KNEW, J) /= 0) THEN
+            ! A possible alternative: IF (ABS(ZMAT(KNEW, J)) > 1.0E-20 * ABS(ZMAT(KNEW, JL))) THEN
+            if (abs(zmat(knew, j)) > 1.0E-20 * maxval(abs(zmat))) then  ! Threshold comes from Powell's BOBYQA
+                ! Multiply a Givens rotation to ZMAT from the right so that ZMAT(KNEW, [JL,J]) becomes [*,0].
+                grot = planerot(zmat(knew, [jl, j]))  ! MATLAB: grot = planerot(zmat(knew, [jl, j])')
+                zmat(:, [jl, j]) = matprod(zmat(:, [jl, j]), transpose(grot))
+            end if
+            zmat(knew, j) = ZERO
+        end do
+
+        sqrtdn = sqrt(abs(denom))
+
+        if (jl == 1) then
+            ! Complete the updating of ZMAT when there is only 1 nonzero in ZMAT(KNEW, :) after the rotation.
+            ! This is the normal case, as IDZ = 1 in precise arithmetic; it also covers the rare case that
+            ! IDZ = NPT-N, meaning that OMEGA = -ZMAT*ZMAT^T. See (4.18) of the NEWUOA paper for details.
+            ! Note that (4.18) updates Z_{NPT-N-1}, but the code here updates ZMAT(:, 1). Correspondingly,
+            ! we implicitly update S_1 to SIGN(DENOM)*S_1 according to (4.18). If IDZ = NPT-N before the
+            ! update, then IDZ is reduced by 1, and we need to switch ZMAT(:, 1) and ZMAT(:, IDZ) to maintain
+            ! that S_J = -1 iff 1 <= J < IDZ, which is done after the END IF together with another case.
+
+            !----------------------------------------------------------------------------------------------!
+            ! Up to now, TEMPA = ZMAT(KNEW, 1) if IDZ = 1 and TEMPA = -ZMAT(KNEW, 1) if IDZ >= 2. However,
+            ! according to (4.18) of the NEWUOA paper, TEMPB should always be ZMAT(KNEW, 1)/SQRTDN
+            ! regardless of IDZ. Therefore, the following definition of TEMPB is inconsistent with (4.18).
+            ! This is probably a BUG. See also Lemma 4 and (5.13) of Powell's paper "On updating the inverse
+            ! of a KKT matrix". However, the inconsistency is hardly observable in practice, because JL = 1
+            ! implies IDZ = 1 in precise arithmetic.
+            !--------------------------------------------!
+            ! !tempb = tempa/sqrtdn
+            ! !tempa = tau/sqrtdn
+            !--------------------------------------------!
+            ! Here is the corrected version (only TEMPB is changed).
+            tempa = tau / sqrtdn
+            tempb = zmat(knew, 1) / sqrtdn
+            !----------------------------------------------------------------------------------------------!
+
+            ! The following line updates ZMAT(:, 1) according to (4.18) of the NEWUOA paper.
+            zmat(:, 1) = tempa * zmat(:, 1) - tempb * vlag(1:npt)
+
+            !----------------------------------------------------------------------------------------------!
+            ! Zaikun 20220411: The update of IDZ is decoupled from the update of ZMAT, located after END IF.
+            !----------------------------------------------------------------------------------------------!
+            ! The following six lines from Powell's NEWUOA code are obviously problematic --- SQRTDN is
+            ! always nonnegative. According to (4.18) of the NEWUOA paper, "SQRTDN < 0" and "SQRTDN >= 0"
+            ! below should be both revised to "DENOM < 0". See also the corresponding part of the LINCOA
+            ! code. Note that the NEWUOA paper uses SIGMA to denote DENOM. Check also Lemma 4 and (5.13) of
+            ! Powell's paper "On updating the inverse of a KKT matrix". Note that the BOBYQA code does not
+            ! have this part, as it does not have IDZ at all.
+            ! !if (idz == 1 .and. sqrtdn < 0) then
+            ! !    idz = 2
+            ! !end if
+            ! !if (idz >= 2 .and. sqrtdn >= 0) then
+            ! !    reduce_idz = .true.
+            ! !end if
+            ! This is the corrected version, copied from LINCOA.
+            ! !if (denom < 0) then
+            ! !    if (idz == 1) then
+            ! !        idz = 2
+            ! !    else
+            ! !        reduce_idz = .true.
+            ! !    end if
+            ! !end if
+            !----------------------------------------------------------------------------------------------!
+        else
+            ! Complete the updating of ZMAT in the alternative case: ZMAT(KNEW, :) has 2 nonzeros. See (4.19)
+            ! and (4.20) of the NEWUOA paper.
+            ! First, set JA and JB so that ZMAT(: [JA, JB]) corresponds to [Z_1, Z_2] in (4.19) when BETA>=0,
+            ! and corresponds to [Z2, Z1] in (4.20) when BETA<0. In this way, the update of ZMAT(:, [JA, JB])
+            ! follows the same scheme regardless of BETA. Indeed, since S_1 = 1 and S_2 = -1 in (4.19)-(4.20)
+            ! as elaborated above the equations, ZMAT(:, [1, JL]) always correspond to [Z_2, Z_1].
+            if (beta >= 0) then  ! ZMAT(:, [JA, JB]) corresponds to [Z_1, Z_2] in (4.19)
+                ja = jl
+                jb = 1
+            else  ! ZMAT(:, [JA, JB]) corresponds to [Z_2, Z_1] in (4.20)
+                ja = 1
+                jb = jl
+            end if
+            ! Now update ZMAT(:, [ja, jb]) according to (4.19)--(4.20) of the NEWUOA paper.
+            temp = zmat(knew, jb) / denom
+            !tempa = temp * beta
+            !tempb = temp * tau
+            tempa = (beta / denom) * zmat(knew, jb)
+            tempb = (tau / denom) * zmat(knew, jb)
+            temp = zmat(knew, ja)
+            scala = ONE / sqrt(abs(beta) * temp**2 + tau**2)  ! 1/SQRT(ZETA) in (4.19)-(4.20) of NEWUOA paper
+            scalb = scala * sqrtdn
+            zmat(:, ja) = scala * (tau * zmat(:, ja) - temp * vlag(1:npt))
+            zmat(:, jb) = scalb * (zmat(:, jb) - tempa * hcol(1:npt) - tempb * vlag(1:npt))
+
+            !----------------------------------------------------------------------------------------------!
+            ! Zaikun 20220411: The update of IDZ is decoupled from the update of ZMAT, located after END IF.
+            !----------------------------------------------------------------------------------------------!
+            ! If and only if DENOM < 0, IDZ will be revised according to the sign of BETA.
+            ! See (4.19)--(4.20) of the NEWUOA paper.
+            ! !if (denom < 0) then
+            ! !    if (beta < 0) then
+            ! !        idz = idz + 1
+            ! !    else
+            ! !        reduce_idz = .true.
+            ! !    end if
+            ! !end if
+            !----------------------------------------------------------------------------------------------!
+        end if
+
+        !--------------------------------------------------------------------------------------------------!
+        ! Zaikun 20220411: The update of IDZ is decoupled from the update of ZMAT, located right below.
+        !--------------------------------------------------------------------------------------------------!
+        ! IDZ is reduced in the following case. Then exchange ZMAT(:, 1) and ZMAT(:, IDZ).
+        ! !if (reduce_idz) then
+        ! !    idz = idz - 1
+        ! !    if (idz > 1) then
+        ! !        zmat(:, [1, idz]) = zmat(:, [idz, 1])
+        ! !    end if
+        ! !end if
+        !--------------------------------------------------------------------------------------------------!
+
+        ! According to (4.18) and (4.19)--(4.20) of the NEWUOA paper, the coefficients {S_J} need update iff
+        ! DENOM < 0, in which case one of the S_J will flip the sign when multiplied by SIGN(DENOM), leading
+        ! to an increase of IDZ (if S_J flipped from 1 to -1) or a decrease (if S_J flipped from -1 to 1).
+        if (denom < 0) then
+            if (idz == 1 .or. (idz < npt - n .and. beta < 0)) then  ! (4.18), (4.20) of the NEWUOA paper
+                idz = idz + 1
+            elseif (idz == npt - n .or. (idz > 1 .and. beta >= 0)) then  ! (4.18), (4.19) of the NEWUOA paper
+                idz = idz - 1
+                ! Exchange ZMAT(:, 1) and ZMAT(:. IDZ) if IDZ > 1. Why? No matter whether the update is
+                ! given by (4.18) (IDZ = NPT-N) or (4.19) (1 < IDZ < NPT-N and BETA >= 0), we have S_1 = +1
+                ! and S_{IDZ} = -1 at this moment (unless IDZ = 1). Thus we need to exchange ZMAT(:, 1) with
+                ! ZMAT(:, IDZ) and implicitly S_1 with S_IDZ to maintain that S_J = -1 iff 1 <= J < IDZ.
+                ! Note that, in the case of (4.18), ZMAT(:, 1) (and implicitly S_1) rather than
+                ! ZMAT(:, NPT-N-1) was updated by the code above.
+                if (idz > 1) then
+                    zmat(:, [1, idz]) = zmat(:, [idz, 1])
+                end if
+            end if
+        end if
+
+    end subroutine updateh
 
 end module parquet_prima_powalg

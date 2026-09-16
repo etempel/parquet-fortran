@@ -259,8 +259,12 @@ parquet_optimize_support.f90
 parquet_prima.f90
 parquet_prima_bobyqa.f90
 parquet_prima_bobyqb.f90
+parquet_prima_cobyla.f90
+parquet_prima_cobylb.f90
 parquet_prima_common.f90
 parquet_prima_linalg.f90
+parquet_prima_lincoa.f90
+parquet_prima_lincob.f90
 parquet_prima_powalg.f90
 parquet_random.f90
 parquet_sampling.f90
@@ -501,8 +505,12 @@ parquet_optimize_support.f90
 parquet_prima.f90
 parquet_prima_bobyqa.f90
 parquet_prima_bobyqb.f90
+parquet_prima_cobyla.f90
+parquet_prima_cobylb.f90
 parquet_prima_common.f90
 parquet_prima_linalg.f90
+parquet_prima_lincoa.f90
+parquet_prima_lincob.f90
 parquet_prima_powalg.f90
 parquet_random.f90
 parquet_read.f90

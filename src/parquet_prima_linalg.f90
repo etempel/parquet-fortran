@@ -57,10 +57,13 @@
 !!    non-finite value: it never reaches the model.
 !! 5. `memory.F90`'s `safealloc` is plain `allocate` with `int64` extents; `huge.F90`, `inf.F90`
 !!    and `infnan.F90` are the `ieee_arithmetic` predicates below.
-!! 6. Only what BOBYQA reaches is vendored. LINCOA's and COBYLA's halves of `linalg_mod`,
-!!    `powalg_mod` and `common` arrive with those solvers, so that no phase ships a procedure
-!!    nothing can call. `feature_optimizer.md` 12.1 allows a phase to extend what an earlier one
-!!    built; the alternative was about 1500 lines no test could reach.
+!! 6. Only what the three vendored solvers reach is vendored: about half of `linalg_mod` and a
+!!    third of `powalg_mod`, and of `common` only the files 6.5 names. Whatever NEWUOA and UOBYQA
+!!    alone use is not here and is not to be added (Q15). `qr`, `istriu`, `istril` and `isbanded`
+!!    are private, because nothing outside this module calls them once upstream's `call assert`
+!!    sites are gone. `norm` keeps upstream's generic name over two specifics -- the Euclidean
+!!    norm and the named one -- of which `norm_2` is the one name in this file that upstream does
+!!    not have, because upstream's `p_norm` takes an exponent this one does not.
 !! 7. Every procedure and dummy carries its `!>`/`!!`; upstream's rationale comments are kept as
 !!    plain `!` blocks, its `!====! Calculation starts !====!` decoration is not, and every line
 !!    is inside 132 columns with no `/` immediately followed by `*` (cpp runs over this file).
@@ -85,7 +88,10 @@ module parquet_prima_linalg
 
     public :: ZERO, ONE, TWO, HALF, QUART, TEN, TENTH
     public :: PI, EPS, REALMIN, REALMAX, BOUNDMAX
+    public :: MAXPOW10, FUNCMAX, CONSTRMAX, TINYCV
     public :: RHOBEG_DFT, RHOEND_DFT, FTARGET_DFT, MAXFUN_DIM_DFT
+    public :: CTOL_DFT, CWEIGHT_DFT, MAXFILT_DFT
+    public :: ETA1_DFT, ETA2_DFT, GAMMA1_DFT, GAMMA2_DFT
     public :: INFO_DFT, SMALL_TR_RADIUS, FTARGET_ACHIEVED
     public :: TRSUBP_FAILED, MAXFUN_REACHED, MAXTR_REACHED
     public :: NAN_INF_X, NAN_INF_F, NAN_INF_MODEL
@@ -93,7 +99,8 @@ module parquet_prima_linalg
     public :: is_nan, is_finite, is_inf, is_posinf, is_neginf
     public :: prima_abort
     public :: inprod, matprod, outprod, r1update, r2update, symmetrize
-    public :: diag, planerot, trueloc, norm, linspace, smat_mul_vec, int
+    public :: diag, planerot, hypotenuse, trueloc, norm, linspace, smat_mul_vec, int
+    public :: eye, inv, solve, lsqr, isminor, maximum
 
     ! ---- PRIMA's named constants (`common/consts.F90`) ----
 
@@ -122,6 +129,19 @@ module parquet_prima_linalg
     real(real64), parameter :: REALMAX = huge(0.0_real64)
     !> PRIMA's `BOUNDMAX`: a bound at or beyond this magnitude is treated as absent.
     real(real64), parameter :: BOUNDMAX = QUART * REALMAX
+    !> PRIMA's `MAXPOW10`: the decimal exponent range of the working precision.
+    integer, parameter :: MAXPOW10 = range(0.0_real64)
+    !> PRIMA's `HALF_MAXPOW10`.
+    integer, parameter :: HALF_MAXPOW10 = floor(real(MAXPOW10) / 2.0)
+    !> PRIMA's `FUNCMAX`: the magnitude beyond which upstream moderates an objective value.
+    !!
+    !! Nothing here moderates (deviation 4), so this is used only where the constrained solvers
+    !! compare against it -- `selectx`'s reference values in `parquet_prima_common`.
+    real(real64), parameter :: FUNCMAX = TEN**max(4, min(30, HALF_MAXPOW10))
+    !> PRIMA's `CONSTRMAX`: `FUNCMAX`'s counterpart for a constraint value.
+    real(real64), parameter :: CONSTRMAX = FUNCMAX
+    !> PRIMA's `TINYCV`: the positive value LINCOA gives a residual that is zero but not active.
+    real(real64), parameter :: TINYCV = TEN**max(-60, -MAXPOW10)
 
     !> PRIMA's `RHOBEG_DFT`: the default initial trust-region radius.
     real(real64), parameter :: RHOBEG_DFT = ONE
@@ -131,6 +151,22 @@ module parquet_prima_linalg
     real(real64), parameter :: FTARGET_DFT = -REALMAX
     !> PRIMA's `MAXFUN_DIM_DFT`: the default evaluation budget is this times the dimension.
     integer, parameter :: MAXFUN_DIM_DFT = 500
+    !> PRIMA's `CTOL_DFT`: a point whose constraint violation is at or below this is feasible.
+    real(real64), parameter :: CTOL_DFT = sqrt(EPS)
+    !> PRIMA's `CWEIGHT_DFT`: how heavily the filter weighs violation against value.
+    real(real64), parameter :: CWEIGHT_DFT = TEN**min(8, MAXPOW10)
+    !> PRIMA's `MIN_MAXFILT`: the shortest filter upstream recommends.
+    integer, parameter :: MIN_MAXFILT = 200
+    !> PRIMA's `MAXFILT_DFT`: how many points the constrained solvers' filter keeps.
+    integer, parameter :: MAXFILT_DFT = 10 * MIN_MAXFILT
+    !> PRIMA's `ETA1_DFT`: below this reduction ratio the trust-region radius contracts.
+    real(real64), parameter :: ETA1_DFT = TENTH
+    !> PRIMA's `ETA2_DFT`: above this reduction ratio it expands.
+    real(real64), parameter :: ETA2_DFT = 0.7_real64
+    !> PRIMA's `GAMMA1_DFT`: the contraction factor.
+    real(real64), parameter :: GAMMA1_DFT = HALF
+    !> PRIMA's `GAMMA2_DFT`: the expansion factor.
+    real(real64), parameter :: GAMMA2_DFT = TWO
 
     ! ---- PRIMA's exit codes (`common/infos.f90`) ----
 
@@ -174,6 +210,26 @@ module parquet_prima_linalg
     interface linspace
         module procedure linspace_r, linspace_i
     end interface linspace
+
+    interface eye
+        module procedure eye1, eye2
+    end interface eye
+
+    interface lsqr
+        module procedure lsqr_Rdiag, lsqr_Rfull
+    end interface lsqr
+
+    interface isminor
+        module procedure isminor0, isminor1
+    end interface isminor
+
+    interface maximum
+        module procedure maximum1, maximum2
+    end interface maximum
+
+    interface norm
+        module procedure norm_2, named_norm_vec
+    end interface norm
 
     interface int
         module procedure logical_to_int
@@ -542,11 +598,13 @@ contains
     !! evaluating `1/scaling` first cannot produce a NaN, which upstream records happening with
     !! `flang -ffast-math`.
     !!
-    !! Upstream's `p_norm` takes an optional exponent and answers the 0-, 1-, p- and
-    !! infinity-norms as well. Nothing BOBYQA calls passes one, so only this branch is vendored,
-    !! and with it goes upstream's one `call validate` in this file -- an argument check with no
-    !! argument left to check.
-    function norm(x) result(y)
+    !! **The one procedure here whose name is not upstream's.** Upstream's `p_norm` takes an
+    !! optional exponent and answers the 0-, 1-, p- and infinity-norms from the same body; nothing
+    !! in this tier passes one, so only this branch is vendored, and a procedure called `p_norm`
+    !! that refuses a `p` would be worse than a renamed one. With the other branches went
+    !! upstream's one `call validate` in this file -- an argument check with no argument left to
+    !! check.
+    function norm_2(x) result(y)
         real(real64), intent(in) :: x(:)  !! the vector
         real(real64)             :: y     !! the Euclidean norm
 
@@ -577,7 +635,43 @@ contains
             end if
         end if
 
-    end function norm
+    end function norm_2
+
+    !> A named norm of a vector, upstream's `named_norm_vec`.
+    !!
+    !! `'inf'` is the largest magnitude and `'fro'` the Euclidean norm, which is also what any
+    !! other name gets. A NaN anywhere gives a NaN and an infinity gives `+Infinity`, before the
+    !! name is even looked at, which is what makes the two norms agree on a degenerate vector.
+    !!
+    !! Upstream lowercases and strips the name through `string_mod` first. That module is not
+    !! vendored (deviation 2: it exists for the printing layer), and every call site in this tier
+    !! passes a lower-case literal, so the name is matched as it arrives.
+    function named_norm_vec(x, nname) result(y)
+        real(real64), intent(in)     :: x(:)   !! the vector
+        character(len=*), intent(in) :: nname  !! `'inf'` or `'fro'`
+        real(real64)                 :: y      !! the norm
+
+        if (size(x) == 0) then
+            y = ZERO
+        else if (.not. all(is_finite(x))) then
+            ! If X contains NaN, then Y is NaN. Otherwise, Y is Inf when X contains +/-Inf.
+            y = sum(abs(x))
+        else if (.not. any(abs(x) > 0)) then
+            ! The following is incorrect without checking the last case, as X may be all NaN.
+            y = ZERO
+        else
+            select case (nname)
+            case ('inf')
+                ! If SIZE(X) = 0, then MAXVAL(ABS(X)) = -HUGE(X); since we have handled such a
+                ! case above, it is OK to write Y = MAXVAL(ABS(X)) here, but we append a 0 for
+                ! robustness.
+                y = maxval([abs(x), ZERO])
+            case default
+                y = norm_2(x)
+            end select
+        end if
+
+    end function named_norm_vec
 
     !> The product of a packed symmetric matrix and a vector, upstream's `smat_mul_vec`.
     !!
@@ -674,5 +768,480 @@ contains
         y = merge(tsource=1, fsource=0, mask=x)
 
     end function logical_to_int
+
+    ! ---- What LINCOA and COBYLA add: the factorisations and the two constrained tests ----------
+    !
+    ! Everything above is what BOBYQA reaches. The rest of PRIMA's `linalg_mod` that this tier
+    ! needs arrives here, with the two solvers that call it (`feature_optimizer.md` 12.1 allows a
+    ! phase to extend what an earlier one built).
+
+    !> `sqrt(x1**2 + x2**2)` without overflowing or underflowing, upstream's `hypotenuse`.
+    !!
+    !! The final `min`/`max` is upstream's: without it rounding can put the answer outside
+    !! `[max(|x1|, |x2|), |x1| + |x2|]`, which the Givens rotations built on it rely on.
+    function hypotenuse(x1, x2) result(r)
+        real(real64), intent(in) :: x1    !! one side
+        real(real64), intent(in) :: x2    !! the other side
+        real(real64) :: r                 !! the hypotenuse
+        real(real64) :: y(2)
+
+        if (.not. is_finite(x1)) then
+            r = abs(x1)
+        elseif (.not. is_finite(x2)) then
+            r = abs(x2)
+        else
+            y = abs([x1, x2])
+            y = [minval(y), maxval(y)]
+            if (y(1) > sqrt(REALMIN) .and. y(2) < sqrt(REALMAX / 2.1_real64)) then
+                r = sqrt(sum(y**2))
+            elseif (y(2) > 0) then
+                r = y(2) * sqrt((y(1) / y(2))**2 + ONE)
+            else
+                r = ZERO
+            end if
+            ! Without the following line, R > Y(1) + Y(2) or R < Y(2) may happen due to rounding errors.
+            r = min(sum(y), max(y(2), r))
+        end if
+
+    end function hypotenuse
+
+    !> The `n`-by-`n` identity matrix, upstream's `eye1` behind the generic `eye`.
+    function eye1(n) result(x)
+        integer, intent(in) :: n                   !! the order
+        real(real64) :: x(max(n, 0), max(n, 0))    !! the identity matrix
+        integer :: i
+
+        if (size(x, 1) * size(x, 2) > 0) then
+            x = ZERO
+            do i = 1, int(min(size(x, 1), size(x, 2)))
+                x(i, i) = ONE
+            end do
+        end if
+
+    end function eye1
+
+    !> The `m`-by-`n` matrix with ones on the main diagonal, upstream's `eye2`.
+    !!
+    !! Rectangular as well as square: COBYLA builds its initial simplex from `eye(n, n + 1)`.
+    function eye2(m, n) result(x)
+        integer, intent(in) :: m                   !! rows
+        integer, intent(in) :: n                   !! columns
+        real(real64) :: x(max(m, 0), max(n, 0))    !! the matrix
+        integer :: i
+
+        if (size(x, 1) * size(x, 2) > 0) then
+            x = ZERO
+            do i = 1, int(min(size(x, 1), size(x, 2)))
+                x(i, i) = ONE
+            end do
+        end if
+
+    end function eye2
+
+    !> Whether `A` is banded within the given bandwidths, to a tolerance; upstream's `isbanded`.
+    function isbanded(A, lwidth, uwidth, tol) result(is_banded)
+        real(real64), intent(in) :: A(:, :)          !! the matrix
+        integer, intent(in) :: lwidth                !! how many sub-diagonals may be non-zero
+        integer, intent(in) :: uwidth                !! how many super-diagonals may be non-zero
+        real(real64), intent(in), optional :: tol    !! tolerance, absolute or relative to `maxval(abs(A))`; default zero
+        logical :: is_banded                         !! whether every entry outside the band is within `tol` of zero
+        integer :: i
+        integer :: m
+        integer :: n
+        real(real64) :: tol_loc
+
+        tol_loc = ZERO
+        if (present(tol)) then
+            tol_loc = max(tol, tol * maxval(abs(A)))
+        end if
+        if (is_nan(tol_loc)) then
+            tol_loc = ZERO
+        end if
+
+        m = int(size(A, 1))
+        n = int(size(A, 2))
+
+        is_banded = .true.
+        do i = 1, n
+            is_banded = (all(abs(A(i + lwidth + 1:m, i)) <= tol_loc) .and. all(abs(A(1:i - uwidth - 1, i)) <= tol_loc))
+            if (.not. is_banded) then
+                exit
+            end if
+        end do
+
+    end function isbanded
+
+    !> Whether `A` is lower triangular to a tolerance, upstream's `istril`.
+    function istril(A, tol) result(is_tril)
+        real(real64), intent(in) :: A(:, :)          !! the matrix
+        real(real64), intent(in), optional :: tol    !! tolerance; default zero
+        logical :: is_tril                           !! whether the strict upper triangle is within `tol` of zero
+        integer :: width
+        real(real64) :: tol_loc
+
+        if (present(tol)) then
+            tol_loc = tol
+        else
+            tol_loc = ZERO
+        end if
+        width = int(max(0, size(A, 1) - 1))
+        is_tril = isbanded(A, width, 0, tol_loc)
+
+    end function istril
+
+    !> Whether `A` is upper triangular to a tolerance, upstream's `istriu`.
+    function istriu(A, tol) result(is_triu)
+        real(real64), intent(in) :: A(:, :)          !! the matrix
+        real(real64), intent(in), optional :: tol    !! tolerance; default zero
+        logical :: is_triu                           !! whether the strict lower triangle is within `tol` of zero
+        integer :: width
+        real(real64) :: tol_loc
+
+        if (present(tol)) then
+            tol_loc = tol
+        else
+            tol_loc = ZERO
+        end if
+        width = int(max(0, size(A, 2) - 1))
+        is_triu = isbanded(A, 0, width, tol_loc)
+
+    end function istriu
+
+    !> The QR factorisation of `A`, optionally with column pivoting; upstream's `qr`.
+    !!
+    !! Givens rotations applied to the transpose, so the work is on columns throughout. With `P`
+    !! present the columns are pivoted by descending remaining norm and `A(:, P) = Q*R`; without it
+    !! `A = Q*R`.
+    !!
+    !! Upstream's guard on the first line tests `R` twice where it means `P`, so a call asking for
+    !! the permutation alone would return with `P` unset. Kept as upstream has it: no call in this
+    !! tier takes that form, and a silent divergence from the commit is worse than a dead branch.
+    subroutine qr(A, Q, R, P)
+        real(real64), intent(in) :: A(:, :)               !! the matrix to factorise
+        real(real64), intent(out), optional :: Q(:, :)    !! the orthonormal columns
+        real(real64), intent(out), optional :: R(:, :)    !! the upper triangle
+        integer, intent(out), optional :: P(:)            !! the column permutation; its presence is what turns pivoting on
+        logical :: pivot
+        integer :: i
+        integer :: j
+        integer :: k
+        integer :: m
+        integer :: n
+        real(real64) :: G(2, 2)
+        real(real64) :: Q_loc(size(A, 1), size(A, 1))
+        real(real64) :: T(size(A, 2), size(A, 1))
+
+        if (.not. (present(Q) .or. present(R) .or. present(R))) then
+            return
+        end if
+
+        m = int(size(A, 1))
+        n = int(size(A, 2))
+
+        pivot = (present(P))
+        Q_loc = eye(m)
+        T = transpose(A) ! T is the transpose of R. We consider T in order to work on columns.
+        if (pivot) then
+            P = linspace(1, n, n)
+        end if
+
+        do j = 1, n
+            if (pivot) then
+                k = int(maxloc(sum(T(j:n, j:m)**2, dim=2), dim=1))
+                if (k > 1 .and. k <= n - j + 1) then
+                    k = k + j - 1
+                    P([j, k]) = P([k, j])
+                    T([j, k], :) = T([k, j], :)
+                end if
+            end if
+            do i = m, j + 1, -1
+                G = transpose(planerot(T(j, [j, i])))
+                T(j, [j, i]) = [hypotenuse(T(j, j), T(j, i)), ZERO]  !T(j, [j, i]) = [sqrt(T(j, j)**2 + T(j, i)**2), ZERO]
+                T(j + 1:n, [j, i]) = matprod(T(j + 1:n, [j, i]), G)
+                Q_loc(:, [j, i]) = matprod(Q_loc(:, [j, i]), G)
+            end do
+        end do
+
+        if (present(Q)) then
+            Q = Q_loc(:, 1:size(Q, 2))
+        end if
+        if (present(R)) then
+            R = transpose(T(:, 1:size(R, 1)))
+        end if
+
+    end subroutine qr
+
+    !> The inverse of a small invertible matrix, upstream's `inv`.
+    !!
+    !! Naive by intent, as upstream says: forward or back substitution when `A` is triangular --
+    !! which is the case COBYLA invokes, on its simplex -- and otherwise through `qr`. Not for
+    !! general use, and not a pseudo-inverse.
+    function inv(A) result(B)
+        real(real64), intent(in) :: A(:, :)          !! the matrix
+        real(real64) :: B(size(A, 1), size(A, 1))    !! its inverse
+        integer :: P(size(A, 1))
+        integer :: InvP(size(A, 1))
+        integer :: i
+        integer :: n
+        real(real64) :: Q(size(A, 1), size(A, 1))
+        real(real64) :: R(size(A, 1), size(A, 1))
+
+        n = int(size(A, 1))
+
+        if (n <= 0) then ! Of course, N < 0 should never happen.
+            return
+        end if
+
+        if (istril(A)) then
+            ! This case is invoked in COBYLA.
+            R = transpose(A) ! Take transpose to work on columns.
+            B = ZERO
+            do i = 1, n
+                B(i, i) = ONE / R(i, i)
+                B(1:i - 1, i) = -matprod(B(1:i - 1, 1:i - 1), R(1:i - 1, i) / R(i, i))
+            end do
+            B = transpose(B)
+        elseif (istriu(A)) then
+            B = ZERO
+            do i = 1, n
+                B(i, i) = ONE / A(i, i)
+                B(1:i - 1, i) = -matprod(B(1:i - 1, 1:i - 1), A(1:i - 1, i) / A(i, i))
+            end do
+        else
+            ! This is NOT the best algorithm for the inverse, but since the QR subroutine is available ...
+            call qr(A, Q, R, P)
+            R = transpose(R) ! Take transpose to work on columns.
+            B = ZERO
+            do i = n, 1, -1
+                B(:, i) = (Q(:, i) - matprod(B(:, i + 1:n), R(i + 1:n, i))) / R(i, i)
+            end do
+            InvP(P) = linspace(1, n, n) ! The inverse permutation
+            B = transpose(B(:, InvP))
+        end if
+
+    end function inv
+
+    !> The solution of `A*x = b` for a small invertible `A`, upstream's `solve`.
+    !!
+    !! Substitution when `A` is triangular -- LINCOA's case, on the `R` of its active-set
+    !! factorisation -- and otherwise through `qr`.
+    function solve(A, b) result(x)
+        real(real64), intent(in) :: A(:, :)    !! the square matrix
+        real(real64), intent(in) :: b(:)       !! the right-hand side
+        real(real64) :: x(size(A, 2))          !! the solution
+        integer :: P(size(A, 1))
+        integer :: i
+        integer :: n
+        real(real64) :: Q(size(A, 1), size(A, 1))
+        real(real64) :: R(size(A, 1), size(A, 2))
+
+        n = int(size(A, 1))
+
+        if (n <= 0) then ! Of course, N < 0 should never happen.
+            return
+        end if
+
+        ! Zaikun 20220527: With the following code, Huawei Bisheng flang 2.1.0, Arm Fortran Compiler 23.1,
+        ! and AOCC 5.1 flang, which raise a false positive error about out-bound subscripts when invoked
+        ! with the -Mbounds flag. See https://github.com/flang-compiler/flang/issues/1238
+        if (istril(A)) then
+            do i = 1, n
+                x(i) = (b(i) - inprod(A(i, 1:i - 1), x(1:i - 1))) / A(i, i) ! INPROD = 0 if I == 1.
+            end do
+        elseif (istriu(A)) then ! This case is invoked in LINCOA.
+            do i = n, 1, -1
+                x(i) = (b(i) - inprod(A(i, i + 1:n), x(i + 1:n))) / A(i, i) ! INPROD = 0 if I == N.
+            end do
+        else
+            ! This is NOT a good algorithm for linear systems, but since the QR subroutine is available ...
+            call qr(A, Q, R, P)
+            x = matprod(b, Q)
+            do i = n, 1, -1
+                x(i) = (x(i) - inprod(R(i, i + 1:n), x(i + 1:n))) / R(i, i) ! INPROD = 0 if I == N.
+            end do
+            x(P) = x ! Handle the permutation.
+        end if
+
+    end function solve
+
+    !> The least-squares solution of `A*x = b` from an externally supplied `Q` and the diagonal of
+    !> `R`; upstream's `lsqr_Rdiag`, COBYLA's form.
+    !!
+    !! COBYLA carries the factorisation of its active constraint gradients as `Q` (its `z`) and the
+    !! diagonal `Rdiag` (its `zdota`), so the factorisation is never recomputed. The `isminor` test
+    !! is Powell's: a component whose departure from zero is attributable to rounding is set to
+    !! zero, which is what keeps the active set from drifting.
+    function lsqr_Rdiag(A, b, Q, Rdiag) result(x)
+        real(real64), intent(in) :: A(:, :)               !! the matrix, m by n
+        real(real64), intent(in) :: b(:)                  !! the right-hand side, of length m
+        real(real64), intent(in), optional :: Q(:, :)     !! the factorisation's orthonormal columns; computed here when absent
+        real(real64), intent(in), optional :: Rdiag(:)    !! the diagonal of R; computed from `Q` and `A` when absent
+        real(real64) :: x(size(A, 2))                     !! the least-squares solution
+        logical :: pivot
+        integer :: i
+        integer :: j
+        integer :: m
+        integer :: n
+        integer :: P(size(A, 2))
+        integer :: rank
+        real(real64) :: Q_loc(size(A, 1), min(size(A, 1), size(A, 2)))
+        real(real64) :: Rdiag_loc(min(size(A, 1), size(A, 2)))
+        real(real64) :: y(size(b))
+        real(real64) :: yq
+        real(real64) :: yqa
+
+        m = int(size(A, 1))
+        n = int(size(A, 2))
+
+        if (n <= 0) then ! Of course, N < 0 should never happen.
+            return
+        end if
+
+        if (present(Q)) then
+            Q_loc = Q(:, 1:size(Q_loc, 2))
+            if (present(Rdiag)) then
+                Rdiag_loc = Rdiag
+            else
+                Rdiag_loc = [(inprod(Q_loc(:, i), A(:, i)), i=1, min(m, n))]
+                ! MATLAB: Rdiag_loc = sum(Q_loc(:, 1:min(m,n)) .* A(:, 1:min(m,n)), 1); % Row vector
+            end if
+            rank = min(m, n)
+            pivot = .false.
+        else
+            call qr(A, Q=Q_loc, P=P)
+            Rdiag_loc = [(inprod(Q_loc(:, i), A(:, P(i))), i=1, min(m, n))]
+            ! MATLAB: Rdiag_loc = sum(Q_loc(:, 1:min(m,n)) .* A(:, P(1:min(m,n))), 1); % Row vector
+            rank = maxval([0, trueloc(abs(Rdiag_loc) > 0)])
+            pivot = .true.
+        end if
+
+        x = ZERO
+        y = b ! Local copy of B; B is INTENT(IN) and should not be modified.
+
+        do i = rank, 1, -1
+            if (pivot) then
+                j = P(i)
+            else
+                j = i
+            end if
+            ! The following IF comes from Powell. It forces X(J) = 0 if deviations from this value can be
+            ! attributed to computer rounding errors. This is a favorable choice in the context of COBYLA.
+            yq = inprod(y, Q_loc(:, i))
+            yqa = inprod(abs(y), abs(Q_loc(:, i)))
+            if (isminor(yq, yqa)) then
+                x(j) = ZERO
+            else
+                x(j) = yq / Rdiag_loc(i)
+                y = y - x(j) * A(:, j)
+            end if
+        end do
+
+        !  Postconditions
+        !if (DEBUGGING) then
+        ! ! The following test cannot be passed.
+        ! !call assert(norm(matprod(b - matprod(A, x), A)) <= max(tol, tol * norm(matprod(b, A))), &
+        ! ! & 'A*X is the projection of B to the column space of A', srname)
+        !end if
+
+    end function lsqr_Rdiag
+
+    !> The least-squares solution of `A*x = b` from an externally supplied economy QR factorisation;
+    !> upstream's `lsqr_Rfull`, LINCOA's form.
+    !!
+    !! The back substitution is written as the explicit double loop upstream keeps rather than the
+    !! `inprod` form beside it, for the reason upstream records: it works slightly better in LINCOA.
+    function lsqr_Rfull(b, Q, R) result(x)
+        real(real64), intent(in) :: b(:)       !! the right-hand side, of length m
+        real(real64), intent(in) :: Q(:, :)    !! the orthonormal columns, m by n
+        real(real64), intent(in) :: R(:, :)    !! the upper triangle, n by n, non-singular
+        real(real64) :: x(size(R, 2))          !! the least-squares solution
+        integer :: i
+        integer :: j
+        integer :: m
+        integer :: n
+
+        m = int(size(Q, 1))
+        n = int(size(R, 2))
+
+        if (n <= 0) then ! Of course, N < 0 should never happen.
+            return
+        end if
+
+        x = matprod(b, Q)
+        do i = n, 1, -1
+            do j = i + 1, n
+                x(i) = x(i) - R(i, j) * x(j)
+            end do
+            x(i) = x(i) / R(i, i)
+        end do
+        !--------------------------------------------------------------------------------------------------!
+        ! The following is equivalent to the above, yet the above version works slightly better in LINCOA.
+        ! !do i = n, 1, -1
+        ! !    x(i) = (inprod(Q(:, i), b) - inprod(R(i, i + 1:n), x(i + 1:n))) / R(i, i)
+        ! !end do
+        !--------------------------------------------------------------------------------------------------!
+
+    end function lsqr_Rfull
+
+    !> Whether `x` is negligible beside `ref` in this arithmetic, upstream's `isminor0`.
+    !!
+    !! Powell's test, and exact arithmetic is not what it answers: it is true when adding a tenth of
+    !! `x` to `|ref|` changes nothing that adding a fifth does not, i.e. when `x`'s departure from
+    !! zero is attributable to rounding. The sensitivity `TENTH` is Powell's.
+    pure function isminor0(x, ref) result(is_minor)
+        real(real64), intent(in) :: x      !! the value under test
+        real(real64), intent(in) :: ref    !! the reference magnitude
+        logical :: is_minor                !! whether `x` is negligible beside `ref`
+        real(real64), parameter :: sensitivity = TENTH
+        real(real64) :: refa
+        real(real64) :: refb
+
+        refa = abs(ref) + sensitivity * abs(x)
+        refb = abs(ref) + TWO * sensitivity * abs(x)
+        is_minor = (abs(ref) >= refa .or. refa >= refb)
+
+    end function isminor0
+
+    !> `isminor0` element by element, upstream's `isminor1`.
+    function isminor1(x, ref) result(is_minor)
+        real(real64), intent(in) :: x(:)      !! the values
+        real(real64), intent(in) :: ref(:)    !! the reference magnitudes, the same length
+        logical :: is_minor(size(x))          !! the element-wise verdict
+        integer :: i
+
+        is_minor = [(isminor0(x(i), ref(i)), i=1, int(size(x)))]
+
+    end function isminor1
+
+    !> `maxval(x)`, but a NaN anywhere in `x` gives a NaN; upstream's `maximum1`.
+    !!
+    !! F2018 leaves `maxval` over a NaN unspecified, and this repository's own rules say why that
+    !! matters: under nagfor at `-O4` such a reduction aborts the process. Upstream detects the NaN
+    !! through `sum(abs(x))` rather than `any(is_nan(x))`, which is one pass instead of two.
+    !!
+    !! The constrained solvers compare violations with it, where a NaN must propagate rather than be
+    !! quietly skipped.
+    function maximum1(x) result(y)
+        real(real64), intent(in) :: x(:)    !! the values
+        real(real64) :: y                   !! the largest, or a NaN if any element is one
+        real(real64) :: nan_test
+
+        !y = merge(tsource=sum(x), fsource=maxval(x), mask=any(is_nan(x)))
+        nan_test = sum(abs(x)) ! 1. Assume: X has NaN iff NAN_TEST = NaN. 2. Avoid enormous calls to IS_NAN
+        y = merge(tsource=nan_test, fsource=maxval(x), mask=is_nan(nan_test))
+
+    end function maximum1
+
+    !> `maximum1` over a matrix, upstream's `maximum2`.
+    function maximum2(x) result(y)
+        real(real64), intent(in) :: x(:, :)    !! the values
+        real(real64) :: y                      !! the largest, or a NaN if any element is one
+        real(real64) :: nan_test
+
+        !y = merge(tsource=sum(x), fsource=maxval(x), mask=any(is_nan(x)))
+        nan_test = sum(abs(x)) ! 1. Assume: X has NaN iff NAN_TEST = NaN. 2. Avoid enormous calls to IS_NAN
+        y = merge(tsource=nan_test, fsource=maxval(x), mask=is_nan(nan_test))
+
+    end function maximum2
 
 end module parquet_prima_linalg

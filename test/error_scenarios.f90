@@ -32,8 +32,9 @@ program error_scenarios
     ! The optimisation scenarios' objectives: module procedures and module-level types shared with
     ! test_optimize.f90, so a scenario and a test name the same objective and neither reaches an
     ! internal procedure.
-    use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc
-    use parquet_prima, only : pf_minimize_bobyqa
+    use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc, &
+        dist12, outside_disc, negative_count_disc, nan_constraint_disc
+    use parquet_prima, only : pf_minimize_bobyqa, pf_minimize_lincoa, pf_minimize_cobyla
     use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex, pf_minimize_de, &
         pf_minimize_multistart
     use parquet_tables
@@ -3716,6 +3717,20 @@ program error_scenarios
         call scenario_prima_nonfinite_value()
     case ("prima_bobyqa_constraints_not_honoured")
         call scenario_prima_bobyqa_constraints_not_honoured()
+    case ("prima_lincoa_constraints_not_honoured")
+        call scenario_prima_lincoa_constraints_not_honoured()
+    case ("prima_lincoa_shape")
+        call scenario_prima_lincoa_shape()
+    case ("prima_zero_constraint_row")
+        call scenario_prima_zero_constraint_row()
+    case ("prima_lincoa_infeasible_start")
+        call scenario_prima_lincoa_infeasible_start()
+    case ("prima_ctol_negative")
+        call scenario_prima_ctol_negative()
+    case ("prima_cobyla_negative_count")
+        call scenario_prima_cobyla_negative_count()
+    case ("prima_constraint_nonfinite")
+        call scenario_prima_constraint_nonfinite()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -32036,5 +32051,82 @@ contains
         call pf_minimize_bobyqa(obj, x, fmin)
         print '(a, 2es22.15)', "accepted a constrained objective in BOBYQA: ", x(1), fmin
     end subroutine scenario_prima_bobyqa_constraints_not_honoured
+
+    !> A constrained objective handed to LINCOA, which honours linear constraints but not
+    !! `c(x) <= 0`.
+    subroutine scenario_prima_lincoa_constraints_not_honoured()
+        type(unit_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = 0.5_real64
+        call pf_minimize_lincoa(obj, x, fmin)
+        print '(a, 2es22.15)', "accepted a constrained objective in LINCOA: ", x(1), fmin
+    end subroutine scenario_prima_lincoa_constraints_not_honoured
+
+    !> A constraint matrix whose shape does not match `x` and `b_ineq`.
+    subroutine scenario_prima_lincoa_shape()
+        real(real64) :: x(2), fmin, a(1, 3), b(1)
+
+        x = 0.0_real64
+        a = 1.0_real64
+        b = 1.0_real64
+        call pf_minimize_lincoa(dist12, x, fmin, a_ineq=a, b_ineq=b)
+        print '(a, es22.15)', "accepted a constraint matrix of the wrong shape: ", fmin
+    end subroutine scenario_prima_lincoa_shape
+
+    !> A constraint row of all zeros, PRIMA's `ZERO_LINEAR_CONSTRAINT`, which upstream drops with
+    !! a warning.
+    subroutine scenario_prima_zero_constraint_row()
+        real(real64) :: x(2), fmin, a(2, 2), b(2)
+
+        x = 0.0_real64
+        a(1, :) = [1.0_real64, 1.0_real64]
+        a(2, :) = 0.0_real64
+        b = 1.0_real64
+        call pf_minimize_lincoa(dist12, x, fmin, a_ineq=a, b_ineq=b)
+        print '(a, es22.15)', "accepted an all-zero constraint row: ", fmin
+    end subroutine scenario_prima_zero_constraint_row
+
+    !> A start point that violates the linear constraints, which PRIMA would admit by relaxing
+    !! their right-hand sides.
+    subroutine scenario_prima_lincoa_infeasible_start()
+        real(real64) :: x(2), fmin, a(1, 2), b(1)
+
+        x = [2.0_real64, 2.0_real64]
+        a(1, :) = [1.0_real64, 1.0_real64]
+        b = 1.0_real64
+        call pf_minimize_lincoa(dist12, x, fmin, a_ineq=a, b_ineq=b)
+        print '(a, es22.15)', "accepted an infeasible start in LINCOA: ", fmin
+    end subroutine scenario_prima_lincoa_infeasible_start
+
+    !> A negative feasibility tolerance, which PRIMA would replace by its default.
+    subroutine scenario_prima_ctol_negative()
+        type(outside_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = [2.0_real64, 0.5_real64]
+        call pf_minimize_cobyla(obj, x, fmin, ctol=-1.0_real64)
+        print '(a, es22.15)', "accepted a negative ctol: ", fmin
+    end subroutine scenario_prima_ctol_negative
+
+    !> An objective whose `n_constraints` answers a negative number.
+    subroutine scenario_prima_cobyla_negative_count()
+        type(negative_count_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = [2.0_real64, 0.5_real64]
+        call pf_minimize_cobyla(obj, x, fmin)
+        print '(a, es22.15)', "accepted a negative n_constraints: ", fmin
+    end subroutine scenario_prima_cobyla_negative_count
+
+    !> A constraint value that is a NaN, which PRIMA's `moderatec` would clamp and carry on with.
+    subroutine scenario_prima_constraint_nonfinite()
+        type(nan_constraint_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = [2.0_real64, 0.5_real64]
+        call pf_minimize_cobyla(obj, x, fmin)
+        print '(a, es22.15)', "accepted a NaN constraint value: ", fmin
+    end subroutine scenario_prima_constraint_nonfinite
     !
 end program error_scenarios

@@ -1525,8 +1525,8 @@ module test_module_surface_prima
     end type prima_surface_objective
 
     !> A CONSTRAINED objective, reached through this import alone: `pf_constrained_objective` and
-    !! both its deferred bindings are re-exported too, and phase 4's `pf_minimize_cobyla` needs
-    !! them to be.
+    !! both its deferred bindings are re-exported too, which is what `pf_minimize_cobyla` below
+    !! needs them to be.
     type, extends(pf_constrained_objective) :: prima_surface_constrained
         integer :: calls = 0 !! evaluations, unused but for keeping the type honest
     contains
@@ -1579,11 +1579,11 @@ contains
 
     end subroutine prima_surface_constr
 
-    !> Exercises `pf_minimize_bobyqa` and the solver object through `use parquet_prima` alone.
+    !> Exercises every entry point of `parquet_prima` through `use parquet_prima` alone.
     !!
-    !! Phase 4 adds the `pf_minimize_lincoa` and `pf_minimize_cobyla` calls, as those generics
-    !! reach the spec: a generic declared here with no implementation would link until something
-    !! called it, and this is the test that calls every one.
+    !! An entry point declared in the spec with no implementation links until something calls it,
+    !! so this is the test that calls every one: `pf_minimize_bobyqa` in both forms,
+    !! `pf_minimize_lincoa` in both forms, `pf_minimize_cobyla`, and `pf_bobyqa_solver%run`.
     subroutine check_prima_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
 
@@ -1593,8 +1593,11 @@ contains
         type(prima_surface_objective)   :: obj
         type(prima_surface_constrained) :: constrained
         real(real64)                    :: x(1), fmin, lower(1), upper(1), c(1)
+        real(real64)                    :: a_ineq(1, 1), b_ineq(1)
 
         what = ""
+        a_ineq(1, 1) = 1.0_real64
+        b_ineq = 1.0_real64
 
         ! BOBYQA with a plain function, with both records.
         x = [5.0_real64]
@@ -1633,6 +1636,33 @@ contains
                 call constrained%constraints([0.5_real64], c)
                 if (c(1) > 0.0_real64) what = "pf_constrained_objective%constraints"
             end if
+        end if
+
+        ! LINCOA, both forms, with one linear constraint that binds: `x <= 1` cuts off the free
+        ! minimiser at `2`, so the answer is `1`.
+        if (what == "") then
+            x = [0.0_real64]
+            call pf_minimize_lincoa(prima_offset_square, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                    rhobeg=0.5_real64, rhoend=1.0e-8_real64, ctol=1.0e-9_real64, &
+                                    info=info)
+            if (abs(x(1) - 1.0_real64) > 1.0e-6_real64) what = "pf_minimize_lincoa"
+            if (what == "" .and. info%cstrv > 1.0e-9_real64) what = "pf_optimize_info%cstrv"
+        end if
+        if (what == "") then
+            x = [0.0_real64]
+            call pf_minimize_lincoa(obj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                    rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=info)
+            if (abs(x(1) - 1.0_real64) > 1.0e-6_real64) what = "pf_minimize_lincoa with an object"
+        end if
+
+        ! COBYLA, which is the one entry point taking a `pf_constrained_objective`. The constraint
+        ! `x - 1 <= 0` binds the same way.
+        if (what == "") then
+            x = [0.0_real64]
+            call pf_minimize_cobyla(constrained, x, fmin, rhobeg=0.5_real64, &
+                                    rhoend=1.0e-8_real64, info=info)
+            if (abs(x(1) - 1.0_real64) > 1.0e-5_real64) what = "pf_minimize_cobyla"
+            if (what == "" .and. info%status == PF_OPT_INFEASIBLE) what = "PF_OPT_INFEASIBLE"
         end if
 
         ! The remaining status codes are reachable by name through this import alone.

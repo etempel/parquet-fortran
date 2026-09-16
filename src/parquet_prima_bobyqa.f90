@@ -1,5 +1,5 @@
-!> `pf_minimize_bobyqa`: the validation, the scaling, the call into the vendored engine and the
-!> translation of PRIMA's exit code into a `pf_optimize_info`.
+!> `pf_minimize_bobyqa`: the scaling, the call into the vendored engine and the translation of
+!> PRIMA's exit code into a `pf_optimize_info`.
 !!
 !! **This file replaces PRIMA's own driver** `fortran/bobyqa/bobyqa.f90` and the part of
 !! `fortran/common/preproc.f90` that it calls. Upstream reads an absent or invalid argument,
@@ -8,7 +8,9 @@
 !! treated as absent. Here an absent argument gets upstream's default and an INVALID one is
 !! refused with the message of `feature_optimizer.md` 5.6, because this library has no channel
 !! for a warning and a silently adjusted argument is how a caller comes to believe they asked for
-!! something they did not.
+!! something they did not. The refusals themselves are `refuse_bad_call` in
+!! `parquet_prima_common`, shared with the other two drivers so that one set of abort sites serves
+!! all three.
 !!
 !! **The one adjustment kept** is PRIMA's `honour_x0` reduction of `rhobeg`. BOBYQA requires the
 !! start to be at least `rhobeg` from every inactive bound; upstream can satisfy that by moving
@@ -17,65 +19,40 @@
 !! The radius the run ended at comes back in `info%rho`.
 submodule (parquet_prima) parquet_prima_bobyqa
 
-    use parquet_prima_common, only : prima_state
+    use parquet_prima_common, only : prima_state, refuse_bad_call, finish_run
     use parquet_prima_bobyqb, only : bobyqb
-    use parquet_prima_linalg, only : prima_abort, is_finite, is_nan, trueloc, &
-        ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, BOUNDMAX, &
-        RHOBEG_DFT, RHOEND_DFT, FTARGET_DFT, MAXFUN_DIM_DFT, &
-        SMALL_TR_RADIUS, FTARGET_ACHIEVED, TRSUBP_FAILED, MAXFUN_REACHED, MAXTR_REACHED, &
-        NAN_INF_X, NAN_INF_F, NAN_INF_MODEL, NO_SPACE_BETWEEN_BOUNDS, DAMAGING_ROUNDING
+    use parquet_prima_linalg, only : is_finite, trueloc, &
+        ZERO, ONE, EPS, BOUNDMAX, ETA1_DFT, ETA2_DFT, GAMMA1_DFT, GAMMA2_DFT, &
+        RHOBEG_DFT, RHOEND_DFT, FTARGET_DFT, MAXFUN_DIM_DFT
 
     implicit none
 
     !> The generic every abort message here names.
     character(len=*), parameter :: EP = "pf_minimize_bobyqa"
 
-    !> One text for every way the pair of radii can be wrong, as 5.6 specifies it.
-    character(len=*), parameter :: RADII_TEXT = &
-        "rhobeg and rhoend must be finite and positive with rhoend <= rhobeg"
-
-    !> Upstream's `ETA1_DFT`: below this reduction ratio the trust-region radius contracts.
-    real(real64), parameter :: ETA1_DFT = TENTH
-    !> Upstream's `ETA2_DFT`: above this reduction ratio it expands.
-    real(real64), parameter :: ETA2_DFT = 0.7_real64
-    !> Upstream's `GAMMA1_DFT`: the contraction factor.
-    real(real64), parameter :: GAMMA1_DFT = HALF
-    !> Upstream's `GAMMA2_DFT`: the expansion factor.
-    real(real64), parameter :: GAMMA2_DFT = TWO
-
-    !> Wraps a plain `procedure(pf_objective_func)` as an objective object.
-    !!
-    !! `parquet_optimize` has one of these for its own specifics and keeps it private, so this
-    !! module declares its own rather than widening that one: the type is an implementation
-    !! detail of "the function form delegates to the object form", not API.
-    type, extends(pf_objective) :: prima_func_objective
-        procedure(pf_objective_func), nopass, pointer :: fun => null() !! the wrapped function
-    contains
-        procedure :: eval => prima_func_objective_eval !! Calls the wrapped function.
-    end type prima_func_objective
-
 contains
 
-    !> Calls the wrapped plain function.
-    function prima_func_objective_eval(this, x) result(f)
-        class(prima_func_objective), intent(inout) :: this !! the wrapper
-        real(real64), intent(in)                   :: x(:) !! the point
-        real(real64)                               :: f    !! objective value at `x`
+    ! The adapter every driver submodule of this module uses; declared in the spec, implemented
+    ! here (`.claude/rules/code-style.md`: a separate module procedure is implemented in exactly
+    ! one descendant of the module that declares its interface).
+    module procedure prima_func_objective_eval
 
         f = this%fun(x)
 
-    end function prima_func_objective_eval
+    end procedure prima_func_objective_eval
 
     module procedure minimize_bobyqa_obj
 
-        integer :: n, npt_use, maxfun_use, prima_info, nf, status
+        integer :: n, npt_use, maxfun_use, prima_info, nf
         real(real64) :: rhobeg_use, rhoend_use, rhobeg_in, ftarget_use, fout
         real(real64), allocatable :: sc(:), lo(:), hi(:), y(:)
         logical, allocatable :: at_lower(:), at_upper(:)
         type(prima_state) :: st
 
         n = size(x)
-        call refuse_bad_call(f, n, x, lower, upper, rhobeg, rhoend, npt, scale, max_neval, context)
+        call refuse_bad_call(EP, f, x, allow_constrained=.false., lower=lower, upper=upper, &
+                             rhobeg=rhobeg, rhoend=rhoend, npt=npt, scale=scale, &
+                             max_neval=max_neval, context=context)
 
         ! ---- the caller's units to the engine's ------------------------------------------------
         allocate(sc(n))
@@ -147,38 +124,10 @@ contains
         fmin = fout
 
         ! ---- what happened ---------------------------------------------------------------------
-        select case (prima_info)
-        case (SMALL_TR_RADIUS)
-            status = PF_OPT_OK
-        case (FTARGET_ACHIEVED)
-            status = PF_OPT_TARGET
-        case (MAXFUN_REACHED, MAXTR_REACHED)
-            status = PF_OPT_LIMIT
-        case default
-            ! TRSUBP_FAILED, DAMAGING_ROUNDING and NAN_INF_MODEL are the rounding failures 5.6
-            ! names. NAN_INF_X, NAN_INF_F and NO_SPACE_BETWEEN_BOUNDS cannot arrive: a non-finite
-            ! value aborts in `evaluate` and the bounds are refused above. They land here rather
-            ! than in an arm of their own so that `status` is defined whatever the engine returns.
-            status = PF_OPT_ROUNDING
-        end select
-
-        if (present(info)) then
-            info%status = status
-            info%converged = (status == PF_OPT_OK .or. status == PF_OPT_TARGET)
-            info%neval = st%neval
-            info%niter = st%niter
-            info%rho = st%rho
-        end if
-
-        if (present(history)) then
-            history%n = st%record%n
-            if (st%record%n > 0) then
-                history%x = st%record%x(:, 1:st%record%n)
-                history%f = st%record%f(1:st%record%n)
-            else
-                allocate(history%x(n, 0), history%f(0))
-            end if
-        end if
+        !
+        ! No `cstrv`: BOBYQA honours its bounds at every point it evaluates, so a bound violation
+        ! is not a thing the caller has to be told about and `PF_OPT_INFEASIBLE` cannot arise.
+        call finish_run(prima_info, st, n, info, history)
 
     end procedure minimize_bobyqa_obj
 
@@ -231,110 +180,5 @@ contains
                                  rhoend=this%rhoend, scale=sc, max_neval=maxfun_use, info=info)
 
     end procedure bobyqa_solver_run
-
-    !> Refuses every call `feature_optimizer.md` 5.6 says is refused, before anything is allocated.
-    !!
-    !! Impure by nature: it exists to abort (`api-conventions.md`), and ifx deletes a `pure`
-    !! guard-only subroutine at `-O0`.
-    subroutine refuse_bad_call(f, n, x, lower, upper, rhobeg, rhoend, npt, scale, max_neval, &
-                               context)
-        class(pf_objective), intent(in)        :: f          !! the caller's objective
-        integer, intent(in)                    :: n          !! `size(x)`
-        real(real64), intent(in)               :: x(:)       !! the start point
-        real(real64), intent(in), optional     :: lower(:)   !! bounds
-        real(real64), intent(in), optional     :: upper(:)   !! bounds
-        real(real64), intent(in), optional     :: rhobeg     !! initial radius
-        real(real64), intent(in), optional     :: rhoend     !! final radius
-        integer, intent(in), optional          :: npt        !! interpolation points
-        real(real64), intent(in), optional     :: scale(:)   !! per-coordinate scale
-        integer, intent(in), optional          :: max_neval  !! evaluation budget
-        character(len=*), intent(in), optional :: context    !! call-site text
-
-        real(real64) :: rhobeg_test, rhoend_test
-        integer :: npt_max
-
-        ! pf_constrained_objective EXTENDS pf_objective, so the language accepts one here. An
-        ! engine that cannot read its constraints would minimise it without them and return a
-        ! confident answer from the wrong region.
-        !
-        ! WHAT THIS FORBIDS: a new entry point in this module without this `select type`. Only
-        ! `pf_minimize_cobyla` may accept one, and only because it reads the constraints. The
-        ! scenario `prima_bobyqa_constraints_not_honoured` is what holds it here.
-        select type (f)
-        class is (pf_constrained_objective)
-            call abort_here("this engine does not honour nonlinear constraints; " // &
-                "use pf_minimize_cobyla")
-        end select
-
-        if (n < 1) call abort_here("at least one variable is required")
-        if (any(is_nan(x))) call abort_here("the start point must not contain NaN")
-
-        if (present(scale)) then
-            if (size(scale) /= n) call abort_here("scale and x must have the same size")
-            if (.not. all(is_finite(scale))) call abort_here("scale must be finite and positive")
-            if (any(scale <= ZERO)) call abort_here("scale must be finite and positive")
-        end if
-
-        if (present(lower)) then
-            if (size(lower) /= n) call abort_here("lower, upper and x must have the same size")
-        end if
-        if (present(upper)) then
-            if (size(upper) /= n) call abort_here("lower, upper and x must have the same size")
-        end if
-        if (present(lower) .and. present(upper)) then
-            if (any(upper - lower <= TWO * EPS)) call abort_here( &
-                "every upper bound must exceed its lower bound by more than 2*epsilon")
-        end if
-        ! The start is never moved (Q9), so a start outside the bounds is the caller's mistake
-        ! rather than something to project away.
-        if (present(lower)) then
-            if (any(x < lower)) call abort_here("the start point must lie within the bounds")
-        end if
-        if (present(upper)) then
-            if (any(x > upper)) call abort_here("the start point must lie within the bounds")
-        end if
-
-        if (present(rhobeg) .or. present(rhoend)) then
-            rhobeg_test = ONE
-            rhoend_test = ZERO
-            if (present(rhobeg)) rhobeg_test = rhobeg
-            if (present(rhoend)) rhoend_test = rhoend
-            ! Finiteness FIRST, and each test on its own line: `.or.` does not short-circuit, and
-            ! an ordered comparison against a NaN signals IEEE_INVALID even where it answers.
-            if (.not. is_finite(rhobeg_test)) call abort_here(RADII_TEXT)
-            if (.not. is_finite(rhoend_test)) call abort_here(RADII_TEXT)
-            if (rhobeg_test <= ZERO) call abort_here(RADII_TEXT)
-            if (present(rhoend)) then
-                if (rhoend_test <= ZERO) call abort_here(RADII_TEXT)
-            end if
-            if (rhoend_test > rhobeg_test) call abort_here(RADII_TEXT)
-        end if
-
-        if (present(npt)) then
-            npt_max = (n + 1) * (n + 2) / 2
-            if (npt < n + 2) call abort_here("npt must be in [n+2, (n+1)(n+2)/2]")
-            if (npt > npt_max) call abort_here("npt must be in [n+2, (n+1)(n+2)/2]")
-        end if
-
-        if (present(max_neval)) then
-            if (max_neval < 1) call abort_here("max_neval must be positive")
-            if (max_neval > huge(1) / 2) call abort_here("max_neval must not exceed huge(1)/2")
-        end if
-
-    contains
-
-        !> Aborts with this entry point and the caller's context, whether or not one was given.
-        subroutine abort_here(text)
-            character(len=*), intent(in) :: text !! what went wrong
-
-            if (present(context)) then
-                call prima_abort(EP, text, context)
-            else
-                call prima_abort(EP, text)
-            end if
-
-        end subroutine abort_here
-
-    end subroutine refuse_bad_call
 
 end submodule parquet_prima_bobyqa

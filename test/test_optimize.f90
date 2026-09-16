@@ -87,7 +87,9 @@ contains
             new_unittest("xtol decides how many minima count as distinct", &
                          test_multistart_xtol), &
             new_unittest("the solver object's own budget reaches every local run", &
-                         test_multistart_solver_options) &
+                         test_multistart_solver_options), &
+            new_unittest("no finite start is PF_OPT_NONFINITE, the box centre and +Inf", &
+                         test_multistart_nothing_finite) &
             ]
 
     end subroutine collect_tests_optimize
@@ -864,6 +866,11 @@ contains
         if (allocated(error)) return
         call check(error, fmin > huge(1.0_real64), "and it must be +Infinity, not merely large")
         if (allocated(error)) return
+        call check(error, .not. ieee_is_nan(info%spread), &
+            "the spread must be +Infinity too, never the NaN that Inf - Inf gives")
+        if (allocated(error)) return
+        call check(error, info%spread > huge(1.0_real64), "and the spread must be +Infinity")
+        if (allocated(error)) return
         call check(error, all(x == 0.5_real64*(lo + hi)), "the point reported is the box's centre")
 
     end subroutine test_de_nothing_finite
@@ -998,5 +1005,42 @@ contains
             "the solver's own budget must reach the runs, or they would each cost thousands")
 
     end subroutine test_multistart_solver_options
+
+    !> No start coming back finite ends the run without a point to report, as it does for DE.
+    !!
+    !! `pf_simplex_solver` aborts on a NaN before the driver sees one, so the case is reached
+    !! through a solver that screens nothing (`unscreened_solver`).
+    subroutine test_multistart_nothing_finite(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(unscreened_solver) :: solver
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = [-5.0_real64, -3.0_real64]
+        hi = [4.0_real64, 6.0_real64]
+        call pf_minimize_multistart(always_nan, lo, hi, 42_int64, x, fmin, nstart=6, solver=solver, &
+                                    info=info)
+
+        call check(error, info%status, PF_OPT_NONFINITE, "no finite start is its own status")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "and it is not convergence")
+        if (allocated(error)) return
+        call check(error, info%nonfinite, 6, "every start counted")
+        if (allocated(error)) return
+        call check(error, info%nminima, 0, "and no minimum found")
+        if (allocated(error)) return
+        call check(error, .not. ieee_is_nan(fmin), &
+            "the value must be +Infinity, never a NaN a caller's comparison would trap on")
+        if (allocated(error)) return
+        call check(error, fmin > huge(1.0_real64), "and it must be +Infinity, not merely large")
+        if (allocated(error)) return
+        call check(error, .not. ieee_is_nan(info%spread), &
+            "the spread must be +Infinity too, never the NaN that Inf - Inf gives")
+        if (allocated(error)) return
+        call check(error, info%spread > huge(1.0_real64), "and the spread must be +Infinity")
+        if (allocated(error)) return
+        call check(error, all(x == 0.5_real64*(lo + hi)), "the point reported is the box's centre")
+
+    end subroutine test_multistart_nothing_finite
 
 end module test_optimize

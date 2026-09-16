@@ -50,6 +50,7 @@ contains
         real(real64) :: fw                            !! differential weight actually in force
         real(real64) :: cr_use                        !! crossover probability actually in force
         real(real64) :: fhi, flo                      !! worst and best value in the population
+        real(real64) :: spread_end                    !! the value spread the run ended on
         real(real64) :: rtol                          !! fractional spread of the current values
         real(real64) :: denom                         !! scale the fractional test divides by
         real(real64) :: fpolish                       !! value the optional final simplex reached
@@ -176,8 +177,9 @@ contains
             status = PF_OPT_NONFINITE
             x(:) = 0.5_real64*(lower(:) + upper(:))
             fmin = ieee_value(1.0_real64, ieee_positive_inf)
-            fhi = fmin
-            flo = fmin
+            ! The spread is `+Infinity` too, set rather than formed: the difference of two
+            ! infinities is a NaN, and forming it raises IEEE invalid, fatal under nagfor.
+            spread_end = fmin
 
         else
 
@@ -253,6 +255,11 @@ contains
 
             end do generations
 
+            ! Every exit is taken after `fhi` and `flo` were last formed and before the population
+            ! changed again. The selection keeps a finite value finite, so `flo` is finite and
+            ! the difference is finite or `+Infinity`.
+            spread_end = fhi - flo
+
             ib = minloc(fpop, 1)
             x(:) = pop(:,ib)
             fmin = fpop(ib)
@@ -283,7 +290,7 @@ contains
             info%neval = neval
             info%niter = g
             info%nonfinite = nonfinite
-            info%spread = fhi - flo
+            info%spread = spread_end
         end if
 
     contains

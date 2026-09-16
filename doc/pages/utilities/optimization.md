@@ -180,8 +180,8 @@ counts every non-finite value the run saw. So an objective that is only defined 
 its domain, with no guard of your own.
 
 The exception is a box where **nothing** is finite: that is `PF_OPT_NONFINITE`, `x` comes back as
-the box's centre and `fmin` as `+Infinity` (never a NaN, so a caller's own comparison is safe), and
-`converged` is false.
+the box's centre, `fmin` and `info%spread` as `+Infinity` (never a NaN, so a caller's own
+comparison is safe), and `converged` is false.
 
 ## Many starts, one local engine
 

@@ -14,7 +14,8 @@
 !! the same objective without either of them reaching the facade.
 module test_optimize_support
 
-    use parquet_optimize, only : pf_objective, pf_constrained_objective
+    use parquet_optimize, only : pf_objective, pf_constrained_objective, pf_local_solver, &
+                                 pf_optimize_info
     use iso_fortran_env, only : real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf
 
@@ -28,7 +29,7 @@ module test_optimize_support
     public :: rastrigin, rastrigin_gradient, twin_wells, nan_corner
     public :: bad_scaling, bad_scaling_unit, BAD_SCALING_SCALE, BAD_SCALING_MIN
     public :: disc_fit, outside_disc, dist12, sphere123, SPHERE123_CENTRE
-    public :: negative_count_disc, nan_constraint_disc
+    public :: negative_count_disc, nan_constraint_disc, unscreened_solver
 
     !> Sum of squares about `1` plus a shift, counting its own evaluations.
     !!
@@ -116,6 +117,16 @@ module test_optimize_support
     contains
         procedure :: constraints => nan_constraint                !! Returns a NaN.
     end type nan_constraint_disc
+
+    !> A local solver that evaluates its start once and hands back whatever the objective said.
+    !!
+    !! It screens nothing, as a caller's own `pf_local_solver` extension is free not to: with
+    !! `always_nan` every start comes back NaN, which is the only route to the multistart driver's
+    !! `PF_OPT_NONFINITE` case, since `pf_simplex_solver` aborts on the first NaN itself.
+    type, extends(pf_local_solver) :: unscreened_solver
+    contains
+        procedure :: run => unscreened_run !! Evaluates the start once and reports that value.
+    end type unscreened_solver
 
     !> The centre of `sphere123`, and its unconstrained minimiser.
     real(real64), parameter :: SPHERE123_CENTRE(3) = [1.0_real64, 2.0_real64, 3.0_real64]
@@ -296,6 +307,21 @@ contains
         c(1) = ieee_value(1.0_real64, ieee_quiet_nan) + sum(x)*0.0_real64
 
     end subroutine nan_constraint
+
+    !> One evaluation at the start, reported as the minimum with no finiteness screen.
+    subroutine unscreened_run(this, obj, x, fmin, lower, upper, info)
+        class(unscreened_solver), intent(in) :: this     !! the solver
+        class(pf_objective), intent(inout)   :: obj      !! the objective
+        real(real64), intent(inout)          :: x(:)     !! the start, left where it is
+        real(real64), intent(out)            :: fmin     !! the objective's value at `x`, unscreened
+        real(real64), intent(in)             :: lower(:) !! the driver's box, not used
+        real(real64), intent(in)             :: upper(:) !! the driver's box, not used
+        type(pf_optimize_info), intent(out)  :: info     !! one evaluation
+
+        fmin = obj%eval(x)
+        info%neval = 1
+
+    end subroutine unscreened_run
 
     !> Squared distance from `SPHERE123_CENTRE`, for the linearly constrained KKT test.
     function sphere123(x) result(f)

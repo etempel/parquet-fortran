@@ -45,6 +45,7 @@ contains
         integer, allocatable :: neval_k(:)             !! evaluations each run spent
         integer, allocatable :: status_k(:)            !! the code each run ended on
         real(real64) :: xtol_use                       !! merge radius actually in force, as a fraction
+        real(real64) :: spread_end                     !! spread of the starts' final values
         integer :: npar                                !! number of variables
         integer :: ns                                  !! number of starts actually in force
         integer :: nt                                  !! team size the starts run on
@@ -120,6 +121,9 @@ contains
             x(:) = 0.5_real64*(lower(:) + upper(:))
             fmin = ieee_value(1.0_real64, ieee_positive_inf)
             nmin = 0
+            ! The spread is `+Infinity` too, set rather than formed: `fs` is unscreened here, and
+            ! `maxval`/`minval` over NaNs, or the difference of two infinities, trap under nagfor.
+            spread_end = fmin
 
         else
 
@@ -132,6 +136,8 @@ contains
             kbest = minloc(fs, 1)
             x(:) = xs(:,kbest)
             fmin = fs(kbest)
+            ! Screened and holding at least one finite value: finite or `+Infinity`.
+            spread_end = maxval(fs) - minval(fs)
 
             ! Distinct minima, counted by walking the starts IN INDEX ORDER and merging each into
             ! the first representative it is within `xtol` of, coordinate by coordinate. Walking in
@@ -180,7 +186,7 @@ contains
             info%neval = sum(neval_k)
             info%niter = ns
             info%nonfinite = nonfinite
-            info%spread = maxval(fs) - minval(fs)
+            info%spread = spread_end
             info%nminima = nmin
             info%nlimit = count(status_k == PF_OPT_LIMIT)
         end if

@@ -23,6 +23,13 @@
 !! `outside="extrapolate"`; `F_INTEGRAL` holds the integral over each inside pair, and
 !! `F_INTEGRAL_OUT` and `F_INTEGRAL_CLAMP` the integral over each outside pair under
 !! `outside="extrapolate"` and `outside="clamp"`. `P6_*` is the guide page's `x**2` example.
+!!
+!! For a grid `G`: `G_X` and `G_Y` are its lines along each axis and `G_Z` its values, `G_Z(i, j)` at
+!! `(G_X(i), G_Y(j))`; `(G_XQ(i), G_YQ(i))` are the queries inside it and `(G_XO(i), G_YO(i))` those
+!! beyond it. Every grid expectation array has one column per grid variant, numbered by the `G2_*`
+!! variant indices: `G_VALUE` holds the value at each query inside, and `G_VALUE_OUT` and
+!! `G_VALUE_CLAMP` the value at each query beyond under `outside="extrapolate"` and
+!! `outside="clamp"`.
 module test_interpolate_golden
     use iso_fortran_env, only : real64
     implicit none
@@ -886,5 +893,278 @@ module test_interpolate_golden
     real(real64), parameter :: P6_FAR = 99.0_real64
     !> The natural cubic spline's end segment continued to `P6_FAR`.
     real(real64), parameter :: P6_NATURAL_FAR = -337578.4736842105_real64
+
+    ! ---- the grids ----
+
+    !> Queries inside each grid.
+    integer, parameter :: G2_NQ = 40
+    !> Queries beyond each grid, in one coordinate or both.
+    integer, parameter :: G2_NO = 8
+    !> Grid variants, the columns of every grid expectation array.
+    integer, parameter :: G2_NV = 3
+    !> Column of `method="linear"`.
+    integer, parameter :: G2_LINEAR = 1
+    !> Column of `method="cubic", bc="natural"`.
+    integer, parameter :: G2_NATURAL = 2
+    !> Column of `method="cubic", bc="not_a_knot"`.
+    integer, parameter :: G2_NOT_A_KNOT = 3
+
+    ! ---- N57: five lines along x and seven along y, both at irregular gaps ----
+
+    !> Lines along x in grid N57.
+    integer, parameter :: N57_NX = 5
+    !> Lines along y in grid N57.
+    integer, parameter :: N57_NY = 7
+    !> Grid N57's lines along x, strictly increasing.
+    real(real64), parameter :: N57_X(N57_NX) = [-0.5_real64, -0.125_real64, 0.375_real64, 0.5_real64, 1.5_real64]
+    !> Grid N57's lines along y, strictly increasing.
+    real(real64), parameter :: N57_Y(N57_NY) = [0.0_real64, 0.3125_real64, 0.375_real64, 0.875_real64, 1.375_real64, &
+        1.6875_real64, 2.5_real64]
+    !> Grid N57's values, `N57_Z(i, j)` at `(N57_X(i), N57_Y(j))`.
+    real(real64), parameter :: N57_Z(N57_NX, N57_NY) = reshape([-0.46875_real64, -0.25_real64, 0.40625_real64, 0.21875_real64, &
+        0.46875_real64, -0.0625_real64, 0.25_real64, -0.28125_real64, -0.375_real64, -0.03125_real64, 0.34375_real64, &
+        -0.34375_real64, -0.59375_real64, -0.40625_real64, 0.21875_real64, -0.53125_real64, 0.53125_real64, -0.53125_real64, &
+        0.125_real64, -0.0625_real64, -0.125_real64, 0.3125_real64, -0.09375_real64, -0.0625_real64, 0.40625_real64, &
+        0.28125_real64, 0.28125_real64, -0.5625_real64, 0.3125_real64, 0.34375_real64, -0.59375_real64, 0.4375_real64, &
+        0.625_real64, -0.03125_real64, -0.25_real64], [N57_NX, N57_NY])
+    !> The x of each of grid N57's queries inside it.
+    real(real64), parameter :: N57_XQ(G2_NQ) = [-0.34375_real64, 0.8125_real64, -0.03125_real64, 1.125_real64, 0.28125_real64, &
+        1.4375_real64, 0.59375_real64, -0.25_real64, 0.90625_real64, 0.0625_real64, 1.21875_real64, 0.375_real64, &
+        -0.46875_real64, 0.6875_real64, -0.15625_real64, 1.0_real64, 0.15625_real64, 1.3125_real64, 0.46875_real64, &
+        -0.375_real64, 0.78125_real64, -0.0625_real64, 1.09375_real64, 0.25_real64, 1.40625_real64, 0.5625_real64, &
+        -0.28125_real64, 0.875_real64, 0.03125_real64, 1.1875_real64, 0.34375_real64, -0.5_real64, -0.5_real64, 1.5_real64, &
+        -0.5_real64, 1.5_real64, 0.375_real64, -0.125_real64, 1.5_real64, 0.09375_real64]
+    !> The y of each of grid N57's queries inside it.
+    real(real64), parameter :: N57_YQ(G2_NQ) = [0.4296875_real64, 1.328125_real64, 2.2265625_real64, 0.625_real64, &
+        1.5234375_real64, 2.421875_real64, 0.8203125_real64, 1.71875_real64, 0.1171875_real64, 1.015625_real64, &
+        1.9140625_real64, 0.3125_real64, 1.2109375_real64, 2.109375_real64, 0.5078125_real64, 1.40625_real64, 2.3046875_real64, &
+        0.703125_real64, 1.6015625_real64, 0.0_real64, 0.8984375_real64, 1.796875_real64, 0.1953125_real64, 1.09375_real64, &
+        1.9921875_real64, 0.390625_real64, 1.2890625_real64, 2.1875_real64, 0.5859375_real64, 1.484375_real64, &
+        2.3828125_real64, 0.78125_real64, 0.0_real64, 0.0_real64, 2.5_real64, 2.5_real64, 0.3125_real64, 1.1328125_real64, &
+        1.7578125_real64, 2.5_real64]
+    !> The x of each of grid N57's queries beyond it.
+    real(real64), parameter :: N57_XO(G2_NO) = [-0.75_real64, 1.625_real64, 0.15625_real64, 0.15625_real64, -0.53125_real64, &
+        1.625_real64, -0.75_real64, 1.53125_real64]
+    !> The y of each of grid N57's queries beyond it.
+    real(real64), parameter :: N57_YO(G2_NO) = [1.6796875_real64, 1.6796875_real64, -0.15625_real64, 2.8125_real64, &
+        -0.0390625_real64, 2.8125_real64, 2.8125_real64, -0.15625_real64]
+    !> Grid N57: the value at each query inside the grid, one column per grid variant.
+    real(real64), parameter :: N57_VALUE(G2_NQ, G2_NV) = reshape([0.041341145833333336_real64, 0.08233642578125_real64, &
+        0.35499924879807693_real64, -0.00390625_real64, -0.20126953124999999_real64, -0.18073918269230768_real64, &
+        0.057647705078125_real64, 0.27403846153846156_real64, 0.1119384765625_real64, 0.1405029296875_real64, &
+        0.18900240384615385_real64, -0.28125_real64, -0.20475260416666666_real64, 0.11553485576923077_real64, &
+        -0.0927734375_real64, 0.1875_real64, 0.365966796875_real64, 0.0169677734375_real64, 0.048632812499999997_real64, &
+        -0.39583333333333331_real64, 0.0721282958984375_real64, 0.21416766826923078_real64, 0.0308837890625_real64, &
+        -0.14599609375_real64, 0.126953125_real64, -0.3521728515625_real64, 0.123046875_real64, 0.054987980769230768_real64, &
+        -0.15985107421875_real64, 0.28574218750000002_real64, 0.45130333533653844_real64, -0.3671875_real64, -0.46875_real64, &
+        0.46875_real64, -0.59375_real64, -0.25_real64, -0.28125_real64, 0.41845703125_real64, 0.29236778846153844_real64, &
+        0.51953125_real64, -0.018495039820777433_real64, -0.001648853302459781_real64, 0.30055308751359788_real64, &
+        1.1239992555337801_real64, -0.42038901664038919_real64, -0.25320774388691408_real64, 0.58672520817667628_real64, &
+        0.48274497036384656_real64, -0.52879848123478379_real64, 0.37650796167275707_real64, 1.3656362764560559_real64, &
+        -0.28125_real64, -0.35176045172771986_real64, 1.130850323357337_real64, -0.80999997159956005_real64, &
+        0.26423718223298087_real64, 0.23275058042820276_real64, 0.75662185919730607_real64, 0.027879267933196322_real64, &
+        -0.44693354874261099_real64, 1.020767428594813_real64, 0.093532334297649899_real64, -0.61142625061050515_real64, &
+        -0.046128594709496235_real64, 0.52305503289269939_real64, -0.28462801696613488_real64, 0.24076982195318414_real64, &
+        0.99097746498663397_real64, -1.2828123334457955_real64, 0.59833310568901743_real64, 0.35563033015582818_real64, &
+        -0.20296908201180988_real64, -0.46875_real64, 0.46875_real64, -0.59375_real64, -0.25_real64, -0.28125_real64, &
+        0.69995038983592706_real64, 0.29553882766461753_real64, 0.9396209716796875_real64, -0.023389803786055697_real64, &
+        0.21659196736192876_real64, 0.07719148628876947_real64, 4.195090728970448_real64, -0.34949737765388716_real64, &
+        0.40279253073601162_real64, 0.89903731676852916_real64, 0.73726222160154098_real64, -2.1578497965439101_real64, &
+        0.23962757317717578_real64, 9.5140089283415428_real64, -0.28125_real64, -0.25442827341068058_real64, &
+        4.9081932408524613_real64, -0.73763525121257167_real64, 0.70801170059412588_real64, -0.68086557965753358_real64, &
+        3.6689192760101563_real64, -0.0075751074494193466_real64, -0.55415842128408088_real64, 2.5680254162041329_real64, &
+        0.022877554080717483_real64, -2.1002795668124787_real64, -0.11032691615561764_real64, 5.0250191337051344_real64, &
+        -0.24405099040823552_real64, 0.36546122612652443_real64, 8.4202124199634234_real64, -1.1957803095222583_real64, &
+        1.6980386029064989_real64, -0.21839715564164774_real64, -0.22176003522565071_real64, -0.46875_real64, 0.46875_real64, &
+        -0.59375_real64, -0.25_real64, -0.28125_real64, 0.68958894829562722_real64, 0.2688033487511543_real64, &
+        0.93440170086782648_real64], [G2_NQ, G2_NV])
+    !> Grid N57: the value at each query beyond the grid, under outside="extrapolate", one column per grid variant.
+    real(real64), parameter :: N57_VALUE_OUT(G2_NO, G2_NV) = reshape([0.26380208333333333_real64, 0.3505859375_real64, &
+        0.203125_real64, 0.826171875_real64, -0.53678385416666663_real64, -0.51772836538461542_real64, &
+        -1.8822115384615385_real64, 0.72509765625_real64, 0.1000336950951079_real64, -0.07628622528823753_real64, &
+        -0.07521816966391856_real64, 2.1725522805991506_real64, -0.39555626848898717_real64, 0.3755074763918807_real64, &
+        -2.065600468720671_real64, 1.0389951918997042_real64, -2.8823153799976806_real64, -4.2090360298579972_real64, &
+        -6.052277490089474_real64, 6.4697310390222098_real64, 0.59937390257869472_real64, 38.344531063022863_real64, &
+        20.876653206802199_real64, 4.1338600060017354_real64], [G2_NO, G2_NV])
+    !> Grid N57: the value at each query beyond the grid, under outside="clamp", one column per grid variant.
+    real(real64), parameter :: N57_VALUE_CLAMP(G2_NO, G2_NV) = reshape([0.27109375000000002_real64, 0.34531250000000002_real64, &
+        0.119140625_real64, 0.54296875_real64, -0.46875_real64, -0.25_real64, -0.59375_real64, 0.46875_real64, &
+        0.27729363364984916_real64, 0.34904796394664206_real64, 0.28311904343105415_real64, 0.9995880126953125_real64, &
+        -0.46875_real64, -0.25_real64, -0.59375_real64, 0.46875_real64, 0.27605963754241775_real64, 0.35114536699236837_real64, &
+        0.29574995619640504_real64, 0.9839316496433872_real64, -0.46875_real64, -0.25_real64, -0.59375_real64, &
+        0.46875_real64], [G2_NO, G2_NV])
+
+    ! ---- E86: eight evenly spaced lines along x, six along y at gaps growing thirty-two-fold ----
+
+    !> Lines along x in grid E86.
+    integer, parameter :: E86_NX = 8
+    !> Lines along y in grid E86.
+    integer, parameter :: E86_NY = 6
+    !> Grid E86's lines along x, strictly increasing.
+    real(real64), parameter :: E86_X(E86_NX) = [0.0_real64, 0.25_real64, 0.5_real64, 0.75_real64, 1.0_real64, 1.25_real64, &
+        1.5_real64, 1.75_real64]
+    !> Grid E86's lines along y, strictly increasing.
+    real(real64), parameter :: E86_Y(E86_NY) = [0.0_real64, 0.0625_real64, 0.1875_real64, 0.4375_real64, 0.9375_real64, &
+        2.9375_real64]
+    !> Grid E86's values, `E86_Z(i, j)` at `(E86_X(i), E86_Y(j))`.
+    real(real64), parameter :: E86_Z(E86_NX, E86_NY) = reshape([-0.9375_real64, -0.25_real64, 0.4375_real64, 1.125_real64, &
+        -0.5_real64, 0.1875_real64, 0.875_real64, -0.75_real64, -0.625_real64, 0.1875_real64, -1.0625_real64, 0.25_real64, &
+        -0.5_real64, -1.0_real64, 1.0625_real64, 1.0625_real64, 0.3125_real64, -1.0625_real64, 0.375_real64, 0.0_real64, &
+        0.125_real64, 0.75_real64, -0.4375_real64, -1.125_real64, -0.4375_real64, 0.625_real64, 0.125_real64, 0.375_real64, &
+        -0.9375_real64, 0.8125_real64, 1.0_real64, -0.375_real64, -0.5625_real64, 0.625_real64, 0.5_real64, -0.9375_real64, &
+        0.9375_real64, -0.8125_real64, 0.75_real64, 1.0_real64, -0.0625_real64, -1.0625_real64, -0.8125_real64, 0.6875_real64, &
+        1.125_real64, 0.5_real64, 1.125_real64, 0.6875_real64], [E86_NX, E86_NY])
+    !> The x of each of grid E86's queries inside it.
+    real(real64), parameter :: E86_XQ(G2_NQ) = [0.13671875_real64, 1.1484375_real64, 0.41015625_real64, 1.421875_real64, &
+        0.68359375_real64, 1.6953125_real64, 0.95703125_real64, 0.21875_real64, 1.23046875_real64, 0.4921875_real64, &
+        1.50390625_real64, 0.765625_real64, 0.02734375_real64, 1.0390625_real64, 0.30078125_real64, 1.3125_real64, &
+        0.57421875_real64, 1.5859375_real64, 0.84765625_real64, 0.109375_real64, 1.12109375_real64, 0.3828125_real64, &
+        1.39453125_real64, 0.65625_real64, 1.66796875_real64, 0.9296875_real64, 0.19140625_real64, 1.203125_real64, &
+        0.46484375_real64, 1.4765625_real64, 0.73828125_real64, 0.0_real64, 0.0_real64, 1.75_real64, 0.0_real64, 1.75_real64, &
+        0.5_real64, 0.25_real64, 1.75_real64, 0.51953125_real64]
+    !> The y of each of grid E86's queries inside it.
+    real(real64), parameter :: E86_YQ(G2_NQ) = [0.5048828125_real64, 1.560546875_real64, 2.6162109375_real64, 0.734375_real64, &
+        1.7900390625_real64, 2.845703125_real64, 0.9638671875_real64, 2.01953125_real64, 0.1376953125_real64, &
+        1.193359375_real64, 2.2490234375_real64, 0.3671875_real64, 1.4228515625_real64, 2.478515625_real64, &
+        0.5966796875_real64, 1.65234375_real64, 2.7080078125_real64, 0.826171875_real64, 1.8818359375_real64, 0.0_real64, &
+        1.0556640625_real64, 2.111328125_real64, 0.2294921875_real64, 1.28515625_real64, 2.3408203125_real64, &
+        0.458984375_real64, 1.5146484375_real64, 2.5703125_real64, 0.6884765625_real64, 1.744140625_real64, &
+        2.7998046875_real64, 0.91796875_real64, 0.0_real64, 0.0_real64, 2.9375_real64, 2.9375_real64, 0.0625_real64, &
+        1.3310546875_real64, 2.0654296875_real64, 2.9375_real64]
+    !> The x of each of grid E86's queries beyond it.
+    real(real64), parameter :: E86_XO(G2_NO) = [-0.21875_real64, 1.859375_real64, 0.57421875_real64, 0.57421875_real64, &
+        -0.02734375_real64, 1.859375_real64, -0.21875_real64, 1.77734375_real64]
+    !> The y of each of grid E86's queries beyond it.
+    real(real64), parameter :: E86_YO(G2_NO) = [1.9736328125_real64, 1.9736328125_real64, -0.18359375_real64, 3.3046875_real64, &
+        -0.0458984375_real64, 3.3046875_real64, 3.3046875_real64, -0.18359375_real64]
+    !> Grid E86: the value at each query inside the grid, one column per grid variant.
+    real(real64), parameter :: E86_VALUE(G2_NQ, G2_NV) = reshape([0.13592147827148438_real64, 0.16493606567382812_real64, &
+        -0.66984844207763672_real64, 0.537841796875_real64, -0.19558286666870117_real64, 0.79064369201660156_real64, &
+        0.62096357345581055_real64, -0.2884674072265625_real64, 0.0389251708984375_real64, 0.33449935913085938_real64, &
+        0.99277257919311523_real64, 0.2127685546875_real64, -0.36934137344360352_real64, 0.94397354125976562_real64, &
+        0.54768753051757812_real64, -0.036529541015625_real64, -0.3166499137878418_real64, 0.7672271728515625_real64, &
+        0.29706144332885742_real64, -0.63671875_real64, 0.13311672210693359_real64, -0.31489944458007812_real64, &
+        0.20749664306640625_real64, -0.3074493408203125_real64, 0.85698461532592773_real64, -0.52631378173828125_real64, &
+        0.0076613426208496094_real64, 0.414947509765625_real64, 0.35707473754882812_real64, 0.79020881652832031_real64, &
+        0.51479005813598633_real64, -0.5576171875_real64, -0.9375_real64, -0.75_real64, -0.0625_real64, 0.6875_real64, &
+        -1.0625_real64, 0.292938232421875_real64, 0.823760986328125_real64, -0.6953125_real64, 0.73219132270447695_real64, &
+        1.2503112021711791_real64, -0.38015850901031994_real64, 1.0480438361964599_real64, -1.4685254721959018_real64, &
+        0.76828894893170907_real64, 0.94183147253850519_real64, -1.7489361183298293_real64, -0.26924528666459779_real64, &
+        1.2541588729639588_real64, -0.43021331807869556_real64, 0.25148864773988006_real64, -0.21560424552960147_real64, &
+        2.4241473371823998_real64, 1.3178454934709496_real64, -1.6275132860789581_real64, -0.13216769612520765_real64, &
+        1.526681878715896_real64, 0.15479256073480721_real64, -0.61704686334230607_real64, 0.67538195949261659_real64, &
+        0.20078964220407733_real64, 0.335852166981012_real64, -1.0362369573796137_real64, 0.2470094999167517_real64, &
+        -0.78377295234994748_real64, -1.383205124556449_real64, 0.4026427626546224_real64, -0.084970518334359618_real64, &
+        -1.0948384074786881_real64, 0.24100627442418326_real64, -0.5983779493469914_real64, -0.9375_real64, -0.75_real64, &
+        -0.0625_real64, 0.6875_real64, -1.0625_real64, -0.73506831165381004_real64, 0.3310523920689486_real64, &
+        -0.71910604354402363_real64, 1.2933011908846832_real64, 6.199543892539964_real64, 2.9522071297066139_real64, &
+        1.1840913094617729_real64, -3.5138545951895952_real64, -2.3265272151263847_real64, 1.026038617688988_real64, &
+        -15.708102472411882_real64, -0.16895876000634102_real64, 2.594695029957975_real64, -13.042219382714523_real64, &
+        0.22977597707018388_real64, -1.4858906524528697_real64, 13.785986373182098_real64, 1.2637766147675702_real64, &
+        -3.1201264990354898_real64, 3.2751179961614834_real64, 2.1732719893461918_real64, -0.1485226729674177_real64, &
+        -0.55659094267484677_real64, 1.3046397669522114_real64, 2.1979174131783501_real64, 0.40891301628470156_real64, &
+        -1.2695756237568696_real64, -12.405339938321376_real64, -0.79842419735954129_real64, -9.5455310871537637_real64, &
+        5.0814265028679166_real64, -0.28048173445522406_real64, -9.5027954552377842_real64, -1.6561955182593604_real64, &
+        -0.63322521460488668_real64, -0.9375_real64, -0.75_real64, -0.0625_real64, 0.6875_real64, -1.0625_real64, &
+        -4.2044096723533055_real64, -8.4782581648739885_real64, -0.7196877624429584_real64], [G2_NQ, G2_NV])
+    !> Grid E86: the value at each query beyond the grid, under outside="extrapolate", one column per grid variant.
+    real(real64), parameter :: E86_VALUE_OUT(G2_NO, G2_NV) = reshape([-0.35091781616210938_real64, 0.79165458679199219_real64, &
+        4.5028076171875_real64, -0.44804763793945312_real64, -1.232147216796875_real64, 0.3834991455078125_real64, &
+        1.255706787109375_real64, -6.7740478515625_real64, 2.2988666521898211_real64, 0.7480178937429891_real64, &
+        -3.9134384861075429_real64, -0.84496732708920042_real64, -1.143033336582866_real64, 0.19642549605939652_real64, &
+        0.051769113712450437_real64, 6.1851754846022633_real64, 156.78695961267451_real64, 0.38222707939744105_real64, &
+        28.56937785828941_real64, -10.370187656336707_real64, 0.32184966804823245_real64, -3.6583567895427467_real64, &
+        -249.78500831867262_real64, -35.013451175266368_real64], [G2_NO, G2_NV])
+    !> Grid E86: the value at each query beyond the grid, under outside="clamp", one column per grid variant.
+    real(real64), parameter :: E86_VALUE_CLAMP(G2_NO, G2_NV) = reshape([-0.303466796875_real64, 0.838104248046875_real64, &
+        0.6416015625_real64, -0.3671875_real64, -0.9375_real64, 0.6875_real64, -0.0625_real64, -0.75_real64, &
+        0.2767055230793497_real64, 0.32186276224727461_real64, 0.78832932347409379_real64, -0.40938422230255639_real64, &
+        -0.9375_real64, 0.6875_real64, -0.0625_real64, -0.75_real64, 5.4653177801490678_real64, -8.0083118165410099_real64, &
+        0.79316474090922962_real64, -0.41046778722242877_real64, -0.9375_real64, 0.6875_real64, -0.0625_real64, &
+        -0.75_real64], [G2_NO, G2_NV])
+
+    ! ---- S55: a square grid with different lines along each axis and values that are not symmetric ----
+
+    !> Lines along x in grid S55.
+    integer, parameter :: S55_NX = 5
+    !> Lines along y in grid S55.
+    integer, parameter :: S55_NY = 5
+    !> Grid S55's lines along x, strictly increasing.
+    real(real64), parameter :: S55_X(S55_NX) = [0.0_real64, 0.25_real64, 0.375_real64, 0.875_real64, 1.0_real64]
+    !> Grid S55's lines along y, strictly increasing.
+    real(real64), parameter :: S55_Y(S55_NY) = [-0.25_real64, 0.125_real64, 0.375_real64, 0.5_real64, 1.125_real64]
+    !> Grid S55's values, `S55_Z(i, j)` at `(S55_X(i), S55_Y(j))`.
+    real(real64), parameter :: S55_Z(S55_NX, S55_NY) = reshape([-0.203125_real64, -0.15625_real64, -0.109375_real64, &
+        -0.0625_real64, -0.015625_real64, -0.09375_real64, -0.03125_real64, 0.0625_real64, 0.1875_real64, -0.109375_real64, &
+        -0.21875_real64, -0.140625_real64, 0.0_real64, 0.203125_real64, 0.015625_real64, -0.125_real64, -0.03125_real64, &
+        0.15625_real64, -0.015625_real64, -0.09375_real64, 0.1875_real64, -0.15625_real64, 0.078125_real64, -0.015625_real64, &
+        0.015625_real64], [S55_NX, S55_NY])
+    !> The x of each of grid S55's queries inside it.
+    real(real64), parameter :: S55_XQ(G2_NQ) = [0.078125_real64, 0.65625_real64, 0.234375_real64, 0.8125_real64, &
+        0.390625_real64, 0.96875_real64, 0.546875_real64, 0.125_real64, 0.703125_real64, 0.28125_real64, 0.859375_real64, &
+        0.4375_real64, 0.015625_real64, 0.59375_real64, 0.171875_real64, 0.75_real64, 0.328125_real64, 0.90625_real64, &
+        0.484375_real64, 0.0625_real64, 0.640625_real64, 0.21875_real64, 0.796875_real64, 0.375_real64, 0.953125_real64, &
+        0.53125_real64, 0.109375_real64, 0.6875_real64, 0.265625_real64, 0.84375_real64, 0.421875_real64, 0.0_real64, &
+        0.0_real64, 1.0_real64, 0.0_real64, 1.0_real64, 0.375_real64, 0.25_real64, 1.0_real64, 0.296875_real64]
+    !> The y of each of grid S55's queries inside it.
+    real(real64), parameter :: S55_YQ(G2_NQ) = [-0.013671875_real64, 0.48046875_real64, 0.974609375_real64, 0.09375_real64, &
+        0.587890625_real64, 1.08203125_real64, 0.201171875_real64, 0.6953125_real64, -0.185546875_real64, 0.30859375_real64, &
+        0.802734375_real64, -0.078125_real64, 0.416015625_real64, 0.91015625_real64, 0.029296875_real64, 0.5234375_real64, &
+        1.017578125_real64, 0.13671875_real64, 0.630859375_real64, -0.25_real64, 0.244140625_real64, 0.73828125_real64, &
+        -0.142578125_real64, 0.3515625_real64, 0.845703125_real64, -0.03515625_real64, 0.458984375_real64, 0.953125_real64, &
+        0.072265625_real64, 0.56640625_real64, 1.060546875_real64, 0.1796875_real64, -0.25_real64, -0.25_real64, 1.125_real64, &
+        1.125_real64, 0.125_real64, 0.373046875_real64, 0.716796875_real64, 1.125_real64]
+    !> The x of each of grid S55's queries beyond it.
+    real(real64), parameter :: S55_XO(G2_NO) = [-0.125_real64, 1.0625_real64, 0.328125_real64, 0.328125_real64, &
+        -0.015625_real64, 1.0625_real64, -0.125_real64, 1.015625_real64]
+    !> The y of each of grid S55's queries beyond it.
+    real(real64), parameter :: S55_YO(G2_NO) = [0.673828125_real64, 0.673828125_real64, -0.3359375_real64, 1.296875_real64, &
+        -0.271484375_real64, 1.296875_real64, 1.296875_real64, -0.3359375_real64]
+    !> Grid S55: the value at each query inside the grid, one column per grid variant.
+    real(real64), parameter :: S55_VALUE(G2_NQ, G2_NV) = reshape([-0.1164703369140625_real64, 0.068115234375_real64, &
+        -0.11126708984375_real64, 0.15185546875_real64, 0.14023590087890625_real64, 0.0021728515625000001_real64, &
+        0.094608306884765625_real64, -0.048828125_real64, -0.04026031494140625_real64, -0.07952880859375_real64, &
+        -0.01143646240234375_real64, -0.020263671875_real64, -0.1827850341796875_real64, 0.052215576171875_real64, &
+        -0.0814361572265625_real64, 0.026611328125_real64, 0.006683349609375_real64, 0.11529541015625_real64, &
+        0.10587310791015625_real64, -0.19140625_real64, 0.11890029907226562_real64, -0.069775390625000003_real64, &
+        -0.0017064412434895833_real64, 0.005859375_real64, -0.026641845703125_real64, 0.017730712890625_real64, &
+        -0.1169891357421875_real64, 0.027587890625_real64, -0.037933349609375_real64, -0.005401611328125_real64, &
+        0.07663726806640625_real64, -0.12109375_real64, -0.203125_real64, -0.015625_real64, 0.1875_real64, 0.015625_real64, &
+        0.0625_real64, -0.1397705078125_real64, -0.055810546874999999_real64, -0.068359375_real64, &
+        -0.068767485270436093_real64, 0.18798898347310775_real64, -0.06380529869718414_real64, 0.2525222232482317_real64, &
+        0.26235572411018315_real64, -0.031151247615634179_real64, 0.22702647537726048_real64, -0.028433042480262703_real64, &
+        0.0043968546549662821_real64, -0.11823507098692471_real64, -0.21485502447676472_real64, 0.061131781240835299_real64, &
+        -0.19816081145431721_real64, 0.18562227488493621_real64, -0.043708354369318032_real64, 0.062017253760624745_real64, &
+        0.07201393149494914_real64, 0.13308869625927097_real64, 0.31198431508433144_real64, -0.19607655142965588_real64, &
+        0.31081525622351158_real64, 0.014892154682817639_real64, 0.042608902126168073_real64, -0.013670915563301017_real64, &
+        -0.19056818426068778_real64, 0.14760300180881314_real64, -0.15794829823341267_real64, 0.044549841163241732_real64, &
+        -0.0065616345740378175_real64, -0.090382733000462553_real64, 0.19286466469558478_real64, -0.12813703819344052_real64, &
+        -0.203125_real64, -0.015625_real64, 0.1875_real64, 0.015625_real64, 0.0625_real64, -0.14142718663118398_real64, &
+        -0.1867263568564124_real64, -0.083227427864846909_real64, -0.014650948749645029_real64, 0.18539658816626423_real64, &
+        0.24349984279525355_real64, 0.23764273367195485_real64, 0.3321016647438077_real64, -0.21142587659569043_real64, &
+        0.20399836981228092_real64, -0.020047501091645142_real64, 0.012659277497742746_real64, -0.1183481502153529_real64, &
+        -0.63622758058494333_real64, 0.15954589598965105_real64, -0.21493637696781048_real64, 0.22726774406205932_real64, &
+        -0.0053093524555525816_real64, 0.055450701758126233_real64, 0.41649912021667118_real64, 0.14328144436497589_real64, &
+        0.39375713656679812_real64, -0.20875164281542055_real64, 0.28382917754315745_real64, 0.20874500642465341_real64, &
+        0.011913010198166211_real64, -0.012878632545471192_real64, -0.6483777133644425_real64, 0.20630231746537697_real64, &
+        -0.21835904048532115_real64, -0.14093439768407948_real64, 0.018364397437968177_real64, -0.14285342667848047_real64, &
+        0.39741274453443165_real64, -0.13892626762390137_real64, -0.203125_real64, -0.015625_real64, 0.1875_real64, &
+        0.015625_real64, 0.0625_real64, -0.14132041328010106_real64, -0.4078633189201355_real64, &
+        -0.066686755028840541_real64], [G2_NQ, G2_NV])
+    !> Grid S55: the value at each query beyond the grid, under outside="extrapolate", one column per grid variant.
+    real(real64), parameter :: S55_VALUE_OUT(G2_NO, G2_NV) = reshape([-0.024121093749999999_real64, &
+        -0.087182617187500006_real64, -0.16231282552083334_real64, -0.036083984375000003_real64, -0.2122650146484375_real64, &
+        0.076367187500000003_real64, 0.50546875000000002_real64, 0.021565755208333332_real64, 0.048678832493344884_real64, &
+        -0.16127716953140064_real64, -0.1927256824408568_real64, -0.15601329850057236_real64, -0.2194884222079099_real64, &
+        0.1440291355930505_real64, 0.62866314356169906_real64, 0.060257025630179824_real64, 1.1196768510237196_real64, &
+        -0.14226195484404147_real64, -0.42204680307456394_real64, -1.3529019778872902_real64, -0.25511654669084849_real64, &
+        0.60374988783504047_real64, -0.21134955142623432_real64, 0.29566554548748336_real64], [G2_NO, G2_NV])
+    !> Grid S55: the value at each query beyond the grid, under outside="clamp", one column per grid variant.
+    real(real64), parameter :: S55_VALUE_CLAMP(G2_NO, G2_NV) = reshape([-0.0380859375_real64, -0.063330078124999994_real64, &
+        -0.126953125_real64, -0.009765625_real64, -0.203125_real64, 0.015625_real64, 0.1875_real64, -0.015625_real64, &
+        0.0077434800182584551_real64, -0.18417286864940494_real64, -0.12610107298322051_real64, -0.017782049140466851_real64, &
+        -0.203125_real64, 0.015625_real64, 0.1875_real64, -0.015625_real64, 0.12320379689335823_real64, &
+        -0.34990140199661257_real64, -0.12501533009181512_real64, -0.0045760680581921733_real64, -0.203125_real64, &
+        0.015625_real64, 0.1875_real64, -0.015625_real64], [G2_NO, G2_NV])
 
 end module test_interpolate_golden ! GCOVR_EXCL_LINE

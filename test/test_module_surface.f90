@@ -1378,11 +1378,11 @@ contains
 
 end module test_module_surface_integrate
 
-!> `parquet_interpolate` alone: the interpolant object and every binding it has, the one-shot generic
-!! in both ranks, the test-only hook, and no settings knob at all.
+!> `parquet_interpolate` alone: both interpolant objects and every binding each has, the one-shot
+!! generic in every form, the test-only hook for each object, and no settings knob at all.
 !!
 !! **One library import, and it must stay that way.** This module's row in the entry-module table
-!! claims that `use parquet_interpolate` compiles three Fortran files and re-exports no setting --
+!! claims that `use parquet_interpolate` compiles four Fortran files and re-exports no setting --
 !! interpolation reads none and prints nothing, so there is no knob for it to re-export.
 module test_module_surface_interpolate
     use parquet_interpolate              ! THE ONLY library import.
@@ -1398,8 +1398,9 @@ contains
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
 
         type(pf_interp_1d) :: line, spline, knot, clamped, shape
-        real(real64)       :: x(4), y(4), v(2)
-        logical            :: was_uniform
+        type(pf_interp_2d) :: plane, surface
+        real(real64)       :: x(4), y(4), v(2), z(4, 4), gy(4)
+        logical            :: was_uniform, x_was_uniform, y_was_uniform
 
         what = ""
         x = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64]
@@ -1455,6 +1456,39 @@ contains
         if (what == "") then
             call parquet_debug_interp_force_search(line, was_uniform)
             if (.not. was_uniform) what = "parquet_debug_interp_force_search"
+        end if
+
+        ! The grid interpolant, both methods, on a scalar pair and on arrays: `z = 1 + 2*x + 3*y`,
+        ! which bilinear interpolation and both bicubic splines reproduce.
+        gy = [0.0_real64, 0.5_real64, 2.0_real64, 3.0_real64]
+        z = 1.0_real64 + spread(2.0_real64*x, 2, 4) + spread(3.0_real64*gy, 1, 4)
+        if (what == "") then
+            call plane%init(x, gy, z, method="linear")
+            if (plane%eval(1.5_real64, 1.25_real64) /= 7.75_real64) what = "pf_interp_2d%eval"
+        end if
+        if (what == "") then
+            v = plane%eval([0.5_real64, 2.5_real64], [0.25_real64, 2.0_real64])
+            if (v(1) /= 2.75_real64 .or. v(2) /= 12.0_real64) what = "pf_interp_2d%eval (elemental)"
+        end if
+        if (what == "") then
+            call surface%init(x, gy, z, bc="not_a_knot", outside="extrapolate")
+            if (abs(surface%eval(4.0_real64, 3.5_real64) - 19.5_real64) > 1.0e-12_real64) what = "pf_interp_2d%init"
+        end if
+        if (what == "" .and. .not. surface%is_initialised()) what = "pf_interp_2d%is_initialised"
+        if (what == "") then
+            call surface%clear()
+            if (surface%is_initialised()) what = "pf_interp_2d%clear"
+        end if
+        if (what == "") then
+            if (pf_interp(x, gy, z, 1.5_real64, 1.25_real64, method="linear") /= 7.75_real64) what = "pf_interp (grid, scalar)"
+        end if
+        if (what == "") then
+            v = pf_interp(x, gy, z, [0.5_real64, 2.5_real64], [0.25_real64, 2.0_real64], method="linear")
+            if (v(1) /= 2.75_real64 .or. v(2) /= 12.0_real64) what = "pf_interp (grid, array)"
+        end if
+        if (what == "") then
+            call parquet_debug_interp_force_search(plane, x_was_uniform, y_was_uniform)
+            if (.not. x_was_uniform .or. y_was_uniform) what = "parquet_debug_interp_force_search (grid)"
         end if
 
     end subroutine check_interpolate_surface
@@ -1900,7 +1934,7 @@ contains
                          test_utils_surface), &
             new_unittest("parquet_integrate alone integrates and hands back its record", &
                          test_integrate_surface), &
-            new_unittest("parquet_interpolate alone builds an interpolant and evaluates it", &
+            new_unittest("parquet_interpolate alone builds both interpolants and evaluates them", &
                          test_interpolate_surface), &
             new_unittest("parquet_optimize alone minimises through both engines and a solver", &
                          test_optimize_surface), &

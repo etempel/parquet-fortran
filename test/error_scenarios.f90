@@ -3698,6 +3698,40 @@ program error_scenarios
         call scenario_interpolate_integral_before_init()
     case ("interpolate_bad_order")
         call scenario_interpolate_bad_order()
+    case ("interpolate_2d_shape")
+        call scenario_interpolate_2d_shape()
+    case ("interpolate_2d_unknown_method")
+        call scenario_interpolate_2d_unknown_method()
+    case ("interpolate_2d_pchip")
+        call scenario_interpolate_2d_pchip()
+    case ("interpolate_2d_bc_with_linear")
+        call scenario_interpolate_2d_bc_with_linear()
+    case ("interpolate_2d_unknown_bc")
+        call scenario_interpolate_2d_unknown_bc()
+    case ("interpolate_2d_clamped")
+        call scenario_interpolate_2d_clamped()
+    case ("interpolate_2d_unknown_outside")
+        call scenario_interpolate_2d_unknown_outside()
+    case ("interpolate_2d_too_few_x")
+        call scenario_interpolate_2d_too_few_x()
+    case ("interpolate_2d_not_a_knot_too_few")
+        call scenario_interpolate_2d_not_a_knot_too_few()
+    case ("interpolate_2d_x_not_monotonic")
+        call scenario_interpolate_2d_x_not_monotonic()
+    case ("interpolate_2d_y_not_monotonic")
+        call scenario_interpolate_2d_y_not_monotonic()
+    case ("interpolate_2d_inf_in_x")
+        call scenario_interpolate_2d_inf_in_x()
+    case ("interpolate_2d_inf_in_y")
+        call scenario_interpolate_2d_inf_in_y()
+    case ("interpolate_2d_nan_in_z")
+        call scenario_interpolate_2d_nan_in_z()
+    case ("interpolate_2d_eval_before_init")
+        call scenario_interpolate_2d_eval_before_init()
+    case ("interpolate_2d_one_shot_shape")
+        call scenario_interpolate_2d_one_shot_shape()
+    case ("interpolate_2d_query_sizes")
+        call scenario_interpolate_2d_query_sizes()
     case ("optimize_size_zero")
         call scenario_optimize_size_zero()
     case ("optimize_budget_zero")
@@ -31994,6 +32028,189 @@ contains
         v = c%derivative(1.5_real64, order=3)
         print '(a, es22.15)', "accepted a third derivative: ", v
     end subroutine scenario_interpolate_bad_order
+    !
+    !> Values laid out for the transposed grid: seven rows of five for five lines along x and seven
+    !> along y, which the shape check refuses whenever the two axes differ in length.
+    subroutine scenario_interpolate_2d_shape()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(7, 5)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], &
+                    [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64, 7.0_real64], z)
+        print '(a, l1)', "accepted values shaped for the transposed grid, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_shape
+    !
+    !> A method token the grid does not know, answered with the grid's own list of methods.
+    subroutine scenario_interpolate_2d_unknown_method()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, method="quadratic")
+        print '(a, l1)', "accepted an unknown grid method, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_unknown_method
+    !
+    !> The shape-preserving method, which has no grid form: a surface is not shape-preserving because
+    !> its curves along each axis are.
+    subroutine scenario_interpolate_2d_pchip()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, method="pchip")
+        print '(a, l1)', "accepted method=""pchip"" on a grid, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_pchip
+    !
+    !> An end condition given with bilinear interpolation, which has none.
+    subroutine scenario_interpolate_2d_bc_with_linear()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, method="linear", &
+                    bc="natural")
+        print '(a, l1)', "accepted an end condition for bilinear interpolation, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_bc_with_linear
+    !
+    !> An end-condition token the grid does not know, answered with the grid's own list.
+    subroutine scenario_interpolate_2d_unknown_bc()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, bc="periodic")
+        print '(a, l1)', "accepted an unknown grid end condition, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_unknown_bc
+    !
+    !> The clamped end condition, which has no grid form: it would need slopes along every edge.
+    subroutine scenario_interpolate_2d_clamped()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, bc="clamped")
+        print '(a, l1)', "accepted bc=""clamped"" on a grid, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_clamped
+    !
+    !> An out-of-range policy token the grid does not know.
+    subroutine scenario_interpolate_2d_unknown_outside()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, outside="wrap")
+        print '(a, l1)', "accepted an unknown grid outside policy, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_unknown_outside
+    !
+    !> A single line along x, which has no cell.
+    subroutine scenario_interpolate_2d_too_few_x()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(1, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z)
+        print '(a, l1)', "accepted one line along x, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_too_few_x
+    !
+    !> Three lines along y for a not-a-knot spline, which needs four along each axis; the five along x
+    !> pass.
+    subroutine scenario_interpolate_2d_not_a_knot_too_few()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(5, 3)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, &
+                    bc="not_a_knot")
+        print '(a, l1)', "accepted three lines along y for bc=""not_a_knot"", built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_not_a_knot_too_few
+    !
+    !> Lines along x that are neither increasing nor decreasing.
+    subroutine scenario_interpolate_2d_x_not_monotonic()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(4, 3)
+
+        z = 1.0_real64
+        call g%init([0.0_real64, 2.0_real64, 1.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z)
+        print '(a, l1)', "accepted unsorted lines along x, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_x_not_monotonic
+    !
+    !> A repeated line along y: a row of cells of zero height.
+    subroutine scenario_interpolate_2d_y_not_monotonic()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 4)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [0.0_real64, 1.0_real64, 1.0_real64, 2.0_real64], z)
+        print '(a, l1)', "accepted a repeated line along y, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_y_not_monotonic
+    !
+    !> An infinite last line along x, which passes the ordering and would make its cells infinitely wide.
+    subroutine scenario_interpolate_2d_inf_in_x()
+        type(pf_interp_2d) :: g
+        real(real64) :: x(4), z(4, 3)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        x(4) = positive_infinity()
+        z = 1.0_real64
+        call g%init(x, [1.0_real64, 2.0_real64, 3.0_real64], z)
+        print '(a, l1)', "accepted an infinite line along x, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_inf_in_x
+    !
+    !> An infinite last line along y, refused by its own axis's check.
+    subroutine scenario_interpolate_2d_inf_in_y()
+        type(pf_interp_2d) :: g
+        real(real64) :: y(4), z(3, 4)
+
+        y = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        y(4) = positive_infinity()
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], y, z)
+        print '(a, l1)', "accepted an infinite line along y, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_inf_in_y
+    !
+    !> A NaN value, which would reach the tables of second derivatives and every later evaluation.
+    subroutine scenario_interpolate_2d_nan_in_z()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 4)
+
+        z = 1.0_real64
+        z(2, 3) = nan_value()
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64], z)
+        print '(a, l1)', "accepted a NaN grid value, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_nan_in_z
+    !
+    !> Evaluating a grid object that was never built. `%eval` is `pure`, so its result is printed: an
+    !> unused pure call may be deleted, and the abort with it.
+    subroutine scenario_interpolate_2d_eval_before_init()
+        type(pf_interp_2d) :: g
+        real(real64) :: v
+
+        v = g%eval(1.0_real64, 1.0_real64)
+        print '(a, es22.15)', "evaluated a grid interpolant that was never built: ", v
+    end subroutine scenario_interpolate_2d_eval_before_init
+    !
+    !> The grid's one-shot form validates through the same body under its own name, and carries the
+    !> caller's context.
+    subroutine scenario_interpolate_2d_one_shot_shape()
+        real(real64) :: z(7, 5), v
+
+        z = 1.0_real64
+        v = pf_interp([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], &
+                      [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64, 7.0_real64], z, &
+                      1.5_real64, 1.5_real64, context="my_grid")
+        print '(a, es22.15)', "accepted values shaped for the transposed grid in one shot: ", v
+    end subroutine scenario_interpolate_2d_one_shot_shape
+    !
+    !> Three x coordinates and two y coordinates: no query can be formed from the third x.
+    subroutine scenario_interpolate_2d_query_sizes()
+        real(real64) :: z(3, 3), v(3)
+
+        z = 1.0_real64
+        v = pf_interp([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 2.0_real64, 3.0_real64], z, &
+                      [1.5_real64, 2.0_real64, 2.5_real64], [1.5_real64, 2.5_real64])
+        print '(a, 3es22.15)', "accepted query coordinates of different sizes: ", v
+    end subroutine scenario_interpolate_2d_query_sizes
     !
     !> A zero-length start point: the simplex needs at least one variable.
     subroutine scenario_optimize_size_zero()

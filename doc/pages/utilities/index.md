@@ -52,10 +52,10 @@ helpers, and the two generators meant to be copied into your own project.
   built once over a table of abscissae and ordinates, ascending or descending, and evaluated,
   differentiated and integrated anywhere: straight lines between the points, a cubic spline with a
   natural, not-a-knot or clamped end, or a shape-preserving cubic that keeps monotone data
-  monotone; a policy for queries beyond the table (the end value, the end segment continued, or
-  NaN), a mask that drops points before building, and a one-shot form for a table queried only a
-  few times. Every binding that reads an object is `pure`, so one object serves a whole team of
-  threads. Nothing is printed.
+  monotone; the same over values on a rectilinear grid, bilinear or bicubic; a policy for queries
+  beyond the table (the end value, the end segment continued, or NaN), a mask that drops points
+  before building, and a one-shot form for a table queried only a few times. Every binding that
+  reads an object is `pure`, so one object serves a whole team of threads. Nothing is printed.
 - [Optimisation: minimising a function of one or many variables](optimization.html) —
   four engines in two tiers: Brent's method on a bracket and the Nelder-Mead simplex from a start
   point for a local minimum, differential evolution over a whole box and a multistart driver over

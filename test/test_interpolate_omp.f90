@@ -1,6 +1,7 @@
 !> Threading tests for `parquet_interpolate`: that one object nobody writes may be evaluated,
-!> differentiated and integrated from a whole team at once, that objects built concurrently on
-!> different threads stay independent, and that the team these tests rely on is really opened.
+!> differentiated and integrated from a whole team at once, a grid object evaluated likewise, that
+!> objects built concurrently on different threads stay independent, and that the team these tests
+!> rely on is really opened.
 !!
 !! **The claim under test is the module's own header sentence** -- "one object nobody writes may be
 !! evaluated from any number of threads at once, and two objects never share anything" -- and it is
@@ -42,6 +43,11 @@ module test_interpolate_omp
     integer, parameter :: QUERIES = 200000
     !> Tables built concurrently, one per iteration, each on its own thread's object.
     integer, parameter :: BUILDS = 20000
+    !> Grid lines along `x` of the shared grid, `sin(x)*sin(y)` over `[0, 2*pi]` by `[0, pi]`: a spacing
+    !! of `pi/256`.
+    integer, parameter :: GRID_NX = 513
+    !> Grid lines along `y` of the shared grid: the same spacing.
+    integer, parameter :: GRID_NY = 257
 
 contains
 
@@ -52,6 +58,8 @@ contains
         testsuite = [ &
             new_unittest("one object is evaluated by a whole team at once", &
                          test_shared_object_is_read_only), &
+            new_unittest("one grid object is evaluated by a whole team at once", &
+                         test_shared_grid_is_read_only), &
             new_unittest("objects built on different threads at once stay independent", &
                          test_objects_per_thread_are_independent), &
             new_unittest("a call inside a team reaches the whole team", &
@@ -131,6 +139,64 @@ contains
         call check(error, far == 0, "a concurrent integral strayed from 1 - cos beyond the spline's error bound")
 
     end subroutine test_shared_object_is_read_only
+
+    !> One bicubic grid object over `sin(x)*sin(y)`, evaluated at 200 000 points from a parallel loop.
+    !!
+    !! Bit equality with a serial pass over the same points, and every concurrent answer against the
+    !! closed form. `sin` has a zero second derivative at `0`, `pi` and `2*pi`, so the natural spline of
+    !! `sin` along each axis has the right end condition and errs by at most the interior bound
+    !! `5/384 * h**4 * max|sin''''|` with `h = pi/256`, about `3e-10`. On a grid of products the
+    !! bicubic spline is the product of the two one-dimensional splines, so it errs by at most the
+    !! sum of their two errors, about `6e-10`; `1e-8` leaves room for the libm `sin` the oracle calls.
+    subroutine test_shared_grid_is_read_only(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        real(real64), parameter :: PI = 4.0_real64*atan(1.0_real64)
+
+        type(pf_interp_2d)        :: surface
+        real(real64), allocatable :: gx(:), gy(:), gz(:, :), px(:), py(:), serial(:), shared(:)
+        integer                   :: i, j, differ, far
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the loop below runs on one thread, so " // &
+                       "'one grid object evaluated by a whole team at once' would hold because " // &
+                       "nothing was concurrent")
+        return
+#endif
+        allocate (gx(GRID_NX), gy(GRID_NY), gz(GRID_NX, GRID_NY), px(QUERIES), py(QUERIES), shared(QUERIES))
+        do i = 1, GRID_NX
+            gx(i) = 2.0_real64*PI*real(i - 1, real64)/real(GRID_NX - 1, real64)
+        end do
+        do j = 1, GRID_NY
+            gy(j) = PI*real(j - 1, real64)/real(GRID_NY - 1, real64)
+        end do
+        do j = 1, GRID_NY
+            do i = 1, GRID_NX
+                gz(i, j) = sin(gx(i))*sin(gy(j))
+            end do
+        end do
+        do i = 1, QUERIES
+            ! 7919 and 10007 are primes sharing no factor with QUERIES, so each coordinate visits every
+            ! residue once, in different orders; both products stay below `huge(1)`.
+            px(i) = 2.0_real64*PI*real(mod(i*7919, QUERIES), real64)/real(QUERIES, real64)
+            py(i) = PI*real(mod(i*10007, QUERIES), real64)/real(QUERIES, real64)
+        end do
+        call surface%init(gx, gy, gz)
+        serial = surface%eval(px, py)
+
+        !$omp parallel do default(shared) private(i) schedule(static)
+        do i = 1, QUERIES
+            shared(i) = surface%eval(px(i), py(i))
+        end do
+        !$omp end parallel do
+
+        differ = count(shared /= serial)
+        call check(error, differ == 0, "a concurrent evaluation of one grid object differed from the serial one")
+        if (allocated(error)) return
+        far = count(abs(shared - sin(px)*sin(py)) > 1.0e-8_real64)
+        call check(error, far == 0, "a concurrent grid evaluation strayed from sin(x)*sin(y) beyond the spline's error bound")
+
+    end subroutine test_shared_grid_is_read_only
 
     !> 20 000 tables, each built and evaluated on its own thread's object while the other threads do
     !! the same, each against its own closed form.

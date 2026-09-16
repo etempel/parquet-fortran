@@ -22,13 +22,17 @@ the library's closed forms cannot be copied into the oracle:
   its value, derivatives and integral are read off that polynomial, where the library evaluates
   closed forms in `t = s/h`;
 * an integral is summed over the pieces between the limits and the knots, each piece on the
-  polynomial its midpoint selects, where the library brackets both limits and sums whole segments.
+  polynomial its midpoint selects, where the library brackets both limits and sums whole segments;
+* a grid is interpolated along `y` first -- every row of values solved as a one-dimensional spline
+  in full and evaluated at the query's `y` -- and the results then along `x`, where the library
+  builds tables of second derivatives along `x`, along `y` and along `x` of those along `y`, and
+  evaluates along `x` at the query's cell before `y`.
 
-**The fixtures are dyadic rationals**: every knot, ordinate, slope, query and limit is an integer
-over a power of two, so each is an exact double and Python and Fortran hold the same table bit for
-bit. They are emitted as literals rather than mirrored as recipes on the Fortran side: the largest
-has 33 points, which is shorter as a literal than as the code that would rebuild it, and a literal
-cannot drift from the generator that produced it.
+**The fixtures are dyadic rationals**: every knot, ordinate, slope, grid line, value, query and
+limit is an integer over a power of two, so each is an exact double and Python and Fortran hold the
+same table bit for bit. They are emitted as literals rather than mirrored as recipes on the Fortran
+side: the largest has 33 points, which is shorter as a literal than as the code that would rebuild
+it, and a literal cannot drift from the generator that produced it.
 
 What each fixture pins:
 
@@ -51,6 +55,20 @@ end conditions, and `pchip` -- at 25 interior queries (some of which land on kno
 the table under `outside="extrapolate"`, for the value and both derivatives; and integrated over 6
 pairs of limits inside the table and 3 reaching beyond it, the latter under both
 `outside="extrapolate"` and `outside="clamp"`.
+
+And three grids, each with a spacing of its own along each axis:
+
+* `N57`, five lines along `x` and seven along `y`, both at irregular gaps: the general case;
+* `E86`, eight evenly spaced lines along `x`, bracketed by arithmetic, and six along `y` whose gaps
+  grow thirty-two-fold;
+* `S55`, a square grid of five lines each way, the two axes' lines different and the values not
+  symmetric: a value table given transposed passes the shape check only on a square grid, so this is
+  the grid whose golden rows a transposition must fail.
+
+Each is evaluated bilinearly and as the bicubic spline under `natural` and `not_a_knot`, at 40 points
+inside the grid (the corners, a node, and points on interior and last grid lines among them) and at
+8 beyond it in one coordinate or both, the latter under `outside="extrapolate"` and
+`outside="clamp"`.
 
 Usage:
     python3 tools/generate_interpolate_vectors.py              # rewrite test/test_interpolate_golden.f90
@@ -82,6 +100,17 @@ VARIANTS = [
     ("GI_NOT_A_KNOT", "cubic", "not_a_knot"),
     ("GI_CLAMPED", "cubic", "clamped"),
     ("GI_PCHIP", "pchip", None),
+]
+
+#: Queries inside each grid, and queries beyond it in one coordinate or both.
+NQ2, NO2 = 40, 8
+
+#: The variants every grid is evaluated under, in the order of the grid expectation arrays' columns:
+#: (Fortran index name, method token, end-condition token).
+GRID_VARIANTS = [
+    ("G2_LINEAR", "linear", None),
+    ("G2_NATURAL", "cubic", "natural"),
+    ("G2_NOT_A_KNOT", "cubic", "not_a_knot"),
 ]
 
 
@@ -179,6 +208,61 @@ PARABOLA_X = [Fraction(i) for i in range(1, 7)]
 PARABOLA_Y = [xi * xi for xi in PARABOLA_X]
 PARABOLA_PROBES = [Fraction(3, 2), Fraction(5, 2), Fraction(11, 2)]
 PARABOLA_FAR = Fraction(99)
+
+
+def grid_n57():
+    """Five lines along x at gaps of 1/8 to 1, seven along y at gaps of 1/16 to 13/16; values over 32,
+    both signs, `z[i][j]` at `(x[i], y[j])`."""
+    x = [Fraction(v, 8) for v in (-4, -1, 3, 4, 12)]
+    y = [Fraction(v, 16) for v in (0, 5, 6, 14, 22, 27, 40)]
+    z = [[Fraction((i * i * 7 + j * 13 + i * j * j * 3 + 5) % 41 - 20, 32) for j in range(7)] for i in range(5)]
+    return x, y, z
+
+
+def grid_e86():
+    """Eight lines along x a quarter apart, six along y at gaps doubling from 1/16 to 1/2 and then 2;
+    values over 16."""
+    x = [Fraction(i, 4) for i in range(8)]
+    y = [Fraction(v, 16) for v in (0, 1, 3, 7, 15, 47)]
+    z = [[Fraction((i * 11 + j * j * 5 + i * i * j * 2 + 3) % 37 - 18, 16) for j in range(6)] for i in range(8)]
+    return x, y, z
+
+
+def grid_s55():
+    """Five lines each way, at gaps of 1/8 to 1/2 along x and 1/8 to 5/8 along y; values over 64,
+    not symmetric."""
+    x = [Fraction(v, 8) for v in (0, 2, 3, 7, 8)]
+    y = [Fraction(v, 8) for v in (-2, 1, 3, 4, 9)]
+    z = [[Fraction((i * 3 + j * j * 7 + i * i * j + 1) % 29 - 14, 64) for j in range(5)] for i in range(5)]
+    return x, y, z
+
+
+#: The grids, by the name their Fortran parameters carry.
+GRIDS = [("N57", grid_n57), ("E86", grid_e86), ("S55", grid_s55)]
+
+
+def grid_queries(x, y):
+    """40 dyadic points inside the grid: 32 spread over it by two unrelated recipes, then the four
+    corners, an interior node, a point on an interior line along x, and a point on each axis's last
+    line."""
+    sx, sy = x[-1] - x[0], y[-1] - y[0]
+    points = [(x[0] + sx * Fraction((j * 37 + 5) % 64, 64), y[0] + sy * Fraction((j * 23 + 11) % 64, 64))
+              for j in range(32)]
+    points += [(x[0], y[0]), (x[-1], y[0]), (x[0], y[-1]), (x[-1], y[-1]), (x[2], y[1]),
+               (x[1], y[0] + sy * Fraction(29, 64)), (x[-1], y[0] + sy * Fraction(45, 64)),
+               (x[0] + sx * Fraction(19, 64), y[-1])]
+    return points
+
+
+def grid_outside(x, y):
+    """8 dyadic points beyond the grid: beyond each of its four edges with the other coordinate inside,
+    and beyond two edges at once, near each corner and far from it."""
+    sx, sy = x[-1] - x[0], y[-1] - y[0]
+    below_x, above_x = x[0] - sx / 8, x[-1] + sx / 16
+    below_y, above_y = y[0] - sy / 16, y[-1] + sy / 8
+    inside_x, inside_y = x[0] + sx * Fraction(21, 64), y[0] + sy * Fraction(43, 64)
+    return [(below_x, inside_y), (above_x, inside_y), (inside_x, below_y), (inside_x, above_y),
+            (x[0] - sx / 64, y[0] - sy / 64), (above_x, above_y), (below_x, above_y), (x[-1] + sx / 64, below_y)]
 
 
 # ======================================================================================
@@ -377,6 +461,36 @@ class Interpolant:
         return total
 
 
+class Grid:
+    """One variant built over one grid, as the tensor product of the one-dimensional interpolants.
+
+    Every row of values is its own one-dimensional interpolant along `y`; a query evaluates each at
+    its `y` and interpolates the results along `x` at its `x`, each continued beyond its axis the way
+    `outside="extrapolate"` continues a segment. The one-dimensional interpolants here are linear in
+    their ordinates, so this is the one function whichever axis goes first -- which `--self-test`
+    checks exactly rather than assumes."""
+
+    def __init__(self, x, y, z, method, bc):
+        self.x, self.y, self.z, self.method, self.bc = x, y, z, method, bc
+        self.rows = [Interpolant(y, z[i], method, bc) for i in range(len(x))]
+
+    def at(self, xq, yq):
+        """The value at `(xq, yq)`."""
+        along_y = [row.at(yq) for row in self.rows]
+        return Interpolant(self.x, along_y, self.method, self.bc).at(xq)
+
+    def at_x_first(self, xq, yq):
+        """The same value, interpolating every column along `x` first and the results along `y`."""
+        columns = [[self.z[i][j] for i in range(len(self.x))] for j in range(len(self.y))]
+        along_x = [Interpolant(self.x, column, self.method, self.bc).at(xq) for column in columns]
+        return Interpolant(self.y, along_x, self.method, self.bc).at(yq)
+
+
+def clamp_to(v, lines):
+    """`v` moved onto the nearer end of `lines` when it lies beyond them."""
+    return min(max(v, lines[0]), lines[-1])
+
+
 def build(x, y, slopes, variant):
     """The interpolant of one variant over one fixture."""
     _, method, bc = variant
@@ -404,6 +518,19 @@ def cases(x, y, slopes):
     return table
 
 
+def grid_cases(x, y, z):
+    """Every expectation one grid carries, keyed by the suffix its Fortran parameter takes; each is a
+    list with one column per grid variant."""
+    inside, beyond = grid_queries(x, y), grid_outside(x, y)
+    table = {key: [] for key in ("VALUE", "VALUE_OUT", "VALUE_CLAMP")}
+    for _, method, bc in GRID_VARIANTS:
+        g = Grid(x, y, z, method, bc)
+        table["VALUE"].append([g.at(a, b) for a, b in inside])
+        table["VALUE_OUT"].append([g.at(a, b) for a, b in beyond])
+        table["VALUE_CLAMP"].append([g.at(clamp_to(a, x), clamp_to(b, y)) for a, b in beyond])
+    return table
+
+
 # ======================================================================================
 # --self-test: the model against scipy.interpolate, and against its own definitions
 # ======================================================================================
@@ -412,7 +539,8 @@ def self_test():
     """Validate the exact model against scipy, and the model against properties it must have."""
     try:
         import numpy as np
-        from scipy.interpolate import CubicSpline, PchipInterpolator, make_interp_spline
+        from scipy.interpolate import CubicSpline, PchipInterpolator, RegularGridInterpolator, make_interp_spline
+        from scipy.sparse.linalg import spsolve
     except ImportError as exc:                                   # pragma: no cover - maintainer tool
         print("generate_interpolate_vectors.py --self-test: needs numpy and scipy (%s)" % exc,
               file=sys.stderr)
@@ -542,11 +670,91 @@ def self_test():
     agree("P6 natural", [f.at(q) for q in PARABOLA_PROBES + [PARABOLA_FAR]],
           obj([float(v) for v in PARABOLA_PROBES + [PARABOLA_FAR]]), 36.0)
 
+    # The grids, against scipy by two routes: `RegularGridInterpolator` for the bilinear and the
+    # not-a-knot rows -- its cubic method solves for a tensor-product not-a-knot spline, and by default
+    # does so iteratively, to an absolute tolerance of 1e-6, so the direct `spsolve` is passed -- and
+    # `CubicSpline` applied along `y` and then along `x` for both end conditions, since scipy has no
+    # natural tensor-product spline of its own.
+    for name, maker in GRIDS:
+        x, y, z = maker()
+        xf, yf = np.array([float(v) for v in x]), np.array([float(v) for v in y])
+        zf = np.array([[float(v) for v in row] for row in z])
+        scale = float(np.max(np.abs(zf)))
+        inside, beyond = grid_queries(x, y), grid_outside(x, y)
+        points = np.array([[float(a), float(b)] for a, b in inside + beyond])
+        # Moved onto the grid by numpy, not by the model's own `clamp_to`, which is what is checked.
+        clamped = np.array([[np.clip(float(a), xf[0], xf[-1]), np.clip(float(b), yf[0], yf[-1])] for a, b in beyond])
+        table = grid_cases(x, y, z)
+        for column, (index, method, bc) in enumerate(GRID_VARIANTS):
+            label = "%s %s" % (name, index)
+            model = table["VALUE"][column] + table["VALUE_OUT"][column]
+            if method == "linear":
+                grid = RegularGridInterpolator((xf, yf), zf, method="linear", bounds_error=False, fill_value=None)
+                agree(label + " against RegularGridInterpolator", model, grid(points), scale)
+                agree(label + " clamped, against RegularGridInterpolator", table["VALUE_CLAMP"][column],
+                      grid(clamped), scale)
+            elif bc == "not_a_knot":
+                grid = RegularGridInterpolator((xf, yf), zf, method="cubic", bounds_error=False, fill_value=None,
+                                               solver=spsolve)
+                agree(label + " against RegularGridInterpolator", model, grid(points), scale)
+                agree(label + " clamped, against RegularGridInterpolator", table["VALUE_CLAMP"][column],
+                      grid(clamped), scale)
+            if method == "cubic":
+                kind = bc.replace("_", "-")
+                sequential = [float(CubicSpline(xf, CubicSpline(yf, zf, axis=1, bc_type=kind)(b), bc_type=kind)(a))
+                              for a, b in points]
+                agree(label + " against CubicSpline along y then x", model, sequential, scale)
+
+            # The model's own properties, independently of scipy.
+            g = Grid(x, y, z, method, bc)
+            if any(g.at(x[i], y[j]) != z[i][j] for i in range(len(x)) for j in range(len(y))):
+                failures.append("%s: the model does not reproduce every grid node exactly" % label)
+            for a, b in inside + beyond:
+                if g.at(a, b) != g.at_x_first(a, b):
+                    failures.append("%s: the model depends on which axis goes first at %s" % (label, (a, b)))
+            for j in range(len(y)):
+                line = Interpolant(x, [z[i][j] for i in range(len(x))], method, bc)
+                if any(g.at(a, y[j]) != line.at(a) for a, _ in inside):
+                    failures.append("%s: the model restricted to a line along x is not that line's interpolant"
+                                    % label)
+            # A product of one function of x and one of y interpolates as the product of the two
+            # one-dimensional interpolants.
+            fx, gy = [z[i][0] for i in range(len(x))], list(z[0])
+            product = Grid(x, y, [[a * b for b in gy] for a in fx], method, bc)
+            along_x, along_y = Interpolant(x, fx, method, bc), Interpolant(y, gy, method, bc)
+            if any(product.at(a, b) != along_x.at(a) * along_y.at(b) for a, b in inside + beyond):
+                failures.append("%s: the model of a product is not the product of the two interpolants" % label)
+        if len(x) == len(y):
+            # The square grid is the one a transposed value table reaches the library on: its golden
+            # rows must tell the two apart under every variant.
+            transposed = grid_cases(x, y, [list(column) for column in zip(*z)])
+            for column, (index, _, _) in enumerate(GRID_VARIANTS):
+                if transposed["VALUE"][column] == table["VALUE"][column]:
+                    failures.append("%s %s: the transposed values answer the same golden rows" % (name, index))
+
+    # Bilinear interpolation reproduces `a + b*x + c*y + d*x*y`, and the not-a-knot bicubic spline a
+    # product of two cubics.
+    x, y, _ = grid_n57()
+    probes = grid_queries(x, y) + grid_outside(x, y)
+    g = Grid(x, y, [[3 + 2 * a - b + a * b / 4 for b in y] for a in x], "linear", None)
+    if any(g.at(a, b) != 3 + 2 * a - b + a * b / 4 for a, b in probes):
+        failures.append("bilinear interpolation does not reproduce a + b*x + c*y + d*x*y")
+    g = Grid(x, y, [[(a ** 3 - 2 * a) * (b ** 3 + b) for b in y] for a in x], "cubic", "not_a_knot")
+    if any(g.at(a, b) != (a ** 3 - 2 * a) * (b ** 3 + b) for a, b in probes):
+        failures.append("the not-a-knot bicubic spline does not reproduce a product of cubics")
+
     # Every value the Fortran side reads must be the exact double the model used.
     for name, maker in FIXTURES:
         x, y, slopes = maker()
         values = list(x) + list(y) + list(slopes) + interior_queries(x) + outside_queries(x)
         values += [v for pair in inside_limits(x) + outside_limits(x) for v in pair]
+        for v in values:
+            if Fraction(float(v)) != v:
+                failures.append("%s: %s is not an exact double" % (name, v))
+    for name, maker in GRIDS:
+        x, y, z = maker()
+        values = list(x) + list(y) + [v for row in z for v in row]
+        values += [v for point in grid_queries(x, y) + grid_outside(x, y) for v in point]
         for v in values:
             if Fraction(float(v)) != v:
                 failures.append("%s: %s is not an exact double" % (name, v))
@@ -557,9 +765,11 @@ def self_test():
         return 1
     print("generate_interpolate_vectors.py --self-test: the exact model agrees with scipy %s "
           "(numpy %s) to 1e-12 on %d fixtures under %d variants -- values, both derivatives and "
-          "integrals, inside the table and beyond it -- and on the page's example; it holds every "
-          "property it is checked for, and the fixtures reach all %d PCHIP rules"
-          % (scipy.__version__, np.__version__, len(FIXTURES), len(VARIANTS), len(wanted)))
+          "integrals, inside the table and beyond it -- on the page's example, and on %d grids under "
+          "%d variants, inside the grid and beyond it; it holds every property it is checked for, and "
+          "the fixtures reach all %d PCHIP rules"
+          % (scipy.__version__, np.__version__, len(FIXTURES), len(VARIANTS), len(GRIDS), len(GRID_VARIANTS),
+             len(wanted)))
     return 0
 
 
@@ -616,6 +826,13 @@ HEADER = '''!===========================================
 !! `outside="extrapolate"`; `F_INTEGRAL` holds the integral over each inside pair, and
 !! `F_INTEGRAL_OUT` and `F_INTEGRAL_CLAMP` the integral over each outside pair under
 !! `outside="extrapolate"` and `outside="clamp"`. `P6_*` is the guide page's `x**2` example.
+!!
+!! For a grid `G`: `G_X` and `G_Y` are its lines along each axis and `G_Z` its values, `G_Z(i, j)` at
+!! `(G_X(i), G_Y(j))`; `(G_XQ(i), G_YQ(i))` are the queries inside it and `(G_XO(i), G_YO(i))` those
+!! beyond it. Every grid expectation array has one column per grid variant, numbered by the `G2_*`
+!! variant indices: `G_VALUE` holds the value at each query inside, and `G_VALUE_OUT` and
+!! `G_VALUE_CLAMP` the value at each query beyond under `outside="extrapolate"` and
+!! `outside="clamp"`.
 module test_interpolate_golden
     use iso_fortran_env, only : real64
     implicit none
@@ -662,6 +879,27 @@ CASE_DOCS = {
     "INTEGRAL": ("the integral over each inside pair of limits", "GI_NI"),
     "INTEGRAL_OUT": ("the integral over each outside pair of limits, under outside=\"extrapolate\"", "GI_NJ"),
     "INTEGRAL_CLAMP": ("the integral over each outside pair of limits, under outside=\"clamp\"", "GI_NJ"),
+}
+
+#: What each grid variant column holds.
+GRID_VARIANT_DOCS = {
+    "G2_LINEAR": 'method="linear"',
+    "G2_NATURAL": 'method="cubic", bc="natural"',
+    "G2_NOT_A_KNOT": 'method="cubic", bc="not_a_knot"',
+}
+
+#: What each grid's doc-comment says it pins.
+GRID_DOCS = {
+    "N57": "five lines along x and seven along y, both at irregular gaps",
+    "E86": "eight evenly spaced lines along x, six along y at gaps growing thirty-two-fold",
+    "S55": "a square grid with different lines along each axis and values that are not symmetric",
+}
+
+#: What each grid expectation array holds, and its row count.
+GRID_CASE_DOCS = {
+    "VALUE": ("the value at each query inside the grid", "G2_NQ"),
+    "VALUE_OUT": ("the value at each query beyond the grid, under outside=\"extrapolate\"", "G2_NO"),
+    "VALUE_CLAMP": ("the value at each query beyond the grid, under outside=\"clamp\"", "G2_NO"),
 }
 
 
@@ -721,6 +959,50 @@ def emit():
     out.append("    !> The natural cubic spline's end segment continued to `P6_FAR`.")
     out.append("    real(real64), parameter :: P6_NATURAL_FAR = %s" % fortran_real(parabola.at(PARABOLA_FAR)))
     out.append("")
+
+    out.append("    ! ---- the grids ----")
+    out.append("")
+    out.append("    !> Queries inside each grid.")
+    out.append("    integer, parameter :: G2_NQ = %d" % NQ2)
+    out.append("    !> Queries beyond each grid, in one coordinate or both.")
+    out.append("    integer, parameter :: G2_NO = %d" % NO2)
+    out.append("    !> Grid variants, the columns of every grid expectation array.")
+    out.append("    integer, parameter :: G2_NV = %d" % len(GRID_VARIANTS))
+    for index, (name, _, _) in enumerate(GRID_VARIANTS, start=1):
+        out.append("    !> Column of `%s`." % GRID_VARIANT_DOCS[name])
+        out.append("    integer, parameter :: %s = %d" % (name, index))
+    out.append("")
+    for name, maker in GRIDS:
+        x, y, z = maker()
+        out.append("    ! ---- %s: %s ----" % (name, GRID_DOCS[name]))
+        out.append("")
+        out.append("    !> Lines along x in grid %s." % name)
+        out.append("    integer, parameter :: %s_NX = %d" % (name, len(x)))
+        out.append("    !> Lines along y in grid %s." % name)
+        out.append("    integer, parameter :: %s_NY = %d" % (name, len(y)))
+        out.append("    !> Grid %s's lines along x, strictly increasing." % name)
+        out += wrap_array("    real(real64), parameter :: %s_X(%s_NX) =" % (name, name), [fortran_real(v) for v in x])
+        out.append("    !> Grid %s's lines along y, strictly increasing." % name)
+        out += wrap_array("    real(real64), parameter :: %s_Y(%s_NY) =" % (name, name), [fortran_real(v) for v in y])
+        out.append("    !> Grid %s's values, `%s_Z(i, j)` at `(%s_X(i), %s_Y(j))`." % (name, name, name, name))
+        out += wrap_array("    real(real64), parameter :: %s_Z(%s_NX, %s_NY) = reshape(" % (name, name, name),
+                          [fortran_real(z[i][j]) for j in range(len(y)) for i in range(len(x))],
+                          tail="], [%s_NX, %s_NY])" % (name, name), opener="[")
+        for suffix, points, count, where in (("Q", grid_queries(x, y), "G2_NQ", "inside it"),
+                                             ("O", grid_outside(x, y), "G2_NO", "beyond it")):
+            out.append("    !> The x of each of grid %s's queries %s." % (name, where))
+            out += wrap_array("    real(real64), parameter :: %s_X%s(%s) =" % (name, suffix, count),
+                              [fortran_real(a) for a, _ in points])
+            out.append("    !> The y of each of grid %s's queries %s." % (name, where))
+            out += wrap_array("    real(real64), parameter :: %s_Y%s(%s) =" % (name, suffix, count),
+                              [fortran_real(b) for _, b in points])
+        for suffix, columns in grid_cases(x, y, z).items():
+            doc, rows = GRID_CASE_DOCS[suffix]
+            out.append("    !> Grid %s: %s, one column per grid variant." % (name, doc))
+            out += wrap_array("    real(real64), parameter :: %s_%s(%s, G2_NV) = reshape(" % (name, suffix, rows),
+                              [fortran_real(v) for column in columns for v in column],
+                              tail="], [%s, G2_NV])" % rows, opener="[")
+        out.append("")
     out.append("end module test_interpolate_golden ! GCOVR_EXCL_LINE")
     text = "\n".join(out) + "\n"
     for lineno, line in enumerate(text.split("\n"), start=1):
@@ -745,12 +1027,12 @@ def main(argv):
                   "tools/generate_interpolate_vectors.py." % OUT_PATH.relative_to(REPO_ROOT),
                   file=sys.stderr)
             return 1
-        print("generate_interpolate_vectors.py --check: %s carries all %d fixtures, current."
-              % (OUT_PATH.relative_to(REPO_ROOT), len(FIXTURES) + 1))
+        print("generate_interpolate_vectors.py --check: %s carries all %d fixtures and %d grids, current."
+              % (OUT_PATH.relative_to(REPO_ROOT), len(FIXTURES) + 1, len(GRIDS)))
         return 0
     OUT_PATH.write_text(text)
-    print("generate_interpolate_vectors.py: wrote %s (%d fixtures, exact rational model)"
-          % (OUT_PATH.relative_to(REPO_ROOT), len(FIXTURES) + 1))
+    print("generate_interpolate_vectors.py: wrote %s (%d fixtures and %d grids, exact rational model)"
+          % (OUT_PATH.relative_to(REPO_ROOT), len(FIXTURES) + 1, len(GRIDS)))
     return 0
 
 

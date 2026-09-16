@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **138** of this library's Fortran files.
+also the largest: a project that imports it compiles **139** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -59,13 +59,13 @@ in every one of them.
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
-| `parquet_interpolate` | 3 | no | `pf_interp_1d` and `pf_interp`: linear, cubic-spline and shape-preserving interpolation of tabulated data |
+| `parquet_interpolate` | 4 | no | `pf_interp_1d`, `pf_interp_2d` and `pf_interp`: linear, cubic-spline and shape-preserving interpolation of tabulated data, in one dimension and on a rectilinear grid |
 | `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
 | `parquet_prima` | 24 | no | `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla`: Powell's derivative-free solvers, vendored from PRIMA — a function of several variables with bounds, linear constraints or nonlinear ones |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 138 | **yes** | everything above, through one `use` |
+| `parquet` | 139 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 

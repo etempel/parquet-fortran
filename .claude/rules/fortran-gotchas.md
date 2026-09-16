@@ -109,10 +109,12 @@ in `code-style.md`.
   looks like "both zero" (a pole, a zero-length vector). `grep -n "atan2" src/*.f90` is the audit;
   guard every site whose arguments can both vanish.
 - **`min`/`max`/`minval`/`maxval` and the two-`if` clamp compile to `minsd`/`maxsd`, which raise
-  `IEEE_INVALID` on a quiet NaN** (ordinary comparisons do not), and the answer is wrong even where
-  it does not trap. Screen the NaN first, as its own statement; refuse a NaN input at a validating
-  entry point. `any(x <= 0)` does NOT reject a NaN; `.not. all(x > 0)` does. Census of the
-  instruction per procedure (the audit; a source grep cannot see an if-converted clamp):
+  `IEEE_INVALID` on a quiet NaN** (so does an ordered comparison, `<`, `>`, `<=` or `>=`, under
+  gfortran at `-O0` and `-O2` alike, which compiles it to `comisd`; `==` and `/=` never raise it,
+  and ifx raises it on no comparison), and the answer is wrong even where it does not trap. Screen
+  the NaN first, as its own statement; refuse a NaN input at a validating entry point.
+  `any(x <= 0)` does NOT reject a NaN; `.not. all(x > 0)` does. Census of the instruction per
+  procedure (the audit; a source grep cannot see an if-converted clamp):
 
 ```bash
 for o in build/<hash>/parquet-fortran/src_*.o; do objdump -d "$o" | awk -v O="$o" \
@@ -343,7 +345,11 @@ done | sort | uniq -c | sort -rn
   itself unusable when it is exactly what the test needs
   (`test_absorbing_weight_keeps_positions_ordered`). It is a Heisenbug: printing `total` first
   hides it. Declare the variable `volatile` so the stored value is read back rather than the
-  expression that produced it, which is the question such a precondition is asking.
+  expression that produced it, which is the question such a precondition is asking. It rearranges
+  a weighted sum the same way: `(1 - s)*a + s*b` at `s = 1` answered `0.09999999999999998` for
+  `a = 0.7`, `b = 0.1`. A weight of exactly zero stays exact under any rearrangement and a weight of
+  exactly one does not, so an interpolant that must return an end value exactly answers that end
+  directly (`interp_2d_eval`, `src/parquet_interpolate_2d.f90`).
 - **A `pure` procedure can be INLINED at one call site and left out-of-line at another — at `-O0` —
   so "both routes call the same kernel" does not mean "both routes round alike."** ifx compiled the
   out-of-line `stats_block_moments` vectorised (`addpd`/`mulpd`, two lanes combined at the end) and

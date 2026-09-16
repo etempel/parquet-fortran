@@ -1,6 +1,6 @@
 !> Tests for `parquet_interpolate`: `pf_interp_1d` under every method and end condition, its
-!> derivatives and integrals, the out-of-range policies, the mask, descending tables, and the
-!> one-shot `pf_interp`.
+!> derivatives and integrals, `pf_interp_2d` bilinear and bicubic, the out-of-range policies, the
+!> mask, descending tables and grid axes, and the one-shot `pf_interp` in both dimensions.
 !!
 !! **Every expected value is a golden expectation or a closed form**, never a number read off a run.
 !! The golden rows come from `tools/generate_interpolate_vectors.py`, which solves every spline
@@ -17,7 +17,10 @@
 !!
 !! **A variant** is one of the five interpolants a table can be built as, in the order of the golden
 !! arrays' columns: `linear`, the cubic spline under `natural`, `not_a_knot` and `clamped`, and
-!! `pchip` (`VARIANT_NAMES`). A table outside the golden fixtures is clamped with `TEST_SLOPES`.
+!! `pchip` (`VARIANT_NAMES`). A table outside the golden fixtures is clamped with `TEST_SLOPES`. A
+!! **grid variant** is one of the three interpolants a grid can be built as, in the order of the golden
+!! grid arrays' columns: bilinear, and the bicubic spline under `natural` and `not_a_knot`
+!! (`GRID_VARIANT_NAMES`).
 !!
 !! This suite is pure computation with no fixture files and no process-global state, so it runs
 !! concurrently in the runner. Its only library import is `use parquet_interpolate`: it is registered
@@ -30,7 +33,8 @@ module test_interpolate
     use parquet_interpolate
     use test_interpolate_support
     use test_interpolate_golden, only : GI_NQ, GI_NO, GI_NI, GI_NJ, GI_NV, GI_LINEAR, GI_NATURAL, GI_NOT_A_KNOT, &
-        GI_CLAMPED, GI_PCHIP, P6_PROBES, P6_NATURAL, P6_FAR, P6_NATURAL_FAR
+        GI_CLAMPED, GI_PCHIP, P6_PROBES, P6_NATURAL, P6_FAR, P6_NATURAL_FAR, G2_NQ, G2_NO, G2_NV, G2_LINEAR, &
+        G2_NATURAL, G2_NOT_A_KNOT
     use iso_fortran_env, only : real64
     use, intrinsic :: ieee_arithmetic, only : ieee_is_nan, ieee_get_flag, ieee_set_flag, &
         ieee_support_flag, ieee_invalid, ieee_divide_by_zero, ieee_value, ieee_positive_inf, ieee_negative_inf
@@ -82,18 +86,28 @@ contains
                          test_outside_policies), &
             new_unittest("a NaN query or limit answers NaN and raises no flag under every policy", &
                          test_nan_query_is_quiet), &
-            new_unittest("a query on a knot answers that knot's ordinate exactly", &
+            new_unittest("a query on a knot or a grid node answers its value exactly", &
                          test_knots_are_exact), &
             new_unittest("the arithmetic bracket and bisection answer the same bits", &
                          test_uniform_and_search_agree), &
-            new_unittest("a descending table interpolates as its ascending twin, bit for bit", &
+            new_unittest("a descending table or grid axis interpolates as its ascending twin, bit for bit", &
                          test_descending_tables), &
             new_unittest("is_valid drops exactly the points it marks", &
                          test_is_valid_drops_points), &
             new_unittest("pf_interp answers what the object answers, bit for bit", &
                          test_one_shot_equals_object), &
             new_unittest("clear releases an object and init rebuilds or replaces one", &
-                         test_clear_and_rebuild) &
+                         test_clear_and_rebuild), &
+            new_unittest("bilinear interpolation reproduces a bilinear function and matches the golden rows", &
+                         test_bilinear_is_exact), &
+            new_unittest("the bicubic spline matches the exact model and reproduces a product of cubics", &
+                         test_bicubic_matches_the_model), &
+            new_unittest("a grid interpolant restricted to a grid line is that line's interpolant", &
+                         test_grid_restricts_to_the_line_interpolant), &
+            new_unittest("a grid of products interpolates as the product of two interpolants", &
+                         test_grid_is_separable), &
+            new_unittest("clamp, extrapolate and nan each answer as documented beyond a grid", &
+                         test_outside_policies_2d) &
             ]
 
     end subroutine collect_tests_interpolate
@@ -717,14 +731,24 @@ contains
     !!
     !! The evenly spaced fixture `U9` is the one that makes a missing screen visible: its bracket is
     !! guessed with `floor`, which raises IEEE_INVALID on a NaN and returns an arbitrary integer.
+    !!
+    !! On a grid, a NaN in either coordinate, in both, and beside an infinity answers NaN under every
+    !! grid variant and policy, quietly. Each grid is also built transposed, so that each coordinate in
+    !! turn meets `E86`'s evenly spaced axis, where a missing screen takes `floor` of the NaN: that is
+    !! what shows the missing screen under ifx, while gfortran raises the flag on every grid already, at
+    !! the first ordered comparison with the NaN.
     subroutine test_nan_query_is_quiet(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(golden_fixture) :: f
-        type(pf_interp_1d)   :: c
-        real(real64)         :: nan, got(5)
-        logical              :: can_test, saved, raised
-        integer              :: which, v, ip
+        type(golden_fixture)      :: f
+        type(golden_grid)         :: g
+        type(pf_interp_1d)        :: c
+        type(pf_interp_2d)        :: grid
+        real(real64), allocatable :: ax(:), ay(:), az(:, :)
+        real(real64)              :: nan, inf, got(5), mid_x, mid_y
+        character(len=:), allocatable :: what
+        logical                   :: can_test, saved, raised
+        integer                   :: which, v, ip, turn
 
         nan = nan_value()
         do which = 1, GOLDEN_TABLES
@@ -746,6 +770,40 @@ contains
             end do
         end do
 
+        inf = positive_infinity()
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            do turn = 1, 2
+                if (turn == 1) then
+                    ax = g%x
+                    ay = g%y
+                    az = g%z
+                else
+                    ax = g%y
+                    ay = g%x
+                    az = transpose(g%z)
+                end if
+                mid_x = 0.5_real64*(ax(1) + ax(2))
+                mid_y = 0.5_real64*(ay(1) + ay(2))
+                do v = 1, G2_NV
+                    do ip = 1, 3
+                        what = ", grid variant " // trim(GRID_VARIANT_NAMES(v)) // ", policy " // trim(POLICIES(ip)) // &
+                               ", grid " // trim(g%name)
+                        if (turn == 2) what = what // " transposed"
+                        call init_grid_variant(grid, v, ax, ay, az, trim(POLICIES(ip)))
+                        call invalid_begin(can_test, saved)
+                        got = [grid%eval(nan, mid_y), grid%eval(mid_x, nan), grid%eval(nan, nan), grid%eval(nan, inf), &
+                               grid%eval(-inf, nan)]
+                        call invalid_end(can_test, saved, raised)
+                        call check(error, all(ieee_is_nan(got)), "a NaN coordinate must answer NaN" // what)
+                        if (allocated(error)) return
+                        call check(error, .not. raised, "a NaN coordinate raised IEEE_INVALID" // what)
+                        if (allocated(error)) return
+                    end do
+                end do
+            end do
+        end do
+
     end subroutine test_nan_query_is_quiet
 
     !> `%eval(x(k))` is `y(k)`, bit for bit, for every knot, variant and policy, ascending and
@@ -756,17 +814,24 @@ contains
     !! where `0.7 + (0.1 - 0.7)` is `0.09999999999999998`: a last knot answered through the linear
     !! segment formula rather than directly shows there. The bent table's arithmetic bracket guesses
     !! one segment too low exactly on half its knots, which the correction must walk up from.
+    !!
+    !! On a grid, `%eval(x(i), y(j))` is `z(i, j)`, bit for bit, at every node of every golden grid and
+    !! of a grid whose last cells along each axis run from `0.7` to `0.1`, under every grid variant and
+    !! policy, as given, with either axis descending and with both: every last grid line is the high
+    !! end of its cell.
     subroutine test_knots_are_exact(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         integer, parameter :: BENT_N = 4097
 
         type(golden_fixture)      :: f
+        type(golden_grid)         :: g
         type(pf_interp_1d)        :: c
-        real(real64), allocatable :: x(:), y(:)
+        type(pf_interp_2d)        :: grid
+        real(real64), allocatable :: x(:), y(:), gx(:), gy(:), gz(:, :), px(:, :), py(:, :)
         real(real64)              :: sx(31), sy(31), bx(BENT_N), by(BENT_N), slopes(2)
         character(len=3)          :: name
-        integer                   :: table, v, ip, n, missed
+        integer                   :: table, v, ip, n, missed, turn, nx, ny
 
         call sine_table(sx, sy)
         call bent_grid(BENT_N, bx, by)
@@ -805,6 +870,51 @@ contains
             end do
         end do
 
+        do table = 1, GOLDEN_GRIDS + 1
+            if (table <= GOLDEN_GRIDS) then
+                call golden_grid_get(table, g)
+                name = g%name
+                gx = g%x
+                gy = g%y
+                gz = g%z
+            else
+                ! Along x, rows 1, 2 and 4 end on 0.7 then 0.1; along y, columns 1 and 5 do.
+                name = "end"
+                gx = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+                gy = [0.0_real64, 0.5_real64, 1.0_real64, 1.5_real64]
+                gz = reshape([0.3_real64, 0.2_real64, 0.5_real64, 0.7_real64, 0.1_real64, &
+                              0.6_real64, 0.9_real64, 0.4_real64, 0.7_real64, 0.1_real64, &
+                              0.7_real64, 0.3_real64, 0.8_real64, 0.2_real64, 0.7_real64, &
+                              0.1_real64, 0.4_real64, 0.6_real64, 0.7_real64, 0.1_real64], [5, 4])
+            end if
+            nx = size(gx)
+            ny = size(gy)
+            px = spread(gx, 2, ny)
+            py = spread(gy, 1, nx)
+            do v = 1, G2_NV
+                do ip = 1, 3
+                    missed = 0
+                    do turn = 1, 4
+                        select case (turn)
+                        case (1)
+                            call init_grid_variant(grid, v, gx, gy, gz, trim(POLICIES(ip)))
+                        case (2)
+                            call init_grid_variant(grid, v, gx(nx:1:-1), gy, gz(nx:1:-1, :), trim(POLICIES(ip)))
+                        case (3)
+                            call init_grid_variant(grid, v, gx, gy(ny:1:-1), gz(:, ny:1:-1), trim(POLICIES(ip)))
+                        case default
+                            call init_grid_variant(grid, v, gx(nx:1:-1), gy(ny:1:-1), gz(nx:1:-1, ny:1:-1), &
+                                                   trim(POLICIES(ip)))
+                        end select
+                        missed = missed + count(grid%eval(px, py) /= gz)
+                    end do
+                    call check(error, missed == 0, "a grid node did not answer its own value, grid variant " // &
+                               trim(GRID_VARIANT_NAMES(v)) // ", policy " // trim(POLICIES(ip)) // ", grid " // trim(name))
+                    if (allocated(error)) return
+                end do
+            end do
+        end do
+
     end subroutine test_knots_are_exact
 
     !> The arithmetic bracket and bisection answer the same bits, and the hook that switches between
@@ -821,17 +931,31 @@ contains
     !! has its own segment formula to be handed the wrong segment. And two negative controls: an
     !! irregular table is not bracketed by arithmetic at all, and neither is an even table with one
     !! knot moved a fifth of a step.
+    !!
+    !! A grid decides each axis on its own, and the hook reports each. Four grids: one even along both
+    !! axes; `E86`, even along `x` only; `E86` transposed, even along `y` only; and one bent along both
+    !! axes as the bent table is, with the same guard counting wrong guesses in each direction along
+    !! each axis. Each must report exactly its even axes, and on each the two paths answer the same bits
+    !! at a query on every grid line and a four-hundredth of a step either side of it, under every grid
+    !! variant.
     subroutine test_uniform_and_search_agree(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         integer, parameter :: N = 4097
         integer, parameter :: SPREAD = 10000
+        integer, parameter :: GRID_NX = 257
+        integer, parameter :: GRID_NY = 129
 
         type(golden_fixture)      :: f
+        type(golden_grid)         :: g
         type(pf_interp_1d)        :: fast, slow
-        real(real64), allocatable :: x(:), y(:), q(:)
-        logical                   :: was
-        integer                   :: i, v, k, guess, misguessed, low, differ
+        type(pf_interp_2d)        :: grid_fast, grid_slow
+        real(real64), allocatable :: x(:), y(:), q(:), gx(:), gy(:), gz(:, :), qx(:), qy(:)
+        real(real64)              :: bent_x(GRID_NX), bent_y(GRID_NY), unused_x(GRID_NX), unused_y(GRID_NY)
+        character(len=14)         :: grid_name
+        logical                   :: was, x_was, y_was, x_even, y_even
+        integer                   :: i, j, v, k, guess, misguessed, low, differ, table, nx, ny
+        integer                   :: wrong(2, 2)
 
         ! An exactly even table: every knot a multiple of 1/1024.
         allocate (x(N), y(N), q(SPREAD + N))
@@ -909,6 +1033,107 @@ contains
         call fast%init(x, y)
         call parquet_debug_interp_force_search(fast, was)
         call check(error, .not. was, "an even table with one knot moved a fifth of a step must not count as even")
+        if (allocated(error)) return
+
+        call golden_grid_get(2, g)
+        call bent_grid(GRID_NX, bent_x, unused_x)
+        call bent_grid(GRID_NY, bent_y, unused_y)
+        wrong = 0
+        do table = 1, 4
+            select case (table)
+            case (1)
+                grid_name = "even"
+                gx = [(real(i - 1, real64)/64.0_real64, i = 1, GRID_NX)]
+                gy = [(real(j - 1, real64)/32.0_real64, j = 1, GRID_NY)]
+                x_even = .true.
+                y_even = .true.
+            case (2)
+                grid_name = "E86"
+                gx = g%x
+                gy = g%y
+                x_even = .true.
+                y_even = .false.
+            case (3)
+                grid_name = "E86 transposed"
+                gx = g%y
+                gy = g%x
+                x_even = .false.
+                y_even = .true.
+            case default
+                grid_name = "bent"
+                gx = bent_x
+                gy = bent_y
+                x_even = .true.
+                y_even = .true.
+            end select
+            nx = size(gx)
+            ny = size(gy)
+            if (allocated(gz)) deallocate (gz)
+            allocate (gz(nx, ny))
+            do j = 1, ny
+                do i = 1, nx
+                    gz(i, j) = sin(3.0_real64*gx(i))*cos(2.0_real64*gy(j)) + gx(i)*gy(j)/8.0_real64
+                end do
+            end do
+            ! On each x line and a four-hundredth of a mean step either side of it, at a y that walks
+            ! through the y lines; then the same across.
+            if (allocated(qx)) deallocate (qx, qy)
+            allocate (qx(3*(nx + ny)), qy(3*(nx + ny)))
+            do i = 1, nx
+                do k = 1, 3
+                    qx(3*(i - 1) + k) = gx(i) + real(k - 2, real64)*0.0025_real64*(gx(nx) - gx(1))/real(nx - 1, real64)
+                    qy(3*(i - 1) + k) = gy(1 + mod(i - 1, ny))
+                end do
+            end do
+            do j = 1, ny
+                do k = 1, 3
+                    qx(3*(nx + j - 1) + k) = gx(1 + mod(3*j, nx))
+                    qy(3*(nx + j - 1) + k) = gy(j) + real(k - 2, real64)*0.0025_real64*(gy(ny) - gy(1))/real(ny - 1, real64)
+                end do
+            end do
+            if (table == 4) then
+                ! The guard, as for the bent table: the mean step of each axis is exactly one.
+                do i = 1, size(qx)
+                    call count_wrong_guess(gx, qx(i), wrong(1, :))
+                    call count_wrong_guess(gy, qy(i), wrong(2, :))
+                end do
+            end if
+            do v = 1, G2_NV
+                call init_grid_variant(grid_fast, v, gx, gy, gz, "clamp")
+                grid_slow = grid_fast
+                call parquet_debug_interp_force_search(grid_slow, x_was, y_was)
+                call check(error, (x_was .eqv. x_even) .and. (y_was .eqv. y_even), &
+                           "a grid must report bracketing by arithmetic along exactly its even axes, grid variant " // &
+                           trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(grid_name))
+                if (allocated(error)) return
+                differ = count(grid_fast%eval(qx, qy) /= grid_slow%eval(qx, qy))
+                call check(error, differ == 0, "the arithmetic bracket and bisection disagreed on a grid, grid variant " // &
+                           trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(grid_name))
+                if (allocated(error)) return
+            end do
+        end do
+        call check(error, all(wrong > 0), "the bent grid must hold queries the arithmetic guess puts both above and " // &
+                   "below their cell along each axis, or a direction of the correction goes untested there")
+
+    contains
+
+        !> Counts a query inside `lines`, whose mean step is one, whose arithmetic guess is above its
+        !! cell (`tally(1)`) or below it (`tally(2)`).
+        subroutine count_wrong_guess(lines, point, tally)
+            real(real64), intent(in) :: lines(:) !! grid lines from 0 to `size(lines) - 1`
+            real(real64), intent(in) :: point    !! the query's coordinate on that axis
+            integer, intent(inout)   :: tally(:) !! guesses above, and below, the true cell
+
+            integer :: m, guessed, cell
+
+            m = size(lines)
+            if (point < lines(1) .or. point >= lines(m)) return
+            guessed = max(1, min(1 + floor(point - lines(1)), m - 1))
+            cell = max(1, min(count(lines <= point), m - 1))
+            if (guessed > cell) tally(1) = tally(1) + 1
+            if (guessed < cell) tally(2) = tally(2) + 1
+
+        end subroutine count_wrong_guess
 
     end subroutine test_uniform_and_search_agree
 
@@ -918,15 +1143,22 @@ contains
     !! reversed in `x` but not in `y` would interpolate the mirror image of the data; a clamped one
     !! whose slopes were not swapped with it would impose each slope at the wrong end (risk 8), which
     !! the derivative at the descending call's first point shows directly.
+    !!
+    !! A grid given with `x` descending, with `y` descending and with both, its values reversed along the
+    !! same axes, answers the same bits as the ascending grid at every query inside and beyond it and at
+    !! every node, under every grid variant and policy (risk 2 on a grid). The negative control: a grid
+    !! whose `x` is reversed and whose values are not interpolates a different surface.
     subroutine test_descending_tables(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(golden_fixture)      :: f
+        type(golden_grid)         :: g
         type(pf_interp_1d)        :: up, down
-        real(real64), allocatable :: probes(:), xd(:), yd(:)
+        type(pf_interp_2d)        :: grid_up, grid_down
+        real(real64), allocatable :: probes(:), xd(:), yd(:), px(:), py(:), want(:)
         real(real64)              :: sd(2), iu(GI_NI + GI_NJ), id(GI_NI + GI_NJ)
         character(len=:), allocatable :: what
-        integer                   :: which, v, ip, n, i
+        integer                   :: which, v, ip, n, i, nx, ny, turn, differ
 
         do which = 1, GOLDEN_TABLES
             call golden_fixture_get(which, f)
@@ -966,6 +1198,43 @@ contains
             call check(error, abs(down%derivative(xd(1)) - sd(1)) <= 1.0e-12_real64*max(1.0_real64, abs(sd(1))), &
                        "a descending clamped table must meet its first slope at its own first point, fixture " // &
                        trim(f%name))
+            if (allocated(error)) return
+        end do
+
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            nx = size(g%x)
+            ny = size(g%y)
+            px = [g%xq, g%xo, reshape(spread(g%x, 2, ny), [nx*ny])]
+            py = [g%yq, g%yo, reshape(spread(g%y, 1, nx), [nx*ny])]
+            do v = 1, G2_NV
+                do ip = 1, 3
+                    call init_grid_variant(grid_up, v, g%x, g%y, g%z, trim(POLICIES(ip)))
+                    want = grid_up%eval(px, py)
+                    differ = 0
+                    do turn = 1, 3
+                        select case (turn)
+                        case (1)
+                            call init_grid_variant(grid_down, v, g%x(nx:1:-1), g%y, g%z(nx:1:-1, :), trim(POLICIES(ip)))
+                        case (2)
+                            call init_grid_variant(grid_down, v, g%x, g%y(ny:1:-1), g%z(:, ny:1:-1), trim(POLICIES(ip)))
+                        case default
+                            call init_grid_variant(grid_down, v, g%x(nx:1:-1), g%y(ny:1:-1), g%z(nx:1:-1, ny:1:-1), &
+                                                   trim(POLICIES(ip)))
+                        end select
+                        differ = differ + count(.not. same_bits(grid_down%eval(px, py), want))
+                    end do
+                    call check(error, differ == 0, "a grid with a descending axis answered differently from its " // &
+                               "ascending twin, grid variant " // trim(GRID_VARIANT_NAMES(v)) // ", policy " // &
+                               trim(POLICIES(ip)) // ", grid " // trim(g%name))
+                    if (allocated(error)) return
+                end do
+            end do
+            call grid_up%init(g%x, g%y, g%z)
+            call grid_down%init(g%x(nx:1:-1), g%y, g%z)
+            call check(error, any(grid_up%eval(px, py) /= grid_down%eval(px, py)), &
+                       "reversing x without its values must change the surface, or the reversal tests nothing, grid " // &
+                       trim(g%name))
             if (allocated(error)) return
         end do
 
@@ -1013,13 +1282,16 @@ contains
     end subroutine test_is_valid_drops_points
 
     !> `pf_interp` answers what `%init` followed by `%eval` answers, bit for bit, in both of its
-    !! ranks, on every variant and policy and with a mask.
+    !! ranks, on every variant and policy and with a mask; and on a grid, in both of its forms, on
+    !! every grid variant and policy and with no optional argument at all.
     subroutine test_one_shot_equals_object(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(golden_fixture)      :: f
+        type(golden_grid)         :: g
         type(pf_interp_1d)        :: c
-        real(real64), allocatable :: probes(:), got(:), want(:)
+        type(pf_interp_2d)        :: grid
+        real(real64), allocatable :: probes(:), got(:), want(:), px(:), py(:)
         logical, allocatable      :: keep(:)
         integer                   :: which, v, ip, i, differ
 
@@ -1048,14 +1320,46 @@ contains
             if (allocated(error)) return
         end do
 
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            px = [g%xq, g%xo]
+            py = [g%yq, g%yo]
+            do v = 1, G2_NV
+                do ip = 1, 3
+                    call init_grid_variant(grid, v, g%x, g%y, g%z, trim(POLICIES(ip)))
+                    want = grid%eval(px, py)
+                    got = grid_one_shot(v, g%x, g%y, g%z, trim(POLICIES(ip)), px, py)
+                    differ = count(.not. same_bits(got, want))
+                    do i = 1, size(px)
+                        if (.not. same_bits(grid_one_shot_at(v, g%x, g%y, g%z, trim(POLICIES(ip)), px(i), py(i)), &
+                                            want(i))) differ = differ + 1
+                    end do
+                    call check(error, differ == 0, "pf_interp differed from the grid object, grid variant " // &
+                               trim(GRID_VARIANT_NAMES(v)) // ", policy " // trim(POLICIES(ip)) // ", grid " // trim(g%name))
+                    if (allocated(error)) return
+                end do
+            end do
+            call grid%init(g%x, g%y, g%z)
+            want = grid%eval(px, py)
+            differ = count(.not. same_bits(pf_interp(g%x, g%y, g%z, px, py), want))
+            do i = 1, size(px)
+                if (.not. same_bits(pf_interp(g%x, g%y, g%z, px(i), py(i)), want(i))) differ = differ + 1
+            end do
+            call check(error, differ == 0, "pf_interp with every default differed from the grid object, grid " // &
+                       trim(g%name))
+            if (allocated(error)) return
+        end do
+
     end subroutine test_one_shot_equals_object
 
     !> `%clear` returns an object to its unbuilt state, twice as harmlessly as once; `%init` builds a
-    !! cleared object again, and replaces the table of a built one.
+    !! cleared object again, and replaces the table of a built one -- on a table and on a grid.
     subroutine test_clear_and_rebuild(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(pf_interp_1d) :: c
+        type(pf_interp_2d) :: grid
+        real(real64)       :: plane(2, 3)
 
         call c%clear()
         call check(error, .not. c%is_initialised(), "clearing a fresh object must leave it unbuilt")
@@ -1076,8 +1380,303 @@ contains
         call c%init([0.0_real64, 2.0_real64], [10.0_real64, 20.0_real64], method="linear")
         call check(error, c%eval(1.0_real64) == 15.0_real64 .and. c%eval(3.0_real64) == 20.0_real64, &
                    "init on a built object must replace its table")
+        if (allocated(error)) return
+
+        ! A grid: `x + 2*y` on two lines along x and three along y, then ten times that, then a smaller grid.
+        call grid%clear()
+        call check(error, .not. grid%is_initialised(), "clearing a fresh grid object must leave it unbuilt")
+        if (allocated(error)) return
+        plane = reshape([0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], [2, 3])
+        call grid%init([0.0_real64, 1.0_real64], [0.0_real64, 1.0_real64, 2.0_real64], plane, method="linear")
+        call check(error, grid%is_initialised() .and. grid%eval(0.5_real64, 1.5_real64) == 3.5_real64, &
+                   "init must build the grid object")
+        if (allocated(error)) return
+        call grid%clear()
+        call check(error, .not. grid%is_initialised(), "clear must return a built grid object to its unbuilt state")
+        if (allocated(error)) return
+        call grid%clear()
+        call check(error, .not. grid%is_initialised(), "a second clear of a grid object must be harmless")
+        if (allocated(error)) return
+        call grid%init([0.0_real64, 1.0_real64], [0.0_real64, 1.0_real64, 2.0_real64], 10.0_real64*plane, method="linear")
+        call check(error, grid%is_initialised() .and. grid%eval(0.5_real64, 1.5_real64) == 35.0_real64, &
+                   "init must rebuild a cleared grid object from the new grid")
+        if (allocated(error)) return
+        call grid%init([0.0_real64, 2.0_real64], [0.0_real64, 2.0_real64], &
+                       reshape([1.0_real64, 3.0_real64, 5.0_real64, 7.0_real64], [2, 2]), method="linear")
+        call check(error, grid%eval(1.0_real64, 1.0_real64) == 4.0_real64 .and. grid%eval(3.0_real64, 3.0_real64) == 7.0_real64, &
+                   "init on a built grid object must replace its grid")
 
     end subroutine test_clear_and_rebuild
+
+    !> Bilinear interpolation reproduces `4 + 2*x + 3*y + x*y/2` at a thousand points of a 5 by 7 grid
+    !! at irregular gaps along both axes, and matches the golden bilinear rows of every grid.
+    !!
+    !! On each cell such a function is its own bilinear interpolant, so what is left is rounding. Each
+    !! fraction carries an ulp of itself, which moves the answer by the function's slope along that
+    !! axis times a cell's width times an ulp: at most `5*3` epsilons along `x` and `7*2.25` along `y`.
+    !! The three weighted sums have positive terms adding up to the answer, and add a few epsilons of
+    !! it. The function is at least 4 on the grid, so the whole is below `ROUNDING` of the answer.
+    subroutine test_bilinear_is_exact(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: POINTS = 1000
+
+        type(golden_grid)  :: g
+        type(pf_interp_2d) :: plane
+        real(real64)       :: gx(5), gy(7), gz(5, 7), p(POINTS), q(POINTS), want(POINTS)
+        integer            :: i, j, which
+
+        gx = [0.0_real64, 1.5_real64, 2.0_real64, 5.0_real64, 8.0_real64]
+        gy = [0.0_real64, 0.25_real64, 1.0_real64, 1.5_real64, 3.0_real64, 3.75_real64, 6.0_real64]
+        do j = 1, 7
+            do i = 1, 5
+                gz(i, j) = bilinear_sample(gx(i), gy(j))
+            end do
+        end do
+        ! 7919 and 6007 share no factor with the primes 10007 and 10009, so the points do not repeat.
+        do i = 1, POINTS
+            p(i) = 8.0_real64*real(mod(i*7919, 10007), real64)/10007.0_real64
+            q(i) = 6.0_real64*real(mod(i*6007, 10009), real64)/10009.0_real64
+        end do
+        want = bilinear_sample(p, q)
+        call plane%init(gx, gy, gz, method="linear")
+        call check(error, all(abs(plane%eval(p, q) - want) <= ROUNDING*want), &
+                   "bilinear interpolation of 4 + 2x + 3y + xy/2 strayed from it beyond rounding")
+        if (allocated(error)) return
+
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            call check_golden_grid_rows(error, g, G2_LINEAR)
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_bilinear_is_exact
+
+    !> The bicubic spline matches the exact model on every grid under both end conditions, and the
+    !! not-a-knot one reproduces `(x**3 - 2*x)*(y**3 + y)` inside `N57` and beyond it.
+    !!
+    !! The golden rows' model interpolates every row along `y` and then the results along `x`, with no
+    !! table of second derivatives at all, so a table built along the wrong axis or from the wrong
+    !! table disagrees with it between the grid lines (risk 7), and on the square grid `S55` so does a
+    !! value table read the wrong way round, which the shape check cannot see there (risk 3). A
+    !! not-a-knot spline reproduces a cubic along each axis, so their tensor product reproduces a
+    !! product of two cubics, but for rounding: on values up to about 27, under a few ulp.
+    subroutine test_bicubic_matches_the_model(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(golden_grid)         :: g
+        type(pf_interp_2d)        :: grid
+        real(real64), allocatable :: px(:), py(:), want(:), cz(:, :)
+        integer                   :: which, i, j
+
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            call check_golden_grid_rows(error, g, G2_NATURAL)
+            if (allocated(error)) return
+            call check_golden_grid_rows(error, g, G2_NOT_A_KNOT)
+            if (allocated(error)) return
+        end do
+
+        call golden_grid_get(1, g)
+        allocate (cz(size(g%x), size(g%y)))
+        do j = 1, size(g%y)
+            do i = 1, size(g%x)
+                cz(i, j) = (g%x(i)**3 - 2.0_real64*g%x(i))*(g%y(j)**3 + g%y(j))
+            end do
+        end do
+        call grid%init(g%x, g%y, cz, bc="not_a_knot", outside="extrapolate")
+        px = [g%xq, g%xo]
+        py = [g%yq, g%yo]
+        want = (px**3 - 2.0_real64*px)*(py**3 + py)
+        call check(error, all(abs(grid%eval(px, py) - want) <= 1.0e-12_real64*max(abs(want), maxval(abs(want)))), &
+                   "the not-a-knot bicubic spline did not reproduce (x**3 - 2x)*(y**3 + y)")
+
+    end subroutine test_bicubic_matches_the_model
+
+    !> A grid interpolant restricted to any grid line is the one-dimensional interpolant of that line,
+    !! along both axes, inside the grid and continued beyond it; and the grid built transposed answers
+    !! the same function at the transposed query (risk 7).
+    !!
+    !! On the line `x = x(i)` the tensor product leaves row `i` alone, so `%eval(x(i), yq)` is the
+    !! one-dimensional interpolant of `z(i, :)` at `yq` with the same end condition, continued by
+    !! `"extrapolate"` beyond the grid as it is; a table of second derivatives along `y` built along the
+    !! wrong axis breaks that, and so do rows and columns taken the wrong way round. Between the lines
+    !! the value also reads the mixed table `zxxyy`, built along `x` of the table along `y`, which is the
+    !! same table as along `y` of the table along `x` -- and the transposed grid builds it that second
+    !! way. The two routes round differently, so each agreement is to `GOLDEN_RTOL` of the larger of the
+    !! value and the grid's largest value.
+    subroutine test_grid_restricts_to_the_line_interpolant(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: ALONG = 54
+
+        type(golden_grid)         :: g
+        type(pf_interp_2d)        :: grid, flipped
+        type(pf_interp_1d)        :: line
+        real(real64), allocatable :: px(:), py(:)
+        real(real64)              :: fraction(ALONG), zmax
+        integer                   :: which, v, i, j, k, off
+
+        ! From a twenty-fourth of each axis's span before it to a sixteenth after it.
+        do k = 1, ALONG
+            fraction(k) = real(k - 3, real64)/48.0_real64
+        end do
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            zmax = maxval(abs(g%z))
+            px = g%x(1) + (g%x(size(g%x)) - g%x(1))*fraction
+            py = g%y(1) + (g%y(size(g%y)) - g%y(1))*fraction
+            do v = 1, G2_NV
+                call init_grid_variant(grid, v, g%x, g%y, g%z, "extrapolate")
+                off = 0
+                do i = 1, size(g%x)
+                    call init_line_variant(line, v, g%y, g%z(i, :))
+                    off = off + count(.not. close_to(grid%eval(g%x(i), py), line%eval(py), zmax))
+                end do
+                do j = 1, size(g%y)
+                    call init_line_variant(line, v, g%x, g%z(:, j))
+                    off = off + count(.not. close_to(grid%eval(px, g%y(j)), line%eval(px), zmax))
+                end do
+                call check(error, off == 0, "a grid interpolant on a grid line is not that line's interpolant, " // &
+                           "grid variant " // trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(g%name))
+                if (allocated(error)) return
+                call init_grid_variant(flipped, v, g%y, g%x, transpose(g%z), "extrapolate")
+                call check(error, all(close_to(grid%eval([g%xq, g%xo], [g%yq, g%yo]), &
+                                               flipped%eval([g%yq, g%yo], [g%xq, g%xo]), zmax)), &
+                           "the transposed grid answered a different function, grid variant " // &
+                           trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(g%name))
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_grid_restricts_to_the_line_interpolant
+
+    !> A grid of products `f(x(i))*g(y(j))` interpolates as the product of the one-dimensional
+    !! interpolants of `f` and of `g`, under every grid variant, at 200 points inside each golden grid
+    !! and beyond it, to `1e-12` relative.
+    !!
+    !! Every one-dimensional interpolant a grid variant is made of is linear in its data, so the tensor
+    !! product of two of them factors, whichever order the axes are taken in: a mixed table built along
+    !! the wrong axis or from the wrong table does not. `f` and `g` are the grid's first column and
+    !! first row of values.
+    subroutine test_grid_is_separable(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: POINTS = 200
+
+        type(golden_grid)         :: g
+        type(pf_interp_2d)        :: product
+        type(pf_interp_1d)        :: along_x, along_y
+        real(real64), allocatable :: fx(:), gy(:), pz(:, :)
+        real(real64)              :: px(POINTS), py(POINTS), want(POINTS), sx, sy, scale
+        integer                   :: which, v, k
+
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            fx = g%z(:, 1)
+            gy = g%z(1, :)
+            pz = spread(fx, 2, size(gy))*spread(gy, 1, size(fx))
+            sx = g%x(size(g%x)) - g%x(1)
+            sy = g%y(size(g%y)) - g%y(1)
+            ! 37 and 53 share no factor with 200, so each visits every step once, in different orders.
+            do k = 1, POINTS
+                px(k) = g%x(1) + sx*(1.25_real64*real(mod(k*37, POINTS), real64)/real(POINTS - 1, real64) - 0.125_real64)
+                py(k) = g%y(1) + sy*(1.25_real64*real(mod(k*53, POINTS), real64)/real(POINTS - 1, real64) - 0.125_real64)
+            end do
+            scale = maxval(abs(fx))*maxval(abs(gy))
+            do v = 1, G2_NV
+                call init_grid_variant(product, v, g%x, g%y, pz, "extrapolate")
+                call init_line_variant(along_x, v, g%x, fx)
+                call init_line_variant(along_y, v, g%y, gy)
+                want = along_x%eval(px)*along_y%eval(py)
+                call check(error, all(abs(product%eval(px, py) - want) <= 1.0e-12_real64*max(abs(want), scale)), &
+                           "a grid of products did not interpolate as the product of the two interpolants, " // &
+                           "grid variant " // trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(g%name))
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_grid_is_separable
+
+    !> Each policy under each grid variant beyond every golden grid -- beyond each edge with the other
+    !! coordinate inside, and beyond two edges at once -- and at infinite coordinates.
+    !!
+    !! `"clamp"` moves each coordinate beyond the grid onto its nearer end line, on its own: it answers
+    !! the golden clamped rows, and the same bits as the query moved there by hand, infinite coordinates
+    !! included. `"extrapolate"` answers the golden rows of the nearest cell's polynomial continued.
+    !! `"nan"` answers a quiet NaN when either coordinate lies beyond the grid, infinities included,
+    !! and the same bits as `"clamp"` at every query inside it. IEEE_INVALID is read around every clamped
+    !! and NaN call: an infinite coordinate carried into a cell's arithmetic, or a NaN made by
+    !! arithmetic, raises it, and ends a program under nagfor's default traps.
+    subroutine test_outside_policies_2d(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(golden_grid)             :: g
+        type(pf_interp_2d)            :: clamped, continued, refused
+        real(real64), allocatable     :: mx(:), my(:), ix(:), iy(:), jx(:), jy(:)
+        real(real64)                  :: inf, zmax
+        real(real64)                  :: beyond(G2_NO), moved(G2_NO), nan_beyond(G2_NO), inside(G2_NQ), nan_inside(G2_NQ)
+        real(real64)                  :: at_infinity(8), moved_infinity(8), nan_infinity(8)
+        character(len=:), allocatable :: what
+        logical                       :: can_test, saved, raised
+        integer                       :: which, v, nx, ny
+
+        inf = positive_infinity()
+        do which = 1, GOLDEN_GRIDS
+            call golden_grid_get(which, g)
+            nx = size(g%x)
+            ny = size(g%y)
+            zmax = maxval(abs(g%z))
+            ! The queries beyond the grid, and infinite ones beyond each edge and each corner, each moved
+            ! onto the grid by hand.
+            mx = g%xo
+            my = g%yo
+            where (mx < g%x(1)) mx = g%x(1)
+            where (mx > g%x(nx)) mx = g%x(nx)
+            where (my < g%y(1)) my = g%y(1)
+            where (my > g%y(ny)) my = g%y(ny)
+            ix = [-inf, inf, g%xq(1), g%xq(2), -inf, inf, -inf, inf]
+            iy = [g%yq(3), g%yq(4), -inf, inf, -inf, -inf, inf, inf]
+            jx = [g%x(1), g%x(nx), g%xq(1), g%xq(2), g%x(1), g%x(nx), g%x(1), g%x(nx)]
+            jy = [g%yq(3), g%yq(4), g%y(1), g%y(ny), g%y(1), g%y(1), g%y(ny), g%y(ny)]
+            do v = 1, G2_NV
+                what = ", grid variant " // trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(g%name)
+                call init_grid_variant(clamped, v, g%x, g%y, g%z, "clamp")
+                call init_grid_variant(continued, v, g%x, g%y, g%z, "extrapolate")
+                call init_grid_variant(refused, v, g%x, g%y, g%z, "nan")
+
+                call invalid_begin(can_test, saved)
+                beyond = clamped%eval(g%xo, g%yo)
+                moved = clamped%eval(mx, my)
+                at_infinity = clamped%eval(ix, iy)
+                moved_infinity = clamped%eval(jx, jy)
+                inside = clamped%eval(g%xq, g%yq)
+                nan_beyond = refused%eval(g%xo, g%yo)
+                nan_infinity = refused%eval(ix, iy)
+                nan_inside = refused%eval(g%xq, g%yq)
+                call invalid_end(can_test, saved, raised)
+
+                call check(error, all(close_to(beyond, g%value_clamp(:, v), zmax)), &
+                           "clamp beyond the grid disagrees with the golden rows" // what)
+                if (allocated(error)) return
+                call check(error, all(same_bits(beyond, moved)) .and. all(same_bits(at_infinity, moved_infinity)), &
+                           "clamp must answer what the query moved onto the grid answers" // what)
+                if (allocated(error)) return
+                call check(error, all(close_to(continued%eval(g%xo, g%yo), g%value_out(:, v), zmax)), &
+                           "extrapolate must continue the nearest cell's polynomial" // what)
+                if (allocated(error)) return
+                call check(error, all(ieee_is_nan(nan_beyond)) .and. all(ieee_is_nan(nan_infinity)), &
+                           "nan must answer a NaN beyond the grid in either coordinate" // what)
+                if (allocated(error)) return
+                call check(error, all(same_bits(nan_inside, inside)), "nan must answer what clamp answers inside the grid" // &
+                           what)
+                if (allocated(error)) return
+                call check(error, .not. raised, "clamping or refusing a query beyond the grid raised IEEE_INVALID" // what)
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_outside_policies_2d
 
     ! ---- helpers -------------------------------------------------------------------------------
 
@@ -1360,6 +1959,127 @@ contains
                    "the integral over [a, c] is not the sum of the integrals over [a, b] and [b, c]")
 
     end subroutine check_additive
+
+    !> Builds grid variant `v` of `GRID_VARIANT_NAMES` over `(x, y, z)` under the policy `outside`.
+    subroutine init_grid_variant(g, v, x, y, z, outside)
+        type(pf_interp_2d), intent(out) :: g       !! the interpolant to build
+        integer, intent(in)             :: v       !! the grid variant, 1 to `G2_NV`
+        real(real64), intent(in)        :: x(:)    !! lines along `x`
+        real(real64), intent(in)        :: y(:)    !! lines along `y`
+        real(real64), intent(in)        :: z(:, :) !! values, `z(i, j)` at `(x(i), y(j))`
+        character(len=*), intent(in)    :: outside !! the policy token
+
+        select case (v)
+        case (G2_LINEAR)
+            call g%init(x, y, z, method="linear", outside=outside)
+        case (G2_NATURAL)
+            call g%init(x, y, z, bc="natural", outside=outside)
+        case default
+            call g%init(x, y, z, bc="not_a_knot", outside=outside)
+        end select
+
+    end subroutine init_grid_variant
+
+    !> Builds the one-dimensional interpolant grid variant `v` is the tensor product of, over `(x, y)`,
+    !! continued beyond the table.
+    subroutine init_line_variant(c, v, x, y)
+        type(pf_interp_1d), intent(out) :: c    !! the interpolant to build
+        integer, intent(in)             :: v    !! the grid variant, 1 to `G2_NV`
+        real(real64), intent(in)        :: x(:) !! abscissae
+        real(real64), intent(in)        :: y(:) !! ordinates
+
+        select case (v)
+        case (G2_LINEAR)
+            call c%init(x, y, method="linear", outside="extrapolate")
+        case (G2_NATURAL)
+            call c%init(x, y, bc="natural", outside="extrapolate")
+        case default
+            call c%init(x, y, bc="not_a_knot", outside="extrapolate")
+        end select
+
+    end subroutine init_line_variant
+
+    !> `pf_interp`'s grid array form for grid variant `v`, with the arguments `init_grid_variant` would
+    !! pass.
+    function grid_one_shot(v, x, y, z, outside, xq, yq) result(zq)
+        integer, intent(in)          :: v             !! the grid variant, 1 to `G2_NV`
+        real(real64), intent(in)     :: x(:)          !! lines along `x`
+        real(real64), intent(in)     :: y(:)          !! lines along `y`
+        real(real64), intent(in)     :: z(:, :)       !! values
+        character(len=*), intent(in) :: outside       !! the policy token
+        real(real64), intent(in)     :: xq(:)         !! the queries' `x`
+        real(real64), intent(in)     :: yq(:)         !! the queries' `y`
+        real(real64)                 :: zq(size(xq))  !! the answers
+
+        select case (v)
+        case (G2_LINEAR)
+            zq = pf_interp(x, y, z, xq, yq, method="linear", outside=outside)
+        case (G2_NATURAL)
+            zq = pf_interp(x, y, z, xq, yq, bc="natural", outside=outside)
+        case default
+            zq = pf_interp(x, y, z, xq, yq, bc="not_a_knot", outside=outside)
+        end select
+
+    end function grid_one_shot
+
+    !> `pf_interp`'s grid scalar form for grid variant `v`, with the arguments `init_grid_variant` would
+    !! pass.
+    function grid_one_shot_at(v, x, y, z, outside, xq, yq) result(zq)
+        integer, intent(in)          :: v       !! the grid variant, 1 to `G2_NV`
+        real(real64), intent(in)     :: x(:)    !! lines along `x`
+        real(real64), intent(in)     :: y(:)    !! lines along `y`
+        real(real64), intent(in)     :: z(:, :) !! values
+        character(len=*), intent(in) :: outside !! the policy token
+        real(real64), intent(in)     :: xq      !! the query's `x`
+        real(real64), intent(in)     :: yq      !! the query's `y`
+        real(real64)                 :: zq      !! the answer
+
+        select case (v)
+        case (G2_LINEAR)
+            zq = pf_interp(x, y, z, xq, yq, method="linear", outside=outside)
+        case (G2_NATURAL)
+            zq = pf_interp(x, y, z, xq, yq, bc="natural", outside=outside)
+        case default
+            zq = pf_interp(x, y, z, xq, yq, bc="not_a_knot", outside=outside)
+        end select
+
+    end function grid_one_shot_at
+
+    !> Asserts the golden rows of grid variant `v` on grid `g` inside the grid, against the scale of
+    !! the grid's largest value, with IEEE_INVALID and IEEE_DIVIDE_BY_ZERO read around the build and
+    !! every evaluation, as `check_golden_rows` reads them.
+    subroutine check_golden_grid_rows(error, g, v)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        type(golden_grid), intent(in)              :: g     !! the grid
+        integer, intent(in)                        :: v     !! the grid variant, 1 to `G2_NV`
+
+        type(pf_interp_2d)            :: grid
+        real(real64)                  :: value(G2_NQ)
+        character(len=:), allocatable :: what
+        logical                       :: can_test, saved(2), raised(2)
+
+        what = ", grid variant " // trim(GRID_VARIANT_NAMES(v)) // ", grid " // trim(g%name)
+        call exceptions_begin(can_test, saved)
+        call init_grid_variant(grid, v, g%x, g%y, g%z, "clamp")
+        value = grid%eval(g%xq, g%yq)
+        call exceptions_end(can_test, saved, raised)
+        call check(error, .not. any(raised), &
+                   "building or evaluating inside the grid raised IEEE_INVALID or IEEE_DIVIDE_BY_ZERO" // what)
+        if (allocated(error)) return
+        call check(error, all(close_to(value, g%value(:, v), maxval(abs(g%z)))), &
+                   "the value disagrees with the golden grid rows" // what)
+
+    end subroutine check_golden_grid_rows
+
+    !> `4 + 2*x + 3*y + x*y/2`, positive on the quadrant, which bilinear interpolation reproduces.
+    elemental function bilinear_sample(x, y) result(v)
+        real(real64), intent(in) :: x !! the point's `x`
+        real(real64), intent(in) :: y !! the point's `y`
+        real(real64)             :: v !! the function there
+
+        v = 4.0_real64 + 2.0_real64*x + 3.0_real64*y + 0.5_real64*x*y
+
+    end function bilinear_sample
 
     !> Agreement with a golden expectation to `GOLDEN_RTOL`, relative to the larger of the
     !! expectation and `scale`.

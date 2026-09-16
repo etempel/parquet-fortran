@@ -50,10 +50,12 @@
 !>                          of one real64 variable over a finite or infinite
 !>                          range, with the integrand as an object carrying its
 !>                          own parameters or as a plain function.
-!>   * `parquet_interpolate` -- `pf_interp_1d` and `pf_interp`: linear,
-!>                          cubic-spline and shape-preserving interpolation of a
-!>                          real64 table, with its derivatives and integrals, as
-!>                          an object built once or in one call.
+!>   * `parquet_interpolate` -- `pf_interp_1d`, `pf_interp_2d` and `pf_interp`:
+!>                          linear, cubic-spline and shape-preserving
+!>                          interpolation of a real64 table, with its derivatives
+!>                          and integrals, and bilinear and bicubic interpolation
+!>                          on a rectilinear grid, as an object built once or in
+!>                          one call.
 !>   * `parquet_optimize` -- `pf_minimize_scalar` (Brent's method on a bracket),
 !>                          `pf_minimize_simplex` (Nelder-Mead from a start
 !>                          point and a step), `pf_minimize_de` (differential

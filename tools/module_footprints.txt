@@ -231,6 +231,7 @@ parquet_wrapper.cpp
 [parquet_interpolate]
 parquet_interpolate.f90
 parquet_interpolate_1d.f90
+parquet_interpolate_2d.f90
 parquet_interpolate_core.f90
 parquet_wrapper.cpp
 
@@ -494,6 +495,7 @@ parquet_integrate_driver.f90
 parquet_integrate_engine.f90
 parquet_interpolate.f90
 parquet_interpolate_1d.f90
+parquet_interpolate_2d.f90
 parquet_interpolate_core.f90
 parquet_io.f90
 parquet_list.f90

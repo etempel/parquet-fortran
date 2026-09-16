@@ -274,7 +274,7 @@ contains
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
     !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
-    !> parquet_interpolate (pf_interp_1d/pf_interp),
+    !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
     !> parquet_prima (pf_minimize_bobyqa/pf_minimize_lincoa/pf_minimize_cobyla/
@@ -498,16 +498,22 @@ contains
             if (allocated(error)) return
         end block
 
-        ! parquet_interpolate: the interpolant object and its one-shot form.
+        ! parquet_interpolate: both interpolant objects and the one-shot form.
         block
             type(pf_interp_1d) :: curve
-            real(real64) :: knots(3), values(3)
+            type(pf_interp_2d) :: plane
+            real(real64) :: knots(3), values(3), grid_values(3, 2)
             knots = [0.0_real64, 1.0_real64, 2.0_real64]
             values = [1.0_real64, 3.0_real64, 5.0_real64]
             call curve%init(knots, values, method="linear")
             call check(error, curve%eval(0.5_real64) == 2.0_real64 .and. &
                 pf_interp(knots, values, 1.5_real64, method="linear") == 4.0_real64, &
                 "pf_interp_1d and pf_interp must be reachable from use parquet alone and interpolate a line")
+            if (allocated(error)) return
+            grid_values = reshape([1.0_real64, 3.0_real64, 5.0_real64, 2.0_real64, 4.0_real64, 6.0_real64], [3, 2])
+            call plane%init(knots, [0.0_real64, 1.0_real64], grid_values, method="linear")
+            call check(error, plane%eval(0.5_real64, 0.5_real64) == 2.5_real64, &
+                "pf_interp_2d must be reachable from use parquet alone and interpolate a plane")
             if (allocated(error)) return
         end block
 

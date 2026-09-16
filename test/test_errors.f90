@@ -3211,7 +3211,7 @@ contains
             new_unittest("a non-finite constraint value is refused rather than moderated", &
                 test_prima_constraint_nonfinite_aborts) &
             ]
-        ! ---- parquet_interpolate: the one-dimensional interpolant's abort paths ----
+        ! ---- parquet_interpolate: both interpolants' abort paths ----
         p32 = [ &
             new_unittest("x and y of different sizes are refused", &
                 test_interpolate_size_mismatch_aborts), &
@@ -3266,7 +3266,41 @@ contains
             new_unittest("integrating an interpolant that was never built aborts", &
                 test_interpolate_integral_before_init_aborts), &
             new_unittest("a third derivative of an interpolant aborts", &
-                test_interpolate_bad_order_aborts) &
+                test_interpolate_bad_order_aborts), &
+            new_unittest("values shaped for the transposed grid are refused", &
+                test_interpolate_2d_shape_aborts), &
+            new_unittest("an unknown grid interpolation method is refused", &
+                test_interpolate_2d_unknown_method_aborts), &
+            new_unittest("a shape-preserving grid is refused", &
+                test_interpolate_2d_pchip_aborts), &
+            new_unittest("an end condition for bilinear interpolation is refused", &
+                test_interpolate_2d_bc_with_linear_aborts), &
+            new_unittest("an unknown grid end condition is refused", &
+                test_interpolate_2d_unknown_bc_aborts), &
+            new_unittest("a clamped grid spline is refused", &
+                test_interpolate_2d_clamped_aborts), &
+            new_unittest("an unknown out-of-range policy for a grid is refused", &
+                test_interpolate_2d_unknown_outside_aborts), &
+            new_unittest("a grid with one line along x is refused", &
+                test_interpolate_2d_too_few_x_aborts), &
+            new_unittest("a not-a-knot grid spline over three lines along y is refused", &
+                test_interpolate_2d_not_a_knot_too_few_aborts), &
+            new_unittest("unsorted lines along x are refused", &
+                test_interpolate_2d_x_not_monotonic_aborts), &
+            new_unittest("a repeated line along y is refused", &
+                test_interpolate_2d_y_not_monotonic_aborts), &
+            new_unittest("an infinite line along x is refused", &
+                test_interpolate_2d_inf_in_x_aborts), &
+            new_unittest("an infinite line along y is refused", &
+                test_interpolate_2d_inf_in_y_aborts), &
+            new_unittest("a NaN grid value is refused", &
+                test_interpolate_2d_nan_in_z_aborts), &
+            new_unittest("evaluating a grid interpolant that was never built aborts", &
+                test_interpolate_2d_eval_before_init_aborts), &
+            new_unittest("pf_interp refuses a misshaped grid under its own name, with the context", &
+                test_interpolate_2d_one_shot_shape_aborts), &
+            new_unittest("pf_interp refuses grid coordinates of different sizes", &
+                test_interpolate_2d_query_sizes_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]
@@ -19525,5 +19559,125 @@ contains
             failure_message="a third derivative was expected to error stop", &
             required_stderr="pf_interp_1d%derivative: order must be 1 or 2")
     end subroutine test_interpolate_bad_order_aborts
+    !
+    subroutine test_interpolate_2d_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_shape", expect_abort=.true., &
+            failure_message="values shaped (7, 5) for a 5 by 7 grid were expected to error stop", &
+            required_stderr="pf_interp_2d%init: z must be shaped (size(x), size(y)): got (7, 5) for (5, 7)")
+    end subroutine test_interpolate_2d_shape_aborts
+    !
+    subroutine test_interpolate_2d_unknown_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_unknown_method", expect_abort=.true., &
+            failure_message="an unknown grid method token was expected to error stop", &
+            required_stderr="pf_interp_2d%init: unknown method ""quadratic""; expected ""linear"" or ""cubic""")
+    end subroutine test_interpolate_2d_unknown_method_aborts
+    !
+    subroutine test_interpolate_2d_pchip_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_pchip", expect_abort=.true., &
+            failure_message="method=pchip on a grid was expected to error stop", &
+            required_stderr="pf_interp_2d%init: method ""pchip"" is not offered in two dimensions")
+    end subroutine test_interpolate_2d_pchip_aborts
+    !
+    subroutine test_interpolate_2d_bc_with_linear_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_bc_with_linear", expect_abort=.true., &
+            failure_message="an end condition for bilinear interpolation was expected to error stop", &
+            required_stderr="pf_interp_2d%init: bc applies only to method ""cubic""")
+    end subroutine test_interpolate_2d_bc_with_linear_aborts
+    !
+    subroutine test_interpolate_2d_unknown_bc_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_unknown_bc", expect_abort=.true., &
+            failure_message="an unknown grid end-condition token was expected to error stop", &
+            required_stderr="pf_interp_2d%init: unknown bc ""periodic""; expected ""natural"" or ""not_a_knot""")
+    end subroutine test_interpolate_2d_unknown_bc_aborts
+    !
+    subroutine test_interpolate_2d_clamped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_clamped", expect_abort=.true., &
+            failure_message="bc=clamped on a grid was expected to error stop", &
+            required_stderr="pf_interp_2d%init: bc ""clamped"" is not offered in two dimensions")
+    end subroutine test_interpolate_2d_clamped_aborts
+    !
+    subroutine test_interpolate_2d_unknown_outside_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_unknown_outside", expect_abort=.true., &
+            failure_message="an unknown grid outside token was expected to error stop", &
+            required_stderr="pf_interp_2d%init: unknown outside ""wrap""; expected ""clamp"", ""extrapolate"" or ""nan""")
+    end subroutine test_interpolate_2d_unknown_outside_aborts
+    !
+    subroutine test_interpolate_2d_too_few_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_too_few_x", expect_abort=.true., &
+            failure_message="a grid with one line along x was expected to error stop", &
+            required_stderr="pf_interp_2d%init: at least 2 points are needed along x for method ""cubic""; got 1")
+    end subroutine test_interpolate_2d_too_few_x_aborts
+    !
+    subroutine test_interpolate_2d_not_a_knot_too_few_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_not_a_knot_too_few", expect_abort=.true., &
+            failure_message="a not-a-knot grid spline over three lines along y was expected to error stop", &
+            required_stderr="pf_interp_2d%init: at least 4 points are needed along y for method ""cubic"" " // &
+                "with bc ""not_a_knot""; got 3")
+    end subroutine test_interpolate_2d_not_a_knot_too_few_aborts
+    !
+    subroutine test_interpolate_2d_x_not_monotonic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_x_not_monotonic", expect_abort=.true., &
+            failure_message="unsorted lines along x were expected to error stop", &
+            required_stderr="pf_interp_2d%init: x must be strictly increasing or strictly decreasing")
+    end subroutine test_interpolate_2d_x_not_monotonic_aborts
+    !
+    subroutine test_interpolate_2d_y_not_monotonic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_y_not_monotonic", expect_abort=.true., &
+            failure_message="a repeated line along y was expected to error stop", &
+            required_stderr="pf_interp_2d%init: y must be strictly increasing or strictly decreasing")
+    end subroutine test_interpolate_2d_y_not_monotonic_aborts
+    !
+    subroutine test_interpolate_2d_inf_in_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_inf_in_x", expect_abort=.true., &
+            failure_message="an infinite line along x was expected to error stop", &
+            required_stderr="pf_interp_2d%init: x must be finite")
+    end subroutine test_interpolate_2d_inf_in_x_aborts
+    !
+    subroutine test_interpolate_2d_inf_in_y_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_inf_in_y", expect_abort=.true., &
+            failure_message="an infinite line along y was expected to error stop", &
+            required_stderr="pf_interp_2d%init: y must be finite")
+    end subroutine test_interpolate_2d_inf_in_y_aborts
+    !
+    subroutine test_interpolate_2d_nan_in_z_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_nan_in_z", expect_abort=.true., &
+            failure_message="a NaN grid value was expected to error stop", &
+            required_stderr="pf_interp_2d%init: z must be finite")
+    end subroutine test_interpolate_2d_nan_in_z_aborts
+    !
+    subroutine test_interpolate_2d_eval_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_eval_before_init", expect_abort=.true., &
+            failure_message="evaluating an unbuilt grid interpolant was expected to error stop", &
+            required_stderr="pf_interp_2d%eval: the interpolant is not initialised")
+    end subroutine test_interpolate_2d_eval_before_init_aborts
+    !
+    subroutine test_interpolate_2d_one_shot_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_one_shot_shape", expect_abort=.true., &
+            failure_message="a misshaped grid in one shot was expected to error stop", &
+            required_stderr="pf_interp: z must be shaped (size(x), size(y)): got (7, 5) for (5, 7) (context: my_grid)")
+    end subroutine test_interpolate_2d_one_shot_shape_aborts
+    !
+    subroutine test_interpolate_2d_query_sizes_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_query_sizes", expect_abort=.true., &
+            failure_message="query coordinates of different sizes were expected to error stop", &
+            required_stderr="pf_interp: xq and yq differ in size: 3 and 2")
+    end subroutine test_interpolate_2d_query_sizes_aborts
     !
 end module test_errors

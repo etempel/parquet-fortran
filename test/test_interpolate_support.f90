@@ -1,5 +1,6 @@
 !> The tables `test_interpolate.f90`, `test_interpolate_omp.f90` and `test/error_scenarios.f90`
-!> share, with the closed form of each beside it, and the golden fixtures gathered one per object.
+!> share, with the closed form of each beside it, and the golden fixtures and grids gathered one per
+!> object.
 !!
 !! **No expected value here is read off a run.** A table is either a golden fixture, whose
 !! expectations `tools/generate_interpolate_vectors.py` derives exactly over rationals, or a
@@ -19,7 +20,8 @@ module test_interpolate_support
     private
 
     public :: golden_fixture, golden_fixture_get, GOLDEN_TABLES
-    public :: VARIANT_NAMES, POLICIES
+    public :: golden_grid, golden_grid_get, GOLDEN_GRIDS
+    public :: VARIANT_NAMES, GRID_VARIANT_NAMES, POLICIES
     public :: sine_table, SINE_LINEAR_BOUND, SINE_CUBIC_BOUND
     public :: bent_grid, BENT_AMPLITUDE
     public :: line_2x1
@@ -27,12 +29,19 @@ module test_interpolate_support
 
     !> The golden fixtures `golden_fixture_get` hands out, numbered 1 to this.
     integer, parameter :: GOLDEN_TABLES = 5
+    !> The golden grids `golden_grid_get` hands out, numbered 1 to this.
+    integer, parameter :: GOLDEN_GRIDS = 3
 
     !> The variants a one-dimensional interpolant offers, one per column of every golden expectation
     !! array and in the same order: `method="linear"`; `method="cubic"` under `bc="natural"`,
     !! `bc="not_a_knot"` and `bc="clamped"`; and `method="pchip"`.
     character(len=10), parameter :: VARIANT_NAMES(GI_NV) = [character(len=10) :: "linear", "natural", "not_a_knot", &
                                                             "clamped", "pchip"]
+    !> The variants a two-dimensional interpolant offers, one per column of every golden grid
+    !! expectation array and in the same order: `method="linear"`, and `method="cubic"` under
+    !! `bc="natural"` and `bc="not_a_knot"`.
+    character(len=10), parameter :: GRID_VARIANT_NAMES(G2_NV) = [character(len=10) :: "linear", "natural", &
+                                                                 "not_a_knot"]
     !> The three out-of-range policies, as their tokens.
     character(len=11), parameter :: POLICIES(3) = [character(len=11) :: "clamp", "extrapolate", "nan"]
 
@@ -59,6 +68,22 @@ module test_interpolate_support
         real(real64) :: integral_out(GI_NJ, GI_NV) = 0.0_real64       !! extrapolated, over `(oa, ob)`
         real(real64) :: integral_clamp(GI_NJ, GI_NV) = 0.0_real64     !! clamped, over `(oa, ob)`
     end type golden_fixture
+
+    !> One golden grid of `test_interpolate_golden`: its lines, values and queries, and every
+    !! expectation, one column per variant of `GRID_VARIANT_NAMES`.
+    type :: golden_grid
+        character(len=3)          :: name = ""                        !! its name in the golden file
+        real(real64), allocatable :: x(:)                             !! lines along `x`, strictly increasing
+        real(real64), allocatable :: y(:)                             !! lines along `y`, strictly increasing
+        real(real64), allocatable :: z(:, :)                          !! values, `z(i, j)` at `(x(i), y(j))`
+        real(real64) :: xq(G2_NQ) = 0.0_real64                        !! the x of each query inside the grid
+        real(real64) :: yq(G2_NQ) = 0.0_real64                        !! the y of each query inside the grid
+        real(real64) :: xo(G2_NO) = 0.0_real64                        !! the x of each query beyond it
+        real(real64) :: yo(G2_NO) = 0.0_real64                        !! the y of each query beyond it
+        real(real64) :: value(G2_NQ, G2_NV) = 0.0_real64              !! the value at each query inside
+        real(real64) :: value_out(G2_NO, G2_NV) = 0.0_real64          !! extrapolated, at each query beyond
+        real(real64) :: value_clamp(G2_NO, G2_NV) = 0.0_real64        !! clamped, at each query beyond
+    end type golden_grid
 
     !> How far the linear interpolant of `sin` on unit-spaced knots may stray from `sin`: the
     !! piecewise-linear error bound `h**2/8 * max|f''|`, with `h = 1` and `max|sin''| = 1`.
@@ -112,6 +137,25 @@ contains
         end select
 
     end subroutine golden_fixture_get
+
+    !> Golden grid `which` of `test_interpolate_golden`, numbered 1 to `GOLDEN_GRIDS`.
+    subroutine golden_grid_get(which, g)
+        integer, intent(in)            :: which !! the grid, 1 to `GOLDEN_GRIDS`
+        type(golden_grid), intent(out) :: g     !! receives it
+
+        select case (which)
+        case (1)
+            g = golden_grid("N57", N57_X, N57_Y, N57_Z, N57_XQ, N57_YQ, N57_XO, N57_YO, N57_VALUE, N57_VALUE_OUT, &
+                            N57_VALUE_CLAMP)
+        case (2)
+            g = golden_grid("E86", E86_X, E86_Y, E86_Z, E86_XQ, E86_YQ, E86_XO, E86_YO, E86_VALUE, E86_VALUE_OUT, &
+                            E86_VALUE_CLAMP)
+        case default
+            g = golden_grid("S55", S55_X, S55_Y, S55_Z, S55_XQ, S55_YQ, S55_XO, S55_YO, S55_VALUE, S55_VALUE_OUT, &
+                            S55_VALUE_CLAMP)
+        end select
+
+    end subroutine golden_grid_get
 
     !> `sin` tabulated at the integers `0..30`, qfeet's own spline fixture.
     subroutine sine_table(x, y)

@@ -1,11 +1,11 @@
 !> Interpolation of tabulated `real64` data: `pf_interp_1d`, an interpolant built once over a table
-!> of abscissae and ordinates and evaluated, differentiated and integrated anywhere, and `pf_interp`,
-!> the one-shot form.
+!> of abscissae and ordinates and evaluated, differentiated and integrated anywhere; `pf_interp_2d`,
+!> the same over values tabulated on a rectilinear grid; and `pf_interp`, the one-shot form of both.
 !!
 !! `parquet_interpolate` is an **Arrow-free leaf**: it imports the two INTRINSIC modules
 !! `iso_fortran_env` and `ieee_arithmetic`, and no module of this library. An intrinsic module is
 !! not a compiled file, not a tier edge and not a footprint entry, so `use parquet_interpolate`
-!! compiles three Fortran files and never crosses the C++ boundary.
+!! compiles four Fortran files and never crosses the C++ boundary.
 !! `check_parquet_interpolate_stays_arrow_free` (tools/check_source_conventions.py) keeps that true.
 !!
 !! **Nothing in this module prints.** It reads no setting, emits no INFO, NOTE or WARNING, and
@@ -27,10 +27,13 @@
 !! `"clamp"` (the default) answers the value at the nearest end, a derivative of zero and an
 !! integral that is flat beyond the table; `"extrapolate"` continues the end segment's polynomial
 !! for all three; and `"nan"` answers a quiet NaN for a point beyond the table and for an integral
-!! with a limit there.
+!! with a limit there. On a grid the policy applies to each coordinate on its own: `"clamp"` moves
+!! each coordinate beyond the grid to its nearest grid line, `"extrapolate"` continues the nearest
+!! cell's polynomial, and `"nan"` answers a NaN when either coordinate lies beyond the grid.
 !!
-!! A table may be given ascending or descending; it is stored ascending, which is the only order the
-!! workers see, and the end slopes of `bc="clamped"` are swapped with it.
+!! A table may be given ascending or descending, and so may each axis of a grid; each is stored
+!! ascending, which is the only order the workers see, with the ordinates, the values along that
+!! axis and the end slopes of `bc="clamped"` reversed with it.
 module parquet_interpolate
 
     use iso_fortran_env, only : real64
@@ -40,7 +43,7 @@ module parquet_interpolate
     implicit none
     private
 
-    public :: pf_interp_1d, pf_interp
+    public :: pf_interp_1d, pf_interp_2d, pf_interp
     public :: parquet_debug_interp_force_search
 
     ! ---- private codes: what an object stores for each token --------------------------------
@@ -199,37 +202,147 @@ module parquet_interpolate
 
     end interface
 
-    ! ---- the one-shot generic, implemented in parquet_interpolate_1d.f90 ---------------------
+    ! ---- the two-dimensional interpolant -----------------------------------------------------
 
-    !> Interpolates the table `(x, y)` at `xq` in one call, building and discarding an interpolant.
+    !> A two-dimensional interpolant over values tabulated on a rectilinear grid: build it once with
+    !! `%init`, then evaluate it anywhere.
+    !!
+    !! The grid is the outer product of two strictly monotonic axes, each with a spacing of its own,
+    !! and `z(i, j)` is the value at `(x(i), y(j))`. Every component is private. An object holds its
+    !! own copy of the grid, each axis stored ascending, and for the bicubic spline three tables of
+    !! second derivatives the size of the grid. Intrinsic assignment copies it deeply; there is no
+    !! finalizer.
+    type :: pf_interp_2d
+        private
+        real(real64), allocatable :: x(:)        !! the grid lines along `x`, stored strictly increasing
+        real(real64), allocatable :: y(:)        !! the grid lines along `y`, stored strictly increasing
+        real(real64), allocatable :: z(:, :)     !! the values, `z(i, j)` at `(x(i), y(j))`
+        real(real64), allocatable :: zxx(:, :)   !! second derivatives along `x` of every column of `z`;
+                                                 !! unallocated for `linear`
+        real(real64), allocatable :: zyy(:, :)   !! second derivatives along `y` of every row of `z`;
+                                                 !! unallocated for `linear`
+        real(real64), allocatable :: zxxyy(:, :) !! second derivatives along `x` of every column of `zyy`;
+                                                 !! unallocated for `linear`
+        integer      :: nx = 0                   !! grid lines along `x`; 0 until `%init`. A default integer,
+                                                 !! since an axis longer than `huge(1)` lines is not an
+                                                 !! input this module is for
+        integer      :: ny = 0                   !! grid lines along `y`
+        integer      :: method = 0               !! `M_LINEAR` or `M_CUBIC`
+        integer      :: outside = 0              !! `O_CLAMP`, `O_EXTRAPOLATE` or `O_NAN`
+        logical      :: x_reversed = .false.     !! the caller's `x` was descending
+        logical      :: y_reversed = .false.     !! the caller's `y` was descending
+        logical      :: x_uniform = .false.      !! `x` evenly spaced: its bracket is guessed by arithmetic
+        logical      :: y_uniform = .false.      !! `y` evenly spaced: its bracket is guessed by arithmetic
+        real(real64) :: x_step = 0.0_real64      !! mean spacing along `x`
+        real(real64) :: y_step = 0.0_real64      !! mean spacing along `y`
+    contains
+        procedure :: init => interp_2d_init            !! Stores the grid and builds the tables.
+        procedure :: eval => interp_2d_eval            !! Value at a point; `pure elemental`.
+        procedure :: is_initialised => interp_2d_ready !! `.true.` once built; never aborts.
+        procedure :: clear => interp_2d_clear          !! Releases the grid; the object may be rebuilt.
+    end type pf_interp_2d
+
+    ! ---- the bindings, implemented in parquet_interpolate_2d.f90 ----------------------------
+
+    interface
+
+        !> Builds the interpolant over the values `z` on the grid `x` by `y`.
+        !!
+        !! ```
+        !! call g%init(x, y, z, [method], [bc], [outside], [context])
+        !! ```
+        !!
+        !! `z(i, j)` is the value at `(x(i), y(j))`, so `z` is shaped `(size(x), size(y))`. Each axis
+        !! must be strictly increasing or strictly decreasing and finite, with a spacing of its own,
+        !! and must hold at least two lines, or four for `bc="not_a_knot"`; every value must be finite.
+        !! `method` is `"linear"`, which is bilinear interpolation on each cell, or `"cubic"` (the
+        !! default), the bicubic spline: the cubic spline along each axis in turn, whose restriction to
+        !! any grid line is the one-dimensional spline of that line. `bc` is its end condition on every
+        !! edge, `"natural"` (the default) or `"not_a_knot"`. `outside` says what a point beyond the
+        !! grid answers, for each coordinate on its own: `"clamp"` (the default), `"extrapolate"` or
+        !! `"nan"`. Tokens are matched without regard to case. `context` is appended to any abort
+        !! message. A second `%init` on a built object replaces its grid.
+        module subroutine interp_2d_init(this, x, y, z, method, bc, outside, context)
+            implicit none
+            class(pf_interp_2d), intent(out)       :: this    !! the interpolant to build
+            real(real64), intent(in)               :: x(:)    !! the grid lines along `x`, strictly monotonic
+            real(real64), intent(in)               :: y(:)    !! the grid lines along `y`, strictly monotonic
+            real(real64), intent(in)               :: z(:, :) !! the values, shaped `(size(x), size(y))`
+            character(len=*), intent(in), optional :: method  !! `"linear"` or `"cubic"`
+            character(len=*), intent(in), optional :: bc      !! the spline's end condition
+            character(len=*), intent(in), optional :: outside !! `"clamp"`, `"extrapolate"` or `"nan"`
+            character(len=*), intent(in), optional :: context !! call-site text for abort messages
+        end subroutine interp_2d_init
+
+        !> The interpolant's value at `(xq, yq)`: `pure elemental`, so two conforming arrays of
+        !! coordinates answer an array.
+        !!
+        !! A NaN coordinate answers NaN. A coordinate beyond the grid answers what the object's
+        !! `outside=` policy says, each coordinate on its own; a query on a grid node answers that
+        !! node's value exactly. Aborts on an object that was never built.
+        pure elemental module function interp_2d_eval(this, xq, yq) result(v)
+            implicit none
+            class(pf_interp_2d), intent(in) :: this !! the interpolant
+            real(real64), intent(in)        :: xq   !! the query's `x`
+            real(real64), intent(in)        :: yq   !! the query's `y`
+            real(real64)                    :: v    !! the interpolated value
+        end function interp_2d_eval
+
+        !> `.true.` once `%init` has built the object and `%clear` has not released it since.
+        pure module function interp_2d_ready(this) result(ok)
+            implicit none
+            class(pf_interp_2d), intent(in) :: this !! the interpolant
+            logical                         :: ok   !! the object can be evaluated
+        end function interp_2d_ready
+
+        !> Releases the grid and returns the object to its unbuilt state; harmless on a fresh one.
+        pure module subroutine interp_2d_clear(this)
+            implicit none
+            class(pf_interp_2d), intent(inout) :: this !! the interpolant to release
+        end subroutine interp_2d_clear
+
+    end interface
+
+    ! ---- the one-shot generic, implemented in parquet_interpolate_1d.f90 and _2d.f90 ------------
+
+    !> Interpolates the table `(x, y)` at `xq`, or the grid values `z` at `(xq, yq)`, in one call,
+    !! building and discarding an interpolant.
     !!
     !! ```
     !! yq = pf_interp(x, y, xq, [method], [bc], [slopes], [outside], [is_valid], [context])
+    !! zq = pf_interp(x, y, z, xq, yq, [method], [bc], [outside], [context])
     !! ```
     !!
     !! Optional arguments are shown in square brackets, with the comma outside the bracket. FORD
     !! renders no per-argument documentation for a generic with several specifics, so every argument
     !! is named here instead:
     !!
-    !! * `x`, `y` -- the table, rank-1 `real64` of one size: `x` strictly increasing or strictly
-    !!   decreasing and finite, `y` finite.
-    !! * `xq` -- the query: a scalar, answered by a scalar, or a rank-1 array, answered by an array of
-    !!   its size.
-    !! * `method` -- `"linear"`; `"cubic"` (the default), a C2 cubic spline; or `"pchip"`, a C1 cubic
-    !!   that keeps monotone data monotone.
-    !! * `bc` -- the cubic spline's end condition: `"natural"` (the default), `"not_a_knot"` or
-    !!   `"clamped"`. Refused with any other method.
-    !! * `slopes` -- rank-1 `real64` of two elements, the first derivatives at the table's first and
-    !!   last point for `bc="clamped"`; required with it and refused without it.
+    !! * `x`, `y` -- in one dimension, the table, rank-1 `real64` of one size: `x` strictly increasing
+    !!   or strictly decreasing and finite, `y` finite. In two dimensions, the grid lines along each
+    !!   axis, each strictly increasing or strictly decreasing and finite.
+    !! * `z` -- in two dimensions only, the values, rank-2 `real64` shaped `(size(x), size(y))`,
+    !!   `z(i, j)` at `(x(i), y(j))`, every one finite.
+    !! * `xq` -- in one dimension, the query: a scalar, answered by a scalar, or a rank-1 array,
+    !!   answered by an array of its size.
+    !! * `xq`, `yq` -- in two dimensions, the query's coordinates: two scalars, answered by a scalar,
+    !!   or two rank-1 arrays of one size, answered by an array of that size.
+    !! * `method` -- `"linear"`; `"cubic"` (the default), a C2 cubic spline; or, in one dimension
+    !!   only, `"pchip"`, a C1 cubic that keeps monotone data monotone.
+    !! * `bc` -- the cubic spline's end condition: `"natural"` (the default), `"not_a_knot"` or, in one
+    !!   dimension only, `"clamped"`. Refused with any other method.
+    !! * `slopes` -- in one dimension only, rank-1 `real64` of two elements, the first derivatives at
+    !!   the table's first and last point for `bc="clamped"`; required with it and refused without it.
     !! * `outside` -- what a query beyond the table answers: `"clamp"` (the default, the end value),
-    !!   `"extrapolate"` (the end segment continued) or `"nan"`.
-    !! * `is_valid` -- rank-1 `logical` of the table's size; a point marked `.false.` is dropped.
+    !!   `"extrapolate"` (the end segment continued) or `"nan"`; in two dimensions, for each
+    !!   coordinate on its own.
+    !! * `is_valid` -- in one dimension only, rank-1 `logical` of the table's size; a point marked
+    !!   `.false.` is dropped.
     !! * `context` -- text appended to any abort message, capped at 100 characters.
     !!
     !! The answer is bit for bit what `%init` with the same arguments followed by `%eval` gives,
     !! because that is how it is computed; its abort messages begin `pf_interp: `. Building the
     !! interpolant is the expensive half, so a table queried more than a handful of times wants a
-    !! `pf_interp_1d` object instead.
+    !! `pf_interp_1d` or `pf_interp_2d` object instead.
     interface pf_interp
 
         !> One query point.
@@ -264,17 +377,48 @@ module parquet_interpolate
             real(real64)                           :: yq(size(xq)) !! the interpolated values
         end function interp_1d_oneshot_array
 
+        !> One query point on a grid.
+        module function interp_2d_oneshot_scalar(x, y, z, xq, yq, method, bc, outside, context) result(zq)
+            implicit none
+            real(real64), intent(in)               :: x(:)    !! the grid lines along `x`, strictly monotonic
+            real(real64), intent(in)               :: y(:)    !! the grid lines along `y`, strictly monotonic
+            real(real64), intent(in)               :: z(:, :) !! the values, shaped `(size(x), size(y))`
+            real(real64), intent(in)               :: xq      !! the query's `x`
+            real(real64), intent(in)               :: yq      !! the query's `y`
+            character(len=*), intent(in), optional :: method  !! `"linear"` or `"cubic"`
+            character(len=*), intent(in), optional :: bc      !! the spline's end condition
+            character(len=*), intent(in), optional :: outside !! the out-of-range policy
+            character(len=*), intent(in), optional :: context !! call-site text
+            real(real64)                           :: zq      !! the interpolated value
+        end function interp_2d_oneshot_scalar
+
+        !> An array of query points on a grid, given as two arrays of coordinates of one size.
+        module function interp_2d_oneshot_array(x, y, z, xq, yq, method, bc, outside, context) result(zq)
+            implicit none
+            real(real64), intent(in)               :: x(:)          !! the grid lines along `x`
+            real(real64), intent(in)               :: y(:)          !! the grid lines along `y`
+            real(real64), intent(in)               :: z(:, :)       !! the values, shaped `(size(x), size(y))`
+            real(real64), intent(in)               :: xq(:)         !! the queries' `x`
+            real(real64), intent(in)               :: yq(:)         !! the queries' `y`, one per `xq`
+            character(len=*), intent(in), optional :: method        !! `"linear"` or `"cubic"`
+            character(len=*), intent(in), optional :: bc            !! the spline's end condition
+            character(len=*), intent(in), optional :: outside       !! the out-of-range policy
+            character(len=*), intent(in), optional :: context       !! call-site text
+            real(real64)                           :: zq(size(xq))  !! the interpolated values
+        end function interp_2d_oneshot_array
+
     end interface pf_interp
 
-    ! ---- the test-only hook, implemented in parquet_interpolate_1d.f90 ------------------------
+    ! ---- the test-only hook, implemented in parquet_interpolate_1d.f90 and _2d.f90 --------------
 
     !> Test-only. Makes an object find every bracket by bisection, and reports whether it was
     !! finding them by arithmetic until now.
     !!
     !! An evenly spaced table is bracketed by arithmetic and every other one by bisection, and the
     !! two must answer the same bits; this is what lets one test evaluate the same table through both
-    !! paths. Public only because the flag it clears is a private component; no library code calls
-    !! it, and there is no way to switch the arithmetic path back on short of `%init`.
+    !! paths. A grid decides each axis on its own and reports each. Public only because the flags it
+    !! clears are private components; no library code calls it, and there is no way to switch the
+    !! arithmetic path back on short of `%init`.
     interface parquet_debug_interp_force_search
 
         !> The one-dimensional object's form.
@@ -283,6 +427,14 @@ module parquet_interpolate
             type(pf_interp_1d), intent(inout) :: this        !! the interpolant to switch
             logical, intent(out)              :: was_uniform !! it was bracketing by arithmetic
         end subroutine interp_1d_force_search
+
+        !> The two-dimensional object's form, reporting each axis.
+        module subroutine interp_2d_force_search(this, x_was_uniform, y_was_uniform)
+            implicit none
+            type(pf_interp_2d), intent(inout) :: this          !! the interpolant to switch
+            logical, intent(out)              :: x_was_uniform !! `x` was bracketed by arithmetic
+            logical, intent(out)              :: y_was_uniform !! `y` was bracketed by arithmetic
+        end subroutine interp_2d_force_search
 
     end interface parquet_debug_interp_force_search
 

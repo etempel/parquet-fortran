@@ -4,7 +4,7 @@ title: Interpolation of tabulated data with parquet_interpolate
 
 `parquet_interpolate` reads a value off a table of numbers at any point: build an interpolant from
 a table of abscissae and ordinates once, then evaluate, differentiate or integrate it wherever you
-need. It reaches no reader, no writer and no setting: `use parquet_interpolate` compiles three
+need. It reaches no reader, no writer and no setting: `use parquet_interpolate` compiles four
 Fortran files and nothing of the Arrow stack. `use parquet` brings it in too, so nothing here needs
 a second import. See [Choosing a module](../operating/choosing-a-module.html) for what each entry
 module costs.
@@ -12,7 +12,9 @@ module costs.
 Three methods: straight lines between neighbouring points; a cubic spline — a smooth curve whose
 slope and curvature are continuous across every point; and PCHIP, a cubic that keeps monotone data
 monotone and never overshoots it. The table is `real64`, ascending or descending, and what a query
-beyond its ends answers is a choice you make once, when you build.
+beyond its ends answers is a choice you make once, when you build. Values tabulated on a grid are
+interpolated the same way, bilinearly or with a bicubic spline: see
+[Two dimensions](#two-dimensions).
 
 ## Quick example
 
@@ -62,6 +64,10 @@ s  = c%integral(a, b)
 ok = c%is_initialised()
 call c%clear()
 yq = pf_interp(x, y, xq, [method], [bc], [slopes], [outside], [is_valid], [context])
+
+call g%init(x, y, z, [method], [bc], [outside], [context])
+v  = g%eval(xq, yq)
+zq = pf_interp(x, y, z, xq, yq, [method], [bc], [outside], [context])
 ```
 
 ## Building an interpolant
@@ -210,16 +216,78 @@ NaN. A NaN made by arithmetic on an infinity — that one, or an integral from o
 other whose two ends extend with opposite signs — raises IEEE_INVALID, which ends a program built
 with that trap enabled, as nagfor builds are by default.
 
+## Two dimensions
+
+`pf_interp_2d` interpolates values tabulated on a rectilinear grid: `x` holds the grid lines along
+one axis and `y` those along the other, each strictly increasing or strictly decreasing with a
+spacing of its own, and `z(i, j)` is the value at `(x(i), y(j))`, so `z` is shaped
+`(size(x), size(y))`.
+
+```fortran
+type(pf_interp_2d) :: surface, plane
+real(real64) :: gx(5), gy(4), gz(5, 4)
+integer :: i, j
+
+! A grid: z = x**2 * y at x = 0, 0.5, ..., 2 and y = 0, 1, 2, 3.
+gx = [(0.5_real64*real(i - 1, real64), i = 1, 5)]
+gy = [(real(j - 1, real64), j = 1, 4)]
+do j = 1, 4
+    gz(:, j) = gx**2*gy(j)
+end do
+
+call surface%init(gx, gy, gz, bc="not_a_knot")
+call plane%init(gx, gy, gz, method="linear")
+
+print *, surface%eval(0.75_real64, 1.5_real64)     ! 0.84375, which is x**2 * y there
+print *, plane%eval(0.75_real64, 1.5_real64)       ! 0.9375
+print *, surface%eval([0.25_real64, 1.25_real64], [0.5_real64, 2.5_real64])   ! 0.03125 and 3.90625
+print *, surface%eval(3.0_real64, 1.5_real64)      ! 6.0: x is beyond the grid, and clamped to 2
+```
+
+`g%eval(xq, yq)` is `pure` and `elemental` in both coordinates: two scalars answer a scalar, and two
+arrays of one shape answer an array of that shape. A query on a grid node answers that node's
+value exactly.
+
+**`method="linear"`** is bilinear interpolation: on each cell, linear along each axis. It
+reproduces any `a + b*x + c*y + d*x*y` exactly and never leaves the range of a cell's four
+values.
+
+**`method="cubic"`**, the default, is the bicubic spline: the cubic spline along each axis in turn,
+with the end condition `bc` on every edge of the grid, `"natural"` (the default) or `"not_a_knot"`,
+which needs at least four grid lines along each axis. On any grid line it is the one-dimensional
+spline of that line's values, and it reproduces whatever that spline reproduces along both axes at
+once: under `"natural"`, anything straight along each axis, as bilinear interpolation does; under
+`"not_a_knot"`, any polynomial of degree three or less in each coordinate, such as `x**2 * y` above.
+
+**`outside=` applies to each coordinate on its own.** `"clamp"` moves a coordinate beyond the grid
+onto the nearer grid line, `"extrapolate"` continues the polynomial of the nearest cell, and `"nan"`
+answers a quiet NaN when either coordinate lies beyond the grid. A NaN coordinate answers NaN under
+every policy, as a NaN query does in one dimension.
+
+An axis given descending works as it stands, with `z` in the same order as that axis: the grid is
+stored ascending and answers exactly what the same grid given ascending answers.
+
+`method="pchip"` and `bc="clamped"` are refused on a grid. PCHIP's slopes depend on the data, so
+interpolating along one axis and then the other gives a different surface for each order, and a
+clamped surface would need a slope at every point of every edge. A grid object evaluates only; it
+has no `%derivative` or `%integral`, and `%init` takes no `is_valid=`.
+
+`%init` keeps its own copy of the grid and, for the bicubic spline, three more tables of the same
+size. An evaluation then costs a bracket search along each axis — a bisection, or arithmetic along
+an evenly spaced axis — and, for the bicubic spline, five cubic segments.
+
 ## One call, no object
 
 ```fortran
 yq = pf_interp(x, y, xq, method="linear")
+zq = pf_interp(x, y, z, xq, yq, method="linear")
 ```
 
 `pf_interp` builds an interpolant, evaluates it at `xq` — a scalar, or a rank-1 array — and
-discards it. It takes the same optional arguments as `%init` and answers exactly what the object
+discards it; given a grid's values `z`, it evaluates at `(xq, yq)`, two scalars or two rank-1 arrays
+of one size. It takes the same optional arguments as `%init` and answers exactly what the object
 answers, bit for bit, because that is how it computes; its abort messages begin `pf_interp:`
-instead of `pf_interp_1d%init:`. The build is the expensive half, and this form repeats it on every
+instead of `pf_interp_1d%init:` or `pf_interp_2d%init:`. The build is the expensive half, and this form repeats it on every
 call, so a table queried more than a handful of times wants an object instead. There is no
 one-shot derivative or integral: build an object.
 
@@ -254,9 +322,9 @@ end do
 !$omp end parallel do
 ```
 
-Do not list a `pf_interp_1d` in a `private()` clause, where gfortran starts each thread's copy from
-garbage rather than from an unbuilt object, and do not declare one in a `block` inside the region,
-which ifx does not support for a type like this one. `pf_interp` called from the loop is safe as
+Do not list a `pf_interp_1d` or a `pf_interp_2d` in a `private()` clause, where gfortran starts each
+thread's copy from garbage rather than from an unbuilt object, and do not declare one in a `block`
+inside the region, which ifx does not support for a type like these. `pf_interp` called from the loop is safe as
 well: its object is local to the call. See [Thread safety](../operating/thread-safety.html) for how
 this sits beside the rest of the library.
 
@@ -283,12 +351,32 @@ program with `error stop` and a message that begins with the entry point, `pf_in
 | an infinite `x` | `x must be finite` |
 | a NaN or an infinite `y` | `y must be finite` |
 
+A grid is checked in its own order, below, with messages that begin `pf_interp_2d%init:`, or
+`pf_interp:` for the one-shot form:
+
+| Refused | Message |
+|---|---|
+| a `z` not shaped `(size(x), size(y))` | `z must be shaped (size(x), size(y)): got (<a>, <b>) for (<nx>, <ny>)` |
+| an unknown `method` | `unknown method "<token>"; expected "linear" or "cubic"` |
+| `method="pchip"` | `method "pchip" is not offered in two dimensions` |
+| `bc` with `method="linear"` | `bc applies only to method "cubic"` |
+| an unknown `bc` | `unknown bc "<token>"; expected "natural" or "not_a_knot"` |
+| `bc="clamped"` | `bc "clamped" is not offered in two dimensions` |
+| an unknown `outside` | `unknown outside "<token>"; expected "clamp", "extrapolate" or "nan"` |
+| fewer than two grid lines along `x`, then along `y`, or four for `bc="not_a_knot"` | `at least <k> points are needed along x for method "<method>"; got <n>`, or `along y`, the method followed by ` with bc "not_a_knot"` where that is the reason |
+| an `x` not strictly monotonic or holding a NaN, then a `y` | `x must be strictly increasing or strictly decreasing`, or the same of `y` |
+| an infinite `x`, then an infinite `y` | `x must be finite`, or `y must be finite` |
+| a NaN or an infinite value in `z` | `z must be finite` |
+
+`pf_interp` given two arrays of coordinates of different sizes aborts with
+`pf_interp: xq and yq differ in size: <a> and <b>`, before it builds anything.
+
 Evaluating, differentiating or integrating an object that was never built aborts with
-`pf_interp_1d%eval: the interpolant is not initialised`, or the same with `%derivative` or
-`%integral`, and a derivative of any order but 1 or 2 with
-`pf_interp_1d%derivative: order must be 1 or 2`. Those three are `pure`, so their messages carry no
-context. Nothing a query or a limit can be — a NaN, an infinity, a point far outside the table — is
-an error.
+`pf_interp_1d%eval: the interpolant is not initialised`, or the same with `%derivative`,
+`%integral` or `pf_interp_2d%eval`, and a derivative of any order but 1 or 2 with
+`pf_interp_1d%derivative: order must be 1 or 2`. Those are `pure`, so their messages carry no
+context. Nothing a query or a limit can be — a NaN, an infinity, a point far outside the table or
+the grid — is an error.
 
 ## Moving from qfeet's `spline_type`
 

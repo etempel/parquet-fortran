@@ -1410,6 +1410,48 @@ program error_scenarios
         call scenario_random_subset_empty_population()
     case ("random_subset_int32_too_narrow")
         call scenario_random_subset_int32_too_narrow()
+    case ("random_disc_radius_negative")
+        call scenario_random_disc_radius_negative()
+    case ("random_disc_radius_nan")
+        call scenario_random_disc_radius_nan()
+    case ("random_disc_centre_zero")
+        call scenario_random_disc_centre_zero()
+    case ("random_disc_centre_nan")
+        call scenario_random_disc_centre_nan()
+    case ("random_disc_inner_exceeds_radius")
+        call scenario_random_disc_inner_exceeds_radius()
+    case ("random_disc_inner_nan")
+        call scenario_random_disc_inner_nan()
+    case ("random_disc_radec_dec_out_of_range")
+        call scenario_random_disc_radec_dec_out_of_range()
+    case ("random_disc_radec_centre_nan")
+        call scenario_random_disc_radec_centre_nan()
+    case ("random_disc_radec_radius_negative")
+        call scenario_random_disc_radec_radius_negative()
+    case ("random_ball_radius_negative")
+        call scenario_random_ball_radius_negative()
+    case ("random_ball_inner_exceeds_radius")
+        call scenario_random_ball_inner_exceeds_radius()
+    case ("random_vmf_kappa_negative")
+        call scenario_random_vmf_kappa_negative()
+    case ("random_vmf_kappa_nan")
+        call scenario_random_vmf_kappa_nan()
+    case ("random_vmf_mu_zero")
+        call scenario_random_vmf_mu_zero()
+    case ("random_vmf_radec_sigma_not_positive")
+        call scenario_random_vmf_radec_sigma_not_positive()
+    case ("random_vmf_radec_sigma_nan")
+        call scenario_random_vmf_radec_sigma_nan()
+    case ("random_fill_direction_bad_shape")
+        call scenario_random_fill_direction_bad_shape()
+    case ("random_fill_radec_size_mismatch")
+        call scenario_random_fill_radec_size_mismatch()
+    case ("random_sphere_draw_beyond_2p62")
+        call scenario_random_sphere_draw_beyond_2p62()
+    case ("random_fill_direction_draw_beyond_2p62")
+        call scenario_random_fill_direction_draw_beyond_2p62()
+    case ("random_stream_disc_inner_exceeds_radius")
+        call scenario_random_stream_disc_inner_exceeds_radius()
     case ("sort_unknown_column")
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
@@ -23124,6 +23166,226 @@ contains
         call pf_random_subset(idx, int(huge(1_int32), int64) + 1_int64, 1_int64)   ! -> aborts
         print '(a,i0)', "unexpectedly drew int32 elements from a wider population: ", idx(1)
     end subroutine scenario_random_subset_int32_too_narrow
+
+    ! ---- parquet_random: points on a sphere ----
+    !
+    ! Every refusal here sits inside a `pure` procedure, so every scenario PRINTS the value it drew,
+    ! control and refused call alike: gfortran deletes a pure call whose result is unused at -O1 and
+    ! above, and the scenario would then exit 0 (`check_scenario_uses_a_pure_result`). Each control is
+    ! the nearest legal call, so a guard drawn one step too tight aborts on the control instead.
+
+    !> A negative angular radius is refused. The control is radius 0, which is legal and is the centre.
+    subroutine scenario_random_disc_radius_negative()
+        real(real64) :: v(3)
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.0_real64)
+        print '(a,3es12.4)', "drew a disc of radius 0: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], -0.1_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a disc of negative radius: ", v
+    end subroutine scenario_random_disc_radius_negative
+
+    !> A NaN radius is refused. The control is a radius above the half turn, which clamps rather than
+    !! aborts -- so a guard written `radius <= pi` would fail the control.
+    subroutine scenario_random_disc_radius_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: v(3)
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 3.5_real64)
+        print '(a,3es12.4)', "drew a disc of radius 3.5, the whole sphere: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], &
+                              ieee_value(0.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a disc of NaN radius: ", v
+    end subroutine scenario_random_disc_radius_nan
+
+    !> A zero centre names no direction. The control is a centre of length about 1e-300, which does.
+    subroutine scenario_random_disc_centre_zero()
+        real(real64) :: v(3)
+        v = pf_random_disc_at(1_int64, 1_int64, [1.0e-300_real64, 0.0_real64, 1.0e-300_real64], 0.5_real64)
+        print '(a,3es12.4)', "drew a disc about a centre of length 1e-300: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 0.0_real64], 0.5_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a disc about the zero vector: ", v
+    end subroutine scenario_random_disc_centre_zero
+
+    !> A centre with a NaN component is refused before anything could compare against it.
+    subroutine scenario_random_disc_centre_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: v(3)
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64)
+        print '(a,3es12.4)', "drew a disc about +z: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, [ieee_value(0.0_real64, ieee_quiet_nan), 0.0_real64, 1.0_real64], &
+                              0.5_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a disc about a NaN centre: ", v
+    end subroutine scenario_random_disc_centre_nan
+
+    !> An inner radius beyond the outer names an empty ring. The control is `r_inner = radius`, the
+    !! circle itself, which is legal.
+    subroutine scenario_random_disc_inner_exceeds_radius()
+        real(real64) :: v(3)
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, 1_int64, 0.5_real64)
+        print '(a,3es12.4)', "drew the circle r_inner = radius: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, 1_int64, &
+                              0.6_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a ring whose inner radius exceeds its outer: ", v
+    end subroutine scenario_random_disc_inner_exceeds_radius
+
+    !> A NaN inner radius is refused by its own screen, ahead of the range test it would slip through.
+    subroutine scenario_random_disc_inner_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: v(3)
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, 1_int64, 0.0_real64)
+        print '(a,3es12.4)', "drew a disc with r_inner = 0: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, 1_int64, &
+                              ieee_value(0.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a disc with a NaN inner radius: ", v
+    end subroutine scenario_random_disc_inner_nan
+
+    !> A declination outside [-90, 90] is refused rather than read as the direction it names: a cap
+    !! about a mirrored position is a plausible wrong answer. The control is the pole itself.
+    subroutine scenario_random_disc_radec_dec_out_of_range()
+        real(real64) :: ra, dec
+        call pf_random_disc_radec_at(1_int64, 1_int64, 10.0_real64, 90.0_real64, 1.0_real64, ra, dec)
+        print '(a,2es12.4)', "drew a disc about the pole: ", ra, dec
+        call pf_random_disc_radec_at(1_int64, 1_int64, 10.0_real64, 90.5_real64, 1.0_real64, ra, dec)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly drew a disc about declination 90.5: ", ra, dec
+    end subroutine scenario_random_disc_radec_dec_out_of_range
+
+    !> A NaN right ascension is refused. The control is one past two turns, which is legal.
+    subroutine scenario_random_disc_radec_centre_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: ra, dec
+        call pf_random_disc_radec_at(1_int64, 1_int64, 725.0_real64, -90.0_real64, 1.0_real64, ra, dec)
+        print '(a,2es12.4)', "drew a disc about ra0 725: ", ra, dec
+        call pf_random_disc_radec_at(1_int64, 1_int64, ieee_value(0.0_real64, ieee_quiet_nan), 10.0_real64, &
+                                     1.0_real64, ra, dec)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly drew a disc about a NaN right ascension: ", ra, dec
+    end subroutine scenario_random_disc_radec_centre_nan
+
+    !> The RA/Dec disc names its radius `radius_deg`, and so does its refusal. The control is 180
+    !! degrees, the whole sky.
+    subroutine scenario_random_disc_radec_radius_negative()
+        real(real64) :: ra, dec
+        call pf_random_disc_radec_at(1_int64, 1_int64, 10.0_real64, 20.0_real64, 180.0_real64, ra, dec)
+        print '(a,2es12.4)', "drew a disc of radius 180 degrees: ", ra, dec
+        call pf_random_disc_radec_at(1_int64, 1_int64, 10.0_real64, 20.0_real64, -1.0_real64, ra, dec)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly drew a disc of radius -1 degree: ", ra, dec
+    end subroutine scenario_random_disc_radec_radius_negative
+
+    !> A negative ball radius is refused. The control is radius 0, the origin.
+    subroutine scenario_random_ball_radius_negative()
+        real(real64) :: p(3)
+        p = pf_random_ball_at(1_int64, 1_int64, 0.0_real64)
+        print '(a,3es12.4)', "drew a point in a ball of radius 0: ", p
+        p = pf_random_ball_at(1_int64, 1_int64, -1.0_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a point in a ball of negative radius: ", p
+    end subroutine scenario_random_ball_radius_negative
+
+    !> A shell whose inner radius exceeds its outer is refused. The control is the sphere `r_inner = radius`.
+    subroutine scenario_random_ball_inner_exceeds_radius()
+        real(real64) :: p(3)
+        p = pf_random_ball_at(1_int64, 1_int64, 2.0_real64, 1_int64, 2.0_real64)
+        print '(a,3es12.4)', "drew a point on the sphere r_inner = radius: ", p
+        p = pf_random_ball_at(1_int64, 1_int64, 2.0_real64, 1_int64, 2.5_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a point in an inverted shell: ", p
+    end subroutine scenario_random_ball_inner_exceeds_radius
+
+    !> A negative concentration is refused. The control is `kappa = 0`, the uniform direction. The
+    !! refused value is large enough that its message takes the three-digit exponent form.
+    subroutine scenario_random_vmf_kappa_negative()
+        real(real64) :: v(3)
+        v = pf_random_vmf_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.0_real64)
+        print '(a,3es12.4)', "drew a vMF with kappa 0: ", v
+        v = pf_random_vmf_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], -1.0e300_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a vMF with a negative kappa: ", v
+    end subroutine scenario_random_vmf_kappa_negative
+
+    !> A NaN concentration is refused. The control is `kappa = 1e-30`, which must still draw.
+    subroutine scenario_random_vmf_kappa_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: v(3)
+        v = pf_random_vmf_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], 1.0e-30_real64)
+        print '(a,3es12.4)', "drew a vMF with kappa 1e-30: ", v
+        v = pf_random_vmf_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 1.0_real64], &
+                             ieee_value(0.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a vMF with a NaN kappa: ", v
+    end subroutine scenario_random_vmf_kappa_nan
+
+    !> A zero mean direction is refused, through the same check the disc's centre goes through.
+    subroutine scenario_random_vmf_mu_zero()
+        real(real64) :: v(3)
+        v = pf_random_vmf_at(1_int64, 1_int64, [0.0_real64, 1.0e-300_real64, 0.0_real64], 5.0_real64)
+        print '(a,3es12.4)', "drew a vMF about a mean of length 1e-300: ", v
+        v = pf_random_vmf_at(1_int64, 1_int64, [0.0_real64, 0.0_real64, 0.0_real64], 5.0_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a vMF about the zero vector: ", v
+    end subroutine scenario_random_vmf_mu_zero
+
+    !> A width of zero is refused: it names no distribution. The control is a width of 1e-300 degrees.
+    subroutine scenario_random_vmf_radec_sigma_not_positive()
+        real(real64) :: ra, dec
+        call pf_random_vmf_radec_at(1_int64, 1_int64, 10.0_real64, 20.0_real64, 1.0e-300_real64, ra, dec)
+        print '(a,2es12.4)', "drew a vMF of width 1e-300 degrees: ", ra, dec
+        call pf_random_vmf_radec_at(1_int64, 1_int64, 10.0_real64, 20.0_real64, 0.0_real64, ra, dec)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly drew a vMF of width 0: ", ra, dec
+    end subroutine scenario_random_vmf_radec_sigma_not_positive
+
+    !> A NaN width is refused by its own screen. The control is a width of 1e155 degrees, the uniform limit.
+    subroutine scenario_random_vmf_radec_sigma_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: ra, dec
+        call pf_random_vmf_radec_at(1_int64, 1_int64, 10.0_real64, 20.0_real64, 1.0e155_real64, ra, dec)
+        print '(a,2es12.4)', "drew a vMF of width 1e155 degrees: ", ra, dec
+        call pf_random_vmf_radec_at(1_int64, 1_int64, 10.0_real64, 20.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), &
+                                    ra, dec)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly drew a vMF of NaN width: ", ra, dec
+    end subroutine scenario_random_vmf_radec_sigma_nan
+
+    !> A direction fill needs three rows. The controls are a (3, 0) fill -- a no-op -- and a (3, 2) one.
+    subroutine scenario_random_fill_direction_bad_shape()
+        real(real64) :: none(3, 0), good(3, 2), bad(2, 4)
+        call pf_random_fill_direction(1_int64, 1_int64, none)
+        call pf_random_fill_direction(1_int64, 1_int64, good)
+        print '(a,3es12.4)', "filled three rows: ", good(:, 2)
+        call pf_random_fill_direction(1_int64, 1_int64, bad)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly filled two rows: ", bad(:, 1)
+    end subroutine scenario_random_fill_direction_bad_shape
+
+    !> An RA/Dec fill needs two arrays of one size. The control fills two of size 4.
+    subroutine scenario_random_fill_radec_size_mismatch()
+        real(real64) :: ra(4), dec(4), dec3(3)
+        call pf_random_fill_radec(1_int64, 1_int64, ra, dec)
+        print '(a,2es12.4)', "filled four positions, the last ", ra(4), dec(4)
+        call pf_random_fill_radec(1_int64, 1_int64, ra, dec3)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly filled arrays of sizes 4 and 3: ", ra(1), dec3(1)
+    end subroutine scenario_random_fill_radec_size_mismatch
+
+    !> Draw `2**62 + 1` would read block `2**62`, whose index sets bit 62 and so lands in another word
+    !! space silently; it is refused. The control is draw `2**62`, the last that exists.
+    subroutine scenario_random_sphere_draw_beyond_2p62()
+        integer(int64), parameter :: LAST = 4611686018427387904_int64
+        real(real64) :: v(3)
+        v = pf_random_direction_at(1_int64, 1_int64, LAST)
+        print '(a,3es12.4)', "drew direction 2**62: ", v
+        v = pf_random_direction_at(1_int64, 1_int64, LAST + 1_int64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew direction 2**62 + 1: ", v
+    end subroutine scenario_random_sphere_draw_beyond_2p62
+
+    !> A fill is bounded by its LAST draw, through its own check. The control ends exactly on `2**62`.
+    subroutine scenario_random_fill_direction_draw_beyond_2p62()
+        integer(int64), parameter :: LAST = 4611686018427387904_int64
+        real(real64) :: v(3, 4)
+        call pf_random_fill_direction(1_int64, 1_int64, v, LAST - 3_int64)
+        print '(a,3es12.4)', "filled up to direction 2**62, the last ", v(:, 4)
+        call pf_random_fill_direction(1_int64, 1_int64, v, LAST - 2_int64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly filled past direction 2**62: ", v(:, 4)
+    end subroutine scenario_random_fill_direction_draw_beyond_2p62
+
+    !> The stream form names itself in its refusal. The control is the circle `r_inner = radius`.
+    subroutine scenario_random_stream_disc_inner_exceeds_radius()
+        type(pf_random_stream) :: rng
+        real(real64) :: v(3)
+        call rng%seed(1_int64, 1_int64)
+        call rng%disc([0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, v, r_inner=0.5_real64)
+        print '(a,3es12.4)', "drew the circle r_inner = radius from a stream: ", v
+        call rng%disc([0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, v, r_inner=0.6_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew an inverted ring from a stream: ", v
+    end subroutine scenario_random_stream_disc_inner_exceeds_radius
 
     !> A typed keyword makes the writer synthesize a "<KEY>.datatype" entry, so a caller's own
     !! entry of that name would be a second writer of the same key and the file would carry two,

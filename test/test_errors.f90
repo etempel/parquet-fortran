@@ -85,7 +85,7 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:), p29(:), p30(:), p31(:), p32(:)
+                                            p28(:), p29(:), p30(:), p31(:), p32(:), p33(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3316,8 +3316,53 @@ contains
             new_unittest("evaluating an interpolant that was never built at no queries aborts", &
                 test_interpolate_eval_array_before_init_aborts) &
             ]
+        ! ---- parquet_random: points on a sphere ----
+        p33 = [ &
+            new_unittest("a disc refuses a negative angular radius", &
+                test_random_disc_radius_negative_aborts), &
+            new_unittest("a disc refuses a NaN angular radius", &
+                test_random_disc_radius_nan_aborts), &
+            new_unittest("a disc refuses the zero vector as its centre", &
+                test_random_disc_centre_zero_aborts), &
+            new_unittest("a disc refuses a centre with a NaN component", &
+                test_random_disc_centre_nan_aborts), &
+            new_unittest("a disc refuses an inner radius beyond its outer", &
+                test_random_disc_inner_exceeds_radius_aborts), &
+            new_unittest("a disc refuses a NaN inner radius", &
+                test_random_disc_inner_nan_aborts), &
+            new_unittest("a sky disc refuses a declination outside [-90, 90]", &
+                test_random_disc_radec_dec_out_of_range_aborts), &
+            new_unittest("a sky disc refuses a NaN right ascension", &
+                test_random_disc_radec_centre_nan_aborts), &
+            new_unittest("a sky disc refuses a negative radius_deg, under that name", &
+                test_random_disc_radec_radius_negative_aborts), &
+            new_unittest("a ball refuses a negative radius", &
+                test_random_ball_radius_negative_aborts), &
+            new_unittest("a shell refuses an inner radius beyond its outer", &
+                test_random_ball_inner_exceeds_radius_aborts), &
+            new_unittest("a vMF draw refuses a negative concentration", &
+                test_random_vmf_kappa_negative_aborts), &
+            new_unittest("a vMF draw refuses a NaN concentration", &
+                test_random_vmf_kappa_nan_aborts), &
+            new_unittest("a vMF draw refuses the zero vector as its mean direction", &
+                test_random_vmf_mu_zero_aborts), &
+            new_unittest("a sky vMF draw refuses a width of zero", &
+                test_random_vmf_radec_sigma_not_positive_aborts), &
+            new_unittest("a sky vMF draw refuses a NaN width", &
+                test_random_vmf_radec_sigma_nan_aborts), &
+            new_unittest("a direction fill refuses an array without three rows", &
+                test_random_fill_direction_bad_shape_aborts), &
+            new_unittest("an RA/Dec fill refuses arrays of different sizes", &
+                test_random_fill_radec_size_mismatch_aborts), &
+            new_unittest("a sphere draw refuses draw 2**62 + 1, which would read another word space", &
+                test_random_sphere_draw_beyond_2p62_aborts), &
+            new_unittest("a direction fill refuses a last draw beyond 2**62", &
+                test_random_fill_direction_draw_beyond_2p62_aborts), &
+            new_unittest("a stream's disc names itself when it refuses an inverted ring", &
+                test_random_stream_disc_inner_exceeds_radius_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19760,5 +19805,189 @@ contains
             failure_message="evaluating an unbuilt interpolant at a rank-1 array of no queries was expected to error stop", &
             required_stderr="pf_interp_1d%eval: the interpolant is not initialised")
     end subroutine test_interpolate_eval_array_before_init_aborts
+    !
+    ! ---- parquet_random: points on a sphere ----
+    !
+    !> See scenario_random_disc_radius_negative.
+    subroutine test_random_disc_radius_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_radius_negative", expect_abort=.true., &
+            failure_message="a disc of negative radius was expected to abort", &
+            required_stderr="pf_random_disc_at: radius must be finite and at least 0 (got " // &
+            "-1.0000000E-01)")
+    end subroutine test_random_disc_radius_negative_aborts
+    !
+    !> See scenario_random_disc_radius_nan.
+    subroutine test_random_disc_radius_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_radius_nan", expect_abort=.true., &
+            failure_message="a disc of NaN radius was expected to abort", &
+            required_stderr="pf_random_disc_at: radius must be finite and at least 0 (got NaN)")
+    end subroutine test_random_disc_radius_nan_aborts
+    !
+    !> See scenario_random_disc_centre_zero.
+    subroutine test_random_disc_centre_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_centre_zero", expect_abort=.true., &
+            failure_message="a disc about the zero vector was expected to abort", &
+            required_stderr="pf_random_disc_at: the centre must be a nonzero, finite direction")
+    end subroutine test_random_disc_centre_zero_aborts
+    !
+    !> See scenario_random_disc_centre_nan.
+    subroutine test_random_disc_centre_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_centre_nan", expect_abort=.true., &
+            failure_message="a disc about a NaN centre was expected to abort", &
+            required_stderr="pf_random_disc_at: the centre must be a nonzero, finite direction")
+    end subroutine test_random_disc_centre_nan_aborts
+    !
+    !> See scenario_random_disc_inner_exceeds_radius.
+    subroutine test_random_disc_inner_exceeds_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_inner_exceeds_radius", expect_abort=.true., &
+            failure_message="a ring whose inner radius exceeds its outer was expected to abort", &
+            required_stderr="pf_random_disc_at: r_inner must lie in [0, radius] (got 6.0000000E-01 " // &
+            "against 5.0000000E-01)")
+    end subroutine test_random_disc_inner_exceeds_radius_aborts
+    !
+    !> See scenario_random_disc_inner_nan.
+    subroutine test_random_disc_inner_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_inner_nan", expect_abort=.true., &
+            failure_message="a ring with a NaN inner radius was expected to abort", &
+            required_stderr="pf_random_disc_at: r_inner must lie in [0, radius] (got NaN against " // &
+            "5.0000000E-01)")
+    end subroutine test_random_disc_inner_nan_aborts
+    !
+    !> See scenario_random_disc_radec_dec_out_of_range.
+    subroutine test_random_disc_radec_dec_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_radec_dec_out_of_range", expect_abort=.true., &
+            failure_message="a disc about declination 90.5 was expected to abort", &
+            required_stderr="pf_random_disc_radec_at: the centre (ra0, dec0) must be finite with " // &
+            "dec0 in [-90, 90] (got 1.0000000E+01, 9.0500000E+01)")
+    end subroutine test_random_disc_radec_dec_out_of_range_aborts
+    !
+    !> See scenario_random_disc_radec_centre_nan.
+    subroutine test_random_disc_radec_centre_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_radec_centre_nan", expect_abort=.true., &
+            failure_message="a disc about a NaN right ascension was expected to abort", &
+            required_stderr="pf_random_disc_radec_at: the centre (ra0, dec0) must be finite with " // &
+            "dec0 in [-90, 90] (got NaN, 1.0000000E+01)")
+    end subroutine test_random_disc_radec_centre_nan_aborts
+    !
+    !> See scenario_random_disc_radec_radius_negative.
+    subroutine test_random_disc_radec_radius_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_radec_radius_negative", expect_abort=.true., &
+            failure_message="a disc of radius -1 degree was expected to abort", &
+            required_stderr="pf_random_disc_radec_at: radius_deg must be finite and at least 0 (got " // &
+            "-1.0000000E+00)")
+    end subroutine test_random_disc_radec_radius_negative_aborts
+    !
+    !> See scenario_random_ball_radius_negative.
+    subroutine test_random_ball_radius_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_ball_radius_negative", expect_abort=.true., &
+            failure_message="a ball of negative radius was expected to abort", &
+            required_stderr="pf_random_ball_at: radius must be finite and at least 0 (got " // &
+            "-1.0000000E+00)")
+    end subroutine test_random_ball_radius_negative_aborts
+    !
+    !> See scenario_random_ball_inner_exceeds_radius.
+    subroutine test_random_ball_inner_exceeds_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_ball_inner_exceeds_radius", expect_abort=.true., &
+            failure_message="an inverted shell was expected to abort", &
+            required_stderr="pf_random_ball_at: r_inner must lie in [0, radius] (got 2.5000000E+00 " // &
+            "against 2.0000000E+00)")
+    end subroutine test_random_ball_inner_exceeds_radius_aborts
+    !
+    !> See scenario_random_vmf_kappa_negative.
+    subroutine test_random_vmf_kappa_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_vmf_kappa_negative", expect_abort=.true., &
+            failure_message="a vMF with kappa -1e300 was expected to abort", &
+            required_stderr="pf_random_vmf_at: kappa must be finite and at least 0 (got " // &
+            "-1.0000000E+300)")
+    end subroutine test_random_vmf_kappa_negative_aborts
+    !
+    !> See scenario_random_vmf_kappa_nan.
+    subroutine test_random_vmf_kappa_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_vmf_kappa_nan", expect_abort=.true., &
+            failure_message="a vMF with a NaN kappa was expected to abort", &
+            required_stderr="pf_random_vmf_at: kappa must be finite and at least 0 (got NaN)")
+    end subroutine test_random_vmf_kappa_nan_aborts
+    !
+    !> See scenario_random_vmf_mu_zero.
+    subroutine test_random_vmf_mu_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_vmf_mu_zero", expect_abort=.true., &
+            failure_message="a vMF about the zero vector was expected to abort", &
+            required_stderr="pf_random_vmf_at: the centre must be a nonzero, finite direction")
+    end subroutine test_random_vmf_mu_zero_aborts
+    !
+    !> See scenario_random_vmf_radec_sigma_not_positive.
+    subroutine test_random_vmf_radec_sigma_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_vmf_radec_sigma_not_positive", expect_abort=.true., &
+            failure_message="a vMF of width 0 was expected to abort", &
+            required_stderr="pf_random_vmf_radec_at: sigma_deg must be finite and strictly positive " // &
+            "(got 0.0000000E+00)")
+    end subroutine test_random_vmf_radec_sigma_not_positive_aborts
+    !
+    !> See scenario_random_vmf_radec_sigma_nan.
+    subroutine test_random_vmf_radec_sigma_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_vmf_radec_sigma_nan", expect_abort=.true., &
+            failure_message="a vMF of NaN width was expected to abort", &
+            required_stderr="pf_random_vmf_radec_at: sigma_deg must be finite and strictly positive " // &
+            "(got NaN)")
+    end subroutine test_random_vmf_radec_sigma_nan_aborts
+    !
+    !> See scenario_random_fill_direction_bad_shape.
+    subroutine test_random_fill_direction_bad_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_fill_direction_bad_shape", expect_abort=.true., &
+            failure_message="a direction fill into two rows was expected to abort", &
+            required_stderr="pf_random_fill_direction: v must be shaped (3, n) (got 2 rows)")
+    end subroutine test_random_fill_direction_bad_shape_aborts
+    !
+    !> See scenario_random_fill_radec_size_mismatch.
+    subroutine test_random_fill_radec_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_fill_radec_size_mismatch", expect_abort=.true., &
+            failure_message="an RA/Dec fill into arrays of sizes 4 and 3 was expected to abort", &
+            required_stderr="pf_random_fill_radec: ra and dec must have the same size (got 4 and 3)")
+    end subroutine test_random_fill_radec_size_mismatch_aborts
+    !
+    !> See scenario_random_sphere_draw_beyond_2p62.
+    subroutine test_random_sphere_draw_beyond_2p62_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_sphere_draw_beyond_2p62", expect_abort=.true., &
+            failure_message="direction 2**62 + 1 was expected to abort", &
+            required_stderr="pf_random_direction_at: draw must be at most 2**62 (got " // &
+            "4611686018427387905); the sphere family addresses one block per draw")
+    end subroutine test_random_sphere_draw_beyond_2p62_aborts
+    !
+    !> See scenario_random_fill_direction_draw_beyond_2p62.
+    subroutine test_random_fill_direction_draw_beyond_2p62_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_fill_direction_draw_beyond_2p62", expect_abort=.true., &
+            failure_message="a direction fill ending past 2**62 was expected to abort", &
+            required_stderr="pf_random_fill_direction: draw must be at most 2**62 (got " // &
+            "4611686018427387902 + 4 - 1)")
+    end subroutine test_random_fill_direction_draw_beyond_2p62_aborts
+    !
+    !> See scenario_random_stream_disc_inner_exceeds_radius.
+    subroutine test_random_stream_disc_inner_exceeds_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_stream_disc_inner_exceeds_radius", expect_abort=.true., &
+            failure_message="an inverted ring from a stream was expected to abort", &
+            required_stderr="pf_random_stream%disc: r_inner must lie in [0, radius] (got " // &
+            "6.0000000E-01 against 5.0000000E-01)")
+    end subroutine test_random_stream_disc_inner_exceeds_radius_aborts
     !
 end module test_errors

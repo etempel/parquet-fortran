@@ -481,6 +481,9 @@ the chord `2*sin(theta/2)`, which is strictly increasing, so a Euclidean ball of
 unit-vector space selects exactly the points within that angle. There is no pole special case and
 no wrap at 0h, because a sphere has neither.
 
+To draw random positions inside such a cap rather than find the catalogue points in it, see
+[Points on a sphere](random.html#points-on-a-sphere).
+
 **A zero radius is a knife edge, and not the way to find one catalogue entry.** The query point is
 not compared as `(ra, dec)`: it is converted to a unit vector by the same expression `%build_sky`
 applied to the catalogue. Two evaluations of that expression are not required to agree to the last

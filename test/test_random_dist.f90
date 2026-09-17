@@ -2,7 +2,7 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !> Tests for `parquet_random`'s DISTRIBUTIONS -- the exponential, and everything Phase 3 adds
-!> beyond the uniforms.
+!> beyond the uniforms -- and for its POINTS ON A SPHERE, which are distributions over directions.
 !>
 !> **A separate suite from `random` because the questions are different in kind.** The uniform
 !> tests ask whether a bit pattern is the one the contract names; a distribution test has to ask
@@ -29,8 +29,11 @@ module test_random_dist
     ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
     use parquet_random
     use parquet_expkey, only: parquet_debug_exp_key
+    ! The points-on-a-sphere gates measure what they draw with the pixelisation's equal-area cells and
+    ! its distances, which know nothing of how the draws were made.
+    use parquet_healpix, only: pf_vec2pix_ring, pf_angdist, pf_angdist_deg
     use test_random_vectors
-    use iso_fortran_env, only: int32, int64, real64
+    use iso_fortran_env, only: int32, int64, real32, real64
     use testdrive, only: new_unittest, unittest_type, error_type, check
 
     implicit none
@@ -55,6 +58,24 @@ module test_random_dist
     !! below one ulp of any interval mass the gate divides by, so every cell index is the one the
     !! uncut function gives.
     real(real64), parameter :: TN_CUT = 37.0_real64
+
+    !> `pi` and friends for the points-on-a-sphere gates.
+    real(real64), parameter :: PI = 3.14159265358979323846264338327950288_real64
+    !> `2*pi`.
+    real(real64), parameter :: TWO_PI = 2.0_real64 * PI
+    !> Radians per degree.
+    real(real64), parameter :: DEG = PI / 180.0_real64
+    !> The `+z` axis.
+    real(real64), parameter :: ZAXIS(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+    !> A sphere result against the 60-digit model: 32 ulp of 1, ABSOLUTE, for a component of a unit
+    !! vector or a rotation. Measured on the rows the generator pins, the cancellation-free transforms
+    !! land within 6 ulp; a cancelling one misses the small-radius and small-`kappa` rows by millions.
+    real(real64), parameter :: SPH_TOL = 32.0_real64 * epsilon(1.0_real64)
+    !> A sky position against the 60-digit model, in degrees: on `dec`, and on `ra` scaled by `cos(dec)`.
+    real(real64), parameter :: SPH_TOL_DEG = 1.0e-12_real64
+    !> Two forms that compute one value through one body -- a tier, a kind, a `do concurrent` -- agree to
+    !! a few ulp rather than to the bit, since a compiler may round two call sites differently.
+    real(real64), parameter :: SPH_SAME = 4.0_real64 * epsilon(1.0_real64)
 
 contains
 
@@ -119,7 +140,33 @@ contains
             new_unittest("the truncated normal's stream cost is variable, observed, and rewind-exact", &
                          test_normal_trunc_cost), &
             new_unittest("a far-out interval reaches the tilted case and terminates, at every scale", &
-                         test_normal_trunc_far_tail_terminates) &
+                         test_normal_trunc_far_tail_terminates), &
+            new_unittest("golden vectors: every points-on-a-sphere family, its uniforms exact and its values to 32 ulp", &
+                         test_sphere_golden), &
+            new_unittest("the sphere producers, their tier-0 forms and their fills are one grid, one block per draw", &
+                         test_sphere_tiers_agree), &
+            new_unittest("every sphere family is independent of the others and of pf_random_at, with a coupled control", &
+                         test_sphere_families_independent), &
+            new_unittest("each RA/Dec sphere form is its vector form in the standard frame, and a pole's RA is 0", &
+                         test_sphere_radec_is_the_vector_form), &
+            new_unittest("directions are uniform: mean, marginals, equal-area pixels, and a rejected control", &
+                         test_direction_is_uniform), &
+            new_unittest("a disc is uniform over its ring and contained in it, about any centre, at every limit", &
+                         test_disc_is_uniform_and_contained), &
+            new_unittest("a sky disc stays uniform across the pole and the wrap, and qfeet's flat disc does not", &
+                         test_disc_radec_across_the_pole_and_the_wrap), &
+            new_unittest("points in a ball or a shell are uniform in volume, with a rejected control", &
+                         test_ball_is_uniform_in_volume), &
+            new_unittest("the vMF draw: mean cosine, exact CDF, uniform and Gaussian limits, and a control", &
+                         test_vmf_moments_and_limits), &
+            new_unittest("rotations are proper, orthonormal and Haar-uniform, with a rejected control", &
+                         test_rotation_is_haar), &
+            new_unittest("every tier-0 sphere form is pure: usable in do concurrent, same values", &
+                         test_sphere_purity), &
+            new_unittest("the int32 and int64 stream-index specifics of every sphere form agree", &
+                         test_sphere_kinds_agree), &
+            new_unittest("draw 2**62 is the last a sphere form or fill accepts, and a draw below 1 clamps", &
+                         test_sphere_draw_bound) &
             ]
     end subroutine collect_tests_parquet_random_dist
 
@@ -2133,5 +2180,1187 @@ contains
         expect = dn / real(NCELL, real64)
         chi2 = sum((real(counts, real64) - expect) ** 2 / expect)
     end subroutine trunc_gate
+
+    ! ================================================================================
+    ! Points on a sphere
+    ! ================================================================================
+
+    !> Every golden row of the points-on-a-sphere tables, against the 60-digit model.
+    !!
+    !! **Two claims per row, held to two strengths.** The uniforms a row names are pinned bit for bit
+    !! against the cipher's raw block on the family's derived key, so the table and the library
+    !! agree about which words a coordinate reads. The values are pinned to `SPH_TOL` of the model,
+    !! an ABSOLUTE tolerance because a component formed as a sum of products has no relative
+    !! accuracy near zero; that catches a changed transform, and the rows are chosen so it catches
+    !! the two cancelling ones by a wide margin -- the plain `1 - cos` form misses the `1e-9` disc by
+    !! millions of ulp and the plain vMF logarithm puts the `kappa = 1e-30` rows at the far pole.
+    subroutine test_sphere_golden(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer :: k, j
+        integer(int64) :: key, d
+        real(real64) :: u1, u2, v(3), want(3), centre(3), radius, inner, ra, dec, r(3, 3), rw(3, 3), scale
+        real(real64) :: worst
+        logical :: differs
+
+        call check(error, pf_sphere_algorithm == "sphere:archimedes+frame+vmfinv+cbrt+shoemake/libm/v1", &
+            "pf_sphere_algorithm no longer reads sphere:archimedes+frame+vmfinv+cbrt+shoemake/libm/v1: the " // &
+            "vectors in this suite are the contract for that exact string, so they must be regenerated with it")
+        if (allocated(error)) return
+
+        worst = 0.0_real64
+        differs = .false.
+
+        ! ---- pf_random_direction_at and pf_random_radec_at ----
+        do k = 1, n_sdir
+            d = max(sdir_draw(k), 1_int64)
+            key = pf_random_key(sdir_seed(k), sph_label_direction)
+            call sph_block_uniforms(key, sdir_stream(k), d, u1, u2)
+            call check(error, transfer(u1, 0_int64) == sdir_u1_bits(k) .and. transfer(u2, 0_int64) == sdir_u2_bits(k), &
+                "the direction table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            v = pf_random_direction_at(sdir_seed(k), sdir_stream(k), sdir_draw(k))
+            want = sph_vec(sdir_v_bits, k)
+            call sph_note(v, want, worst, differs)
+            call check(error, maxval(abs(v - want)) <= SPH_TOL, &
+                "pf_random_direction_at is more than 32 ulp from the 60-digit model, so the transform has changed")
+            if (allocated(error)) return
+            call check(error, abs(norm2(v) - 1.0_real64) <= 8.0_real64 * epsilon(1.0_real64), &
+                "pf_random_direction_at returned a vector whose length is not 1 to 8 ulp")
+            if (allocated(error)) return
+            call pf_random_radec_at(sdir_seed(k), sdir_stream(k), ra, dec, sdir_draw(k))
+            call check(error, sph_deg_gap(ra, dec, sdir_ra_bits(k), sdir_dec_bits(k)) <= SPH_TOL_DEG, &
+                "pf_random_radec_at is more than 1e-12 degrees from the 60-digit model")
+            if (allocated(error)) return
+            call check(error, ra >= 0.0_real64 .and. ra < 360.0_real64 .and. dec >= -90.0_real64 .and. dec <= 90.0_real64, &
+                "pf_random_radec_at returned a position outside [0, 360) x [-90, 90]")
+            if (allocated(error)) return
+        end do
+
+        ! ---- pf_random_disc_at ----
+        do k = 1, n_sdisc
+            key = pf_random_key(sdisc_seed(k), sph_label_disc)
+            call sph_block_uniforms(key, sdisc_stream(k), sdisc_draw(k), u1, u2)
+            call check(error, transfer(u1, 0_int64) == sdisc_u1_bits(k) .and. transfer(u2, 0_int64) == sdisc_u2_bits(k), &
+                "the disc table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            centre = sph_vec(sdisc_centre_bits, k)
+            radius = transfer(sdisc_radius_bits(k), 0.0_real64)
+            inner = transfer(sdisc_inner_bits(k), 0.0_real64)
+            if (sdisc_inner_given(k)) then
+                v = pf_random_disc_at(sdisc_seed(k), sdisc_stream(k), centre, radius, sdisc_draw(k), inner)
+            else
+                v = pf_random_disc_at(sdisc_seed(k), sdisc_stream(k), centre, radius, sdisc_draw(k))
+            end if
+            want = sph_vec(sdisc_v_bits, k)
+            call sph_note(v, want, worst, differs)
+            call check(error, maxval(abs(v - want)) <= SPH_TOL, &
+                "pf_random_disc_at is more than 32 ulp from the 60-digit model, so the transform has changed")
+            if (allocated(error)) return
+        end do
+
+        ! ---- pf_random_disc_radec_at ----
+        do k = 1, n_sdrd
+            key = pf_random_key(sdrd_seed(k), sph_label_disc)
+            call sph_block_uniforms(key, sdrd_stream(k), sdrd_draw(k), u1, u2)
+            call check(error, transfer(u1, 0_int64) == sdrd_u1_bits(k) .and. transfer(u2, 0_int64) == sdrd_u2_bits(k), &
+                "the disc RA/Dec table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            if (sdrd_inner_given(k)) then
+                call pf_random_disc_radec_at(sdrd_seed(k), sdrd_stream(k), transfer(sdrd_ra0_bits(k), 0.0_real64), &
+                    transfer(sdrd_dec0_bits(k), 0.0_real64), transfer(sdrd_radius_bits(k), 0.0_real64), ra, dec, &
+                    sdrd_draw(k), transfer(sdrd_inner_bits(k), 0.0_real64))
+            else
+                call pf_random_disc_radec_at(sdrd_seed(k), sdrd_stream(k), transfer(sdrd_ra0_bits(k), 0.0_real64), &
+                    transfer(sdrd_dec0_bits(k), 0.0_real64), transfer(sdrd_radius_bits(k), 0.0_real64), ra, dec, &
+                    sdrd_draw(k))
+            end if
+            call check(error, sph_deg_gap(ra, dec, sdrd_ra_bits(k), sdrd_dec_bits(k)) <= SPH_TOL_DEG, &
+                "pf_random_disc_radec_at is more than 1e-12 degrees from the 60-digit model")
+            if (allocated(error)) return
+        end do
+
+        ! ---- pf_random_ball_at ----
+        do k = 1, n_sball
+            key = pf_random_key(sball_seed(k), sph_label_ball)
+            call sph_block_uniforms(key, sball_stream(k), sball_draw(k), u1, u2)
+            call check(error, transfer(u1, 0_int64) == sball_u1_bits(k) .and. transfer(u2, 0_int64) == sball_u2_bits(k), &
+                "the ball table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            call check(error, transfer(pf_random_at(pf_random_key(sball_seed(k), sph_label_ball_radius), sball_stream(k), &
+                sball_draw(k)), 0_int64) == sball_u3_bits(k), &
+                "the ball's radius uniform is not pf_random_at on its second label at (key, stream, draw)")
+            if (allocated(error)) return
+            radius = transfer(sball_radius_bits(k), 0.0_real64)
+            inner = transfer(sball_inner_bits(k), 0.0_real64)
+            if (sball_inner_given(k)) then
+                v = pf_random_ball_at(sball_seed(k), sball_stream(k), radius, sball_draw(k), inner)
+            else
+                v = pf_random_ball_at(sball_seed(k), sball_stream(k), radius, sball_draw(k))
+            end if
+            want = sph_vec(sball_p_bits, k)
+            scale = max(1.0_real64, radius)
+            call sph_note(v / scale, want / scale, worst, differs)
+            call check(error, maxval(abs(v - want)) <= SPH_TOL * scale, &
+                "pf_random_ball_at is more than 32 ulp of its radius from the 60-digit model")
+            if (allocated(error)) return
+        end do
+
+        ! ---- pf_random_vmf_at ----
+        do k = 1, n_svmf
+            key = pf_random_key(svmf_seed(k), sph_label_vmf)
+            call sph_block_uniforms(key, svmf_stream(k), svmf_draw(k), u1, u2)
+            call check(error, transfer(u1, 0_int64) == svmf_u1_bits(k) .and. transfer(u2, 0_int64) == svmf_u2_bits(k), &
+                "the vMF table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            v = pf_random_vmf_at(svmf_seed(k), svmf_stream(k), sph_vec(svmf_mu_bits, k), &
+                                 transfer(svmf_kappa_bits(k), 0.0_real64), svmf_draw(k))
+            want = sph_vec(svmf_v_bits, k)
+            call sph_note(v, want, worst, differs)
+            call check(error, maxval(abs(v - want)) <= SPH_TOL, &
+                "pf_random_vmf_at is more than 32 ulp from the 60-digit model, so the transform has changed")
+            if (allocated(error)) return
+        end do
+
+        ! ---- pf_random_vmf_radec_at ----
+        do k = 1, n_svrd
+            key = pf_random_key(svrd_seed(k), sph_label_vmf)
+            call sph_block_uniforms(key, svrd_stream(k), svrd_draw(k), u1, u2)
+            call check(error, transfer(u1, 0_int64) == svrd_u1_bits(k) .and. transfer(u2, 0_int64) == svrd_u2_bits(k), &
+                "the vMF RA/Dec table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            call pf_random_vmf_radec_at(svrd_seed(k), svrd_stream(k), transfer(svrd_ra0_bits(k), 0.0_real64), &
+                transfer(svrd_dec0_bits(k), 0.0_real64), transfer(svrd_sigma_bits(k), 0.0_real64), ra, dec, svrd_draw(k))
+            call check(error, sph_deg_gap(ra, dec, svrd_ra_bits(k), svrd_dec_bits(k)) <= SPH_TOL_DEG, &
+                "pf_random_vmf_radec_at is more than 1e-12 degrees from the 60-digit model")
+            if (allocated(error)) return
+        end do
+
+        ! ---- pf_random_rotation_at ----
+        do k = 1, n_srot
+            key = pf_random_key(srot_seed(k), sph_label_rotation)
+            call sph_block_uniforms(key, srot_stream(k), srot_draw(k), u1, u2)
+            call check(error, transfer(u1, 0_int64) == srot_u1_bits(k) .and. transfer(u2, 0_int64) == srot_u2_bits(k), &
+                "the rotation table and the cipher disagree about which block this coordinate names")
+            if (allocated(error)) return
+            call check(error, transfer(pf_random_at(pf_random_key(srot_seed(k), sph_label_rotation_angle), srot_stream(k), &
+                srot_draw(k)), 0_int64) == srot_u3_bits(k), &
+                "the rotation's third uniform is not pf_random_at on its second label at (key, stream, draw)")
+            if (allocated(error)) return
+            r = pf_random_rotation_at(srot_seed(k), srot_stream(k), srot_draw(k))
+            do j = 1, 3
+                rw(1, j) = transfer(srot_r_bits(9 * (k - 1) + 3 * (j - 1) + 1), 0.0_real64)
+                rw(2, j) = transfer(srot_r_bits(9 * (k - 1) + 3 * (j - 1) + 2), 0.0_real64)
+                rw(3, j) = transfer(srot_r_bits(9 * (k - 1) + 3 * (j - 1) + 3), 0.0_real64)
+                call sph_note(r(:, j), rw(:, j), worst, differs)
+            end do
+            call check(error, maxval(abs(r - rw)) <= SPH_TOL, &
+                "pf_random_rotation_at is more than 32 ulp from the 60-digit model, so the construction has changed")
+            if (allocated(error)) return
+            call check(error, sph_orthonormal_gap(r) <= 1.0e-14_real64, &
+                "pf_random_rotation_at returned a matrix that is not a proper rotation to 1e-14")
+            if (allocated(error)) return
+        end do
+
+        ! Vacuity guard. A table whose every value agreed to the bit would mean the reference had been
+        ! read back out of the implementation rather than derived for it.
+        call check(error, differs, &
+            "not one golden component differs from its 60-digit reference by even an ulp, which is what a table " // &
+            "generated FROM the implementation would look like rather than one generated for it")
+        if (allocated(error)) return
+        call check(error, worst > 0.0_real64, "the worst golden gap is zero, contradicting the guard above")
+    end subroutine test_sphere_golden
+
+    !> The stream walk, the bulk fills and the coordinate-addressed forms are one grid.
+    !!
+    !! **Held to `SPH_SAME`, a few ulp, rather than to the bit.** Each producer and its tier-0 form call
+    !! one body, but a compiler may inline it at one site and not the other and round the two
+    !! differently (`fortran-gotchas.md`, ifx); a different block is a different point, O(1) away, so
+    !! the tolerance loses nothing. **Chunk invariance of a fill is exact**, as it is for every fill
+    !! in this module: one code path serves every element however the fill is split.
+    subroutine test_sphere_tiers_agree(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: STREAM = 11_int64
+        real(real64), parameter :: CENTRE(3) = [0.3_real64, -0.5_real64, 0.8_real64]
+        type(pf_random_stream) :: rng, fresh
+        integer(int64) :: k, d, s, st
+        integer :: n
+        real(real64) :: v(3), w(3), r(3, 3), ra, dec, ra2, dec2, x
+        real(real32) :: x32
+        real(real64) :: whole(3, 16), part(3, 16), empty3(3, 0), fra(16), fdec(16), pra(16), pdec(16)
+        real(real64) :: empty(0), empty_dec(0)
+
+        call rng%seed(dist_seed, STREAM)
+        do k = 1_int64, 16_int64
+            call rng%direction(v)
+            call check(error, maxval(abs(v - pf_random_direction_at(dist_seed, STREAM, k))) <= SPH_SAME, &
+                "%direction does not walk the pf_random_direction_at grid one block per draw")
+            if (allocated(error)) return
+            call check(error, rng%position() == 4_int64 * k + 1_int64, &
+                "%direction did not cost exactly one block (4 words)")
+            if (allocated(error)) return
+        end do
+
+        ! Every producer on ONE stream, interleaved, so each has to land on the block the one before it
+        ! left: `d` counts the blocks consumed, and every value is compared at its own block.
+        call rng%seed(dist_seed, STREAM)
+        d = 0_int64
+        do k = 1_int64, 4_int64
+            d = d + 1_int64
+            call rng%radec(ra, dec)
+            call pf_random_radec_at(dist_seed, STREAM, ra2, dec2, d)
+            call check(error, sph_deg_gap(ra, dec, transfer(ra2, 0_int64), transfer(dec2, 0_int64)) <= SPH_TOL_DEG, &
+                "%radec does not walk the pf_random_radec_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%disc(CENTRE, 0.4_real64, v)
+            call check(error, maxval(abs(v - pf_random_disc_at(dist_seed, STREAM, CENTRE, 0.4_real64, d))) <= SPH_SAME, &
+                "%disc without r_inner does not walk the pf_random_disc_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%disc(CENTRE, 0.4_real64, v, r_inner=0.1_real64)
+            call check(error, maxval(abs(v - pf_random_disc_at(dist_seed, STREAM, CENTRE, 0.4_real64, d, 0.1_real64))) &
+                <= SPH_SAME, "%disc with r_inner does not walk the pf_random_disc_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%disc_radec(150.0_real64, -89.0_real64, 3.0_real64, ra, dec)
+            call pf_random_disc_radec_at(dist_seed, STREAM, 150.0_real64, -89.0_real64, 3.0_real64, ra2, dec2, d)
+            call check(error, sph_deg_gap(ra, dec, transfer(ra2, 0_int64), transfer(dec2, 0_int64)) <= SPH_TOL_DEG, &
+                "%disc_radec without r_inner_deg does not walk the pf_random_disc_radec_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%disc_radec(150.0_real64, -89.0_real64, 3.0_real64, ra, dec, r_inner_deg=1.0_real64)
+            call pf_random_disc_radec_at(dist_seed, STREAM, 150.0_real64, -89.0_real64, 3.0_real64, ra2, dec2, d, &
+                                         1.0_real64)
+            call check(error, sph_deg_gap(ra, dec, transfer(ra2, 0_int64), transfer(dec2, 0_int64)) <= SPH_TOL_DEG, &
+                "%disc_radec with r_inner_deg does not walk the pf_random_disc_radec_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%ball(2.5_real64, v)
+            call check(error, maxval(abs(v - pf_random_ball_at(dist_seed, STREAM, 2.5_real64, d))) <= 2.5_real64 * SPH_SAME, &
+                "%ball without r_inner does not walk the pf_random_ball_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%ball(2.5_real64, v, r_inner=1.0_real64)
+            call check(error, maxval(abs(v - pf_random_ball_at(dist_seed, STREAM, 2.5_real64, d, 1.0_real64))) &
+                <= 2.5_real64 * SPH_SAME, "%ball with r_inner does not walk the pf_random_ball_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%vmf(CENTRE, 50.0_real64, v)
+            call check(error, maxval(abs(v - pf_random_vmf_at(dist_seed, STREAM, CENTRE, 50.0_real64, d))) <= SPH_SAME, &
+                "%vmf does not walk the pf_random_vmf_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%vmf_radec(10.0_real64, 20.0_real64, 1.0_real64, ra, dec)
+            call pf_random_vmf_radec_at(dist_seed, STREAM, 10.0_real64, 20.0_real64, 1.0_real64, ra2, dec2, d)
+            call check(error, sph_deg_gap(ra, dec, transfer(ra2, 0_int64), transfer(dec2, 0_int64)) <= SPH_TOL_DEG, &
+                "%vmf_radec does not walk the pf_random_vmf_radec_at grid")
+            if (allocated(error)) return
+            d = d + 1_int64
+            call rng%rotation(r)
+            call check(error, maxval(abs(r - pf_random_rotation_at(dist_seed, STREAM, d))) <= SPH_SAME, &
+                "%rotation does not walk the pf_random_rotation_at grid")
+            if (allocated(error)) return
+        end do
+        call check(error, rng%position() == 4_int64 * d + 1_int64, &
+            "an interleaved run of sphere producers did not cost exactly one block each")
+        if (allocated(error)) return
+
+        ! Block alignment. A `%uniform32` leaves the cursor on word 2; the next sphere producer must
+        ! skip to the next block rather than straddle one.
+        call rng%seed(dist_seed, STREAM)
+        call rng%uniform32(x32)
+        call rng%direction(v)
+        call check(error, rng%position() == 9_int64, &
+            "%direction taken after a %uniform32 did not align to the next block: it must leave position 9")
+        if (allocated(error)) return
+        call check(error, maxval(abs(v - pf_random_direction_at(dist_seed, STREAM, 2_int64))) <= SPH_SAME, &
+            "%direction taken after a %uniform32 is not block 2's direction")
+        if (allocated(error)) return
+        call rng%seed(dist_seed, STREAM)
+        call rng%uniform(x)
+        call rng%disc(CENTRE, 0.3_real64, v)
+        call check(error, rng%position() == 9_int64, &
+            "%disc taken after a %uniform did not align to the next block: it must leave position 9")
+        if (allocated(error)) return
+        ! The producer read its family's sub-stream, so the raw words of the block it consumed are
+        ! still exactly what %uniform finds there.
+        call rng%rewind(5_int64)
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(dist_seed, STREAM, 3_int64), &
+            "a %uniform rewound onto the block a sphere producer consumed does not see that block's raw words")
+        if (allocated(error)) return
+
+        ! %address hands back what %seed was given, before and after draws, for every seeding form.
+        call fresh%address(s, st)
+        call check(error, s == 0_int64 .and. st == 0_int64, "%address on a stream never seeded is not (0, 0)")
+        if (allocated(error)) return
+        call rng%seed(dist_seed)
+        call rng%address(s, st)
+        call check(error, s == dist_seed .and. st == 0_int64, "%address after %seed(seed) is not (seed, 0)")
+        if (allocated(error)) return
+        call rng%seed(dist_seed, 7_int32)
+        call rng%direction(v)
+        call rng%address(s, st)
+        call check(error, s == dist_seed .and. st == 7_int64, "%address after %seed(seed, int32 7) is not (seed, 7)")
+        if (allocated(error)) return
+        call rng%seed(-dist_seed, -3_int64)
+        call rng%address(s, st)
+        call check(error, s == -dist_seed .and. st == -3_int64, "%address after %seed(-seed, int64 -3) is not (-seed, -3)")
+        if (allocated(error)) return
+
+        ! The fills: element k is the scalar draw to a few ulp, and chunking is exact.
+        call pf_random_fill_direction(dist_seed, STREAM, whole, 5_int64)
+        call pf_random_fill_radec(dist_seed, STREAM, fra, fdec, 5_int64)
+        do k = 1_int64, 16_int64
+            w = pf_random_direction_at(dist_seed, STREAM, k + 4_int64)
+            call check(error, maxval(abs(whole(:, k) - w)) <= 2.0_real64 * SPH_SAME, &
+                "pf_random_fill_direction's column k is not pf_random_direction_at at draw+k-1 to a few ulp")
+            if (allocated(error)) return
+            call pf_random_radec_at(dist_seed, STREAM, ra, dec, k + 4_int64)
+            call check(error, sph_deg_gap(fra(k), fdec(k), transfer(ra, 0_int64), transfer(dec, 0_int64)) <= SPH_TOL_DEG, &
+                "pf_random_fill_radec's element k is not pf_random_radec_at at draw+k-1")
+            if (allocated(error)) return
+        end do
+        do n = 1, 16
+            part = 0.0_real64
+            call pf_random_fill_direction(dist_seed, STREAM, part(:, 1:n), 5_int64)
+            call check(error, all(part(:, 1:n) == whole(:, 1:n)), &
+                "a partial pf_random_fill_direction is not a prefix of a longer one, so the fill is not splittable")
+            if (allocated(error)) return
+            pra = 0.0_real64
+            pdec = 0.0_real64
+            call pf_random_fill_radec(dist_seed, STREAM, pra(1:n), pdec(1:n), 5_int64)
+            call check(error, all(pra(1:n) == fra(1:n)) .and. all(pdec(1:n) == fdec(1:n)), &
+                "a partial pf_random_fill_radec is not a prefix of a longer one")
+            if (allocated(error)) return
+        end do
+        call pf_random_fill_direction(dist_seed, STREAM, part(:, 1:3), 9_int64)
+        call check(error, all(part(:, 1:3) == whole(:, 5:7)), "pf_random_fill_direction starting at draw 9 does not resume there")
+        if (allocated(error)) return
+        call pf_random_fill_radec(dist_seed, STREAM, pra(1:3), pdec(1:3), 9_int64)
+        call check(error, all(pra(1:3) == fra(5:7)) .and. all(pdec(1:3) == fdec(5:7)), &
+            "pf_random_fill_radec starting at draw 9 does not resume there")
+        if (allocated(error)) return
+        call pf_random_fill_direction(dist_seed, STREAM, empty3)
+        call pf_random_fill_radec(dist_seed, STREAM, empty, empty_dec)
+        call check(error, size(empty3, 2) == 0 .and. size(empty) == 0 .and. size(empty_dec) == 0, &
+            "a zero-sized sphere fill did not stay zero-sized")
+        if (allocated(error)) return
+
+        ! An elemental RA/Dec form over an index array is the scalar calls.
+        call pf_random_radec_at(dist_seed, [(k, k=1_int64,16_int64)], pra, pdec)
+        do k = 1_int64, 16_int64
+            call pf_random_radec_at(dist_seed, k, ra, dec)
+            call check(error, sph_deg_gap(pra(k), pdec(k), transfer(ra, 0_int64), transfer(dec, 0_int64)) <= SPH_TOL_DEG, &
+                "an elemental pf_random_radec_at over a stream vector does not equal the scalar calls")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sphere_tiers_agree
+
+    !> Every family is independent of every other at one coordinate, and of the raw axis there.
+    !!
+    !! **A joint test, with the coupling it exists to catch built as a control.** Each family's
+    !! output is turned back into the uniform its construction consumed -- the direction's and the
+    !! whole-sphere disc's `z`, the ball's direction and radius, the uniform vMF's cosine, the
+    !! rotation's `r(3,3)` and its second quaternion angle -- and every pair from different families
+    !! goes through a chi-square test of independence on an 8 x 8 table. Two families sharing a label
+    !! would read one block, which makes the pair a function of one uniform and the table a diagonal.
+    !! The control builds exactly that: the disc as it would be on the direction's label. The
+    !! threshold is the 5-sigma point, so 33 tests on one fixed seed cannot fail by chance.
+    subroutine test_sphere_families_independent(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: NSTAT = 9
+        integer, parameter :: NBIN = 8
+        integer(int64), parameter :: NDRAW = 40000_int64
+        !> The family each statistic belongs to; a pair within one family is not tested.
+        integer, parameter :: FAMILY(NSTAT) = [1, 1, 2, 3, 3, 4, 5, 5, 6]
+        real(real64), allocatable :: stat(:, :), coupled(:)
+        real(real64) :: v(3), p(3), r(3, 3), limit, chi2
+        integer(int64) :: k
+        integer :: a, b
+
+        allocate(stat(NSTAT, NDRAW), coupled(NDRAW))
+        do k = 1_int64, NDRAW
+            v = pf_random_direction_at(dist_seed, k)
+            stat(1, k) = 0.5_real64 * (v(3) + 1.0_real64)
+            stat(2, k) = modulo(atan2(v(2), v(1)) / TWO_PI, 1.0_real64)
+            v = pf_random_disc_at(dist_seed, k, ZAXIS, PI)
+            stat(3, k) = 0.5_real64 * (1.0_real64 - v(3))
+            p = pf_random_ball_at(dist_seed, k, 1.0_real64)
+            stat(4, k) = 0.5_real64 * (p(3) / norm2(p) + 1.0_real64)
+            stat(5, k) = norm2(p) ** 3
+            v = pf_random_vmf_at(dist_seed, k, ZAXIS, 0.0_real64)
+            stat(6, k) = 0.5_real64 * (1.0_real64 - v(3))
+            r = pf_random_rotation_at(dist_seed, k)
+            stat(7, k) = 0.5_real64 * (r(3, 3) + 1.0_real64)
+            ! w**2 - z**2 = (r11 + r22)/2 and 2*z*w = (r21 - r12)/2, so this is twice the second
+            ! quaternion angle: a function of the third uniform alone.
+            stat(8, k) = modulo(atan2(r(2, 1) - r(1, 2), r(1, 1) + r(2, 2)) / TWO_PI, 1.0_real64)
+            stat(9, k) = pf_random_at(dist_seed, k)
+            ! CONTROL: the whole-sphere disc's uniform as it would be on the DIRECTION's label.
+            coupled(k) = pf_random_at(pf_random_key(dist_seed, sph_label_direction), k, 1_int64)
+        end do
+
+        limit = chi2_quantile((NBIN - 1) * (NBIN - 1), 5.0_real64)
+        chi2 = sph_independence(stat(1, :), coupled, NBIN)
+        call check(error, chi2 > 100.0_real64 * limit, &
+            "the deliberately coupled control -- a disc on the direction's label -- passes the independence test, " // &
+            "so this test has no power and its verdicts below mean nothing")
+        if (allocated(error)) return
+        do a = 1, NSTAT - 1
+            do b = a + 1, NSTAT
+                if (FAMILY(a) == FAMILY(b)) cycle
+                chi2 = sph_independence(stat(a, :), stat(b, :), NBIN)
+                call check(error, chi2 <= limit, &
+                    "two points-on-a-sphere families, or a family and pf_random_at, are dependent at one coordinate: " // &
+                    "they share a label or a block (feature_risks.md Risk-123)")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_sphere_families_independent
+
+    !> Each RA/Dec form is its vector form read in the standard frame: the same point, not a new draw.
+    !!
+    !! The reference is converted HERE, by a formula written independently of the library's
+    !! (`(cos(dec)cos(ra), cos(dec)sin(ra), sin(dec))`, compared as vectors), so a swapped `atan2`
+    !! argument, a sign or a wrap defect shows as a vector 1e-9 away rather than as two conversions
+    !! agreeing with each other. The pole rule is asserted exactly: a centre ON a pole with radius 0
+    !! is the pole, and the pole's right ascension is 0.
+    subroutine test_sphere_radec_is_the_vector_form(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 3000_int64
+        real(real64), parameter :: RA0(4) = [150.0_real64, 359.9_real64, 10.0_real64, 283.0_real64]
+        real(real64), parameter :: DEC0(4) = [-89.0_real64, 10.0_real64, 20.0_real64, 61.0_real64]
+        real(real64) :: v(3), c(3), ra, dec, sigma, kappa, worst
+        integer(int64) :: k
+        integer :: j
+
+        worst = 0.0_real64
+        do k = 1_int64, NDRAW
+            j = int(modulo(k, 4_int64)) + 1
+            call pf_random_radec_at(dist_seed, k, ra, dec, 3_int64)
+            call check(error, ra >= 0.0_real64 .and. ra < 360.0_real64 .and. dec >= -90.0_real64 .and. dec <= 90.0_real64, &
+                "pf_random_radec_at returned a position outside [0, 360) x [-90, 90]")
+            if (allocated(error)) return
+            worst = max(worst, maxval(abs(sph_vec_of(ra, dec) - pf_random_direction_at(dist_seed, k, 3_int64))))
+
+            c = sph_vec_of(RA0(j), DEC0(j))
+            call pf_random_disc_radec_at(dist_seed, k, RA0(j), DEC0(j), 3.0_real64, ra, dec, 2_int64, 1.0_real64)
+            v = pf_random_disc_at(dist_seed, k, c, 3.0_real64 * DEG, 2_int64, 1.0_real64 * DEG)
+            worst = max(worst, maxval(abs(sph_vec_of(ra, dec) - v)))
+
+            sigma = 0.5_real64 * real(j, real64)
+            kappa = 1.0_real64 / (sigma * DEG) ** 2
+            call pf_random_vmf_radec_at(dist_seed, k, RA0(j), DEC0(j), sigma, ra, dec)
+            v = pf_random_vmf_at(dist_seed, k, c, kappa)
+            worst = max(worst, maxval(abs(sph_vec_of(ra, dec) - v)))
+        end do
+        ! 1e-9 degrees is about 1.7e-11 radians; each side is a few ulp, so this is generous and a
+        ! wrong frame, a sign or a swapped argument misses it by many orders of magnitude.
+        call check(error, worst <= 1.7e-11_real64, &
+            "an RA/Dec form is not its vector form read in the standard frame -- they must be the same point to 1e-9 degrees")
+        if (allocated(error)) return
+
+        ! The pole rule, exactly: on a pole the offset is zero, so no rounding is involved.
+        call pf_random_disc_radec_at(dist_seed, 1_int64, 123.4_real64, 90.0_real64, 0.0_real64, ra, dec)
+        call check(error, ra == 0.0_real64 .and. dec == 90.0_real64, &
+            "a disc of radius 0 on the north pole is not (0, 90) exactly: a declination of 90 is the pole whatever ra0 " // &
+            "says, and the right ascension of a pole is 0 by rule")
+        if (allocated(error)) return
+        call pf_random_disc_radec_at(dist_seed, 1_int64, 17.0_real64, -90.0_real64, 0.0_real64, ra, dec, 5_int64)
+        call check(error, ra == 0.0_real64 .and. dec == -90.0_real64, &
+            "a disc of radius 0 on the south pole is not (0, -90) exactly")
+        if (allocated(error)) return
+        ! A vMF of vanishing width sits within far less than an ulp of the pole, so its declination is
+        ! exactly -90 while its right ascension is the meaningless one of a point 1e-154 radians away.
+        call pf_random_vmf_radec_at(dist_seed, 1_int64, 17.0_real64, -90.0_real64, 1.0e-170_real64, ra, dec)
+        call check(error, dec == -90.0_real64 .and. ra >= 0.0_real64 .and. ra < 360.0_real64, &
+            "a vMF of vanishing width on the south pole does not sit on the pole")
+    end subroutine test_sphere_radec_is_the_vector_form
+
+    !> Directions are uniform on the sphere: the mean, both marginals, and equal-area pixels.
+    !!
+    !! **The pixel chi-square is the load-bearing gate**: the 192 equal-area pixels of `nside = 4` see
+    !! a non-isotropic construction the marginals can miss. The control keeps each draw's azimuth and
+    !! remaps its cosine through `u**2`, which the same gates must reject.
+    subroutine test_direction_is_uniform(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 192000_int64
+        integer, parameter :: NCELL = 20
+        integer(int64) :: k, ipix, zc(NCELL), pc(NCELL), pix(0:191), cz(NCELL), cpix(0:191)
+        real(real64) :: v(3), vc(3), mean(3), u, zz, s, ph, se
+
+        zc = 0_int64; pc = 0_int64; pix = 0_int64; cz = 0_int64; cpix = 0_int64
+        mean = 0.0_real64
+        do k = 1_int64, NDRAW
+            v = pf_random_direction_at(dist_seed, 21_int64, k)
+            mean = mean + v
+            call sph_count(zc, 0.5_real64 * (v(3) + 1.0_real64))
+            ph = atan2(v(2), v(1))
+            call sph_count(pc, modulo(ph / TWO_PI, 1.0_real64))
+            call pf_vec2pix_ring(4_int64, v, ipix)
+            pix(ipix) = pix(ipix) + 1_int64
+            ! CONTROL: z drawn as u**2 on the same azimuth.
+            u = 0.5_real64 * (v(3) + 1.0_real64)
+            zz = 2.0_real64 * u * u - 1.0_real64
+            s = sqrt((1.0_real64 - zz) * (1.0_real64 + zz))
+            vc = [s * cos(ph), s * sin(ph), zz]
+            call sph_count(cz, 0.5_real64 * (zz + 1.0_real64))
+            call pf_vec2pix_ring(4_int64, vc, ipix)
+            cpix(ipix) = cpix(ipix) + 1_int64
+        end do
+        mean = mean / real(NDRAW, real64)
+        se = sqrt(1.0_real64 / (3.0_real64 * real(NDRAW, real64)))
+        call check(error, all(abs(mean) <= 4.0_real64 * se), "the mean direction is more than 4 standard errors from 0")
+        if (allocated(error)) return
+        call check(error, sph_chi2(zc) <= chi2_999(NCELL - 1), "z is not uniform on [-1, 1] at the 0.999 level")
+        if (allocated(error)) return
+        call check(error, sph_chi2(pc) <= chi2_999(NCELL - 1), "the azimuth is not uniform at the 0.999 level")
+        if (allocated(error)) return
+        call check(error, sph_chi2(pix) <= chi2_999(191), &
+            "directions are not uniform over the 192 equal-area pixels of nside 4 at the 0.999 level")
+        if (allocated(error)) return
+        call check(error, sph_chi2(cz) > chi2_999(NCELL - 1) .and. sph_chi2(cpix) > chi2_999(191), &
+            "the gates ACCEPT directions whose cosine is drawn as u**2, so they measure nothing")
+    end subroutine test_direction_is_uniform
+
+    !> A disc is uniform over its cap and contained in it, about any centre, with and without a hole.
+    !!
+    !! Four centres -- `+z`, a generic one, `-z` and one of length about `2e-300` -- and a radius of 0.4
+    !! with and without `r_inner = 0.1`. Every draw must be inside the ring; the cosine of the angle
+    !! from the centre must be uniform between the two bounds and the azimuth uniform in a frame the
+    !! TEST builds, which has nothing to do with the library's. The control draws the ANGLE uniformly
+    !! instead of its cosine, the classic mistake. Then the limits: `radius = 0` is the centre, a
+    !! radius of `pi` or above is the whole sphere, and `r_inner = radius` is the circle itself.
+    subroutine test_disc_is_uniform_and_contained(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 60000_int64
+        integer, parameter :: NCELL = 20
+        real(real64), parameter :: RADIUS = 0.4_real64
+        real(real64), parameter :: CENTRES(3, 4) = reshape([0.0_real64, 0.0_real64, 1.0_real64, &
+            0.3_real64, -0.5_real64, 0.8_real64, 0.0_real64, 0.0_real64, -1.0_real64, &
+            1.0e-300_real64, -2.0e-300_real64, 5.0e-301_real64], [3, 4])
+        integer(int64) :: k, outside, tc(NCELL), ac(NCELL), cc(NCELL), pix(0:191), ipix
+        real(real64) :: centre(3), cu(3), f1(3), f2(3), v(3), rin, ang, cos_in, cos_out, t, theta_c
+        integer :: j, variant
+
+        do j = 1, 4
+            centre = CENTRES(:, j)
+            cu = centre / maxval(abs(centre))
+            cu = cu / norm2(cu)
+            call sph_test_frame(cu, f1, f2)
+            do variant = 1, 2
+                rin = merge(0.0_real64, 0.1_real64, variant == 1)
+                cos_in = cos(rin)
+                cos_out = cos(RADIUS)
+                tc = 0_int64; ac = 0_int64; cc = 0_int64
+                outside = 0_int64
+                do k = 1_int64, NDRAW
+                    if (variant == 1) then
+                        v = pf_random_disc_at(dist_seed, 31_int64, centre, RADIUS, k)
+                    else
+                        v = pf_random_disc_at(dist_seed, 31_int64, centre, RADIUS, k, rin)
+                    end if
+                    call pf_angdist(cu, v, ang)
+                    if (ang > RADIUS + 1.0e-12_real64 .or. ang < rin - 1.0e-12_real64) outside = outside + 1_int64
+                    t = (cos_in - dot_product(v, cu)) / (cos_in - cos_out)
+                    call sph_count(tc, t)
+                    call sph_count(ac, modulo(atan2(dot_product(v, f2), dot_product(v, f1)) / TWO_PI, 1.0_real64))
+                    ! CONTROL: the angle, not its cosine, uniform between the bounds.
+                    theta_c = rin + t * (RADIUS - rin)
+                    call sph_count(cc, (cos_in - cos(theta_c)) / (cos_in - cos_out))
+                end do
+                call check(error, outside == 0_int64, "pf_random_disc_at placed a point outside its ring")
+                if (allocated(error)) return
+                call check(error, sph_chi2(tc) <= chi2_999(NCELL - 1), &
+                    "the cosine of a disc point's angle from the centre is not uniform between the ring's bounds")
+                if (allocated(error)) return
+                call check(error, sph_chi2(ac) <= chi2_999(NCELL - 1), &
+                    "a disc point's azimuth about the centre is not uniform, so the frame is not orthonormal or not about c")
+                if (allocated(error)) return
+                call check(error, sph_chi2(cc) > chi2_999(NCELL - 1), &
+                    "the gate ACCEPTS a disc whose angle, rather than its cosine, is uniform -- it measures nothing")
+                if (allocated(error)) return
+            end do
+        end do
+
+        ! radius = 0 is the normalised centre. On +z that is exact by construction: the offset is 0,
+        ! and 0 times any finite azimuth term adds nothing.
+        do k = 1_int64, 50_int64
+            v = pf_random_disc_at(dist_seed, k, ZAXIS, 0.0_real64)
+            call check(error, all(v == ZAXIS), "a disc of radius 0 about +z did not return +z exactly")
+            if (allocated(error)) return
+            v = pf_random_disc_at(dist_seed, k, [0.3_real64, -0.5_real64, 0.8_real64], 0.0_real64)
+            call check(error, maxval(abs(v - [0.3_real64, -0.5_real64, 0.8_real64] / norm2([0.3_real64, -0.5_real64, &
+                0.8_real64]))) <= SPH_SAME, "a disc of radius 0 did not return its normalised centre")
+            if (allocated(error)) return
+        end do
+
+        ! pi and anything above it is the whole sphere, uniform over equal-area pixels.
+        do variant = 1, 2
+            pix = 0_int64
+            do k = 1_int64, 192000_int64
+                v = pf_random_disc_at(dist_seed, 33_int64, [0.3_real64, -0.5_real64, 0.8_real64], &
+                                      merge(PI, 4.0_real64, variant == 1), k)
+                call pf_vec2pix_ring(4_int64, v, ipix)
+                pix(ipix) = pix(ipix) + 1_int64
+            end do
+            call check(error, sph_chi2(pix) <= chi2_999(191), &
+                "a disc of radius pi, or one above it that clamps there, is not uniform over the whole sphere")
+            if (allocated(error)) return
+        end do
+
+        ! Both radii past the half turn clamp to it, so the ring between them is the antipode alone.
+        do k = 1_int64, 50_int64
+            v = pf_random_disc_at(dist_seed, 37_int64, ZAXIS, 4.0_real64, k, 3.5_real64)
+            call check(error, maxval(abs(v - [0.0_real64, 0.0_real64, -1.0_real64])) <= SPH_SAME, &
+                "a ring whose two radii both pass the half turn is not the antipode: both must clamp to pi")
+            if (allocated(error)) return
+        end do
+
+        ! r_inner = radius is the circle itself.
+        do k = 1_int64, 2000_int64
+            v = pf_random_disc_at(dist_seed, 35_int64, [0.3_real64, -0.5_real64, 0.8_real64], 0.3_real64, k, 0.3_real64)
+            call pf_angdist([0.3_real64, -0.5_real64, 0.8_real64], v, ang)
+            call check(error, abs(ang - 0.3_real64) <= 1.0e-12_real64, "a ring with r_inner = radius is not the circle itself")
+            if (allocated(error)) return
+        end do
+
+        ! A tiny disc keeps its size: the plain 1 - cos form would collapse every point onto the centre.
+        outside = 0_int64
+        ang = 0.0_real64
+        do k = 1_int64, 2000_int64
+            v = pf_random_disc_at(dist_seed, 36_int64, [0.3_real64, -0.5_real64, 0.8_real64], 1.0e-9_real64, k)
+            call pf_angdist([0.3_real64, -0.5_real64, 0.8_real64], v, t)
+            if (t > 1.0e-9_real64 * (1.0_real64 + 1.0e-6_real64)) outside = outside + 1_int64
+            ang = max(ang, t)
+        end do
+        call check(error, outside == 0_int64 .and. ang > 0.9e-9_real64, &
+            "a disc of radius 1e-9 radians does not fill its own radius: its points must reach 0.9e-9 and never pass 1e-9")
+    end subroutine test_disc_is_uniform_and_contained
+
+    !> A disc on the sky stays uniform across the pole and across `ra = 0`, and qfeet's flat disc does not.
+    !!
+    !! Three centres from the design -- `dec0 = 89.5` (the disc crosses the pole), `ra0 = 359.9` (it
+    !! straddles the wrap) and qfeet's own `(150, -89)` -- at radii of 3 and 30 degrees. Containment
+    !! and the cosine's uniformity are measured with `pf_angdist_deg`, which needs no frame. The
+    !! control is qfeet's `get_random_radec_in_radius`: a flat disc of offsets rotated onto the
+    !! centre, whose density at the rim exceeds the centre's by `1/cos(radius) - 1` -- invisible at 3
+    !! degrees, and rejected by the same gate at 30.
+    subroutine test_disc_radec_across_the_pole_and_the_wrap(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 100000_int64
+        integer, parameter :: NCELL = 20
+        real(real64), parameter :: RA0(3) = [40.0_real64, 359.9_real64, 150.0_real64]
+        real(real64), parameter :: DEC0(3) = [89.5_real64, 10.0_real64, -89.0_real64]
+        real(real64), parameter :: RADII(2) = [3.0_real64, 30.0_real64]
+        integer(int64) :: k, bad, tc(NCELL), qc(NCELL), past_pole, below_wrap, above_wrap
+        real(real64) :: ra, dec, ang, cos_r, r, a, dra, ddec
+        integer :: j, m
+
+        do m = 1, 2
+            cos_r = cos(RADII(m) * DEG)
+            do j = 1, 3
+                tc = 0_int64; qc = 0_int64
+                bad = 0_int64; past_pole = 0_int64; below_wrap = 0_int64; above_wrap = 0_int64
+                do k = 1_int64, NDRAW
+                    call pf_random_disc_radec_at(dist_seed, 41_int64, RA0(j), DEC0(j), RADII(m), ra, dec, k)
+                    if (.not. (ra >= 0.0_real64 .and. ra < 360.0_real64 .and. dec >= -90.0_real64 .and. &
+                               dec <= 90.0_real64)) bad = bad + 1_int64
+                    ang = pf_angdist_deg(ra, dec, RA0(j), DEC0(j))
+                    if (ang > RADII(m) + 1.0e-9_real64) bad = bad + 1_int64
+                    call sph_count(tc, (1.0_real64 - cos(ang * DEG)) / (1.0_real64 - cos_r))
+                    if (dec > DEC0(j) .and. abs(modulo(ra - RA0(j) + 180.0_real64, 360.0_real64) - 180.0_real64) > 90.0_real64) &
+                        past_pole = past_pole + 1_int64
+                    if (ra < 1.0_real64) below_wrap = below_wrap + 1_int64
+                    if (ra > 359.0_real64) above_wrap = above_wrap + 1_int64
+                    ! CONTROL: qfeet's flat disc, whose angle from the centre is exactly this.
+                    r = sqrt(pf_random_at(dist_seed, 42_int64, 2_int64 * k - 1_int64)) * RADII(m) * DEG
+                    a = TWO_PI * pf_random_at(dist_seed, 42_int64, 2_int64 * k)
+                    dra = r * cos(a)
+                    ddec = r * sin(a)
+                    call sph_count(qc, (1.0_real64 - cos(ddec) * cos(dra)) / (1.0_real64 - cos_r))
+                end do
+                call check(error, bad == 0_int64, &
+                    "pf_random_disc_radec_at returned a position out of range or outside its disc")
+                if (allocated(error)) return
+                call check(error, sph_chi2(tc) <= chi2_999(NCELL - 1), &
+                    "the cosine of the angle from a sky disc's centre is not uniform, so the disc is not uniform on the sphere")
+                if (allocated(error)) return
+                if (j == 1) then
+                    call check(error, past_pole > 0_int64, &
+                        "vacuity: no draw of the disc at dec0 = 89.5 crossed the pole, so the pole was not exercised")
+                    if (allocated(error)) return
+                end if
+                if (j == 2) then
+                    call check(error, below_wrap > 0_int64 .and. above_wrap > 0_int64, &
+                        "vacuity: the disc at ra0 = 359.9 did not land on both sides of ra = 0")
+                    if (allocated(error)) return
+                end if
+                if (m == 2) then
+                    call check(error, sph_chi2(qc) > chi2_999(NCELL - 1), &
+                        "the gate ACCEPTS qfeet's flat-disc approximation at a 30-degree radius, so it cannot tell " // &
+                        "a uniform cap from the distortion it was written to catch")
+                    if (allocated(error)) return
+                end if
+            end do
+        end do
+    end subroutine test_disc_radec_across_the_pole_and_the_wrap
+
+    !> Points in a ball are uniform in volume: `(r/R)**3` uniform, the direction isotropic, a shell
+    !! uniform between its radii, and a zero radius the origin. The control draws `r = R*u`.
+    subroutine test_ball_is_uniform_in_volume(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 192000_int64
+        integer, parameter :: NCELL = 20
+        real(real64), parameter :: RADIUS = 2.5_real64
+        real(real64), parameter :: INNER = 1.25_real64
+        integer(int64) :: k, ipix, bad, rc(NCELL), sc(NCELL), cc(NCELL), pix(0:191)
+        real(real64) :: p(3), rr, u
+
+        rc = 0_int64; sc = 0_int64; cc = 0_int64; pix = 0_int64
+        bad = 0_int64
+        do k = 1_int64, NDRAW
+            p = pf_random_ball_at(dist_seed, 51_int64, RADIUS, k)
+            rr = norm2(p)
+            if (rr > RADIUS * (1.0_real64 + 1.0e-14_real64)) bad = bad + 1_int64
+            u = (rr / RADIUS) ** 3
+            call sph_count(rc, u)
+            call sph_count(cc, u ** 3)                   ! CONTROL: r = R*u makes (r/R)**3 = u**3
+            call pf_vec2pix_ring(4_int64, p, ipix)
+            pix(ipix) = pix(ipix) + 1_int64
+            p = pf_random_ball_at(dist_seed, 52_int64, RADIUS, k, INNER)
+            rr = norm2(p)
+            if (rr < INNER * (1.0_real64 - 1.0e-14_real64) .or. rr > RADIUS * (1.0_real64 + 1.0e-14_real64)) &
+                bad = bad + 1_int64
+            call sph_count(sc, (rr ** 3 - INNER ** 3) / (RADIUS ** 3 - INNER ** 3))
+        end do
+        call check(error, bad == 0_int64, "pf_random_ball_at placed a point outside its ball or shell")
+        if (allocated(error)) return
+        call check(error, sph_chi2(rc) <= chi2_999(NCELL - 1), "(r/R)**3 is not uniform, so the ball is not uniform in volume")
+        if (allocated(error)) return
+        call check(error, sph_chi2(pix) <= chi2_999(191), "a ball point's direction is not isotropic")
+        if (allocated(error)) return
+        call check(error, sph_chi2(sc) <= chi2_999(NCELL - 1), &
+            "(r**3 - r_in**3)/(R**3 - r_in**3) is not uniform, so the shell is not uniform in volume")
+        if (allocated(error)) return
+        call check(error, sph_chi2(cc) > chi2_999(NCELL - 1), &
+            "the gate ACCEPTS a ball whose radius is R*u, so it cannot tell volume from length")
+        if (allocated(error)) return
+        do k = 1_int64, 20_int64
+            p = pf_random_ball_at(dist_seed, k, 0.0_real64)
+            call check(error, all(p == 0.0_real64), "a ball of radius 0 did not return the origin")
+            if (allocated(error)) return
+        end do
+    end subroutine test_ball_is_uniform_in_volume
+
+    !> The von Mises-Fisher draw has the right mean at every scale, the exact cosine distribution, the
+    !! uniform limit at `kappa = 0` and at vanishing `kappa`, and the Gaussian limit of `sigma_deg`.
+    !!
+    !! The mean cosine against `coth(kappa) - 1/kappa` at `kappa` from 1e-3 to 1000, where the last
+    !! runs the arm on which `exp(-2*kappa)` is exactly 0. The cosine's exact CDF,
+    !! `(exp(kappa*(w-1)) - exp(-2*kappa))/(1 - exp(-2*kappa))`, at 1 and 50. `kappa` of 0, 1e-12 and
+    !! 1e-30 must all be uniform over equal-area pixels: a `log(1 - x)` written plainly sends every
+    !! draw at `kappa = 1e-30` to one pole. And at `sigma_deg = 0.01` the offsets must have the
+    !! Rayleigh moments of an isotropic Gaussian of that width, with a width 5 % too large as the
+    !! rejected control.
+    subroutine test_vmf_moments_and_limits(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 100000_int64
+        integer, parameter :: NCELL = 20
+        real(real64), parameter :: MU(3) = [0.3_real64, -0.5_real64, 0.8_real64]
+        real(real64), parameter :: KAPPAS(4) = [1.0e-3_real64, 1.0_real64, 50.0_real64, 1000.0_real64]
+        real(real64), parameter :: TINY_KAPPAS(3) = [0.0_real64, 1.0e-12_real64, 1.0e-30_real64]
+        real(real64), parameter :: SIGMA = 0.01_real64
+        integer(int64) :: k, ipix, wc(NCELL), pix(0:191)
+        real(real64) :: mu_hat(3), v(3), w, sum_w, kappa, want, var, fw, ra, dec, th, s1, s2, c1, c2
+        integer :: j
+
+        mu_hat = MU / norm2(MU)
+        do j = 1, 4
+            kappa = KAPPAS(j)
+            sum_w = 0.0_real64
+            wc = 0_int64
+            do k = 1_int64, NDRAW
+                v = pf_random_vmf_at(dist_seed, 61_int64, MU, kappa, k)
+                w = dot_product(v, mu_hat)
+                sum_w = sum_w + w
+                if (j == 2 .or. j == 3) then
+                    ! Only where exp(-2*kappa) is a normal number, so no underflow flag is raised.
+                    fw = (exp(kappa * (w - 1.0_real64)) - exp(-2.0_real64 * kappa)) / (1.0_real64 - exp(-2.0_real64 * kappa))
+                    call sph_count(wc, fw)
+                end if
+            end do
+            want = 1.0_real64 / tanh(kappa) - 1.0_real64 / kappa
+            var = 1.0_real64 - 2.0_real64 * want / kappa - want * want
+            call check(error, abs(sum_w / real(NDRAW, real64) - want) <= 5.0_real64 * sqrt(var / real(NDRAW, real64)), &
+                "the mean cosine of vMF draws is more than 5 standard errors from coth(kappa) - 1/kappa")
+            if (allocated(error)) return
+            if (j == 2 .or. j == 3) then
+                call check(error, sph_chi2(wc) <= chi2_999(NCELL - 1), &
+                    "the cosine of vMF draws does not follow its exact CDF at the 0.999 level")
+                if (allocated(error)) return
+            end if
+        end do
+
+        do j = 1, 3
+            pix = 0_int64
+            do k = 1_int64, 192000_int64
+                v = pf_random_vmf_at(dist_seed, 62_int64, MU, TINY_KAPPAS(j), k)
+                call pf_vec2pix_ring(4_int64, v, ipix)
+                pix(ipix) = pix(ipix) + 1_int64
+            end do
+            call check(error, sph_chi2(pix) <= chi2_999(191), &
+                "vMF draws at kappa 0, 1e-12 or 1e-30 are not uniform over the sphere: the uniform limit has been lost")
+            if (allocated(error)) return
+        end do
+
+        ! The Gaussian limit of the sky form, and a control 5 % too wide.
+        do j = 1, 2
+            s1 = 0.0_real64
+            s2 = 0.0_real64
+            do k = 1_int64, NDRAW
+                call pf_random_vmf_radec_at(dist_seed, 63_int64, 10.0_real64, 20.0_real64, &
+                                            SIGMA * merge(1.0_real64, 1.05_real64, j == 1), ra, dec, k)
+                th = pf_angdist_deg(ra, dec, 10.0_real64, 20.0_real64) / SIGMA
+                s1 = s1 + th
+                s2 = s2 + th * th
+            end do
+            c1 = s1 / real(NDRAW, real64)
+            c2 = s2 / real(NDRAW, real64)
+            ! Rayleigh with unit width: mean sqrt(pi/2), variance 2 - pi/2; E[th**2] = 2, var 4.
+            if (j == 1) then
+                call check(error, abs(c1 - sqrt(PI / 2.0_real64)) <= 5.0_real64 * sqrt((2.0_real64 - PI / 2.0_real64) &
+                    / real(NDRAW, real64)) .and. abs(c2 - 2.0_real64) <= 5.0_real64 * sqrt(4.0_real64 / real(NDRAW, real64)), &
+                    "vMF offsets at sigma_deg = 0.01 do not have the Rayleigh moments of a Gaussian of that width")
+            else
+                call check(error, abs(c1 - sqrt(PI / 2.0_real64)) > 5.0_real64 * sqrt((2.0_real64 - PI / 2.0_real64) &
+                    / real(NDRAW, real64)), "the Gaussian-limit gate ACCEPTS a width 5 % too large, so it measures nothing")
+            end if
+            if (allocated(error)) return
+        end do
+    end subroutine test_vmf_moments_and_limits
+
+    !> Rotations are Haar-uniform: proper and orthonormal, the image of an axis isotropic, and the
+    !! rotation angle distributed as `(1 - cos a)/pi`. The control rotates by a uniform angle about a
+    !! fixed axis, which is orthonormal and proper and still wrong.
+    subroutine test_rotation_is_haar(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 40000_int64
+        integer, parameter :: NCELL = 20
+        integer(int64) :: k, ipix, bad, pix(0:191), ac(NCELL), cc(NCELL)
+        real(real64) :: r(3, 3), ang, v(3)
+
+        pix = 0_int64; ac = 0_int64; cc = 0_int64
+        bad = 0_int64
+        do k = 1_int64, NDRAW
+            r = pf_random_rotation_at(dist_seed, 71_int64, k)
+            if (sph_orthonormal_gap(r) > 1.0e-14_real64) bad = bad + 1_int64
+            v = matmul(r, ZAXIS)
+            call pf_vec2pix_ring(4_int64, v, ipix)
+            pix(ipix) = pix(ipix) + 1_int64
+            ang = acos(max(-1.0_real64, min(1.0_real64, 0.5_real64 * (r(1, 1) + r(2, 2) + r(3, 3) - 1.0_real64))))
+            call sph_count(ac, (ang - sin(ang)) / PI)
+            ! CONTROL: a uniform angle about a fixed axis.
+            ang = PI * pf_random_at(dist_seed, 72_int64, k)
+            call sph_count(cc, (ang - sin(ang)) / PI)
+        end do
+        call check(error, bad == 0_int64, "pf_random_rotation_at returned a matrix that is not a proper rotation to 1e-14")
+        if (allocated(error)) return
+        call check(error, sph_chi2(pix) <= chi2_999(191), "a random rotation's image of +z is not isotropic")
+        if (allocated(error)) return
+        call check(error, sph_chi2(ac) <= chi2_999(NCELL - 1), &
+            "the rotation angle is not distributed as (1 - cos a)/pi, so the rotations are not Haar-uniform")
+        if (allocated(error)) return
+        call check(error, sph_chi2(cc) > chi2_999(NCELL - 1), &
+            "the gate ACCEPTS rotations by a uniform angle, so it cannot tell Haar measure from a naive draw")
+    end subroutine test_rotation_is_haar
+
+    !> Every tier-0 sphere form is `pure`: usable in `do concurrent`, with the values it has outside.
+    !!
+    !! A compile-time property asserted at run time, as `test_exp_purity` explains: a form that stopped
+    !! being pure would fail to compile here.
+    subroutine test_sphere_purity(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: N = 64
+        real(real64), parameter :: C(3) = [0.3_real64, -0.5_real64, 0.8_real64]
+        integer :: j
+        real(real64) :: dv(3, N), dd(3, N), db(3, N), dm(3, N), dr(3, 3, N)
+        real(real64) :: ra(N), dec(N), dra(N), ddec(N), vra(N), vdec(N), ra1, dec1
+        real(real64) :: worst, worst_deg
+
+        do concurrent (j = 1:N)
+            dv(:, j) = pf_random_direction_at(dist_seed, int(j, int64))
+            dd(:, j) = pf_random_disc_at(dist_seed, int(j, int64), C, 0.3_real64, 2_int64, 0.1_real64)
+            db(:, j) = pf_random_ball_at(dist_seed, int(j, int64), 2.0_real64, 3_int64, 1.0_real64)
+            dm(:, j) = pf_random_vmf_at(dist_seed, int(j, int64), C, 20.0_real64)
+            dr(:, :, j) = pf_random_rotation_at(dist_seed, int(j, int64))
+            call pf_random_radec_at(dist_seed, int(j, int64), ra(j), dec(j))
+            call pf_random_disc_radec_at(dist_seed, int(j, int64), 10.0_real64, 20.0_real64, 2.0_real64, dra(j), ddec(j))
+            call pf_random_vmf_radec_at(dist_seed, int(j, int64), 10.0_real64, 20.0_real64, 2.0_real64, vra(j), vdec(j))
+        end do
+        worst = 0.0_real64
+        worst_deg = 0.0_real64
+        do j = 1, N
+            worst = max(worst, maxval(abs(dv(:, j) - pf_random_direction_at(dist_seed, int(j, int64)))))
+            worst = max(worst, maxval(abs(dd(:, j) - pf_random_disc_at(dist_seed, int(j, int64), C, 0.3_real64, 2_int64, &
+                                                                        0.1_real64))))
+            worst = max(worst, maxval(abs(db(:, j) - pf_random_ball_at(dist_seed, int(j, int64), 2.0_real64, 3_int64, &
+                                                                        1.0_real64))) / 2.0_real64)
+            worst = max(worst, maxval(abs(dm(:, j) - pf_random_vmf_at(dist_seed, int(j, int64), C, 20.0_real64))))
+            worst = max(worst, maxval(abs(dr(:, :, j) - pf_random_rotation_at(dist_seed, int(j, int64)))))
+            call pf_random_radec_at(dist_seed, int(j, int64), ra1, dec1)
+            worst_deg = max(worst_deg, sph_deg_gap(ra(j), dec(j), transfer(ra1, 0_int64), transfer(dec1, 0_int64)))
+            call pf_random_disc_radec_at(dist_seed, int(j, int64), 10.0_real64, 20.0_real64, 2.0_real64, ra1, dec1)
+            worst_deg = max(worst_deg, sph_deg_gap(dra(j), ddec(j), transfer(ra1, 0_int64), transfer(dec1, 0_int64)))
+            call pf_random_vmf_radec_at(dist_seed, int(j, int64), 10.0_real64, 20.0_real64, 2.0_real64, ra1, dec1)
+            worst_deg = max(worst_deg, sph_deg_gap(vra(j), vdec(j), transfer(ra1, 0_int64), transfer(dec1, 0_int64)))
+        end do
+        call check(error, worst <= SPH_SAME .and. worst_deg <= SPH_TOL_DEG, &
+            "a tier-0 sphere form gives different values inside a do concurrent body than outside it")
+    end subroutine test_sphere_purity
+
+    !> The `int32` and `int64` stream-index specifics are one procedure reached two ways, for every
+    !! name including the fills, at negative indices too -- where a lost sign extension would show.
+    subroutine test_sphere_kinds_agree(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int32), parameter :: I32S(4) = [-5_int32, 0_int32, 7_int32, huge(1_int32)]
+        real(real64), parameter :: C(3) = [0.3_real64, -0.5_real64, 0.8_real64]
+        real(real64) :: worst, worst_deg, ra1, dec1, ra2, dec2, f1(3, 4), f2(3, 4), g1(4), g2(4), h1(4), h2(4)
+        integer :: j
+        integer(int64) :: i64
+
+        worst = 0.0_real64
+        worst_deg = 0.0_real64
+        do j = 1, 4
+            i64 = int(I32S(j), int64)
+            worst = max(worst, maxval(abs(pf_random_direction_at(dist_seed, I32S(j), 2_int64) - &
+                                          pf_random_direction_at(dist_seed, i64, 2_int64))))
+            worst = max(worst, maxval(abs(pf_random_disc_at(dist_seed, I32S(j), C, 0.5_real64, 2_int64, 0.2_real64) - &
+                                          pf_random_disc_at(dist_seed, i64, C, 0.5_real64, 2_int64, 0.2_real64))))
+            worst = max(worst, maxval(abs(pf_random_ball_at(dist_seed, I32S(j), 1.0_real64, 2_int64, 0.5_real64) - &
+                                          pf_random_ball_at(dist_seed, i64, 1.0_real64, 2_int64, 0.5_real64))))
+            worst = max(worst, maxval(abs(pf_random_vmf_at(dist_seed, I32S(j), C, 7.0_real64, 2_int64) - &
+                                          pf_random_vmf_at(dist_seed, i64, C, 7.0_real64, 2_int64))))
+            worst = max(worst, maxval(abs(pf_random_rotation_at(dist_seed, I32S(j), 2_int64) - &
+                                          pf_random_rotation_at(dist_seed, i64, 2_int64))))
+            call pf_random_radec_at(dist_seed, I32S(j), ra1, dec1, 2_int64)
+            call pf_random_radec_at(dist_seed, i64, ra2, dec2, 2_int64)
+            worst_deg = max(worst_deg, sph_deg_gap(ra1, dec1, transfer(ra2, 0_int64), transfer(dec2, 0_int64)))
+            call pf_random_disc_radec_at(dist_seed, I32S(j), 10.0_real64, 20.0_real64, 2.0_real64, ra1, dec1, 2_int64, &
+                                         1.0_real64)
+            call pf_random_disc_radec_at(dist_seed, i64, 10.0_real64, 20.0_real64, 2.0_real64, ra2, dec2, 2_int64, 1.0_real64)
+            worst_deg = max(worst_deg, sph_deg_gap(ra1, dec1, transfer(ra2, 0_int64), transfer(dec2, 0_int64)))
+            call pf_random_vmf_radec_at(dist_seed, I32S(j), 10.0_real64, 20.0_real64, 2.0_real64, ra1, dec1, 2_int64)
+            call pf_random_vmf_radec_at(dist_seed, i64, 10.0_real64, 20.0_real64, 2.0_real64, ra2, dec2, 2_int64)
+            worst_deg = max(worst_deg, sph_deg_gap(ra1, dec1, transfer(ra2, 0_int64), transfer(dec2, 0_int64)))
+            call pf_random_fill_direction(dist_seed, I32S(j), f1, 3_int64)
+            call pf_random_fill_direction(dist_seed, i64, f2, 3_int64)
+            worst = max(worst, maxval(abs(f1 - f2)))
+            call pf_random_fill_radec(dist_seed, I32S(j), g1, h1, 3_int64)
+            call pf_random_fill_radec(dist_seed, i64, g2, h2, 3_int64)
+            worst_deg = max(worst_deg, maxval(abs(g1 - g2)), maxval(abs(h1 - h2)))
+        end do
+        call check(error, worst <= SPH_SAME .and. worst_deg <= SPH_TOL_DEG, &
+            "the int32 and int64 stream-index specifics of a sphere form disagree")
+        if (allocated(error)) return
+        ! And the index reaches the draw at all: streams -5 and 5 are different points.
+        call check(error, maxval(abs(pf_random_direction_at(dist_seed, -5_int32) - pf_random_direction_at(dist_seed, 5_int32))) &
+            > 1.0e-3_real64, "pf_random_direction_at gives the same point on streams -5 and 5, so the index is not reaching it")
+    end subroutine test_sphere_kinds_agree
+
+    !> Draw `2**62` is the last one every sphere form accepts, and a fill may end exactly there;
+    !! a draw below 1 clamps to 1. The refusal beyond it is `random_sphere_draw_beyond_2p62`.
+    subroutine test_sphere_draw_bound(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: LAST = 4611686018427387904_int64
+        real(real64), parameter :: C(3) = [0.3_real64, -0.5_real64, 0.8_real64]
+        real(real64) :: v(3), r(3, 3), ra, dec, ra2, dec2, f(3, 3), fra(3), fdec(3)
+        logical :: ok
+
+        v = pf_random_direction_at(dist_seed, 3_int64, LAST)
+        ok = abs(norm2(v) - 1.0_real64) <= 8.0_real64 * epsilon(1.0_real64)
+        v = pf_random_disc_at(dist_seed, 3_int64, C, 0.2_real64, LAST, 0.1_real64)
+        ok = ok .and. abs(norm2(v) - 1.0_real64) <= 8.0_real64 * epsilon(1.0_real64)
+        v = pf_random_ball_at(dist_seed, 3_int64, 2.0_real64, LAST, 1.0_real64)
+        ok = ok .and. norm2(v) >= 1.0_real64 - 1.0e-14_real64 .and. norm2(v) <= 2.0_real64 + 1.0e-14_real64
+        v = pf_random_vmf_at(dist_seed, 3_int64, C, 3.0_real64, LAST)
+        ok = ok .and. abs(norm2(v) - 1.0_real64) <= 8.0_real64 * epsilon(1.0_real64)
+        r = pf_random_rotation_at(dist_seed, 3_int64, LAST)
+        ok = ok .and. sph_orthonormal_gap(r) <= 1.0e-14_real64
+        call pf_random_radec_at(dist_seed, 3_int64, ra, dec, LAST)
+        ok = ok .and. ra >= 0.0_real64 .and. ra < 360.0_real64
+        call pf_random_disc_radec_at(dist_seed, 3_int64, 10.0_real64, 20.0_real64, 2.0_real64, ra, dec, LAST)
+        ok = ok .and. pf_angdist_deg(ra, dec, 10.0_real64, 20.0_real64) <= 2.0_real64 + 1.0e-9_real64
+        call pf_random_vmf_radec_at(dist_seed, 3_int64, 10.0_real64, 20.0_real64, 2.0_real64, ra, dec, LAST)
+        ok = ok .and. dec >= -90.0_real64 .and. dec <= 90.0_real64
+        call check(error, ok, "a sphere form at draw 2**62, the last it accepts, did not return a valid value")
+        if (allocated(error)) return
+
+        call pf_random_fill_direction(dist_seed, 3_int64, f, LAST - 2_int64)
+        call check(error, maxval(abs(f(:, 3) - pf_random_direction_at(dist_seed, 3_int64, LAST))) <= 2.0_real64 * SPH_SAME, &
+            "a pf_random_fill_direction whose last draw is exactly 2**62 does not end on draw 2**62")
+        if (allocated(error)) return
+        call pf_random_fill_radec(dist_seed, 3_int64, fra, fdec, LAST - 2_int64)
+        call pf_random_radec_at(dist_seed, 3_int64, ra, dec, LAST)
+        call check(error, sph_deg_gap(fra(3), fdec(3), transfer(ra, 0_int64), transfer(dec, 0_int64)) <= SPH_TOL_DEG, &
+            "a pf_random_fill_radec whose last draw is exactly 2**62 does not end on draw 2**62")
+        if (allocated(error)) return
+
+        ! Below 1 clamps to 1, as everywhere in the module.
+        call pf_random_radec_at(dist_seed, 3_int64, ra, dec, 0_int64)
+        call pf_random_radec_at(dist_seed, 3_int64, ra2, dec2, 1_int64)
+        call check(error, sph_deg_gap(ra, dec, transfer(ra2, 0_int64), transfer(dec2, 0_int64)) <= SPH_TOL_DEG .and. &
+            maxval(abs(pf_random_direction_at(dist_seed, 3_int64, -9_int64) - pf_random_direction_at(dist_seed, 3_int64))) &
+            <= SPH_SAME, "a sphere draw below 1 does not clamp to draw 1")
+    end subroutine test_sphere_draw_bound
+
+    ! ---- Points on a sphere: helpers ----
+
+    !> The three `real64` values a flattened bit table holds for row `k`.
+    pure function sph_vec(bits, k) result(v)
+        integer(int64), intent(in) :: bits(:)       !! three bit patterns per row
+        integer, intent(in) :: k                    !! the row
+        real(real64) :: v(3)                        !! the row's vector
+        v(1) = transfer(bits(3 * (k - 1) + 1), 0.0_real64)
+        v(2) = transfer(bits(3 * (k - 1) + 2), 0.0_real64)
+        v(3) = transfer(bits(3 * (k - 1) + 3), 0.0_real64)
+    end function sph_vec
+
+    !> A sky position as a unit vector, written here independently of the library's conversion.
+    pure function sph_vec_of(ra, dec) result(v)
+        real(real64), intent(in) :: ra              !! right ascension, degrees
+        real(real64), intent(in) :: dec             !! declination, degrees
+        real(real64) :: v(3)                        !! the unit vector, standard frame
+        v = [cos(dec * DEG) * cos(ra * DEG), cos(dec * DEG) * sin(ra * DEG), sin(dec * DEG)]
+    end function sph_vec_of
+
+    !> The two uniforms of draw `d` of `(key, stream)` straight from the cipher: block `d - 1`'s halves.
+    subroutine sph_block_uniforms(key, stream, d, u1, u2)
+        integer(int64), intent(in) :: key           !! the derived key
+        integer(int64), intent(in) :: stream        !! the stream index
+        integer(int64), intent(in) :: d             !! the draw
+        real(real64), intent(out) :: u1             !! the block's first uniform
+        real(real64), intent(out) :: u2             !! the block's second uniform
+        integer(int64) :: w0, w1, w2, w3
+        call parquet_debug_random_block(key, stream, d - 1_int64, w0, w1, w2, w3)
+        u1 = real(ishft(ior(ishft(w1, 32), w0), -11), real64) * 2.0_real64 ** (-53)
+        u2 = real(ishft(ior(ishft(w3, 32), w2), -11), real64) * 2.0_real64 ** (-53)
+    end subroutine sph_block_uniforms
+
+    !> Records the worst gap between a result and its reference, and whether any differ at all.
+    pure subroutine sph_note(got, want, worst, differs)
+        real(real64), intent(in) :: got(3)          !! the value under test
+        real(real64), intent(in) :: want(3)         !! the reference
+        real(real64), intent(inout) :: worst        !! the largest gap so far
+        logical, intent(inout) :: differs           !! whether any component so far is not bit-identical
+        worst = max(worst, maxval(abs(got - want)))
+        if (any(transfer(got, [0_int64]) /= transfer(want, [0_int64]))) differs = .true.
+    end subroutine sph_note
+
+    !> The gap between a sky position and a reference given as bit patterns, in degrees: the larger
+    !! of the declination gap and the right-ascension gap scaled by `cos(dec)`, across the wrap.
+    pure function sph_deg_gap(ra, dec, ra_bits, dec_bits) result(g)
+        real(real64), intent(in) :: ra              !! right ascension under test, degrees
+        real(real64), intent(in) :: dec             !! declination under test, degrees
+        integer(int64), intent(in) :: ra_bits       !! the reference right ascension's bit pattern
+        integer(int64), intent(in) :: dec_bits      !! the reference declination's bit pattern
+        real(real64) :: g                           !! the gap, degrees
+        real(real64) :: ra_ref, dec_ref, dra
+        ra_ref = transfer(ra_bits, 0.0_real64)
+        dec_ref = transfer(dec_bits, 0.0_real64)
+        dra = abs(ra - ra_ref)
+        dra = min(dra, 360.0_real64 - dra)
+        g = max(abs(dec - dec_ref), dra * cos(dec_ref * DEG))
+    end function sph_deg_gap
+
+    !> How far a matrix is from a proper rotation: the worst entry of `r r^T - I`, or of `det - 1`.
+    pure function sph_orthonormal_gap(r) result(g)
+        real(real64), intent(in) :: r(3, 3)         !! the matrix
+        real(real64) :: g                           !! the gap
+        real(real64) :: det, m(3, 3)
+        integer :: i
+        m = matmul(r, transpose(r))
+        g = 0.0_real64
+        do i = 1, 3
+            g = max(g, maxval(abs(m(:, i) - merge(1.0_real64, 0.0_real64, [1, 2, 3] == i))))
+        end do
+        det = r(1, 1) * (r(2, 2) * r(3, 3) - r(2, 3) * r(3, 2)) - r(1, 2) * (r(2, 1) * r(3, 3) - r(2, 3) * r(3, 1)) &
+            + r(1, 3) * (r(2, 1) * r(3, 2) - r(2, 2) * r(3, 1))
+        g = max(g, abs(det - 1.0_real64))
+    end function sph_orthonormal_gap
+
+    !> Adds a value in `[0, 1)` to one of `size(counts)` equal cells, clamping a rounding edge inward.
+    pure subroutine sph_count(counts, u)
+        integer(int64), intent(inout) :: counts(:)  !! the cells
+        real(real64), intent(in) :: u               !! the value, nominally in `[0, 1)`
+        integer :: cell
+        cell = int(real(size(counts), real64) * u) + 1
+        cell = max(1, min(size(counts), cell))
+        counts(cell) = counts(cell) + 1_int64
+    end subroutine sph_count
+
+    !> The chi-square of `counts` against equal expectations.
+    pure function sph_chi2(counts) result(c)
+        integer(int64), intent(in) :: counts(:)     !! observed cell counts
+        real(real64) :: c                           !! the statistic
+        real(real64) :: expect
+        expect = real(sum(counts), real64) / real(size(counts), real64)
+        c = sum((real(counts, real64) - expect) ** 2) / expect
+    end function sph_chi2
+
+    !> Pearson's chi-square test of independence of two samples in `[0, 1)`, on an `nbin x nbin` table.
+    !!
+    !! The expectation of each cell is the product of its row and column totals over the sample size,
+    !! so the marginals need not be uniform -- two of the statistics that feed it are not.
+    pure function sph_independence(a, b, nbin) result(c)
+        real(real64), intent(in) :: a(:)            !! the first sample
+        real(real64), intent(in) :: b(:)            !! the second, paired with the first
+        integer, intent(in) :: nbin                 !! cells per axis
+        real(real64) :: c                           !! the statistic, `(nbin-1)**2` degrees of freedom
+        integer(int64) :: table(nbin, nbin), rows(nbin), cols(nbin)
+        integer :: k, i, j
+        real(real64) :: expect
+        table = 0_int64
+        do k = 1, size(a)
+            i = max(1, min(nbin, int(real(nbin, real64) * a(k)) + 1))
+            j = max(1, min(nbin, int(real(nbin, real64) * b(k)) + 1))
+            table(i, j) = table(i, j) + 1_int64
+        end do
+        rows = sum(table, dim=2)
+        cols = sum(table, dim=1)
+        c = 0.0_real64
+        do j = 1, nbin
+            do i = 1, nbin
+                expect = real(rows(i), real64) * real(cols(j), real64) / real(size(a), real64)
+                if (expect > 0.0_real64) c = c + (real(table(i, j), real64) - expect) ** 2 / expect
+            end do
+        end do
+    end function sph_independence
+
+    !> The upper quantile of a chi-square with `df` degrees of freedom `z` normal deviates out,
+    !! by Wilson-Hilferty, as `chi2_999` is at `z = 3.09`.
+    pure function chi2_quantile(df, z) result(q)
+        integer, intent(in) :: df                   !! degrees of freedom, at least 1
+        real(real64), intent(in) :: z               !! the deviate
+        real(real64) :: q                           !! the quantile
+        real(real64) :: d, h
+        d = real(max(df, 1), real64)
+        h = 2.0_real64 / (9.0_real64 * d)
+        q = d * (1.0_real64 - h + z * sqrt(h)) ** 3
+    end function chi2_quantile
+
+    !> An orthonormal frame perpendicular to a unit vector, built the TEST's way: Gram-Schmidt
+    !! against whichever of `x` and `y` is further from it -- not the library's rule.
+    pure subroutine sph_test_frame(c, f1, f2)
+        real(real64), intent(in) :: c(3)            !! a unit vector
+        real(real64), intent(out) :: f1(3)          !! perpendicular to `c`
+        real(real64), intent(out) :: f2(3)          !! `c x f1`
+        real(real64) :: a(3)
+        a = merge([1.0_real64, 0.0_real64, 0.0_real64], [0.0_real64, 1.0_real64, 0.0_real64], abs(c(1)) < abs(c(2)))
+        f1 = a - dot_product(a, c) * c
+        f1 = f1 / norm2(f1)
+        f2 = [c(2) * f1(3) - c(3) * f1(2), c(3) * f1(1) - c(1) * f1(3), c(1) * f1(2) - c(2) * f1(1)]
+    end subroutine sph_test_frame
 
 end module test_random_dist

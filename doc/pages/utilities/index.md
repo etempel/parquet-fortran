@@ -78,8 +78,9 @@ helpers, and the two generators meant to be copied into your own project.
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;
   `pf_random_stream` for when you cannot say up front how many you need; five distributions
-  (exponential, normal, normal truncated to an interval, Gamma, Poisson); then permutations,
-  subsets and resampling, and weighted draws without replacement. Those last live in
+  (exponential, normal, normal truncated to an interval, Gamma, Poisson); random points on a
+  sphere: directions, discs about an axis, balls, a Gaussian-like scatter and rotations; then
+  permutations, subsets and resampling, and weighted draws without replacement. Those last live in
   `parquet_sampling`, the sibling module for drawing from a *population* rather than drawing a
   number.
 - [Spatial neighbour search with `pf_spatial_index`](spatial.html) — a uniform-grid index over

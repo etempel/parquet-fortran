@@ -907,7 +907,7 @@ contains
     subroutine check_random_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
         integer(int64), parameter :: seed = 20260823_int64
-        real(real64) :: u
+        real(real64) :: u, v(3)
         integer(int64) :: k, bits
         character(len=:), allocatable :: algo
 
@@ -930,6 +930,14 @@ contains
         ! keeps it re-exported, and a change to it is a change to every value above.
         algo = pf_random_algorithm
         if (what == "" .and. len_trim(algo) == 0) what = "pf_random_algorithm is empty"
+
+        ! The points-on-a-sphere family is reachable through the same one import, and its identifier
+        ! with it; a unit length is the one property any direction must have.
+        v = pf_random_direction_at(seed, 1_int64)
+        if (what == "" .and. abs(norm2(v) - 1.0_real64) > 1.0e-12_real64) &
+            what = "pf_random_direction_at did not return a unit vector"
+        algo = pf_sphere_algorithm
+        if (what == "" .and. len_trim(algo) == 0) what = "pf_sphere_algorithm is empty"
     end subroutine check_random_surface
 
 end module test_module_surface_random

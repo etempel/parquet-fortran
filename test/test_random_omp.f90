@@ -26,7 +26,7 @@ module test_random_omp
     use parquet_random
     use parquet_sampling
     use iso_fortran_env, only: int32, int64, real64
-    use testdrive, only: new_unittest, unittest_type, error_type, check
+    use testdrive, only: new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
     use omp_lib, only: omp_get_max_threads, omp_get_num_threads, omp_get_thread_num
 #endif
@@ -52,7 +52,8 @@ contains
             new_unittest("a per-iteration stream reproduces under every schedule", test_stream_schedule), &
             new_unittest("a bulk permutation is bit-identical at every thread count", test_perm_threads), &
             new_unittest("a resample is bit-identical at every thread count", test_resample_threads), &
-            new_unittest("per-thread weighted samplers reproduce the serial sequences", test_weighted_per_thread) &
+            new_unittest("per-thread weighted samplers reproduce the serial sequences", test_weighted_per_thread), &
+            new_unittest("directions are identical under every schedule and thread count", test_direction_schedule) &
             ]
     end subroutine collect_tests_parquet_random_omp
 
@@ -603,5 +604,57 @@ contains
         call check(error, all(par >= 1) .and. all(par <= nw), &
                    "every item drawn in parallel must be a valid item index")
     end subroutine test_weighted_per_thread
+
+    !> A direction fill chunked over a dynamic schedule gives the serial fill bit for bit, at 1, 2
+    !! and 8 threads.
+    !!
+    !! **Bit for bit, not to a few ulp**, because what varies here is only how the columns are split
+    !! between calls, and a fill's chunk invariance is exact: every column goes through the same
+    !! code whichever call serves it. Chunks of 37 columns, so no chunk boundary falls on a multiple
+    !! of any vector width, each chunk starting at its own draw. The team-size vacuity guard is the
+    !! one `test_schedule_independence` explains: a region handed a team of one compares the serial
+    !! arm with itself.
+    subroutine test_direction_schedule(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: NCOL = 20000
+        integer, parameter :: CHUNK = 37
+        integer, parameter :: teams(3) = [1, 2, 8]
+        real(real64), allocatable :: serial(:, :), got(:, :)
+        integer :: ti, c, lo, hi, team
+        character(len=80) :: msg
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the region below is a serial loop, so every team size " // &
+            "would be the serial fill compared with itself")
+        return
+#endif
+        allocate(serial(3, NCOL), got(3, NCOL))
+        call pf_random_fill_direction(seed, 9_int64, serial)
+        do ti = 1, size(teams)
+            got = 0.0_real64
+            team = 1
+            !$omp parallel do schedule(dynamic, 1) num_threads(teams(ti)) default(shared) private(c, lo, hi)
+            do c = 1, (NCOL + CHUNK - 1) / CHUNK
+#ifdef _OPENMP
+                if (c == 1) team = omp_get_num_threads()
+#endif
+                lo = (c - 1) * CHUNK + 1
+                hi = min(NCOL, c * CHUNK)
+                call pf_random_fill_direction(seed, 9_int64, got(:, lo:hi), int(lo, int64))
+            end do
+            !$omp end parallel do
+            if (teams(ti) > 1) then
+                call check(error, team > 1, &
+                    "vacuity guard: the direction fill's region ran with a team of one, so nothing was varied")
+                if (allocated(error)) return
+            end if
+            if (any(got /= serial)) then
+                write (msg, '(a,i0,a)') "a direction fill chunked over ", teams(ti), &
+                    " threads differs from the serial fill"
+                call check(error, .false., trim(msg))
+                return
+            end if
+        end do
+    end subroutine test_direction_schedule
 
 end module test_random_omp

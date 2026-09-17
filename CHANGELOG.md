@@ -89,6 +89,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   object may be shared read-only by any number of threads. Nothing is printed. An Arrow-free entry
   module. `bench/benchmark_interpolate.sh` measures it. See
   [Interpolation of tabulated data](doc/pages/utilities/interpolation.md).
+- **Random points on a sphere, in `parquet_random`.** `pf_random_direction_at` draws a uniform unit
+  vector and `pf_random_radec_at` the same point as `(ra, dec)` in degrees; `pf_random_disc_at` and
+  `pf_random_disc_radec_at` draw uniformly within an angular radius of a direction or a sky
+  position, with `r_inner=` for a ring; `pf_random_ball_at` draws uniformly in a ball or a shell;
+  `pf_random_vmf_at` and `pf_random_vmf_radec_at` draw a von Mises–Fisher direction about a centre,
+  by `kappa` or by `sigma_deg`; `pf_random_rotation_at` draws a uniform rotation matrix. Each is
+  addressed by seed, stream and draw like every other draw and has a `pf_random_stream` producer
+  costing one block; the direction and RA/Dec forms have draw-axis fills, and `%address` returns a
+  stream's seed and stream index. `pf_sphere_algorithm` freezes the family's values. See
+  [Random numbers](doc/pages/utilities/random.md).
 
 ### Changed
 

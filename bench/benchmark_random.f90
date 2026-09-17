@@ -19,6 +19,11 @@
 !!     library arm is doing strictly more here: it addresses a fresh stream per iteration, which the
 !!     intrinsic cannot express at all.
 !!
+!! Then **three rows for a point on a sphere**, measured against this library's own uniforms rather
+!! than the intrinsic, since what a caller weighs there is drawing two uniforms and building the
+!! direction by hand: the scalar `pf_random_direction_at` loop, `%direction` on a stream, and
+!! `pf_random_fill_direction`, each against the two uniforms per direction it replaces.
+!!
 !! Rules this program follows, all of them from CLAUDE.md's benchmarking notes: every buffer is
 !! fully written before the timer starts (first-touch page faults otherwise land entirely on
 !! whichever arm runs first), each arm runs both orders, the reported figure is the best of several
@@ -36,7 +41,8 @@ program benchmark_random
 
     use iso_fortran_env, only: int64, real32, real64, output_unit
     use parquet, only: pf_random_at, pf_random_fill_draws, pf_random_algorithm, &
-                       parquet_debug_random_uses_int128
+                       parquet_debug_random_uses_int128, pf_random_direction_at, &
+                       pf_random_fill_direction, pf_random_stream
 
     implicit none
 
@@ -72,6 +78,14 @@ program benchmark_random
         call bulk_r32(sizes(k), rounds)
     end do
     call scalar_r64(n_scalar, rounds)
+
+    write (output_unit, "(a)") ""
+    write (output_unit, "(a)") "Points on a sphere, per direction, nanoseconds. 'ratio' is direction / the two"
+    write (output_unit, "(a)") "pf_random uniforms it replaces, on the same tier."
+    write (output_unit, "(a)") ""
+    write (output_unit, "(a)") "  arm        n            2 uniforms     direction      ratio"
+    write (output_unit, "(a)") "  ---------- ------------ -------------- -------------- ------"
+    call sphere_arms(min(n_scalar, sizes(nsizes)), rounds)
 
 contains
 
@@ -250,5 +264,91 @@ contains
         call report("scalar r64", n, t_intr, t_lib)
         if (acc == -1.0_real64) write (output_unit, "(a)") ""
     end subroutine scalar_r64
+
+    !> A direction per iteration against the two uniforms it consumes, on each tier.
+    !!
+    !! The baseline is this library's own uniform rather than the intrinsic: a direction reads one
+    !! block of its own sub-stream and adds a sine, a cosine and a square root, so the ratio is the
+    !! price of the transform, which is the figure a caller choosing between drawing two uniforms and
+    !! building the direction by hand needs. Three shapes: the coordinate-addressed scalar loop, the
+    !! stream walk, and the draw-axis fill against `pf_random_fill_draws` over the same count of
+    !! uniforms. The stream arm reseeds every round so both arms start at position 1.
+    subroutine sphere_arms(n, rounds)
+        integer(int64), intent(in) :: n                     !! Directions per round.
+        integer, intent(in) :: rounds                       !! Rounds; the best of each arm is reported.
+
+        real(real64), allocatable :: dirs(:, :), unif(:)
+        real(real64) :: t0, t_base, t_lib, x, acc, v(3)
+        type(pf_random_stream) :: rng
+        integer(int64) :: i
+        integer :: r
+
+        allocate (dirs(3, n), unif(2_int64 * n))
+        call pf_random_fill_direction(SEED, STREAM, dirs)
+        call pf_random_fill_draws(SEED, STREAM, unif)
+        acc = sum(dirs(:, 1)) + unif(1)
+
+        ! ---- scalar: a direction per stream against two uniforms per stream ----
+        t_base = huge(1.0_real64)
+        t_lib = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            do i = 1_int64, n
+                acc = acc + pf_random_at(SEED, i, 1_int64) + pf_random_at(SEED, i, 2_int64)
+            end do
+            t_base = min(t_base, now() - t0)
+
+            t0 = now()
+            do i = 1_int64, n
+                v = pf_random_direction_at(SEED, i)
+                acc = acc + v(3)
+            end do
+            t_lib = min(t_lib, now() - t0)
+        end do
+        call report("dir scalar", n, t_base, t_lib)
+
+        ! ---- stream: %direction against two %uniform ----
+        t_base = huge(1.0_real64)
+        t_lib = huge(1.0_real64)
+        do r = 1, rounds
+            call rng%seed(SEED, STREAM)
+            t0 = now()
+            do i = 1_int64, n
+                call rng%uniform(x)
+                acc = acc + x
+                call rng%uniform(x)
+                acc = acc + x
+            end do
+            t_base = min(t_base, now() - t0)
+
+            call rng%seed(SEED, STREAM)
+            t0 = now()
+            do i = 1_int64, n
+                call rng%direction(v)
+                acc = acc + v(3)
+            end do
+            t_lib = min(t_lib, now() - t0)
+        end do
+        call report("dir stream", n, t_base, t_lib)
+
+        ! ---- fill: a (3, n) direction fill against a fill of 2n uniforms ----
+        t_base = huge(1.0_real64)
+        t_lib = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call pf_random_fill_draws(SEED, STREAM, unif)
+            t_base = min(t_base, now() - t0)
+            acc = acc + unif(1)
+
+            t0 = now()
+            call pf_random_fill_direction(SEED, STREAM, dirs)
+            t_lib = min(t_lib, now() - t0)
+            acc = acc + dirs(3, n)
+        end do
+        call report("dir fill", n, t_base, t_lib)
+
+        if (acc == -1.0_real64) write (output_unit, "(a)") ""   ! keeps `acc` live; never taken
+        deallocate (dirs, unif)
+    end subroutine sphere_arms
 
 end program benchmark_random

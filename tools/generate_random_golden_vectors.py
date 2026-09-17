@@ -498,6 +498,353 @@ def fill_at32(seed, stream, count, draw=1):
 
 
 # ---------------------------------------------------------------------------------------------
+# Points on a sphere.
+#
+# Every family is libm-backed (a sine and a cosine at least), so, like `pf_random_exp_at`, none of
+# its values can be frozen as a bit pattern.  They are pinned instead against a model of the
+# transform in `decimal` at 60 significant digits (plus guard digits), correctly rounded to double
+# once at emission, and the suite allows a few ulp.  `decimal` has `ln`, `exp` and `sqrt` but no
+# trigonometry, so the sine, cosine and arctangent below are series with argument reduction --
+# which keeps `--check` runnable on a bare `python3`.
+#
+# The MODEL IS THE MATHEMATICAL TRANSFORM, not the library's floating-point recipe: the offset
+# from a centre is `1 - cos` computed exactly here, where the library forms it from half-angle
+# sines, and the vMF offset is `-ln(u' + u*exp(-2*kappa))/kappa` exactly, where the library
+# splits it into a `log1p` arm and a sum arm.  That is what makes a row evidence rather than a
+# restatement: the recipe that avoids cancellation has to land where the exact value is.
+#
+# The labels below must equal the `sphere_*_label` parameters in `src/parquet_random.f90`;
+# `self_test` reads them back from the source.
+# ---------------------------------------------------------------------------------------------
+
+SPHERE_LABELS = {
+    "direction": 2349958352582825620,
+    "disc": 3756084276780366762,
+    "ball": 8225117764143958046,
+    "ball_radius": 8082096235867769506,
+    "vmf": 2338640209577774087,
+    "rotation": 6988326662294119861,
+    "rotation_angle": 8949935999960278870,
+}
+
+#: The last draw a sphere family addresses: one block per draw, and block 2**62 would set bit 62.
+SPHERE_DRAW_MAX = 1 << 62
+
+#: Significant digits of every sphere reference, and the guard digits the series work in.
+SPHERE_PREC = 60
+SPHERE_GUARD = 25
+
+#: pi to 110 digits, so that no reduction below loses anything the 85 working digits hold.
+DPI = decimal.Decimal("3.14159265358979323846264338327950288419716939937510582097494459230781640628"
+                      "620899862803482534211706798214808651")
+
+
+def dctx():
+    """The working context of every sphere computation: 60 digits plus guard digits."""
+    return decimal.localcontext(prec=SPHERE_PREC + SPHERE_GUARD)
+
+
+def dtiny():
+    """The size below which a series term no longer affects the working digits."""
+    return decimal.Decimal(10) ** (-(SPHERE_PREC + SPHERE_GUARD + 5))
+
+
+def dsin_cos(x):
+    """`(sin(x), cos(x))` for a Decimal `x`: reduced over `[0, 2*pi)` to the nearest quadrant, so the
+    Taylor series runs on `|r| <= pi/4`, where no term exceeds the result it sums to."""
+    D = decimal.Decimal
+    with dctx():
+        two_pi = 2 * DPI
+        x = x % two_pi
+        if x < 0:
+            x += two_pi
+        half_pi = DPI / 2
+        q = int((x + DPI / 4) // half_pi)
+        r = x - q * half_pi
+        r2 = r * r
+        s, term, k = r, r, 1
+        while abs(term) >= dtiny():
+            term = -term * r2 / ((2 * k) * (2 * k + 1))
+            s += term
+            k += 1
+        c, term, k = D(1), D(1), 1
+        while abs(term) >= dtiny():
+            term = -term * r2 / ((2 * k - 1) * (2 * k))
+            c += term
+            k += 1
+        q %= 4
+        if q == 0:
+            return +s, +c
+        if q == 1:
+            return +c, -s
+        if q == 2:
+            return -s, -c
+        return -c, +s
+
+
+def datan(x):
+    """`atan(x)` for a Decimal: `pi/2 - atan(1/x)` above 1, three argument halvings, then Taylor."""
+    with dctx():
+        if x < 0:
+            return -datan(-x)
+        if x > 1:
+            return DPI / 2 - datan(1 / x)
+        for _ in range(3):
+            x = x / (1 + (1 + x * x).sqrt())
+        x2 = x * x
+        s, power, k = x, x, 1
+        while True:
+            power = -power * x2
+            term = power / (2 * k + 1)
+            if abs(term) < dtiny():
+                break
+            s += term
+            k += 1
+        return 8 * s
+
+
+def datan2(y, x):
+    """`atan2(y, x)` for Decimals, in `(-pi, pi]`; `(0, 0)` gives 0, the value the pole rule needs."""
+    with dctx():
+        if x > 0:
+            return datan(y / x)
+        if x < 0:
+            return datan(y / x) + (DPI if y >= 0 else -DPI)
+        if y > 0:
+            return DPI / 2
+        if y < 0:
+            return -DPI / 2
+        return decimal.Decimal(0)
+
+
+def dfloat(x):
+    """A Decimal correctly rounded to the nearest double."""
+    return float(x)
+
+
+def sphere_pair(seed, label, stream, draw):
+    """The two uniforms of a sphere draw: the halves of block `draw - 1` of the family's derived key.
+
+    They are `at(key, stream, 2*draw - 1)` and `at(key, stream, 2*draw)`; the block is named
+    directly because `2*draw` is not representable in the library's `int64` at the last draw.
+    """
+    c = block(random_key(seed, label), stream, draw - 1)
+    return (float(((c[1] << 32) | c[0]) >> 11) * 2.0 ** -53,
+            float(((c[3] << 32) | c[2]) >> 11) * 2.0 ** -53)
+
+
+def sphere_extra(seed, label, stream, draw):
+    """The ball's radius uniform and the rotation's third uniform: `at(key, stream, draw)`."""
+    return at(random_key(seed, label), stream, draw)
+
+
+def d_unit(v):
+    """A vector of doubles or Decimals normalised exactly."""
+    D = decimal.Decimal
+    with dctx():
+        w = [D(x) for x in v]
+        n = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt()
+        return [w[0] / n, w[1] / n, w[2] / n]
+
+
+def frame_axis(v):
+    """The axis the frame is built on: where `v` has its smallest magnitude, the lowest on a tie."""
+    a = [abs(x) for x in v]
+    k = 0
+    if a[1] < a[k]:
+        k = 1
+    if a[2] < a[k]:
+        k = 2
+    return k
+
+
+def d_frame(c, axis):
+    """`(e1, e2)`: `e1 = c x axis` normalised, `e2 = c x e1`, so `(e1, e2, c)` is right-handed."""
+    D = decimal.Decimal
+    with dctx():
+        if axis == 0:
+            w = [D(0), c[2], -c[1]]
+        elif axis == 1:
+            w = [-c[2], D(0), c[0]]
+        else:
+            w = [c[1], -c[0], D(0)]
+        n = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt()
+        e1 = [w[0] / n, w[1] / n, w[2] / n]
+        e2 = [c[1] * e1[2] - c[2] * e1[1], c[2] * e1[0] - c[0] * e1[2], c[0] * e1[1] - c[1] * e1[0]]
+        return e1, e2
+
+
+def d_place(c, e1, e2, h, u2):
+    """The point at `1 - cos(theta) = h` from `c`, at azimuth `2*pi*u2` in `(e1, e2)`."""
+    with dctx():
+        z = 1 - h
+        s = (h * (2 - h)).sqrt()
+        sp, cp = dsin_cos(2 * DPI * decimal.Decimal(u2))
+        return [z * c[j] + s * (cp * e1[j] + sp * e2[j]) for j in range(3)]
+
+
+def d_direction(u1, u2):
+    """Archimedes: `z = 2*u1 - 1`, azimuth `2*pi*u2`."""
+    with dctx():
+        z = 2 * decimal.Decimal(u1) - 1
+        s = ((1 - z) * (1 + z)).sqrt()
+        sp, cp = dsin_cos(2 * DPI * decimal.Decimal(u2))
+        return [s * cp, s * sp, z]
+
+
+def d_cap_h(radius, r_inner, u1):
+    """`h = 1 - cos(theta)`, uniform between the ring's two radii, each clamped to the half turn."""
+    D = decimal.Decimal
+    with dctx():
+        pi_d = D(math.pi)
+        ro, ri = min(D(radius), pi_d), min(D(r_inner), pi_d)
+        _, co = dsin_cos(ro)
+        _, ci = dsin_cos(ri)
+        return (1 - ci) + D(u1) * (ci - co)
+
+
+def dexpm1(x):
+    """`exp(x) - 1` for a Decimal: the series below 1e-3, where `exp(x)` and 1 would cancel.
+
+    **Cancellation is a hazard in the model too**: at `kappa = 3e-307`, which a width of `1e155`
+    degrees gives, `exp(-2*kappa)` is exactly 1 at 85 digits, and the plain form would put the
+    reference at the centre while the library -- correctly -- draws the uniform limit.
+    """
+    D = decimal.Decimal
+    with dctx():
+        if abs(x) >= D("1e-3"):
+            return x.exp() - 1                    # loses at most 3 of the 85 working digits
+        total, term, n = D(0), D(1), 1
+        while True:
+            term = term * x / n
+            if abs(term) < dtiny() * abs(x):
+                break
+            total += term
+            n += 1
+        return total
+
+
+def dlog1p(x):
+    """`ln(1 + x)` for a Decimal above -1: the series below 1e-3 in magnitude, for `dexpm1`'s reason."""
+    D = decimal.Decimal
+    with dctx():
+        if abs(x) >= D("1e-3"):
+            return (1 + x).ln()
+        total, power, n = D(0), D(1), 1
+        while True:
+            power = -power * x
+            term = -power / n
+            if abs(term) < dtiny() * abs(x):
+                break
+            total += term
+            n += 1
+        return total
+
+
+def d_vmf_h(kappa, u1):
+    """The vMF offset `1 - w = -ln((1 - u) + u*exp(-2*kappa))/kappa`, exactly; `2*u` at `kappa = 0`.
+
+    Written as `-log1p(-u*(-expm1(-2*kappa)))/kappa`, the same quantity, so that no `kappa` however
+    small rounds it away: a different recipe from the library's `sinh`/`atanh` one, on purpose.
+    """
+    D = decimal.Decimal
+    with dctx():
+        if kappa == 0:
+            return 2 * D(u1)
+        k = D(kappa)
+        return -dlog1p(-D(u1) * -dexpm1(-2 * k)) / k
+
+
+def d_radec(v):
+    """A vector read as `(ra, dec)` in degrees, standard frame; the pole's right ascension is 0."""
+    with dctx():
+        if v[0] == 0 and v[1] == 0:
+            ra = decimal.Decimal(0)
+        else:
+            ra = datan2(v[1], v[0]) * 180 / DPI
+            if ra < 0:
+                ra += 360
+        dec = datan2(v[2], (v[0] * v[0] + v[1] * v[1]).sqrt()) * 180 / DPI
+        return ra, dec
+
+
+def d_centre_radec(ra0, dec0):
+    """`(ra0, dec0)` in degrees as a unit vector in the standard frame; a declination of +/-90 is
+    the pole exactly, whatever `ra0` says."""
+    D = decimal.Decimal
+    with dctx():
+        if dec0 == 90.0:
+            return [D(0), D(0), D(1)]
+        if dec0 == -90.0:
+            return [D(0), D(0), D(-1)]
+        sd, cd = dsin_cos(D(dec0) * DPI / 180)
+        sa, ca = dsin_cos(D(ra0) * DPI / 180)
+        return [cd * ca, cd * sa, sd]
+
+
+def sphere_direction(seed, stream, draw):
+    """`pf_random_direction_at`, with its two uniforms: `(v, u1, u2)`."""
+    u1, u2 = sphere_pair(seed, SPHERE_LABELS["direction"], stream, clamp_draw(draw))
+    return d_direction(u1, u2), u1, u2
+
+
+def sphere_disc(seed, stream, draw, centre, radius, r_inner, axis_from=None):
+    """`pf_random_disc_at`: `(v, u1, u2, h)`.  `axis_from` overrides the vector the frame's axis is
+    chosen from, which the RA/Dec form needs: its centre is exact here and rounded in the library."""
+    u1, u2 = sphere_pair(seed, SPHERE_LABELS["disc"], stream, clamp_draw(draw))
+    c = d_unit(centre)
+    e1, e2 = d_frame(c, frame_axis(centre if axis_from is None else axis_from))
+    h = d_cap_h(radius, r_inner, u1)
+    return d_place(c, e1, e2, h, u2), u1, u2, h
+
+
+def sphere_ball(seed, stream, draw, radius, r_inner):
+    """`pf_random_ball_at`: `(p, u1, u2, u3)`."""
+    D = decimal.Decimal
+    d = clamp_draw(draw)
+    u1, u2 = sphere_pair(seed, SPHERE_LABELS["ball"], stream, d)
+    u3 = sphere_extra(seed, SPHERE_LABELS["ball_radius"], stream, d)
+    with dctx():
+        v = d_direction(u1, u2)
+        if radius == 0:
+            return [D(0)] * 3, u1, u2, u3
+        q = D(r_inner) / D(radius)
+        a = q ** 3 + D(u3) * (1 - q ** 3)
+        r = D(radius) * ((a.ln() / 3).exp() if a > 0 else D(0))
+        return [r * v[0], r * v[1], r * v[2]], u1, u2, u3
+
+
+def sphere_vmf(seed, stream, draw, mu, kappa, axis_from=None):
+    """`pf_random_vmf_at`: `(v, u1, u2, h)`; `axis_from` as for `sphere_disc`."""
+    u1, u2 = sphere_pair(seed, SPHERE_LABELS["vmf"], stream, clamp_draw(draw))
+    c = d_unit(mu)
+    e1, e2 = d_frame(c, frame_axis(mu if axis_from is None else axis_from))
+    h = d_vmf_h(kappa, u1)
+    return d_place(c, e1, e2, h, u2), u1, u2, h
+
+
+def sphere_rotation(seed, stream, draw):
+    """`pf_random_rotation_at`: `(r, u1, u2, u3)` with `r[i][j]` row `i`, column `j`.
+
+    Shoemake: `(x, y, z, w) = (a sin t1, a cos t1, b sin t2, b cos t2)`, `a = sqrt(1 - u1)`,
+    `b = sqrt(u1)`, `t1 = 2 pi u2`, `t2 = 2 pi u3`, with `w` the scalar part.
+    """
+    D = decimal.Decimal
+    d = clamp_draw(draw)
+    u1, u2 = sphere_pair(seed, SPHERE_LABELS["rotation"], stream, d)
+    u3 = sphere_extra(seed, SPHERE_LABELS["rotation_angle"], stream, d)
+    with dctx():
+        a, b = (1 - D(u1)).sqrt(), D(u1).sqrt()
+        s1, c1 = dsin_cos(2 * DPI * D(u2))
+        s2, c2 = dsin_cos(2 * DPI * D(u3))
+        x, y, z, w = a * s1, a * c1, b * s2, b * c2
+        r = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+             [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+             [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
+    return r, u1, u2, u3
+
+
+# ---------------------------------------------------------------------------------------------
 # Published anchors.  Every one is independent of RETRY_TAG and of the draw-mapping question, so
 # each is evidence about the oracle rather than about a decision.  Provenance is in the names:
 # KAT = Random123's own test vectors; the rest are feature_random_reference.md §3.
@@ -847,6 +1194,113 @@ def self_test():
     eq("the sample label differs from the normal labels",
        SAMPLE_LABEL in (NORMAL_ZIG_LABEL, NORMAL_POLAR_LABEL, 0), False)
 
+    # ---- Points on a sphere ------------------------------------------------------------------
+    #
+    # The labels, cross-checked against the SOURCE for the reason SAMPLE_LABEL is, and required to
+    # be distinct from each other, from 0 and from every other label this oracle knows: two families
+    # sharing a label would be two functions of one pair of uniforms (Risk-123).
+    random_src = pathlib.Path(__file__).resolve().parent.parent / "src" / "parquet_random.f90"
+    if random_src.exists():
+        text = random_src.read_text()
+        for name, value in SPHERE_LABELS.items():
+            m = re.search(r"sphere_%s_label\s*=\s*(-?\d+)_int64" % name, text)
+            if m is None:
+                bad.append("src/parquet_random.f90 declares no sphere_%s_label" % name)
+            else:
+                eq("SPHERE_LABELS[%s] matches src/parquet_random.f90" % name, value, int(m.group(1)))
+        declared = set(re.findall(r"sphere_(\w+?)_label\s*=", text))
+        eq("every sphere label in the source is modelled", declared, set(SPHERE_LABELS))
+    labels = list(SPHERE_LABELS.values())
+    eq("the sphere labels are distinct", len(set(labels)), len(labels))
+    eq("no sphere label is 0 or another family's",
+       bool(set(labels) & {0, NORMAL_ZIG_LABEL, NORMAL_POLAR_LABEL, SAMPLE_LABEL}), False)
+
+    # The decimal trigonometry, against values it cannot fake: exact angles and the Pythagorean
+    # identity at 58 digits. A transcription error in a series or a quadrant shows up here first.
+    D = decimal.Decimal
+    close = D("1e-58")
+    with dctx():
+        checks = [
+            ("sin(pi/6) = 1/2", dsin_cos(DPI / 6)[0], D("0.5")),
+            ("cos(pi/3) = 1/2", dsin_cos(DPI / 3)[1], D("0.5")),
+            ("sin(pi/2) = 1", dsin_cos(DPI / 2)[0], D(1)),
+            ("cos(pi) = -1", dsin_cos(DPI)[1], D(-1)),
+            ("sin(7*pi/6) = -1/2", dsin_cos(7 * DPI / 6)[0], D("-0.5")),
+            ("cos(-2*pi/3) = -1/2", dsin_cos(-2 * DPI / 3)[1], D("-0.5")),
+            ("atan(sqrt(3)) = pi/3", datan(D(3).sqrt()), DPI / 3),
+            ("atan2(1, -1) = 3*pi/4", datan2(D(1), D(-1)), 3 * DPI / 4),
+            ("atan2(-1, -1) = -3*pi/4", datan2(D(-1), D(-1)), -3 * DPI / 4),
+            ("atan2(0, -1) = pi", datan2(D(0), D(-1)), DPI),
+            ("atan2(-2, 0) = -pi/2", datan2(D(-2), D(0)), -DPI / 2),
+        ]
+        for label, got, want in checks:
+            if abs(got - want) > close:
+                bad.append("sphere model: %s is off by %s" % (label, abs(got - want)))
+        # The vMF offset at the two ends of kappa: 2*u in the uniform limit to within kappa itself,
+        # and the plain formula where nothing cancels.
+        for kappa in ("1e-300", "1e-40"):
+            if abs(d_vmf_h(float(kappa), 0.25) - D("0.5")) > D(kappa):
+                bad.append("sphere model: the vMF offset at kappa %s is not 2*u" % kappa)
+        plain = -((1 - D("0.25")) + D("0.25") * (D(-4)).exp()).ln() / 2
+        if abs(d_vmf_h(2.0, 0.25) - plain) > close:
+            bad.append("sphere model: the vMF offset at kappa 2 is not the plain inverse CDF")
+        for x in ("0.1", "1", "2.5", "4", "6.2", "-3"):
+            s, c = dsin_cos(D(x))
+            if abs(s * s + c * c - 1) > close:
+                bad.append("sphere model: sin^2 + cos^2 is not 1 at %s" % x)
+            # The half-angle form the library uses must be the same number as 1 - cos.
+            hs, _ = dsin_cos(D(x) / 2)
+            if abs(2 * hs * hs - (1 - c)) > close:
+                bad.append("sphere model: 2*sin(x/2)**2 is not 1 - cos(x) at %s" % x)
+
+    # The block mapping: the two uniforms are the halves of block draw-1 of the derived key, i.e.
+    # pf_random_at at draws 2d-1 and 2d -- and the second label is read at (key, stream, draw).
+    for d in (1, 2, 5, 1000):
+        key = random_key(0, SPHERE_LABELS["direction"])
+        eq("direction uniforms at draw %d are at(key, 0, 2d-1) and at(key, 0, 2d)" % d,
+           sphere_pair(0, SPHERE_LABELS["direction"], 0, d), (at(key, 0, 2 * d - 1), at(key, 0, 2 * d)))
+    top = block(random_key(12345, SPHERE_LABELS["disc"]), 1, SPHERE_DRAW_MAX - 1)
+    eq("draw 2**62 reads block 2**62 - 1 of the REAL64 space",
+       sphere_pair(12345, SPHERE_LABELS["disc"], 1, SPHERE_DRAW_MAX)[0],
+       float(((top[1] << 32) | top[0]) >> 11) * 2.0 ** -53)
+    eq("block 2**62 - 1 leaves the domain bits clear", (SPHERE_DRAW_MAX - 1) >> 62, 0)
+
+    # The model's own distributions, cheaply: an isotropic mean, a disc that stays inside itself,
+    # the vMF's mean resultant length, and an orthonormal rotation.
+    n = 3000
+    zsum = D(0)
+    for d in range(1, n + 1):
+        zsum += sphere_direction(4242, 3, d)[0][2]
+    if abs(float(zsum) / n) > 4.0 / math.sqrt(3 * n):
+        bad.append("sphere model: the mean z of %d directions is more than 4 SE from 0" % n)
+    cap = 1 - dsin_cos(D("0.5"))[1]
+    for d in range(1, 200):
+        h = sphere_disc(4242, 3, d, (0.0, 0.0, 1.0), 0.5, 0.0)[3]
+        if not (0 <= h <= cap):
+            bad.append("sphere model: a disc of radius 0.5 placed a point at h = %s" % h)
+            break
+    wsum = D(0)
+    for d in range(1, n + 1):
+        wsum += 1 - sphere_vmf(4242, 3, d, (0.0, 0.0, 1.0), 50.0)[3]
+    want_w = (math.cosh(50.0) / math.sinh(50.0)) - 1.0 / 50.0
+    if abs(float(wsum) / n - want_w) > 6.0 * math.sqrt((1 - want_w * want_w) / n):
+        bad.append("sphere model: the vMF mean resultant at kappa 50 is %.5f, want %.5f"
+                   % (float(wsum) / n, want_w))
+    for d in (1, 2, 3):
+        r = sphere_rotation(4242, 3, d)[0]
+        with dctx():
+            worst = max(abs(sum(r[i][k] * r[j][k] for k in range(3)) - (1 if i == j else 0))
+                        for i in range(3) for j in range(3))
+        if worst > close:
+            bad.append("sphere model: rotation %d is not orthonormal (%s)" % (d, worst))
+
+    # The emitted form of a real is its exact bit pattern: a round trip loses nothing.
+    for x in (0.1, -2.5e-300, math.pi, 1.0 - 2.0 ** -53):
+        back = struct.unpack("<d", struct.pack("<q", int(bits64(x).split("_")[0].strip("()"))))[0] \
+            if not bits64(x).startswith("(") else None
+        if back is not None and back != x:
+            bad.append("sphere emission: %r does not survive its bit pattern" % x)
+
     return bad
 
 
@@ -1062,6 +1516,221 @@ def fill_rows():
         v64.extend(fill_at(seed, stream, count, start))
         v32.extend(fill_at32(seed, stream, count, start))
     return meta, v64, v32
+
+
+# ---- Points on a sphere ----
+#
+# **Which rows, and one rule that picks them.**  A placement about a centre is ill-conditioned
+# only near the ANTIPODE: there `sin(theta)` comes from `h*(2 - h)` with `2 - h` small, so an ulp
+# of rounding in `h` moves the point by `eps/sin(theta)`, in any implementation.  That is inherent
+# to the parameterisation and says nothing about the library, so a row whose exact `2 - h` is
+# below 0.1 is skipped for the next draw on the same stream.  The rule reads the exact model only,
+# never libm, so `--check` regenerates the same table on every platform.
+#
+# Every other shape a mapping has to get right is here on purpose: a radius of 1e-9 (a plain
+# `1 - cos` loses the whole radius), a `kappa` of 1e-30 (a plain `log(1 - x)` sends every point to
+# one pole), the vMF on both sides of its `log1p` switch, the pole rule, both clamps, the ring
+# `r_inner = radius`, a centre that must be scaled before it is normalised, and draw `2**62`.
+
+SPHERE_SEEDS = [0, 1, 12345, -7, INT64_MAX, INT64_MIN]
+SPHERE_STREAMS = [-5, 0, 1000000]
+SPHERE_DRAWS = [0, 1, 2, 5]                       # 0 exercises the clamp
+
+#: (centre, radius, r_inner or None) for `pf_random_disc_at`.
+DISC_CASES = [
+    ((0.0, 0.0, 1.0), 0.5, None),
+    ((0.0, 0.0, 1.0), 0.0, None),                 # the centre itself
+    ((0.3, -0.5, 0.8), 1.0e-9, None),             # 1 - cos(1e-9) is one ulp from 0
+    ((0.3, -0.5, 0.8), 1.0e-5, 0.4e-5),
+    ((0.3, -0.5, 0.8), 0.3, 0.3),                 # the ring itself
+    ((-1.0, 1.0e-3, 2.0e-3), 2.0, None),
+    ((-1.0, 1.0e-3, 2.0e-3), 2.0, 0.8),
+    ((0.0, 0.0, -1.0), math.pi, None),            # the whole sphere
+    ((0.2, 0.9, -0.4), 4.0, None),                # clamped to the half turn
+    ((1.0e-300, 0.0, 1.0e-300), 0.7, None),       # scaled before it is normalised
+    ((1.0, 1.0, 1.0), 1.2, 0.1),                  # a three-way tie picks the x axis
+    ((5.0, -2.0, 3.0), 1.0e-3, None),             # any length
+]
+
+#: (ra0, dec0, radius_deg, r_inner_deg or None) for `pf_random_disc_radec_at`.
+DISC_RADEC_CASES = [
+    (150.0, -89.0, 3.0, None),                    # qfeet's own test case
+    (359.9, 10.0, 1.0, 0.5),                      # straddles ra = 0
+    (0.0, 90.0, 30.0, None),                      # centred on the pole
+    (123.4, 90.0, 0.0, None),                     # the pole itself: ra = 0 by rule
+    (45.0, 0.0, 180.0, None),                     # the whole sky
+    (200.0, -45.0, 1.0e-4, None),                 # a third of an arcsecond
+    (10.0, 20.0, 181.0, None),                    # clamped to the whole sky
+    (300.0, 60.0, 5.0, 5.0),                      # the ring itself
+    (-30.0, -10.0, 2.0, 1.0),                     # a negative ra0
+    (725.0, 33.0, 7.0, None),                     # ra0 past two turns
+]
+
+#: (radius, r_inner or None) for `pf_random_ball_at`.
+BALL_CASES = [
+    (1.0, None), (2.5, 1.0), (0.0, None), (1.0e-3, None), (7.0, 7.0), (1.0e5, 99999.0), (3.0, 0.0),
+]
+
+#: (mu, kappa) for `pf_random_vmf_at`.
+VMF_CASES = [
+    ((0.3, -0.5, 0.8), 0.0),
+    ((0.3, -0.5, 0.8), 1.0e-30),
+    ((0.3, -0.5, 0.8), 1.0e-12),
+    ((0.0, 0.0, -1.0), 1.0e-3),
+    ((0.0, 0.0, -1.0), 1.0),
+    ((5.0, -2.0, 3.0), 19.999),
+    ((5.0, -2.0, 3.0), 20.0),
+    ((1.0, 1.0, 1.0), 50.0),
+    ((-1.0, 1.0e-3, 2.0e-3), 1000.0),
+    ((0.2, 0.9, -0.4), 1.0e6),
+    ((0.2, 0.9, -0.4), 1.0e12),
+    ((1.0e-300, 0.0, 1.0e-300), 3.0),
+]
+
+#: (ra0, dec0, sigma_deg) for `pf_random_vmf_radec_at`.
+VMF_RADEC_CASES = [
+    (10.0, 20.0, 1.0),
+    (200.0, -45.0, 0.001),
+    (0.0, 90.0, 30.0),
+    (359.0, -89.5, 1.0e-6),
+    (45.0, 30.0, 1000.0),                         # kappa about 3.3e-3: nearly uniform
+    (123.0, -10.0, 1.0e-160),                     # kappa past the double range: the centre
+    (77.0, 5.0, 1.0e155),                         # kappa below 1e-300: the uniform limit
+]
+
+
+def sphere_coordinate(n):
+    """The `n`-th (seed, stream, draw) of a deterministic walk over the sphere grid."""
+    return (SPHERE_SEEDS[n % len(SPHERE_SEEDS)], SPHERE_STREAMS[n % len(SPHERE_STREAMS)],
+            1 + (7 * n) % 11)
+
+
+def well_conditioned(h):
+    """A placement is pinned only where the exact `2 - h` is at least 0.1; see above."""
+    with dctx():
+        return 2 - h >= decimal.Decimal("0.1")
+
+
+def check_axis_unambiguous(centre, what):
+    """Refuse an exact RA/Dec centre whose two smallest magnitudes nearly tie: the library rounds the
+    centre before choosing the frame's axis, so a near-tie could choose the other one there."""
+    D = decimal.Decimal
+    a = sorted(abs(x) for x in centre)
+    if a[0] == 0 and a[1] == 0:
+        return                                    # a pole: both are exactly 0 on both sides
+    with dctx():
+        if a[1] - a[0] <= D("1e-9"):
+            raise SystemExit("%s: the centre's two smallest components nearly tie, so the frame's axis "
+                             "would depend on rounding -- choose another case" % what)
+
+
+def sphere_direction_rows():
+    """(seed, stream, draw, u1, u2, v, (ra, dec)) over the grid, plus draw 2**62."""
+    coords = [(s, t, d) for s in SPHERE_SEEDS for t in SPHERE_STREAMS for d in SPHERE_DRAWS]
+    coords.append((12345, 1, SPHERE_DRAW_MAX))
+    rows = []
+    for seed, stream, draw in coords:
+        v, u1, u2 = sphere_direction(seed, stream, draw)
+        rows.append((seed, stream, draw, u1, u2, v, d_radec(v)))
+    return rows
+
+
+def sphere_disc_rows():
+    """(seed, stream, draw, centre, radius, r_inner, given, u1, u2, v), one row per case."""
+    rows = []
+    for n, (centre, radius, inner) in enumerate(DISC_CASES):
+        seed, stream, draw = sphere_coordinate(n)
+        for step in range(64):
+            v, u1, u2, h = sphere_disc(seed, stream, draw + step, centre, radius, inner or 0.0)
+            if well_conditioned(h):
+                break
+        else:
+            raise SystemExit("sphere_disc_rows: no well-conditioned draw for case %d" % n)
+        rows.append((seed, stream, draw + step, centre, radius, inner or 0.0, inner is not None, u1, u2, v))
+    return rows
+
+
+def sphere_disc_radec_rows():
+    """(seed, stream, draw, ra0, dec0, radius_deg, r_inner_deg, given, u1, u2, (ra, dec)), one per case."""
+    D = decimal.Decimal
+    rows = []
+    for n, (ra0, dec0, radius, inner) in enumerate(DISC_RADEC_CASES):
+        seed, stream, draw = sphere_coordinate(n + 3)
+        centre = d_centre_radec(ra0, dec0)
+        check_axis_unambiguous(centre, "DISC_RADEC_CASES[%d]" % n)
+        with dctx():
+            rad = D(radius) * DPI / 180
+            rin = D(inner or 0.0) * DPI / 180
+        for step in range(64):
+            v, u1, u2, h = sphere_disc(seed, stream, draw + step, centre, rad, rin, axis_from=centre)
+            if well_conditioned(h):
+                break
+        else:
+            raise SystemExit("sphere_disc_radec_rows: no well-conditioned draw for case %d" % n)
+        rows.append((seed, stream, draw + step, ra0, dec0, radius, inner or 0.0, inner is not None,
+                     u1, u2, d_radec(v)))
+    return rows
+
+
+def sphere_ball_rows():
+    """(seed, stream, draw, radius, r_inner, given, u1, u2, u3, p), three coordinates per case."""
+    rows = []
+    for n, (radius, inner) in enumerate(BALL_CASES):
+        for j in range(3):
+            seed, stream, draw = sphere_coordinate(3 * n + j + 5)
+            p, u1, u2, u3 = sphere_ball(seed, stream, draw, radius, inner or 0.0)
+            rows.append((seed, stream, draw, radius, inner or 0.0, inner is not None, u1, u2, u3, p))
+    return rows
+
+
+def sphere_vmf_rows():
+    """(seed, stream, draw, mu, kappa, u1, u2, v): per case one row with `u1 <= 0.45` and one with
+    `u1 >= 0.6`, so the library's `log1p` arm and its sum arm are both pinned wherever they differ."""
+    rows = []
+    for n, (mu, kappa) in enumerate(VMF_CASES):
+        seed, stream, draw = sphere_coordinate(n + 7)
+        for want_low in (True, False):
+            for step in range(256):
+                v, u1, u2, h = sphere_vmf(seed, stream, draw + step, mu, kappa)
+                if (u1 <= 0.45 if want_low else u1 >= 0.6) and well_conditioned(h):
+                    break
+            else:
+                raise SystemExit("sphere_vmf_rows: no suitable draw for case %d" % n)
+            rows.append((seed, stream, draw + step, mu, kappa, u1, u2, v))
+    return rows
+
+
+def sphere_vmf_radec_rows():
+    """(seed, stream, draw, ra0, dec0, sigma_deg, u1, u2, (ra, dec)), two coordinates per case."""
+    D = decimal.Decimal
+    rows = []
+    for n, (ra0, dec0, sigma) in enumerate(VMF_RADEC_CASES):
+        centre = d_centre_radec(ra0, dec0)
+        check_axis_unambiguous(centre, "VMF_RADEC_CASES[%d]" % n)
+        with dctx():
+            s = D(sigma) * DPI / 180
+            kappa = 1 / (s * s)
+        for j in range(2):
+            seed, stream, draw = sphere_coordinate(2 * n + j + 11)
+            for step in range(64):
+                v, u1, u2, h = sphere_vmf(seed, stream, draw + step, centre, kappa, axis_from=centre)
+                if well_conditioned(h):
+                    break
+            else:
+                raise SystemExit("sphere_vmf_radec_rows: no well-conditioned draw for case %d" % n)
+            rows.append((seed, stream, draw + step, ra0, dec0, sigma, u1, u2, d_radec(v)))
+    return rows
+
+
+def sphere_rotation_rows():
+    """(seed, stream, draw, u1, u2, u3, r) over part of the grid."""
+    rows = []
+    for seed in SPHERE_SEEDS[:4]:
+        for stream in SPHERE_STREAMS:
+            for draw in (1, 2, 5):
+                r, u1, u2, u3 = sphere_rotation(seed, stream, draw)
+                rows.append((seed, stream, draw, u1, u2, u3, r))
+    return rows
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1350,9 +2019,145 @@ def gen_module():
                [(".true." if r[2] < f else ".false.")
                 for f in SAMPLE_FRACTIONS for r in samples])
     L.append("")
+    L += gen_sphere_tables()
     L.append("end module test_random_vectors")
     L.append("")
     return "\n".join(L)
+
+
+def bits64(x):
+    """The `transfer` bit pattern of a double (or a Decimal rounded to one), as an `int64` literal."""
+    return int_literal(struct.unpack("<q", struct.pack("<d", float(x)))[0], "int64")
+
+
+def gen_sphere_tables():
+    """The points-on-a-sphere section of the emitted module."""
+    dirs = sphere_direction_rows()
+    discs = sphere_disc_rows()
+    drds = sphere_disc_radec_rows()
+    balls = sphere_ball_rows()
+    vmfs = sphere_vmf_rows()
+    vrds = sphere_vmf_radec_rows()
+    rots = sphere_rotation_rows()
+
+    def logical(b):
+        return ".true." if b else ".false."
+
+    L = []
+    L.append("    ! ---- Points on a sphere: pf_sphere_algorithm ----")
+    L.append("    !")
+    L.append("    ! Every family is libm-backed, so no value below is exact contract. Each reference is")
+    L.append("    ! the mathematical transform at 60 significant digits, correctly rounded to double,")
+    L.append("    ! and the suite asserts a few ulp of it. The UNIFORMS a row names (*_u1_bits and")
+    L.append("    ! the rest) are exact: they are pf_random_at on the family's derived key -- the halves")
+    L.append("    ! of block draw-1, or the draw itself for a second label -- and pin the label and the")
+    L.append("    ! block mapping bit for bit.")
+    L.append("    !")
+    L.append("    ! A row is pinned only where the exact 2 - h is at least 0.1, h being 1 - cos of the")
+    L.append("    ! angle from the centre: nearer the antipode an ulp of h moves the point by eps/sin,")
+    L.append("    ! in any implementation. Vectors are flattened three per row, the rotation nine per")
+    L.append("    ! row in column order.")
+    for name, value in (("direction", "direction"), ("disc", "disc"), ("ball", "ball"),
+                        ("ball_radius", "ball_radius"), ("vmf", "vmf"), ("rotation", "rotation"),
+                        ("rotation_angle", "rotation_angle")):
+        L.append("    integer(int64), parameter :: sph_label_%s = %s"
+                 % (name, int_literal(SPHERE_LABELS[value], "int64")))
+    L.append("")
+
+    L.append("    ! pf_random_direction_at and pf_random_radec_at: the same point.")
+    L.append("    integer, parameter :: n_sdir = %d" % len(dirs))
+    L += array("integer(int64)", "sdir_seed", "n_sdir", [int_literal(r[0], "int64") for r in dirs])
+    L += array("integer(int64)", "sdir_stream", "n_sdir", [int_literal(r[1], "int64") for r in dirs])
+    L += array("integer(int64)", "sdir_draw", "n_sdir", [int_literal(r[2], "int64") for r in dirs])
+    L += array("integer(int64)", "sdir_u1_bits", "n_sdir", [bits64(r[3]) for r in dirs])
+    L += array("integer(int64)", "sdir_u2_bits", "n_sdir", [bits64(r[4]) for r in dirs])
+    L += array("integer(int64)", "sdir_v_bits", "3 * n_sdir", [bits64(x) for r in dirs for x in r[5]])
+    L += array("integer(int64)", "sdir_ra_bits", "n_sdir", [bits64(r[6][0]) for r in dirs])
+    L += array("integer(int64)", "sdir_dec_bits", "n_sdir", [bits64(r[6][1]) for r in dirs])
+    L.append("")
+
+    L.append("    ! pf_random_disc_at. sdisc_inner_given false means r_inner is left absent.")
+    L.append("    integer, parameter :: n_sdisc = %d" % len(discs))
+    L += array("integer(int64)", "sdisc_seed", "n_sdisc", [int_literal(r[0], "int64") for r in discs])
+    L += array("integer(int64)", "sdisc_stream", "n_sdisc", [int_literal(r[1], "int64") for r in discs])
+    L += array("integer(int64)", "sdisc_draw", "n_sdisc", [int_literal(r[2], "int64") for r in discs])
+    L += array("integer(int64)", "sdisc_centre_bits", "3 * n_sdisc", [bits64(x) for r in discs for x in r[3]])
+    L += array("integer(int64)", "sdisc_radius_bits", "n_sdisc", [bits64(r[4]) for r in discs])
+    L += array("integer(int64)", "sdisc_inner_bits", "n_sdisc", [bits64(r[5]) for r in discs])
+    L += array("logical", "sdisc_inner_given", "n_sdisc", [logical(r[6]) for r in discs])
+    L += array("integer(int64)", "sdisc_u1_bits", "n_sdisc", [bits64(r[7]) for r in discs])
+    L += array("integer(int64)", "sdisc_u2_bits", "n_sdisc", [bits64(r[8]) for r in discs])
+    L += array("integer(int64)", "sdisc_v_bits", "3 * n_sdisc", [bits64(x) for r in discs for x in r[9]])
+    L.append("")
+
+    L.append("    ! pf_random_disc_radec_at, in degrees.")
+    L.append("    integer, parameter :: n_sdrd = %d" % len(drds))
+    L += array("integer(int64)", "sdrd_seed", "n_sdrd", [int_literal(r[0], "int64") for r in drds])
+    L += array("integer(int64)", "sdrd_stream", "n_sdrd", [int_literal(r[1], "int64") for r in drds])
+    L += array("integer(int64)", "sdrd_draw", "n_sdrd", [int_literal(r[2], "int64") for r in drds])
+    L += array("integer(int64)", "sdrd_ra0_bits", "n_sdrd", [bits64(r[3]) for r in drds])
+    L += array("integer(int64)", "sdrd_dec0_bits", "n_sdrd", [bits64(r[4]) for r in drds])
+    L += array("integer(int64)", "sdrd_radius_bits", "n_sdrd", [bits64(r[5]) for r in drds])
+    L += array("integer(int64)", "sdrd_inner_bits", "n_sdrd", [bits64(r[6]) for r in drds])
+    L += array("logical", "sdrd_inner_given", "n_sdrd", [logical(r[7]) for r in drds])
+    L += array("integer(int64)", "sdrd_u1_bits", "n_sdrd", [bits64(r[8]) for r in drds])
+    L += array("integer(int64)", "sdrd_u2_bits", "n_sdrd", [bits64(r[9]) for r in drds])
+    L += array("integer(int64)", "sdrd_ra_bits", "n_sdrd", [bits64(r[10][0]) for r in drds])
+    L += array("integer(int64)", "sdrd_dec_bits", "n_sdrd", [bits64(r[10][1]) for r in drds])
+    L.append("")
+
+    L.append("    ! pf_random_ball_at. sball_u3_bits is the radius uniform, from the second label.")
+    L.append("    integer, parameter :: n_sball = %d" % len(balls))
+    L += array("integer(int64)", "sball_seed", "n_sball", [int_literal(r[0], "int64") for r in balls])
+    L += array("integer(int64)", "sball_stream", "n_sball", [int_literal(r[1], "int64") for r in balls])
+    L += array("integer(int64)", "sball_draw", "n_sball", [int_literal(r[2], "int64") for r in balls])
+    L += array("integer(int64)", "sball_radius_bits", "n_sball", [bits64(r[3]) for r in balls])
+    L += array("integer(int64)", "sball_inner_bits", "n_sball", [bits64(r[4]) for r in balls])
+    L += array("logical", "sball_inner_given", "n_sball", [logical(r[5]) for r in balls])
+    L += array("integer(int64)", "sball_u1_bits", "n_sball", [bits64(r[6]) for r in balls])
+    L += array("integer(int64)", "sball_u2_bits", "n_sball", [bits64(r[7]) for r in balls])
+    L += array("integer(int64)", "sball_u3_bits", "n_sball", [bits64(r[8]) for r in balls])
+    L += array("integer(int64)", "sball_p_bits", "3 * n_sball", [bits64(x) for r in balls for x in r[9]])
+    L.append("")
+
+    L.append("    ! pf_random_vmf_at, each case on both sides of the library's log1p switch.")
+    L.append("    integer, parameter :: n_svmf = %d" % len(vmfs))
+    L += array("integer(int64)", "svmf_seed", "n_svmf", [int_literal(r[0], "int64") for r in vmfs])
+    L += array("integer(int64)", "svmf_stream", "n_svmf", [int_literal(r[1], "int64") for r in vmfs])
+    L += array("integer(int64)", "svmf_draw", "n_svmf", [int_literal(r[2], "int64") for r in vmfs])
+    L += array("integer(int64)", "svmf_mu_bits", "3 * n_svmf", [bits64(x) for r in vmfs for x in r[3]])
+    L += array("integer(int64)", "svmf_kappa_bits", "n_svmf", [bits64(r[4]) for r in vmfs])
+    L += array("integer(int64)", "svmf_u1_bits", "n_svmf", [bits64(r[5]) for r in vmfs])
+    L += array("integer(int64)", "svmf_u2_bits", "n_svmf", [bits64(r[6]) for r in vmfs])
+    L += array("integer(int64)", "svmf_v_bits", "3 * n_svmf", [bits64(x) for r in vmfs for x in r[7]])
+    L.append("")
+
+    L.append("    ! pf_random_vmf_radec_at: kappa = 1/sigma**2 with sigma in radians, in the model exactly.")
+    L.append("    integer, parameter :: n_svrd = %d" % len(vrds))
+    L += array("integer(int64)", "svrd_seed", "n_svrd", [int_literal(r[0], "int64") for r in vrds])
+    L += array("integer(int64)", "svrd_stream", "n_svrd", [int_literal(r[1], "int64") for r in vrds])
+    L += array("integer(int64)", "svrd_draw", "n_svrd", [int_literal(r[2], "int64") for r in vrds])
+    L += array("integer(int64)", "svrd_ra0_bits", "n_svrd", [bits64(r[3]) for r in vrds])
+    L += array("integer(int64)", "svrd_dec0_bits", "n_svrd", [bits64(r[4]) for r in vrds])
+    L += array("integer(int64)", "svrd_sigma_bits", "n_svrd", [bits64(r[5]) for r in vrds])
+    L += array("integer(int64)", "svrd_u1_bits", "n_svrd", [bits64(r[6]) for r in vrds])
+    L += array("integer(int64)", "svrd_u2_bits", "n_svrd", [bits64(r[7]) for r in vrds])
+    L += array("integer(int64)", "svrd_ra_bits", "n_svrd", [bits64(r[8][0]) for r in vrds])
+    L += array("integer(int64)", "svrd_dec_bits", "n_svrd", [bits64(r[8][1]) for r in vrds])
+    L.append("")
+
+    L.append("    ! pf_random_rotation_at. srot_u3_bits is the third uniform, from the second label.")
+    L.append("    integer, parameter :: n_srot = %d" % len(rots))
+    L += array("integer(int64)", "srot_seed", "n_srot", [int_literal(r[0], "int64") for r in rots])
+    L += array("integer(int64)", "srot_stream", "n_srot", [int_literal(r[1], "int64") for r in rots])
+    L += array("integer(int64)", "srot_draw", "n_srot", [int_literal(r[2], "int64") for r in rots])
+    L += array("integer(int64)", "srot_u1_bits", "n_srot", [bits64(r[3]) for r in rots])
+    L += array("integer(int64)", "srot_u2_bits", "n_srot", [bits64(r[4]) for r in rots])
+    L += array("integer(int64)", "srot_u3_bits", "n_srot", [bits64(r[5]) for r in rots])
+    L += array("integer(int64)", "srot_r_bits", "9 * n_srot",
+               [bits64(r[6][i][j]) for r in rots for j in range(3) for i in range(3)])
+    L.append("")
+    return L
 
 
 def main():

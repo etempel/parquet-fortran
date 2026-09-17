@@ -22,7 +22,11 @@
 # Times `pf_random_*` against the intrinsic `random_number`, per value,
 # driving `bench/benchmark_random.f90`. Three arms: the `real64` and `real32` bulk fills (`call
 # random_number(v)` against `call pf_random_fill_draws(seed, s, v)`, the like-for-like array shape)
-# and a scalar loop (`call random_number(x)` against `x = pf_random_at(seed, i)`).
+# and a scalar loop (`call random_number(x)` against `x = pf_random_at(seed, i)`). Then three rows
+# for a point on a sphere -- the scalar `pf_random_direction_at` loop, `%direction` on a stream and
+# `pf_random_fill_direction` -- each against the two `pf_random_*` uniforms per direction it
+# replaces, so the price of the transform is measured rather than stated; their length is the
+# smaller of SCALAR and the largest of SIZES.
 #
 # Its result inverts between compilers, which is the reason to run it per machine rather than quote
 # a figure. On machine B the library costs 2.2x the intrinsic under gfortran 15.2 and 0.48x -- i.e.

@@ -43,7 +43,7 @@ in every one of them.
 | `parquet_version` | 2 | no | `parquet_get_version`: which parquet-fortran this is |
 | `parquet_temporal` | 1 | no | `parquet_date`, `parquet_time`, `parquet_timestamp` and their unit constants |
 | `parquet_strings` | 2 | no | `parquet_string_column` / `parquet_string`: packed, null-aware string storage |
-| `parquet_random` | 3 | no | counter-based random numbers and the four distributions |
+| `parquet_random` | 3 | no | counter-based random numbers, the distributions and the points-on-a-sphere family |
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types, plus `pf_sort_threads` |
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 15 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |

@@ -135,8 +135,10 @@ All the scalar draws are `pure elemental`, so they accept conformable arrays as 
 For bulk work, prefer the scalar call inside your own loop or one of the two fills; a whole-array
 elemental call over a constructed index array is much slower than any of them.
 
-Beyond the uniforms there are four **distributions** — exponential, normal, Gamma and Poisson. They
-are addressed the same way and are documented in [Distributions](#distributions) below.
+Beyond the uniforms there are the **distributions** — exponential, normal, truncated normal, Gamma
+and Poisson — and **points on a sphere**: directions, discs and rings, balls and shells, a
+Gaussian-like scatter and rotations. They are addressed the same way and are documented in
+[Distributions](#distributions) and [Points on a sphere](#points-on-a-sphere) below.
 
 ### Which fill: the two axes
 
@@ -272,6 +274,8 @@ The producers, with what each costs in words (positions are counted in 32-bit wo
 | `call rng%int_range(lo, hi, r)` | exactly-unbiased integer in `[lo, hi]` | 2 |
 | `call rng%fill(v)` | the next `size(v)` values | 2 or 1 each |
 | `call rng%fill(v, lo, hi)` | the next `size(v)` integers | 2 each |
+| `call rng%direction(v)`, `%radec`, `%disc`, `%disc_radec`, `%ball`, `%vmf`, `%vmf_radec`, `%rotation` | a point on a sphere; see [Points on a sphere](#points-on-a-sphere) | 4, block-aligned |
+| `call rng%address(seed, stream)` | the seed and stream index `%seed` was given | — |
 | `call rng%rewind([pos])` | sets the position; no argument means 1 | — |
 | `rng%position()` | the current position | — |
 
@@ -550,7 +554,7 @@ narrowing of `pf_random_at`, and does not visit the same values. That is deliber
 probability 2⁻⁵³ for the `real64` form — and 1.0 is unreachable by construction, so a caller may
 divide by `1 - x` but not by `x`.
 
-**Two identities are contract, and they are the only two.**
+**Two identities between the uniform generics are contract, and they are the only two.**
 
 - `pf_random_at(seed, i, draw)` is exactly `pf_random_bits_at(seed, i, draw)`'s top 53 bits scaled
   into `[0, 1)`.
@@ -684,6 +688,8 @@ that look interchangeable, because two of them are not.
 | `%normal_truncated(lo, hi)` | given libm | n/a (no bulk form) |
 | `%gamma(shape)` | given libm | n/a (no bulk form) |
 | `%poisson(lambda)` | given libm | n/a (no bulk form) |
+| `%direction`, `%radec`, `pf_random_direction_at`, `pf_random_radec_at`, `pf_random_fill_direction`, `pf_random_fill_radec` | given libm | **yes**, to a couple of ulp |
+| `%disc`, `%disc_radec`, `%ball`, `%vmf`, `%vmf_radec`, `%rotation` and their `pf_random_*_at` forms | given libm | n/a (no bulk form); the stream walk is the coordinate form, to a couple of ulp |
 
 Two things that table is saying, and both matter more than they look:
 
@@ -865,6 +871,7 @@ One per distribution family, separate from `pf_random_algorithm` and from each o
 | `pf_normal_truncated_algorithm` | the three proposals, the rule choosing between them, **both of that rule's thresholds**, each proposal's draw order, and which normal the straight-rejection case consumes |
 | `pf_gamma_algorithm` | the Marsaglia–Tsang variant, the `shape < 1` boost, **and which normal the inner loop consumes** |
 | `pf_poisson_algorithm` | both algorithms, the crossover `lambda`, and each one's draw order |
+| `pf_sphere_algorithm` | every points-on-a-sphere family: the direction's construction, the frame taking `+z` onto a centre, the von Mises–Fisher inverse, the ball's cube root, the rotation's quaternion, the family labels and the one-block-per-draw mapping |
 
 One more lives outside this module, and is listed here because a program recording contracts wants
 all of them in one place: **`parquet_sample_algorithm`** (from `parquet_core`, so `use parquet_io` or
@@ -884,11 +891,155 @@ value — a program recording only Gamma's identifier would otherwise miss it.
 `%position` stays exact for every producer, including the rejection-based ones: it reports where the
 stream *is*. What stops being possible is **predicting** it. A fixed-cost producer lets you compute
 where a stream will be after a known sequence of draws (`%uniform` 2 words, `%uniform32` 1, `%bits`
-2, `%int_range` 2, `%exp` 2, all of the last three pair-aligned); `%normal`, `%normal_portable`,
-`%normal_truncated`, `%gamma` and `%poisson` do not.
+2, `%int_range` 2, `%exp` 2, all of the last three pair-aligned, and every points-on-a-sphere
+producer 4, block-aligned); `%normal`, `%normal_portable`, `%normal_truncated`, `%gamma` and
+`%poisson` do not.
 
 So checkpoint and restart — save `%position()`, `%rewind` to it later — keeps working for every
 producer. Arithmetic on positions does not.
+
+## Points on a sphere
+
+Five families draw a point: a **direction** uniform on the sphere, a direction uniform within an
+angle of a centre (a **disc**, or a ring), a point uniform inside a **ball** (or a shell), a
+Gaussian-like scatter about a centre (the **von Mises–Fisher** distribution), and a uniform
+**rotation**. Each is addressed by `(seed, i, [draw])` like every other draw here, and each has a
+`pf_random_stream` producer. Every family that names a place on the sky also has an RA/Dec form.
+
+```fortran
+v = pf_random_direction_at(seed, i)                  ! a unit vector, uniform on the sphere
+call pf_random_radec_at(seed, i, ra, dec)            ! the same point, in degrees
+v = pf_random_disc_at(seed, i, axis, 0.1_real64)     ! within 0.1 radians of axis
+p = pf_random_ball_at(seed, i, 2.0_real64)           ! inside the ball of radius 2 about the origin
+v = pf_random_vmf_at(seed, i, axis, 400.0_real64)    ! scattered about axis, width about 1/sqrt(400)
+r = pf_random_rotation_at(seed, i)                   ! a 3 x 3 rotation matrix
+
+call pf_random_disc_radec_at(seed, i, 150.0_real64, -30.0_real64, 1.5_real64, ra, dec)   ! 1.5 deg
+call pf_random_vmf_radec_at(seed, i, 150.0_real64, -30.0_real64, 0.05_real64, ra, dec)   ! 0.05 deg
+```
+
+**Units follow the layer.** The vector forms take angles in radians and return vectors in whatever
+frame the centre you gave them is in. The RA/Dec forms take and return degrees, `ra` in `[0, 360)`
+and `dec` in `[-90, 90]`, and every radius argument there ends in `_deg`. A caller with an angle in
+degrees and a vector form writes `pf_random_disc_at(seed, i, axis, max_angle_deg * pi/180)`.
+
+**The two forms of one family are the same point, not two draws.** `pf_random_radec_at(seed, i)` is
+`pf_random_direction_at(seed, i)` read as a right ascension and declination; the RA/Dec disc and
+scatter are the vector forms about the converted centre. A program that wants the same point in two
+coordinate systems gets it; one that wants two points calls one form at two draws.
+
+**Different families are independent**, of each other and of every other draw in this module at the
+same coordinate: each reads its own derived sub-stream. A program drawing a weight with
+`pf_random_at` and a direction with `pf_random_direction_at` for the same particle gets two
+unrelated numbers, not a weight that secretly is the direction's `z`.
+
+### Directions and sky positions
+
+`pf_random_direction_at(seed, i, [draw])` returns a `real(real64)` vector of length 3 and length 1,
+built as Archimedes did: `z` uniform on `[-1, 1)` and an azimuth uniform on `[0, 2*pi)`.
+`pf_random_radec_at(seed, i, ra, dec, [draw])` is that point in degrees, and is `pure elemental`, so
+a whole catalogue is one statement:
+
+```fortran
+integer(int64) :: idx(n)
+real(real64) :: ra(n), dec(n)
+
+idx = [(k, k = 1, n)]
+call pf_random_radec_at(seed, idx, ra, dec)          ! row k is stream k
+```
+
+The vector forms are `pure` but cannot be elemental, since their result is an array. Loop over
+them, or use the draw-axis fills for the shape a mock catalogue wants:
+`pf_random_fill_direction(seed, i, v, [draw])` fills the columns of a `(3, n)` array and
+`pf_random_fill_radec(seed, i, ra, dec, [draw])` two arrays of one size, with element `k` the draw
+`draw + k - 1` of stream `i`. They are a
+convenience rather than a speed-up: a direction already uses a whole enciphering. Like every fill
+here they split at any boundary with identical results, and take no `threads=`.
+
+At a pole the right ascension is **0 by rule**: the declination alone says where a pole is, and
+the arctangent that would otherwise name a right ascension there is undefined.
+
+### Discs and rings
+
+`pf_random_disc_at(seed, i, centre, radius, [draw], [r_inner])` is uniform over the directions
+within `radius` radians of `centre` — the spherical cap. `centre` may have any nonzero length. With
+`r_inner`, directions closer than it are excluded, so a ring between two angles is the same call:
+
+```fortran
+v = pf_random_disc_at(seed, i, axis, 0.3_real64, r_inner=0.1_real64)   ! between 0.1 and 0.3 rad
+v = pf_random_disc_at(seed, i, axis, 0.3_real64, r_inner=0.3_real64)   ! on the circle at 0.3 rad
+v = pf_random_disc_at(seed, i, axis, pi/2, r_inner=pi/2)              ! in the plane normal to axis
+```
+
+`radius = 0` returns the centre, and a radius above `pi` is the whole sphere; an `r_inner` above
+`pi` clamps there too. The cosine of the angle from the centre is exactly uniform between the two
+bounds, which is what uniform per unit solid angle means. A flat disc of offsets in RA and Dec
+rotated onto the centre — the construction it is tempting to write by hand — is not: its density
+at the rim of a 30-degree disc is 15 % above its density at the centre.
+
+`pf_random_disc_radec_at(seed, i, ra0, dec0, radius_deg, ra, dec, [draw], [r_inner_deg])` is the
+same on the sky, and a disc may cross a pole or straddle `ra = 0` freely.
+
+These are the drawing counterparts of two searches in
+[Spatial neighbour search](spatial.html#search-on-the-sky): `pf_spatial_index%within_sky` finds the
+catalogue points already inside such a cap, and `%within_cone` the points inside a cone in space.
+
+**Small discs keep their size.** The offset from the centre is formed directly rather than as the
+difference of two cosines, so a disc of a thousandth of an arcsecond is as uniform as a disc of ten
+degrees; subtracting `cos(radius)` from 1 would round a disc that small onto its centre.
+
+### Balls and shells
+
+`pf_random_ball_at(seed, i, radius, [draw], [r_inner])` is uniform in volume inside the ball of
+`radius` about the origin, or in the shell between `r_inner` and `radius`. Add a centre at the call
+site. `radius = 0` is the origin. The radius is drawn so that `(r/radius)**3` is uniform, which is
+what uniform in volume requires; a radius drawn uniformly crowds the centre.
+
+### A Gaussian-like scatter: the von Mises–Fisher distribution
+
+`pf_random_vmf_at(seed, i, mu, kappa, [draw])` scatters directions about `mu` with a concentration
+`kappa >= 0`. `kappa = 0` is the uniform direction; a large `kappa` is a tight scatter whose offsets
+are Gaussian with a width of `1/sqrt(kappa)` radians per axis. Every `kappa` gives the right answer
+to the last few ulp: a concentration of `1e-30` is still uniform, and one of `1e12` a scatter of a
+microradian.
+
+`pf_random_vmf_radec_at(seed, i, ra0, dec0, sigma_deg, ra, dec, [draw])` takes the width an error
+ellipse is quoted in instead. It is `pf_random_vmf_at` with `kappa = 1/sigma**2`, `sigma` in
+radians, so a caller holding `kappa` uses the vector form.
+
+### Rotations
+
+`pf_random_rotation_at(seed, i, [draw])` returns a `(3, 3)` rotation matrix uniform over all
+rotations, proper (determinant +1). Apply it as `matmul(r, v)`; column `k` is where the `k`-th axis
+goes. Rotating a fixed model by it gives the model a uniformly random orientation.
+
+### Streams, the draw bound, and frames
+
+Each producer on `pf_random_stream` — `%direction(v)`, `%radec(ra, dec)`,
+`%disc(centre, radius, v, [r_inner])`, `%disc_radec(ra0, dec0, radius_deg, ra, dec, [r_inner_deg])`,
+`%ball(radius, p, [r_inner])`, `%vmf(mu, kappa, v)`, `%vmf_radec(ra0, dec0, sigma_deg, ra, dec)` and
+`%rotation(r)` — costs **one block, four words**, taken block-aligned, and returns the
+coordinate-addressed value at that block to a couple of ulp. So a stream walk and a loop of
+coordinate calls agree, as they do for `%exp`, and `%position` stays predictable.
+`call rng%address(seed, stream)` hands back the seed and stream index a stream was given, for a
+caller that needs to compute a coordinate draw at a stream's own coordinates.
+
+**`draw` is at most 2⁶²** in every points-on-a-sphere form, and a fill's last draw likewise; beyond
+it the call stops the program. One block per draw is why: block 2⁶² would read another generic's
+words.
+
+**The RA/Dec forms take no `frame=`, and need none.** The HEALPix layer names a frame because two
+declination conventions are in use and mixing them searches the wrong hemisphere (see
+[HEALPix](healpix.html)). A sampler whose input and output are both `(ra, dec)` gives the same
+answer under either convention: the two differ by a reflection, which maps the cap about
+`(ra0, dec0)` in one convention onto the cap about the same labels in the other and preserves its
+area. Converting one of these positions to a vector is where a frame enters, and that conversion is
+the caller's. A declination outside `[-90, 90]` is refused rather than folded back, since a disc
+about the mirrored position would be a plausible wrong answer.
+
+`pf_sphere_algorithm` freezes every value these forms produce, **for a given libm** — each needs a
+sine and a cosine — and there is no `_portable` form. A direction costs about two uniforms plus a
+sine, a cosine and a square root; `bench/benchmark_random.sh` measures the ratio.
 
 ## Weighted draws without replacement
 

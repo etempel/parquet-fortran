@@ -149,6 +149,18 @@ module parquet_random
     public :: parquet_debug_random_uses_int128
     public :: parquet_debug_random_uses_safe64
     public :: parquet_debug_random_block
+    ! ---- Points on a sphere ----
+    public :: pf_sphere_algorithm
+    public :: pf_random_direction_at
+    public :: pf_random_radec_at
+    public :: pf_random_disc_at
+    public :: pf_random_disc_radec_at
+    public :: pf_random_ball_at
+    public :: pf_random_vmf_at
+    public :: pf_random_vmf_radec_at
+    public :: pf_random_rotation_at
+    public :: pf_random_fill_direction
+    public :: pf_random_fill_radec
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
     !! key and counter layout, the word order, the integer rule and its retry key. Its value changes
@@ -248,6 +260,26 @@ module parquet_random
     character(len=*), parameter :: pf_normal_truncated_algorithm = &
         "normal_trunc:robert95-3case/naive+uniform+exptilt/normal=ziggurat256/libm/v1"
 
+    !> Identifies the points-on-a-sphere mappings: every part of every family that decides a value.
+    !!
+    !! One string covers all eight producers and both coordinate forms of each, on the rule the
+    !! exponential's identifier gives: a program recording a single string wants to know whether any
+    !! of them moved. It names, in order: `archimedes`, the direction's `z = 2*u1 - 1` and
+    !! `phi = 2*pi*u2`; `frame`, the right-handed frame that takes `+z` onto a centre (the normalised
+    !! centre crossed with the axis along which the caller's centre has its smallest component), and
+    !! the cap's `1 - cos` offset formed from half-angle sines; `vmfinv`, the von Mises-Fisher
+    !! inverse CDF on the `1 - u` convention, evaluated without cancellation at every `kappa`;
+    !! `cbrt`, the ball's radius as a cube root of a mixture written on the ratio `r_inner/radius`;
+    !! and `shoemake`, the quaternion construction and its expansion into a matrix. Behind all of them
+    !! sit the family labels, the one-block-per-draw mapping, the standard frame and the pole rule of
+    !! the RA/Dec forms.
+    !!
+    !! **Bit-identical for a given libm**: every family takes a sine and a cosine, and the vMF a
+    !! logarithm, from libm. There are no `_portable` forms, for the reason `%gamma_portable` does
+    !! not exist -- nothing here could keep the promise such a name would make.
+    character(len=*), parameter :: pf_sphere_algorithm = &
+        "sphere:archimedes+frame+vmfinv+cbrt+shoemake/libm/v1"
+
     !> Where the truncated normal's straddling arm switches from naive rejection to the uniform
     !! proposal. **Frozen contract; see `pf_normal_truncated_algorithm`.**
     !!
@@ -273,6 +305,46 @@ module parquet_random
     integer(int64), parameter :: normal_zig_label = 4839268151750326891_int64
     !> Label separating the coordinate-addressed polar form's sub-streams. See `normal_zig_label`.
     integer(int64), parameter :: normal_polar_label = 1572035988640217453_int64
+
+    ! ---- Points on a sphere: the family labels ----
+    !
+    ! **Not decoration -- `feature_risks.md` Risk-123**, for the reason `normal_zig_label` gives. A
+    ! direction consumes two uniforms, so a family reading the raw words at its own coordinate would
+    ! hand a caller who also draws `pf_random_at` there a weight that IS its direction's `z`. Each
+    ! family therefore reads `(pf_random_key(seed, label), i)` at block `draw - 1`, and the values
+    ! below need only differ from each other, from 0 and from every other label in the library;
+    ! `tools/generate_random_golden_vectors.py --self-test` reads them back from this file and checks
+    ! exactly that. The two coordinate forms of one family share its label on purpose: they are the
+    ! same point, not two draws.
+
+    !> Label of `pf_random_direction_at`, `pf_random_radec_at` and their stream and bulk forms.
+    integer(int64), parameter :: sphere_direction_label = 2349958352582825620_int64
+    !> Label of `pf_random_disc_at` and `pf_random_disc_radec_at`.
+    integer(int64), parameter :: sphere_disc_label = 3756084276780366762_int64
+    !> Label of `pf_random_ball_at`'s direction.
+    integer(int64), parameter :: sphere_ball_label = 8225117764143958046_int64
+    !> Label of `pf_random_ball_at`'s radius uniform, read at `(key, i, draw)` in `pf_random_at`'s grid.
+    integer(int64), parameter :: sphere_ball_radius_label = 8082096235867769506_int64
+    !> Label of `pf_random_vmf_at` and `pf_random_vmf_radec_at`.
+    integer(int64), parameter :: sphere_vmf_label = 2338640209577774087_int64
+    !> Label of `pf_random_rotation_at`'s first two uniforms.
+    integer(int64), parameter :: sphere_rotation_label = 6988326662294119861_int64
+    !> Label of `pf_random_rotation_at`'s third uniform, read at `(key, i, draw)` in `pf_random_at`'s grid.
+    integer(int64), parameter :: sphere_rotation_angle_label = 8949935999960278870_int64
+
+    !> `pi` in `real64`, private: this module imports no utility tier for a constant.
+    real(real64), parameter :: sphere_pi = 3.14159265358979323846264338327950288_real64
+    !> `2*pi`, the doubling of `sphere_pi` and so exact.
+    real(real64), parameter :: sphere_two_pi = 2.0_real64 * sphere_pi
+    !> Radians per degree, folded as a constant so every compiler rounds it the same way.
+    real(real64), parameter :: sphere_deg2rad = sphere_pi / 180.0_real64
+    !> Degrees per radian.
+    real(real64), parameter :: sphere_rad2deg = 180.0_real64 / sphere_pi
+    !> The exponent of the ball's cube root.
+    real(real64), parameter :: sphere_third = 1.0_real64 / 3.0_real64
+    !> The last draw a sphere family can address, `2**62`: one block per draw, and block `2**62` would
+    !! set bit 62 of the block index and read another word space silently.
+    integer(int64), parameter :: sphere_draw_max = 4611686018427387904_int64
 
     !> Smallest `u1**2 + u2**2` the polar form accepts, `2**-53`.
     !!
@@ -774,6 +846,169 @@ module parquet_random
         module procedure pf_random_fill_normal_portable_i64
     end interface pf_random_fill_normal_portable
 
+    ! ================================================================================
+    ! Tier 0 -- points on a sphere
+    ! ================================================================================
+    !
+    ! Five families, each addressed by `(seed, i, [draw])` like every draw in this module, each with
+    ! a vector form in radians and -- where a sky position means something -- an RA/Dec form in
+    ! degrees. What they share, and what is contract for all of them (`pf_sphere_algorithm`):
+    !
+    !   * **One block per draw.** A family reads the two halves of block `draw - 1` of its own
+    !     derived sub-stream `(pf_random_key(seed, label), i)`, plus one further uniform from a
+    !     second label for the ball and the rotation. Nothing rejects, so the cost is fixed and the
+    !     stream walk reaches the same value at the same draw.
+    !   * **Independence.** Each family has its own label, so two families at one coordinate are
+    !     two draws, and neither shares a bit with `pf_random_at` or any other generic there.
+    !   * **The two coordinate forms of one family are the SAME point**, not two draws: the RA/Dec
+    !     form is the vector form read in the standard frame. A program wanting two points calls one
+    !     form at two draws.
+    !   * **`draw` is at most `2**62`**, refused beyond it, since block `2**62` would set bit 62 of
+    !     the block index and read another word space silently.
+    !
+    ! **Why the RA/Dec forms take no `frame=`.** `parquet_healpix` refuses a free RA/Dec procedure
+    ! because two declination conventions are in live use and mixing them searches the wrong
+    ! hemisphere. A sampler whose input and output are BOTH `(ra, dec)` is immune: the mirrored
+    ! convention is a reflection in `z`, which maps the direction labelled `(ra, dec)` in one frame to
+    ! the one labelled `(ra, dec)` in the other and preserves angles and solid angle, so the cap about
+    ! `(ra0, dec0)` and its uniform measure are the same set of labels either way. The RA/Dec forms
+    ! compute in the standard frame, `z = sin(dec)`, and the answer is the same under either.
+
+    !> A direction uniformly distributed on the unit sphere: value `draw` (default 1) of stream `i`.
+    !!
+    !! `v = pf_random_direction_at(seed, i, [draw])`. `seed` and `draw` are `integer(int64)`; `i` is
+    !! `integer(int32)` or `integer(int64)`, the two giving identical values; the result is a
+    !! `real(real64)` vector of length 3 and length 1. `draw` below 1 clamps to 1 and above `2**62`
+    !! aborts. **Archimedes' construction**: `z = 2*u1 - 1` and an azimuth `2*pi*u2` from the two
+    !! halves of one block, so `z` is exactly uniform on `[-1, 1)` and `(0, 0, -1)` is reachable
+    !! exactly. `pure`, not `elemental` -- a rank-1 result cannot be -- so a loop, or
+    !! `pf_random_fill_direction`, draws many.
+    interface pf_random_direction_at
+        module procedure pf_random_direction_at_i32
+        module procedure pf_random_direction_at_i64
+    end interface pf_random_direction_at
+
+    !> `pf_random_direction_at`'s point, as a right ascension and declination in degrees.
+    !!
+    !! `call pf_random_radec_at(seed, i, ra, dec, [draw])`: `ra` in `[0, 360)` and `dec` in
+    !! `[-90, 90]`, both `real(real64)` and `intent(out)`; `seed`, `i` and `draw` as for
+    !! `pf_random_direction_at`. **The same point, not a second draw**: read in the standard frame,
+    !! `dec = atan2(z, hypot(x, y))`, and the right ascension of a pole is 0 by rule. `pure
+    !! elemental`, so an index array fills a whole catalogue in one statement, one stream per row.
+    interface pf_random_radec_at
+        module procedure pf_random_radec_at_i32
+        module procedure pf_random_radec_at_i64
+    end interface pf_random_radec_at
+
+    !> A direction uniformly distributed within an angular `radius` of `centre`, in radians.
+    !!
+    !! `v = pf_random_disc_at(seed, i, centre, radius, [draw], [r_inner])`. `centre` is a
+    !! `real(real64)` vector of length 3, any nonzero finite length, normalised internally; `radius`
+    !! is at least 0 and a value above `pi` is the whole sphere; `r_inner` in `[0, radius]` (default
+    !! 0) excludes the directions closer than it, so a ring between two angles costs no extra name
+    !! and `r_inner = radius` is the circle itself. The result is a unit vector in the caller's own
+    !! frame. `radius = 0` returns the normalised centre exactly. The cosine of the angle from the
+    !! centre is exactly uniform over the ring, and the azimuth about the centre is measured in a
+    !! right-handed frame fixed by `pf_sphere_algorithm`. A NaN, negative or infinite radius, an
+    !! `r_inner` outside `[0, radius]`, a centre that is zero, NaN or infinite, and a `draw` above
+    !! `2**62` abort, naming this procedure. `seed`, `i` and `draw` as for `pf_random_direction_at`.
+    interface pf_random_disc_at
+        module procedure pf_random_disc_at_i32
+        module procedure pf_random_disc_at_i64
+    end interface pf_random_disc_at
+
+    !> A sky position uniformly distributed within `radius_deg` of `(ra0, dec0)`, all in degrees.
+    !!
+    !! `call pf_random_disc_radec_at(seed, i, ra0, dec0, radius_deg, ra, dec, [draw], [r_inner_deg])`.
+    !! **The same point as `pf_random_disc_at`** with the centre converted in the standard frame and
+    !! both radii converted to radians. `ra0` is any finite value; `dec0` must lie in `[-90, 90]`, and
+    !! is refused outside it rather than read as the direction it names, because a cap about a
+    !! mirrored position is a plausible wrong answer nothing downstream could see; `dec0 = +/-90` is
+    !! the pole exactly, whatever `ra0` says. `radius_deg` above 180 is the whole sky;
+    !! `r_inner_deg` in `[0, radius_deg]` (default 0). `ra` in `[0, 360)` and `dec` in `[-90, 90]`
+    !! are `intent(out)`. `pure elemental`, so an index array draws a whole catalogue about one
+    !! centre, or about a centre per row.
+    interface pf_random_disc_radec_at
+        module procedure pf_random_disc_radec_at_i32
+        module procedure pf_random_disc_radec_at_i64
+    end interface pf_random_disc_radec_at
+
+    !> A point uniformly distributed inside the ball of `radius` about the origin, or in a shell.
+    !!
+    !! `p = pf_random_ball_at(seed, i, radius, [draw], [r_inner])`. `radius` is finite and at least
+    !! 0; `r_inner` in `[0, radius]` (default 0) makes it the shell between the two. The result is a
+    !! `real(real64)` vector of length 3; add a centre at the call site. A direction from the
+    !! family's first label times `radius * (q**3 + u*(1 - q**3))**(1/3)` with `q = r_inner/radius`
+    !! and `u` from its second label -- written on the ratio, so no `radius**3` can overflow.
+    !! `radius = 0` is the origin. Refusals as for `pf_random_disc_at`.
+    interface pf_random_ball_at
+        module procedure pf_random_ball_at_i32
+        module procedure pf_random_ball_at_i64
+    end interface pf_random_ball_at
+
+    !> A von Mises-Fisher direction about `mu` with concentration `kappa`: a Gaussian-like scatter.
+    !!
+    !! `v = pf_random_vmf_at(seed, i, mu, kappa, [draw])`. `mu` is any nonzero finite vector of length
+    !! 3; `kappa` is finite and at least 0, where 0 is the uniform direction and a large `kappa` a
+    !! tight scatter of per-axis width about `1/sqrt(kappa)` radians. The inverse of the distribution
+    !! of the cosine, `w = 1 + log(u' + (1 - u')*exp(-2*kappa))/kappa` with `u' = 1 - u`, evaluated
+    !! so that nothing cancels at any `kappa`: a tiny `kappa` still gives the uniform limit to the last
+    !! ulp and a huge one the centre. Refusals as for `pf_random_disc_at`, with `kappa` in place of the
+    !! radii.
+    interface pf_random_vmf_at
+        module procedure pf_random_vmf_at_i32
+        module procedure pf_random_vmf_at_i64
+    end interface pf_random_vmf_at
+
+    !> A von Mises-Fisher sky position about `(ra0, dec0)` with a Gaussian width `sigma_deg`.
+    !!
+    !! `call pf_random_vmf_radec_at(seed, i, ra0, dec0, sigma_deg, ra, dec, [draw])`. **The same point
+    !! as `pf_random_vmf_at` with `kappa = 1/sigma**2`, `sigma` in radians** -- the concentration whose
+    !! small-angle limit is an isotropic Gaussian with that per-axis width, the number an error
+    !! ellipse is quoted in. `sigma_deg` must be finite and strictly positive; the centre and the
+    !! outputs as for `pf_random_disc_radec_at`.
+    interface pf_random_vmf_radec_at
+        module procedure pf_random_vmf_radec_at_i32
+        module procedure pf_random_vmf_radec_at_i64
+    end interface pf_random_vmf_radec_at
+
+    !> A rotation matrix drawn uniformly from all rotations (the Haar measure).
+    !!
+    !! `r = pf_random_rotation_at(seed, i, [draw])`: a `real(real64)` array shaped `(3, 3)`, proper
+    !! (determinant +1) and orthonormal to rounding. Applied as `matmul(r, v)`, so column `k` is the
+    !! image of the `k`-th axis. Shoemake's construction: a uniform unit quaternion from three
+    !! uniforms, two from the family's first label and one from its second, expanded into a matrix.
+    interface pf_random_rotation_at
+        module procedure pf_random_rotation_at_i32
+        module procedure pf_random_rotation_at_i64
+    end interface pf_random_rotation_at
+
+    !> Fills the columns of `v` with consecutive directions of one stream, starting at `draw`.
+    !!
+    !! `call pf_random_fill_direction(seed, i, v, [draw])`: `v` is `real(real64)`, shaped `(3, n)`,
+    !! `intent(out)`, and column `k` is `pf_random_direction_at(seed, i, draw+k-1)` to a couple of ulp
+    !! -- a compiler may serve the sine and cosine from a vector libm in this loop and a scalar one
+    !! in the scalar call -- and exactly as far as chunking goes: a fill split anywhere agrees with a
+    !! whole one. `v` must have three rows even when it has no columns, and a zero-column fill is a
+    !! no-op. `draw + n - 1` must be at most `2**62`. No `threads=`, for the reason
+    !! `pf_random_fill_exp` gives. It amortises nothing -- a direction already uses a whole block --
+    !! and exists for the shape a mock catalogue wants.
+    interface pf_random_fill_direction
+        module procedure pf_random_fill_direction_i32
+        module procedure pf_random_fill_direction_i64
+    end interface pf_random_fill_direction
+
+    !> Fills `ra` and `dec` with consecutive sky positions of one stream, starting at `draw`.
+    !!
+    !! `call pf_random_fill_radec(seed, i, ra, dec, [draw])`: `ra` and `dec` are rank-1
+    !! `real(real64)` arrays of one size, `intent(out)`, and element `k` is
+    !! `pf_random_radec_at(seed, i, ra, dec, draw+k-1)` to a couple of ulp, exactly as far as
+    !! chunking goes. Arrays of different sizes abort; the rest as for `pf_random_fill_direction`.
+    interface pf_random_fill_radec
+        module procedure pf_random_fill_radec_i32
+        module procedure pf_random_fill_radec_i64
+    end interface pf_random_fill_radec
+
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
     !!
@@ -837,6 +1072,15 @@ module parquet_random
     !! the same coordinate rather than re-reading a word a previous draw already used. `%int_range`
     !! cost 4 words plus up to 3 of alignment until `pf_random_algorithm` reached `/v2`, when the
     !! integer generic's stride became 2.
+    !!
+    !! **The points-on-a-sphere producers cost one whole BLOCK, 4 words, block-aligned**:
+    !! `%direction`, `%radec`, `%disc`, `%disc_radec`, `%ball`, `%vmf`, `%vmf_radec` and `%rotation`
+    !! each advance to the next multiple of four words (up to 3 of alignment) and then past one
+    !! block, and the value is the coordinate-addressed one at draw `(position - 1)/4 + 1` of that
+    !! block. They read their family's own derived sub-stream at that block's index rather than the
+    !! raw words there, so a `%uniform` rewound onto the same block still sees those words fresh.
+    !! `%address` returns the seed and stream index `%seed` was given, which is what a caller needs
+    !! to compute a coordinate-addressed draw at a stream's own coordinates.
     !!
     !! **A producer whose cost is VARIABLE cannot be predicted, only observed.** Every producer
     !! listed above has a fixed cost, so a caller can compute where the stream will be after a
@@ -913,6 +1157,15 @@ module parquet_random
         !> Sets the position; with no argument, back to 1. Accepts any value `%position` gave.
         generic :: rewind => rewind_base, rewind_i32, rewind_i64
         procedure :: position => stream_position    !! Current 1-based word position.
+        procedure :: address => stream_address      !! The seed and stream index `%seed` was given.
+        procedure :: direction => stream_direction  !! Next uniform unit vector; one block, block-aligned.
+        procedure :: radec => stream_radec          !! `%direction`'s point as `(ra, dec)`, degrees; one block.
+        procedure :: disc => stream_disc            !! Next direction within an angle of a centre; one block.
+        procedure :: disc_radec => stream_disc_radec  !! `%disc` about `(ra0, dec0)`, degrees; one block.
+        procedure :: ball => stream_ball            !! Next point in a ball or shell; one block.
+        procedure :: vmf => stream_vmf              !! Next von Mises-Fisher direction; one block.
+        procedure :: vmf_radec => stream_vmf_radec  !! `%vmf` about `(ra0, dec0)` by `sigma_deg`; one block.
+        procedure :: rotation => stream_rotation    !! Next uniform rotation matrix; one block.
     end type pf_random_stream
 
 
@@ -1154,6 +1407,232 @@ contains
         integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
         call fill_normal_portable(seed, i, v, draw_or_1(draw))
     end subroutine pf_random_fill_normal_portable_i64
+
+    ! ================================================================================
+    ! Tier 0 -- points on a sphere: the specifics
+    ! ================================================================================
+
+    !> `pf_random_direction_at` for an `integer(int32)` stream index.
+    pure function pf_random_direction_at_i32(seed, i, draw) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64) :: v(3)                        !! a unit vector uniform on the sphere
+        v = direction_draw(seed, int(i, int64), sph_draw("pf_random_direction_at", draw))
+    end function pf_random_direction_at_i32
+
+    !> `pf_random_direction_at` for an `integer(int64)` stream index.
+    pure function pf_random_direction_at_i64(seed, i, draw) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64) :: v(3)                        !! a unit vector uniform on the sphere
+        v = direction_draw(seed, i, sph_draw("pf_random_direction_at", draw))
+    end function pf_random_direction_at_i64
+
+    !> `pf_random_radec_at` for an `integer(int32)` stream index.
+    pure elemental subroutine pf_random_radec_at_i32(seed, i, ra, dec, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        call sph_radec(direction_draw(seed, int(i, int64), sph_draw("pf_random_radec_at", draw)), ra, dec)
+    end subroutine pf_random_radec_at_i32
+
+    !> `pf_random_radec_at` for an `integer(int64)` stream index.
+    pure elemental subroutine pf_random_radec_at_i64(seed, i, ra, dec, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        call sph_radec(direction_draw(seed, i, sph_draw("pf_random_radec_at", draw)), ra, dec)
+    end subroutine pf_random_radec_at_i64
+
+    !> `pf_random_disc_at` for an `integer(int32)` stream index.
+    pure function pf_random_disc_at_i32(seed, i, centre, radius, draw, r_inner) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(in) :: centre(3)       !! the disc's centre; any nonzero finite length
+        real(real64), intent(in) :: radius          !! angular radius, radians, at least 0; above `pi` is the sphere
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64), intent(in), optional :: r_inner !! inner angular radius in `[0, radius]`; absent means 0
+        real(real64) :: v(3)                        !! a unit vector uniform in the disc or ring
+        v = disc_draw("pf_random_disc_at", seed, int(i, int64), sph_draw("pf_random_disc_at", draw), &
+                      centre, radius, r_inner)
+    end function pf_random_disc_at_i32
+
+    !> `pf_random_disc_at` for an `integer(int64)` stream index.
+    pure function pf_random_disc_at_i64(seed, i, centre, radius, draw, r_inner) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(in) :: centre(3)       !! the disc's centre; any nonzero finite length
+        real(real64), intent(in) :: radius          !! angular radius, radians, at least 0; above `pi` is the sphere
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64), intent(in), optional :: r_inner !! inner angular radius in `[0, radius]`; absent means 0
+        real(real64) :: v(3)                        !! a unit vector uniform in the disc or ring
+        v = disc_draw("pf_random_disc_at", seed, i, sph_draw("pf_random_disc_at", draw), &
+                      centre, radius, r_inner)
+    end function pf_random_disc_at_i64
+
+    !> `pf_random_disc_radec_at` for an `integer(int32)` stream index.
+    pure elemental subroutine pf_random_disc_radec_at_i32(seed, i, ra0, dec0, radius_deg, ra, dec, draw, r_inner_deg)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(in) :: ra0             !! right ascension of the centre, degrees; any finite value
+        real(real64), intent(in) :: dec0            !! declination of the centre, degrees, in `[-90, 90]`
+        real(real64), intent(in) :: radius_deg      !! angular radius, degrees, at least 0; above 180 is the sky
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64), intent(in), optional :: r_inner_deg !! inner radius, degrees, in `[0, radius_deg]`
+        call disc_radec_draw("pf_random_disc_radec_at", seed, int(i, int64), sph_draw("pf_random_disc_radec_at", draw), &
+                             ra0, dec0, radius_deg, ra, dec, r_inner_deg)
+    end subroutine pf_random_disc_radec_at_i32
+
+    !> `pf_random_disc_radec_at` for an `integer(int64)` stream index.
+    pure elemental subroutine pf_random_disc_radec_at_i64(seed, i, ra0, dec0, radius_deg, ra, dec, draw, r_inner_deg)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(in) :: ra0             !! right ascension of the centre, degrees; any finite value
+        real(real64), intent(in) :: dec0            !! declination of the centre, degrees, in `[-90, 90]`
+        real(real64), intent(in) :: radius_deg      !! angular radius, degrees, at least 0; above 180 is the sky
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64), intent(in), optional :: r_inner_deg !! inner radius, degrees, in `[0, radius_deg]`
+        call disc_radec_draw("pf_random_disc_radec_at", seed, i, sph_draw("pf_random_disc_radec_at", draw), &
+                             ra0, dec0, radius_deg, ra, dec, r_inner_deg)
+    end subroutine pf_random_disc_radec_at_i64
+
+    !> `pf_random_ball_at` for an `integer(int32)` stream index.
+    pure function pf_random_ball_at_i32(seed, i, radius, draw, r_inner) result(p)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(in) :: radius          !! the ball's radius; finite, at least 0
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64), intent(in), optional :: r_inner !! the shell's inner radius in `[0, radius]`; absent means 0
+        real(real64) :: p(3)                        !! a point uniform in the ball or shell about the origin
+        p = ball_draw("pf_random_ball_at", seed, int(i, int64), sph_draw("pf_random_ball_at", draw), radius, r_inner)
+    end function pf_random_ball_at_i32
+
+    !> `pf_random_ball_at` for an `integer(int64)` stream index.
+    pure function pf_random_ball_at_i64(seed, i, radius, draw, r_inner) result(p)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(in) :: radius          !! the ball's radius; finite, at least 0
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64), intent(in), optional :: r_inner !! the shell's inner radius in `[0, radius]`; absent means 0
+        real(real64) :: p(3)                        !! a point uniform in the ball or shell about the origin
+        p = ball_draw("pf_random_ball_at", seed, i, sph_draw("pf_random_ball_at", draw), radius, r_inner)
+    end function pf_random_ball_at_i64
+
+    !> `pf_random_vmf_at` for an `integer(int32)` stream index.
+    pure function pf_random_vmf_at_i32(seed, i, mu, kappa, draw) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(in) :: mu(3)           !! the mean direction; any nonzero finite length
+        real(real64), intent(in) :: kappa           !! the concentration; finite, at least 0
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64) :: v(3)                        !! a unit vector from the von Mises-Fisher distribution
+        v = vmf_draw("pf_random_vmf_at", seed, int(i, int64), sph_draw("pf_random_vmf_at", draw), mu, kappa)
+    end function pf_random_vmf_at_i32
+
+    !> `pf_random_vmf_at` for an `integer(int64)` stream index.
+    pure function pf_random_vmf_at_i64(seed, i, mu, kappa, draw) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(in) :: mu(3)           !! the mean direction; any nonzero finite length
+        real(real64), intent(in) :: kappa           !! the concentration; finite, at least 0
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64) :: v(3)                        !! a unit vector from the von Mises-Fisher distribution
+        v = vmf_draw("pf_random_vmf_at", seed, i, sph_draw("pf_random_vmf_at", draw), mu, kappa)
+    end function pf_random_vmf_at_i64
+
+    !> `pf_random_vmf_radec_at` for an `integer(int32)` stream index.
+    pure elemental subroutine pf_random_vmf_radec_at_i32(seed, i, ra0, dec0, sigma_deg, ra, dec, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(in) :: ra0             !! right ascension of the centre, degrees; any finite value
+        real(real64), intent(in) :: dec0            !! declination of the centre, degrees, in `[-90, 90]`
+        real(real64), intent(in) :: sigma_deg       !! per-axis Gaussian width, degrees; finite, above 0
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        call vmf_radec_draw("pf_random_vmf_radec_at", seed, int(i, int64), sph_draw("pf_random_vmf_radec_at", draw), &
+                            ra0, dec0, sigma_deg, ra, dec)
+    end subroutine pf_random_vmf_radec_at_i32
+
+    !> `pf_random_vmf_radec_at` for an `integer(int64)` stream index.
+    pure elemental subroutine pf_random_vmf_radec_at_i64(seed, i, ra0, dec0, sigma_deg, ra, dec, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(in) :: ra0             !! right ascension of the centre, degrees; any finite value
+        real(real64), intent(in) :: dec0            !! declination of the centre, degrees, in `[-90, 90]`
+        real(real64), intent(in) :: sigma_deg       !! per-axis Gaussian width, degrees; finite, above 0
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        call vmf_radec_draw("pf_random_vmf_radec_at", seed, i, sph_draw("pf_random_vmf_radec_at", draw), &
+                            ra0, dec0, sigma_deg, ra, dec)
+    end subroutine pf_random_vmf_radec_at_i64
+
+    !> `pf_random_rotation_at` for an `integer(int32)` stream index.
+    pure function pf_random_rotation_at_i32(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64) :: r(3, 3)                     !! a proper rotation matrix, uniform over all rotations
+        r = rotation_draw(seed, int(i, int64), sph_draw("pf_random_rotation_at", draw))
+    end function pf_random_rotation_at_i32
+
+    !> `pf_random_rotation_at` for an `integer(int64)` stream index.
+    pure function pf_random_rotation_at_i64(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
+        real(real64) :: r(3, 3)                     !! a proper rotation matrix, uniform over all rotations
+        r = rotation_draw(seed, i, sph_draw("pf_random_rotation_at", draw))
+    end function pf_random_rotation_at_i64
+
+    !> `pf_random_fill_direction` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_direction_i32(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: v(:, :)        !! shaped `(3, n)`; column `k` is draw `draw+k-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_direction(seed, int(i, int64), v, draw)
+    end subroutine pf_random_fill_direction_i32
+
+    !> `pf_random_fill_direction` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_direction_i64(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: v(:, :)        !! shaped `(3, n)`; column `k` is draw `draw+k-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_direction(seed, i, v, draw)
+    end subroutine pf_random_fill_direction_i64
+
+    !> `pf_random_fill_radec` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_radec_i32(seed, i, ra, dec, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: ra(:)          !! right ascensions, degrees; element `k` is draw `draw+k-1`
+        real(real64), intent(out) :: dec(:)         !! declinations, degrees; the same size as `ra`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_radec(seed, int(i, int64), ra, dec, draw)
+    end subroutine pf_random_fill_radec_i32
+
+    !> `pf_random_fill_radec` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_radec_i64(seed, i, ra, dec, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: ra(:)          !! right ascensions, degrees; element `k` is draw `draw+k-1`
+        real(real64), intent(out) :: dec(:)         !! declinations, degrees; the same size as `ra`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_radec(seed, i, ra, dec, draw)
+    end subroutine pf_random_fill_radec_i64
 
     !> `pf_random_fill_draws` filling `real64` from an `integer(int32)` stream index.
     pure subroutine pf_random_fill_draws_r64_i32(seed, i, v, draw)
@@ -1999,6 +2478,517 @@ contains
             call polar_normal(pf_random_key(root, draw + (k - 1_int64)), stream, 1_int64, v(k), pairs)
         end do
     end subroutine fill_normal_portable
+
+    ! ================================================================================
+    ! Points on a sphere: the mappings
+    ! ================================================================================
+    !
+    ! **Every refusal lives in a `pure` procedure that also PRODUCES what the draw uses** -- the
+    ! validated draw index, the normalised centre, the validated radii, the vMF offset, the
+    ! concentration -- never in a check-only call: ifx deletes a guard-only `pure` call at `-O0`
+    ! (`api-conventions.md`). A NaN is screened by `x /= x`, as its own statement, before any ordered
+    ! comparison or `min`/`max` could raise `IEEE_INVALID` on it -- `x /= x` rather than
+    ! `ieee_is_nan` because the screens run once per draw and `ieee_is_nan` is a runtime call under
+    ! ifx and nagfor; the price is one accepted `-Wcompare-reals` note per screen.
+    !
+    ! **Every small quantity is formed directly rather than as a difference.** The offset of a point
+    ! from its centre is carried as `h = 1 - cos(theta)`, never as `cos(theta)` subtracted from 1:
+    ! a disc of `1e-9` radians holds its points to about an ulp this way and would lose its whole
+    ! radius the other way, since `cos(1e-9)` and 1 are one double. The cap's two bounds come from
+    ! half-angle sines for the same reason, and the vMF offset from `atanh` and `sinh` wherever
+    ! `log(1 - x)` would cancel -- a `kappa` of `1e-30` otherwise puts every point at one pole.
+
+    !> A `real64` as message text, in `es` form so no leading zero or exponent width varies by compiler.
+    pure function sph_real_text(x) result(t)
+        real(real64), intent(in) :: x               !! the value to render
+        character(len=24) :: t                      !! the rendering, left-justified
+        if (x /= x) then
+            t = "NaN"
+        else if (abs(x) >= 1.0e100_real64 .or. (abs(x) > 0.0_real64 .and. abs(x) < 1.0e-99_real64)) then
+            write (t, '(es15.7e3)') x
+        else
+            write (t, '(es14.7)') x
+        end if
+        t = adjustl(t)
+    end function sph_real_text
+
+    !> The validated 1-based draw index of a sphere draw: absent means 1, below 1 clamps to 1, above
+    !! `2**62` aborts naming `who`.
+    pure function sph_draw(who, draw) result(d)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in), optional :: draw !! the caller's `draw`, present or not
+        integer(int64) :: d                          !! a draw index in `[1, 2**62]`
+        character(len=24) :: t
+        d = draw_or_1(draw)
+        if (d > sphere_draw_max) then
+            write (t, '(i0)') d
+            error stop who // ": draw must be at most 2**62 (got " // trim(t) // &
+                "); the sphere family addresses one block per draw"
+        end if
+    end function sph_draw
+
+    !> The validated first draw of a fill of `n > 0` values: as `sph_draw`, for the fill's LAST draw.
+    pure function sph_fill_start(who, draw, n) result(d)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in), optional :: draw !! the caller's starting `draw`, present or not
+        integer(int64), intent(in) :: n              !! how many values the fill draws; at least 1
+        integer(int64) :: d                          !! the first draw index; `d + n - 1 <= 2**62`
+        character(len=24) :: t, tn
+        d = draw_or_1(draw)
+        ! Compared as `d > max - (n - 1)`, which cannot overflow for any `n >= 1`, rather than by
+        ! forming the last draw, which can.
+        if (d > sphere_draw_max - (n - 1_int64)) then
+            write (t, '(i0)') d
+            write (tn, '(i0)') n
+            error stop who // ": draw must be at most 2**62 (got " // trim(t) // " + " // trim(tn) // &
+                " - 1); the sphere family addresses one block per draw"
+        end if
+    end function sph_fill_start
+
+    !> The two uniforms of one sphere draw: the halves of block `d - 1` of `(key, stream)`.
+    !!
+    !! They are exactly `pf_random_at(key, stream, 2*d - 1)` and `pf_random_at(key, stream, 2*d)`,
+    !! read from one enciphering; the block index is formed directly because `2*d` overflows at the
+    !! last admitted draw. `d` is already validated.
+    pure subroutine sph_pair(key, stream, d, u1, u2)
+        integer(int64), intent(in) :: key           !! the family's derived key
+        integer(int64), intent(in) :: stream        !! the stream index
+        integer(int64), intent(in) :: d             !! the draw, in `[1, 2**62]`
+        real(real64), intent(out) :: u1             !! the block's first uniform, in `[0, 1)`
+        real(real64), intent(out) :: u2             !! the block's second uniform, in `[0, 1)`
+        integer(int64) :: w0, w1, w2, w3
+        call random_block(key, stream, ior(DOM_REAL64, d - 1_int64), w0, w1, w2, w3)
+        u1 = to_real64(ior(ishft(w1, 32), w0))
+        u2 = to_real64(ior(ishft(w3, 32), w2))
+    end subroutine sph_pair
+
+    !> `centre` validated and normalised: scaled by its largest component first, so a vector like
+    !! `[1e-300, 0, 1e-300]` is a direction rather than a zero, then divided by its length.
+    pure function sph_unit(who, centre) result(c)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        real(real64), intent(in) :: centre(3)        !! any nonzero, finite vector
+        real(real64) :: c(3)                         !! the unit vector along it
+        real(real64) :: scale, length
+        if (centre(1) /= centre(1) .or. centre(2) /= centre(2) .or. centre(3) /= centre(3)) then
+            error stop who // ": the centre must be a nonzero, finite direction"
+        end if
+        scale = max(abs(centre(1)), abs(centre(2)), abs(centre(3)))
+        if (.not. (scale > 0.0_real64 .and. scale <= huge(scale))) then
+            error stop who // ": the centre must be a nonzero, finite direction"
+        end if
+        c = centre / scale
+        length = sqrt(c(1) * c(1) + c(2) * c(2) + c(3) * c(3))
+        c = c / length
+    end function sph_unit
+
+    !> The right-handed orthonormal frame `(e1, e2, c)` taking `+z` onto `c`. **Frozen contract.**
+    !!
+    !! `e1` is the normalised cross product of `c` with the coordinate axis along which the CALLER'S
+    !! vector has its smallest component (the lowest such axis on a tie), and `e2 = c x e1`. That axis
+    !! is never within 54.7 degrees of `c`, so the cross product never cancels. It is chosen from the
+    !! caller's vector rather than from `c` because a positive scaling cannot reorder the components
+    !! of the one while the rounding of the other can.
+    pure subroutine sph_frame(centre, c, e1, e2)
+        real(real64), intent(in) :: centre(3)       !! the caller's vector, which picks the axis
+        real(real64), intent(in) :: c(3)            !! its normalisation
+        real(real64), intent(out) :: e1(3)          !! the first frame vector, perpendicular to `c`
+        real(real64), intent(out) :: e2(3)          !! `c x e1`
+        real(real64) :: w(3), length
+        integer :: k
+        k = 1
+        if (abs(centre(2)) < abs(centre(k))) k = 2
+        if (abs(centre(3)) < abs(centre(k))) k = 3
+        select case (k)
+        case (1)
+            w = [0.0_real64, c(3), -c(2)]
+        case (2)
+            w = [-c(3), 0.0_real64, c(1)]
+        case default
+            w = [c(2), -c(1), 0.0_real64]
+        end select
+        length = sqrt(w(1) * w(1) + w(2) * w(2) + w(3) * w(3))
+        e1 = w / length
+        e2 = [c(2) * e1(3) - c(3) * e1(2), c(3) * e1(1) - c(1) * e1(3), c(1) * e1(2) - c(2) * e1(1)]
+    end subroutine sph_frame
+
+    !> `(radius, r_inner)` validated: `radius` finite and at least 0, `r_inner` in `[0, radius]`.
+    !!
+    !! `suffix` is `""` or `"_deg"`, so a message names the arguments as the caller spelled them.
+    pure function sph_radii(who, suffix, radius, r_inner) result(r)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        character(len=*), intent(in) :: suffix       !! `""` for radians, `"_deg"` for degrees
+        real(real64), intent(in) :: radius           !! the outer radius
+        real(real64), intent(in) :: r_inner          !! the inner radius
+        real(real64) :: r(2)                         !! `[radius, r_inner]`, unchanged
+        if (radius /= radius) then
+            error stop who // ": radius" // suffix // " must be finite and at least 0 (got NaN)"
+        end if
+        if (.not. (radius >= 0.0_real64 .and. radius <= huge(radius))) then
+            error stop who // ": radius" // suffix // " must be finite and at least 0 (got " // &
+                trim(sph_real_text(radius)) // ")"
+        end if
+        if (r_inner /= r_inner) then
+            error stop who // ": r_inner" // suffix // " must lie in [0, radius" // suffix // &
+                "] (got NaN against " // trim(sph_real_text(radius)) // ")"
+        end if
+        if (.not. (r_inner >= 0.0_real64 .and. r_inner <= radius)) then
+            error stop who // ": r_inner" // suffix // " must lie in [0, radius" // suffix // "] (got " // &
+                trim(sph_real_text(r_inner)) // " against " // trim(sph_real_text(radius)) // ")"
+        end if
+        r = [radius, r_inner]
+    end function sph_radii
+
+    !> The point at offset `h = 1 - cos(theta)` from `c` and azimuth `2*pi*u2` in the frame `(e1, e2)`.
+    !!
+    !! `h` is in `[0, 2]`, so `h*(2 - h)` -- the squared sine of `theta` -- is never negative.
+    pure function sph_place(c, e1, e2, h, u2) result(v)
+        real(real64), intent(in) :: c(3)            !! the centre, a unit vector
+        real(real64), intent(in) :: e1(3)           !! the frame's first vector
+        real(real64), intent(in) :: e2(3)           !! the frame's second vector
+        real(real64), intent(in) :: h               !! `1 - cos` of the angle from `c`, in `[0, 2]`
+        real(real64), intent(in) :: u2              !! the azimuth's uniform, in `[0, 1)`
+        real(real64) :: v(3)                        !! the unit vector placed there
+        real(real64) :: z, s, phi, cp, sp
+        z = 1.0_real64 - h
+        s = sqrt(h * (2.0_real64 - h))
+        phi = sphere_two_pi * u2
+        cp = cos(phi)
+        sp = sin(phi)
+        v = z * c + s * (cp * e1 + sp * e2)
+    end function sph_place
+
+    !> A sky position converted to a unit vector in the standard frame, `z = sin(dec)`, validated.
+    !!
+    !! **A declination of exactly +/-90 is the pole `(0, 0, +/-1)` by rule**, whatever `ra0` says:
+    !! `cos(90 * pi/180)` is `6.1e-17` rather than 0, a representation limit no formulation removes,
+    !! which is why it is stated as a rule (`pf_angdist_deg` makes the same one).
+    pure function sph_centre_radec(who, ra0, dec0) result(c)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        real(real64), intent(in) :: ra0              !! right ascension, degrees; any finite value
+        real(real64), intent(in) :: dec0             !! declination, degrees, in `[-90, 90]`
+        real(real64) :: c(3)                         !! the unit vector
+        real(real64) :: a, d, cd
+        if (ra0 /= ra0 .or. dec0 /= dec0) then
+            error stop who // ": the centre (ra0, dec0) must be finite with dec0 in [-90, 90] (got " // &
+                trim(sph_real_text(ra0)) // ", " // trim(sph_real_text(dec0)) // ")"
+        end if
+        if (.not. (abs(ra0) <= huge(ra0) .and. dec0 >= -90.0_real64 .and. dec0 <= 90.0_real64)) then
+            error stop who // ": the centre (ra0, dec0) must be finite with dec0 in [-90, 90] (got " // &
+                trim(sph_real_text(ra0)) // ", " // trim(sph_real_text(dec0)) // ")"
+        end if
+        if (dec0 == 90.0_real64) then
+            c = [0.0_real64, 0.0_real64, 1.0_real64]
+        else if (dec0 == -90.0_real64) then
+            c = [0.0_real64, 0.0_real64, -1.0_real64]
+        else
+            d = dec0 * sphere_deg2rad
+            a = ra0 * sphere_deg2rad
+            cd = cos(d)
+            c = [cd * cos(a), cd * sin(a), sin(d)]
+        end if
+    end function sph_centre_radec
+
+    !> A unit vector read as a sky position in the standard frame, in degrees.
+    !!
+    !! `dec = atan2(z, hypot(x, y))`, never `asin(z)`, which loses half its digits near a pole. **The
+    !! right ascension of a pole is 0 by rule**: `atan2(0, 0)` is prohibited by the standard and
+    !! nagfor answers it with a NaN and `IEEE_INVALID`. The `ra >= 360` fold is not redundant: a
+    !! right ascension a hair below 0 comes back as exactly 360 once 360 is added.
+    pure subroutine sph_radec(v, ra, dec)
+        real(real64), intent(in) :: v(3)            !! a unit vector
+        real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
+        if (v(1) == 0.0_real64 .and. v(2) == 0.0_real64) then
+            ra = 0.0_real64
+        else
+            ra = atan2(v(2), v(1)) * sphere_rad2deg
+            if (ra < 0.0_real64) ra = ra + 360.0_real64
+            if (ra >= 360.0_real64) ra = 0.0_real64
+        end if
+        dec = atan2(v(3), hypot(v(1), v(2))) * sphere_rad2deg
+    end subroutine sph_radec
+
+    !> The direction of draw `d` of `(key, stream)`: Archimedes' construction. `key` is derived.
+    !!
+    !! `z = 2*u1 - 1` is exact, and so are `1 - z` and `1 + z`, so the squared sine is one rounding.
+    pure function sph_direction_of_key(key, stream, d) result(v)
+        integer(int64), intent(in) :: key           !! the family's derived key
+        integer(int64), intent(in) :: stream        !! the stream index
+        integer(int64), intent(in) :: d             !! the draw, validated
+        real(real64) :: v(3)                        !! a unit vector
+        real(real64) :: u1, u2, z, s, phi
+        call sph_pair(key, stream, d, u1, u2)
+        z = (u1 + u1) - 1.0_real64
+        s = sqrt((1.0_real64 - z) * (1.0_real64 + z))
+        phi = sphere_two_pi * u2
+        v = [s * cos(phi), s * sin(phi), z]
+    end function sph_direction_of_key
+
+    !> `pf_random_direction_at`'s value at a validated draw: the one body its tiers share.
+    pure function direction_draw(seed, stream, d) result(v)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! the stream index
+        integer(int64), intent(in) :: d             !! the draw, validated
+        real(real64) :: v(3)                        !! a unit vector
+        v = sph_direction_of_key(key_from(seed, sphere_direction_label), stream, d)
+    end function direction_draw
+
+    !> `pf_random_disc_at`'s value at a validated draw: the one body its tiers and its RA/Dec form share.
+    !!
+    !! `h = 1 - cos(theta)` is uniform between the ring's two bounds, `2*sin(r_inner/2)**2` and
+    !! `2*sin(radius/2)**2`, their difference formed as a product of sines so a thin ring keeps its
+    !! width; both radii are clamped to `pi` first.
+    pure function disc_draw(who, seed, stream, d, centre, radius, r_inner) result(v)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64), intent(in) :: centre(3)        !! the disc's centre; any nonzero finite length
+        real(real64), intent(in) :: radius           !! the angular radius, radians
+        real(real64), intent(in), optional :: r_inner !! the inner angular radius, radians; absent means 0
+        real(real64) :: v(3)                         !! a unit vector in the disc or ring
+        real(real64) :: c(3), e1(3), e2(3), rr(2), ro, ri, s, h_in, dh, u1, u2, h
+        rr(2) = 0.0_real64
+        if (present(r_inner)) rr(2) = r_inner
+        rr = sph_radii(who, "", radius, rr(2))
+        c = sph_unit(who, centre)
+        call sph_frame(centre, c, e1, e2)
+        ro = min(rr(1), sphere_pi)
+        ri = min(rr(2), sphere_pi)
+        s = sin(0.5_real64 * ri)
+        h_in = 2.0_real64 * s * s
+        dh = 2.0_real64 * sin(0.5_real64 * (ro + ri)) * sin(0.5_real64 * (ro - ri))
+        call sph_pair(key_from(seed, sphere_disc_label), stream, d, u1, u2)
+        h = min(max(h_in + u1 * dh, 0.0_real64), 2.0_real64)
+        v = sph_place(c, e1, e2, h, u2)
+    end function disc_draw
+
+    !> `pf_random_disc_radec_at`'s value at a validated draw: `disc_draw` in degrees and the standard frame.
+    pure subroutine disc_radec_draw(who, seed, stream, d, ra0, dec0, radius_deg, ra, dec, r_inner_deg)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64), intent(in) :: ra0              !! the centre's right ascension, degrees
+        real(real64), intent(in) :: dec0             !! the centre's declination, degrees
+        real(real64), intent(in) :: radius_deg       !! the angular radius, degrees
+        real(real64), intent(out) :: ra              !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec             !! declination, degrees, in `[-90, 90]`
+        real(real64), intent(in), optional :: r_inner_deg !! the inner radius, degrees; absent means 0
+        real(real64) :: rr(2)
+        rr(2) = 0.0_real64
+        if (present(r_inner_deg)) rr(2) = r_inner_deg
+        rr = sph_radii(who, "_deg", radius_deg, rr(2))
+        call sph_radec(disc_draw(who, seed, stream, d, sph_centre_radec(who, ra0, dec0), &
+                                 rr(1) * sphere_deg2rad, rr(2) * sphere_deg2rad), ra, dec)
+    end subroutine disc_radec_draw
+
+    !> `pf_random_ball_at`'s value at a validated draw.
+    !!
+    !! The radius is `radius * (q**3 + u*(1 - q**3))**(1/3)` with `q = r_inner/radius`, and
+    !! `1 - q**3` is formed as `(1 - q)*(1 + q + q**2)` with `1 - q = (radius - r_inner)/radius`, so a
+    !! thin shell keeps its thickness.
+    pure function ball_draw(who, seed, stream, d, radius, r_inner) result(p)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64), intent(in) :: radius           !! the ball's radius
+        real(real64), intent(in), optional :: r_inner !! the shell's inner radius; absent means 0
+        real(real64) :: p(3)                         !! a point in the ball or shell
+        real(real64) :: rr(2), dir(3), u, q, omq, r
+        rr(2) = 0.0_real64
+        if (present(r_inner)) rr(2) = r_inner
+        rr = sph_radii(who, "", radius, rr(2))
+        dir = sph_direction_of_key(key_from(seed, sphere_ball_label), stream, d)
+        u = to_real64(bits_of(key_from(seed, sphere_ball_radius_label), stream, d, DOM_REAL64))
+        if (rr(1) <= 0.0_real64) then               ! 0 exactly: `sph_radii` refused below it
+            p = 0.0_real64
+        else
+            q = rr(2) / rr(1)
+            omq = (rr(1) - rr(2)) / rr(1)
+            r = rr(1) * ((q * q) * q + u * (omq * (1.0_real64 + q + q * q))) ** sphere_third
+            p = r * dir
+        end if
+    end function ball_draw
+
+    !> The vMF offset `h = 1 - w` from one uniform, validating `kappa`: the inverse CDF of the cosine.
+    !!
+    !! `h = -log(1 - x)/kappa` with `x = u*(1 - exp(-2*kappa))`, formed in whichever way cancels
+    !! nothing. `1 - exp(-2*kappa)` is `2*sinh(kappa)*exp(-kappa)`, exact to rounding at any `kappa`,
+    !! and exactly 1 from `kappa = 20` on, where `exp(-40)` is below half an ulp of 1. For `x <= 1/2`
+    !! the logarithm is `log1p(-x)`, written `-2*atanh(x/(2 - x))` because Fortran has no `log1p`;
+    !! above it, `1 - x` is the sum `(1 - u) + u*exp(-2*kappa)` of two non-negative terms. `kappa = 0`
+    !! is the uniform limit `h = 2*u`, taken as its own arm.
+    pure function sph_vmf_h(who, kappa, u) result(h)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        real(real64), intent(in) :: kappa            !! the concentration; finite, at least 0
+        real(real64), intent(in) :: u                !! the uniform, in `[0, 1)`
+        real(real64) :: h                            !! `1 - cos` of the angle from the mean, in `[0, 2]`
+        real(real64) :: em, ex, x
+        if (kappa /= kappa) then
+            error stop who // ": kappa must be finite and at least 0 (got NaN)"
+        end if
+        if (.not. (kappa >= 0.0_real64 .and. kappa <= huge(kappa))) then
+            error stop who // ": kappa must be finite and at least 0 (got " // trim(sph_real_text(kappa)) // ")"
+        end if
+        if (kappa <= 0.0_real64) then               ! 0 exactly: the validation above refused below it
+            h = u + u
+            return
+        end if
+        if (kappa >= 20.0_real64) then
+            em = 1.0_real64
+            ex = 0.0_real64
+        else
+            ex = exp(-2.0_real64 * kappa)
+            em = 2.0_real64 * sinh(kappa) * exp(-kappa)
+        end if
+        x = u * em
+        if (x <= 0.5_real64) then
+            h = 2.0_real64 * atanh(x / (2.0_real64 - x)) / kappa
+        else
+            h = -log((1.0_real64 - u) + u * ex) / kappa
+        end if
+        h = min(max(h, 0.0_real64), 2.0_real64)
+    end function sph_vmf_h
+
+    !> `pf_random_vmf_at`'s value at a validated draw: the one body its tiers and its RA/Dec form share.
+    pure function vmf_draw(who, seed, stream, d, mu, kappa) result(v)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64), intent(in) :: mu(3)            !! the mean direction; any nonzero finite length
+        real(real64), intent(in) :: kappa            !! the concentration
+        real(real64) :: v(3)                         !! a unit vector
+        real(real64) :: c(3), e1(3), e2(3), u1, u2, h
+        c = sph_unit(who, mu)
+        call sph_frame(mu, c, e1, e2)
+        call sph_pair(key_from(seed, sphere_vmf_label), stream, d, u1, u2)
+        h = sph_vmf_h(who, kappa, u1)
+        v = sph_place(c, e1, e2, h, u2)
+    end function vmf_draw
+
+    !> The concentration of a Gaussian width `sigma_deg`: `1/sigma**2` with `sigma` in radians, validated.
+    !!
+    !! A `sigma` so large that its square would overflow is the uniform limit, 0; one so small that its
+    !! square would underflow is the centre, a `kappa` of `1e300`, whose offsets are below `1e-149`
+    !! radians. Both are within an ulp of the draws they replace, and neither raises an IEEE flag:
+    !! `huge` would, since the offset `h` it gives is subnormal.
+    pure function sph_sigma_kappa(who, sigma_deg) result(kappa)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        real(real64), intent(in) :: sigma_deg        !! the width, degrees; finite, above 0
+        real(real64) :: kappa                        !! the concentration, radians**-2
+        real(real64) :: s
+        if (sigma_deg /= sigma_deg) then
+            error stop who // ": sigma_deg must be finite and strictly positive (got NaN)"
+        end if
+        if (.not. (sigma_deg > 0.0_real64 .and. sigma_deg <= huge(sigma_deg))) then
+            error stop who // ": sigma_deg must be finite and strictly positive (got " // &
+                trim(sph_real_text(sigma_deg)) // ")"
+        end if
+        s = sigma_deg * sphere_deg2rad
+        if (s >= 1.0e150_real64) then
+            kappa = 0.0_real64
+        else if (s <= 1.0e-150_real64) then
+            kappa = 1.0e300_real64
+        else
+            kappa = 1.0_real64 / (s * s)
+        end if
+    end function sph_sigma_kappa
+
+    !> `pf_random_vmf_radec_at`'s value at a validated draw: `vmf_draw` by width, in the standard frame.
+    pure subroutine vmf_radec_draw(who, seed, stream, d, ra0, dec0, sigma_deg, ra, dec)
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64), intent(in) :: ra0              !! the centre's right ascension, degrees
+        real(real64), intent(in) :: dec0             !! the centre's declination, degrees
+        real(real64), intent(in) :: sigma_deg        !! the per-axis width, degrees
+        real(real64), intent(out) :: ra              !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec             !! declination, degrees, in `[-90, 90]`
+        call sph_radec(vmf_draw(who, seed, stream, d, sph_centre_radec(who, ra0, dec0), &
+                                sph_sigma_kappa(who, sigma_deg)), ra, dec)
+    end subroutine vmf_radec_draw
+
+    !> `pf_random_rotation_at`'s value at a validated draw: Shoemake's uniform quaternion, as a matrix.
+    !!
+    !! `(x, y, z, w) = (a*sin(t1), a*cos(t1), b*sin(t2), b*cos(t2))` with `a = sqrt(1 - u1)`,
+    !! `b = sqrt(u1)`, `t1 = 2*pi*u2`, `t2 = 2*pi*u3`, and `w` the scalar part; `u1, u2` are the
+    !! halves of block `d - 1` of the first label and `u3` the uniform at `(key, stream, d)` of the
+    !! second. `r(3,3) = 2*u1 - 1` to rounding.
+    pure function rotation_draw(seed, stream, d) result(r)
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64) :: r(3, 3)                      !! a proper rotation matrix
+        real(real64) :: u1, u2, u3, a, b, t1, t2, qx, qy, qz, qw
+        call sph_pair(key_from(seed, sphere_rotation_label), stream, d, u1, u2)
+        u3 = to_real64(bits_of(key_from(seed, sphere_rotation_angle_label), stream, d, DOM_REAL64))
+        a = sqrt(1.0_real64 - u1)
+        b = sqrt(u1)
+        t1 = sphere_two_pi * u2
+        t2 = sphere_two_pi * u3
+        qx = a * sin(t1)
+        qy = a * cos(t1)
+        qz = b * sin(t2)
+        qw = b * cos(t2)
+        r(1, 1) = 1.0_real64 - 2.0_real64 * (qy * qy + qz * qz)
+        r(2, 1) = 2.0_real64 * (qx * qy + qz * qw)
+        r(3, 1) = 2.0_real64 * (qx * qz - qy * qw)
+        r(1, 2) = 2.0_real64 * (qx * qy - qz * qw)
+        r(2, 2) = 1.0_real64 - 2.0_real64 * (qx * qx + qz * qz)
+        r(3, 2) = 2.0_real64 * (qy * qz + qx * qw)
+        r(1, 3) = 2.0_real64 * (qx * qz + qy * qw)
+        r(2, 3) = 2.0_real64 * (qy * qz - qx * qw)
+        r(3, 3) = 1.0_real64 - 2.0_real64 * (qx * qx + qy * qy)
+    end function rotation_draw
+
+    !> `pf_random_fill_direction`'s body: the derived key hoisted, then one scalar draw per column.
+    pure subroutine fill_direction(seed, stream, v, draw)
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        real(real64), intent(out) :: v(:, :)         !! shaped `(3, n)`
+        integer(int64), intent(in), optional :: draw !! the caller's starting draw, present or not
+        integer(int64) :: n, k, d0, key
+        character(len=24) :: t
+        if (size(v, 1, kind=int64) /= 3_int64) then
+            write (t, '(i0)') size(v, 1, kind=int64)
+            error stop "pf_random_fill_direction: v must be shaped (3, n) (got " // trim(t) // " rows)"
+        end if
+        n = size(v, 2, kind=int64)
+        if (n <= 0_int64) return                    ! a zero-column fill is a defined no-op
+        d0 = sph_fill_start("pf_random_fill_direction", draw, n)
+        key = key_from(seed, sphere_direction_label)
+        do k = 1_int64, n
+            v(:, k) = sph_direction_of_key(key, stream, d0 + (k - 1_int64))
+        end do
+    end subroutine fill_direction
+
+    !> `pf_random_fill_radec`'s body: `fill_direction`'s loop, each direction read as a sky position.
+    pure subroutine fill_radec(seed, stream, ra, dec, draw)
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        real(real64), intent(out) :: ra(:)           !! right ascensions, degrees
+        real(real64), intent(out) :: dec(:)          !! declinations, degrees
+        integer(int64), intent(in), optional :: draw !! the caller's starting draw, present or not
+        integer(int64) :: n, k, d0, key
+        character(len=24) :: t, t2
+        if (size(ra, kind=int64) /= size(dec, kind=int64)) then
+            write (t, '(i0)') size(ra, kind=int64)
+            write (t2, '(i0)') size(dec, kind=int64)
+            error stop "pf_random_fill_radec: ra and dec must have the same size (got " // trim(t) // &
+                " and " // trim(t2) // ")"
+        end if
+        n = size(ra, kind=int64)
+        if (n <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        d0 = sph_fill_start("pf_random_fill_radec", draw, n)
+        key = key_from(seed, sphere_direction_label)
+        do k = 1_int64, n
+            call sph_radec(sph_direction_of_key(key, stream, d0 + (k - 1_int64)), ra(k), dec(k))
+        end do
+    end subroutine fill_radec
 
     ! ================================================================================
     ! Bulk fills
@@ -3961,6 +4951,119 @@ contains
         x = v
     end subroutine stream_normal_portable
 
+    !> `%address`: the seed and the stream index this stream was given by `%seed`.
+    !!
+    !! **The one sphere-era binding that is not a producer.** It exists so a caller can compute a
+    !! coordinate-addressed draw at a stream's own coordinates. It is a subroutine with two results
+    !! rather than two functions because the names they would need are taken: `%seed` is the
+    !! seeding generic, which cannot mix subroutines and functions, and `stream` is a component,
+    !! which a binding may not share a name with. A stream never seeded answers `0, 0`.
+    pure subroutine stream_address(self, seed, stream)
+        class(pf_random_stream), intent(in) :: self     !! the stream to query
+        integer(int64), intent(out) :: seed             !! the seed `%seed` was given
+        integer(int64), intent(out) :: stream           !! the stream index `%seed` was given
+        seed = self%key
+        stream = self%stream
+    end subroutine stream_address
+
+    !> `%direction`: the next uniform direction, taking one block, block-aligned.
+    !!
+    !! The value is `pf_random_direction_at(seed, stream, d)` for the block `d` it consumed, whatever
+    !! the cursor was beforehand; the raw words of that block are never read, so `%uniform` rewound
+    !! onto it sees them fresh.
+    pure subroutine stream_direction(self, v)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: v(3)               !! a unit vector uniform on the sphere
+        integer(int64) :: d
+        call take_block(self, d)
+        v = direction_draw(self%key, self%stream, d)
+    end subroutine stream_direction
+
+    !> `%radec`: `%direction`'s point as a sky position in degrees, taking one block.
+    pure subroutine stream_radec(self, ra, dec)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: ra                 !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec                !! declination, degrees, in `[-90, 90]`
+        integer(int64) :: d
+        call take_block(self, d)
+        call sph_radec(direction_draw(self%key, self%stream, d), ra, dec)
+    end subroutine stream_radec
+
+    !> `%disc`: the next direction within `radius` radians of `centre`, taking one block. See
+    !! `pf_random_disc_at` for the arguments and their refusals.
+    pure subroutine stream_disc(self, centre, radius, v, r_inner)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: centre(3)           !! the disc's centre; any nonzero finite length
+        real(real64), intent(in) :: radius              !! angular radius, radians, at least 0
+        real(real64), intent(out) :: v(3)               !! a unit vector uniform in the disc or ring
+        real(real64), intent(in), optional :: r_inner   !! inner angular radius in `[0, radius]`
+        integer(int64) :: d
+        call take_block(self, d)
+        v = disc_draw("pf_random_stream%disc", self%key, self%stream, d, centre, radius, r_inner)
+    end subroutine stream_disc
+
+    !> `%disc_radec`: `%disc` about a sky position, in degrees, taking one block. See
+    !! `pf_random_disc_radec_at`.
+    pure subroutine stream_disc_radec(self, ra0, dec0, radius_deg, ra, dec, r_inner_deg)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: ra0                 !! right ascension of the centre, degrees
+        real(real64), intent(in) :: dec0                !! declination of the centre, degrees, in `[-90, 90]`
+        real(real64), intent(in) :: radius_deg          !! angular radius, degrees, at least 0
+        real(real64), intent(out) :: ra                 !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec                !! declination, degrees, in `[-90, 90]`
+        real(real64), intent(in), optional :: r_inner_deg !! inner radius, degrees, in `[0, radius_deg]`
+        integer(int64) :: d
+        call take_block(self, d)
+        call disc_radec_draw("pf_random_stream%disc_radec", self%key, self%stream, d, ra0, dec0, radius_deg, &
+                             ra, dec, r_inner_deg)
+    end subroutine stream_disc_radec
+
+    !> `%ball`: the next point in the ball of `radius` about the origin, or in a shell, taking one
+    !! block. See `pf_random_ball_at`.
+    pure subroutine stream_ball(self, radius, p, r_inner)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: radius              !! the ball's radius; finite, at least 0
+        real(real64), intent(out) :: p(3)               !! a point uniform in the ball or shell
+        real(real64), intent(in), optional :: r_inner   !! the shell's inner radius in `[0, radius]`
+        integer(int64) :: d
+        call take_block(self, d)
+        p = ball_draw("pf_random_stream%ball", self%key, self%stream, d, radius, r_inner)
+    end subroutine stream_ball
+
+    !> `%vmf`: the next von Mises-Fisher direction about `mu`, taking one block. See `pf_random_vmf_at`.
+    pure subroutine stream_vmf(self, mu, kappa, v)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: mu(3)               !! the mean direction; any nonzero finite length
+        real(real64), intent(in) :: kappa               !! the concentration; finite, at least 0
+        real(real64), intent(out) :: v(3)               !! a unit vector
+        integer(int64) :: d
+        call take_block(self, d)
+        v = vmf_draw("pf_random_stream%vmf", self%key, self%stream, d, mu, kappa)
+    end subroutine stream_vmf
+
+    !> `%vmf_radec`: `%vmf` about a sky position by Gaussian width, in degrees, taking one block. See
+    !! `pf_random_vmf_radec_at`.
+    pure subroutine stream_vmf_radec(self, ra0, dec0, sigma_deg, ra, dec)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: ra0                 !! right ascension of the centre, degrees
+        real(real64), intent(in) :: dec0                !! declination of the centre, degrees, in `[-90, 90]`
+        real(real64), intent(in) :: sigma_deg           !! per-axis Gaussian width, degrees; above 0
+        real(real64), intent(out) :: ra                 !! right ascension, degrees, in `[0, 360)`
+        real(real64), intent(out) :: dec                !! declination, degrees, in `[-90, 90]`
+        integer(int64) :: d
+        call take_block(self, d)
+        call vmf_radec_draw("pf_random_stream%vmf_radec", self%key, self%stream, d, ra0, dec0, sigma_deg, ra, dec)
+    end subroutine stream_vmf_radec
+
+    !> `%rotation`: the next uniform rotation matrix, taking one block. See `pf_random_rotation_at`.
+    pure subroutine stream_rotation(self, r)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: r(3, 3)            !! a proper rotation matrix
+        integer(int64) :: d
+        call take_block(self, d)
+        r = rotation_draw(self%key, self%stream, d)
+    end subroutine stream_rotation
+
     !> `%fill` for a `real64` array.
     !!
     !! Routes to `fill_r64` whenever the position is pair-aligned, because the bulk fills walk
@@ -4075,8 +5178,9 @@ contains
     !! pattern an earlier producer had already handed out. Aligning costs at most ONE word, and is
     !! what keeps a stream's `%int_range` equal to the `pf_random_int_at` at the same coordinate.
     !!
-    !! It cost up to three words, and was called `align_to_block`, while the integer generic had
-    !! stride 4 and consumed a whole block per value.
+    !! It cost up to three words while the integer generic had stride 4 and consumed a whole block
+    !! per value; that whole-block alignment is `align_to_block` now, and the points-on-a-sphere
+    !! producers are what use it.
     pure subroutine align_to_pair(self)
         class(pf_random_stream), intent(inout) :: self  !! the stream to align
         if (modulo(self%pos, 2_int64) /= 0_int64) call advance_by(self, 1_int64)
@@ -4090,6 +5194,27 @@ contains
         draw = self%pos / 2_int64 + 1_int64
         call advance_by(self, 2_int64)
     end subroutine take_pair
+
+    !> Advances to the next whole-BLOCK boundary (a multiple of four words) if not already on one.
+    !!
+    !! The points-on-a-sphere producers need it: each addresses one whole block, so starting between
+    !! blocks would re-address a block whose words an earlier producer had handed out. Costs at most
+    !! three words.
+    pure subroutine align_to_block(self)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to align
+        integer(int64) :: r
+        r = modulo(self%pos, 4_int64)
+        if (r /= 0_int64) call advance_by(self, 4_int64 - r)
+    end subroutine align_to_block
+
+    !> Aligns to a block, then reserves it, returning the 1-based draw index the block occupies.
+    pure subroutine take_block(self, draw)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int64), intent(out) :: draw             !! draw index of the block reserved
+        call align_to_block(self)
+        draw = self%pos / 4_int64 + 1_int64
+        call advance_by(self, 4_int64)
+    end subroutine take_block
 
     !> One word of the stream, from the held block when it is the right one.
     !!

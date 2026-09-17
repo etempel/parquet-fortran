@@ -87,7 +87,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   building. `pf_interp_2d` is the same over values on a rectilinear grid, bilinear or bicubic.
   `pf_interp` is the one-shot form of both. Every binding that reads an object is pure, so one
   object may be shared read-only by any number of threads. Nothing is printed. An Arrow-free entry
-  module. See [Interpolation of tabulated data](doc/pages/utilities/interpolation.md).
+  module. `bench/benchmark_interpolate.sh` measures it. See
+  [Interpolation of tabulated data](doc/pages/utilities/interpolation.md).
 
 ### Changed
 

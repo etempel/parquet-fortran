@@ -37,6 +37,11 @@ paths:
 
 - **Warm the data before timing** on any lazy API (`%prefetch`/`%materialize_all` first), and warm
   the result array's pages (write once through every path before the timed loop).
+- **A job that allocates and frees large arrays inside the timed loop is timing glibc** until shown
+  otherwise: a freed block above the mmap or trim threshold goes back to the kernel, so every
+  repetition faults its pages in again and a per-element cost "rises with size". Rerun with
+  `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=4294967296` before
+  attributing the rise to the algorithm (`bench/benchmark_interpolate.sh`, `build` mode).
 - **Always `--profile release`, and VERIFY optimisation for both halves.** fpm has no release
   flags for flang or nagfor's C++ half: check
   `fpm build --profile release --show-model | grep -o 'fortran_compile_flags="[^"]*"'` and the

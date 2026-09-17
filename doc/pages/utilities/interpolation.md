@@ -183,11 +183,14 @@ slope of `"linear"` and the curvature of `"pchip"`.
 interpolant, since it is a polynomial on every segment. It is `pure`, not `elemental`; `b < a`
 negates it and `a == b` answers zero. Its work grows with the number of points between the limits.
 
-**Finding the segment** a query falls in is a bisection, except on an evenly spaced table, where it
-is arithmetic and cheaper. `%init` detects an even table by itself; there is nothing to declare.
-Both routes answer the same bits for every query, because the arithmetic answer is checked against
-the table before it is used: a table that is only nearly even is never evaluated on the wrong
-segment.
+**An evaluation is a search for the segment the query falls in, then a few multiplications.** The
+search is a bisection, except on an evenly spaced table, where it is arithmetic. `%init` detects an
+even table by itself; there is nothing to declare. A bisection does more work the longer the table,
+while the arithmetic does the same at any length, so even spacing saves more the longer the table
+is, and on a table of a few dozen points it may save nothing. Both routes answer the same bits for
+every query, because the arithmetic answer is checked against the table before it is used: a table
+that is only nearly even is never evaluated on the wrong segment. `bench/benchmark_interpolate.sh`
+times both routes on the same table.
 
 ## Outside the table
 
@@ -287,9 +290,10 @@ zq = pf_interp(x, y, z, xq, yq, method="linear")
 discards it; given a grid's values `z`, it evaluates at `(xq, yq)`, two scalars or two rank-1 arrays
 of one size. It takes the same optional arguments as `%init` and answers exactly what the object
 answers, bit for bit, because that is how it computes; its abort messages begin `pf_interp:`
-instead of `pf_interp_1d%init:` or `pf_interp_2d%init:`. The build is the expensive half, and this form repeats it on every
-call, so a table queried more than a handful of times wants an object instead. There is no
-one-shot derivative or integral: build an object.
+instead of `pf_interp_1d%init:` or `pf_interp_2d%init:`. The build is the expensive half, and this
+form repeats it on every call, so a table queried more than a handful of times wants an object
+instead; `bench/benchmark_interpolate.sh` compares the two. There is no one-shot derivative or
+integral: build an object.
 
 ## Threads
 

@@ -167,7 +167,7 @@ contains
         call evaluate_pass(0_int64, .true.)
         neval = np_use
         g = 0
-        nonfinite = count(.not. ieee_is_finite(fpop))
+        nonfinite = count(.not. is_finite_quiet(fpop))
 
         if (nonfinite == np_use) then
 
@@ -186,7 +186,7 @@ contains
             ! A non-finite individual is outside the objective's domain, not an error: carried as
             ! `+Infinity` so that every later `minloc`, `maxval` and `<` is ordered. Without this
             ! the very first `minloc` would compare a NaN, which nagfor traps on.
-            where (.not. ieee_is_finite(fpop)) fpop = ieee_value(1.0_real64, ieee_positive_inf)
+            where (.not. is_finite_quiet(fpop)) fpop = ieee_value(1.0_real64, ieee_positive_inf)
 
             ib = minloc(fpop, 1)
             if (present(history)) call history%append(pop(:,ib), fpop(ib))
@@ -235,14 +235,14 @@ contains
                 g = g + 1
                 call evaluate_pass(pf_random_key(seed, int(g, int64)), .false.)
                 neval = neval + np_use
-                nonfinite = nonfinite + count(.not. ieee_is_finite(ftrial))
+                nonfinite = nonfinite + count(.not. is_finite_quiet(ftrial))
 
                 ! Greedy one-to-one selection, element-wise and serial: individual `i` competes
                 ! with trial `i` and with nothing else, so no thread ever decides another's fate.
                 ! A non-finite trial never wins -- screened here rather than in the comparison,
                 ! which would raise IEEE invalid on the NaN.
                 do i = 1, np_use
-                    keep = ieee_is_finite(ftrial(i))
+                    keep = is_finite_quiet(ftrial(i))
                     if (keep) keep = (ftrial(i) <= fpop(i))
                     if (keep) then
                         pop(:,i) = trial(:,i)

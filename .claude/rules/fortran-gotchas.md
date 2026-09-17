@@ -210,6 +210,14 @@ done | sort | uniq -c | sort -rn
   `private()`. ifx forbids the `block` form for a type with allocatable components — see below.
 - **`-128_int8` trips the range check**; build the high bit with `ibset(0_int8, 7)`. An
   array-constructor implied-do index has no implicit type under `implicit none`; list the elements.
+- **`ieee_is_finite` over an array SIGNALS `IEEE_INVALID` on a quiet NaN once vectorised**: `where`
+  from `-O2` and `count` at `-O3` compile to `cmpnlepd`, while the scalar form is a quiet `ucomisd`
+  and `ieee_is_nan` vectorises to the quiet `cmpunordpd`. The default and `debug` profiles cannot
+  show it; `--profile release` can. A screen over values that may legitimately be NaN, on a path
+  that carries on rather than aborting, reads the exponent bits instead (`is_finite_quiet`,
+  `src/parquet_optimize_support.f90`; `test_de_nan_region`). To name the line: append
+  `-g -ffpe-trap=invalid` to `FPM_FFLAGS` in its own `FPM_BUILD_DIR`, then run the one test under
+  `lldb -b -o "process handle SIGFPE --stop true --pass false" -o run -o bt`.
 - **`-finit-*` does not reach an `allocate` payload**, so a clean `-finit-*` run does not rule out
   uninitialised memory (`-finit-real=zero`, not `=0`).
 - **`intent(out)`'s implicit reset has one confirmed counterexample** on a scalar `logical`

@@ -89,7 +89,9 @@ contains
             new_unittest("the solver object's own budget reaches every local run", &
                          test_multistart_solver_options), &
             new_unittest("no finite start is PF_OPT_NONFINITE, the box centre and +Inf", &
-                         test_multistart_nothing_finite) &
+                         test_multistart_nothing_finite), &
+            new_unittest("NaN starts are counted and skipped, and the best finite start wins", &
+                         test_multistart_some_nan_starts) &
             ]
 
     end subroutine collect_tests_optimize
@@ -679,14 +681,16 @@ contains
     !! never left the finite part of.
     !!
     !! **The IEEE_INVALID assertion is what makes the two NaN guards testable at all.** Deleting
-    !! either of them -- the `ieee_is_finite` screen on the selection, or the `+Infinity`
+    !! either of them -- the `is_finite_quiet` screen on the selection, or the `+Infinity`
     !! substitution that keeps a non-finite incumbent out of `minloc` and `maxval` -- changes no
     !! answer this test could otherwise see, because IEEE makes every ordered comparison against a
     !! NaN false and the right individual wins anyway. What changes is that `<=`, `minsd` and
     !! `maxsd` then SIGNAL on a NaN operand: invisible under gfortran and ifx, fatal under nagfor's
     !! default `-ieee=stop`, which would abort the whole runner on a build this machine cannot run.
     !! Reading the flag turns that into an ordinary assertion here. Both mutations were confirmed
-    !! to fail this test and nothing else.
+    !! to fail this test and nothing else. The screens themselves raise it too when written as
+    !! `ieee_is_finite` over an array, which gfortran vectorises into a signalling compare, so this
+    !! test fails under `--profile release` on that spelling and passes under the default profile.
     subroutine test_de_nan_region(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
         type(pf_optimize_info) :: info
@@ -1015,11 +1019,28 @@ contains
         type(pf_optimize_info) :: info
         type(unscreened_solver) :: solver
         real(real64) :: x(2), fmin, lo(2), hi(2)
+        logical :: flags_work, was_raised, raised
 
         lo = [-5.0_real64, -3.0_real64]
         hi = [4.0_real64, 6.0_real64]
+
+        ! The flag bracket is `test_de_nan_region`'s, written out in place for the same reason: a
+        ! helper procedure would have a flag signalling on its entry restored on its return.
+        flags_work = ieee_support_flag(ieee_invalid, 0.0_real64)
+        was_raised = .false.
+        if (flags_work) then
+            call ieee_get_flag(ieee_invalid, was_raised)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+
         call pf_minimize_multistart(always_nan, lo, hi, 42_int64, x, fmin, nstart=6, solver=solver, &
                                     info=info)
+
+        raised = .false.
+        if (flags_work) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, was_raised)
+        end if
 
         call check(error, info%status, PF_OPT_NONFINITE, "no finite start is its own status")
         if (allocated(error)) return
@@ -1040,7 +1061,86 @@ contains
         call check(error, info%spread > huge(1.0_real64), "and the spread must be +Infinity")
         if (allocated(error)) return
         call check(error, all(x == 0.5_real64*(lo + hi)), "the point reported is the box's centre")
+        if (allocated(error)) return
+        call check(error, .not. raised, &
+            "counting the NaN starts raised IEEE_INVALID, which is a silent flag under this " // &
+            "compiler and a fatal trap under nagfor's default -ieee=stop")
 
     end subroutine test_multistart_nothing_finite
+
+    !> NaN starts are counted and passed over, and the lowest finite start is the answer.
+    !!
+    !! The case between `test_multistart_basins` (every start finite) and
+    !! `test_multistart_nothing_finite` (none), and the only one reaching the driver's `+Infinity`
+    !! substitution and its per-start screen. `unscreened_solver` leaves each start where it is, so
+    !! the record's columns ARE the starts, and `nan_corner` re-evaluated on each is the reference.
+    !! Eight Latin-hypercube strata of width 1.25 over `[-5, 5]` guarantee the mix for any seed:
+    !! strata 7 and 8 lie wholly above 2, so at least two starts are NaN, and at most three starts
+    !! per coordinate lie in strata 6 to 8, so at least two have both coordinates below 2.
+    !!
+    !! The IEEE_INVALID assertion is `test_de_nan_region`'s, for the same reason, and its bracket is
+    !! written out in place for the reason `test_multistart_nothing_finite` gives.
+    subroutine test_multistart_some_nan_starts(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+        type(unscreened_solver) :: solver
+        real(real64) :: x(2), fmin, lo(2), hi(2), fk, fbest
+        integer :: k, nnan
+        logical :: flags_work, was_raised, raised
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+
+        flags_work = ieee_support_flag(ieee_invalid, 0.0_real64)
+        was_raised = .false.
+        if (flags_work) then
+            call ieee_get_flag(ieee_invalid, was_raised)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+
+        call pf_minimize_multistart(nan_corner, lo, hi, 7_int64, x, fmin, nstart=8, solver=solver, &
+                                    info=info, history=record)
+
+        raised = .false.
+        if (flags_work) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, was_raised)
+        end if
+
+        call check(error, record%n, 8, "one record per start")
+        if (allocated(error)) return
+
+        ! Only a value `ieee_is_nan` has passed reaches the ordered comparison.
+        nnan = 0
+        fbest = huge(1.0_real64)
+        do k = 1, record%n
+            fk = nan_corner(record%x(:,k))
+            if (ieee_is_nan(fk)) then
+                nnan = nnan + 1
+            else if (fk < fbest) then
+                fbest = fk
+            end if
+        end do
+
+        call check(error, nnan >= 2 .and. nnan <= 6, &
+            "vacuity guard: eight strata over [-5, 5] must give both NaN and finite starts")
+        if (allocated(error)) return
+        call check(error, info%nonfinite, nnan, "every NaN start counted, and nothing else")
+        if (allocated(error)) return
+        call check(error, info%status /= PF_OPT_NONFINITE, "a finite start exists, so a minimum does")
+        if (allocated(error)) return
+        call check(error, fmin == fbest, "the lowest finite start is the answer")
+        if (allocated(error)) return
+        call check(error, fmin == nan_corner(x), "and x is the start that value came from")
+        if (allocated(error)) return
+        call check(error, info%nminima >= 1, "a finite start is at least one minimum")
+        if (allocated(error)) return
+        call check(error, .not. raised, &
+            "a NaN start reached an ordered comparison or a signalling screen: IEEE_INVALID was " // &
+            "raised, which is a silent flag under this compiler and a fatal trap under nagfor's " // &
+            "default -ieee=stop")
+
+    end subroutine test_multistart_some_nan_starts
 
 end module test_optimize

@@ -106,7 +106,7 @@ contains
         end if
 
         ! ---- reduce, serially and in start order ---------------------------------------------
-        nonfinite = count(.not. ieee_is_finite(fs))
+        nonfinite = count(.not. is_finite_quiet(fs))
 
         if (present(history)) then
             history%n = 0
@@ -129,7 +129,7 @@ contains
 
             ! Carried as `+Infinity` so every comparison below is ordered: a NaN reaching `minloc`
             ! or `maxval` is wrong everywhere and traps under nagfor.
-            where (.not. ieee_is_finite(fs)) fs = ieee_value(1.0_real64, ieee_positive_inf)
+            where (.not. is_finite_quiet(fs)) fs = ieee_value(1.0_real64, ieee_positive_inf)
 
             ! The lowest value wins, and `minloc` gives the lowest index on a tie -- so a function
             ! with two equal minima always returns the same one, whatever the thread count.
@@ -146,7 +146,7 @@ contains
             tol(:) = xtol_use*(upper(:) - lower(:))
             nmin = 0
             do k = 1, ns
-                if (.not. ieee_is_finite(fs(k))) cycle
+                if (.not. is_finite_quiet(fs(k))) cycle
                 fresh = .true.
                 do m = 1, nmin
                     if (all(abs(xs(:,k) - reps(:,m)) <= tol(:))) then

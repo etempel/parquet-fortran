@@ -172,6 +172,14 @@ contains
 
     end procedure validate_box
 
+    module procedure is_finite_quiet
+
+        integer(int64), parameter :: EXPONENT_BITS = int(z'7FF0000000000000', int64) !! all-ones exponent
+
+        finite = iand(transfer(v, 0_int64), EXPONENT_BITS) /= EXPONENT_BITS
+
+    end procedure is_finite_quiet
+
     module procedure resolve_threads
 
         nt = 1

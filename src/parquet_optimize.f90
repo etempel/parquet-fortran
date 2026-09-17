@@ -673,6 +673,20 @@ module parquet_optimize
             character(len=*), intent(in), optional :: context     !! caller's call-site text
         end subroutine validate_box
 
+        !> Whether `v` is finite, read from its bits so that no NaN is ever compared.
+        !!
+        !! **The screen for a value that may legitimately be a NaN**: an objective value the
+        !! population tier treats as "outside my domain", on a path that carries on rather than
+        !! aborting. gfortran vectorises `ieee_is_finite` over an array (`where` from `-O2`, `count`
+        !! at `-O3`) into `cmpnlepd`, a SIGNALLING compare, so the very screen meant to keep a NaN
+        !! out of every ordered comparison raises IEEE invalid on it. An all-ones exponent field is
+        !! exactly a NaN or an infinity, and testing it is integer arithmetic, which raises nothing.
+        elemental module function is_finite_quiet(v) result(finite)
+            implicit none
+            real(real64), intent(in) :: v      !! the value screened
+            logical                  :: finite !! `v` is neither a NaN nor an infinity
+        end function is_finite_quiet
+
         !> Validates a `threads=` request and lowers it to what this process's affinity allows.
         !!
         !! **The one place either module resolves a thread count**, and the only call that can

@@ -105,6 +105,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   value-unsafe floating-point model too: ifx's default `-fp-model=fast`, which a FLAGLESS
   `fpm build` selects, rewrote the projection's division into a multiply by the reciprocal and
   dropped the on-axis points whose parameter is not representable (19 of 21 on a lattice row).
+- `parquet_write_column` and `parquet_write_column_chunk` no longer crash under ifx when a numeric
+  `values` or `is_valid` is a large non-contiguous array, such as a component section `data(:)%x`.
+- Many other minor fixes and improvements.
 
 ## [v2.4.0] - 2026-09-14
 

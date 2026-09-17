@@ -218,6 +218,14 @@ done | sort | uniq -c | sort -rn
   LHS** (`out%cache%x = self%cache%x` reports a spurious bound mismatch), and the same shape with a
   deferred-length character array segfaults on CI's gfortran while running clean locally. Use an
   explicit `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop.
+- **A derived-type component section (`data(:)%x`) reaches an assumed-shape dummy as a contiguous
+  copy made at the call**, where ifx passes it strided. A test meant to reach a callee's strided
+  path passes a stride section (`x(1::2)`), which stays strided under both
+  (`test_write_strided_arguments`); `--profile debug`'s `-fcheck=array-temps` names each copying line.
+- **A disassociated array POINTER is not an absent optional**, although F2018 15.5.2.12 says it
+  is: passed to an optional assumed-shape dummy it segfaults at the call at `-O0`, or arrives
+  `present` at `-O2`; ifx treats it as absent. Forward an absent optional dummy instead
+  (`write_strided_file`, `test/test_writing.f90`).
 - **Never pass a POINTER-VALUED FUNCTION RESULT straight to a procedure dummy**; bind it to a
   local pointer and pass that. `call sub(pick(name))` where `pick` returns
   `procedure(iface), pointer` is rejected outright by ifx (`error #6637: When a dummy argument is
@@ -261,8 +269,11 @@ done | sort | uniq -c | sort -rn
   does not override the profile.
 - **Never pass a FUNCTION RESULT or an ARRAY CONSTRUCTOR to an EXPLICIT-SHAPE array dummy**; assign
   to a named local (or a `parameter` when constant) and pass that, or `warning (406)` fires on every
-  call. A genuinely non-contiguous actual (`data(:)%id` into a `contiguous` dummy) is a mandated
-  copy-in, not a defect; the warning names the CALLEE, so check the actual at the outermost call.
+  call. **A genuinely non-contiguous actual reaching an assumed-size or explicit-shape dummy is
+  copied onto the STACK**, which dies with SIGSEGV once the copy passes the stack limit: library
+  code forwarding a caller's assumed-shape array to such a dummy tests `is_contiguous` and copies
+  into an allocatable itself (`parquet_write_int32_column`, `test_write_strided_arguments`). The
+  warning names the CALLEE, so check the actual at the outermost call.
   An I/O list section of an allocatable component warns; an implied-do over it is silent
   (`col_print`). Triage: `fpm test --profile debug 2>&1 | grep -c 'warning (406)'`.
 - **Two threads reaching `ERROR STOP` at once leave the exit status nondeterministic, including 0**

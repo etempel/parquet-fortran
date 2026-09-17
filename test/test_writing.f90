@@ -28,6 +28,24 @@ module test_writing
         logical :: flag
         logical, dimension(1:6) :: flag_arr
     end type test_output_type
+
+    !> The columns `test_write_strided_arguments` writes, each array twice the column's extent in every
+    !> dimension: the column is every other element (`i32(1::2)`, `m_i32(1::2, 1::2)`) and the elements
+    !> between are junk, so a copy that took the wrong stride writes junk.
+    type strided_fixture
+        integer(int32) :: i32(8) = -999_int32
+        integer(int64) :: i64(8) = -999_int64
+        real(real32) :: f32(8) = -999.0_real32
+        real(real64) :: f64(8) = -999.0_real64
+        logical :: flag(8) = .true.
+        logical :: ok(8) = .false.
+        integer(int32) :: m_i32(6, 8) = -999_int32
+        integer(int64) :: m_i64(6, 8) = -999_int64
+        real(real32) :: m_f32(6, 8) = -999.0_real32
+        real(real64) :: m_f64(6, 8) = -999.0_real64
+        logical :: m_flag(6, 8) = .true.
+        logical :: m_ok(6, 8) = .false.
+    end type strided_fixture
     !
 contains
     !
@@ -172,6 +190,8 @@ contains
                 test_streaming_write_single_row_group_roundtrip), &
             new_unittest("streaming row-group write: string and logical chunked columns round-trip", &
                 test_streaming_write_string_logical_roundtrip), &
+            new_unittest("every numeric write specific round-trips a strided values and is_valid", &
+                test_write_strided_arguments), &
             new_unittest("parquet_get_chunk_size(writer) reports what the writer was opened with, unchanged " // &
                 "by streaming", test_streaming_get_chunk_size), &
             new_unittest("streaming row-group write: a chunk is converted to the schema's declared numeric " // &
@@ -3705,6 +3725,179 @@ contains
             "streamed string/logical columns did not round-trip correctly")
     end subroutine test_streaming_write_string_logical_roundtrip
 
+    !> Every numeric write specific accepts a STRIDED `values` and a strided `is_valid` -- rank 1 for
+    !> the scalar specifics and rank 2 for the matrix ones, whole-column and chunked -- and writes
+    !> exactly what a contiguous copy of them holds, with the mask passed and without it.
+    !>
+    !> A specific copies such an argument into an allocatable itself before its flat worker's
+    !> assumed-size dummies see it (the note above the flat write workers in
+    !> src/parquet_write_numeric.f90): a copy the compiler makes at that call is an array temporary,
+    !> which ifx puts on the stack. Under ifx's debug profile a specific that left the copy to the
+    !> compiler prints `warning (406)` for its call here.
+    !>
+    !> The arguments are stride-2 sections of plain arrays, not component sections such as
+    !> `data(:)%x` (`write_test_data`'s shape): gfortran copies a component section at the CALLER's
+    !> call, so under gfortran one reaches the library contiguous and exercises nothing, while a
+    !> stride section reaches it strided under every compiler.
+    subroutine test_write_strided_arguments(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: masked_file = "test_run/test_write_strided_masked.parquet"
+        character(len=*), parameter :: bare_file = "test_run/test_write_strided_bare.parquet"
+        type(strided_fixture) :: fx
+        logical :: want(4), m_want(3, 4)
+        character(len=:), allocatable :: bad
+        integer :: i, k
+
+        do i = 1, 4
+            fx%i32(2*i - 1) = 10*i + 1
+            fx%i64(2*i - 1) = 3000000000_int64 + i
+            fx%f32(2*i - 1) = 0.5_real32*i
+            fx%f64(2*i - 1) = 0.25_real64*i
+            fx%flag(2*i - 1) = mod(i, 2) == 0
+            fx%ok(2*i - 1) = i /= 2
+            do k = 1, 3
+                fx%m_i32(2*k - 1, 2*i - 1) = 100*i + k
+                fx%m_i64(2*k - 1, 2*i - 1) = 4000000000_int64 + 10*i + k
+                fx%m_f32(2*k - 1, 2*i - 1) = 1.5_real32*(10*i + k)
+                fx%m_f64(2*k - 1, 2*i - 1) = 0.125_real64*(10*i + k)
+                fx%m_flag(2*k - 1, 2*i - 1) = mod(i + k, 2) == 0
+                fx%m_ok(2*k - 1, 2*i - 1) = .true.
+            end do
+        end do
+        fx%m_ok(1, 3) = .false.
+        fx%m_ok(5, 5) = .false.
+
+        call write_strided_file(masked_file, fx, fx%ok(1::2), fx%m_ok(1::2, 1::2))
+        call write_strided_file(bare_file, fx)
+
+        bad = ""
+        want = fx%ok(1::2)
+        m_want = fx%m_ok(1::2, 1::2)
+        call compare_strided_file(masked_file, fx, want, m_want, bad)
+        want = .true.
+        m_want = .true.
+        call compare_strided_file(bare_file, fx, want, m_want, bad)
+        call check(error, len(bad) == 0, "a strided values or is_valid did not round-trip through:" // bad)
+    end subroutine test_write_strided_arguments
+
+    !> Writes `fx`'s columns through all twenty numeric write specifics -- ten whole columns, and ten
+    !> chunked ones over two row groups of two rows -- every `values` a stride-2 section, and every
+    !> mask the caller's `ok`/`m_ok` (stride-2 sections too) when it passes them.
+    subroutine write_strided_file(filename, fx, ok, m_ok)
+        character(len=*), intent(in) :: filename !! the file to write.
+        type(strided_fixture), intent(in) :: fx !! the columns, with junk between their elements.
+        logical, intent(in), optional :: ok(:) !! every scalar column's mask; passed with `m_ok` or not at all.
+        logical, intent(in), optional :: m_ok(:,:) !! every matrix column's mask.
+        type(parquet_writer) :: writer
+        integer :: g, lo, hi
+
+        call parquet_open_writer(writer, filename, chunk_size=2)
+        call parquet_write_column(writer, "i32", fx%i32(1::2), is_valid=ok)
+        call parquet_write_column(writer, "i64", fx%i64(1::2), is_valid=ok)
+        call parquet_write_column(writer, "f32", fx%f32(1::2), is_valid=ok)
+        call parquet_write_column(writer, "f64", fx%f64(1::2), is_valid=ok)
+        call parquet_write_column(writer, "flag", fx%flag(1::2), is_valid=ok)
+        call parquet_write_column(writer, "m_i32", fx%m_i32(1::2, 1::2), is_valid=m_ok)
+        call parquet_write_column(writer, "m_i64", fx%m_i64(1::2, 1::2), is_valid=m_ok)
+        call parquet_write_column(writer, "m_f32", fx%m_f32(1::2, 1::2), is_valid=m_ok)
+        call parquet_write_column(writer, "m_f64", fx%m_f64(1::2, 1::2), is_valid=m_ok)
+        call parquet_write_column(writer, "m_flag", fx%m_flag(1::2, 1::2), is_valid=m_ok)
+        do g = 1, 2
+            lo = 2*g - 1
+            hi = 2*g
+            call parquet_new_row_group(writer, 2)
+            if (present(ok)) then
+                call write_strided_chunks(writer, fx, lo, hi, ok(lo:hi), m_ok(:, lo:hi))
+            else
+                call write_strided_chunks(writer, fx, lo, hi)
+            end if
+            call parquet_finish_row_group(writer)
+        end do
+        call parquet_close_writer(writer)
+    end subroutine write_strided_file
+
+    !> Rows `lo` to `hi` of `fx`'s ten chunked columns for `write_strided_file`, the masks forwarded as
+    !> they came. Row `r` of a column is element `2*r - 1` of its array.
+    subroutine write_strided_chunks(writer, fx, lo, hi, ok, m_ok)
+        type(parquet_writer), intent(inout) :: writer !! open writer, with the row group open.
+        type(strided_fixture), intent(in) :: fx !! the columns, with junk between their elements.
+        integer, intent(in) :: lo !! the row group's first row.
+        integer, intent(in) :: hi !! the row group's last row.
+        logical, intent(in), optional :: ok(:) !! the scalar columns' mask for these rows, or absent.
+        logical, intent(in), optional :: m_ok(:,:) !! the matrix columns' mask for these rows, or absent.
+        integer :: a, b
+
+        a = 2*lo - 1
+        b = 2*hi - 1
+        call parquet_write_column_chunk(writer, "c_i32", fx%i32(a:b:2), is_valid=ok)
+        call parquet_write_column_chunk(writer, "c_i64", fx%i64(a:b:2), is_valid=ok)
+        call parquet_write_column_chunk(writer, "c_f32", fx%f32(a:b:2), is_valid=ok)
+        call parquet_write_column_chunk(writer, "c_f64", fx%f64(a:b:2), is_valid=ok)
+        call parquet_write_column_chunk(writer, "c_flag", fx%flag(a:b:2), is_valid=ok)
+        call parquet_write_column_chunk(writer, "c_m_i32", fx%m_i32(1::2, a:b:2), is_valid=m_ok)
+        call parquet_write_column_chunk(writer, "c_m_i64", fx%m_i64(1::2, a:b:2), is_valid=m_ok)
+        call parquet_write_column_chunk(writer, "c_m_f32", fx%m_f32(1::2, a:b:2), is_valid=m_ok)
+        call parquet_write_column_chunk(writer, "c_m_f64", fx%m_f64(1::2, a:b:2), is_valid=m_ok)
+        call parquet_write_column_chunk(writer, "c_m_flag", fx%m_flag(1::2, a:b:2), is_valid=m_ok)
+    end subroutine write_strided_chunks
+
+    !> Reads back every column `write_strided_file` wrote, whole-column (no prefix) and chunked
+    !> (`c_`), and appends the name of each whose validity differs from `want`/`m_want`, or whose
+    !> values differ from `fx`'s where it is valid, to `bad`.
+    subroutine compare_strided_file(filename, fx, want, m_want, bad)
+        character(len=*), intent(in) :: filename !! the file to read.
+        type(strided_fixture), intent(in) :: fx !! the columns it was written from.
+        logical, intent(in) :: want(:) !! the expected validity of each scalar column.
+        logical, intent(in) :: m_want(:,:) !! the expected validity of each matrix column.
+        character(len=:), allocatable, intent(inout) :: bad !! the failing columns, appended.
+        type(parquet_reader) :: reader
+        integer(int32) :: i32(size(want)), m_i32(size(m_want, 1), size(m_want, 2))
+        integer(int64) :: i64(size(want)), m_i64(size(m_want, 1), size(m_want, 2))
+        real(real32) :: f32(size(want)), m_f32(size(m_want, 1), size(m_want, 2))
+        real(real64) :: f64(size(want)), m_f64(size(m_want, 1), size(m_want, 2))
+        logical :: flag(size(want)), m_flag(size(m_want, 1), size(m_want, 2))
+        logical :: ok(size(want)), m_ok(size(m_want, 1), size(m_want, 2))
+        character(len=2) :: pre
+        integer :: pass
+
+        call parquet_open_reader(reader, filename)
+        do pass = 1, 2
+            pre = merge("  ", "c_", pass == 1)
+            call parquet_read_column(reader, trim(pre) // "i32", i32, is_valid=ok)
+            if (.not. (all(ok .eqv. want) .and. all(pack(i32, want) == pack(fx%i32(1::2), want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "i32"
+            call parquet_read_column(reader, trim(pre) // "i64", i64, is_valid=ok)
+            if (.not. (all(ok .eqv. want) .and. all(pack(i64, want) == pack(fx%i64(1::2), want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "i64"
+            call parquet_read_column(reader, trim(pre) // "f32", f32, is_valid=ok)
+            if (.not. (all(ok .eqv. want) .and. all(pack(f32, want) == pack(fx%f32(1::2), want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "f32"
+            call parquet_read_column(reader, trim(pre) // "f64", f64, is_valid=ok)
+            if (.not. (all(ok .eqv. want) .and. all(pack(f64, want) == pack(fx%f64(1::2), want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "f64"
+            call parquet_read_column(reader, trim(pre) // "flag", flag, is_valid=ok)
+            if (.not. (all(ok .eqv. want) .and. all(pack(flag, want) .eqv. pack(fx%flag(1::2), want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "flag"
+            call parquet_read_column(reader, trim(pre) // "m_i32", m_i32, is_valid=m_ok)
+            if (.not. (all(m_ok .eqv. m_want) .and. all(pack(m_i32, m_want) == pack(fx%m_i32(1::2, 1::2), m_want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "m_i32"
+            call parquet_read_column(reader, trim(pre) // "m_i64", m_i64, is_valid=m_ok)
+            if (.not. (all(m_ok .eqv. m_want) .and. all(pack(m_i64, m_want) == pack(fx%m_i64(1::2, 1::2), m_want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "m_i64"
+            call parquet_read_column(reader, trim(pre) // "m_f32", m_f32, is_valid=m_ok)
+            if (.not. (all(m_ok .eqv. m_want) .and. all(pack(m_f32, m_want) == pack(fx%m_f32(1::2, 1::2), m_want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "m_f32"
+            call parquet_read_column(reader, trim(pre) // "m_f64", m_f64, is_valid=m_ok)
+            if (.not. (all(m_ok .eqv. m_want) .and. all(pack(m_f64, m_want) == pack(fx%m_f64(1::2, 1::2), m_want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "m_f64"
+            call parquet_read_column(reader, trim(pre) // "m_flag", m_flag, is_valid=m_ok)
+            if (.not. (all(m_ok .eqv. m_want) .and. &
+                       all(pack(m_flag, m_want) .eqv. pack(fx%m_flag(1::2, 1::2), m_want)))) &
+                bad = bad // " " // filename // ":" // trim(pre) // "m_flag"
+        end do
+        call parquet_close_reader(reader)
+    end subroutine compare_strided_file
+
     !> parquet_get_chunk_size(writer) reports what the writer was OPENED with -- the caller's own
     !> chunk_size=, or the schema-based estimate -- and streaming never changes it. That is the
     !> claim doc/pages/io/writing.md's "Picking rows_per_group" makes, and it is guarded by
@@ -4231,13 +4424,12 @@ contains
         call parquet_open_writer(writer, filename, schema, write_maml=write_maml)
 
         ! The `data(:)%<component>` arguments below are DELIBERATE and must not be packed into
-        ! contiguous locals to quieten a compiler: a derived-type component section is the natural
-        ! way to write a column out of an array of structures, so this is the one place the suite
-        ! exercises a strided actual argument reaching the writer at all. The library's public
-        ! dummies are `contiguous`, so each such call is argument-associated through a copy -- which
-        ! ifx reports as `forrtl: warning (406)` under the debug profile's `-check arg_temp_created`.
-        ! Those six warnings are the copy the contract promises, not a defect; every other 406 in
-        ! this suite was avoidable and has been removed.
+        ! contiguous locals: a derived-type component section is the natural way to write a column
+        ! out of an array of structures. Under ifx one reaches the writer strided, and the writer
+        ! copies it into an allocatable itself (the note above the flat write workers,
+        ! src/parquet_write_numeric.f90); gfortran copies it at this call instead, so under gfortran
+        ! these calls reach nothing strided. `test_write_strided_arguments` passes every numeric
+        ! specific stride sections, which stay strided under both.
         call parquet_write_column(writer, schema%cinfo%col(8)%name, arr_col)
         call parquet_write_column(writer, "id0", data(:)%id)
         call parquet_write_column(writer, schema%cinfo%col(12)%name, data(:)%flag)

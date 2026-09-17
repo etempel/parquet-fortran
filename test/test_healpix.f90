@@ -1889,6 +1889,7 @@ contains
         integer(int32), allocatable :: got32(:)
         integer(int64), allocatable :: got64(:)
         real(real64), parameter :: V(3) = [0.6_real64, -0.3_real64, 0.7416198487095663_real64]
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
         integer :: isch, scheme
         logical :: ok
 
@@ -1921,7 +1922,7 @@ contains
         ! a second walk rather than a replay. Asserted in RING, where the whole sphere comes back
         ! in ascending pixel order and any gap is visible.
         npix = 12_int64 * NS64 * NS64
-        call pf_query_disc_alloc(NS32, [0.0_real64, 0.0_real64, 1.0_real64], 4.0_real64, got32, n32)
+        call pf_query_disc_alloc(NS32, NORTH, 4.0_real64, got32, n32)
         call check(error, int(n32, int64), npix, &
                    "an int32 disc past pi/2 radians should still hold every pixel")
         if (allocated(error)) return

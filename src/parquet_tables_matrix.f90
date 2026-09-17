@@ -190,10 +190,12 @@ contains
     module procedure set_matrix_i32
         integer, allocatable :: slots(:)
         integer(int32), allocatable :: buf(:)
+        integer(int64) :: arr_dims(2), mask_dims(2)
         integer :: k
         !
-        call matrix_prepare_write(self, names, arr_shape(size(arr, 1), size(arr, 2, kind=int64)), &
-            "set_matrix", slots, is_valid_shaped(is_valid))
+        arr_dims = arr_shape(size(arr, 1), size(arr, 2, kind=int64))
+        mask_dims = is_valid_shaped(is_valid)
+        call matrix_prepare_write(self, names, arr_dims, "set_matrix", slots, mask_dims)
         call matrix_check_kinds(self, slots, names, [PK_INT32], "int32", "set_matrix")
         do k = 1, size(slots)
             buf = arr(k, :)
@@ -213,10 +215,12 @@ contains
     module procedure set_matrix_i64
         integer, allocatable :: slots(:)
         integer(int64), allocatable :: buf(:)
+        integer(int64) :: arr_dims(2), mask_dims(2)
         integer :: k
         !
-        call matrix_prepare_write(self, names, arr_shape(size(arr, 1), size(arr, 2, kind=int64)), &
-            "set_matrix", slots, is_valid_shaped(is_valid))
+        arr_dims = arr_shape(size(arr, 1), size(arr, 2, kind=int64))
+        mask_dims = is_valid_shaped(is_valid)
+        call matrix_prepare_write(self, names, arr_dims, "set_matrix", slots, mask_dims)
         call matrix_check_kinds(self, slots, names, [PK_INT64], "int64", "set_matrix")
         do k = 1, size(slots)
             buf = arr(k, :)
@@ -236,10 +240,12 @@ contains
     module procedure set_matrix_f32
         integer, allocatable :: slots(:)
         real(real32), allocatable :: buf(:)
+        integer(int64) :: arr_dims(2), mask_dims(2)
         integer :: k
         !
-        call matrix_prepare_write(self, names, arr_shape(size(arr, 1), size(arr, 2, kind=int64)), &
-            "set_matrix", slots, is_valid_shaped(is_valid))
+        arr_dims = arr_shape(size(arr, 1), size(arr, 2, kind=int64))
+        mask_dims = is_valid_shaped(is_valid)
+        call matrix_prepare_write(self, names, arr_dims, "set_matrix", slots, mask_dims)
         call matrix_check_kinds(self, slots, names, [PK_FLOAT32], "float32", "set_matrix")
         do k = 1, size(slots)
             buf = arr(k, :)
@@ -259,10 +265,12 @@ contains
     module procedure set_matrix_f64
         integer, allocatable :: slots(:)
         real(real64), allocatable :: buf(:)
+        integer(int64) :: arr_dims(2), mask_dims(2)
         integer :: k
         !
-        call matrix_prepare_write(self, names, arr_shape(size(arr, 1), size(arr, 2, kind=int64)), &
-            "set_matrix", slots, is_valid_shaped(is_valid))
+        arr_dims = arr_shape(size(arr, 1), size(arr, 2, kind=int64))
+        mask_dims = is_valid_shaped(is_valid)
+        call matrix_prepare_write(self, names, arr_dims, "set_matrix", slots, mask_dims)
         call matrix_check_kinds(self, slots, names, [PK_FLOAT64], "float64", "set_matrix")
         do k = 1, size(slots)
             buf = arr(k, :)
@@ -282,10 +290,12 @@ contains
     module procedure set_matrix_bool
         integer, allocatable :: slots(:)
         logical, allocatable :: buf(:)
+        integer(int64) :: arr_dims(2), mask_dims(2)
         integer :: k
         !
-        call matrix_prepare_write(self, names, arr_shape(size(arr, 1), size(arr, 2, kind=int64)), &
-            "set_matrix", slots, is_valid_shaped(is_valid))
+        arr_dims = arr_shape(size(arr, 1), size(arr, 2, kind=int64))
+        mask_dims = is_valid_shaped(is_valid)
+        call matrix_prepare_write(self, names, arr_dims, "set_matrix", slots, mask_dims)
         call matrix_check_kinds(self, slots, names, [PK_LOGICAL], "logical", "set_matrix")
         do k = 1, size(slots)
             buf = arr(k, :)
@@ -402,6 +412,10 @@ contains
     !! to do with it. `mask_shape` is `[0, 0]` when no mask was passed -- an absent optional
     !! cannot be forwarded through a non-optional dummy, and the alternative (five copies of the
     !! same two comparisons) is what this worker exists to avoid.
+    !!
+    !! Callers pass both pairs as named locals, never `arr_shape(...)` or `is_valid_shaped(...)`
+    !! written into the call: ifx argument-associates a function result with an explicit-shape
+    !! dummy through a temporary, which `-check all` reports on every call (`fortran-gotchas.md`).
     subroutine matrix_prepare_write(self, names, arr_dims, proc, slots, mask_dims)
         class(parquet_table), intent(inout) :: self    !! the table.
         character(len=*), intent(in) :: names(:)       !! the columns named by the caller.

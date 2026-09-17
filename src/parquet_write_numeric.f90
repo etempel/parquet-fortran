@@ -954,6 +954,36 @@ contains
     ! A caller that supplied no `is_valid` leaves `vmask` disassociated, which makes it ABSENT at
     ! every `optional` dummy it is passed on to (F2018 15.5.2.12) -- so the qc checker and
     ! parquet_make_valid_buf_write take their own no-mask paths without this code branching again.
+    !
+    ! A STRIDED ARGUMENT IS COPIED BY THE PUBLIC SPECIFIC, never by the compiler. `flat` and `valid`
+    ! are assumed-size, so a `values` or `is_valid` that is not contiguous -- a component section such
+    ! as `data(:)%x`, the natural way to write a column out of an array of structures -- needs a
+    ! contiguous copy to associate with them. Left to the compiler, that copy is an array temporary
+    ! made at the call, and ifx makes it on the STACK: a column of a few million values overflows a
+    ! default 8 MiB stack and the write dies with SIGSEGV (gfortran's copy is on the heap), and
+    ! ifx's `-check arg_temp_created` reports every such call as `warning (406)`. So each specific
+    ! tests both arguments and, when either is strided, copies both into allocatables and passes
+    ! those, an unallocated `valid_c` standing for an absent mask (F2018 15.5.2.12); a contiguous
+    ! call takes the path it always did. `test_write_strided_arguments` (test/test_writing.f90)
+    ! passes every specific a strided `values`, with a strided mask and without one.
+
+    !> `.true.` unless a scalar column's validity mask was passed and is strided: the mask half of the
+    !> test each public numeric write specific makes before calling its flat worker (note above).
+    pure function is_contiguous_or_absent_r1(mask) result(ok)
+        logical, intent(in), optional :: mask(:) !! a caller's `is_valid`, possibly absent.
+        logical :: ok !! `.false.` only for a present, strided mask.
+        ok = .true.
+        if (present(mask)) ok = is_contiguous(mask)
+    end function is_contiguous_or_absent_r1
+
+    !> `is_contiguous_or_absent_r1` for a matrix column's mask. Two names rather than a generic: the
+    !> specifics would differ only in an OPTIONAL dummy's rank, which does not distinguish them.
+    pure function is_contiguous_or_absent_r2(mask) result(ok)
+        logical, intent(in), optional :: mask(:,:) !! a caller's `is_valid`, possibly absent.
+        logical :: ok !! `.false.` only for a present, strided mask.
+        ok = .true.
+        if (present(mask)) ok = is_contiguous(mask)
+    end function is_contiguous_or_absent_r2
 
     !> Whole-column write worker for parquet_write_int32_column/_matrix_column.
     subroutine write_int32_flat(writer, name, flat, nelem, asize, nrows, valid)
@@ -1537,6 +1567,8 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int32), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1560,13 +1592,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_int32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_int32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int32_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int32_column
     module procedure parquet_write_int32_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int32), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1587,13 +1627,21 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        call write_int32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_int32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int32_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int32_matrix_column
     module procedure parquet_write_int64_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int64), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1617,13 +1665,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_int64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_int64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int64_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int64_column
     module procedure parquet_write_int64_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int64), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1644,13 +1700,21 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        call write_int64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_int64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int64_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int64_matrix_column
     module procedure parquet_write_float32_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real32), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1674,13 +1738,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_float32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_float32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float32_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float32_column
     module procedure parquet_write_float32_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real32), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1701,13 +1773,21 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        call write_float32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_float32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float32_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float32_matrix_column
     module procedure parquet_write_float64_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real64), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1731,13 +1811,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_float64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_float64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float64_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float64_column
     module procedure parquet_write_float64_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real64), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1758,13 +1846,21 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        call write_float64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_float64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float64_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float64_matrix_column
     module procedure parquet_write_logical_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        logical, allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1788,13 +1884,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_logical_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_logical_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_logical_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_logical_column
     module procedure parquet_write_logical_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        logical, allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
@@ -1815,13 +1919,21 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        call write_logical_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_logical_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_logical_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_logical_matrix_column
     module procedure parquet_write_int32_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int32), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -1845,13 +1957,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_int32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_int32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int32_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int32_column_chunk
     module procedure parquet_write_int32_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int32), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -1872,13 +1992,21 @@ contains
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
-        call write_int32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_int32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int32_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int32_matrix_column_chunk
     module procedure parquet_write_int64_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int64), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -1902,13 +2030,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_int64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_int64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int64_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int64_column_chunk
     module procedure parquet_write_int64_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        integer(int64), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -1929,13 +2065,21 @@ contains
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
-        call write_int64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_int64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_int64_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_int64_matrix_column_chunk
     module procedure parquet_write_float32_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real32), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -1959,13 +2103,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_float32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_float32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float32_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float32_column_chunk
     module procedure parquet_write_float32_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real32), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -1986,13 +2138,21 @@ contains
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
-        call write_float32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_float32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float32_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float32_matrix_column_chunk
     module procedure parquet_write_float64_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real64), allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -2016,13 +2176,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_float64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_float64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float64_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float64_column_chunk
     module procedure parquet_write_float64_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        real(real64), allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -2043,13 +2211,21 @@ contains
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
-        call write_float64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_float64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_float64_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_float64_matrix_column_chunk
     module procedure parquet_write_logical_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        logical, allocatable :: values_c(:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -2073,13 +2249,21 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call write_logical_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
+            call write_logical_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_logical_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_logical_column_chunk
     module procedure parquet_write_logical_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
+        logical, allocatable :: values_c(:,:) !! `values`, copied when it or `is_valid` is strided.
+        logical, allocatable :: valid_c(:,:) !! `is_valid`, copied likewise; unallocated (absent) without one.
         call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
@@ -2100,7 +2284,13 @@ contains
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
-        call write_logical_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
+            call write_logical_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) valid_c = is_valid
+            call write_logical_chunk_flat(writer, name, values_c, size(values, kind=int64), asize, nrows, valid_c)
+        end if
     end procedure parquet_write_logical_matrix_column_chunk
 
 end submodule parquet_write_numeric

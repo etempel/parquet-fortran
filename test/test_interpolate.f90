@@ -68,7 +68,7 @@ contains
         testsuite = [ &
             new_unittest("both methods follow a sine within their error bounds", &
                          test_spline_follows_a_sine), &
-            new_unittest("two points, re-initialising, descending and uneven tables, elemental calls", &
+            new_unittest("two points, re-initialising, descending and uneven tables, array calls", &
                          test_edge_cases), &
             new_unittest("linear reproduces a straight line and matches the golden rows", &
                          test_linear_is_exact_on_lines), &
@@ -90,6 +90,14 @@ contains
                          test_knots_are_exact), &
             new_unittest("the arithmetic bracket and bisection answer the same bits", &
                          test_uniform_and_search_agree), &
+            new_unittest("an array of queries answers what each query answers alone, in any order", &
+                         test_array_answers_each_query), &
+            new_unittest("extrapolating beyond a short end segment continues its polynomial without cancelling", &
+                         test_extrapolation_beyond_a_short_end_segment), &
+            new_unittest("a query one ulp beside a knot answers that knot's ordinate to rounding", &
+                         test_a_query_beside_a_knot), &
+            new_unittest("a cubic spline builds and answers at the edges of its scale", &
+                         test_spline_at_the_edges_of_its_scale), &
             new_unittest("a descending table or grid axis interpolates as its ascending twin, bit for bit", &
                          test_descending_tables), &
             new_unittest("is_valid drops exactly the points it marks", &
@@ -246,13 +254,13 @@ contains
         vals = uneven%eval(xs)
         do i = 1, 3
             call check(error, vals(i) == uneven%eval(xs(i)), &
-                       "the elemental call must answer each scalar call's bits")
+                       "an array call must answer each scalar call's bits")
             if (allocated(error)) return
         end do
         vals = uneven_lin%eval(xs)
         do i = 1, 3
             call check(error, vals(i) == uneven_lin%eval(xs(i)), &
-                       "the elemental linear call must answer each scalar call's bits")
+                       "an array call over a linear interpolant must answer each scalar call's bits")
             if (allocated(error)) return
         end do
 
@@ -920,7 +928,7 @@ contains
     !> The arithmetic bracket and bisection answer the same bits, and the hook that switches between
     !! them reports which one an object was using.
     !!
-    !! Four tables. An exactly even one, where the arithmetic guess is exact, at ten thousand
+    !! Five tables. An exactly even one, where the arithmetic guess is exact, at ten thousand
     !! queries and every knot. A table bent up to a two-hundredth of a step either side of the
     !! straight line, which the tolerance still accepts as even and on which the guess is WRONG
     !! beside most knots, too high in one half and too low in the other: a query a four-hundredth of
@@ -928,9 +936,10 @@ contains
     !! guess gets wrong in each direction, since a fixture where it never does would test nothing.
     !! Linear interpolation is what shows a wrong segment there -- a C2 spline's neighbouring cubics
     !! differ by far less than a bit so close to their shared knot. Every variant is run, since each
-    !! has its own segment formula to be handed the wrong segment. And two negative controls: an
-    !! irregular table is not bracketed by arithmetic at all, and neither is an even table with one
-    !! knot moved a fifth of a step.
+    !! has its own segment formula to be handed the wrong segment. A `linspace` of a million points from
+    !! 1000 to 1001, whose rounding sits on each knot's own magnitude, must count as even too, and
+    !! answer the same bits both ways. And two negative controls: an irregular table is not bracketed
+    !! by arithmetic at all, and neither is an even table with one knot moved a fifth of a step.
     !!
     !! A grid decides each axis on its own, and the hook reports each. Four grids: one even along both
     !! axes; `E86`, even along `x` only; `E86` transposed, even along `y` only; and one bent along both
@@ -945,12 +954,13 @@ contains
         integer, parameter :: SPREAD = 10000
         integer, parameter :: GRID_NX = 257
         integer, parameter :: GRID_NY = 129
+        integer, parameter :: LINSPACE_N = 1000000
 
         type(golden_fixture)      :: f
         type(golden_grid)         :: g
         type(pf_interp_1d)        :: fast, slow
         type(pf_interp_2d)        :: grid_fast, grid_slow
-        real(real64), allocatable :: x(:), y(:), q(:), gx(:), gy(:), gz(:, :), qx(:), qy(:)
+        real(real64), allocatable :: x(:), y(:), q(:), gx(:), gy(:), gz(:, :), qx(:), qy(:), lx(:), ly(:), lq(:)
         real(real64)              :: bent_x(GRID_NX), bent_y(GRID_NY), unused_x(GRID_NX), unused_y(GRID_NY)
         character(len=14)         :: grid_name
         logical                   :: was, x_was, y_was, x_even, y_even
@@ -1016,6 +1026,37 @@ contains
                        trim(VARIANT_NAMES(v)))
             if (allocated(error)) return
         end do
+
+        ! An offset linspace of a million points, formed as numpy forms one: the start plus the index times
+        ! the step, and the stop exactly. Each knot sits on the straight line through the two ends to the
+        ! rounding of its own magnitude, which does not accumulate, while its spacings stray from the first
+        ! by far more than a tenth of a step spread over a million of them. Queried a four-hundredth of a
+        ! step either side of every 997th knot and on it.
+        allocate (lx(LINSPACE_N), ly(LINSPACE_N), lq(3*(LINSPACE_N/997)))
+        do i = 1, LINSPACE_N
+            lx(i) = 1000.0_real64 + real(i - 1, real64)*(1.0_real64/real(LINSPACE_N - 1, real64))
+        end do
+        lx(LINSPACE_N) = 1001.0_real64
+        ly = sin(3.0_real64*lx)
+        do i = 1, size(lq)/3
+            k = 997*i
+            lq(3*i - 2) = lx(k) - 0.0025_real64/real(LINSPACE_N - 1, real64)
+            lq(3*i - 1) = lx(k)
+            lq(3*i) = lx(k) + 0.0025_real64/real(LINSPACE_N - 1, real64)
+        end do
+        do v = 1, GI_NV
+            call init_variant(fast, v, lx, ly, TEST_SLOPES, "clamp")
+            slow = fast
+            call parquet_debug_interp_force_search(slow, was)
+            call check(error, was, "an offset linspace of a million points must be bracketed by arithmetic, variant " // &
+                       trim(VARIANT_NAMES(v)))
+            if (allocated(error)) return
+            differ = count(fast%eval(lq) /= slow%eval(lq)) + count(fast%derivative(lq) /= slow%derivative(lq))
+            call check(error, differ == 0, "the arithmetic bracket and bisection disagreed on an offset linspace, " // &
+                       "variant " // trim(VARIANT_NAMES(v)))
+            if (allocated(error)) return
+        end do
+        deallocate (lx, ly, lq)
 
         ! Negative controls: neither of these is bracketed by arithmetic.
         call golden_fixture_get(3, f)
@@ -1136,6 +1177,411 @@ contains
         end subroutine count_wrong_guess
 
     end subroutine test_uniform_and_search_agree
+
+    !> An array of queries answers, bit for bit, what each of its queries answers alone -- ascending,
+    !! descending, in no order, jumping between the ends, repeated, and with NaNs, infinities, the knots
+    !! and the last knot among them -- on every variant and policy, on uneven tables and an even one;
+    !! and an array of every rank from 2 to 7 answers the same way, in array element order.
+    !!
+    !! An array of queries reaches the specific of `%eval` for its rank, which starts each bracket
+    !! search from the segment the query before it fell in; one query bisects from scratch or guesses
+    !! by arithmetic. The two routes share no search, and a segment one out answers other bits wherever
+    !! the interpolant bends at a knot, as linear interpolation does at every one. The long uneven
+    !! table has 1025 knots, each up to three tenths of a step off the line through its ends, so it is
+    !! bisected and a search started in the wrong place has room to go wrong; `R33` is short and
+    !! uneven; the bent table is bracketed by arithmetic. The hook confirms which, and an empty array
+    !! answers an empty array. The arrays of higher rank take the first 128 queries of the order that
+    !! jumps between the ends, on the long uneven table.
+    subroutine test_array_answers_each_query(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: LONG = 1025
+        integer, parameter :: ORDERS = 6
+
+        type(golden_fixture)          :: f
+        type(pf_interp_1d)            :: c, probe
+        real(real64), allocatable     :: x(:), y(:), up(:), q(:), got(:), want(:)
+        real(real64)                  :: span, nan, inf, jumps(128), alone(128)
+        character(len=:), allocatable :: what
+        logical                       :: was, even
+        integer                       :: table, v, ip, order, i, n, m, differ
+
+        nan = nan_value()
+        inf = positive_infinity()
+        do table = 1, 3
+            select case (table)
+            case (1)
+                allocate (x(LONG), y(LONG))
+                do i = 1, LONG
+                    x(i) = real(i - 1, real64) + 0.3_real64*sin(1.7_real64*real(i - 1, real64))
+                    y(i) = 10.0_real64*sin(x(i)/16.0_real64) + x(i)/100.0_real64
+                end do
+                even = .false.
+            case (2)
+                call golden_fixture_get(3, f)
+                x = f%x
+                y = f%y
+                even = .false.
+            case default
+                deallocate (x, y)
+                allocate (x(LONG), y(LONG))
+                call bent_grid(LONG, x, y)
+                even = .true.
+            end select
+            n = size(x)
+            span = x(n) - x(1)
+            call probe%init(x, y, method="linear")
+            call parquet_debug_interp_force_search(probe, was)
+            call check(error, was .eqv. even, "the fixture is not bracketed the way this test needs, table " // &
+                       trim(table_name(table)))
+            if (allocated(error)) return
+
+            ! Ascending: two points below the table, then each knot and two points inside its segment, the
+            ! last knot, and two points above.
+            m = 3*(n - 1) + 5
+            if (allocated(up)) deallocate (up)
+            allocate (up(m))
+            up(1) = x(1) - span/8.0_real64
+            up(2) = x(1) - span/1024.0_real64
+            do i = 1, n - 1
+                up(3*i) = x(i)
+                up(3*i + 1) = x(i) + 0.3_real64*(x(i + 1) - x(i))
+                up(3*i + 2) = x(i) + 0.7_real64*(x(i + 1) - x(i))
+            end do
+            up(m - 2) = x(n)
+            up(m - 1) = x(n) + span/1024.0_real64
+            up(m) = x(n) + span/8.0_real64
+
+            do order = 1, ORDERS
+                if (allocated(q)) deallocate (q)
+                select case (order)
+                case (1)
+                    q = up
+                case (2)
+                    q = up(m:1:-1)
+                case (3)
+                    ! No order: 7919 is prime and divides no `m` here, so this visits every point once.
+                    allocate (q(m))
+                    do i = 1, m
+                        q(i) = up(1 + mod(7919*i, m))
+                    end do
+                case (4)
+                    ! Jumping between the two ends.
+                    allocate (q(m))
+                    do i = 1, m
+                        q(i) = up(merge(i, m + 1 - i, mod(i, 2) == 1))
+                    end do
+                case (5)
+                    ! Each point twice.
+                    allocate (q(2*m))
+                    q(1::2) = up
+                    q(2::2) = up
+                case default
+                    ! A NaN, an infinity or the last knot after every seventh point.
+                    allocate (q(m))
+                    q = up
+                    do i = 7, m, 7
+                        select case (mod(i/7, 4))
+                        case (0)
+                            q(i) = nan
+                        case (1)
+                            q(i) = inf
+                        case (2)
+                            q(i) = -inf
+                        case default
+                            q(i) = x(n)
+                        end select
+                    end do
+                end select
+                if (allocated(want)) deallocate (want)
+                allocate (want(size(q)))
+                do v = 1, GI_NV
+                    do ip = 1, 3
+                        what = ", variant " // trim(VARIANT_NAMES(v)) // ", policy " // trim(POLICIES(ip)) // &
+                               ", table " // trim(table_name(table)) // ", order " // achar(iachar("0") + order)
+                        call init_variant(c, v, x, y, TEST_SLOPES, trim(POLICIES(ip)))
+                        got = c%eval(q)
+                        do i = 1, size(q)
+                            want(i) = c%eval(q(i))
+                        end do
+                        call check(error, size(got) == size(q), "an array of queries answered an array of another size" // &
+                                   what)
+                        if (allocated(error)) return
+                        differ = count(.not. same_bits(got, want))
+                        call check(error, differ == 0, "an array of queries answered other bits than each query alone" // &
+                                   what)
+                        if (allocated(error)) return
+                    end do
+                end do
+            end do
+
+            if (table == 1) then
+                call init_variant(c, GI_LINEAR, x, y, TEST_SLOPES, "extrapolate")
+                do i = 1, size(jumps)
+                    jumps(i) = up(merge(i, m + 1 - i, mod(i, 2) == 1))
+                    alone(i) = c%eval(jumps(i))
+                end do
+                differ = count(.not. same_bits(reshape(c%eval(reshape(jumps(:4), [2, 2])), [4]), alone(:4)))
+                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:8), [2, 2, 2])), [8]), alone(:8)))
+                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:16), [2, 2, 2, 2])), [16]), &
+                                                        alone(:16)))
+                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:32), [2, 2, 2, 2, 2])), [32]), &
+                                                        alone(:32)))
+                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:64), [2, 2, 2, 2, 2, 2])), [64]), &
+                                                        alone(:64)))
+                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps, [2, 2, 2, 2, 2, 2, 2])), [128]), &
+                                                        alone))
+                call check(error, differ == 0, "an array of rank 2 to 7 answered other bits than each query alone")
+                if (allocated(error)) return
+            end if
+        end do
+        got = c%eval(up(1:0))
+        call check(error, size(got) == 0, "an empty array of queries must answer an empty array")
+
+    contains
+
+        !> The name this test gives table `k` in its messages.
+        pure function table_name(k) result(name)
+            integer, intent(in) :: k    !! the table, 1 to 3
+            character(len=11)   :: name !! its name
+
+            select case (k)
+            case (1)
+                name = "long uneven"
+            case (2)
+                name = "R33"
+            case default
+                name = "bent"
+            end select
+
+        end function table_name
+
+    end subroutine test_array_answers_each_query
+
+    !> Extrapolating beyond an end segment far shorter than the distance continues that segment's
+    !! polynomial without losing a digit -- value, slope, curvature and integral, on every variant,
+    !! below the table and above it.
+    !!
+    !! Two tables of the straight line `2*x + 1`, one with a first spacing of `2**-30` and one with a
+    !! last, every knot and ordinate dyadic. Each variant's end segment is then that line exactly --
+    !! the spline's second derivatives are exact zeros and PCHIP's slopes at both of the segment's
+    !! knots exactly 2, asserted first as the fixture's own precondition -- so its polynomial continued
+    !! is the line. Queries lie a hundredth, one, ten and a hundred beyond the table: up to about `1e11`
+    !! widths of the short segment, where a cubic evaluated in its segment's own fraction forms terms in
+    !! the cube of that width that must cancel to the line, and PCHIP answered 0 at `x = -1` for the
+    !! line's -1. Each answer is held to the line's own value within the rounding of evaluating the
+    !! line; so are the integral from each query to the nearer end, and the integral from beyond one end
+    !! to beyond the other, whose pieces inside the table are summed over its segments.
+    subroutine test_extrapolation_beyond_a_short_end_segment(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        real(real64), parameter :: SHORT = 2.0_real64**(-30)
+        real(real64), parameter :: DISTANCES(4) = [0.01_real64, 1.0_real64, 10.0_real64, 100.0_real64]
+        integer, parameter      :: N = 6
+
+        type(pf_interp_1d)            :: c
+        real(real64)                  :: x(N), y(N), q, lo, hi, got, want
+        character(len=:), allocatable :: what
+        integer                       :: table, v, i, near, far_value, far_slope, far_curvature, far_integral
+
+        do table = 1, 2
+            if (table == 1) then
+                x = [0.0_real64, SHORT, 1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+                near = 1
+            else
+                x = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64 - SHORT, 4.0_real64]
+                near = N - 1
+            end if
+            y = line_2x1(x)
+            do v = 1, GI_NV
+                what = ", variant " // trim(VARIANT_NAMES(v)) // merge(", short first segment", ", short last segment ", &
+                                                                       table == 1)
+                call init_variant(c, v, x, y, [2.0_real64, 2.0_real64], "extrapolate")
+                call check(error, c%derivative(x(near)) == 2.0_real64 .and. c%derivative(x(near + 1)) == 2.0_real64 .and. &
+                           c%derivative(x(near), 2) == 0.0_real64 .and. c%derivative(x(near + 1), 2) == 0.0_real64, &
+                           "the short end segment is not exactly the line, so the extrapolation below would measure " // &
+                           "the fixture" // what)
+                if (allocated(error)) return
+
+                far_value = 0
+                far_slope = 0
+                far_curvature = 0
+                far_integral = 0
+                do i = 1, size(DISTANCES)
+                    if (table == 1) then
+                        q = x(1) - DISTANCES(i)
+                        got = c%integral(q, x(1))
+                        want = (x(1)*x(1) + x(1)) - (q*q + q)
+                    else
+                        q = x(N) + DISTANCES(i)
+                        got = c%integral(x(N), q)
+                        want = (q*q + q) - (x(N)*x(N) + x(N))
+                    end if
+                    if (abs(got - want) > ROUNDING*(q*q + abs(q) + 20.0_real64)) far_integral = far_integral + 1
+                    if (abs(c%eval(q) - line_2x1(q)) > ROUNDING*max(1.0_real64, abs(line_2x1(q)))) &
+                        far_value = far_value + 1
+                    if (abs(c%derivative(q) - 2.0_real64) > ROUNDING*2.0_real64) far_slope = far_slope + 1
+                    if (abs(c%derivative(q, 2)) > ROUNDING*2.0_real64) far_curvature = far_curvature + 1
+                    ! From beyond one end to beyond the other.
+                    lo = x(1) - DISTANCES(i)
+                    hi = x(N) + DISTANCES(i)
+                    got = c%integral(lo, hi)
+                    want = (hi*hi + hi) - (lo*lo + lo)
+                    if (abs(got - want) > ROUNDING*real(N, real64)*(hi*hi + lo*lo + 20.0_real64)) &
+                        far_integral = far_integral + 1
+                end do
+                call check(error, far_value == 0, "an extrapolated value strayed from the line" // what)
+                if (allocated(error)) return
+                call check(error, far_slope == 0, "an extrapolated slope strayed from the line's 2" // what)
+                if (allocated(error)) return
+                call check(error, far_curvature == 0, "an extrapolated curvature strayed from the line's 0" // what)
+                if (allocated(error)) return
+                call check(error, far_integral == 0, "an integral beyond the table strayed from x**2 + x" // what)
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_extrapolation_beyond_a_short_end_segment
+
+    !> Queries one to eight ulp either side of a knot answer that knot's ordinate within rounding,
+    !! where the spline's curvature term dwarfs the ordinate -- in one dimension under the clamped and
+    !! not-a-knot end conditions, and on a grid along each axis.
+    !!
+    !! The table is `1 + K*(x - c)**2` with `K = 1e8`, on nine knots `0.3` apart whose middle one is
+    !! `c`. Both end conditions reproduce a quadratic, the clamped one given its end slopes, so the
+    !! spline is flat at `c` with a curvature of `2*K`: within eight ulp of `c` it rises above that
+    !! knot's ordinate, exactly 1, by less than `1e-22`, and its slope there is the rounding of a solve
+    !! over ordinates of up to `3e8`, a few ulp of `2*K*h`, too small to move a value by a bit. The
+    !! segment formula adds a curvature term of up to `K*h**2/3` scaled by a fraction that vanishes at
+    !! the knot, so that fraction must vanish to the bits: formed as `1 - b` beside a knot where `b`
+    !! rounds, it carried that rounding into a term of `3e6`, `2e-10` off. The neighbouring ordinates
+    !! are nine million times the knot's, so a linear part formed from the far knot's ordinate misses by
+    !! a billionth too. A grid holding the table along one axis, constant along the other, is its
+    !! one-dimensional spline along the first, and is built both ways round.
+    subroutine test_a_query_beside_a_knot(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        real(real64), parameter :: K = 1.0e8_real64
+        integer, parameter      :: KNOTS = 9
+        integer, parameter      :: ULPS = 8
+
+        type(pf_interp_1d) :: c
+        type(pf_interp_2d) :: grid
+        real(real64)       :: x(KNOTS), y(KNOTS), z(KNOTS, 4), lines(4), q(2*ULPS), across(2*ULPS), centre
+        integer            :: i, v, far
+
+        do i = 1, KNOTS
+            x(i) = 1.1_real64 + 0.3_real64*real(i - 1, real64)
+        end do
+        centre = x(5)
+        y = 1.0_real64 + K*(x - centre)**2
+        call check(error, y(5) == 1.0_real64, "the middle knot's ordinate must be exactly 1")
+        if (allocated(error)) return
+        q(1) = nearest(centre, -1.0_real64)
+        q(ULPS + 1) = nearest(centre, 1.0_real64)
+        do i = 2, ULPS
+            q(i) = nearest(q(i - 1), -1.0_real64)
+            q(ULPS + i) = nearest(q(ULPS + i - 1), 1.0_real64)
+        end do
+
+        do v = 1, 2
+            if (v == 1) then
+                call c%init(x, y, bc="clamped", slopes=[2.0_real64*K*(x(1) - centre), 2.0_real64*K*(x(KNOTS) - centre)])
+            else
+                call c%init(x, y, bc="not_a_knot")
+            end if
+            far = count(abs(c%eval(q) - 1.0_real64) > ROUNDING)
+            call check(error, far == 0, "a query beside a knot strayed from its ordinate, bc " // &
+                       trim(merge("clamped   ", "not_a_knot", v == 1)))
+            if (allocated(error)) return
+        end do
+
+        lines = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64]
+        do i = 1, 4
+            z(:, i) = y
+        end do
+        across = [(0.25_real64 + 2.5_real64*real(i - 1, real64)/real(2*ULPS - 1, real64), i = 1, 2*ULPS)]
+        call grid%init(x, lines, z, bc="not_a_knot")
+        far = count(abs(grid%eval(q, across) - 1.0_real64) > ROUNDING)
+        call check(error, far == 0, "a grid query beside a grid line along x strayed from the line's value")
+        if (allocated(error)) return
+        call grid%init(lines, x, transpose(z), bc="not_a_knot")
+        far = count(abs(grid%eval(across, q) - 1.0_real64) > ROUNDING)
+        call check(error, far == 0, "a grid query beside a grid line along y strayed from the line's value")
+
+    end subroutine test_a_query_beside_a_knot
+
+    !> A cubic spline builds and answers at the edges of its scale, and `"linear"` and `"pchip"` beyond
+    !! them: the negative control of the two refusals `%init` makes of a spline
+    !! (`interpolate_spline_too_wide` and `interpolate_spline_overflows`, `test/error_scenarios.f90`).
+    !!
+    !! One uneven table, spacings from 0.5 to 2 and ordinates of order one, its abscissae scaled by
+    !! powers of two, so that every quantity a build forms scales by an exact power of two as well:
+    !! the scaled interpolant at a scaled query answers what the unscaled one answers, to rounding,
+    !! and a knot its ordinate exactly. The spline is held to that with its widest spacing at `2**501`
+    !! and its narrowest at `2**-498`, about `1e-150`; and it builds with its widest spacing at
+    !! `2**511`, the widest it accepts, answering finite values and its knots exactly, where a limit a
+    !! factor of two too tight refuses it. Linear interpolation and PCHIP form no square of a spacing,
+    !! and are held to the unscaled answers at scales of `2**996` and `2**-996`, about `1e300` and
+    !! `1e-300`.
+    subroutine test_spline_at_the_edges_of_its_scale(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        real(real64), parameter :: X0(5) = [0.0_real64, 1.0_real64, 3.0_real64, 3.5_real64, 5.0_real64]
+        real(real64), parameter :: Y0(5) = [0.3_real64, -1.2_real64, 0.8_real64, 2.0_real64, -0.5_real64]
+        real(real64), parameter :: Q0(4) = [0.2_real64, 1.7_real64, 3.25_real64, 4.5_real64]
+        integer, parameter      :: EXPONENTS(4) = [500, -497, 996, -996]
+
+        type(pf_interp_1d)            :: unit, scaled
+        real(real64)                  :: s
+        character(len=12)             :: power
+        character(len=:), allocatable :: what
+        integer                       :: which, method
+
+        call check(error, maxval(X0(2:) - X0(:4)) == 2.0_real64 .and. minval(X0(2:) - X0(:4)) == 0.5_real64, &
+                   "the table's spacings must run from 0.5 to exactly 2, or its scaled spacings are not the ones named")
+        if (allocated(error)) return
+
+        do which = 1, size(EXPONENTS)
+            s = scale(1.0_real64, EXPONENTS(which))
+            write (power, '(i0)') EXPONENTS(which)
+            do method = 1, 3
+                ! The spline at the first two scales only; the other two methods at the last two.
+                if ((method == 1) .neqv. (which <= 2)) cycle
+                select case (method)
+                case (1)
+                    what = ", method cubic"
+                    call unit%init(X0, Y0)
+                    call scaled%init(X0*s, Y0)
+                case (2)
+                    what = ", method linear"
+                    call unit%init(X0, Y0, method="linear")
+                    call scaled%init(X0*s, Y0, method="linear")
+                case default
+                    what = ", method pchip"
+                    call unit%init(X0, Y0, method="pchip")
+                    call scaled%init(X0*s, Y0, method="pchip")
+                end select
+                what = what // ", abscissae scaled by 2**" // trim(power)
+                call check(error, all(abs(scaled%eval(Q0*s) - unit%eval(Q0)) <= ROUNDING*maxval(abs(Y0))), &
+                           "a table with scaled abscissae answered other values at the scaled queries" // what)
+                if (allocated(error)) return
+                call check(error, all(scaled%eval(X0*s) == Y0), "a knot of a scaled table did not answer its ordinate" // &
+                           what)
+                if (allocated(error)) return
+            end do
+        end do
+
+        ! At the limit: the widest spacing exactly 2**511.
+        s = scale(1.0_real64, 510)
+        call scaled%init(X0*s, Y0)
+        call check(error, all(abs(scaled%eval(Q0*s)) <= huge(1.0_real64)), &
+                   "a spline whose widest spacing is exactly its limit answered a value that is not finite")
+        if (allocated(error)) return
+        call check(error, all(scaled%eval(X0*s) == Y0), &
+                   "a knot of a spline whose widest spacing is exactly its limit did not answer its ordinate")
+
+    end subroutine test_spline_at_the_edges_of_its_scale
 
     !> The same table given ascending and descending answers the same bits on every variant and
     !! policy -- values and both derivatives inside the table, outside it and on its knots, and every

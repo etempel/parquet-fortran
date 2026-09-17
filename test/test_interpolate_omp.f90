@@ -1,7 +1,8 @@
 !> Threading tests for `parquet_interpolate`: that one object nobody writes may be evaluated,
 !> differentiated and integrated from a whole team at once, a grid object evaluated likewise, that
-!> objects built concurrently on different threads stay independent, and that the team these tests
-!> rely on is really opened.
+!> objects built concurrently on different threads stay independent, that a table of hundreds of
+!> thousands of points is built and interpolated on a worker thread's own stack, and that the team
+!> these tests rely on is really opened.
 !!
 !! **The claim under test is the module's own header sentence** -- "one object nobody writes may be
 !! evaluated from any number of threads at once, and two objects never share anything" -- and it is
@@ -27,6 +28,7 @@ module test_interpolate_omp
 
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     use parquet_interpolate
+    use test_interpolate_support, only : nan_value
     use iso_fortran_env, only : real64
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_get_num_threads, omp_get_thread_num
@@ -62,6 +64,8 @@ contains
                          test_shared_grid_is_read_only), &
             new_unittest("objects built on different threads at once stay independent", &
                          test_objects_per_thread_are_independent), &
+            new_unittest("a large masked table and a large one-shot call fit on a worker thread's stack", &
+                         test_large_tables_on_worker_threads), &
             new_unittest("a call inside a team reaches the whole team", &
                          test_the_team_is_really_opened) &
             ]
@@ -253,6 +257,78 @@ contains
         call check(error, far == 0, "a concurrent one-shot call answered another table's value")
 
     end subroutine test_objects_per_thread_are_independent
+
+    !> On each of four threads at once, a masked table of 600 000 points is built and answers 600 000
+    !! queries, and `pf_interp` answers the same queries over the same masked table, both under
+    !! `method="linear"`.
+    !!
+    !! **The regression is a crash, not a wrong answer.** ifx builds the result of `pack` on the stack,
+    !! and a caller's temporary for an explicit-shape function result too, and an OpenMP worker's stack
+    !! is the runtime's own, a few megabytes by default whatever `ulimit -s` says: a masked table or a
+    !! one-shot result of 600 000 doubles, 4.6 megabytes, ended the whole process with SIGSEGV on a
+    !! worker. The mask drops every seventh point, whose ordinate is a NaN that must not be judged; every
+    !! answer but the last query's, which lies beyond the table, is held to `2*x + 1`, which linear
+    !! interpolation reproduces exactly on these integer knots and half-integer queries. The answers are
+    !! checked in scalar loops, since an array expression of that size is a stack temporary under ifx in
+    !! its own right. The team is asserted to hold more than one thread: a team of one exercises no
+    !! worker's stack.
+    subroutine test_large_tables_on_worker_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: POINTS = 600000
+        integer, parameter :: WORKERS = 4
+
+        type(pf_interp_1d), allocatable :: slot(:)
+        real(real64), allocatable       :: x(:), y(:), q(:), shot(:)
+        logical, allocatable            :: keep(:)
+        real(real64)                    :: want
+        integer                         :: far(WORKERS), thread_of(WORKERS)
+        integer                         :: i, w, threads_seen
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it every table below is built on the main thread, " // &
+                       "whose stack is the process's own, so 'fits on a worker thread's stack' would hold " // &
+                       "because there was no worker")
+        return
+#endif
+        allocate (x(POINTS), y(POINTS), q(POINTS), keep(POINTS), slot(WORKERS))
+        do i = 1, POINTS
+            x(i) = real(i - 1, real64)
+            y(i) = 2.0_real64*x(i) + 1.0_real64
+            q(i) = x(i) + 0.5_real64
+            keep(i) = mod(i, 7) /= 0
+            if (.not. keep(i)) y(i) = nan_value()
+        end do
+        call check(error, keep(1) .and. keep(POINTS), "the mask must keep both ends, or the answers below are not the line")
+        if (allocated(error)) return
+
+        far = 0
+        thread_of = 0
+        !$omp parallel do num_threads(WORKERS) default(shared) private(w, i, want, shot) schedule(static, 1)
+        do w = 1, WORKERS
+            thread_of(w) = thread_slot()
+            call slot(w)%init(x, y, method="linear", is_valid=keep)
+            do i = 1, POINTS - 1
+                want = 2.0_real64*q(i) + 1.0_real64
+                if (abs(slot(w)%eval(q(i)) - want) > 64.0_real64*epsilon(want)*want) far(w) = far(w) + 1
+            end do
+            shot = pf_interp(x, y, q, method="linear", is_valid=keep)
+            do i = 1, POINTS - 1
+                want = 2.0_real64*q(i) + 1.0_real64
+                if (abs(shot(i) - want) > 64.0_real64*epsilon(want)*want) far(w) = far(w) + 1
+            end do
+        end do
+        !$omp end parallel do
+
+        threads_seen = 0
+        do w = 1, WORKERS
+            if (all(thread_of(:w - 1) /= thread_of(w))) threads_seen = threads_seen + 1
+        end do
+        call check(error, threads_seen > 1, "the four builds ran on a team of one, so no worker's stack was exercised")
+        if (allocated(error)) return
+        call check(error, all(far == 0), "a large masked table on a worker thread answered off the line it samples")
+
+    end subroutine test_large_tables_on_worker_threads
 
     !> The guard against a vacuous pass: a team of one proves nothing, so assert the team.
     !!

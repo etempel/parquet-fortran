@@ -3300,7 +3300,21 @@ contains
             new_unittest("pf_interp refuses a misshaped grid under its own name, with the context", &
                 test_interpolate_2d_one_shot_shape_aborts), &
             new_unittest("pf_interp refuses grid coordinates of different sizes", &
-                test_interpolate_2d_query_sizes_aborts) &
+                test_interpolate_2d_query_sizes_aborts), &
+            new_unittest("a cubic spline over knots too far apart is refused", &
+                test_interpolate_spline_too_wide_aborts), &
+            new_unittest("a cubic spline whose second derivatives overflow is refused", &
+                test_interpolate_spline_overflows_aborts), &
+            new_unittest("a bicubic spline over grid lines along x too far apart is refused", &
+                test_interpolate_2d_spline_too_wide_x_aborts), &
+            new_unittest("a bicubic spline over grid lines along y too far apart is refused", &
+                test_interpolate_2d_spline_too_wide_y_aborts), &
+            new_unittest("a bicubic spline whose second derivatives overflow is refused", &
+                test_interpolate_2d_spline_overflows_aborts), &
+            new_unittest("an over-long method token is refused, whatever it trims to", &
+                test_interpolate_long_token_aborts), &
+            new_unittest("evaluating an interpolant that was never built at no queries aborts", &
+                test_interpolate_eval_array_before_init_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]
@@ -19679,5 +19693,72 @@ contains
             failure_message="query coordinates of different sizes were expected to error stop", &
             required_stderr="pf_interp: xq and yq differ in size: 3 and 2")
     end subroutine test_interpolate_2d_query_sizes_aborts
+    !
+    subroutine test_interpolate_spline_too_wide_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_spline_too_wide", expect_abort=.true., &
+            failure_message="a cubic spline over knots 1e160 apart was expected to error stop", &
+            required_stderr="pf_interp_1d%init: x has a spacing of 1.000E+160, above the cubic spline's limit of " // &
+            "6.704E+153; rescale x, or use method ""linear"" or ""pchip""")
+    end subroutine test_interpolate_spline_too_wide_aborts
+    !
+    !> The refusal comes after the overflow it detects, so a build that traps on overflow ends there
+    !> first: nagfor's default `-ieee=stop` does, with its own message rather than the library's.
+    subroutine test_interpolate_spline_overflows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifdef NAGFOR
+        call skip_test(error, "nagfor's default -ieee=stop ends the scenario at the overflow inside the " // &
+            "spline's solve, which is the overflow the refusal detects, before the refusal is reached")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "interpolate_spline_overflows", expect_abort=.true., &
+            failure_message="a cubic spline whose second derivatives overflow was expected to error stop", &
+            required_stderr="pf_interp_1d%init: the cubic spline's second derivatives overflow, with x as closely " // &
+            "spaced as 1.000E-160; rescale the table, or use method ""linear"" or ""pchip""")
+    end subroutine test_interpolate_spline_overflows_aborts
+    !
+    subroutine test_interpolate_2d_spline_too_wide_x_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_spline_too_wide_x", expect_abort=.true., &
+            failure_message="a bicubic spline over lines along x 1e160 apart was expected to error stop", &
+            required_stderr="pf_interp_2d%init: x has a spacing of 1.000E+160, above the bicubic spline's limit of " // &
+            "6.704E+153; rescale x, or use method ""linear""")
+    end subroutine test_interpolate_2d_spline_too_wide_x_aborts
+    !
+    subroutine test_interpolate_2d_spline_too_wide_y_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_spline_too_wide_y", expect_abort=.true., &
+            failure_message="a bicubic spline over lines along y 1e160 apart was expected to error stop", &
+            required_stderr="pf_interp_2d%init: y has a spacing of 1.000E+160, above the bicubic spline's limit of " // &
+            "6.704E+153; rescale y, or use method ""linear""")
+    end subroutine test_interpolate_2d_spline_too_wide_y_aborts
+    !
+    !> Skipped under nagfor for the reason `test_interpolate_spline_overflows_aborts` gives.
+    subroutine test_interpolate_2d_spline_overflows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifdef NAGFOR
+        call skip_test(error, "nagfor's default -ieee=stop ends the scenario at the overflow inside the " // &
+            "spline's solve, which is the overflow the refusal detects, before the refusal is reached")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "interpolate_2d_spline_overflows", expect_abort=.true., &
+            failure_message="a bicubic spline whose second derivatives overflow was expected to error stop", &
+            required_stderr="pf_interp_2d%init: the bicubic spline's second derivatives overflow, with grid lines " // &
+            "as closely spaced as 1.000E-160; rescale the grid, or use method ""linear""")
+    end subroutine test_interpolate_2d_spline_overflows_aborts
+    !
+    subroutine test_interpolate_long_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_long_token", expect_abort=.true., &
+            failure_message="a method token of 107 characters was expected to error stop", &
+            required_stderr="pf_interp_1d%init: unknown method ""linear")
+    end subroutine test_interpolate_long_token_aborts
+    !
+    subroutine test_interpolate_eval_array_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_eval_array_before_init", expect_abort=.true., &
+            failure_message="evaluating an unbuilt interpolant at a rank-1 array of no queries was expected to error stop", &
+            required_stderr="pf_interp_1d%eval: the interpolant is not initialised")
+    end subroutine test_interpolate_eval_array_before_init_aborts
     !
 end module test_errors

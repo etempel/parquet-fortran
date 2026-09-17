@@ -3732,6 +3732,20 @@ program error_scenarios
         call scenario_interpolate_2d_one_shot_shape()
     case ("interpolate_2d_query_sizes")
         call scenario_interpolate_2d_query_sizes()
+    case ("interpolate_spline_too_wide")
+        call scenario_interpolate_spline_too_wide()
+    case ("interpolate_spline_overflows")
+        call scenario_interpolate_spline_overflows()
+    case ("interpolate_2d_spline_too_wide_x")
+        call scenario_interpolate_2d_spline_too_wide_x()
+    case ("interpolate_2d_spline_too_wide_y")
+        call scenario_interpolate_2d_spline_too_wide_y()
+    case ("interpolate_2d_spline_overflows")
+        call scenario_interpolate_2d_spline_overflows()
+    case ("interpolate_long_token")
+        call scenario_interpolate_long_token()
+    case ("interpolate_eval_array_before_init")
+        call scenario_interpolate_eval_array_before_init()
     case ("optimize_size_zero")
         call scenario_optimize_size_zero()
     case ("optimize_budget_zero")
@@ -32211,6 +32225,84 @@ contains
                       [1.5_real64, 2.0_real64, 2.5_real64], [1.5_real64, 2.5_real64])
         print '(a, 3es22.15)', "accepted query coordinates of different sizes: ", v
     end subroutine scenario_interpolate_2d_query_sizes
+    !
+    !> A cubic spline over knots `1e160` apart: its segment formula squares the spacing, which
+    !> overflows, so every value would be a NaN. Nothing overflows before the refusal, so the scenario
+    !> reaches it under nagfor's default `-ieee=stop` too.
+    subroutine scenario_interpolate_spline_too_wide()
+        type(pf_interp_1d) :: c
+
+        call c%init([0.0_real64, 1.0e160_real64, 2.0e160_real64, 3.0e160_real64], &
+                    [0.0_real64, 1.0_real64, 0.0_real64, 1.0_real64])
+        print '(a, l1)', "accepted knots too far apart for a cubic spline, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_spline_too_wide
+    !
+    !> A cubic spline over knots `1e-160` apart and ordinates of order one: its second derivatives are
+    !> about `1e320`, which overflow in the solve.
+    subroutine scenario_interpolate_spline_overflows()
+        type(pf_interp_1d) :: c
+
+        call c%init([0.0_real64, 1.0e-160_real64, 2.0e-160_real64, 3.0e-160_real64], &
+                    [0.0_real64, 1.0_real64, 0.0_real64, 1.0_real64])
+        print '(a, l1)', "accepted a cubic spline whose second derivatives overflow, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_spline_overflows
+    !
+    !> A bicubic grid whose lines along x lie `1e160` apart, refused along x.
+    subroutine scenario_interpolate_2d_spline_too_wide_x()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(4, 3)
+
+        z = 1.0_real64
+        call g%init([0.0_real64, 1.0e160_real64, 2.0e160_real64, 3.0e160_real64], [1.0_real64, 2.0_real64, 3.0_real64], z)
+        print '(a, l1)', "accepted grid lines along x too far apart for a bicubic spline, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_spline_too_wide_x
+    !
+    !> A bicubic grid whose lines along y lie `1e160` apart, refused by its own axis's check.
+    subroutine scenario_interpolate_2d_spline_too_wide_y()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(3, 4)
+
+        z = 1.0_real64
+        call g%init([1.0_real64, 2.0_real64, 3.0_real64], [0.0_real64, 1.0e160_real64, 2.0e160_real64, 3.0e160_real64], z)
+        print '(a, l1)', "accepted grid lines along y too far apart for a bicubic spline, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_spline_too_wide_y
+    !
+    !> A bicubic grid whose lines along x lie `1e-160` apart, over values alternating between 0 and 1
+    !> along x: the second derivatives along x overflow in the solve.
+    subroutine scenario_interpolate_2d_spline_overflows()
+        type(pf_interp_2d) :: g
+        real(real64) :: z(4, 3)
+        integer :: i
+
+        do i = 1, 4
+            z(i, :) = real(mod(i, 2), real64)
+        end do
+        call g%init([0.0_real64, 1.0e-160_real64, 2.0e-160_real64, 3.0e-160_real64], [1.0_real64, 2.0_real64, 3.0_real64], z)
+        print '(a, l1)', "accepted a bicubic spline whose second derivatives overflow, built: ", g%is_initialised()
+    end subroutine scenario_interpolate_2d_spline_overflows
+    !
+    !> A method token longer than any name can be, with blanks inside it: `"linear"`, a hundred blanks
+    !> and an `x`, which a fold keeping the first hundred and one characters trimmed to `"linear"`.
+    subroutine scenario_interpolate_long_token()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], &
+                    method="linear"//repeat(" ", 100)//"x")
+        print '(a, l1)', "accepted an over-long method token with blanks inside it, built: ", c%is_initialised()
+    end subroutine scenario_interpolate_long_token
+    !
+    !> Evaluating an object that was never built at a rank-1 array holding no query, which is refused
+    !> as a single query is, although there is nothing to evaluate. An elemental `%eval` would be
+    !> invoked for no element and answer an empty array. The answers' count is printed, which uses the
+    !> result of the `pure` call.
+    subroutine scenario_interpolate_eval_array_before_init()
+        type(pf_interp_1d) :: c
+        real(real64) :: none(0)
+        real(real64), allocatable :: v(:)
+
+        v = c%eval(none)
+        print '(a, i0)', "evaluated an interpolant that was never built at no queries, answers: ", size(v)
+    end subroutine scenario_interpolate_eval_array_before_init
     !
     !> A zero-length start point: the simplex needs at least one variable.
     subroutine scenario_optimize_size_zero()

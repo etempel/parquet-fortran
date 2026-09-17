@@ -36,9 +36,8 @@
 !! axis and the end slopes of `bc="clamped"` reversed with it.
 module parquet_interpolate
 
-    use iso_fortran_env, only : real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf, ieee_is_finite, &
-        ieee_is_nan
+    use iso_fortran_env, only : real64, int64
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf
 
     implicit none
     private
@@ -63,15 +62,24 @@ module parquet_interpolate
     !> Characters of caller-supplied `context` an abort message reproduces before eliding with
     !! `...` (`api-conventions.md`, errors and diagnostics).
     integer, parameter :: CONTEXT_CAP = 100
-    !> Characters of a caller's unknown token an abort message reproduces before eliding with `...`.
+    !> The longest token this module reads, in characters, and so the longest a known name can be. A
+    !! longer one is refused as unknown before it is folded; an abort message reproduces this many of
+    !! its characters before eliding with `...`.
     integer, parameter :: TOKEN_CAP = 100
-    !> How far from even a table may be and still be bracketed by arithmetic, as a fraction of one
-    !! step spread over the whole table: every spacing must lie within `UNIFORM_TOL_FRACTION*h/n` of
-    !! the first spacing `h`, which keeps the accumulated drift of an accepted table below a fifth of
-    !! a step. It decides only how FAST a bracket is found, never which one: the arithmetic guess is
-    !! corrected against the knots before it is used (`interp_bracket`), so an object answers the same
-    !! bits on either path. `parquet_debug_interp_force_search` makes both paths testable.
+    !> How far from even a table may be and still be bracketed by arithmetic, as a fraction of its mean
+    !! step: every knot must lie within `UNIFORM_TOL_FRACTION` of a step of its place on the straight
+    !! line through the table's two ends. A knot's position is tested rather than a spacing, because
+    !! the rounding of a table formed as `start + (i - 1)*step` sits on each knot's own magnitude and
+    !! does not accumulate, while its spacings can differ from one another by far more than such a
+    !! tolerance spread over a long table. It decides only how FAST a bracket is found, never which one:
+    !! the arithmetic guess is corrected against the knots before it is used (`interp_bracket`), so an
+    !! object answers the same bits on either path. `parquet_debug_interp_force_search` makes both
+    !! paths testable.
     real(real64), parameter :: UNIFORM_TOL_FRACTION = 0.1_real64
+    !> The widest knot spacing a cubic spline accepts, `2**511`. Its segment formula squares a spacing,
+    !! and the square of this one, `2**1022`, is below `huge()`; `linear` and `pchip` square none and
+    !! have no such limit.
+    real(real64), parameter :: SPLINE_MAX_SPACING = scale(1.0_real64, 511)
 
     ! ---- the one-dimensional interpolant -----------------------------------------------------
 
@@ -97,7 +105,18 @@ module parquet_interpolate
         real(real64) :: step = 0.0_real64   !! mean knot spacing, `(x(n) - x(1))/(n - 1)`
     contains
         procedure :: init => interp_1d_init          !! Stores the table and builds the coefficients.
-        procedure :: eval => interp_1d_eval          !! Value at a point; `pure elemental`.
+        ! No specific of `eval` is elemental: a generic holding an elemental specific beside a rank-1 one is
+        ! resolved by the order of its specifics under gfortran (`fortran-gotchas.md`), so each rank has its own.
+        procedure, private :: eval_rank0 => interp_1d_eval       !! `%eval` at one point.
+        procedure, private :: eval_rank1 => interp_1d_eval_rank1 !! `%eval` over a rank-1 array of points.
+        procedure, private :: eval_rank2 => interp_1d_eval_rank2 !! `%eval` over a rank-2 array of points.
+        procedure, private :: eval_rank3 => interp_1d_eval_rank3 !! `%eval` over a rank-3 array of points.
+        procedure, private :: eval_rank4 => interp_1d_eval_rank4 !! `%eval` over a rank-4 array of points.
+        procedure, private :: eval_rank5 => interp_1d_eval_rank5 !! `%eval` over a rank-5 array of points.
+        procedure, private :: eval_rank6 => interp_1d_eval_rank6 !! `%eval` over a rank-6 array of points.
+        procedure, private :: eval_rank7 => interp_1d_eval_rank7 !! `%eval` over a rank-7 array of points.
+        generic :: eval => eval_rank0, eval_rank1, eval_rank2, eval_rank3, eval_rank4, eval_rank5, eval_rank6, &
+                           eval_rank7                !! Value at a point, or at every point of an array; `pure`.
         procedure :: derivative => interp_1d_derivative !! First or second derivative; `pure elemental`.
         procedure :: integral => interp_1d_integral  !! Definite integral over `[a, b]`; `pure`.
         procedure :: is_initialised => interp_1d_ready !! `.true.` once built; never aborts.
@@ -138,17 +157,88 @@ module parquet_interpolate
             character(len=*), intent(in), optional :: context    !! call-site text for abort messages
         end subroutine interp_1d_init
 
-        !> The interpolant's value at `xq`: `pure elemental`, so an array of queries answers an array.
+        !> The interpolant's value at `xq`: `pure`.
         !!
         !! A NaN query answers NaN. A query outside the table answers what the object's `outside=`
         !! policy says; a query on a knot answers that knot's ordinate exactly. Aborts on an object
-        !! that was never built.
-        pure elemental module function interp_1d_eval(this, xq) result(v)
+        !! that was never built. `%eval` over an array of queries of rank 1 to 7 reaches the specific
+        !! of that rank, which answers each query this answer, bit for bit.
+        pure module function interp_1d_eval(this, xq) result(v)
             implicit none
             class(pf_interp_1d), intent(in) :: this !! the interpolant
             real(real64), intent(in)        :: xq   !! the query point
             real(real64)                    :: v    !! the interpolated value
         end function interp_1d_eval
+
+        !> The interpolant's value at every point of a rank-1 array of queries, in their order: what
+        !! `%eval` answers at each point alone, bit for bit.
+        !!
+        !! The search for each query's segment starts from the segment the query before it fell in, so
+        !! queries in ascending or descending order find theirs in a comparison or two on a table of
+        !! any length, and queries in no order pay a few comparisons more than a bisection; an evenly
+        !! spaced table is bracketed by arithmetic either way. The search state lives in the call, not
+        !! in the object, which stays shareable. Aborts on an object that was never built, even for an
+        !! array holding no query.
+        pure module function interp_1d_eval_rank1(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this  !! the interpolant
+            real(real64), intent(in)        :: xq(:) !! the query points
+            real(real64), allocatable       :: v(:)  !! the interpolated value at each, in order
+        end function interp_1d_eval_rank1
+
+        !> `%eval` over a rank-2 array of queries: the value at each, in the array's shape, searched in
+        !! array element order as over a rank-1 array.
+        pure module function interp_1d_eval_rank2(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this     !! the interpolant
+            real(real64), intent(in)        :: xq(:, :) !! the query points
+            real(real64), allocatable       :: v(:, :)  !! the interpolated value at each
+        end function interp_1d_eval_rank2
+
+        !> `%eval` over a rank-3 array of queries: the value at each, in the array's shape, searched in
+        !! array element order as over a rank-1 array.
+        pure module function interp_1d_eval_rank3(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this     !! the interpolant
+            real(real64), intent(in)        :: xq(:, :, :) !! the query points
+            real(real64), allocatable       :: v(:, :, :)  !! the interpolated value at each
+        end function interp_1d_eval_rank3
+
+        !> `%eval` over a rank-4 array of queries: the value at each, in the array's shape, searched in
+        !! array element order as over a rank-1 array.
+        pure module function interp_1d_eval_rank4(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this     !! the interpolant
+            real(real64), intent(in)        :: xq(:, :, :, :) !! the query points
+            real(real64), allocatable       :: v(:, :, :, :)  !! the interpolated value at each
+        end function interp_1d_eval_rank4
+
+        !> `%eval` over a rank-5 array of queries: the value at each, in the array's shape, searched in
+        !! array element order as over a rank-1 array.
+        pure module function interp_1d_eval_rank5(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this     !! the interpolant
+            real(real64), intent(in)        :: xq(:, :, :, :, :) !! the query points
+            real(real64), allocatable       :: v(:, :, :, :, :)  !! the interpolated value at each
+        end function interp_1d_eval_rank5
+
+        !> `%eval` over a rank-6 array of queries: the value at each, in the array's shape, searched in
+        !! array element order as over a rank-1 array.
+        pure module function interp_1d_eval_rank6(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this     !! the interpolant
+            real(real64), intent(in)        :: xq(:, :, :, :, :, :) !! the query points
+            real(real64), allocatable       :: v(:, :, :, :, :, :)  !! the interpolated value at each
+        end function interp_1d_eval_rank6
+
+        !> `%eval` over a rank-7 array of queries: the value at each, in the array's shape, searched in
+        !! array element order as over a rank-1 array.
+        pure module function interp_1d_eval_rank7(this, xq) result(v)
+            implicit none
+            class(pf_interp_1d), intent(in) :: this     !! the interpolant
+            real(real64), intent(in)        :: xq(:, :, :, :, :, :, :) !! the query points
+            real(real64), allocatable       :: v(:, :, :, :, :, :, :)  !! the interpolated value at each
+        end function interp_1d_eval_rank7
 
         !> The interpolant's first or second derivative at `xq`: `pure elemental`.
         !!
@@ -361,7 +451,9 @@ module parquet_interpolate
             real(real64)                           :: yq          !! the interpolated value
         end function interp_1d_oneshot_scalar
 
-        !> An array of query points.
+        !> An array of query points. The result is allocatable rather than shaped `size(xq)`: ifx builds
+        !! the caller's temporary for an explicit-shape result on the stack, where a large `xq` overflows
+        !! it, on an OpenMP worker's small stack first.
         module function interp_1d_oneshot_array(x, y, xq, method, bc, slopes, outside, is_valid, &
                                                 context) result(yq)
             implicit none
@@ -374,7 +466,7 @@ module parquet_interpolate
             character(len=*), intent(in), optional :: outside     !! the out-of-range policy
             logical, intent(in), optional          :: is_valid(:) !! `.false.` drops that point
             character(len=*), intent(in), optional :: context     !! call-site text
-            real(real64)                           :: yq(size(xq)) !! the interpolated values
+            real(real64), allocatable              :: yq(:)       !! the interpolated values, one per query
         end function interp_1d_oneshot_array
 
         !> One query point on a grid.
@@ -392,7 +484,8 @@ module parquet_interpolate
             real(real64)                           :: zq      !! the interpolated value
         end function interp_2d_oneshot_scalar
 
-        !> An array of query points on a grid, given as two arrays of coordinates of one size.
+        !> An array of query points on a grid, given as two arrays of coordinates of one size. The result
+        !! is allocatable for the reason the one-dimensional array form gives.
         module function interp_2d_oneshot_array(x, y, z, xq, yq, method, bc, outside, context) result(zq)
             implicit none
             real(real64), intent(in)               :: x(:)          !! the grid lines along `x`
@@ -404,7 +497,7 @@ module parquet_interpolate
             character(len=*), intent(in), optional :: bc            !! the spline's end condition
             character(len=*), intent(in), optional :: outside       !! the out-of-range policy
             character(len=*), intent(in), optional :: context       !! call-site text
-            real(real64)                           :: zq(size(xq))  !! the interpolated values
+            real(real64), allocatable              :: zq(:)         !! the interpolated values, one per query
         end function interp_2d_oneshot_array
 
     end interface pf_interp
@@ -463,14 +556,24 @@ module parquet_interpolate
             character(len=24)   :: text !! its decimal digits, blank-padded
         end function interp_i2s
 
+        !> A real as text in scientific form with four significant digits and a three-digit exponent,
+        !! `1.000E+160`, left-justified in a 24-character buffer the caller trims.
+        pure module function interp_r2s(v) result(text)
+            implicit none
+            real(real64), intent(in) :: v    !! the value
+            character(len=24)        :: text !! its digits, blank-padded
+        end function interp_r2s
+
         !> Folds a caller's token to lower case for matching against the names this module knows.
         !!
-        !! ASCII only. The buffer is one character longer than `TOKEN_CAP`, so a token longer than
-        !! that can never trim down to a known name.
+        !! ASCII only. A token whose trimmed length exceeds `TOKEN_CAP` folds to blanks, which match
+        !! no name, so its caller refuses it as unknown whatever its first characters are -- a token
+        !! with blanks inside it included, which a fold keeping its first `TOKEN_CAP` characters could
+        !! trim down to a known name.
         module subroutine interp_fold_token(token, folded)
             implicit none
             character(len=*), intent(in)          :: token  !! the caller's token
-            character(len=TOKEN_CAP + 1), intent(out) :: folded !! its lower-case form
+            character(len=TOKEN_CAP), intent(out) :: folded !! its lower-case form, or blanks
         end subroutine interp_fold_token
 
         !> A caller's token in double quotes for an abort message, capped at `TOKEN_CAP` characters.
@@ -489,7 +592,8 @@ module parquet_interpolate
         !> `.true.` if `x` is strictly increasing or strictly decreasing, and which of the two.
         !!
         !! A NaN fails both orderings, and is screened before any comparison is made: an ordered
-        !! comparison against a NaN raises IEEE_INVALID. A repeated value fails both as well.
+        !! comparison against a NaN raises IEEE_INVALID. A repeated value fails both as well. An
+        !! infinity passes, and can only be the first or the last value of a strictly monotonic `x`.
         module function interp_is_monotonic(x, ascending) result(ok)
             implicit none
             real(real64), intent(in) :: x(:)      !! at least two abscissae
@@ -497,16 +601,43 @@ module parquet_interpolate
             logical                  :: ok        !! strictly monotonic, with no NaN
         end function interp_is_monotonic
 
+        !> `.true.` when no value of `v` is a NaN or an infinity.
+        !!
+        !! Judged from each value's bits: an all-ones exponent field is exactly a NaN or an infinity,
+        !! and testing it is integer arithmetic, which raises no IEEE flag and compiles to a loop both
+        !! gfortran and ifx vectorise. This is the whole-table screen of every `%init`, where a
+        !! per-element `ieee_is_finite` is a runtime call under ifx.
+        pure module function interp_all_finite(v) result(ok)
+            implicit none
+            real(real64), intent(in) :: v(:) !! the values
+            logical                  :: ok   !! every one is finite
+        end function interp_all_finite
+
         !> Measures whether an ascending table is evenly spaced enough to bracket by arithmetic.
         !!
-        !! Every spacing must lie within `UNIFORM_TOL_FRACTION*h/n` of the first spacing `h`. The
-        !! mean spacing is returned either way.
+        !! Every knot must lie within `UNIFORM_TOL_FRACTION` of a step of its place on the straight
+        !! line through the two ends. The mean spacing is returned either way.
         module subroutine interp_uniform_step(x, uniform, step)
             implicit none
             real(real64), intent(in)  :: x(:)    !! at least two abscissae, strictly increasing
             logical, intent(out)      :: uniform !! evenly spaced to the tolerance
             real(real64), intent(out) :: step    !! `(x(n) - x(1))/(n - 1)`
         end subroutine interp_uniform_step
+
+        !> The widest spacing of an ascending table, measured only when the table's span exceeds
+        !! `SPLINE_MAX_SPACING`, since no spacing can exceed the span; zero otherwise.
+        pure module function interp_widest_spacing(x) result(widest)
+            implicit none
+            real(real64), intent(in) :: x(:)   !! at least two abscissae, strictly increasing, finite
+            real(real64)             :: widest !! the widest spacing, or zero when the span is within the limit
+        end function interp_widest_spacing
+
+        !> The narrowest spacing of an ascending table.
+        pure module function interp_narrowest_spacing(x) result(narrowest)
+            implicit none
+            real(real64), intent(in) :: x(:)      !! at least two abscissae, strictly increasing
+            real(real64)             :: narrowest !! the narrowest spacing
+        end function interp_narrowest_spacing
 
     end interface
 
@@ -529,6 +660,21 @@ module parquet_interpolate
             real(real64), intent(in) :: xq      !! the query, inside the table
             integer                  :: k       !! the segment's left knot
         end function interp_bracket
+
+        !> The segment `interp_bracket` names, searched from segment `k0` outward: `k0` itself, then the
+        !! segment after it or the one before, then a bisection of the part of the table on the query's
+        !! side of those.
+        !!
+        !! `xq` must lie inside `[x(1), x(n)]` and `k0` in `[1, n-1]`. The segment the inequality names
+        !! is unique, so the answer is `interp_bracket`'s whatever `k0` is; only the work depends on it.
+        pure module function interp_bracket_near(x, n, k0, xq) result(k)
+            implicit none
+            real(real64), intent(in) :: x(:) !! abscissae, strictly increasing
+            integer, intent(in)      :: n    !! points in `x`, at least two
+            integer, intent(in)      :: k0   !! the segment to search from
+            real(real64), intent(in) :: xq   !! the query, inside the table
+            integer                  :: k    !! the segment's left knot
+        end function interp_bracket_near
 
     end interface
 
@@ -582,7 +728,65 @@ module parquet_interpolate
 
     interface
 
-        !> The straight line through `(x0, y0)` and `(x1, y1)` at `xq`, which may lie beyond them.
+        !> The end segment's polynomial continued beyond the table, at `xq`.
+        !!
+        !! The segment from `x0` to `x1` is expanded about its end knot -- `x1` for the table's last
+        !! segment continued above it, `x0` for its first continued below -- as
+        !! `y + e*(d + t*(c2 + t*c3))`, with `e` the query's distance from that knot, `t` the same in
+        !! widths of the segment, `d` the slope at the knot and `c2` and `c3` in units of a slope. Each
+        !! coefficient is formed from differences of the segment's own data, so a straight segment has
+        !! exact zeros beyond its slope, and nothing formed in the fraction of the segment's own origin
+        !! is left to cancel however far away `xq` lies. `k0` and `k1` are second derivatives for
+        !! `M_CUBIC` and slopes for `M_PCHIP`; `M_LINEAR` reads neither.
+        pure module function interp_end_value(method, x0, x1, y0, y1, k0, k1, above, xq) result(v)
+            implicit none
+            integer, intent(in)      :: method !! `M_LINEAR`, `M_CUBIC` or `M_PCHIP`
+            real(real64), intent(in) :: x0     !! the segment's left knot
+            real(real64), intent(in) :: x1     !! the segment's right knot
+            real(real64), intent(in) :: y0     !! the ordinate at `x0`
+            real(real64), intent(in) :: y1     !! the ordinate at `x1`
+            real(real64), intent(in) :: k0     !! the method's coefficient at `x0`
+            real(real64), intent(in) :: k1     !! the method's coefficient at `x1`
+            logical, intent(in)      :: above  !! continued above `x1`, rather than below `x0`
+            real(real64), intent(in) :: xq     !! the point, beyond that knot
+            real(real64)             :: v      !! the polynomial's value there
+        end function interp_end_value
+
+        !> The first (`order` 1) or second (`order` 2) derivative of the end segment's polynomial
+        !! continued beyond the table, at `xq`, in the form `interp_end_value` describes.
+        pure module function interp_end_derivative(method, x0, x1, y0, y1, k0, k1, above, xq, order) result(v)
+            implicit none
+            integer, intent(in)      :: method !! `M_LINEAR`, `M_CUBIC` or `M_PCHIP`
+            real(real64), intent(in) :: x0     !! the segment's left knot
+            real(real64), intent(in) :: x1     !! the segment's right knot
+            real(real64), intent(in) :: y0     !! the ordinate at `x0`
+            real(real64), intent(in) :: y1     !! the ordinate at `x1`
+            real(real64), intent(in) :: k0     !! the method's coefficient at `x0`
+            real(real64), intent(in) :: k1     !! the method's coefficient at `x1`
+            logical, intent(in)      :: above  !! continued above `x1`, rather than below `x0`
+            real(real64), intent(in) :: xq     !! the point, beyond that knot
+            integer, intent(in)      :: order  !! 1 or 2
+            real(real64)             :: v      !! the derivative there
+        end function interp_end_derivative
+
+        !> The integral of the end segment's polynomial continued beyond the table, from its end knot to
+        !! `xq`, in the form `interp_end_value` describes: negative for a positive polynomial below the
+        !! table, where `xq` lies below the knot.
+        pure module function interp_end_integral(method, x0, x1, y0, y1, k0, k1, above, xq) result(v)
+            implicit none
+            integer, intent(in)      :: method !! `M_LINEAR`, `M_CUBIC` or `M_PCHIP`
+            real(real64), intent(in) :: x0     !! the segment's left knot
+            real(real64), intent(in) :: x1     !! the segment's right knot
+            real(real64), intent(in) :: y0     !! the ordinate at `x0`
+            real(real64), intent(in) :: y1     !! the ordinate at `x1`
+            real(real64), intent(in) :: k0     !! the method's coefficient at `x0`
+            real(real64), intent(in) :: k1     !! the method's coefficient at `x1`
+            logical, intent(in)      :: above  !! continued above `x1`, rather than below `x0`
+            real(real64), intent(in) :: xq     !! the upper limit; the end knot is the lower
+            real(real64)             :: v      !! the integral
+        end function interp_end_integral
+
+        !> The straight line through `(x0, y0)` and `(x1, y1)` at `xq` between them.
         pure module function interp_linear_seg_value(x0, x1, y0, y1, xq) result(v)
             implicit none
             real(real64), intent(in) :: x0 !! the segment's left knot
@@ -612,11 +816,16 @@ module parquet_interpolate
             real(real64), intent(in) :: x1 !! the segment's right knot
             real(real64), intent(in) :: y0 !! the ordinate at `x0`
             real(real64), intent(in) :: y1 !! the ordinate at `x1`
-            real(real64), intent(in) :: xq !! the upper limit, which may lie beyond the segment
+            real(real64), intent(in) :: xq !! the upper limit, inside the segment
             real(real64)             :: v  !! the integral
         end function interp_linear_seg_integral
 
-        !> One cubic-spline segment, in second-derivative form, at `xq`, which may lie beyond it.
+        !> One cubic-spline segment, in second-derivative form, at `xq` inside it.
+        !!
+        !! The curvature term is a product of both fractions of the segment, each measured from its own
+        !! knot, so it vanishes to the bits beside either knot however large the second derivatives are;
+        !! the left knot itself answers `y0` directly (the header of parquet_interpolate_core.f90 says
+        !! why).
         pure module function interp_cubic_seg_value(x0, x1, y0, y1, m0, m1, xq) result(v)
             implicit none
             real(real64), intent(in) :: x0 !! the segment's left knot
@@ -629,8 +838,8 @@ module parquet_interpolate
             real(real64)             :: v  !! the cubic's value there
         end function interp_cubic_seg_value
 
-        !> The first (`order` 1) or second (`order` 2) derivative of one cubic-spline segment at `xq`,
-        !! which may lie beyond it.
+        !> The first (`order` 1) or second (`order` 2) derivative of one cubic-spline segment at `xq`
+        !! inside it.
         pure module function interp_cubic_seg_derivative(x0, x1, y0, y1, m0, m1, xq, order) result(v)
             implicit none
             real(real64), intent(in) :: x0    !! the segment's left knot
@@ -644,7 +853,7 @@ module parquet_interpolate
             real(real64)             :: v     !! the derivative there
         end function interp_cubic_seg_derivative
 
-        !> The integral from `x0` to `xq` of one cubic-spline segment, `xq` possibly beyond it.
+        !> The integral from `x0` to `xq` of one cubic-spline segment, `xq` inside it.
         pure module function interp_cubic_seg_integral(x0, x1, y0, y1, m0, m1, xq) result(v)
             implicit none
             real(real64), intent(in) :: x0 !! the segment's left knot, the lower limit
@@ -657,8 +866,7 @@ module parquet_interpolate
             real(real64)             :: v  !! the integral
         end function interp_cubic_seg_integral
 
-        !> One cubic Hermite segment, given its end ordinates and end slopes, at `xq`, which may lie
-        !! beyond it.
+        !> One cubic Hermite segment, given its end ordinates and end slopes, at `xq` inside it.
         pure module function interp_hermite_seg_value(x0, x1, y0, y1, d0, d1, xq) result(v)
             implicit none
             real(real64), intent(in) :: x0 !! the segment's left knot
@@ -672,7 +880,7 @@ module parquet_interpolate
         end function interp_hermite_seg_value
 
         !> The first (`order` 1) or second (`order` 2) derivative of one cubic Hermite segment at
-        !! `xq`, which may lie beyond it.
+        !! `xq` inside it.
         pure module function interp_hermite_seg_derivative(x0, x1, y0, y1, d0, d1, xq, order) result(v)
             implicit none
             real(real64), intent(in) :: x0    !! the segment's left knot
@@ -686,7 +894,7 @@ module parquet_interpolate
             real(real64)             :: v     !! the derivative there
         end function interp_hermite_seg_derivative
 
-        !> The integral from `x0` to `xq` of one cubic Hermite segment, `xq` possibly beyond it.
+        !> The integral from `x0` to `xq` of one cubic Hermite segment, `xq` inside it.
         pure module function interp_hermite_seg_integral(x0, x1, y0, y1, d0, d1, xq) result(v)
             implicit none
             real(real64), intent(in) :: x0 !! the segment's left knot, the lower limit

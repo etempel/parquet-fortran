@@ -1,7 +1,7 @@
 !> The workers every interpolant shares: the abort and its message helpers, the token folding, the
-!> monotonicity and uniformity tests, the bracket search, the tridiagonal solver, the per-knot
-!> coefficients of the cubic spline and of PCHIP, and every segment polynomial's value, derivatives
-!> and integral.
+!> screens a table passes, the bracket search, the tridiagonal solver, the per-knot coefficients of
+!> the cubic spline and of PCHIP, and every segment polynomial's value, derivatives and integral,
+!> inside the table and continued beyond it.
 !!
 !! The linear and natural-cubic arithmetic is taken over from qfeet's `interpolation` module, by the
 !! same author, and reworked to this library's rules: `real64` only, no logging, every abort an
@@ -48,18 +48,37 @@
 !!
 !! **Why an evenly spaced table cannot choose a different segment from bisection.** The arithmetic
 !! bracket `1 + floor((xq - x(1))/step)` is exact only on a table whose knots sit exactly on
-!! multiples of `step`. The uniformity tolerance accepts tables that drift from that by up to a fifth
-!! of a step, and a query that close to a knot would be evaluated on the neighbouring segment's
-!! polynomial continued -- a different number wherever the slope or the curvature changes at that
-!! knot, not the same number to rounding. So the guess is walked, one knot at a time, until
+!! multiples of `step`. The uniformity tolerance accepts tables whose knots lie up to a tenth of a
+!! step off those multiples, and a query that close to a knot would be evaluated on the neighbouring
+!! segment's polynomial continued -- a different number wherever the slope or the curvature changes
+!! at that knot, not the same number to rounding. So the guess is walked, one knot at a time, until
 !! `x(k) <= xq < x(k+1)` holds: on an exactly even table the walk takes no step, on an accepted one
 !! at most one, and the two paths agree for every query.
 !!
 !! **Why a query on a knot answers that knot's ordinate exactly.** The walk makes every interior
 !! knot the LEFT end of its segment, where every segment formula here multiplies what it adds to the
-!! left ordinate by an exact zero; and the evaluators answer `y(n)` for `x(n)` directly. Neither
-!! depends on how a compiler rounds a division, which under a value-unsafe floating-point model is
-!! not guaranteed to give `h/h == 1`.
+!! left ordinate by an exact zero, or, in the cubic spline's value, answers the left ordinate
+!! directly; and the evaluators answer `y(n)` for `x(n)` directly. Neither depends on how a compiler
+!! rounds a division, which under a value-unsafe floating-point model is not guaranteed to give
+!! `h/h == 1`.
+!!
+!! **Why the cubic spline's value measures both fractions.** Its curvature term,
+!! `((a**3 - a)*m0 + (b**3 - b)*m1)*h**2/6` with `a` and `b` the fractions of the segment from its two
+!! knots, is `-a*b*((1 + a)*m0 + (1 + b)*m1)*h**2/6`, a product that vanishes at either knot through
+!! the fraction measured from that knot. Beside a knot where the second derivatives dwarf the
+!! ordinates, that fraction must vanish to the bits: `a` taken as `1 - b` carries the rounding of `b`,
+!! all of `a` beside the right knot, into a term that can be millions of times the value. So `a` is
+!! measured from `x1` as `b` is from `x0`, and the linear part is `a*y0 + b*y1`, which beside either
+!! knot takes that knot's ordinate with a weight near one; a linear part anchored at `y0` loses the
+!! digits of `y0` beside the right knot when `y0` dwarfs `y1`.
+!!
+!! **Why a query beyond the table is answered about the end knot.** A segment's formula in the
+!! fraction of its own origin, evaluated millions of widths away, forms terms in the cube of that
+!! fraction that must cancel to the answer, and beyond an end segment far shorter than the distance
+!! they cancel to nothing: PCHIP over the line `2*x + 1` on the knots `0, 2**-30, 1, 2, 3, 4`
+!! answered 0 at `x = -1`. The end segment is instead expanded about the end knot the query lies
+!! beyond, with coefficients formed from differences of the segment's data (`interp_end_value`), so
+!! that a straight segment continues as its line exactly and a curved one without cancellation.
 submodule (parquet_interpolate) parquet_interpolate_core
 
     implicit none
@@ -95,12 +114,21 @@ contains
 
     end procedure interp_i2s
 
+    module procedure interp_r2s
+
+        write (text, '(es10.3e3)') v
+        text = adjustl(text)
+
+    end procedure interp_r2s
+
     module procedure interp_fold_token
 
         integer :: i, c
 
         folded = ""
-        do i = 1, min(len_trim(token), len(folded))
+        ! Refused whole rather than cut short: a cut token with blanks inside it could trim to a name.
+        if (len_trim(token) > TOKEN_CAP) return
+        do i = 1, len_trim(token)
             c = iachar(token(i:i))
             if (c >= iachar("A") .and. c <= iachar("Z")) c = c + 32
             folded(i:i) = achar(c)
@@ -128,9 +156,11 @@ contains
         ascending = .true.
         n = size(x)
         ! Every NaN first, as its own pass: an ordered comparison against one raises IEEE_INVALID,
-        ! which nagfor's default `-ieee=stop` turns into an abort ahead of this module's message.
+        ! which nagfor's default `-ieee=stop` turns into an abort ahead of this module's message. By
+        ! self-comparison rather than `ieee_is_nan`: this pass runs over every value of the table, and
+        ! `ieee_is_nan` is a runtime call under ifx and nagfor.
         do i = 1, n
-            if (ieee_is_nan(x(i))) return
+            if (x(i) /= x(i)) return
         end do
         ascending = x(2) > x(1)
         if (ascending) then
@@ -146,22 +176,63 @@ contains
 
     end procedure interp_is_monotonic
 
+    module procedure interp_all_finite
+
+        integer(int64), parameter :: EXPONENT_BITS = int(z'7FF0000000000000', int64) !! all-ones exponent
+
+        integer :: i, bad
+
+        ! Counted rather than left at the first: a loop with no exit is one a compiler can vectorise, and a
+        ! table that passes is read to its end either way.
+        bad = 0
+        do i = 1, size(v)
+            if (iand(transfer(v(i), 0_int64), EXPONENT_BITS) == EXPONENT_BITS) bad = bad + 1
+        end do
+        ok = bad == 0
+
+    end procedure interp_all_finite
+
     module procedure interp_uniform_step
 
-        real(real64) :: first, tol
+        real(real64) :: tol
         integer      :: i, n
 
         n = size(x)
         step = (x(n) - x(1))/real(n - 1, real64)
-        first = x(2) - x(1)
-        tol = UNIFORM_TOL_FRACTION*first/real(n, real64)
         uniform = .false.
-        do i = 3, n
-            if (abs(first - (x(i) - x(i - 1))) > tol) return
+        ! A span beyond `huge()` makes the step infinite, and every position test below a NaN.
+        if (step > huge(step)) return
+        tol = UNIFORM_TOL_FRACTION*step
+        do i = 2, n - 1
+            if (abs((x(i) - x(1)) - real(i - 1, real64)*step) > tol) return
         end do
         uniform = .true.
 
     end procedure interp_uniform_step
+
+    module procedure interp_widest_spacing
+
+        integer :: i, n
+
+        n = size(x)
+        widest = 0.0_real64
+        if (x(n) - x(1) <= SPLINE_MAX_SPACING) return
+        do i = 1, n - 1
+            widest = max(widest, x(i + 1) - x(i))
+        end do
+
+    end procedure interp_widest_spacing
+
+    module procedure interp_narrowest_spacing
+
+        integer :: i
+
+        narrowest = x(2) - x(1)
+        do i = 2, size(x) - 1
+            narrowest = min(narrowest, x(i + 1) - x(i))
+        end do
+
+    end procedure interp_narrowest_spacing
 
     ! ---- the bracket search -------------------------------------------------------------------
 
@@ -197,6 +268,40 @@ contains
         end if
 
     end procedure interp_bracket
+
+    module procedure interp_bracket_near
+
+        integer :: lo, hi, mid
+
+        k = k0
+        if (xq >= x(k)) then
+            ! At or above `x(k0)`: segment `k0`, or the next, or a bisection above that.
+            if (k == n - 1) return
+            if (xq < x(k + 1)) return
+            k = k + 1
+            if (k == n - 1) return
+            if (xq < x(k + 1)) return
+            lo = k + 1
+            hi = n
+        else
+            ! Below `x(k0)`, which is then not `x(1)`: the segment before, or a bisection below that.
+            k = k - 1
+            if (xq >= x(k)) return
+            lo = 1
+            hi = k
+        end if
+        ! Bisection, keeping `x(lo) <= xq` and `xq < x(hi)` or `hi == n`, as `interp_bracket` does.
+        do while (hi - lo > 1)
+            mid = lo + (hi - lo)/2
+            if (xq >= x(mid)) then
+                lo = mid
+            else
+                hi = mid
+            end if
+        end do
+        k = lo
+
+    end procedure interp_bracket_near
 
     ! ---- the tridiagonal solver and the per-knot coefficients ------------------------------------
 
@@ -375,11 +480,15 @@ contains
 
         h = x1 - x0
         b = (xq - x0)/h
-        ! `a = 1 - b` rather than `(x1 - xq)/h`: at the left knot `b` is an exact zero and so `a` an
-        ! exact one, which is what makes a knot answer its own ordinate whatever the division rounds
-        ! to.
-        a = 1.0_real64 - b
-        v = a*y0 + b*y1 + ((a*a*a - a)*m0 + (b*b*b - b)*m1)*(h*h)/6.0_real64
+        ! The left knot answers its ordinate directly: `a` is measured below, and `h/h` need not be
+        ! exactly one under a value-unsafe floating-point model.
+        if (b == 0.0_real64) then
+            v = y0
+            return
+        end if
+        ! Each fraction from its own knot, and the curvature term as their product (the header says why).
+        a = (x1 - xq)/h
+        v = a*y0 + b*y1 - a*b*((1.0_real64 + a)*m0 + (1.0_real64 + b)*m1)*(h*h)/6.0_real64
 
     end procedure interp_cubic_seg_value
 
@@ -457,7 +566,114 @@ contains
 
     end procedure interp_hermite_seg_integral
 
+    module procedure interp_end_value
+
+        real(real64) :: yend, slope, c2, c3, h, e, t
+
+        call interp_end_coeffs(method, x0, x1, y0, y1, k0, k1, above, yend, slope, c2, c3, h)
+        e = xq - merge(x1, x0, above)
+        if (method == M_LINEAR) then
+            ! Two terms, so that an infinite query meets no product of an infinity with a zero
+            ! coefficient: the line's value there is the infinity of its slope's sign.
+            v = yend + e*slope
+        else
+            t = e/h
+            v = yend + e*(slope + t*(c2 + t*c3))
+        end if
+
+    end procedure interp_end_value
+
+    module procedure interp_end_derivative
+
+        real(real64) :: yend, slope, c2, c3, h, t
+
+        call interp_end_coeffs(method, x0, x1, y0, y1, k0, k1, above, yend, slope, c2, c3, h)
+        if (method == M_LINEAR) then
+            v = merge(slope, 0.0_real64, order == 1)
+        else
+            t = (xq - merge(x1, x0, above))/h
+            if (order == 1) then
+                v = slope + t*(2.0_real64*c2 + 3.0_real64*t*c3)
+            else
+                v = (2.0_real64*c2 + 6.0_real64*t*c3)/h
+            end if
+        end if
+
+    end procedure interp_end_derivative
+
+    module procedure interp_end_integral
+
+        real(real64) :: yend, slope, c2, c3, h, e, t
+
+        call interp_end_coeffs(method, x0, x1, y0, y1, k0, k1, above, yend, slope, c2, c3, h)
+        e = xq - merge(x1, x0, above)
+        if (method == M_LINEAR) then
+            v = e*(yend + 0.5_real64*e*slope)
+        else
+            t = e/h
+            v = e*(yend + e*(0.5_real64*slope + t*(c2/3.0_real64 + 0.25_real64*t*c3)))
+        end if
+
+    end procedure interp_end_integral
+
     ! ---- helpers private to this submodule -------------------------------------------------------
+
+    !> The coefficients of an end segment's polynomial about its end knot: `yend + e*(slope + t*(c2 +
+    !! t*c3))` at a distance `e` from the knot, `t = e/h`.
+    !!
+    !! `slope` is the polynomial's first derivative at the knot, `c2` half its second derivative there
+    !! times `h`, and `c3` a sixth of its third derivative times `h**2`, so that all three are in
+    !! units of a slope and none needs a square of the spacing. For the cubic spline in
+    !! second-derivative form they are its end slope, `delta - h*(2*m0 + m1)/6` at `x0` and
+    !! `delta + h*(m0 + 2*m1)/6` at `x1`, the end's `m*h/2`, and `(m1 - m0)*h/6`; for a Hermite segment
+    !! the end slope as given, and the differences of the two slopes from the secant `delta`, grouped so
+    !! that a slope equal to the secant contributes an exact zero.
+    pure subroutine interp_end_coeffs(method, x0, x1, y0, y1, k0, k1, above, yend, slope, c2, c3, h)
+        integer, intent(in)       :: method !! `M_LINEAR`, `M_CUBIC` or `M_PCHIP`
+        real(real64), intent(in)  :: x0     !! the segment's left knot
+        real(real64), intent(in)  :: x1     !! the segment's right knot
+        real(real64), intent(in)  :: y0     !! the ordinate at `x0`
+        real(real64), intent(in)  :: y1     !! the ordinate at `x1`
+        real(real64), intent(in)  :: k0     !! the second derivative (`M_CUBIC`) or slope (`M_PCHIP`) at `x0`
+        real(real64), intent(in)  :: k1     !! the same at `x1`
+        logical, intent(in)       :: above  !! about `x1`, rather than `x0`
+        real(real64), intent(out) :: yend   !! the ordinate at the end knot
+        real(real64), intent(out) :: slope  !! the first derivative there
+        real(real64), intent(out) :: c2     !! half the second derivative there, times `h`
+        real(real64), intent(out) :: c3     !! a sixth of the third derivative, times `h**2`
+        real(real64), intent(out) :: h      !! the segment's width
+
+        real(real64) :: delta
+
+        h = x1 - x0
+        delta = (y1 - y0)/h
+        yend = merge(y1, y0, above)
+        select case (method)
+        case (M_CUBIC)
+            c3 = (k1 - k0)*h/6.0_real64
+            if (above) then
+                slope = delta + h*(k0 + 2.0_real64*k1)/6.0_real64
+                c2 = 0.5_real64*k1*h
+            else
+                slope = delta - h*(2.0_real64*k0 + k1)/6.0_real64
+                c2 = 0.5_real64*k0*h
+            end if
+        case (M_PCHIP)
+            c3 = (k0 - delta) + (k1 - delta)
+            if (above) then
+                slope = k1
+                c2 = (k0 - delta) + (k1 - delta) + (k1 - delta)
+            else
+                slope = k0
+                c2 = (delta - k0) + (delta - k0) + (delta - k1)
+            end if
+        case default
+            slope = delta
+            c2 = 0.0_real64
+            c3 = 0.0_real64
+        end select
+
+    end subroutine interp_end_coeffs
 
     !> PCHIP's slope at an end of the table: the three-point estimate from the two end secants, set to
     !! zero where it points against the end secant, and held to three times that secant where the data

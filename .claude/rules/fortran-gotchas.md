@@ -133,9 +133,12 @@ done | sort | uniq -c | sort -rn
   `ieee_is_negative`; build the value at runtime, and have a one-bit fixture assert its own
   precondition first.
 - **Test for NaN with `ieee_is_nan` in cold code and `x /= x` on a hot path** (per-element,
-  per-row, per-comparison, `elemental`), with a comment saying why. `ieee_is_nan` is a runtime call
-  under ifx and nagfor and inlined under gfortran, so a gfortran measurement cannot see the
-  difference. Both forms are quiet on a quiet NaN. `-Wcompare-reals` hits on exact-equality checks
+  per-row, per-comparison, `elemental`), with a comment saying why. **A validation pass over every
+  value of a table or column is per-element, not cold**, however rarely its procedure runs: screen a
+  NaN there by `x /= x`, and a NaN and an infinity together by the exponent bits
+  (`interp_all_finite`, `src/parquet_interpolate_core.f90`). `ieee_is_nan` and `ieee_is_finite` are
+  runtime calls under ifx and nagfor and inlined under gfortran, so a gfortran measurement cannot
+  see the difference. Both forms are quiet on a quiet NaN. `-Wcompare-reals` hits on exact-equality checks
   (`value == anint(value)`) are accepted, not epsilon-ised.
 - **`-ffast-math`/`-Ofast` fold every `ieee_is_nan` guard to `.false.`**; never build with them.
 - **A DIFFERENCE of two nearly-equal doubles carries ~8 digits, the rest is the compiler.** Form
@@ -253,6 +256,15 @@ done | sort | uniq -c | sort -rn
   empty string (`parquet_grouping%agg` and `%add_agg`: `grp%agg(name, colf, out)` with `colf` a
   procedure pointer reaches the token form); nagfor and flang resolve it to the procedure specific. Pass the
   procedure itself; a generic with no `character` competitor (`%apply`) resolves a pointer fine.
+- **A TYPE-BOUND generic holding an `elemental` specific beside a non-elemental one resolves a
+  reference consistent with both to the specific LISTED FIRST under gfortran 15.2**, and every module
+  re-exporting the type reverses that order, so no listing reaches the non-elemental specific from
+  both `use parquet_interpolate` and `use parquet`; F2018 15.5.5.2 names the non-elemental one, as
+  ifx and a plain `interface` generic under gfortran do. The answers can agree to the bit while the
+  wrong specific runs. Give such a generic non-elemental specifics distinguished by rank alone
+  (`pf_interp_1d`'s `eval_rank0` to `eval_rank7`), and pin the resolution through a caller that
+  reaches the type across a re-export, by an observable the specifics differ in
+  (`interpolate_eval_array_before_init`, `test/error_scenarios.f90`).
 - **A dummy PROCEDURE argument in an abbreviated `module procedure` body has an IMPLICIT interface
   under gfortran 15** (`-Werror=implicit-interface` at every call of it), although the spec
   declares it `procedure(<abstract interface>)`; nagfor accepts the body. Restate that body's
@@ -293,6 +305,14 @@ done | sort | uniq -c | sort -rn
   warning names the CALLEE, so check the actual at the outermost call.
   An I/O list section of an allocatable component warns; an implied-do over it is silent
   (`col_print`). Triage: `fpm test --profile debug 2>&1 | grep -c 'warning (406)'`.
+- **`pack` and an EXPLICIT-SHAPE FUNCTION RESULT are stack temporaries under ifx**, the result's in
+  the caller, with no `warning (406)`, since neither is an argument temporary: a large masked table
+  or query array dies with SIGSEGV once it passes the stack limit. `ulimit -s` does not govern an
+  OpenMP worker's stack (`OMP_STACKSIZE`), so a region meets it first, with the process limit
+  unlimited. Count and copy by hand, and declare an array result `allocatable`
+  (`interp_1d_build`, `interp_1d_oneshot_array`); a regression test runs the large case inside a
+  region, where the ordinary `fpm test` reaches a worker's stack
+  (`test_large_tables_on_worker_threads`, `test/test_interpolate_omp.f90`).
 - **Two threads reaching `ERROR STOP` at once leave the exit status nondeterministic, including 0**
   (`exit()` from two threads is undefined); gfortran is deterministic. One abort inside or after a
   region is safe, so the fix is a `critical` around the whole fatal body (`api-conventions.md`).
@@ -490,8 +510,9 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   `character(len=size(xq))`): the dummies arrive with wrong sizes and garbage addresses, so the
   body aborts in a guard on valid input, segfaults, or dies with
   `Cannot allocate array temporary - out of memory`. A result sized from the first dummy or a
-  scalar one, or an allocatable result, compiles correctly. Restate the full interface in the body (`interp_1d_oneshot_array`,
-  `src/parquet_interpolate_1d.f90`). Nothing but a nagfor `fpm test` sees it.
+  scalar one, or an allocatable result, compiles correctly. Restate the full interface in the body, or
+  make the result allocatable (`interp_1d_oneshot_array`, `src/parquet_interpolate_1d.f90`, does
+  both). Nothing but a nagfor `fpm test` sees it.
 - **Keep finalizers deallocate-only; never assign a scalar component in one.** Under
   `-C=undefined` an implicitly invoked finalizer indexes a null definedness map and segfaults on
   the first scalar store, with no diagnostic. Do not re-add the finalizers removed from

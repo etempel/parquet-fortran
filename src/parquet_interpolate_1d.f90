@@ -12,9 +12,11 @@
 !! query or limit, a point beyond the table -- is answered.
 !!
 !! **Every evaluator decides a point beyond the table the same way, before it brackets**: `"clamp"`
-!! and `"nan"` answer there and then, and `"extrapolate"` takes the end segment. The one exception is
-!! `%eval` at the last knot, which answers `y(n)` directly, so that a knot's value never depends on a
-!! segment formula at its right end.
+!! and `"nan"` answer there and then, and `"extrapolate"` continues the end segment's polynomial,
+!! expanded about the end knot the point lies beyond (`interp_end_value`), so that no segment formula
+!! is ever evaluated outside its own segment. The one other exception is `%eval` at the last knot,
+!! which answers `y(n)` directly, so that a knot's value never depends on a segment formula at its
+!! right end.
 submodule (parquet_interpolate) parquet_interpolate_1d
 
     implicit none
@@ -28,63 +30,228 @@ contains
 
     module procedure interp_1d_eval
 
-        integer :: k, n
+        integer :: k
+        logical :: near
 
         if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
-
-        ! A NaN query is answered before any comparison, as `xq /= xq` rather than `ieee_is_nan`:
-        ! this is the per-element path, and `ieee_is_nan` is a runtime call under ifx and nagfor.
-        if (xq /= xq) then
-            v = xq
-            return
-        end if
-
-        n = this%n
-        if (xq < this%x(1)) then
-            select case (this%outside)
-            case (O_CLAMP)
-                v = this%y(1)
-                return
-            case (O_NAN)
-                v = ieee_value(1.0_real64, ieee_quiet_nan)
-                return
-            end select
-            k = 1
-        else if (xq > this%x(n)) then
-            select case (this%outside)
-            case (O_CLAMP)
-                v = this%y(n)
-                return
-            case (O_NAN)
-                v = ieee_value(1.0_real64, ieee_quiet_nan)
-                return
-            end select
-            k = n - 1
-        else if (xq == this%x(n)) then
-            ! The one knot that is the RIGHT end of its segment, where a segment formula would need
-            ! `h/h` to round to exactly one; answered directly instead.
-            v = this%y(n)
-            return
-        else
-            k = interp_bracket(this%x, n, this%uniform, this%step, xq)
-        end if
-
-        select case (this%method)
-        case (M_LINEAR)
-            v = interp_linear_seg_value(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), xq)
-        case (M_CUBIC)
-            v = interp_cubic_seg_value(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
-                                       this%d(k), this%d(k + 1), xq)
-        case default
-            v = interp_hermite_seg_value(this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), &
-                                         this%d(k), this%d(k + 1), xq)
-        end select
+        k = 0
+        near = .false.
+        call interp_1d_value(this, xq, k, near, v)
 
     end procedure interp_1d_eval
 
+    module procedure interp_1d_eval_rank1
+
+        real(real64) :: q, c0, c1
+        integer      :: i, k, n, kend, found
+        logical      :: near
+
+        ! Refused before the queries are looked at, so an array holding none is refused as one query is.
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        n = this%n
+        allocate (v(size(xq)))
+        k = 0
+        near = .false.
+        ! `interp_1d_value` written out, since a call per query is not inlined across a `-fPIC` build and
+        ! this is the loop a column of queries runs; keep the two in step.
+        do i = 1, size(xq)
+            q = xq(i)
+            if (q /= q) then
+                v(i) = q
+                cycle
+            end if
+            if (q < this%x(1)) then
+                select case (this%outside)
+                case (O_CLAMP)
+                    v(i) = this%y(1)
+                case (O_NAN)
+                    v(i) = ieee_value(1.0_real64, ieee_quiet_nan)
+                case default
+                    call interp_1d_end_segment(this, .false., kend, c0, c1)
+                    v(i) = interp_end_value(this%method, this%x(kend), this%x(kend + 1), this%y(kend), this%y(kend + 1), &
+                                            c0, c1, .false., q)
+                end select
+                cycle
+            else if (q > this%x(n)) then
+                select case (this%outside)
+                case (O_CLAMP)
+                    v(i) = this%y(n)
+                case (O_NAN)
+                    v(i) = ieee_value(1.0_real64, ieee_quiet_nan)
+                case default
+                    call interp_1d_end_segment(this, .true., kend, c0, c1)
+                    v(i) = interp_end_value(this%method, this%x(kend), this%x(kend + 1), this%y(kend), this%y(kend + 1), &
+                                            c0, c1, .true., q)
+                end select
+                cycle
+            else if (q == this%x(n)) then
+                v(i) = this%y(n)
+                cycle
+            end if
+
+            if (this%uniform) then
+                found = interp_bracket(this%x, n, .true., this%step, q)
+            else
+                if (near) then
+                    found = interp_bracket_near(this%x, n, k, q)
+                else
+                    found = interp_bracket(this%x, n, .false., this%step, q)
+                end if
+                near = k > 0 .and. abs(found - k) <= 1
+                k = found
+            end if
+
+            select case (this%method)
+            case (M_LINEAR)
+                v(i) = interp_linear_seg_value(this%x(found), this%x(found + 1), this%y(found), this%y(found + 1), q)
+            case (M_CUBIC)
+                v(i) = interp_cubic_seg_value(this%x(found), this%x(found + 1), this%y(found), this%y(found + 1), &
+                                              this%d(found), this%d(found + 1), q)
+            case default
+                v(i) = interp_hermite_seg_value(this%x(found), this%x(found + 1), this%y(found), this%y(found + 1), &
+                                                this%d(found), this%d(found + 1), q)
+            end select
+        end do
+
+    end procedure interp_1d_eval_rank1
+
+    module procedure interp_1d_eval_rank2
+
+        integer :: i1, i2, k
+        logical :: near
+
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        allocate (v(size(xq, 1), size(xq, 2)))
+        k = 0
+        near = .false.
+        do i2 = 1, size(xq, 2)
+            do i1 = 1, size(xq, 1)
+                call interp_1d_value(this, xq(i1, i2), k, near, v(i1, i2))
+            end do
+        end do
+
+    end procedure interp_1d_eval_rank2
+
+    module procedure interp_1d_eval_rank3
+
+        integer :: i1, i2, i3, k
+        logical :: near
+
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        allocate (v(size(xq, 1), size(xq, 2), size(xq, 3)))
+        k = 0
+        near = .false.
+        do i3 = 1, size(xq, 3)
+            do i2 = 1, size(xq, 2)
+                do i1 = 1, size(xq, 1)
+                    call interp_1d_value(this, xq(i1, i2, i3), k, near, v(i1, i2, i3))
+                end do
+            end do
+        end do
+
+    end procedure interp_1d_eval_rank3
+
+    module procedure interp_1d_eval_rank4
+
+        integer :: i1, i2, i3, i4, k
+        logical :: near
+
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        allocate (v(size(xq, 1), size(xq, 2), size(xq, 3), size(xq, 4)))
+        k = 0
+        near = .false.
+        do i4 = 1, size(xq, 4)
+            do i3 = 1, size(xq, 3)
+                do i2 = 1, size(xq, 2)
+                    do i1 = 1, size(xq, 1)
+                        call interp_1d_value(this, xq(i1, i2, i3, i4), k, near, v(i1, i2, i3, i4))
+                    end do
+                end do
+            end do
+        end do
+
+    end procedure interp_1d_eval_rank4
+
+    module procedure interp_1d_eval_rank5
+
+        integer :: i1, i2, i3, i4, i5, k
+        logical :: near
+
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        allocate (v(size(xq, 1), size(xq, 2), size(xq, 3), size(xq, 4), size(xq, 5)))
+        k = 0
+        near = .false.
+        do i5 = 1, size(xq, 5)
+            do i4 = 1, size(xq, 4)
+                do i3 = 1, size(xq, 3)
+                    do i2 = 1, size(xq, 2)
+                        do i1 = 1, size(xq, 1)
+                            call interp_1d_value(this, xq(i1, i2, i3, i4, i5), k, near, v(i1, i2, i3, i4, i5))
+                        end do
+                    end do
+                end do
+            end do
+        end do
+
+    end procedure interp_1d_eval_rank5
+
+    module procedure interp_1d_eval_rank6
+
+        integer :: i1, i2, i3, i4, i5, i6, k
+        logical :: near
+
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        allocate (v(size(xq, 1), size(xq, 2), size(xq, 3), size(xq, 4), size(xq, 5), size(xq, 6)))
+        k = 0
+        near = .false.
+        do i6 = 1, size(xq, 6)
+            do i5 = 1, size(xq, 5)
+                do i4 = 1, size(xq, 4)
+                    do i3 = 1, size(xq, 3)
+                        do i2 = 1, size(xq, 2)
+                            do i1 = 1, size(xq, 1)
+                                call interp_1d_value(this, xq(i1, i2, i3, i4, i5, i6), k, near, v(i1, i2, i3, i4, i5, i6))
+                            end do
+                        end do
+                    end do
+                end do
+            end do
+        end do
+
+    end procedure interp_1d_eval_rank6
+
+    module procedure interp_1d_eval_rank7
+
+        integer :: i1, i2, i3, i4, i5, i6, i7, k
+        logical :: near
+
+        if (this%n == 0) error stop "pf_interp_1d%eval: the interpolant is not initialised"
+        allocate (v(size(xq, 1), size(xq, 2), size(xq, 3), size(xq, 4), size(xq, 5), size(xq, 6), size(xq, 7)))
+        k = 0
+        near = .false.
+        do i7 = 1, size(xq, 7)
+            do i6 = 1, size(xq, 6)
+                do i5 = 1, size(xq, 5)
+                    do i4 = 1, size(xq, 4)
+                        do i3 = 1, size(xq, 3)
+                            do i2 = 1, size(xq, 2)
+                                do i1 = 1, size(xq, 1)
+                                    call interp_1d_value(this, xq(i1, i2, i3, i4, i5, i6, i7), k, near, &
+                                                         v(i1, i2, i3, i4, i5, i6, i7))
+                                end do
+                            end do
+                        end do
+                    end do
+                end do
+            end do
+        end do
+
+    end procedure interp_1d_eval_rank7
+
     module procedure interp_1d_derivative
 
-        integer :: k, n, ord
+        real(real64) :: c0, c1
+        integer      :: k, n, ord
 
         if (this%n == 0) error stop "pf_interp_1d%derivative: the interpolant is not initialised"
         ord = 1
@@ -98,27 +265,19 @@ contains
         end if
 
         n = this%n
-        if (xq < this%x(1)) then
+        if (xq < this%x(1) .or. xq > this%x(n)) then
             select case (this%outside)
             case (O_CLAMP)
                 ! Clamped, the interpolant is constant beyond the table.
                 v = 0.0_real64
-                return
             case (O_NAN)
                 v = ieee_value(1.0_real64, ieee_quiet_nan)
-                return
+            case default
+                call interp_1d_end_segment(this, xq > this%x(n), k, c0, c1)
+                v = interp_end_derivative(this%method, this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), c0, c1, &
+                                          xq > this%x(n), xq, ord)
             end select
-            k = 1
-        else if (xq > this%x(n)) then
-            select case (this%outside)
-            case (O_CLAMP)
-                v = 0.0_real64
-                return
-            case (O_NAN)
-                v = ieee_value(1.0_real64, ieee_quiet_nan)
-                return
-            end select
-            k = n - 1
+            return
         else
             k = interp_bracket(this%x, n, this%uniform, this%step, xq)
         end if
@@ -138,8 +297,8 @@ contains
 
     module procedure interp_1d_integral
 
-        real(real64) :: lo, hi, below, above, inner
-        integer      :: n, k, klo, khi
+        real(real64) :: lo, hi, below, above, inner, c0, c1
+        integer      :: n, k, klo, khi, kend
         logical      :: flipped
 
         if (this%n == 0) error stop "pf_interp_1d%integral: the interpolant is not initialised"
@@ -197,14 +356,41 @@ contains
                     above = interp_1d_flat(hi - this%x(n), this%y(n))
                     hi = this%x(n)
                 end if
+            case default
+                ! Extrapolated, what lies beyond each end is the end segment's polynomial about the end
+                ! knot, integrated from that knot; the rest is integrated inside.
+                if (hi <= this%x(1)) then
+                    call interp_1d_end_segment(this, .false., kend, c0, c1)
+                    s = interp_1d_end_piece(this, kend, c0, c1, .false., hi) - &
+                        interp_1d_end_piece(this, kend, c0, c1, .false., lo)
+                    if (flipped) s = -s
+                    return
+                end if
+                if (lo >= this%x(n)) then
+                    call interp_1d_end_segment(this, .true., kend, c0, c1)
+                    s = interp_1d_end_piece(this, kend, c0, c1, .true., hi) - &
+                        interp_1d_end_piece(this, kend, c0, c1, .true., lo)
+                    if (flipped) s = -s
+                    return
+                end if
+                if (lo < this%x(1)) then
+                    call interp_1d_end_segment(this, .false., kend, c0, c1)
+                    below = -interp_1d_end_piece(this, kend, c0, c1, .false., lo)
+                    lo = this%x(1)
+                end if
+                if (hi > this%x(n)) then
+                    call interp_1d_end_segment(this, .true., kend, c0, c1)
+                    above = interp_1d_end_piece(this, kend, c0, c1, .true., hi)
+                    hi = this%x(n)
+                end if
             end select
         end if
 
-        ! The segments of the two limits, the end segments standing for everything beyond the table,
-        ! then the partial segment of each limit and every whole segment between them. Each piece is
-        ! integrated from its segment's left knot, so a limit on a knot contributes an exact zero.
-        klo = interp_1d_segment_of(this, lo)
-        khi = interp_1d_segment_of(this, hi)
+        ! Both limits now lie inside the table: the segments they fall in, then the partial segment of
+        ! each limit and every whole segment between them. Each piece is integrated from its segment's
+        ! left knot, so a limit on a knot contributes an exact zero.
+        klo = interp_bracket(this%x, n, this%uniform, this%step, lo)
+        khi = interp_bracket(this%x, n, this%uniform, this%step, hi)
         if (klo == khi) then
             inner = interp_1d_piece(this, khi, hi) - interp_1d_piece(this, klo, lo)
         else
@@ -265,10 +451,13 @@ contains
 
     end procedure interp_1d_oneshot_scalar
 
-    ! The FULLY RESTATED form, not `module procedure interp_1d_oneshot_array`: the result's shape is
-    ! taken from `xq`, an assumed-shape dummy that is not the first argument, and nagfor 7.2 compiles
-    ! the abbreviated form of that with every dummy's descriptor wrong -- `x` and `y` arrive with
-    ! the wrong sizes and `xq` at a garbage address.
+    ! The result is ALLOCATABLE: ifx builds the caller's temporary for an explicit-shape function result
+    ! on the stack, which a large `xq` overflows, on an OpenMP worker's small stack first
+    ! (`test_large_tables_on_worker_threads`, test/test_interpolate_omp.f90). And the interface is
+    ! restated in FULL rather than abbreviated to `module procedure interp_1d_oneshot_array`: nagfor 7.2
+    ! compiles the abbreviated form of a result shaped by `xq`, an assumed-shape dummy that is not the
+    ! first argument, with every dummy's descriptor wrong -- so a result given an explicit shape again
+    ! needs this form (`fortran-gotchas.md`).
     module function interp_1d_oneshot_array(x, y, xq, method, bc, slopes, outside, is_valid, &
                                             context) result(yq)
         implicit none
@@ -281,7 +470,7 @@ contains
         character(len=*), intent(in), optional :: outside       !! the out-of-range policy
         logical, intent(in), optional          :: is_valid(:)   !! `.false.` drops that point
         character(len=*), intent(in), optional :: context       !! call-site text
-        real(real64)                           :: yq(size(xq))  !! the interpolated values
+        real(real64), allocatable              :: yq(:)         !! the interpolated values, one per query
 
         type(pf_interp_1d) :: c
 
@@ -310,10 +499,10 @@ contains
         character(len=*), intent(in), optional :: context     !! call-site text
 
         real(real64), allocatable     :: xs(:), ys(:)
-        real(real64)                  :: s1, sn
-        character(len=TOKEN_CAP + 1)  :: tok
+        real(real64)                  :: s1, sn, widest
+        character(len=TOKEN_CAP)      :: tok
         character(len=:), allocatable :: quoted
-        integer                       :: n, bc_code, need
+        integer                       :: n, bc_code, need, i
         logical                       :: ascending
 
         ! Row 1: the two halves of the table pair up.
@@ -387,7 +576,7 @@ contains
                                   trim(interp_i2s(size(slopes))), context)
             end if
             ! Row 10: finite slopes.
-            if (.not. all(ieee_is_finite(slopes))) call interp_abort(entry, "slopes must be finite", context)
+            if (.not. interp_all_finite(slopes)) call interp_abort(entry, "slopes must be finite", context)
             s1 = slopes(1)
             sn = slopes(2)
         end if
@@ -411,10 +600,20 @@ contains
         end if
 
         ! Row 12: enough points survive the mask for the method. A not-a-knot spline needs four: its
-        ! end conditions are two distinct rows only then.
+        ! end conditions are two distinct rows only then. The survivors are copied by hand rather than
+        ! with `pack`, whose result ifx builds on the stack, which a table of a few hundred thousand
+        ! points overflows on an OpenMP worker thread (`test_large_tables_on_worker_threads`,
+        ! test/test_interpolate_omp.f90).
         if (present(is_valid)) then
-            xs = pack(x, is_valid)
-            ys = pack(y, is_valid)
+            allocate (xs(count(is_valid)), ys(count(is_valid)))
+            n = 0
+            do i = 1, size(x)
+                if (is_valid(i)) then
+                    n = n + 1
+                    xs(n) = x(i)
+                    ys(n) = y(i)
+                end if
+            end do
         else
             xs = x
             ys = y
@@ -445,11 +644,15 @@ contains
         end if
 
         ! Row 13a: finite. An infinite end knot passes the ordering and would make its segment's
-        ! width infinite, so every query on that segment would answer NaN.
-        if (.not. all(ieee_is_finite(xs))) call interp_abort(entry, "x must be finite", context)
+        ! width infinite, so every query on that segment would answer NaN. Only an end can be
+        ! infinite in a strictly monotonic table, and neither is a NaN by now, so the comparisons are
+        ! quiet.
+        if (.not. (abs(xs(1)) <= huge(xs(1)) .and. abs(xs(n)) <= huge(xs(n)))) then
+            call interp_abort(entry, "x must be finite", context)
+        end if
 
         ! Row 14: finite ordinates.
-        if (.not. all(ieee_is_finite(ys))) call interp_abort(entry, "y must be finite", context)
+        if (.not. interp_all_finite(ys)) call interp_abort(entry, "y must be finite", context)
 
         ! Stored ascending: the workers see one order only. A slope is a derivative in `x`, which
         ! reversing the table leaves alone, so the two end slopes change places and not sign.
@@ -467,8 +670,22 @@ contains
         call interp_uniform_step(this%x, this%uniform, this%step)
         select case (this%method)
         case (M_CUBIC)
+            ! Row 15: no spacing wider than the spline's limit, since its segment formula squares one.
+            widest = interp_widest_spacing(this%x)
+            if (widest > SPLINE_MAX_SPACING) then
+                call interp_abort(entry, "x has a spacing of "//trim(interp_r2s(widest))//", above the cubic "// &
+                                  "spline's limit of "//trim(interp_r2s(SPLINE_MAX_SPACING))// &
+                                  '; rescale x, or use method "linear" or "pchip"', context)
+            end if
             allocate (this%d(n))
             call interp_spline_coeffs(this%x, this%y, bc_code, s1, sn, this%d)
+            ! Row 16: second derivatives that did not overflow in the solve, as they do over spacings far
+            ! below the ordinates' scale.
+            if (.not. interp_all_finite(this%d)) then
+                call interp_abort(entry, "the cubic spline's second derivatives overflow, with x as closely spaced "// &
+                                  "as "//trim(interp_r2s(interp_narrowest_spacing(this%x)))// &
+                                  '; rescale the table, or use method "linear" or "pchip"', context)
+            end if
         case (M_PCHIP)
             allocate (this%d(n))
             call interp_pchip_slopes(this%x, this%y, this%d)
@@ -477,6 +694,92 @@ contains
     end subroutine interp_1d_build
 
     ! ---- helpers private to this submodule -------------------------------------------------------
+
+    !> The value every specific of `%eval` answers at one query: a NaN its own NaN, a point beyond the
+    !! table what the object's policy says, the last knot its ordinate, and any other point its
+    !! segment's polynomial.
+    !!
+    !! `k` is the segment the last query searched for fell in, 0 before any, and becomes this query's;
+    !! `near` says to search from `k` rather than bisect from scratch. It is set when two queries in a
+    !! row fall in the same or neighbouring segments, as queries in order do, and cleared when a query
+    !! lands further off, as queries in no order do: they then pay one comparison of two integers over
+    !! a bisection, and queries in order a comparison or two in all. An evenly spaced table is bracketed
+    !! by arithmetic whatever the two hold. Neither can change the answer: the segment a query falls in
+    !! is unique.
+    pure subroutine interp_1d_value(this, q, k, near, v)
+        type(pf_interp_1d), intent(in) :: this !! a built interpolant
+        real(real64), intent(in)       :: q    !! the query
+        integer, intent(inout)         :: k    !! the last query's segment, or 0; this query's after
+        logical, intent(inout)         :: near !! search from `k`; whether the next query should, after
+        real(real64), intent(out)      :: v    !! the interpolated value
+
+        real(real64) :: c0, c1
+        integer      :: n, kend, found
+
+        ! A NaN query is answered before any comparison, as `q /= q` rather than `ieee_is_nan`: this is
+        ! the per-element path, and `ieee_is_nan` is a runtime call under ifx and nagfor.
+        if (q /= q) then
+            v = q
+            return
+        end if
+
+        n = this%n
+        if (q < this%x(1)) then
+            select case (this%outside)
+            case (O_CLAMP)
+                v = this%y(1)
+            case (O_NAN)
+                v = ieee_value(1.0_real64, ieee_quiet_nan)
+            case default
+                call interp_1d_end_segment(this, .false., kend, c0, c1)
+                v = interp_end_value(this%method, this%x(kend), this%x(kend + 1), this%y(kend), this%y(kend + 1), &
+                                     c0, c1, .false., q)
+            end select
+            return
+        else if (q > this%x(n)) then
+            select case (this%outside)
+            case (O_CLAMP)
+                v = this%y(n)
+            case (O_NAN)
+                v = ieee_value(1.0_real64, ieee_quiet_nan)
+            case default
+                call interp_1d_end_segment(this, .true., kend, c0, c1)
+                v = interp_end_value(this%method, this%x(kend), this%x(kend + 1), this%y(kend), this%y(kend + 1), &
+                                     c0, c1, .true., q)
+            end select
+            return
+        else if (q == this%x(n)) then
+            ! The one knot that is the RIGHT end of its segment, where a segment formula would need
+            ! `h/h` to round to exactly one; answered directly instead.
+            v = this%y(n)
+            return
+        end if
+
+        if (this%uniform) then
+            ! Arithmetic needs no history, and keeps none.
+            found = interp_bracket(this%x, n, .true., this%step, q)
+        else
+            if (near) then
+                found = interp_bracket_near(this%x, n, k, q)
+            else
+                found = interp_bracket(this%x, n, .false., this%step, q)
+            end if
+            near = k > 0 .and. abs(found - k) <= 1
+            k = found
+        end if
+
+        select case (this%method)
+        case (M_LINEAR)
+            v = interp_linear_seg_value(this%x(found), this%x(found + 1), this%y(found), this%y(found + 1), q)
+        case (M_CUBIC)
+            v = interp_cubic_seg_value(this%x(found), this%x(found + 1), this%y(found), this%y(found + 1), &
+                                       this%d(found), this%d(found + 1), q)
+        case default
+            v = interp_hermite_seg_value(this%x(found), this%x(found + 1), this%y(found), this%y(found + 1), &
+                                         this%d(found), this%d(found + 1), q)
+        end select
+
+    end subroutine interp_1d_value
 
     !> Exchanges two values.
     pure subroutine interp_swap(a, b)
@@ -491,24 +794,42 @@ contains
 
     end subroutine interp_swap
 
-    !> The segment an integration limit is integrated on: the one its bracket names inside the table,
-    !! and the end segment beyond either end, whose polynomial `"extrapolate"` continues.
-    pure function interp_1d_segment_of(this, q) result(k)
-        type(pf_interp_1d), intent(in) :: this !! a built interpolant
-        real(real64), intent(in)       :: q    !! the limit, not a NaN
-        integer                        :: k    !! the segment's left knot
+    !> The end segment `"extrapolate"` continues beyond one end of the table: its left knot, and the
+    !! method's coefficients at its two knots -- second derivatives for the spline, slopes for PCHIP,
+    !! and zeros for `"linear"`, which has none stored.
+    pure subroutine interp_1d_end_segment(this, above, k, c0, c1)
+        type(pf_interp_1d), intent(in) :: this  !! a built interpolant
+        logical, intent(in)            :: above !! the last segment, rather than the first
+        integer, intent(out)           :: k     !! the segment's left knot
+        real(real64), intent(out)      :: c0    !! the coefficient at `x(k)`
+        real(real64), intent(out)      :: c1    !! the coefficient at `x(k + 1)`
 
-        if (q < this%x(1)) then
-            k = 1
-        else if (q > this%x(this%n)) then
-            k = this%n - 1
-        else
-            k = interp_bracket(this%x, this%n, this%uniform, this%step, q)
+        k = merge(this%n - 1, 1, above)
+        c0 = 0.0_real64
+        c1 = 0.0_real64
+        if (this%method /= M_LINEAR) then
+            c0 = this%d(k)
+            c1 = this%d(k + 1)
         end if
 
-    end function interp_1d_segment_of
+    end subroutine interp_1d_end_segment
 
-    !> The integral of segment `k`'s polynomial from its left knot to `q`, which may lie beyond it.
+    !> The integral of the end segment `k`'s polynomial, continued beyond the table, from its end knot
+    !! to `q`.
+    pure function interp_1d_end_piece(this, k, c0, c1, above, q) result(v)
+        type(pf_interp_1d), intent(in) :: this  !! a built interpolant
+        integer, intent(in)            :: k     !! the end segment's left knot
+        real(real64), intent(in)       :: c0    !! the coefficient at `x(k)`
+        real(real64), intent(in)       :: c1    !! the coefficient at `x(k + 1)`
+        logical, intent(in)            :: above !! the last segment, rather than the first
+        real(real64), intent(in)       :: q     !! the upper limit, at or beyond the end knot
+        real(real64)                   :: v     !! the integral
+
+        v = interp_end_integral(this%method, this%x(k), this%x(k + 1), this%y(k), this%y(k + 1), c0, c1, above, q)
+
+    end function interp_1d_end_piece
+
+    !> The integral of segment `k`'s polynomial from its left knot to `q` inside it.
     pure function interp_1d_piece(this, k, q) result(v)
         type(pf_interp_1d), intent(in) :: this !! a built interpolant
         integer, intent(in)            :: k    !! the segment's left knot

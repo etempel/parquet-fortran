@@ -562,7 +562,7 @@ contains
 
     end subroutine run_eval
 
-    !> Times one elemental `%eval` over a set of queries.
+    !> Times one `%eval` over an array of queries.
     subroutine time_eval(c, xq, rounds, seconds, v)
         type(pf_interp_1d), intent(in) :: c       !! a built interpolant
         real(real64), intent(in)       :: xq(:)   !! the queries

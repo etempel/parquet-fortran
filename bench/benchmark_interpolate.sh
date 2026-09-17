@@ -16,18 +16,20 @@
 #               GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=4294967296
 #             keeps the blocks, and takes most of the rise away.
 #
-#   eval      `%eval` in nanoseconds per query, one elemental call over a million queries, at 16,
+#   eval      `%eval` in nanoseconds per query, one call over an array of a million queries, at 16,
 #             1024 and 65 536 points, per method, with the queries in a random order and then
 #             sorted. Three tables per method: an evenly spaced one, bracketed by arithmetic; the
-#             SAME object forced to bisect by `parquet_debug_interp_force_search`, which changes
-#             the bracket search and nothing else, so the difference between the two rows is what
-#             the arithmetic saves; and one with random gaps, which bisects by itself. The mode
-#             confirms through that hook that the even table was on the arithmetic path and the
-#             uneven one was not, and refuses to report otherwise: two bisections compared would
-#             look like a finding. `mismatches` counts the answers the forced bisection gave in
-#             other bits than the arithmetic did. The library promises none, and the program EXITS
-#             NONZERO on any, since a faster path answering differently is not the same computation
-#             made cheaper.
+#             SAME object forced off the arithmetic path by `parquet_debug_interp_force_search`,
+#             which changes the bracket search and nothing else, so the difference between the two
+#             rows is what the arithmetic saves; and one with random gaps, which searches as the
+#             forced object does. That search bisects queries in a random order, and starts sorted
+#             ones from the previous query's segment, so the sorted column of those two rows is what
+#             searching from a neighbour saves. The mode confirms through that hook that the even
+#             table was on the arithmetic path and the uneven one was not, and refuses to report
+#             otherwise: two searches of one kind compared would look like a finding. `mismatches`
+#             counts the answers the forced object gave in other bits than the arithmetic did. The
+#             library promises none, and the program EXITS NONZERO on any, since a faster path
+#             answering differently is not the same computation made cheaper.
 #
 #   grid      `pf_interp_2d%init` in nanoseconds per node and `%eval` in nanoseconds per query,
 #             bilinear and bicubic, on 128 by 128, 512 by 512 and 1024 by 1024 grids, with the
@@ -51,12 +53,13 @@
 # loop, and the promise that one object may be shared is asserted by
 # `test/test_interpolate_omp.f90` rather than timed here.
 #
-# The guide page quotes no figure from here, only two statements that `eval` and `oneshot` must
-# keep true; re-read both against a new run. An evaluation is a search for the segment plus a few
+# The guide page quotes no figure from here, only three statements that `eval` and `oneshot` must
+# keep true; re-read them against a new run. An evaluation is a search for the segment plus a few
 # multiplications, the search being arithmetic on an evenly spaced table, where it saves more the
 # longer the table is and may save nothing on a table of a few dozen points (sorted queries there
-# bisect faster than they divide). And the one-shot form repeats the build on every call, so a
-# table queried more than a handful of times wants an object.
+# search faster than they divide). An array of queries in order finds each segment in a step or two
+# on a table of any length. And the one-shot form repeats the build on every call, so a table
+# queried more than a handful of times wants an object.
 #
 # Usage:
 #   bench/benchmark_interpolate.sh              # every mode
@@ -88,7 +91,7 @@ QUERIES="${QUERIES:-1000000}"
 
 for arg in "$@"; do
     case "$arg" in
-        -h|--help) sed -n '2,75p' "$0"; finished=1; exit 0 ;;
+        -h|--help) sed -n '2,78p' "$0"; finished=1; exit 0 ;;
         *) echo "benchmark_interpolate.sh: unknown argument '$arg';" \
                 "configure it through MODE, ROUNDS and QUERIES" >&2
            exit 2 ;;

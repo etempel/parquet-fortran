@@ -81,7 +81,9 @@ The table has to be one that can be interpolated, and `%init` checks that it is:
 - `x` and `y` are the same size;
 - there are at least two points, or four for `bc="not_a_knot"`;
 - `x` is strictly increasing or strictly decreasing — no repeated value, and no NaN;
-- every `x` and every `y` is finite.
+- every `x` and every `y` is finite;
+- for a cubic spline, no two neighbouring points lie more than `2**511` apart, about `6.7e153`,
+  and the spline's second derivatives do not overflow — see [End conditions](#end-conditions).
 
 Anything else aborts, with a message naming the rule; [What aborts](#what-aborts) lists each.
 
@@ -102,7 +104,8 @@ call c%init(x, y, is_valid=valid)
 the table early and leaves the object unbuilt; `%is_initialised()` reports whether an object can be
 evaluated. Evaluating one that cannot is a fatal error, not a defined value.
 
-Tokens are matched without regard to case: `method="Linear"` is `method="linear"`.
+Tokens are matched without regard to case: `method="Linear"` is `method="linear"`. A token longer
+than 100 characters matches nothing.
 
 ## Choosing a method
 
@@ -164,20 +167,28 @@ Where the table's own ends matter less than its middle, tabulate beyond the rang
 on an evenly spaced table, an end condition's influence falls off by a factor of about four with
 each point into the table.
 
+**A cubic spline has a limit of scale.** Its segments square the spacing of their two points, and
+its second derivatives grow as the ordinates over that square, so `%init` refuses a spline over
+points more than `2**511` apart, and one whose second derivatives overflow: over ordinates of order
+one, that is points closer than about `1e-154`. Rescale such a table first. `"linear"` and
+`"pchip"` have no such limit: over a table whose abscissae are all scaled by the same factor, from
+`1e-300` to `1e300`, they answer the same values at the queries scaled with them.
+
 ## Evaluating
 
-`c%eval(xq)` is `pure` and `elemental`: a scalar query answers a scalar, and an array of any shape
-answers an array of the same shape, so a whole column is interpolated in one call. Being `pure`, it
-may be called from your own `pure` procedures.
+`c%eval(xq)` is `pure`: a scalar query answers a scalar, and an array of queries of any rank up to
+seven answers an array of the same shape, so a whole column is interpolated in one call. Being
+`pure`, it may be called from your own `pure` procedures. It is not `elemental`, so that an array of
+queries can be searched as a whole, as described below.
 
 **A query on a point of the table answers that point's ordinate exactly**, under every method and
 every policy, the last point included.
 
 **`c%derivative(xq, [order])`** is the interpolant's own first derivative (`order=1`, the default)
-or second (`order=2`), `pure` and `elemental` in the same way. It is the derivative of the piece
-`%eval` evaluates, so on a point of the table it is the next segment's, and on the last point the
-last segment's. That only shows where the interpolant has no such derivative across the point: the
-slope of `"linear"` and the curvature of `"pchip"`.
+or second (`order=2`), `pure` and `elemental`, over a scalar or an array of any shape. It is the
+derivative of the piece `%eval` evaluates, so on a point of the table it is the next segment's, and
+on the last point the last segment's. That only shows where the interpolant has no such derivative
+across the point: the slope of `"linear"` and the curvature of `"pchip"`.
 
 **`c%integral(a, b)`** is the interpolant's definite integral from `a` to `b`, exact for the
 interpolant, since it is a polynomial on every segment. It is `pure`, not `elemental`; `b < a`
@@ -191,6 +202,15 @@ is, and on a table of a few dozen points it may save nothing. Both routes answer
 every query, because the arithmetic answer is checked against the table before it is used: a table
 that is only nearly even is never evaluated on the wrong segment. `bench/benchmark_interpolate.sh`
 times both routes on the same table.
+
+**An array of queries is searched from each query's neighbour.** Given an array, `%eval` starts
+the search for each query at the segment the query before it, in array element order, fell in, as
+long as the queries keep landing in the same or neighbouring segments. Queries that come in order,
+ascending or descending, then find their segments in a step or two on a table of any length, and
+queries in no order are bisected as single queries are. Each answer is still the one a single query
+gets, bit for bit, and nothing is remembered between calls, so the object stays shareable.
+`%derivative` searches for each query from scratch. `bench/benchmark_interpolate.sh` times both
+orders.
 
 ## Outside the table
 
@@ -354,6 +374,8 @@ program with `error stop` and a message that begins with the entry point, `pf_in
 | an `x` not strictly monotonic, or holding a NaN | `x must be strictly increasing or strictly decreasing` |
 | an infinite `x` | `x must be finite` |
 | a NaN or an infinite `y` | `y must be finite` |
+| for `method="cubic"`, two neighbouring points more than `2**511` apart | `x has a spacing of <h>, above the cubic spline's limit of 6.704E+153; rescale x, or use method "linear" or "pchip"` |
+| for `method="cubic"`, second derivatives that overflow | `the cubic spline's second derivatives overflow, with x as closely spaced as <h>; rescale the table, or use method "linear" or "pchip"` |
 
 A grid is checked in its own order, below, with messages that begin `pf_interp_2d%init:`, or
 `pf_interp:` for the one-shot form:
@@ -371,13 +393,16 @@ A grid is checked in its own order, below, with messages that begin `pf_interp_2
 | an `x` not strictly monotonic or holding a NaN, then a `y` | `x must be strictly increasing or strictly decreasing`, or the same of `y` |
 | an infinite `x`, then an infinite `y` | `x must be finite`, or `y must be finite` |
 | a NaN or an infinite value in `z` | `z must be finite` |
+| for `method="cubic"`, two neighbouring grid lines more than `2**511` apart, along `x` then along `y` | `x has a spacing of <h>, above the bicubic spline's limit of 6.704E+153; rescale x, or use method "linear"`, or the same of `y` |
+| for `method="cubic"`, second derivatives that overflow | `the bicubic spline's second derivatives overflow, with grid lines as closely spaced as <h>; rescale the grid, or use method "linear"` |
 
 `pf_interp` given two arrays of coordinates of different sizes aborts with
 `pf_interp: xq and yq differ in size: <a> and <b>`, before it builds anything.
 
 Evaluating, differentiating or integrating an object that was never built aborts with
 `pf_interp_1d%eval: the interpolant is not initialised`, or the same with `%derivative`,
-`%integral` or `pf_interp_2d%eval`, and a derivative of any order but 1 or 2 with
+`%integral` or `pf_interp_2d%eval` — `%eval` over a one-dimensional array even when it holds no
+query — and a derivative of any order but 1 or 2 with
 `pf_interp_1d%derivative: order must be 1 or 2`. Those are `pure`, so their messages carry no
 context. Nothing a query or a limit can be — a NaN, an infinity, a point far outside the table or
 the grid — is an error.

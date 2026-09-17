@@ -23,9 +23,11 @@
 !!
 !! **A grid node answers its value exactly.** Each coordinate is placed on its cell as a fraction of
 !! the cell's width, and every formula here multiplies what it takes from the far side of the cell
-!! by that fraction. The bracket walk makes every interior grid line the LOW end of its cell, where
-!! the fraction is an exact zero, and a formula evaluated at an exact zero answers the near side's
-!! value exactly however the compiler rearranges it. A fraction of exactly one does not: ifx's
+!! by that fraction, or answers the near side's value outright at a fraction of zero. The bracket
+!! walk makes every interior grid line the LOW end of its cell, where the fraction is an exact zero,
+!! and a formula evaluated at an exact zero answers the near side's value exactly however the
+!! compiler rearranges it. The bicubic segment also measures the fraction from the cell's high end,
+!! for the reason `interp_cubic_seg_value` gives, and never uses it at a fraction of zero. A fraction of exactly one does not: ifx's
 !! default `-fp-model=fast` rewrote `(1 - s)*a + s*b` so that `s = 1` answered `0.09999999999999998`
 !! for `a = 0.7`, `b = 0.1`. So no formula here is evaluated at the high end of a cell. A coordinate on
 !! an axis's last grid line -- given there, or moved there by `"clamp"` -- is answered from that
@@ -44,7 +46,7 @@ contains
 
     module procedure interp_2d_eval
 
-        real(real64) :: s, t, hx, hy, v0, v1, w0, w1
+        real(real64) :: s, t, sc, tc, hx, hy, v0, v1, w0, w1
         integer      :: i, j, nx, ny
         logical      :: x_beyond, y_beyond, x_high, y_high
 
@@ -63,8 +65,8 @@ contains
 
         nx = this%nx
         ny = this%ny
-        call interp_2d_locate(this%x, nx, this%x_uniform, this%x_step, this%outside, xq, i, s, x_beyond, x_high)
-        call interp_2d_locate(this%y, ny, this%y_uniform, this%y_step, this%outside, yq, j, t, y_beyond, y_high)
+        call interp_2d_locate(this%x, nx, this%x_uniform, this%x_step, this%outside, xq, i, s, sc, x_beyond, x_high)
+        call interp_2d_locate(this%y, ny, this%y_uniform, this%y_step, this%outside, yq, j, t, tc, y_beyond, y_high)
         if (this%outside == O_NAN) then
             if (x_beyond .or. y_beyond) then
                 v = ieee_value(1.0_real64, ieee_quiet_nan)
@@ -80,14 +82,14 @@ contains
                 v = (1.0_real64 - t)*this%z(nx, j) + t*this%z(nx, j + 1)
             else
                 v = interp_2d_cubic(this%z(nx, j), this%z(nx, j + 1), this%zyy(nx, j), this%zyy(nx, j + 1), &
-                                    this%y(j + 1) - this%y(j), t)
+                                    this%y(j + 1) - this%y(j), tc, t)
             end if
         else if (y_high) then
             if (this%method == M_LINEAR) then
                 v = (1.0_real64 - s)*this%z(i, ny) + s*this%z(i + 1, ny)
             else
                 v = interp_2d_cubic(this%z(i, ny), this%z(i + 1, ny), this%zxx(i, ny), this%zxx(i + 1, ny), &
-                                    this%x(i + 1) - this%x(i), s)
+                                    this%x(i + 1) - this%x(i), sc, s)
             end if
         else if (this%method == M_LINEAR) then
             v0 = (1.0_real64 - s)*this%z(i, j) + s*this%z(i + 1, j)
@@ -97,13 +99,13 @@ contains
             ! Along `x` at the cell's two `y` lines: the values, and their second derivatives in `y`.
             hx = this%x(i + 1) - this%x(i)
             hy = this%y(j + 1) - this%y(j)
-            v0 = interp_2d_cubic(this%z(i, j), this%z(i + 1, j), this%zxx(i, j), this%zxx(i + 1, j), hx, s)
-            v1 = interp_2d_cubic(this%z(i, j + 1), this%z(i + 1, j + 1), this%zxx(i, j + 1), this%zxx(i + 1, j + 1), hx, s)
-            w0 = interp_2d_cubic(this%zyy(i, j), this%zyy(i + 1, j), this%zxxyy(i, j), this%zxxyy(i + 1, j), hx, s)
+            v0 = interp_2d_cubic(this%z(i, j), this%z(i + 1, j), this%zxx(i, j), this%zxx(i + 1, j), hx, sc, s)
+            v1 = interp_2d_cubic(this%z(i, j + 1), this%z(i + 1, j + 1), this%zxx(i, j + 1), this%zxx(i + 1, j + 1), hx, sc, s)
+            w0 = interp_2d_cubic(this%zyy(i, j), this%zyy(i + 1, j), this%zxxyy(i, j), this%zxxyy(i + 1, j), hx, sc, s)
             w1 = interp_2d_cubic(this%zyy(i, j + 1), this%zyy(i + 1, j + 1), this%zxxyy(i, j + 1), &
-                                 this%zxxyy(i + 1, j + 1), hx, s)
+                                 this%zxxyy(i + 1, j + 1), hx, sc, s)
             ! Then along `y` between them.
-            v = interp_2d_cubic(v0, v1, w0, w1, hy, t)
+            v = interp_2d_cubic(v0, v1, w0, w1, hy, tc, t)
         end if
 
     end procedure interp_2d_eval
@@ -161,9 +163,9 @@ contains
 
     end procedure interp_2d_oneshot_scalar
 
-    ! The FULLY RESTATED form, not `module procedure interp_2d_oneshot_array`, for the reason
-    ! `interp_1d_oneshot_array` gives: a result shaped by a later assumed-shape dummy is miscompiled
-    ! by nagfor 7.2 in the abbreviated form.
+    ! An ALLOCATABLE result, restated in FULL, for the two reasons `interp_1d_oneshot_array` gives:
+    ! ifx builds the caller's temporary for an explicit-shape result on the stack, and nagfor 7.2
+    ! miscompiles the abbreviated form of a result shaped by a later assumed-shape dummy.
     module function interp_2d_oneshot_array(x, y, z, xq, yq, method, bc, outside, context) result(zq)
         implicit none
         real(real64), intent(in)               :: x(:)          !! the grid lines along `x`
@@ -175,7 +177,7 @@ contains
         character(len=*), intent(in), optional :: bc            !! the spline's end condition
         character(len=*), intent(in), optional :: outside       !! the out-of-range policy
         character(len=*), intent(in), optional :: context       !! call-site text
-        real(real64)                           :: zq(size(xq))  !! the interpolated values
+        real(real64), allocatable              :: zq(:)         !! the interpolated values, one per query
 
         type(pf_interp_2d) :: g
 
@@ -208,7 +210,8 @@ contains
         character(len=*), intent(in), optional :: context !! call-site text
 
         real(real64), allocatable     :: line(:), curvature(:)
-        character(len=TOKEN_CAP + 1)  :: tok
+        real(real64)                  :: widest
+        character(len=TOKEN_CAP)      :: tok
         character(len=:), allocatable :: quoted
         integer                       :: nx, ny, bc_code, need, i, j
         logical                       :: x_ascending, y_ascending
@@ -308,12 +311,19 @@ contains
         end if
 
         ! Row 13a, along each axis: finite, since an infinite end line passes the ordering and would
-        ! make its cells infinitely wide.
-        if (.not. all(ieee_is_finite(x))) call interp_abort(entry, "x must be finite", context)
-        if (.not. all(ieee_is_finite(y))) call interp_abort(entry, "y must be finite", context)
+        ! make its cells infinitely wide. Only an end line can be infinite on a strictly monotonic axis,
+        ! and neither is a NaN by now, so the comparisons are quiet.
+        if (.not. (abs(x(1)) <= huge(x(1)) .and. abs(x(nx)) <= huge(x(nx)))) then
+            call interp_abort(entry, "x must be finite", context)
+        end if
+        if (.not. (abs(y(1)) <= huge(y(1)) .and. abs(y(ny)) <= huge(y(ny)))) then
+            call interp_abort(entry, "y must be finite", context)
+        end if
 
-        ! Row 14: finite values.
-        if (.not. all(ieee_is_finite(z))) call interp_abort(entry, "z must be finite", context)
+        ! Row 14: finite values, a column at a time.
+        do j = 1, ny
+            if (.not. interp_all_finite(z(:, j))) call interp_abort(entry, "z must be finite", context)
+        end do
 
         ! Stored ascending along each axis, with the values reversed along the same axis.
         this%nx = nx
@@ -344,6 +354,20 @@ contains
         call interp_uniform_step(this%y, this%y_uniform, this%y_step)
 
         if (this%method == M_CUBIC) then
+            ! Row 15, along each axis: no spacing wider than the spline's limit, since its segment
+            ! formula squares one.
+            widest = interp_widest_spacing(this%x)
+            if (widest > SPLINE_MAX_SPACING) then
+                call interp_abort(entry, "x has a spacing of "//trim(interp_r2s(widest))//", above the bicubic "// &
+                                  "spline's limit of "//trim(interp_r2s(SPLINE_MAX_SPACING))// &
+                                  '; rescale x, or use method "linear"', context)
+            end if
+            widest = interp_widest_spacing(this%y)
+            if (widest > SPLINE_MAX_SPACING) then
+                call interp_abort(entry, "y has a spacing of "//trim(interp_r2s(widest))//", above the bicubic "// &
+                                  "spline's limit of "//trim(interp_r2s(SPLINE_MAX_SPACING))// &
+                                  '; rescale y, or use method "linear"', context)
+            end if
             allocate (this%zxx(nx, ny), this%zyy(nx, ny), this%zxxyy(nx, ny))
             ! Along `x`, every column of the values.
             do j = 1, ny
@@ -360,22 +384,34 @@ contains
             do j = 1, ny
                 call interp_spline_coeffs(this%x, this%zyy(:, j), bc_code, 0.0_real64, 0.0_real64, this%zxxyy(:, j))
             end do
+            ! Row 16: tables that did not overflow in the solves, as they do over spacings far below the
+            ! values' scale.
+            do j = 1, ny
+                if (.not. (interp_all_finite(this%zxx(:, j)) .and. interp_all_finite(this%zyy(:, j)) .and. &
+                           interp_all_finite(this%zxxyy(:, j)))) then
+                    call interp_abort(entry, "the bicubic spline's second derivatives overflow, with grid lines as "// &
+                                      "closely spaced as "// &
+                                      trim(interp_r2s(min(interp_narrowest_spacing(this%x), &
+                                                          interp_narrowest_spacing(this%y))))// &
+                                      '; rescale the grid, or use method "linear"', context)
+                end if
+            end do
         end if
 
     end subroutine interp_2d_build
 
     ! ---- helpers private to this submodule -------------------------------------------------------
 
-    !> Places one coordinate on its axis: the cell it is evaluated on, how far along that cell, and
-    !! whether it lies on the axis's last grid line instead.
+    !> Places one coordinate on its axis: the cell it is evaluated on, how far along that cell from each
+    !! of its ends, and whether it lies on the axis's last grid line instead.
     !!
-    !! Inside the grid the cell is the one its bracket names, and the fraction is measured from the
-    !! cell's low line -- an exact zero on that line. On the axis's last line, and beyond it under
-    !! `"clamp"`, `high` is set and the fraction is not measured: the caller answers from that line's
-    !! values. Below the grid the cell is the first; `"extrapolate"` measures the fraction below it, and
-    !! `"clamp"` puts the coordinate on the first line, at an exact zero. Under `"nan"` nothing measured
-    !! beyond the grid is read.
-    pure subroutine interp_2d_locate(lines, n, uniform, step, outside, q, k, frac, beyond, high)
+    !! Inside the grid the cell is the one its bracket names, and the fraction `frac` is measured from
+    !! the cell's low line -- an exact zero on that line -- and `comp` from its high line. On the
+    !! axis's last line, and beyond it under `"clamp"`, `high` is set and neither is measured: the
+    !! caller answers from that line's values. Below the grid the cell is the first; `"extrapolate"`
+    !! measures both fractions of a point below it, and `"clamp"` puts the coordinate on the first line,
+    !! at a `frac` of exactly zero. Under `"nan"` nothing measured beyond the grid is read.
+    pure subroutine interp_2d_locate(lines, n, uniform, step, outside, q, k, frac, comp, beyond, high)
         real(real64), intent(in)  :: lines(:) !! the axis's grid lines, strictly increasing
         integer, intent(in)       :: n        !! lines on the axis, at least two
         logical, intent(in)       :: uniform  !! guess the bracket by arithmetic
@@ -383,22 +419,28 @@ contains
         integer, intent(in)       :: outside  !! the object's `O_*` policy
         real(real64), intent(in)  :: q        !! the coordinate, not a NaN
         integer, intent(out)      :: k        !! the cell's low line; `n - 1` when `high`
-        real(real64), intent(out) :: frac     !! how far along the cell, in cell widths; zero when `high`
+        real(real64), intent(out) :: frac     !! how far along the cell from its low line, in cell widths
+        real(real64), intent(out) :: comp     !! how far short of its high line, in cell widths
         logical, intent(out)      :: beyond   !! `q` lies beyond the grid
         logical, intent(out)      :: high     !! `q` is on the last line, or clamped onto it
 
         beyond = .false.
         high = .false.
         frac = 0.0_real64
+        comp = 1.0_real64
         if (q < lines(1)) then
             beyond = .true.
             k = 1
-            if (outside == O_EXTRAPOLATE) frac = (q - lines(1))/(lines(2) - lines(1))
+            if (outside == O_EXTRAPOLATE) then
+                frac = (q - lines(1))/(lines(2) - lines(1))
+                comp = (lines(2) - q)/(lines(2) - lines(1))
+            end if
         else if (q > lines(n)) then
             beyond = .true.
             k = n - 1
             if (outside == O_EXTRAPOLATE) then
                 frac = (q - lines(n - 1))/(lines(n) - lines(n - 1))
+                comp = (lines(n) - q)/(lines(n) - lines(n - 1))
             else
                 high = .true.
             end if
@@ -408,28 +450,32 @@ contains
         else
             k = interp_bracket(lines, n, uniform, step, q)
             frac = (q - lines(k))/(lines(k + 1) - lines(k))
+            comp = (lines(k + 1) - q)/(lines(k + 1) - lines(k))
         end if
 
     end subroutine interp_2d_locate
 
-    !> One cubic-spline segment in second-derivative form, a fraction `b` of the way along it.
+    !> One cubic-spline segment in second-derivative form, at fractions `b` of the way along it from its
+    !! low end and `a` short of its high end.
     !!
-    !! The segment formula of `interp_cubic_seg_value` from its fraction rather than from a point, so
-    !! that the caller measures the fraction once for four segments; a fraction of exactly zero answers
-    !! `y0` exactly.
-    pure function interp_2d_cubic(y0, y1, m0, m1, h, b) result(v)
+    !! The segment formula of `interp_cubic_seg_value` from its two fractions rather than from a point,
+    !! so that the caller measures them once for four segments; a `b` of exactly zero answers `y0`
+    !! exactly. Beyond `[0, 1]` the cubic is continued.
+    pure function interp_2d_cubic(y0, y1, m0, m1, h, a, b) result(v)
         real(real64), intent(in) :: y0 !! the value at the segment's low end
         real(real64), intent(in) :: y1 !! the value at its high end
         real(real64), intent(in) :: m0 !! the second derivative at the low end
         real(real64), intent(in) :: m1 !! the second derivative at the high end
         real(real64), intent(in) :: h  !! the segment's width
-        real(real64), intent(in) :: b  !! how far along it, in widths; beyond `[0, 1]` it is continued
+        real(real64), intent(in) :: a  !! how far short of the high end, in widths
+        real(real64), intent(in) :: b  !! how far along from the low end, in widths
         real(real64)             :: v  !! the cubic's value there
 
-        real(real64) :: a
-
-        a = 1.0_real64 - b
-        v = a*y0 + b*y1 + ((a*a*a - a)*m0 + (b*b*b - b)*m1)*(h*h)/6.0_real64
+        if (b == 0.0_real64) then
+            v = y0
+            return
+        end if
+        v = a*y0 + b*y1 - a*b*((1.0_real64 + a)*m0 + (1.0_real64 + b)*m1)*(h*h)/6.0_real64
 
     end function interp_2d_cubic
 

@@ -2199,6 +2199,12 @@ contains
         integer :: k, j
         integer(int64) :: key, d
         real(real64) :: u1, u2, v(3), want(3), centre(3), radius, inner, ra, dec, r(3, 3), rw(3, 3), scale
+        ! `vs`, `ws` and `mu` are named rather than written inline at the calls below: `sph_note`'s
+        ! and `pf_random_vmf_at`'s array dummies are explicit-shape, so an expression or a function
+        ! result -- a value with no address of its own -- is argument-associated through a temporary,
+        ! which ifx reports as `warning (406)` per call under --profile debug. See
+        ! .claude/rules/fortran-gotchas.md.
+        real(real64) :: vs(3), ws(3), mu(3)
         real(real64) :: worst
         logical :: differs
 
@@ -2299,7 +2305,9 @@ contains
             end if
             want = sph_vec(sball_p_bits, k)
             scale = max(1.0_real64, radius)
-            call sph_note(v / scale, want / scale, worst, differs)
+            vs = v / scale
+            ws = want / scale
+            call sph_note(vs, ws, worst, differs)
             call check(error, maxval(abs(v - want)) <= SPH_TOL * scale, &
                 "pf_random_ball_at is more than 32 ulp of its radius from the 60-digit model")
             if (allocated(error)) return
@@ -2312,7 +2320,8 @@ contains
             call check(error, transfer(u1, 0_int64) == svmf_u1_bits(k) .and. transfer(u2, 0_int64) == svmf_u2_bits(k), &
                 "the vMF table and the cipher disagree about which block this coordinate names")
             if (allocated(error)) return
-            v = pf_random_vmf_at(svmf_seed(k), svmf_stream(k), sph_vec(svmf_mu_bits, k), &
+            mu = sph_vec(svmf_mu_bits, k)
+            v = pf_random_vmf_at(svmf_seed(k), svmf_stream(k), mu, &
                                  transfer(svmf_kappa_bits(k), 0.0_real64), svmf_draw(k))
             want = sph_vec(svmf_v_bits, k)
             call sph_note(v, want, worst, differs)
@@ -2740,6 +2749,12 @@ contains
         real(real64), parameter :: CENTRES(3, 4) = reshape([0.0_real64, 0.0_real64, 1.0_real64, &
             0.3_real64, -0.5_real64, 0.8_real64, 0.0_real64, 0.0_real64, -1.0_real64, &
             1.0e-300_real64, -2.0e-300_real64, 5.0e-301_real64], [3, 4])
+        ! The generic centre, `CENTRES(:, 2)`, named rather than written inline at the calls below:
+        ! `pf_random_disc_at`'s `centre(3)` and `pf_angdist`'s `vec1(3)` dummies are explicit-shape,
+        ! so an array constructor -- a value with no address of its own -- is argument-associated
+        ! through a temporary, which ifx reports as `warning (406)` on every call under
+        ! --profile debug. See .claude/rules/fortran-gotchas.md.
+        real(real64), parameter :: TILTED(3) = [0.3_real64, -0.5_real64, 0.8_real64]
         integer(int64) :: k, outside, tc(NCELL), ac(NCELL), cc(NCELL), pix(0:191), ipix
         real(real64) :: centre(3), cu(3), f1(3), f2(3), v(3), rin, ang, cos_in, cos_out, t, theta_c
         integer :: j, variant
@@ -2790,9 +2805,9 @@ contains
             v = pf_random_disc_at(dist_seed, k, ZAXIS, 0.0_real64)
             call check(error, all(v == ZAXIS), "a disc of radius 0 about +z did not return +z exactly")
             if (allocated(error)) return
-            v = pf_random_disc_at(dist_seed, k, [0.3_real64, -0.5_real64, 0.8_real64], 0.0_real64)
-            call check(error, maxval(abs(v - [0.3_real64, -0.5_real64, 0.8_real64] / norm2([0.3_real64, -0.5_real64, &
-                0.8_real64]))) <= SPH_SAME, "a disc of radius 0 did not return its normalised centre")
+            v = pf_random_disc_at(dist_seed, k, TILTED, 0.0_real64)
+            call check(error, maxval(abs(v - TILTED / norm2(TILTED))) <= SPH_SAME, &
+                "a disc of radius 0 did not return its normalised centre")
             if (allocated(error)) return
         end do
 
@@ -2800,8 +2815,7 @@ contains
         do variant = 1, 2
             pix = 0_int64
             do k = 1_int64, 192000_int64
-                v = pf_random_disc_at(dist_seed, 33_int64, [0.3_real64, -0.5_real64, 0.8_real64], &
-                                      merge(PI, 4.0_real64, variant == 1), k)
+                v = pf_random_disc_at(dist_seed, 33_int64, TILTED, merge(PI, 4.0_real64, variant == 1), k)
                 call pf_vec2pix_ring(4_int64, v, ipix)
                 pix(ipix) = pix(ipix) + 1_int64
             end do
@@ -2820,8 +2834,8 @@ contains
 
         ! r_inner = radius is the circle itself.
         do k = 1_int64, 2000_int64
-            v = pf_random_disc_at(dist_seed, 35_int64, [0.3_real64, -0.5_real64, 0.8_real64], 0.3_real64, k, 0.3_real64)
-            call pf_angdist([0.3_real64, -0.5_real64, 0.8_real64], v, ang)
+            v = pf_random_disc_at(dist_seed, 35_int64, TILTED, 0.3_real64, k, 0.3_real64)
+            call pf_angdist(TILTED, v, ang)
             call check(error, abs(ang - 0.3_real64) <= 1.0e-12_real64, "a ring with r_inner = radius is not the circle itself")
             if (allocated(error)) return
         end do
@@ -2830,8 +2844,8 @@ contains
         outside = 0_int64
         ang = 0.0_real64
         do k = 1_int64, 2000_int64
-            v = pf_random_disc_at(dist_seed, 36_int64, [0.3_real64, -0.5_real64, 0.8_real64], 1.0e-9_real64, k)
-            call pf_angdist([0.3_real64, -0.5_real64, 0.8_real64], v, t)
+            v = pf_random_disc_at(dist_seed, 36_int64, TILTED, 1.0e-9_real64, k)
+            call pf_angdist(TILTED, v, t)
             if (t > 1.0e-9_real64 * (1.0_real64 + 1.0e-6_real64)) outside = outside + 1_int64
             ang = max(ang, t)
         end do

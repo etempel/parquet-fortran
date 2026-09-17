@@ -1437,7 +1437,13 @@ contains
         real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
         real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
         integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
-        call sph_radec(direction_draw(seed, int(i, int64), sph_draw("pf_random_radec_at", draw)), ra, dec)
+        ! Named rather than written inline at the call: `sph_radec`'s `v(3)` dummy is explicit-shape,
+        ! so a function result -- a value with no address of its own -- is argument-associated
+        ! through a temporary, which ifx reports as `warning (406)` on every call under
+        ! --profile debug. See .claude/rules/fortran-gotchas.md.
+        real(real64) :: v(3)
+        v = direction_draw(seed, int(i, int64), sph_draw("pf_random_radec_at", draw))
+        call sph_radec(v, ra, dec)
     end subroutine pf_random_radec_at_i32
 
     !> `pf_random_radec_at` for an `integer(int64)` stream index.
@@ -1447,7 +1453,9 @@ contains
         real(real64), intent(out) :: ra             !! right ascension, degrees, in `[0, 360)`
         real(real64), intent(out) :: dec            !! declination, degrees, in `[-90, 90]`
         integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1, at most `2**62`
-        call sph_radec(direction_draw(seed, i, sph_draw("pf_random_radec_at", draw)), ra, dec)
+        real(real64) :: v(3)                        ! named for `sph_radec`'s explicit-shape dummy, as above
+        v = direction_draw(seed, i, sph_draw("pf_random_radec_at", draw))
+        call sph_radec(v, ra, dec)
     end subroutine pf_random_radec_at_i64
 
     !> `pf_random_disc_at` for an `integer(int32)` stream index.
@@ -2775,12 +2783,13 @@ contains
         real(real64), intent(out) :: ra              !! right ascension, degrees, in `[0, 360)`
         real(real64), intent(out) :: dec             !! declination, degrees, in `[-90, 90]`
         real(real64), intent(in), optional :: r_inner_deg !! the inner radius, degrees; absent means 0
-        real(real64) :: rr(2)
+        real(real64) :: rr(2), c(3), v(3)           ! `c` and `v` named for the explicit-shape dummies they reach
         rr(2) = 0.0_real64
         if (present(r_inner_deg)) rr(2) = r_inner_deg
         rr = sph_radii(who, "_deg", radius_deg, rr(2))
-        call sph_radec(disc_draw(who, seed, stream, d, sph_centre_radec(who, ra0, dec0), &
-                                 rr(1) * sphere_deg2rad, rr(2) * sphere_deg2rad), ra, dec)
+        c = sph_centre_radec(who, ra0, dec0)
+        v = disc_draw(who, seed, stream, d, c, rr(1) * sphere_deg2rad, rr(2) * sphere_deg2rad)
+        call sph_radec(v, ra, dec)
     end subroutine disc_radec_draw
 
     !> `pf_random_ball_at`'s value at a validated draw.
@@ -2908,8 +2917,10 @@ contains
         real(real64), intent(in) :: sigma_deg        !! the per-axis width, degrees
         real(real64), intent(out) :: ra              !! right ascension, degrees, in `[0, 360)`
         real(real64), intent(out) :: dec             !! declination, degrees, in `[-90, 90]`
-        call sph_radec(vmf_draw(who, seed, stream, d, sph_centre_radec(who, ra0, dec0), &
-                                sph_sigma_kappa(who, sigma_deg)), ra, dec)
+        real(real64) :: c(3), v(3)                   ! named for the explicit-shape dummies they reach
+        c = sph_centre_radec(who, ra0, dec0)
+        v = vmf_draw(who, seed, stream, d, c, sph_sigma_kappa(who, sigma_deg))
+        call sph_radec(v, ra, dec)
     end subroutine vmf_radec_draw
 
     !> `pf_random_rotation_at`'s value at a validated draw: Shoemake's uniform quaternion, as a matrix.
@@ -2974,6 +2985,7 @@ contains
         real(real64), intent(out) :: dec(:)          !! declinations, degrees
         integer(int64), intent(in), optional :: draw !! the caller's starting draw, present or not
         integer(int64) :: n, k, d0, key
+        real(real64) :: v(3)                         ! named for `sph_radec`'s explicit-shape dummy
         character(len=24) :: t, t2
         if (size(ra, kind=int64) /= size(dec, kind=int64)) then
             write (t, '(i0)') size(ra, kind=int64)
@@ -2986,7 +2998,8 @@ contains
         d0 = sph_fill_start("pf_random_fill_radec", draw, n)
         key = key_from(seed, sphere_direction_label)
         do k = 1_int64, n
-            call sph_radec(sph_direction_of_key(key, stream, d0 + (k - 1_int64)), ra(k), dec(k))
+            v = sph_direction_of_key(key, stream, d0 + (k - 1_int64))
+            call sph_radec(v, ra(k), dec(k))
         end do
     end subroutine fill_radec
 
@@ -4985,8 +4998,10 @@ contains
         real(real64), intent(out) :: ra                 !! right ascension, degrees, in `[0, 360)`
         real(real64), intent(out) :: dec                !! declination, degrees, in `[-90, 90]`
         integer(int64) :: d
+        real(real64) :: v(3)                            ! named for `sph_radec`'s explicit-shape dummy
         call take_block(self, d)
-        call sph_radec(direction_draw(self%key, self%stream, d), ra, dec)
+        v = direction_draw(self%key, self%stream, d)
+        call sph_radec(v, ra, dec)
     end subroutine stream_radec
 
     !> `%disc`: the next direction within `radius` radians of `centre`, taking one block. See

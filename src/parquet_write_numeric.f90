@@ -967,24 +967,6 @@ contains
     ! call takes the path it always did. `test_write_strided_arguments` (test/test_writing.f90)
     ! passes every specific a strided `values`, with a strided mask and without one.
 
-    !> `.true.` unless a scalar column's validity mask was passed and is strided: the mask half of the
-    !> test each public numeric write specific makes before calling its flat worker (note above).
-    pure function is_contiguous_or_absent_r1(mask) result(ok)
-        logical, intent(in), optional :: mask(:) !! a caller's `is_valid`, possibly absent.
-        logical :: ok !! `.false.` only for a present, strided mask.
-        ok = .true.
-        if (present(mask)) ok = is_contiguous(mask)
-    end function is_contiguous_or_absent_r1
-
-    !> `is_contiguous_or_absent_r1` for a matrix column's mask. Two names rather than a generic: the
-    !> specifics would differ only in an OPTIONAL dummy's rank, which does not distinguish them.
-    pure function is_contiguous_or_absent_r2(mask) result(ok)
-        logical, intent(in), optional :: mask(:,:) !! a caller's `is_valid`, possibly absent.
-        logical :: ok !! `.false.` only for a present, strided mask.
-        ok = .true.
-        if (present(mask)) ok = is_contiguous(mask)
-    end function is_contiguous_or_absent_r2
-
     !> Whole-column write worker for parquet_write_int32_column/_matrix_column.
     subroutine write_int32_flat(writer, name, flat, nelem, asize, nrows, valid)
         type(parquet_writer), intent(inout) :: writer !! open writer.

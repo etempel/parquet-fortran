@@ -199,26 +199,43 @@ contains
     !> Reports whether any element of a space-padded string array is longer, once trailing blanks
     !> are ignored, than the column's declared `array_size` -- stopping at the first one that is.
     !>
-    !> `values` is assumed-size, so the matrix specifics pass their rank-2 argument straight in by
-    !> sequence association. This replaced `maxval([(len_trim(values(i)), i=1,nitems)])`, which
-    !> built a complete nitems-element integer temporary, and its `maxval(len_trim(values))`
-    !> sibling, which built an elemental one -- in both cases to compute a maximum that was then
-    !> only ever compared against a limit, so every element was measured even when the first
-    !> already answered the question.
-    pure logical function any_item_too_long(values, nitems, limit) result(too_long)
-        character(len=*), intent(in) :: values(*) !! the elements to check, in any rank.
-        integer(int64), intent(in) :: nitems !! how many elements `values` holds.
+    !> This replaced `maxval([(len_trim(values(i)), i=1,nitems)])`, which built a complete
+    !> nitems-element integer temporary, and its `maxval(len_trim(values))` sibling, which built an
+    !> elemental one -- in both cases to compute a maximum that was then only ever compared against
+    !> a limit, so every element was measured even when the first already answered the question.
+    !>
+    !> `values` is assumed-SHAPE, one specific per rank, rather than one assumed-size dummy for both:
+    !> a caller's strided array reaching an assumed-size dummy is copied at the call, onto the stack
+    !> under ifx (the note above the flat write workers, parquet_write_numeric.f90).
+    pure logical function any_item_too_long_r1(values, limit) result(too_long)
+        character(len=*), intent(in) :: values(:) !! a scalar column's elements.
         integer, intent(in) :: limit !! the column's declared array_size.
         integer(int64) :: i
 
         too_long = .false.
-        do i = 1_int64, nitems
+        do i = 1_int64, size(values, kind=int64)
             if (len_trim(values(i)) > limit) then
                 too_long = .true.
                 return
             end if
         end do
-    end function any_item_too_long
+    end function any_item_too_long_r1
+    !> `any_item_too_long_r1` for a matrix column's (element, row) elements.
+    pure logical function any_item_too_long_r2(values, limit) result(too_long)
+        character(len=*), intent(in) :: values(:,:) !! a matrix column's elements.
+        integer, intent(in) :: limit !! the column's declared array_size.
+        integer(int64) :: i, j
+
+        too_long = .false.
+        do j = 1_int64, size(values, 2, kind=int64)
+            do i = 1_int64, size(values, 1, kind=int64)
+                if (len_trim(values(i, j)) > limit) then
+                    too_long = .true.
+                    return
+                end if
+            end do
+        end do
+    end function any_item_too_long_r2
     ! ---- Flat write workers ----
     !
     ! The four space-padded string specifics (scalar/matrix x whole-column/chunked) share one
@@ -232,7 +249,9 @@ contains
     ! specifics pass `values` itself when no row mask is in force, and the packed copy only when
     ! one is. That copy is what a `pack` over a character array costs -- a fresh deferred-length
     ! array of every kept element -- so skipping it is the whole point. See the same note in
-    ! parquet_write_numeric.f90 for the shared reasoning.
+    ! parquet_write_numeric.f90 for the shared reasoning. A STRIDED `values` or `is_valid` on that path
+    ! is copied into `values_c`/`is_valid_c` by the specific first, as the numeric specifics copy
+    ! theirs, for the reason set out in that same note.
     !
     ! `valid` DELIBERATELY DOES NOT CARRY TARGET here either, for the reason set out in full beside
     ! the numeric workers: nagfor 7.2 miscompiles a call passing an ABSENT optional actual to a
@@ -498,7 +517,7 @@ contains
             ! len(values), not len(values(1)): the element does not exist for a zero-length array.
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            if (any_item_too_long(values, nitems, max_string_len)) then
+            if (any_item_too_long_r1(values, max_string_len)) then
                 error stop "parquet_write_string_column: string length exceeds declared array_size for column: " // trim(name)
             end if
         end if
@@ -512,8 +531,12 @@ contains
             nkeep = count(row_mask, kind=int64)
             if (present(is_valid)) is_valid_c = pack(is_valid, elem_mask)
             call write_string_flat(writer, name, values_c, size(values_c, kind=int64), asize, nkeep, is_valid_c)
-        else
+        else if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
             call write_string_flat(writer, name, values, nitems, asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) is_valid_c = is_valid
+            call write_string_flat(writer, name, values_c, nitems, asize, nrows, is_valid_c)
         end if
     end procedure parquet_write_string_column
     module procedure parquet_write_string_matrix_column
@@ -542,7 +565,7 @@ contains
             ! len(values), not len(values(1, 1)): neither element exists for a zero-sized array.
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            if (any_item_too_long(values, size(values, kind=int64), max_string_len)) then
+            if (any_item_too_long_r2(values, max_string_len)) then
                 error stop "parquet_write_string_matrix_column: string length exceeds declared array_size for column: " &
                     // trim(name)
             end if
@@ -564,8 +587,12 @@ contains
             nkeep = count(row_mask, kind=int64)
             if (present(is_valid)) is_valid_c = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call write_string_flat(writer, name, values_c, size(values_c, kind=int64), asize, nkeep, is_valid_c)
-        else
+        else if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
             call write_string_flat(writer, name, values, nitems, asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) is_valid_c = reshape(is_valid, [size(is_valid, kind=int64)])
+            call write_string_flat(writer, name, values_c, nitems, asize, nrows, is_valid_c)
         end if
     end procedure parquet_write_string_matrix_column
     module procedure parquet_write_string_column_compact
@@ -654,7 +681,7 @@ contains
         if (writer%is_schema_enforced) then
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            if (any_item_too_long(values, nitems, max_string_len)) then
+            if (any_item_too_long_r1(values, max_string_len)) then
                 error stop "parquet_write_string_column_chunk: string length exceeds declared array_size " // &
                     "for column: " // trim(name)
             end if
@@ -669,8 +696,12 @@ contains
             nkeep = count(row_mask, kind=int64)
             if (present(is_valid)) is_valid_c = pack(is_valid, elem_mask)
             call write_string_chunk_flat(writer, name, values_c, size(values_c, kind=int64), asize, nkeep, is_valid_c)
-        else
+        else if (is_contiguous(values) .and. is_contiguous_or_absent_r1(is_valid)) then
             call write_string_chunk_flat(writer, name, values, nitems, asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) is_valid_c = is_valid
+            call write_string_chunk_flat(writer, name, values_c, nitems, asize, nrows, is_valid_c)
         end if
     end procedure parquet_write_string_column_chunk
     module procedure parquet_write_string_matrix_column_chunk
@@ -699,7 +730,7 @@ contains
 
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1, 1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            if (any_item_too_long(values, size(values, kind=int64), max_string_len)) then
+            if (any_item_too_long_r2(values, max_string_len)) then
                 error stop "parquet_write_string_matrix_column_chunk: string length exceeds declared " // &
                     "array_size for column: " // trim(name)
             end if
@@ -719,8 +750,12 @@ contains
             nkeep = count(row_mask, kind=int64)
             if (present(is_valid)) is_valid_c = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
             call write_string_chunk_flat(writer, name, values_c, size(values_c, kind=int64), asize, nkeep, is_valid_c)
-        else
+        else if (is_contiguous(values) .and. is_contiguous_or_absent_r2(is_valid)) then
             call write_string_chunk_flat(writer, name, values, nitems, asize, nrows, is_valid)
+        else
+            values_c = values
+            if (present(is_valid)) is_valid_c = reshape(is_valid, [size(is_valid, kind=int64)])
+            call write_string_chunk_flat(writer, name, values_c, nitems, asize, nrows, is_valid_c)
         end if
     end procedure parquet_write_string_matrix_column_chunk
     module procedure parquet_write_string_column_chunk_compact

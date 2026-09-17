@@ -173,17 +173,24 @@ contains
     !! bitmap kinds dropping their bitmap outright.
     module procedure set_all_str
         logical :: mod_nulls
+        character(len=:), allocatable :: values_c(:) !! `values`, copied when it is strided.
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_STRING, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
-        call refill_string_store(self%str, values, self%nrows, mod_nulls)
+        if (is_contiguous(values)) then
+            call refill_string_store(self%str, values, self%nrows, mod_nulls)
+        else
+            values_c = values
+            call refill_string_store(self%str, values_c, self%nrows, mod_nulls)
+        end if
     end procedure set_all_str
     !
     !> Replaces every value of a PK_STRING_VEC column, from a (width, nrows) array. Trailing
     !! blanks are trimmed, as in `set_all_str`.
     module procedure set_all_strv
         logical :: mod_nulls
+        character(len=:), allocatable :: values_c(:,:) !! `values`, copied when it is strided.
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
         call check_kind(self, PK_STRING_VEC, "set_all")
@@ -192,7 +199,12 @@ contains
         ! `values` is passed to an assumed-size dummy, so sequence association flattens it in
         ! column-major order -- which IS the store's own element-major (i-1)*width + e layout
         ! (RF6/s1), so the flat index the helper walks and the index this kind uses agree.
-        call refill_string_store(self%str, values, self%nrows*int(self%width, int64), mod_nulls)
+        if (is_contiguous(values)) then
+            call refill_string_store(self%str, values, self%nrows*int(self%width, int64), mod_nulls)
+        else
+            values_c = values
+            call refill_string_store(self%str, values_c, self%nrows*int(self%width, int64), mod_nulls)
+        end if
     end procedure set_all_strv
     !
     !> Rebuilds a string store from a flat array of `n` elements, in ONE linear pass.
@@ -214,6 +226,10 @@ contains
     !!
     !! `modify_nulls = .false.` preserves a null element exactly: nulls carry no payload (`set_null`
     !! shrinks the span to zero width), so re-appending a null reproduces it.
+    !!
+    !! **A caller holding a strided `values` copies it into an allocatable first**, as `set_all_str`
+    !! and `set_all_strv` do: passed here as it is, it would be copied by the compiler into an array
+    !! temporary, which ifx makes on the stack, where a large array overflows it.
     subroutine refill_string_store(str, values, n, modify_nulls)
         type(parquet_string_column), intent(inout) :: str !! the store to refill, in place.
         character(len=*), intent(in) :: values(*)         !! `n` elements, in flat store order.
@@ -247,7 +263,8 @@ contains
     !> Relays a flat run of `n` elements into `parquet_string_column%append_values`. Its only job is
     !! the assumed-size dummy: a rank-2 `values` sequence-associates with it and is then passed on
     !! as the contiguous rank-1 section the bulk entry point takes, with no copy. `reshape` would
-    !! do the same flattening by copying the whole array.
+    !! do the same flattening by copying the whole array. A caller holding a strided `values`
+    !! copies it first, for the reason `refill_string_store` gives.
     subroutine append_flat_strings(str, values, n)
         type(parquet_string_column), intent(inout) :: str !! the store to append to.
         character(len=*), intent(in) :: values(*)         !! `n` elements, in flat store order.
@@ -284,6 +301,7 @@ contains
     !! trimmed, as in `append_values_str`.
     module procedure append_values_strv
         integer(int64) :: n
+        character(len=:), allocatable :: values_c(:,:) !! `values`, copied when it is strided.
         call check_kind(self, PK_STRING_VEC, "append_values")
         call check_width(self, size(values, 1, kind=int64), "append_values")
         n = size(values, 2, kind=int64)
@@ -294,7 +312,12 @@ contains
         ! It reaches the rank-1 bulk entry point through an assumed-size relay rather than
         ! `reshape`, which would copy the entire array to produce a flattening that sequence
         ! association gives for free.
-        call append_flat_strings(self%str, values, size(values, kind=int64))
+        if (is_contiguous(values)) then
+            call append_flat_strings(self%str, values, size(values, kind=int64))
+        else
+            values_c = values
+            call append_flat_strings(self%str, values_c, size(values_c, kind=int64))
+        end if
         self%nrows = self%nrows + n
     end procedure append_values_strv
     !

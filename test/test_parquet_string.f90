@@ -50,6 +50,8 @@ contains
             new_unittest("build_from gathers an array of handles into a column", test_build_from), &
             new_unittest("build_from builds from a character array, trimming each element", &
                 test_build_from_character), &
+            new_unittest("build_from and append_values take a strided character array", &
+                test_strided_character_arrays), &
             new_unittest("append_values bulk-appends a character array onto a non-empty column", &
                 test_append_values_character), &
             new_unittest("build_from: empty, all-null, zero-length and repeated handles", &
@@ -1064,6 +1066,72 @@ contains
                 "build_from(character): a zero-length array leaves an empty column")
         end block
     end subroutine test_build_from_character
+    !
+    !> `build_from` and `append_values` (the binding and the module procedure) take a STRIDED
+    !> character array and `is_null` -- stride-2 sections, with junk between their elements that
+    !> reads as a blank-padded "junk" value and a `.true.` null flag -- and store what contiguous
+    !> ones hold.
+    !>
+    !> Neither declares its `values` contiguous: a strided one is copied into an allocatable by the
+    !> procedure itself. A `contiguous` dummy would have the compiler copy it at the CALLER's call,
+    !> on the stack under ifx, and gfortran copies even a contiguous array passed to one from an
+    !> assumed-shape dummy.
+    subroutine test_strided_character_arrays(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=6) :: vals(10)
+        logical :: mask(10)
+        character(len=:), allocatable :: want(:)
+        integer :: k
+
+        vals = "junk"
+        mask = .true.
+        do k = 1, 5
+            write (vals(2*k - 1), "(a,i0)") "v", k
+            mask(2*k - 1) = k == 2
+        end do
+
+        call col%build_from(vals(1::2))
+        want = [character(len=2) :: "v1", "v2", "v3", "v4", "v5"]
+        call expect_column(col, want, [integer :: ], "build_from", error)
+        if (allocated(error)) return
+
+        call col%build_from(vals(1::2), is_null=mask(1::2))
+        call expect_column(col, want, [2], "build_from(is_null=)", error)
+        if (allocated(error)) return
+
+        call col%append_values(vals(1:5:2))
+        call col%append_values(vals(1:5:2), is_null=mask(1:5:2))
+        call parquet_string_column_append_values(col, vals(7:9:2))
+        want = [character(len=2) :: "v1", "v2", "v3", "v4", "v5", "v1", "v2", "v3", "v1", "v2", "v3", "v4", "v5"]
+        call expect_column(col, want, [2, 10], "append_values", error)
+    end subroutine test_strided_character_arrays
+    !
+    !> Checks that `col` holds exactly `want`, element by element, with the elements listed in
+    !> `nulls` null and every other one non-null.
+    subroutine expect_column(col, want, nulls, what, error)
+        type(parquet_string_column), intent(in) :: col !! the column under test.
+        character(len=*), intent(in) :: want(:) !! every element's value; a null one's is not compared.
+        integer, intent(in) :: nulls(:) !! the 1-based indices of the null elements.
+        character(len=*), intent(in) :: what !! the call that built `col`, for the message.
+        type(error_type), allocatable, intent(inout) :: error !! set on the first difference.
+        character(len=:), allocatable :: s
+        integer :: k
+
+        call check(error, col%size() == size(want, kind=int64), what // ": wrong element count")
+        if (allocated(error)) return
+        call check(error, col%null_count() == size(nulls, kind=int64), what // ": wrong null count")
+        if (allocated(error)) return
+        do k = 1, size(want)
+            if (any(nulls == k)) then
+                call check(error, col%is_null(int(k, int64)), what // ": an element passed as null is not null")
+            else
+                call col%get(int(k, int64), s)
+                call check(error, s == trim(want(k)), what // ": an element read back wrong")
+            end if
+            if (allocated(error)) return
+        end do
+    end subroutine expect_column
     !
     !> `%append_values`: the appending counterpart of `build_from`'s character form, and the entry
     !> point `parquet_column%append_values` now routes through.

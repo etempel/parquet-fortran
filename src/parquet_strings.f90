@@ -1973,14 +1973,19 @@ contains
     !! `character(len=24)`: **55.5 ms of per-element calls against 9.5 ms here**, taking
     !! `parquet_column%set_all` from 65.2 ms to 9.5 ms overall (feature_optimise_A7.md, S7-5).
     !!
-    !! **The trick that removes the per-element `transfer`, and the reason for the `contiguous`
-    !! attribute.** `values` is a contiguous array of `character(len=w)`, so its bytes are one
-    !! `w*n` block; `pack_character_bytes` below re-sees exactly that block through a
-    !! `character(len=1) :: src(*)` dummy by sequence association, after which each element's
-    !! payload copy is an ordinary section-to-section assignment between two `character(len=1)`
-    !! arrays -- the same shape `build_from_handles`' phase 3 uses, and no temporary. Sequence
-    !! association needs the actual argument to be contiguous, which is what `contiguous` here
-    !! guarantees (at the cost of a copy-in for the rare strided caller).
+    !! **The trick that removes the per-element `transfer`.** `build_from_elements` takes `values`
+    !! as an assumed-size array of `character(len=w)`, so its bytes are one `w*n` block;
+    !! `pack_character_bytes` below re-sees exactly that block through a `character(len=1) ::
+    !! src(*)` dummy by sequence association, after which each element's payload copy is an
+    !! ordinary section-to-section assignment between two `character(len=1)` arrays -- the same
+    !! shape `build_from_handles`' phase 3 uses, and no temporary.
+    !!
+    !! **`values` is deliberately NOT declared `contiguous`.** Sequence association needs contiguous
+    !! storage, but a `contiguous` dummy has the COMPILER make it: gfortran copies an assumed-shape
+    !! actual into a temporary on every call, contiguous or not, and ifx copies a strided one onto
+    !! the stack, where a large array overflows it. A contiguous `values` instead reaches the
+    !! assumed-size worker with no copy under either compiler, and a strided one is copied into an
+    !! allocatable here.
     !!
     !! **`len_trim` stays on the ELEMENT view and must not be hand-rolled.** Replacing it with a
     !! trailing-blank scan over the byte view -- which looks like the natural thing to do once the
@@ -1991,9 +1996,24 @@ contains
     !! as `%append_null` would leave them, and their `values` entry is ignored.
     subroutine build_from_character(self, values, is_null)
         class(parquet_string_column), intent(inout) :: self       !! cleared, then filled from `values`.
-        character(len=*), intent(in), contiguous :: values(:)     !! source elements; trailing blanks trimmed.
+        character(len=*), intent(in) :: values(:)                 !! source elements; trailing blanks trimmed.
         logical, intent(in), optional :: is_null(:)               !! .true. => store that element as null.
-        integer(int64) :: n, k, nchars, nnull
+        character(len=:), allocatable :: values_c(:)              !! `values`, copied when it is strided.
+        if (is_contiguous(values)) then
+            call build_from_elements(self, values, size(values, kind=int64), is_null)
+        else
+            values_c = values
+            call build_from_elements(self, values_c, size(values_c, kind=int64), is_null)
+        end if
+    end subroutine build_from_character
+    !
+    !> `build_from_character`'s body, over `n` contiguous elements; see it for the shape.
+    subroutine build_from_elements(self, values, n, is_null)
+        class(parquet_string_column), intent(inout) :: self       !! cleared, then filled from `values`.
+        character(len=*), intent(in) :: values(*)                 !! `n` source elements; trailing blanks trimmed.
+        integer(int64), intent(in) :: n                           !! how many elements `values` holds.
+        logical, intent(in), optional :: is_null(:)               !! .true. => store that element as null.
+        integer(int64) :: k, nchars, nnull
         integer, allocatable :: lens(:)
         ! Stands in for `self%data` when the column holds no bytes at all. `ensure_data_cap`
         ! deliberately allocates nothing for a zero-byte payload, and `pack_character_bytes` takes
@@ -2004,7 +2024,6 @@ contains
         ! Handing the same routine a real one-byte array instead keeps ONE implementation of the
         ! offset walk: with every `lens(k)` zero it writes offsets and never touches `dst`.
         character(len=1) :: no_bytes(1)
-        n = size(values, kind=int64)
         if (present(is_null)) then
             if (size(is_null, kind=int64) /= n) then
                 error stop EP//"build_from: is_null must have the same length as values"
@@ -2054,12 +2073,13 @@ contains
             end do
             self%n_null = nnull
         end if
-    end subroutine build_from_character
+    end subroutine build_from_elements
     !
-    !> `build_from_character`'s packing walk. `src` is declared `character(len=1) :: src(*)` so that
-    !! sequence association hands it the caller's whole `w*n` byte block; that is what makes each
-    !! element's copy a section-to-section assignment rather than a `transfer` with a temporary.
-    !! See `build_from_character` for the measurement that justifies the shape.
+    !> The packing walk of `build_from_elements` and `append_elements`. `src` is declared
+    !! `character(len=1) :: src(*)` so that sequence association hands it the caller's whole `w*n`
+    !! byte block; that is what makes each element's copy a section-to-section assignment rather
+    !! than a `transfer` with a temporary. See `build_from_character` for the measurement that
+    !! justifies the shape.
     subroutine pack_character_bytes(src, dst, offsets, lens, n, w, row_base)
         character(len=1), intent(in) :: src(*)      !! the caller's char(w) array, re-seen as bytes.
         character(len=1), intent(inout) :: dst(:)   !! the payload buffer, already sized.
@@ -2089,11 +2109,29 @@ contains
     !!
     !! `is_null`, when present, appends those elements as zero-width nulls and ignores their
     !! `values` entry.
+    !!
+    !! `values` is not declared `contiguous`, for the reason `build_from_character` gives: a strided
+    !! one is copied into an allocatable here, and a contiguous one reaches `append_elements` as it is.
     subroutine parquet_string_column_append_values(self, values, is_null)
         type(parquet_string_column), intent(inout) :: self   !! the column, appended to.
-        character(len=*), intent(in), contiguous :: values(:) !! elements to append; blanks trimmed.
+        character(len=*), intent(in) :: values(:)             !! elements to append; blanks trimmed.
         logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
-        integer(int64) :: n, k, nchars, nnull, base_rows
+        character(len=:), allocatable :: values_c(:)          !! `values`, copied when it is strided.
+        if (is_contiguous(values)) then
+            call append_elements(self, values, size(values, kind=int64), is_null)
+        else
+            values_c = values
+            call append_elements(self, values_c, size(values_c, kind=int64), is_null)
+        end if
+    end subroutine parquet_string_column_append_values
+    !
+    !> `parquet_string_column_append_values`' body, over `n` contiguous elements.
+    subroutine append_elements(self, values, n, is_null)
+        type(parquet_string_column), intent(inout) :: self   !! the column, appended to.
+        character(len=*), intent(in) :: values(*)             !! `n` elements to append; blanks trimmed.
+        integer(int64), intent(in) :: n                       !! how many elements `values` holds.
+        logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
+        integer(int64) :: k, nchars, nnull, base_rows
         integer, allocatable :: lens(:)
         ! Stands in for `self%data` when the column holds no bytes at all. `ensure_data_cap`
         ! deliberately allocates nothing for a zero-byte payload, and `pack_character_bytes` takes
@@ -2105,7 +2143,6 @@ contains
         ! Handing the same routine a real one-byte array instead keeps ONE implementation of the
         ! offset walk: with every `lens(k)` zero it writes offsets and never touches `dst`.
         character(len=1) :: no_bytes(1)
-        n = size(values, kind=int64)
         if (present(is_null)) then
             if (size(is_null, kind=int64) /= n) then
                 error stop EP//"append_values: is_null must have the same length as values"
@@ -2155,13 +2192,13 @@ contains
         end if
         self%nrows = base_rows + n
         self%nchars = self%nchars + nchars
-    end subroutine parquet_string_column_append_values
+    end subroutine append_elements
     !
     !> Binding form of `parquet_string_column_append_values`; forwards to it,
     !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine append_values(self, values, is_null)
         class(parquet_string_column), intent(inout) :: self   !! the column, appended to.
-        character(len=*), intent(in), contiguous :: values(:) !! elements to append; blanks trimmed.
+        character(len=*), intent(in) :: values(:)             !! elements to append; blanks trimmed.
         logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
         call parquet_string_column_append_values(self, values, is_null)
     end subroutine append_values

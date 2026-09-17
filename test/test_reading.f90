@@ -23,6 +23,22 @@ module test_reading
     private
     public :: collect_tests_parquet_reading
     !
+    !> The arrays `test_read_strided_values` reads into: each twice the extent a read fills in every
+    !> dimension and junk throughout, so a read that took the wrong stride shows as a junk element
+    !> overwritten or a value missing.
+    type strided_read
+        integer(int32) :: i32(8) = -999_int32
+        integer(int64) :: i64(8) = -999_int64
+        real(real32) :: f32(8) = -999.0_real32
+        real(real64) :: f64(8) = -999.0_real64
+        character(len=6) :: s(8) = "junk"
+        integer(int32) :: m_i32(6, 8) = -999_int32
+        integer(int64) :: m_i64(6, 8) = -999_int64
+        real(real32) :: m_f32(6, 8) = -999.0_real32
+        real(real64) :: m_f64(6, 8) = -999.0_real64
+        character(len=6) :: m_s(6, 8) = "junk"
+    end type strided_read
+    !
 contains
     !
     subroutine collect_tests_parquet_reading(testsuite)
@@ -135,12 +151,151 @@ contains
             new_unittest("parquet_get_column_names lists every column, expanding nested structs " // &
                 "into dotted leaf paths", &
                 test_get_column_names), &
+            new_unittest("every numeric and string read specific fills a strided values", &
+                test_read_strided_values), &
             new_unittest("parquet_release_column frees a column's buffers without changing any result", &
                 test_release_column) &
             ]
         !
         testsuite = p1
     end subroutine collect_tests_parquet_reading
+    !
+    !> Every read specific that hands `values` to its C binding fills a STRIDED `values` -- a
+    !> stride-2 section of a larger array -- with exactly what a contiguous one receives, and leaves
+    !> the elements between untouched: numeric and string, whole column, one row of a vector column,
+    !> one element position across the rows, and one row group of a scalar and of a vector column.
+    !>
+    !> A specific reads such a `values` into an allocatable and copies it back itself: left to the
+    !> compiler, the copy made for the binding's assumed-size dummy is an array temporary, which ifx
+    !> puts on the stack, and ifx's debug profile prints `warning (406)` for it.
+    subroutine test_read_strided_values(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/test_read_strided_values.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(strided_read) :: whole, whole_want, row, row_want, elem, elem_want, chunk, chunk_want
+        integer(int32) :: i32(4), v_i32(3, 4)
+        integer(int64) :: i64(4), v_i64(3, 4)
+        real(real32) :: f32(4), v_f32(3, 4)
+        real(real64) :: f64(4), v_f64(3, 4)
+        character(len=6) :: s(4), v_s(3, 4)
+        character(len=:), allocatable :: bad
+        integer :: i, k
+
+        do i = 1, 4
+            i32(i) = 10*i + 1
+            i64(i) = 3000000000_int64 + i
+            f32(i) = 0.5_real32*i
+            f64(i) = 0.25_real64*i
+            write (s(i), "(a,i0)") "s", i
+            do k = 1, 3
+                v_i32(k, i) = 100*i + k
+                v_i64(k, i) = 4000000000_int64 + 10*i + k
+                v_f32(k, i) = 1.5_real32*(10*i + k)
+                v_f64(k, i) = 0.125_real64*(10*i + k)
+                write (v_s(k, i), "(a,i0,a,i0)") "v", i, "_", k
+            end do
+        end do
+        ! Two row groups of two rows, for the chunked reads.
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "i32", i32)
+        call parquet_write_column(writer, "i64", i64)
+        call parquet_write_column(writer, "f32", f32)
+        call parquet_write_column(writer, "f64", f64)
+        call parquet_write_column(writer, "s", s)
+        call parquet_write_column(writer, "v_i32", v_i32)
+        call parquet_write_column(writer, "v_i64", v_i64)
+        call parquet_write_column(writer, "v_f32", v_f32)
+        call parquet_write_column(writer, "v_f64", v_f64)
+        call parquet_write_column(writer, "v_s", v_s)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! The whole column; for a string vector column the whole matrix, which reads straight into
+        ! `values` where a numeric one reads through a buffer.
+        call parquet_read_column(reader, "i32", whole%i32(1::2))
+        call parquet_read_column(reader, "i64", whole%i64(1::2))
+        call parquet_read_column(reader, "f32", whole%f32(1::2))
+        call parquet_read_column(reader, "f64", whole%f64(1::2))
+        call parquet_read_column(reader, "s", whole%s(1::2))
+        call parquet_read_column(reader, "v_s", whole%m_s(1::2, 1::2))
+        whole_want%i32(1::2) = i32
+        whole_want%i64(1::2) = i64
+        whole_want%f32(1::2) = f32
+        whole_want%f64(1::2) = f64
+        whole_want%s(1::2) = s
+        whole_want%m_s(1::2, 1::2) = v_s
+        ! Row 2 of each vector column.
+        call parquet_read_array_row_mode(reader, "v_i32", row%i32(1:5:2), 2)
+        call parquet_read_array_row_mode(reader, "v_i64", row%i64(1:5:2), 2)
+        call parquet_read_array_row_mode(reader, "v_f32", row%f32(1:5:2), 2)
+        call parquet_read_array_row_mode(reader, "v_f64", row%f64(1:5:2), 2)
+        call parquet_read_array_row_mode(reader, "v_s", row%s(1:5:2), 2)
+        row_want%i32(1:5:2) = v_i32(:, 2)
+        row_want%i64(1:5:2) = v_i64(:, 2)
+        row_want%f32(1:5:2) = v_f32(:, 2)
+        row_want%f64(1:5:2) = v_f64(:, 2)
+        row_want%s(1:5:2) = v_s(:, 2)
+        ! Element 2 of each vector column, across every row.
+        call parquet_read_array_element_mode(reader, "v_i32", elem%i32(1::2), 2)
+        call parquet_read_array_element_mode(reader, "v_i64", elem%i64(1::2), 2)
+        call parquet_read_array_element_mode(reader, "v_f32", elem%f32(1::2), 2)
+        call parquet_read_array_element_mode(reader, "v_f64", elem%f64(1::2), 2)
+        call parquet_read_array_element_mode(reader, "v_s", elem%s(1::2), 2)
+        elem_want%i32(1::2) = v_i32(2, :)
+        elem_want%i64(1::2) = v_i64(2, :)
+        elem_want%f32(1::2) = v_f32(2, :)
+        elem_want%f64(1::2) = v_f64(2, :)
+        elem_want%s(1::2) = v_s(2, :)
+        ! Row group 2 (rows 3 and 4) of every scalar and every vector column.
+        call parquet_read_column_chunk(reader, "i32", 2, chunk%i32(1:3:2))
+        call parquet_read_column_chunk(reader, "i64", 2, chunk%i64(1:3:2))
+        call parquet_read_column_chunk(reader, "f32", 2, chunk%f32(1:3:2))
+        call parquet_read_column_chunk(reader, "f64", 2, chunk%f64(1:3:2))
+        call parquet_read_column_chunk(reader, "s", 2, chunk%s(1:3:2))
+        call parquet_read_column_chunk(reader, "v_i32", 2, chunk%m_i32(1::2, 1:3:2))
+        call parquet_read_column_chunk(reader, "v_i64", 2, chunk%m_i64(1::2, 1:3:2))
+        call parquet_read_column_chunk(reader, "v_f32", 2, chunk%m_f32(1::2, 1:3:2))
+        call parquet_read_column_chunk(reader, "v_f64", 2, chunk%m_f64(1::2, 1:3:2))
+        call parquet_read_column_chunk(reader, "v_s", 2, chunk%m_s(1::2, 1:3:2))
+        chunk_want%i32(1:3:2) = i32(3:4)
+        chunk_want%i64(1:3:2) = i64(3:4)
+        chunk_want%f32(1:3:2) = f32(3:4)
+        chunk_want%f64(1:3:2) = f64(3:4)
+        chunk_want%s(1:3:2) = s(3:4)
+        chunk_want%m_i32(1::2, 1:3:2) = v_i32(:, 3:4)
+        chunk_want%m_i64(1::2, 1:3:2) = v_i64(:, 3:4)
+        chunk_want%m_f32(1::2, 1:3:2) = v_f32(:, 3:4)
+        chunk_want%m_f64(1::2, 1:3:2) = v_f64(:, 3:4)
+        chunk_want%m_s(1::2, 1:3:2) = v_s(:, 3:4)
+        call parquet_close_reader(reader)
+
+        bad = ""
+        call compare_strided_read(whole, whole_want, "whole", bad)
+        call compare_strided_read(row, row_want, "row", bad)
+        call compare_strided_read(elem, elem_want, "element", bad)
+        call compare_strided_read(chunk, chunk_want, "chunk", bad)
+        call check(error, len(bad) == 0, "a strided read differs, junk included, in:" // bad)
+    end subroutine test_read_strided_values
+    !
+    !> Appends `what:<component>` to `bad` for every component of `got` that differs from `want`.
+    subroutine compare_strided_read(got, want, what, bad)
+        type(strided_read), intent(in) :: got !! the arrays after the reads.
+        type(strided_read), intent(in) :: want !! what they must hold, junk between the values included.
+        character(len=*), intent(in) :: what !! the read mode, for the message.
+        character(len=:), allocatable, intent(inout) :: bad !! the differing components, appended.
+
+        if (any(got%i32 /= want%i32)) bad = bad // " " // what // ":i32"
+        if (any(got%i64 /= want%i64)) bad = bad // " " // what // ":i64"
+        if (any(got%f32 /= want%f32)) bad = bad // " " // what // ":f32"
+        if (any(got%f64 /= want%f64)) bad = bad // " " // what // ":f64"
+        if (any(got%s /= want%s)) bad = bad // " " // what // ":s"
+        if (any(got%m_i32 /= want%m_i32)) bad = bad // " " // what // ":m_i32"
+        if (any(got%m_i64 /= want%m_i64)) bad = bad // " " // what // ":m_i64"
+        if (any(got%m_f32 /= want%m_f32)) bad = bad // " " // what // ":m_f32"
+        if (any(got%m_f64 /= want%m_f64)) bad = bad // " " // what // ":m_f64"
+        if (any(got%m_s /= want%m_s)) bad = bad // " " // what // ":m_s"
+    end subroutine compare_strided_read
 
     subroutine test_read_simple_parquet_file(error)
         type(error_type), allocatable, intent(out) :: error

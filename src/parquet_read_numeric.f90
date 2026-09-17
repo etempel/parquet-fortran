@@ -6,6 +6,11 @@
 !> column_chunk/array_column_chunk, both row-group-index kinds): bodies of
 !> the module procedures declared in parquet_core.f90's interface block, plus
 !> the numeric-only private per-mode worker helpers they depend on.
+!>
+!> A STRIDED `values` (a section such as `x(1::2)`, or a component section such as `data(:)%x`) is
+!> read into an allocatable `values_c` and copied back by the specific itself wherever the binding
+!> takes it as an assumed-size `data`: left to the compiler, that copy is an array temporary made at
+!> the call, which ifx makes on the STACK, where a large column overflows it.
 submodule (parquet_core:parquet_read) parquet_read_numeric
     implicit none
 contains
@@ -14,12 +19,19 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column")
         call check_column_exists(reader, name, "parquet_read_column")
         call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int32_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int32_column(reader%handle, trim(name)//char(0), values_c, size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -31,12 +43,19 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column")
         call check_column_exists(reader, name, "parquet_read_column")
         call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int64_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int64_column(reader%handle, trim(name)//char(0), values_c, size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -48,12 +67,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column")
         call check_column_exists(reader, name, "parquet_read_column")
         call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float32_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float32_column(reader%handle, trim(name)//char(0), values_c, size(values, kind=c_long_long), &
+                valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -65,12 +92,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column")
         call check_column_exists(reader, name, "parquet_read_column")
         call parquet_check_read_row_count(reader, name, size(values, kind=c_long_long))
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float64_column(reader%handle, trim(name)//char(0), values, size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float64_column(reader%handle, trim(name)//char(0), values_c, size(values, kind=c_long_long), &
+                valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -237,12 +272,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_row_mode")
         call check_column_exists(reader, name, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -267,12 +310,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_row_mode")
         call check_column_exists(reader, name, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -297,12 +348,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_row_mode")
         call check_column_exists(reader, name, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float32_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -328,12 +387,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_row_mode")
         call check_column_exists(reader, name, "parquet_read_array_row_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float64_array_row(reader%handle, trim(name)//char(0), int(row_index, kind=c_long_long), values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -388,12 +455,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_element_mode")
         call check_column_exists(reader, name, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values_c, &
+                size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -405,12 +480,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_element_mode")
         call check_column_exists(reader, name, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values_c, &
+                size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -422,12 +505,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_element_mode")
         call check_column_exists(reader, name, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float32_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), &
+                values_c, size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -439,12 +530,20 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_array_element_mode")
         call check_column_exists(reader, name, "parquet_read_array_element_mode")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
-            size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), values, &
+                size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float64_array_element(reader%handle, trim(name)//char(0), int(elem_index, kind=c_long_long), &
+                values_c, size(values, kind=c_long_long), 0_c_long_long, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -486,14 +585,22 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int32_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -513,6 +620,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: asize, nrows, i, j, k
+        integer(int32), allocatable :: values_c(:,:) !! `values`, read into when it is strided, then copied back.
 
         asize = size(values, 1, kind=int64)
         nrows = size(values, 2, kind=int64)
@@ -521,8 +629,15 @@ contains
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_int32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                nrows, asize, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                nrows, asize, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid) .or. present(null_value)) then
             do i = 1_int64, nrows
                 do j = 1_int64, asize
@@ -547,14 +662,22 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        integer(int64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_int64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int64_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -574,6 +697,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: asize, nrows, i, j, k
+        integer(int64), allocatable :: values_c(:,:) !! `values`, read into when it is strided, then copied back.
 
         asize = size(values, 1, kind=int64)
         nrows = size(values, 2, kind=int64)
@@ -582,8 +706,15 @@ contains
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_int64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_int64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                nrows, asize, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_int64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                nrows, asize, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid) .or. present(null_value)) then
             do i = 1_int64, nrows
                 do j = 1_int64, asize
@@ -608,14 +739,22 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real32), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float32_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float32_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -635,6 +774,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: asize, nrows, i, j, k
+        real(real32), allocatable :: values_c(:,:) !! `values`, read into when it is strided, then copied back.
 
         asize = size(values, 1, kind=int64)
         nrows = size(values, 2, kind=int64)
@@ -643,8 +783,15 @@ contains
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_float32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                nrows, asize, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float32_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                nrows, asize, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid) .or. present(null_value)) then
             do i = 1_int64, nrows
                 do j = 1_int64, asize
@@ -669,14 +816,22 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: i
+        real(real64), allocatable :: values_c(:) !! `values`, read into when it is strided, then copied back.
 
         call check_reader_open(reader, "parquet_read_column_chunk")
         call check_column_exists(reader, name, "parquet_read_column_chunk")
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), size(values, kind=int64), valid_buf, valid_ptr)
-        call parquet_read_float64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            size(values, kind=c_long_long), valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float64_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                size(values, kind=c_long_long), valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float64_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                size(values, kind=c_long_long), valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid)) is_valid = valid_buf /= 0_c_int8_t
         if (present(null_value)) then
             do i = 1_int64, size(values, kind=int64)
@@ -696,6 +851,7 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: asize, nrows, i, j, k
+        real(real64), allocatable :: values_c(:,:) !! `values`, read into when it is strided, then copied back.
 
         asize = size(values, 1, kind=int64)
         nrows = size(values, 2, kind=int64)
@@ -704,8 +860,15 @@ contains
         call check_reader_no_sort(reader, "parquet_read_column_chunk")
         call check_row_group_valid(reader, row_group, "parquet_read_column_chunk")
         call make_valid_buf(present(null_value) .or. present(is_valid), asize*nrows, valid_buf, valid_ptr)
-        call parquet_read_float64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
-            nrows, asize, valid_ptr)
+        if (is_contiguous(values)) then
+            call parquet_read_float64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values, &
+                nrows, asize, valid_ptr)
+        else
+            allocate(values_c, mold=values)
+            call parquet_read_float64_array_column_chunk(reader%handle, trim(name)//char(0), row_group, values_c, &
+                nrows, asize, valid_ptr)
+            values = values_c
+        end if
         if (present(is_valid) .or. present(null_value)) then
             do i = 1_int64, nrows
                 do j = 1_int64, asize

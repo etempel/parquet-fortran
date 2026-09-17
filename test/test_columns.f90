@@ -97,6 +97,8 @@ contains
             new_unittest("every vector kind round-trips through all primitives", test_matrix_vector_kinds), &
             new_unittest("set_null/is_null work on every kind", test_matrix_set_null_all_kinds), &
             new_unittest("string vector set_at/get_at and modify_nulls", test_string_vector_set_at), &
+            new_unittest("both string kinds take a strided array in set_all and append_values", &
+                test_string_kinds_take_strided_arrays), &
             new_unittest("clear_null marks a row valid again", test_clear_null), &
             new_unittest("every PK_* constant has a name", test_kind_names_complete), &
             new_unittest("modify_nulls= is honoured by every kind", test_matrix_modify_nulls_all_kinds), &
@@ -1731,6 +1733,69 @@ contains
         call c%get_at(3_int64, row)
         call check(error, trim(row(2)) == "st", "the appended string vector row should round-trip")
     end subroutine test_string_vector_set_at
+    !
+    !> `set_all` and `append_values` on both string kinds take a STRIDED character array -- a stride-2
+    !> section with junk between its elements -- and store what a contiguous one holds, with
+    !> `modify_nulls` both ways. Each copies such an array into an allocatable itself before handing
+    !> the rows on (`refill_string_store`, `append_flat_strings` and `parquet_string_column_append_values`
+    !> in src/parquet_columns_string.f90): a copy the compiler made there is an array temporary, which
+    !> ifx puts on the stack.
+    subroutine test_string_kinds_take_strided_arrays(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        character(len=4) :: flat(8), mat(4, 8), want(4), want_m(2, 4), row(2)
+        character(len=:), allocatable :: s
+        integer :: i, k, src
+        !
+        flat = "junk"
+        mat = "junk"
+        do i = 1, 4
+            write (flat(2*i - 1), "(a,i0)") "e", i
+            want(i) = flat(2*i - 1)
+            do k = 1, 2
+                write (mat(2*k - 1, 2*i - 1), "(a,i0,i0)") "m", i, k
+                want_m(k, i) = mat(2*k - 1, 2*i - 1)
+            end do
+        end do
+        !
+        ! Four rows from set_all, row 3 nulled and kept null by a second set_all, then rows 1 and 2
+        ! appended again as rows 5 and 6.
+        call c%init(PK_STRING, 4_int64)
+        call c%set_all(flat(1::2))
+        call c%set_null(3_int64)
+        call c%set_all(flat(1::2), modify_nulls=.false.)
+        call c%append_values(flat(1:3:2))
+        call check(error, c%length() == 6_int64 .and. c%is_null(3_int64), &
+            "PK_STRING: strided set_all/append_values must leave six rows with row 3 null")
+        if (allocated(error)) return
+        do i = 1, 6
+            if (i == 3) cycle
+            src = i
+            if (i > 4) src = i - 4
+            call c%get_at(int(i, int64), s)
+            call check(error, s == trim(want(src)), "PK_STRING: a row written from a strided array reads back wrong")
+            if (allocated(error)) return
+        end do
+        !
+        ! The same for a width-2 string vector column, from sections strided in both dimensions.
+        call c%init(PK_STRING_VEC, 4_int64, width=2_int32)
+        call c%set_all(mat(1::2, 1::2))
+        call c%set_null(3_int64)
+        call c%set_all(mat(1::2, 1::2), modify_nulls=.false.)
+        call c%append_values(mat(1::2, 1:3:2))
+        call check(error, c%length() == 6_int64 .and. c%is_null(3_int64), &
+            "PK_STRING_VEC: strided set_all/append_values must leave six rows with row 3 null")
+        if (allocated(error)) return
+        do i = 1, 6
+            if (i == 3) cycle
+            src = i
+            if (i > 4) src = i - 4
+            call c%get_at(int(i, int64), row)
+            call check(error, all(row == want_m(:, src)), &
+                "PK_STRING_VEC: a row written from a strided array reads back wrong")
+            if (allocated(error)) return
+        end do
+    end subroutine test_string_kinds_take_strided_arrays
     !
     subroutine test_clear_null(error)
         type(error_type), allocatable, intent(out) :: error

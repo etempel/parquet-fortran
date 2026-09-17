@@ -40,8 +40,9 @@ in `code-style.md`.
   assign normally to blank-pad. **A per-element `transfer` into a `character(len=1)` payload
   allocates a temporary each call**; use sequence association instead (`pack_character_bytes`,
   `src/parquet_strings.f90`): a contiguous `character(len=w)` array passed to a
-  `character(len=1), intent(in) :: src(*)` dummy, with the public dummy declared `contiguous`, rank
-  flattened for free, and `len_trim` kept on the element view.
+  `character(len=1), intent(in) :: src(*)` dummy, rank flattened for free, and `len_trim` kept on
+  the element view. The public dummy stays plain assumed-shape and reaches it through an assumed-size
+  worker (`build_from_elements`), never through a `contiguous` dummy (gfortran and ifx sections).
 - **`.and.` does not short-circuit.** `size(a) == size(b) .and. all(a == b)` reads out of bounds,
   `lo < 0 .and. hi > huge(hi) + lo` overflows, and `cheap .and. expensive() == 0` may evaluate the
   call (ifx does, gfortran does not). Nest the tests whenever the second operand indexes, computes,
@@ -222,6 +223,11 @@ done | sort | uniq -c | sort -rn
   copy made at the call**, where ifx passes it strided. A test meant to reach a callee's strided
   path passes a stride section (`x(1::2)`), which stays strided under both
   (`test_write_strided_arguments`); `--profile debug`'s `-fcheck=array-temps` names each copying line.
+- **An assumed-shape array passed to a `contiguous` dummy is copied on EVERY call, contiguous or
+  not** (unless the actual has TARGET); ifx, and both compilers at an assumed-size dummy, check at
+  run time and copy only a strided one. Code that needs contiguous storage from another procedure's
+  assumed-shape dummy passes it to an assumed-size dummy and copies a strided one itself
+  (`build_from_elements`, `src/parquet_strings.f90`).
 - **A disassociated array POINTER is not an absent optional**, although F2018 15.5.2.12 says it
   is: passed to an optional assumed-shape dummy it segfaults at the call at `-O0`, or arrives
   `present` at `-O2`; ifx treats it as absent. Forward an absent optional dummy instead
@@ -272,7 +278,10 @@ done | sort | uniq -c | sort -rn
   call. **A genuinely non-contiguous actual reaching an assumed-size or explicit-shape dummy is
   copied onto the STACK**, which dies with SIGSEGV once the copy passes the stack limit: library
   code forwarding a caller's assumed-shape array to such a dummy tests `is_contiguous` and copies
-  into an allocatable itself (`parquet_write_int32_column`, `test_write_strided_arguments`). The
+  into an allocatable itself (`parquet_write_int32_column`, `test_write_strided_arguments`; an
+  `intent(out)` one is read into the copy and assigned back, `test_read_strided_values`). **A
+  `contiguous` assumed-shape dummy makes the same stack copy with no `warning (406)`**, so a zero
+  count clears nothing: no dummy a caller's array reaches is declared `contiguous`. The
   warning names the CALLEE, so check the actual at the outermost call.
   An I/O list section of an allocatable component warns; an implied-do over it is silent
   (`col_print`). Triage: `fpm test --profile debug 2>&1 | grep -c 'warning (406)'`.

@@ -37,6 +37,26 @@ contains
             error stop trim(context) // ": writer has not been opened (call parquet_open_writer first)"
         end if
     end subroutine check_writer_open
+
+    !> `.true.` unless a scalar column's validity mask was passed and is strided: the mask half of the
+    !> test a public write specific makes before handing its caller's arrays to an assumed-size
+    !> worker, which copies a strided argument itself (the note above the flat write workers,
+    !> parquet_write_numeric.f90).
+    pure function is_contiguous_or_absent_r1(mask) result(ok)
+        logical, intent(in), optional :: mask(:) !! a caller's `is_valid`, possibly absent.
+        logical :: ok !! `.false.` only for a present, strided mask.
+        ok = .true.
+        if (present(mask)) ok = is_contiguous(mask)
+    end function is_contiguous_or_absent_r1
+
+    !> `is_contiguous_or_absent_r1` for a matrix column's mask. Two names rather than a generic: the
+    !> specifics would differ only in an OPTIONAL dummy's rank, which does not distinguish them.
+    pure function is_contiguous_or_absent_r2(mask) result(ok)
+        logical, intent(in), optional :: mask(:,:) !! a caller's `is_valid`, possibly absent.
+        logical :: ok !! `.false.` only for a present, strided mask.
+        ok = .true.
+        if (present(mask)) ok = is_contiguous(mask)
+    end function is_contiguous_or_absent_r2
     module procedure writer_lock_claim
         ! An unopened writer has no handle to guard. Leaving self%handle null here is what makes
         ! the finalizer below safe to run unconditionally.

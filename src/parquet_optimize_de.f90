@@ -59,7 +59,7 @@ contains
         integer :: gen_budget                         !! generation budget actually in force
         integer :: budget                             !! evaluation budget actually in force
         integer :: nt                                 !! team size the population is evaluated on
-        integer :: i, j, t, g                         !! individual, coordinate, thread, generation
+        integer :: i, t, g                            !! individual, thread, generation
         integer :: ib                                 !! index of the best individual
         integer :: neval, nonfinite                   !! evaluations, and non-finite values seen
         integer :: status                             !! the PF_OPT_* code this run ends on

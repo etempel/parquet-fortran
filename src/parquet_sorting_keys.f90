@@ -839,9 +839,7 @@ contains
     end subroutine move_key
     !
     module procedure drive_engine_partial
-        type(c_ptr) :: builder
-        integer(int64) :: status, ik
-        integer :: jk
+        integer(int64) :: ik
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -867,8 +865,6 @@ contains
     end procedure drive_engine_partial
     !
     module procedure engine_nth_index
-        type(c_ptr) :: builder
-        integer :: ik
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -902,9 +898,6 @@ contains
     end procedure resolve_count
     !
     module procedure engine_is_sorted
-        type(c_ptr) :: builder
-        integer(int64) :: res
-        integer :: ik
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -1226,9 +1219,6 @@ contains
     end procedure buf_append
     !
     module procedure engine_search
-        type(c_ptr) :: builder
-        integer(c_int8_t) :: wflag
-        integer :: ik
         !
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
@@ -1248,9 +1238,7 @@ contains
     end procedure engine_search
     !
     module procedure engine_merge
-        type(c_ptr) :: builder
-        integer(int64) :: status, k
-        integer :: ik
+        integer(int64) :: k
         !
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE

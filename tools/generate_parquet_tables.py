@@ -8064,7 +8064,6 @@ def getslice_str_impl():
         integer :: idx
         integer(int64) :: k
         integer(int64), allocatable :: rows(:)
-        character(len=:), allocatable :: sv
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
@@ -8086,7 +8085,6 @@ def getslice_str_impl():
         integer :: idx, maxlen
         integer(int64) :: k
         integer(int64), allocatable :: rows(:)
-        character(len=:), allocatable :: sv
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
@@ -8116,7 +8114,6 @@ def getslice_str_impl():
         integer :: idx, maxlen, e, wdt
         integer(int64) :: k, flat
         integer(int64), allocatable :: rows(:)
-        character(len=:), allocatable :: sv
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
@@ -8241,7 +8238,6 @@ def rowget_impl(k):
         return """    module procedure row_get_strv
         integer :: idx, e, wdt, maxlen
         integer(int64) :: flat
-        character(len=:), allocatable :: s
         type(parquet_string_column), pointer :: store
         !
         call row_resolve(self, name, "get", idx)
@@ -9023,7 +9019,6 @@ def get_str_impl():
     module procedure get_arr_chr
         integer :: idx, maxlen
         integer(int64) :: i, n
-        character(len=:), allocatable :: s
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get", idx, found)
@@ -9054,7 +9049,6 @@ def get_str_impl():
     module procedure get_arr_chrv
         integer :: idx, maxlen, e, wdt
         integer(int64) :: i, n, flat
-        character(len=:), allocatable :: s
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get", idx, found)
@@ -9697,7 +9691,7 @@ def mat_impl(k):
         # The loop this replaces was one type-bound call per null row, each redoing check_index
         # and the kind select case before touching a single bit.
         null_loop = "                call col%set_validity(valid)"
-        decls = "        integer(int64) :: i"
+        decls = ""
     else:
         # Arrow reports per-ELEMENT validity for a vector column, and parquet_column stores it
         # that way too, so the mask is handed over WHOLE rather than collapsed to one bit per
@@ -9753,7 +9747,6 @@ def mat_str_impl(k):
     return """    module procedure mat_strv
         character(len=:), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         integer :: slen
         !
         ! There is no compact buffer path for a rank-2 string column, so this goes through the
@@ -9806,7 +9799,6 @@ def matchunk_impl(k):
         return """    module procedure matchunk_strv
         character(len=:), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         integer :: slen
         !
         ! parquet_get_string_length is a whole-column question, so this asks for the longest
@@ -9844,7 +9836,7 @@ def matchunk_impl(k):
     # Rank 2 hands the per-ELEMENT mask over whole; see mat_*'s own note for why.
     # Both ranks now hand the whole mask over: rank 1 is per ROW, rank 2 per ELEMENT.
     null_loop = "                call col%set_validity(valid)"
-    idecl = "        integer(int64) :: i\n" if rank == 1 else ""
+    idecl = ""
     return f"""    module procedure matchunk_{tag}
         {decl}, allocatable :: tmp{dims(rank)}
         logical, allocatable :: valid{dims(rank)}

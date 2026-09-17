@@ -182,7 +182,6 @@ contains
     !
     module procedure bits_set_range
         integer(int64) :: k0, k1, w0, w1, b0, b1, w
-        integer(int64) :: mask
         !
         if (hi < lo) return
         k0 = lo - 1_int64                       ! 0-based first bit

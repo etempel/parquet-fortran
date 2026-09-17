@@ -116,7 +116,10 @@ contains
 
     module procedure interp_r2s
 
-        write (text, '(es10.3e3)') v
+        ! The width is D + E + 5, the narrowest that always fits: a NEGATIVE value needs eleven
+        ! columns (`-1.234E-300`), and a narrower field renders it as asterisks. `adjustl` plus the
+        ! callers' `trim` means a positive value reads exactly as it did at a width of ten.
+        write (text, '(es11.3e3)') v
         text = adjustl(text)
 
     end procedure interp_r2s

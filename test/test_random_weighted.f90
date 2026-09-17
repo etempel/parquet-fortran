@@ -919,7 +919,9 @@ contains
 
         ! Item 2 is denormal (flushed to zero under fast-math); item 3 is a NORMAL number below the
         ! overflow bound, which no model flushes. Both must be treated the same way.
-        w = [1.0_real64, 1.0e-320_real64, 1.0e-307_real64, 1.0_real64]
+        ! The subnormal is its bit pattern rather than `1.0e-320_real64`, which ifx reports as
+        ! `remark #7920` on every build; the value is the same double either way.
+        w = [1.0_real64, transfer(2024_int64, 0.0_real64), 1.0e-307_real64, 1.0_real64]
 
         call pf_weighted_permutation(perm, w, 20260819_int64)
         seen = 0

@@ -4016,9 +4016,7 @@ contains
     end procedure valid_from_mask
     !
     module procedure drive_engine
-        type(c_ptr) :: builder
-        integer(int64) :: status, nthreads
-        integer :: ik
+        integer(int64) :: nthreads
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -4074,9 +4072,7 @@ contains
     end procedure drive_engine
     !
     module procedure drive_engine_partial
-        type(c_ptr) :: builder
-        integer(int64) :: status, ik
-        integer :: jk
+        integer(int64) :: ik
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -4102,8 +4098,6 @@ contains
     end procedure drive_engine_partial
     !
     module procedure engine_nth_index
-        type(c_ptr) :: builder
-        integer :: ik
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -4137,9 +4131,6 @@ contains
     end procedure resolve_count
     !
     module procedure engine_is_sorted
-        type(c_ptr) :: builder
-        integer(int64) :: res
-        integer :: ik
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -4676,9 +4667,7 @@ contains
     ! already-extracted buffer in exchange for one entry point per operation instead of three.
     !
     module procedure engine_build_runs
-        type(c_ptr) :: builder
-        integer(int64) :: status, k, nthreads, gek
-        integer :: ik
+        integer(int64) :: k, nthreads, gek
         !
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
@@ -4810,9 +4799,6 @@ contains
     end procedure runs_to_offsets
     !
     module procedure engine_search
-        type(c_ptr) :: builder
-        integer(c_int8_t) :: wflag
-        integer :: ik
         !
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
@@ -4832,9 +4818,7 @@ contains
     end procedure engine_search
     !
     module procedure engine_merge
-        type(c_ptr) :: builder
-        integer(int64) :: status, k
-        integer :: ik
+        integer(int64) :: k
         !
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
@@ -5978,7 +5962,10 @@ contains
         w(f"    module procedure merge_{tag}")
         w("        type(sort_key_buf), allocatable :: bufa(:), bufb(:)")
         w("        integer(int64), allocatable :: perm(:)")
-        w("        integer(int64) :: k, j, na, nb, n")
+        # `j` walks the merged-validity block below, which only the kinds carrying validity
+        # as a separate argument emit -- declaring it for the others leaves it unused.
+        w("        integer(int64) :: k, j, na, nb, n" if nulls == "arg"
+          else "        integer(int64) :: k, na, nb, n")
         w("        logical :: desc, nlo, check")
         if family == "chr":
             w("        character(len=max(len(a), len(b))), allocatable :: pa(:), pb(:)")

@@ -351,9 +351,8 @@ contains
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         type(pf_healpix_grid) :: g
         integer(int64), parameter :: BIG = 1048576_int64   ! 2**20, well past the int32 ceiling
-        integer(int32) :: ip32, n32
+        integer(int32) :: ip32
         integer(int64) :: ip64, n64, gns
-        integer(int32) :: list32(64)
         real(real64) :: v(3), vv(3), ra, dec, th, ph
 
         call g%init(BIG, PF_HP_RING)

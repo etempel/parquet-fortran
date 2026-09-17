@@ -26,7 +26,6 @@ contains
     subroutine test_logging()
         use parquet_logging
         integer :: i, sink
-        type(pf_logger) :: lg
         type(pf_logger) :: lg1, lg2
         character(len=:),allocatable:: msg1,msg2
         !
@@ -326,7 +325,6 @@ contains
     subroutine test_print_string_vector()
         character(len=:), allocatable :: vec(:)
         character(len=:),allocatable:: fortran
-        integer :: i
         !
         fortran = "Fortran"
         !allocate(character(len=7) :: vec(5))

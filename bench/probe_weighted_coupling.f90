@@ -21,7 +21,7 @@ program probe_weighted_coupling
     integer, parameter :: N = 50
     integer(int64), parameter :: NSEED = 500000_int64
     real(real64) :: w(N), total, u, acc
-    integer(int64) :: s, race1, tree1, naive1, both, both_diffstream, naive_both, nr1, nb1, i
+    integer(int64) :: s, race1, tree1, naive1, naive_both, nr1, nb1, i
     integer(int64) :: perm(N), item
     type(pf_weighted_draw) :: d, d2
     logical :: ok

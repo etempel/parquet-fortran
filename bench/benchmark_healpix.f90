@@ -134,7 +134,11 @@ contains
     !! `bench/benchmark_spatial.f90`, which had it already. See CLAUDE.md, "The three machines
     !! available for testing".
     real(real64) function wtime() result(t)
+#ifndef _OPENMP
+        ! Declared only where it is used: under -qopenmp the serial arm below is preprocessed
+        ! away, and ifx then reports the pair as unused (`remark #7712`) on every build.
         integer(int64) :: c, rate
+#endif
 
 #ifdef _OPENMP
         t = omp_get_wtime()

@@ -6788,7 +6788,7 @@ contains
     !> answer-comparing test can see.
     subroutine test_rebuild_folds_a_radius(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:), rv(:), counts(:)
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:), rv(:)
         integer(int64), allocatable :: cnt(:)
         type(pf_spatial_index) :: sx, sk, sxy
         integer(int64) :: base, scalar_folded, list_folded

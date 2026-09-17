@@ -1376,7 +1376,7 @@ contains
     subroutine test_angdist_deg_agrees(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first fault.
         integer :: i, j, ncase
-        real(real64) :: a1, d1, a2, d2, got, ref, v1(3), v2(3), rad
+        real(real64) :: a1, d1, a2, d2, got, v1(3), v2(3), rad
         real(real64) :: acol(7), dcol(7), bulk(7)
         real(real64), parameter :: r2d = 180.0_real64 / pi
 

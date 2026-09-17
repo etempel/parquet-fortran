@@ -288,7 +288,7 @@ contains
     !! bitmap-backed, with the appended rows' bits taken from the source. A null-free append
     !! into a null-free column allocates no bitmap at all.
     module procedure append
-        integer(int64) :: old, n, k, w, e, src_base, dst_base
+        integer(int64) :: old, n, w
         if (self%kind /= other%kind) then
             error stop EP//"append: column kinds differ"
         end if
@@ -326,7 +326,7 @@ contains
     !! then append the source" workflow cheap. For bitmap-backed kinds it is also the operation
     !! that materializes the bitmap, since those rows are the column's first nulls.
     module procedure append_nulls
-        integer(int64) :: old, k
+        integer(int64) :: old
         if (n < 0_int64) error stop EP//"append_nulls: negative row count"
         if (n == 0_int64) return
         if (self%kind == PK_NONE) error stop EP//"append_nulls: column has no kind assigned"
@@ -361,7 +361,7 @@ contains
     !! stale null behind would be a silent wrong answer, so the all-valid source path still has
     !! to clear bits -- but only when this column actually has a bitmap to clear.
     module procedure paste
-        integer(int64) :: n, f, k, w, e, src_base, dst_base
+        integer(int64) :: n, f, w
         if (self%kind /= src%kind) error stop EP//"paste: column kinds differ"
         if (self%width /= src%width) error stop EP//"paste: column widths differ"
         if (is_string_kind(self%kind)) then

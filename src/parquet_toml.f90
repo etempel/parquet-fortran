@@ -2770,7 +2770,6 @@ contains
         character(len=*), intent(in) :: key          !! Key to point at.
         character(len=*), intent(in) :: message      !! What to say about it.
         integer, intent(in), optional :: severity    !! How loud to be.
-        class(toml_value), pointer :: vptr
         character(len=:), allocatable :: wh, diag
         integer :: sev, origin
 

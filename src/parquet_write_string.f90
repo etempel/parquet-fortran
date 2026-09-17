@@ -474,7 +474,7 @@ contains
         writer%observed_string_len(idx) = max(writer%observed_string_len(idx), int(longest))
     end subroutine resolve_compact_array_size
     module procedure parquet_write_string_column
-        integer(int64) :: i, nrows, asize, nitems, nkeep
+        integer(int64) :: nrows, asize, nitems, nkeep
         integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
@@ -540,7 +540,7 @@ contains
         end if
     end procedure parquet_write_string_column
     module procedure parquet_write_string_matrix_column
-        integer(int64) :: i, nrows, asize, nitems, nkeep
+        integer(int64) :: nrows, asize, nitems, nkeep
         integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
@@ -646,7 +646,7 @@ contains
         end if
     end procedure parquet_write_string_column_compact
     module procedure parquet_write_string_column_chunk
-        integer(int64) :: i, nrows, asize, nitems, nkeep
+        integer(int64) :: nrows, asize, nitems, nkeep
         integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
@@ -705,7 +705,7 @@ contains
         end if
     end procedure parquet_write_string_column_chunk
     module procedure parquet_write_string_matrix_column_chunk
-        integer(int64) :: i, nrows, asize, nitems, nkeep
+        integer(int64) :: nrows, asize, nitems, nkeep
         integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)

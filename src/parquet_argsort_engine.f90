@@ -2029,18 +2029,13 @@ contains
         integer, intent(in) :: nt                 !! team size; 1 runs every phase serially.
         !
         integer(int64), allocatable :: ka(:), kb(:) !! key images, ping-ponged between passes.
-        integer(int64), allocatable :: thist(:,:,:) !! per-thread histograms, `(bucket, byte, thread)`.
-        integer :: tid !! this thread's index within the team, 0-based.
-        integer :: tt  !! walk index over threads when the per-thread histograms are reduced.
-        integer(int64) :: c_lo, c_hi !! one thread's chunk of the image array, inclusive.
-        logical :: hist_done !! .true. once the histogram is built, by whichever of the two paths.
         logical :: did_par   !! .true. once Design A or B has ordered the value tier.
         logical :: tier_done !! .true. once the tier split has been done by the threaded path.
         integer(int64), allocatable :: ra(:), rb(:) !! the row indices travelling with them.
         integer(int64), allocatable :: tmp(:)       !! `move_alloc` intermediary for the swap.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
         integer(int64) :: off(0:255)       !! running output cursor per bucket.
-        integer(int64) :: i, j, b, t, u    !! row, output slot, bucket, key image, shift register.
+        integer(int64) :: i, j, b, t       !! row, output slot, bucket, key image.
         integer(int64) :: nv, nnan, nnull  !! rows in the value, NaN and null tiers.
         integer(int64) :: value_base       !! output positions before the value block, 0-based.
         integer(int64) :: nan_pos, null_pos !! next output position for a NaN / a null, 1-based.

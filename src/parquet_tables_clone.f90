@@ -134,7 +134,6 @@ contains
     module procedure table_clone_structure
         integer :: i, n
         logical :: only_res
-        character(len=:), allocatable :: sfx
         !
         call table_check_open(self, "clone_structure")
         call clone_check_same_type(self, out, "clone_structure")

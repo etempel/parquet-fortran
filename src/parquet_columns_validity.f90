@@ -252,7 +252,7 @@ contains
     !!     (see the table in the module doc), so there is nothing to walk and the per-row `is_null`
     !!     loop is the honest implementation.
     module procedure row_validity
-        integer(int64) :: i, e, n, nblk, blk, base, lo, hi, w, nbits
+        integer(int64) :: i, e, n, nblk, blk, base, w, nbits
         integer(int64) :: word
         integer :: p
         !

@@ -603,7 +603,7 @@ contains
     module procedure merge_date
         type(sort_key_buf), allocatable :: bufa(:), bufb(:)
         integer(int64), allocatable :: perm(:)
-        integer(int64) :: k, j, na, nb, n
+        integer(int64) :: k, na, nb, n
         logical :: desc, nlo, check
         !
         desc = .false.
@@ -636,7 +636,7 @@ contains
     module procedure merge_time
         type(sort_key_buf), allocatable :: bufa(:), bufb(:)
         integer(int64), allocatable :: perm(:)
-        integer(int64) :: k, j, na, nb, n
+        integer(int64) :: k, na, nb, n
         logical :: desc, nlo, check
         !
         desc = .false.
@@ -669,7 +669,7 @@ contains
     module procedure merge_ts
         type(sort_key_buf), allocatable :: bufa(:), bufb(:)
         integer(int64), allocatable :: perm(:)
-        integer(int64) :: k, j, na, nb, n
+        integer(int64) :: k, na, nb, n
         logical :: desc, nlo, check
         !
         desc = .false.

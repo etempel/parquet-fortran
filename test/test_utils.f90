@@ -528,8 +528,11 @@ contains
         call check(error, nbad, 0, &
             "pf_probit must answer a finite, oracle-accurate quantile for a subnormal probability")
         if (allocated(error)) return
-        ! The extreme point, asserted on its own so a grid that stopped short is visible.
-        call check(error, ieee_is_finite(pf_probit(4.9406564584124654e-324_real64)), &
+        ! The extreme point, asserted on its own so a grid that stopped short is visible. Written
+        ! as its bit pattern rather than as `4.9406564584124654e-324_real64`: the value is then
+        ! exact whatever a compiler makes of a subnormal decimal literal, and ifx stops reporting
+        ! `remark #7920` for it (test/test_probit_golden.f90's grids carry the same form).
+        call check(error, ieee_is_finite(pf_probit(transfer(1_int64, 0.0_real64))), &
             "pf_probit of the smallest subnormal double must be finite")
     end subroutine test_probit_subnormal_tail
 

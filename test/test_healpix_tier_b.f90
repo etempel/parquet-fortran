@@ -1247,7 +1247,7 @@ contains
     subroutine test_vector_pole_boundary(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first fault.
         real(real64) :: gap_24, gap_25, gap_26, ulp, v(3)
-        integer(int64) :: ip, back
+        integer(int64) :: back
 
         ulp = spacing(1.0_real64)
 

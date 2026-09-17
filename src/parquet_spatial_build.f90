@@ -985,7 +985,7 @@ contains
 
     module procedure spatial_build_sky_worker
         real(real64), allocatable :: vx(:), vy(:), vz(:), chords(:)
-        real(real64) :: cd, rr
+        real(real64) :: cd
         integer(int64) :: n, i
         integer :: k, back
 

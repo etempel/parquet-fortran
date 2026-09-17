@@ -43,6 +43,7 @@ Maintainer-only: it is never run at build time and is stripped from the fpm-publ
 
 import math
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -264,8 +265,19 @@ def probit_mean(ps, ws=None):
 
 
 def fortran_real(v):
-    """`v` as a round-trip-exact Fortran `real64` literal."""
-    text = "%.17g" % float(v)
+    """`v` as a round-trip-exact Fortran `real64` literal.
+
+    A SUBNORMAL is written as its bit pattern through `transfer` rather than as a decimal. The
+    value is then exact by construction instead of by trusting each compiler's decimal-to-subnormal
+    rounding at the very bottom of the exponent range, and ifx stops reporting `remark #7920`
+    ("the result is in the subnormal range") once per such literal on every build. `transfer` with
+    constant arguments is a constant expression, so these stay `parameter`s.
+    """
+    x = float(v)
+    if x != 0.0 and abs(x) < 2.2250738585072014e-308:       # below TINY: a subnormal
+        bits = struct.unpack("<q", struct.pack("<d", x))[0]
+        return "transfer(%d_int64, 0.0_real64)" % bits
+    text = "%.17g" % x
     if not any(c in text for c in ".eE"):
         text += ".0"
     return text + "_real64"
@@ -307,11 +319,14 @@ HEADER = '''!===========================================
 !! the three forward functions. The grids straddle the branch seam at `q = 0.1` deliberately: a
 !! grid sampling only the comfortable middle passes against a kernel whose tail is wrong.
 !!
+!! A value below `TINY` is written as `transfer(<bits>, 0.0_real64)` rather than as a decimal:
+!! the bit pattern is exact whatever a compiler makes of a subnormal decimal literal.
+!!
 !! `PROBIT_Q3` and `MAD_NORMAL_SCALE_REF` are the two spellings of one number that
 !! `feature_risks.md` Risk-252 is about -- `src/parquet_stats_order.f90` freezes the second as a
 !! literal, and nothing but a test compares them.
 module test_probit_golden
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : real64, int64
     implicit none
     public
 '''

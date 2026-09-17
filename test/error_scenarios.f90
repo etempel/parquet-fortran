@@ -27499,8 +27499,9 @@ contains
     !> An nside that is not a power of two.
     subroutine scenario_healpix_disc_nside_not_power2()
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(100_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        call pf_query_disc(100_int64, NORTH, 0.1_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted nside= 100"
     end subroutine scenario_healpix_disc_nside_not_power2
 
@@ -27551,8 +27552,9 @@ contains
     subroutine scenario_healpix_grid_disc_unset()
         type(pf_healpix_grid) :: g
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call g%query_disc([0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        call g%query_disc(NORTH, 0.1_real64, listpix, nlist)
         print '(a)', "unexpectedly queried a disc on an unbuilt grid"
     end subroutine scenario_healpix_grid_disc_unset
 
@@ -27586,32 +27588,36 @@ contains
     subroutine scenario_healpix_grid_disc_int32_too_fine()
         type(pf_healpix_grid) :: g
         integer(int32) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
         call g%init(16384_int64, PF_HP_RING)
-        call g%query_disc([0.0_real64, 0.0_real64, 1.0_real64], 0.0001_real64, listpix, nlist)
+        call g%query_disc(NORTH, 0.0001_real64, listpix, nlist)
         print '(a)', "unexpectedly ran an int32 disc query on an nside= 16384 grid"
     end subroutine scenario_healpix_grid_disc_int32_too_fine
 
     subroutine scenario_healpix_disc_nside_zero()
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(0_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        call pf_query_disc(0_int64, NORTH, 0.1_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted nside= 0"
     end subroutine scenario_healpix_disc_nside_zero
 
     !> An nside above what a 32-bit pixel index can address, asked for in the int32 kind.
     subroutine scenario_healpix_disc_nside_int32_overflow()
         integer(int32) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(16384_int32, [0.0_real64, 0.0_real64, 1.0_real64], 0.001_real64, listpix, nlist)
+        call pf_query_disc(16384_int32, NORTH, 0.001_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted nside= 16384 in the int32 kind"
     end subroutine scenario_healpix_disc_nside_int32_overflow
 
     !> An nside above the module's own ceiling, asked for in the int64 kind.
     subroutine scenario_healpix_disc_nside_int64_overflow()
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(1073741824_int64, [0.0_real64, 0.0_real64, 1.0_real64], 1.0e-9_real64, &
+        call pf_query_disc(1073741824_int64, NORTH, 1.0e-9_real64, &
                            listpix, nlist)
         print '(a)', "unexpectedly accepted nside= 2**30"
     end subroutine scenario_healpix_disc_nside_int64_overflow
@@ -27621,25 +27627,28 @@ contains
         use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
         integer(int64) :: listpix(64), nlist
         real(real64) :: nan
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
         nan = ieee_value(0.0_real64, ieee_quiet_nan)
-        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], nan, listpix, nlist)
+        call pf_query_disc(4_int64, NORTH, nan, listpix, nlist)
         print '(a)', "unexpectedly accepted a NaN radius"
     end subroutine scenario_healpix_disc_radius_nan
 
     !> A negative radius.
     subroutine scenario_healpix_disc_radius_negative()
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], -0.5_real64, listpix, nlist)
+        call pf_query_disc(4_int64, NORTH, -0.5_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted a negative radius"
     end subroutine scenario_healpix_disc_radius_negative
 
     !> A centre vector of zero length, which names no direction at all.
     subroutine scenario_healpix_disc_vector_zero()
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: ZERO3(3) = [0.0_real64, 0.0_real64, 0.0_real64]
 
-        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 0.0_real64], 0.1_real64, listpix, nlist)
+        call pf_query_disc(4_int64, ZERO3, 0.1_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted a zero-length centre vector"
     end subroutine scenario_healpix_disc_vector_zero
 
@@ -27647,18 +27656,20 @@ contains
     subroutine scenario_healpix_disc_vector_nan()
         use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
         integer(int64) :: listpix(64), nlist
-        real(real64) :: nan
+        real(real64) :: nan, centre(3)
 
         nan = ieee_value(0.0_real64, ieee_quiet_nan)
-        call pf_query_disc(4_int64, [nan, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        centre = [nan, 0.0_real64, 1.0_real64]
+        call pf_query_disc(4_int64, centre, 0.1_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted a NaN in the centre vector"
     end subroutine scenario_healpix_disc_vector_nan
 
     !> A scheme selector that is neither PF_HP_RING nor PF_HP_NEST.
     subroutine scenario_healpix_disc_bad_scheme()
         integer(int64) :: listpix(64), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist, &
+        call pf_query_disc(4_int64, NORTH, 0.1_real64, listpix, nlist, &
                            scheme=7)
         print '(a)', "unexpectedly accepted scheme= 7"
     end subroutine scenario_healpix_disc_bad_scheme
@@ -27666,8 +27677,9 @@ contains
     !> A listpix buffer too small for the disc, which must abort rather than truncate.
     subroutine scenario_healpix_disc_buffer_too_small()
         integer(int64) :: listpix(4), nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc(16_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, nlist)
+        call pf_query_disc(16_int64, NORTH, 0.5_real64, listpix, nlist)
         print '(a)', "unexpectedly filled a buffer too small for the result"
     end subroutine scenario_healpix_disc_buffer_too_small
 
@@ -27678,8 +27690,9 @@ contains
     !> otherwise look like a working call, filling two rows and leaving two undefined.
     subroutine scenario_healpix_disc_runs_bad_rows()
         integer(int64) :: runs(4, 64), nruns
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc_runs(16_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, &
+        call pf_query_disc_runs(16_int64, NORTH, 0.5_real64, &
                                 runs, nruns)
         print '(a)', "unexpectedly accepted a run buffer with the wrong number of rows"
     end subroutine scenario_healpix_disc_runs_bad_rows
@@ -27696,8 +27709,9 @@ contains
     !> `pf_query_disc_count` on an nside that is not a power of two: the message must name it.
     subroutine scenario_healpix_disc_count_bad_nside()
         integer(int64) :: nlist
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc_count(6_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, nlist)
+        call pf_query_disc_count(6_int64, NORTH, 0.1_real64, nlist)
         print '(a)', "unexpectedly accepted nside= 6"
     end subroutine scenario_healpix_disc_count_bad_nside
 
@@ -27723,8 +27737,9 @@ contains
     subroutine scenario_healpix_disc_alloc_bad_scheme()
         integer(int64) :: nlist
         integer(int64), allocatable :: listpix(:)
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
-        call pf_query_disc_alloc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, &
+        call pf_query_disc_alloc(4_int64, NORTH, 0.1_real64, &
                                  listpix, nlist, scheme=9)
         print '(a)', "unexpectedly accepted scheme= 9"
     end subroutine scenario_healpix_disc_alloc_bad_scheme
@@ -32441,14 +32456,16 @@ contains
     subroutine scenario_healpix_disc_vector_infinite()
         use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
         integer(int64) :: listpix(64), nlist
-        real(real64) :: inf
+        real(real64) :: inf, centre(3)
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
         inf = ieee_value(0.0_real64, ieee_positive_inf)
         ! A radius that actually selects pixels: a control returning an empty disc would show
         ! only that the call did not abort, not that it did the work.
-        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, nlist)
+        call pf_query_disc(4_int64, NORTH, 0.5_real64, listpix, nlist)
         print '(a,i0)', "control: a finite centre vector was accepted, nlist=", nlist
-        call pf_query_disc(4_int64, [inf, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        centre = [inf, 0.0_real64, 1.0_real64]
+        call pf_query_disc(4_int64, centre, 0.1_real64, listpix, nlist)
         print '(a)', "unexpectedly accepted an infinite component in the centre vector"
     end subroutine scenario_healpix_disc_vector_infinite
 

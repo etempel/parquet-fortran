@@ -1817,7 +1817,6 @@ contains
     module procedure get_arr_chr
         integer :: idx, maxlen
         integer(int64) :: i, n
-        character(len=:), allocatable :: s
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get", idx, found)
@@ -1848,7 +1847,6 @@ contains
     module procedure get_arr_chrv
         integer :: idx, maxlen, e, wdt
         integer(int64) :: i, n, flat
-        character(len=:), allocatable :: s
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get", idx, found)
@@ -2875,7 +2873,6 @@ contains
     module procedure row_get_strv
         integer :: idx, e, wdt, maxlen
         integer(int64) :: flat
-        character(len=:), allocatable :: s
         type(parquet_string_column), pointer :: store
         !
         call row_resolve(self, name, "get", idx)
@@ -3890,7 +3887,6 @@ contains
         integer :: idx
         integer(int64) :: k
         integer(int64), allocatable :: rows(:)
-        character(len=:), allocatable :: sv
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
@@ -3912,7 +3908,6 @@ contains
         integer :: idx, maxlen
         integer(int64) :: k
         integer(int64), allocatable :: rows(:)
-        character(len=:), allocatable :: sv
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
@@ -3942,7 +3937,6 @@ contains
         integer :: idx, maxlen, e, wdt
         integer(int64) :: k, flat
         integer(int64), allocatable :: rows(:)
-        character(len=:), allocatable :: sv
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)

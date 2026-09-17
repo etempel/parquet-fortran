@@ -92,6 +92,14 @@ ifx:         source /opt/fortran/activate_ifx.sh
 - An activation script sourced non-interactively may exit before it finishes, leaving the system
   toolchain active while its exported variables make the shell look configured: redirect its input
   and output, then check the compiler version.
+- **`activate_gcc.sh` ends with `scl enable gcc-toolset-15 /bin/bash`**, an interactive subshell that
+  dies at once without a tty, so sourcing it from a script leaves the system gfortran 11.5 with every
+  `FPM_*` variable set. Take its exports without that line and run the command inside the toolset:
+
+```bash
+source <(sed '$d' /opt/fortran/activate_gcc.sh)   # its exports, minus the trailing `scl enable`
+scl enable gcc-toolset-15 -- bash -c 'gfortran --version | head -1; fpm test'
+```
 - A sourced script inherits the caller's positional parameters (`./run.sh ifx` hands `$1` on):
   `set --` first.
 - The system `gfortran` is 11.5.0, below the project minimum of 13, and silently miscompiles it;

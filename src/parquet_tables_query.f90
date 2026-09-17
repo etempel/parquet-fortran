@@ -1236,7 +1236,6 @@ contains
     end procedure table_valid_mask_rows
     !
     module procedure table_apply_valid
-        integer(int64) :: i
         character(len=32) :: got, want
         character(len=:), allocatable :: sfx
         !
@@ -1289,7 +1288,7 @@ contains
     end procedure table_valid_mask_rows_elem
     !
     module procedure table_apply_valid_elem
-        integer(int64) :: i, e, w
+        integer(int64) :: w
         character(len=64) :: got, want
         character(len=:), allocatable :: sfx
         !

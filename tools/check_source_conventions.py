@@ -7828,12 +7828,357 @@ def check_risk_register_shape():
     return problems
 
 
+#: A declaration with an entity list: the type spec and attributes, then the names after `::`.
+#: The type spec's own parentheses (`character(len=*)`, `real(real64)`) are part of the attribute
+#: half and never read as a shape -- reading them as one is what would make every `character(len=*)`
+#: dummy look like an array.
+_SHAPED_DECL = re.compile(
+    r"^((?:integer|real|logical|complex|character|double\s+precision|type|class)"
+    r"\s*(?:\([^)]*\))?[^:]*)::(.+)$", re.I)
+_DIMENSION_ATTR = re.compile(r"\bdimension\s*\(([^)]*)\)", re.I)
+#: An actual that is an array constructor: `[...]` or the older `(/ ... /)`.
+_ARRAY_CONSTRUCTOR = re.compile(r"^(\[|\(/)")
+#: An actual that opens with a procedure reference or a subscript -- which of the two is decided
+#: against the names in scope, never from the spelling.
+_OPENS_WITH_CALL = re.compile(r"^([a-z_]\w*)\s*\(", re.I)
+#: A reference at a call site: `call name(`, `call obj%binding(`, or a function reference.
+_CALL_OR_REFERENCE = re.compile(r"(?<![\w%])(?:call\s+)?([a-z_]\w*(?:%[a-z_]\w*)*)\s*\(", re.I)
+#: Statement keywords that take a parenthesis and are not calls.
+_NOT_CALLABLE = frozenset(("if", "elseif", "while", "where", "elsewhere", "forall", "select",
+                           "selectcase", "case", "do", "allocate", "deallocate", "nullify",
+                           "associate", "type", "class", "read", "write", "open", "close",
+                           "inquire", "print", "format", "data", "common", "namelist"))
+
+
+def _declared_shape(entity, attributes):
+    """('name', 'explicit'|'assumed'|'scalar') for one declared entity.
+
+    `assumed` covers assumed-shape, deferred-shape and assumed-size alike: none of them is this
+    rule's business, because an actual reaching one is passed by descriptor or by address.
+    """
+    name, _, rest = entity.partition("(")
+    if not rest:
+        found = _DIMENSION_ATTR.search(attributes)
+        spec = found.group(1) if found else None
+    else:
+        depth, spec = 1, ""
+        for ch in rest:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            spec += ch
+    name = name.strip().lower()
+    if not spec or not spec.strip():
+        return name, "scalar"
+    if "*" in spec or ":" in spec:
+        return name, "assumed"
+    return name, "explicit"
+
+
+def _entity_shapes(code):
+    """Yield (name, shape) for every entity a declaration line declares."""
+    found = _SHAPED_DECL.match(code)
+    if not found:
+        return
+    for entity in _split_args(found.group(2)):
+        entity = entity.split("=>")[0]
+        if "=" in entity:
+            entity = entity.split("=")[0]
+        name, shape = _declared_shape(entity, found.group(1))
+        if name:
+            yield name, shape
+
+
+def _shape_index(paths):
+    """Index every procedure's dummy shapes, and which functions return an array.
+
+    Returns (shapes, array_functions, ambiguous):
+      shapes           name -> (ordered dummy names, {dummy: shape})
+      array_functions  names whose RESULT is an explicit-shape array
+      ambiguous        names declared with two different signatures somewhere in the tree
+
+    An `ambiguous` name is resolved to nothing at all: two procedures of the same name in
+    different scopes cannot be told apart here, and guessing would report the wrong one.
+    """
+    shapes, array_functions, ambiguous = {}, set(), set()
+    for path in paths:
+        stack = []
+        for _, code in _logical_lines(path):
+            opened = _PROC_OPEN.match(code)
+            if opened and not re.match(r"^end\b", code, re.IGNORECASE):
+                name = (opened.group(1) or opened.group(3) or opened.group(6)).lower()
+                dummies = [d.strip().lower()
+                           for d in _split_args(opened.group(2) or opened.group(4) or "")]
+                dummies = [d for d in dummies if re.fullmatch(r"\w+", d)]
+                result = re.search(r"\bresult\s*\(\s*(\w+)\s*\)", code, re.IGNORECASE)
+                stack.append({
+                    "name": name,
+                    "dummies": dummies,
+                    "shape": {},
+                    "result": result.group(1).lower() if result else
+                              (name if opened.group(3) else None),
+                    "abbreviated": bool(opened.group(5)),
+                })
+                continue
+            if _PROC_CLOSE.match(code):
+                if stack:
+                    frame = stack.pop()
+                    if frame["abbreviated"]:
+                        continue
+                    shaped = {d: frame["shape"].get(d, "scalar") for d in frame["dummies"]}
+                    record = (frame["dummies"], shaped)
+                    if frame["name"] in shapes and shapes[frame["name"]] != record:
+                        ambiguous.add(frame["name"])
+                    shapes[frame["name"]] = record
+                    if frame["result"] and frame["shape"].get(frame["result"]) == "explicit":
+                        array_functions.add(frame["name"])
+                continue
+            if stack and "::" in code:
+                for name, shape in _entity_shapes(code):
+                    stack[-1]["shape"][name] = shape
+    return shapes, array_functions, ambiguous
+
+
+def _explicit_shape_dummies(callee, shapes, generics, bindings, ambiguous):
+    """(positions, names) of the callee's explicit-shape ARRAY dummies; empty when unresolvable.
+
+    A generic or a type-bound binding is resolved against every candidate specific and only what
+    they AGREE on is reported, so a name whose specifics differ costs nothing. A binding's
+    candidates are indexed by their implementation, whose passed object is the first dummy, so
+    positions are shifted by one.
+    """
+    if "%" in callee:
+        candidates = bindings.get(callee.rsplit("%", 1)[1])
+        offset = 1
+    else:
+        candidates = generics.get(callee) or ([callee] if callee in shapes else None)
+        offset = 0
+    if not candidates:
+        return {}, set()
+    per_candidate = []
+    for candidate in candidates:
+        if candidate in ambiguous or candidate not in shapes:
+            return {}, set()
+        dummies, shaped = shapes[candidate]
+        dummies = dummies[offset:]
+        if len(dummies) != len(shapes[candidate][0]) - offset:
+            return {}, set()
+        per_candidate.append({i: d for i, d in enumerate(dummies)
+                              if shaped.get(d) == "explicit"})
+    if not per_candidate:
+        return {}, set()
+    positions = {i: d for i, d in per_candidate[0].items()
+                 if all(p.get(i) == d for p in per_candidate)}
+    names = set.intersection(*[set(p.values()) for p in per_candidate])
+    return positions, names
+
+
+def _call_argument_text(code, open_paren):
+    """The text between `code[open_paren]` and its matching `)`, quotes respected."""
+    depth, out, quote = 0, "", None
+    for ch in code[open_paren:]:
+        if quote:
+            out += ch
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return out
+        out += ch
+    return None                                     # unbalanced: a continuation this line lost
+
+
+def _bare_operands(text):
+    """(names referenced bare at nesting depth 0, whether an operator sits there).
+
+    A name followed by `(` is dropped: `v(3)`, `a(i:j)` and `f(x)` are a subscript, a section and
+    a reference, none of which says anything about the whole actual's rank on its own.
+    """
+    depth, current, names, has_operator, quote = 0, "", [], False, None
+    for ch in text:
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch in "([":
+            if depth == 0:
+                current = ""
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif depth == 0:
+            if ch.isalnum() or ch in "_%":
+                current += ch
+            else:
+                if ch in "-+*/":
+                    has_operator = True
+                if current:
+                    names.append(current.lower())
+                current = ""
+    if current:
+        names.append(current.lower())
+    return names, has_operator
+
+
+def _needs_a_temporary(actual, in_scope, array_functions):
+    """Why this actual reaches an explicit-shape dummy through a temporary, or None.
+
+    Three shapes have no address of their own, and only these three are reported:
+    an array constructor, the result of an array-valued function, and an array expression. A plain
+    name, a section (`v(:, k)`, `a(i:j)`), a component and anything unresolvable are left alone --
+    a section's own copy, when it is strided, is a different rule with a different fix.
+    """
+    text = actual.strip()
+    if _ARRAY_CONSTRUCTOR.match(text):
+        return "an array constructor"
+    names, has_operator = _bare_operands(text)
+    opening = _OPENS_WITH_CALL.match(text)
+    if opening and not has_operator:
+        name = opening.group(1).lower()
+        if name in array_functions and name not in in_scope:
+            return "the array-valued result of `%s`" % name
+    if has_operator:
+        for name in names:
+            if in_scope.get(name) in ("explicit", "assumed"):
+                return "an array expression over `%s`" % name
+    return None
+
+
+def check_no_array_temporary_at_an_explicit_shape_dummy():
+    """No call hands an array temporary to an explicit-shape array dummy.
+
+    `.claude/rules/fortran-gotchas.md`, ifx. An array constructor, an array-valued function result
+    and an array expression have no address of their own, so a compiler passing one to an
+    explicit-shape dummy copies it into a temporary first. ifx reports every such copy at run time
+    under `--profile debug` (`-check all`), one `forrtl: warning (406)` line per CALL: in a sampler
+    that is one per draw, and six such actuals inside `pf_random_*` once put two million lines
+    through a single `fpm test --profile debug`. gfortran makes the same copy silently, so nothing
+    but an ifx debug run shows it, and by then the real output is buried.
+
+    The fix is always at the CALL: name the value in a local (or a `parameter` when it is
+    constant) and pass that.
+
+    DELIBERATELY NARROW, because a check that cried wolf here would be turned off:
+
+    * only the three shapes above are reported. An array SECTION is not one of them -- `v(:, k)`
+      and `a(i:j)` have addresses, and the copy a strided one costs is a different rule with a
+      different fix -- and neither is a plain name, a component, or a `parameter`.
+    * a dummy is reported only when its shape is EXPLICIT (`vec(3)`, `mat(3, 3)`). Assumed-shape,
+      deferred-shape and assumed-size dummies all take a descriptor or an address and are skipped.
+    * a name whose signature is not indexed here (an intrinsic, a `use`d third-party procedure) is
+      skipped, as is one declared twice with different signatures, and a generic or type-bound
+      binding reports only what EVERY candidate specific agrees on.
+    * an expression is reported only when one of its top-level operands is a name declared an
+      array IN THE CALLING PROCEDURE, so a scalar expression over array elements (`a(i) * 2`) is
+      not mistaken for an array one.
+
+    The shapes are derived from the source on both sides -- the dummies from the callee's
+    declarations, the arrays in scope from the caller's -- so a new procedure is covered the day it
+    is written, with no list to update. Both directions are guarded against passing vacuously: the
+    index must find explicit-shape dummies, and the scan must resolve call sites.
+    """
+    roots = [SRC, TEST, REPO_ROOT / "app", REPO_ROOT / "bench"]
+    paths = sorted(p for root in roots if root.is_dir() for p in root.glob("*.f90"))
+    if not paths:
+        return ["no Fortran source found under src/, test/, app/ or bench/ -- this check is "
+                "passing vacuously; fix its file list"]
+    shapes, array_functions, ambiguous = _shape_index(paths)
+    _, generics, bindings, _ = _fortran_signatures(paths)
+    # A generic counts as array-valued when EVERY specific behind it is: `pf_random_disc_at` is
+    # what a caller writes, and only its `_i32`/`_i64` specifics carry the declaration.
+    array_functions |= {name for name, specifics in generics.items()
+                        if specifics and all(s in array_functions for s in specifics)}
+    explicit_dummies = sum(1 for _, shaped in shapes.values()
+                           for shape in shaped.values() if shape == "explicit")
+    if not explicit_dummies or not array_functions:
+        return ["the shape index found %d explicit-shape dummy/dummies and %d array-valued "
+                "function(s) across %d file(s) -- the declaration parser has gone stale and this "
+                "check proves nothing" % (explicit_dummies, len(array_functions), len(paths))]
+    problems, resolved = [], 0
+    for path in paths:
+        lines = path.read_text().split("\n")
+        for first, last in _procedure_scopes(lines):
+            in_scope = {}
+            for raw in lines[first:last + 1]:
+                for name, shape in _entity_shapes(strip_comment(raw).strip()):
+                    in_scope[name] = shape
+            for lineno, code in _joined_lines(lines, first, last):
+                for found in _CALL_OR_REFERENCE.finditer(code):
+                    callee = found.group(1).lower()
+                    if callee in _NOT_CALLABLE:
+                        continue
+                    positions, names = _explicit_shape_dummies(
+                        callee, shapes, generics, bindings, ambiguous)
+                    if not positions and not names:
+                        continue
+                    argument_text = _call_argument_text(code, found.end() - 1)
+                    if argument_text is None:
+                        continue
+                    resolved += 1
+                    for index, actual in enumerate(_split_args(argument_text)):
+                        keyword = _KEYWORD_ACTUAL.match(actual)
+                        if keyword:
+                            if keyword.group(1).lower() not in names:
+                                continue
+                            actual, dummy = keyword.group(2), keyword.group(1).lower()
+                        elif index in positions:
+                            dummy = positions[index]
+                        else:
+                            continue
+                        reason = _needs_a_temporary(actual, in_scope, array_functions)
+                        if reason:
+                            problems.append(
+                                "%s:%d: `%s` is passed %s as its `%s` argument, which is "
+                                "explicit-shape -- ifx copies it into an array temporary and "
+                                "reports `warning (406)` on every call under --profile debug. "
+                                "Name the value in a local (a `parameter` when it is constant) "
+                                "and pass that (.claude/rules/fortran-gotchas.md, ifx)."
+                                % (path.relative_to(REPO_ROOT), lineno, callee, reason, dummy))
+    if not resolved:
+        return problems + [
+            "no call site reached a procedure with an explicit-shape array dummy -- the call-site "
+            "scan has gone stale and this check proves nothing"]
+    return problems
+
+
+def _joined_lines(lines, first, last):
+    """(lineno, code) over `lines[first:last]`, comments stripped and `&` continuations folded."""
+    out, buffer, start = [], "", None
+    for index in range(first, last + 1):
+        code = strip_comment(lines[index]).strip()
+        if not code and not buffer:
+            continue
+        if start is None:
+            start = index + 1
+        if code.endswith("&"):
+            buffer += code[:-1] + " "
+            continue
+        out.append((start, buffer + code))
+        buffer, start = "", None
+    return out
+
+
 CHECKS = (
     ("every instruction citation names the file that carries the topic",
      check_instruction_citations_resolve),
     ("feature_risks.md is a short register of open risks, and only open ones are cited",
      check_risk_register_shape),
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
+    ("no call hands an array temporary to an explicit-shape dummy",
+     check_no_array_temporary_at_an_explicit_shape_dummy),
     ("no source shape nagfor -C=undefined cannot compile",
      check_no_shape_nagfor_undefined_cannot_compile),
     ("pf_index_map components are adopted and reset",

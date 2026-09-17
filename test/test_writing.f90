@@ -54,7 +54,6 @@ contains
     !> Collect all exported unit tests
     subroutine collect_tests_parquet_writing(testsuite)
         implicit none
-        integer :: status
         !> Collection of tests
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
         ! Built in parts and concatenated ONCE at the end. Neither obvious alternative works:
@@ -507,7 +506,6 @@ contains
     subroutine test_write_maml_sidecar_no_pruning_when_all_enabled(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_writer) :: writer
         type(parquet_schema) :: schema
         type(parquet_maml_file) :: source_maml, sidecar_maml
         type(test_output_type), allocatable :: test_data(:)

@@ -117,7 +117,11 @@ contains
     !> Wall-clock seconds. `omp_get_wtime` when there is OpenMP, `system_clock` otherwise -- an
     !> unguarded `use omp_lib` is a COMPILE failure rather than a graceful fallback to serial.
     real(real64) function wtime() result(t)
+#ifndef _OPENMP
+        ! Declared only where it is used: under -qopenmp the serial arm below is preprocessed
+        ! away, and ifx then reports the pair as unused (`remark #7712`) on every build.
         integer(int64) :: c, rate
+#endif
 
 #ifdef _OPENMP
         t = omp_get_wtime()

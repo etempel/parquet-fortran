@@ -1044,7 +1044,7 @@ contains
         real(real64) :: ns_name, ns_hand, ns_refetch, ns_getat, ns_mkname, ns_mkpos
         real(real64) :: ns_lname, ns_lhand, ns_vrow, ns_velem
         integer(int64) :: i, k
-        integer :: r, kk, pos(4), jslot, e
+        integer :: r, pos(4), jslot, e
 
         write(output_unit, '(a)') "MODE handle -- the shipped parquet_table_col against the name form"
         write(output_unit, '(a,i0,a,i0,a)') "  (ncols = ", ncols, ", ", nrows, " rows per column)"

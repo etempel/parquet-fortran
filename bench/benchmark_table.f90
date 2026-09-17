@@ -1025,7 +1025,7 @@ contains
         type(parquet_schema) :: s
         type(parquet_writer) :: w
         real(real64), allocatable :: g(:)
-        logical, allocatable :: mask(:), built(:)
+        logical, allocatable :: mask(:)
         character(len=:), allocatable :: names(:)
         real(real64) :: t0, t_table, t_perrow, t_ready, x
         integer(int64) :: i64, nrows, nnull

@@ -561,7 +561,6 @@ contains
         character(len=32) :: idx_buf
         integer :: i, j, k
         logical :: has_table, found
-        real(real64) :: qc_bound_value
 
         call parquet_parse_maml_lines(maml%lines, cinfo, metadata)
 

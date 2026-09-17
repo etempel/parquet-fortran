@@ -297,7 +297,8 @@ done | sort | uniq -c | sort -rn
   array dummy**; assign to a named local (or a `parameter` when constant) and pass that, or
   `warning (406)` fires on every call. A contiguous array SECTION needs no local. Per call is per
   DRAW in a sampler: one such actual inside a `pf_random_*`/`sph_*` chain put two million lines
-  through a `--profile debug` run. **A genuinely non-contiguous actual reaching an assumed-size or explicit-shape dummy is
+  through a `--profile debug` run. `check_no_array_temporary_at_an_explicit_shape_dummy` reports
+  the three shapes it can prove. **A genuinely non-contiguous actual reaching an assumed-size or explicit-shape dummy is
   copied onto the STACK**, which dies with SIGSEGV once the copy passes the stack limit: library
   code forwarding a caller's assumed-shape array to such a dummy tests `is_contiguous` and copies
   into an allocatable itself (`parquet_write_int32_column`, `test_write_strided_arguments`; an

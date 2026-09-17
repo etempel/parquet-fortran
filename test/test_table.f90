@@ -1953,7 +1953,6 @@ contains
         type(parquet_table) :: t
         integer(int64), allocatable :: g(:)
         character(len=*), parameter :: f = "test_run/table_userpop_cast.parquet"
-        integer :: i
         !
         call write_basic_fixture(f)
         !

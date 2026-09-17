@@ -288,7 +288,7 @@ contains
     module procedure spatial_scan
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64) :: nc(3), a(3), cnt(3)
-        integer(int64) :: ii, jj, kk, jc, kc, base, s0, e0, t, cap, row, minkey, ntest
+        integer(int64) :: jj, kk, jc, kc, base, s0, e0, t, cap, row, minkey, ntest
         integer(int64) :: run_lo(2), run_hi(2), ilo, ihi
         real(real64) :: r2, r2in, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3

@@ -890,7 +890,7 @@ contains
     end procedure append_storage
     !
     module procedure append_row_of
-        integer(int64) :: at, w, e, src_base, dst_base
+        integer(int64) :: w, e, src_base, dst_base
         if (self%kind /= other%kind) error stop EP//"append_row_of: column kinds differ"
         if (self%width /= other%width) error stop EP//"append_row_of: column widths differ"
         if (irow < 1_int64 .or. irow > other%nrows) then

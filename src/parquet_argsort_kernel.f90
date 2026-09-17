@@ -569,9 +569,7 @@ contains
     end procedure valid_from_mask
     !
     module procedure drive_engine
-        type(c_ptr) :: builder
-        integer(int64) :: status, nthreads
-        integer :: ik
+        integer(int64) :: nthreads
         !
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
@@ -840,9 +838,7 @@ contains
     ! of these is it -- run detection, binary search and merging each cost one extra copy of an
     ! already-extracted buffer in exchange for one entry point per operation instead of three.
     module procedure engine_build_runs
-        type(c_ptr) :: builder
-        integer(int64) :: status, k, nthreads, gek
-        integer :: ik
+        integer(int64) :: k, nthreads, gek
         !
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE

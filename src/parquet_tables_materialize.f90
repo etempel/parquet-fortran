@@ -20,7 +20,7 @@ contains
     module procedure mat_i32
         integer(int32), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
+
         !
         allocate(tmp(nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -48,7 +48,7 @@ contains
     module procedure mat_i64
         integer(int64), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
+
         !
         allocate(tmp(nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -76,7 +76,7 @@ contains
     module procedure mat_f32
         real(real32), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
+
         !
         allocate(tmp(nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -104,7 +104,7 @@ contains
     module procedure mat_f64
         real(real64), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
+
         !
         allocate(tmp(nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -132,7 +132,7 @@ contains
     module procedure mat_bool
         logical, allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
+
         !
         allocate(tmp(nrows))
         ! The file's own statistics answer this from the footer, without reading a byte of the
@@ -348,7 +348,6 @@ contains
     module procedure mat_strv
         character(len=:), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         integer :: slen
         !
         ! There is no compact buffer path for a rank-2 string column, so this goes through the
@@ -415,7 +414,6 @@ contains
     module procedure matchunk_i32
         integer(int32), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
         !
         allocate(tmp(nrows))
         ! Scoped to THIS row group, unlike mat_i32's whole-file question: a file with Nulls
@@ -437,7 +435,6 @@ contains
     module procedure matchunk_i64
         integer(int64), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
         !
         allocate(tmp(nrows))
         ! Scoped to THIS row group, unlike mat_i64's whole-file question: a file with Nulls
@@ -459,7 +456,6 @@ contains
     module procedure matchunk_f32
         real(real32), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
         !
         allocate(tmp(nrows))
         ! Scoped to THIS row group, unlike mat_f32's whole-file question: a file with Nulls
@@ -481,7 +477,6 @@ contains
     module procedure matchunk_f64
         real(real64), allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
         !
         allocate(tmp(nrows))
         ! Scoped to THIS row group, unlike mat_f64's whole-file question: a file with Nulls
@@ -503,7 +498,6 @@ contains
     module procedure matchunk_bool
         logical, allocatable :: tmp(:)
         logical, allocatable :: valid(:)
-        integer(int64) :: i
         !
         allocate(tmp(nrows))
         ! Scoped to THIS row group, unlike mat_bool's whole-file question: a file with Nulls
@@ -664,7 +658,6 @@ contains
     module procedure matchunk_strv
         character(len=:), allocatable :: tmp(:,:)
         logical, allocatable :: valid(:,:)
-        integer(int64) :: i
         integer :: slen
         !
         ! parquet_get_string_length is a whole-column question, so this asks for the longest

@@ -316,6 +316,13 @@ done | sort | uniq -c | sort -rn
 - **Two threads reaching `ERROR STOP` at once leave the exit status nondeterministic, including 0**
   (`exit()` from two threads is undefined); gfortran is deterministic. One abort inside or after a
   region is safe, so the fix is a `critical` around the whole fatal body (`api-conventions.md`).
+- **A `critical` hammered by a team as wide as the machine slows by orders of magnitude under ifx
+  once anything else shares the processors**: the Intel runtime's default lock for `critical`
+  (`KMP_LOCK_KIND=queuing`) is FIFO with spinning waiters, so it is handed to a thread that is not
+  running while the rest spin; gfortran's unfair mutex does not. A test hammering one lock requests
+  a bounded team with `num_threads` and raises its rounds per thread, never
+  `omp_get_max_threads()` (`hammer_team`, `test/test_index_omp.f90`). Confirm the diagnosis by
+  rerunning under `KMP_LOCK_KIND=futex`.
 - **An automatic-length `character` result whose length is a specification expression over
   host-associated variables is an ICE** at `-O1`+ (clean at `-O0`), when called from a sibling
   contained procedure inside a submodule's `module procedure`. Use the subroutine shape the

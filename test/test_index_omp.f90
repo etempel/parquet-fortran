@@ -81,7 +81,9 @@ contains
     !! and the counters still reconcile after every thread has given everything back. A dropped
     !! `!$omp critical` fails this probabilistically, which is exactly the class
     !! `feature_risks.md` is for -- so the iteration count is high enough to make a lost update
-    !! likely rather than merely possible, and the test says so.
+    !! likely rather than merely possible, and the test says so. The rounds are PER THREAD, on
+    !! `hammer_team`'s bounded team: what makes a lost update likely is how long the threads
+    !! interleave, not how many of them there are.
     subroutine test_pool_hammer(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         type(pf_index_pool) :: p
@@ -93,15 +95,17 @@ contains
             "the pool is never reached concurrently and the guard this asserts is never exercised")
         return
 #endif
-        team = 1
-        rounds = 400
-#ifdef _OPENMP
-        team = omp_get_max_threads()
-#endif
+        team = hammer_team()
+        if (team < 2) then
+            call skip_test(error, "needs a team of 2+ (one processor, or OMP_NUM_THREADS=1): on " // &
+                "one thread the pool is never reached concurrently and the guard is never exercised")
+            return
+        end if
+        rounds = 2000
         ! Each thread cycles through taking four indexes and giving them back. Everything it holds
         ! is private; the pool is the only shared object, which is what makes any inconsistency
         ! the pool's own.
-        !$omp parallel do default(shared) private(t, i, k, held) schedule(static)
+        !$omp parallel do default(shared) private(t, i, k, held) num_threads(team) schedule(static)
         do t = 1, team * rounds
             do k = 1_int64, 4_int64
                 held(k) = p%get_index()
@@ -145,16 +149,19 @@ contains
             "assertion below is vacuous rather than merely untestable")
         return
 #endif
-        team = 1
-        rounds = 500
-#ifdef _OPENMP
-        team = omp_get_max_threads()
-#endif
+        team = hammer_team()
+        if (team < 2) then
+            call skip_test(error, "needs a team of 2+ (one processor, or OMP_NUM_THREADS=1): on " // &
+                "one thread no two owners can exist, so the assertion below would be vacuous")
+            return
+        end if
+        rounds = 2500
         cap = 64 * (team + 2)
         allocate(owner(cap))
         owner = 0
         clashes = 0
-        !$omp parallel do default(shared) private(t, tid, idx) reduction(+:clashes) schedule(static)
+        !$omp parallel do default(shared) private(t, tid, idx) reduction(+:clashes) num_threads(team) &
+        !$omp     schedule(static)
         do t = 1, team * rounds
             tid = 1
 #ifdef _OPENMP
@@ -199,15 +206,17 @@ contains
             "cannot happen, so a missing guard would pass")
         return
 #endif
-        team = 1
-#ifdef _OPENMP
-        team = omp_get_max_threads()
-#endif
-        reps = 6
+        team = hammer_team()
+        if (team < 2) then
+            call skip_test(error, "needs a team of 2+ (one processor, or OMP_NUM_THREADS=1): on " // &
+                "one thread the interleaving this asserts cannot happen, so a missing guard would pass")
+            return
+        end if
+        reps = 30
         call m%init()
         ! Every thread streams the SAME key set, so all but the first arrival at each key must get
         ! the index that arrival was given.
-        !$omp parallel do default(shared) private(t, j, idx) schedule(static)
+        !$omp parallel do default(shared) private(t, j, idx) num_threads(team) schedule(static)
         do t = 1, team * reps
             do j = 1, int(nkeys)
                 call m%get_or_add(int(j, int64) * 977_int64, idx)
@@ -237,6 +246,26 @@ contains
         if (allocated(error)) return
         call check(error, all(seen == 1_int64), "and every index in 1..k must have been used")
     end subroutine test_shared_get_or_add
+
+    !> The team a test hammering one lock runs on: at most eight threads, and never more than there
+    !! are processors.
+    !!
+    !! **Never `omp_get_max_threads()`.** A hammer is a stream of tiny critical sections from every
+    !! thread, and ifx's OpenMP runtime implements `!$omp critical` with a FIFO lock whose waiters
+    !! spin rather than sleep (`KMP_LOCK_KIND=queuing`). Once the team outnumbers the processors
+    !! actually free -- a team as wide as the machine, on a machine something else is using -- the
+    !! lock is handed to a thread that is not running while every other waiter spins, and the test
+    !! slows by orders of magnitude where gfortran's unfair mutex does not (`fortran-gotchas.md`,
+    !! ifx). A race needs threads interleaving, not every processor, so the callers raise their
+    !! rounds per thread instead: that is what makes a lost update likely.
+    function hammer_team() result(team)
+        integer :: team !! threads to request with `num_threads`; the caller skips below 2.
+
+        team = 1
+#ifdef _OPENMP
+        team = min(8, omp_get_max_threads(), omp_get_num_procs())
+#endif
+    end function hammer_team
 
     !> Any number of threads may look up a map nobody is mutating, and all get the same answers.
     subroutine test_concurrent_lookups(error)

@@ -591,6 +591,18 @@ contains
             if (allocated(error)) return
         end block
 
+        ! parquet_sphere: the polygon type, one draw from it, and its contract identifier.
+        block
+            type(pf_sky_polygon) :: poly
+            real(real64) :: ra, dec
+            call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], &
+                           [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+            call poly%random_at(20260917_int64, 1_int64, ra, dec)
+            call check(error, poly%contains(ra, dec) .and. len(pf_sky_region_algorithm) > 0, &
+                "pf_sky_polygon must be reachable from use parquet alone and draw inside itself")
+            if (allocated(error)) return
+        end block
+
         ! parquet_logging: the logger value type.
         block
             type(pf_logger) :: lg

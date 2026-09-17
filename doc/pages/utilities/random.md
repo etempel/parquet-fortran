@@ -959,6 +959,10 @@ here they split at any boundary with identical results, and take no `threads=`.
 At a pole the right ascension is **0 by rule**: the declination alone says where a pole is, and
 the arctangent that would otherwise name a right ascension there is undefined.
 
+For points inside a sky polygon or a list of HEALPix pixels, and for conversions between positions
+and vectors that name their declination frame, see
+[Random points and geometry on the sphere](sphere.html).
+
 ### Discs and rings
 
 `pf_random_disc_at(seed, i, centre, radius, [draw], [r_inner])` is uniform over the directions
@@ -1213,3 +1217,5 @@ reproduces the frozen transform, and aborts naming the cause if it does not.
 - [Thread safety](../operating/thread-safety.html) — why this module needs no locking at all.
 - [Sorting, ranking and selection](sorting.html) — `pf_sort` and friends, the other `pf_`-prefixed
   utility API.
+- [Random points and geometry on the sphere](sphere.html) — points in sky polygons and HEALPix
+  pixels, drawn with the addressing this page describes.

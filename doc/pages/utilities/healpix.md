@@ -55,6 +55,8 @@ An **object** can tell you, because it carries the answer rather than asking for
 That is what [`pf_healpix_grid`](#carrying-the-grid-in-an-object) below is for: you name the
 convention once, when you build the grid, and every RA/Dec call on it reads that. If you work in
 RA/Dec at all, use the grid — it is the only place this module offers that layer.
+[`parquet_sphere`](sphere.html#positions-vectors-and-where-the-frame-enters)'s `pf_radec2vec` and
+`pf_vec2radec` are the free-procedure alternative: they name the convention in a `frame=` argument.
 
 **A pixel index is 0-based; the array `pf_query_disc` fills is 1-based.** Those are two different
 things and they are the pair most easily conflated. Pixel indices run `0 .. 12*nside**2 - 1`,

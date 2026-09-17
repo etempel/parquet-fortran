@@ -85,7 +85,7 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:), p29(:), p30(:), p31(:), p32(:), p33(:)
+                                            p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3361,8 +3361,99 @@ contains
             new_unittest("a stream's disc names itself when it refuses an inverted ring", &
                 test_random_stream_disc_inner_exceeds_radius_aborts) &
             ]
+        ! ---- parquet_sphere ----
+        p34 = [ &
+            new_unittest("a sky polygon refuses fewer than three vertices", &
+                test_sphere_polygon_too_few_vertices_aborts), &
+            new_unittest("a sky polygon refuses ra and dec of different sizes", &
+                test_sphere_polygon_size_mismatch_aborts), &
+            new_unittest("a sky polygon refuses an infinite vertex", &
+                test_sphere_polygon_nonfinite_vertex_aborts), &
+            new_unittest("a sky polygon refuses a declination outside [-90, 90]", &
+                test_sphere_polygon_dec_out_of_range_aborts), &
+            new_unittest("a sky polygon refuses an unknown edge rule", &
+                test_sphere_polygon_bad_edge_rule_aborts), &
+            new_unittest("a chart polygon refuses an RA extent above 360", &
+                test_sphere_polygon_ra_extent_over_360_aborts), &
+            new_unittest("a great-circle polygon refuses a vertex 89.9 degrees or more from the mean", &
+                test_sphere_polygon_not_in_hemisphere_aborts), &
+            new_unittest("a great-circle polygon refuses vertices whose directions cancel", &
+                test_sphere_polygon_vertices_cancel_aborts), &
+            new_unittest("a sky polygon refuses zero area", &
+                test_sphere_polygon_zero_area_aborts), &
+            new_unittest("a sky polygon refuses to cover less than 1e-3 of its bounding box", &
+                test_sphere_polygon_below_acceptance_floor_aborts), &
+            new_unittest("a sky polygon refuses %init twice without %clear", &
+                test_sphere_polygon_init_twice_aborts), &
+            new_unittest("a sky polygon's %contains refuses before %init", &
+                test_sphere_polygon_contains_before_init_aborts), &
+            new_unittest("a sky polygon's %area refuses before %init", &
+                test_sphere_polygon_area_before_init_aborts), &
+            new_unittest("a sky polygon's %area_deg2 refuses before %init", &
+                test_sphere_polygon_area_deg2_before_init_aborts), &
+            new_unittest("a sky polygon's %acceptance refuses before %init", &
+                test_sphere_polygon_acceptance_before_init_aborts), &
+            new_unittest("a sky polygon's %bounds refuses before %init", &
+                test_sphere_polygon_bounds_before_init_aborts), &
+            new_unittest("a sky polygon's %random_at refuses before %init", &
+                test_sphere_polygon_random_before_init_aborts), &
+            new_unittest("a sky polygon's %random_fill refuses before %init", &
+                test_sphere_polygon_fill_before_init_aborts), &
+            new_unittest("a sky polygon's %random_fill refuses arrays of different sizes", &
+                test_sphere_polygon_fill_size_mismatch_aborts), &
+            new_unittest("a sky polygon's %random_fill refuses a last draw beyond huge(int64)", &
+                test_sphere_polygon_fill_draw_overflow_aborts), &
+            new_unittest("a sky polygon draw aborts after 100000 rejected candidates", &
+                test_sphere_polygon_candidate_cap_reached_aborts), &
+            new_unittest("a sky polygon's %random_next refuses a stream at its end", &
+                test_sphere_stream_exhausted_aborts), &
+            new_unittest("a pixel draw refuses a grid that was never built", &
+                test_sphere_pixel_grid_not_built_aborts), &
+            new_unittest("a pixel draw refuses a grid finer than nside 2**24", &
+                test_sphere_pixel_nside_over_limit_aborts), &
+            new_unittest("a pixel draw refuses an index outside the grid", &
+                test_sphere_pixel_ipix_out_of_range_aborts), &
+            new_unittest("a mask draw refuses an empty pixel list", &
+                test_sphere_mask_empty_list_aborts), &
+            new_unittest("a mask draw refuses the entry it chooses when it is out of range", &
+                test_sphere_mask_entry_out_of_range_aborts), &
+            new_unittest("a mask draw refuses a negative entry it chooses from an int32 list", &
+                test_sphere_mask_entry_out_of_range_int32_aborts), &
+            new_unittest("a mask fill refuses an array without three rows (int64 list)", &
+                test_sphere_fill_mask_bad_shape_aborts), &
+            new_unittest("a mask RA/Dec fill refuses arrays of different sizes (int64 list)", &
+                test_sphere_fill_mask_radec_size_mismatch_aborts), &
+            new_unittest("a mask fill refuses an array without three rows (int32 list)", &
+                test_sphere_fill_mask_bad_shape_int32_aborts), &
+            new_unittest("a mask RA/Dec fill refuses arrays of different sizes (int32 list)", &
+                test_sphere_fill_mask_radec_size_mismatch_int32_aborts), &
+            new_unittest("a mask fill refuses an out-of-range entry before drawing (int32 list)", &
+                test_sphere_fill_mask_entry_out_of_range_aborts), &
+            new_unittest("a mask RA/Dec fill refuses an out-of-range entry before drawing (int64 list)", &
+                test_sphere_fill_mask_radec_entry_out_of_range_aborts), &
+            new_unittest("a mask fill refuses a last draw beyond huge(int64)", &
+                test_sphere_fill_mask_draw_overflow_aborts), &
+            new_unittest("an offset refuses a centre past a pole", &
+                test_sphere_offset_dec_out_of_range_aborts), &
+            new_unittest("an offset refuses a NaN position angle", &
+                test_sphere_offset_nonfinite_aborts), &
+            new_unittest("an offset refuses a negative separation", &
+                test_sphere_offset_negative_separation_aborts), &
+            new_unittest("a Fibonacci grid refuses n below 1", &
+                test_sphere_fibonacci_n_not_positive_aborts), &
+            new_unittest("a Fibonacci grid refuses an array not shaped (3, n)", &
+                test_sphere_fibonacci_bad_shape_aborts), &
+            new_unittest("a Fibonacci grid refuses an unknown frame", &
+                test_sphere_fibonacci_bad_frame_aborts), &
+            new_unittest("a Fibonacci RA/Dec grid refuses arrays not sized n", &
+                test_sphere_fibonacci_radec_bad_size_aborts), &
+            new_unittest("pf_radec2vec refuses an unknown frame", &
+                test_sphere_radec2vec_bad_frame_aborts), &
+            new_unittest("pf_vec2radec refuses an unknown frame", &
+                test_sphere_vec2radec_bad_frame_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19989,5 +20080,378 @@ contains
             required_stderr="pf_random_stream%disc: r_inner must lie in [0, radius] (got " // &
             "6.0000000E-01 against 5.0000000E-01)")
     end subroutine test_random_stream_disc_inner_exceeds_radius_aborts
+    !
+    !> See scenario_sphere_polygon_too_few_vertices.
+    subroutine test_sphere_polygon_too_few_vertices_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_too_few_vertices", expect_abort=.true., &
+            failure_message="a two-vertex polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%init: at least 3 vertices are needed, ra and dec of one size (got 2 and 2)")
+    end subroutine test_sphere_polygon_too_few_vertices_aborts
+    !
+    !> See scenario_sphere_polygon_size_mismatch.
+    subroutine test_sphere_polygon_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_size_mismatch", expect_abort=.true., &
+            failure_message="vertex arrays of sizes 4 and 3 were expected to abort", &
+            required_stderr="pf_sky_polygon%init: at least 3 vertices are needed, ra and dec of one size (got 4 and 3)")
+    end subroutine test_sphere_polygon_size_mismatch_aborts
+    !
+    !> See scenario_sphere_polygon_nonfinite_vertex.
+    subroutine test_sphere_polygon_nonfinite_vertex_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_nonfinite_vertex", expect_abort=.true., &
+            failure_message="a polygon with an infinite right ascension was expected to abort", &
+            required_stderr="pf_sky_polygon%init: vertex 2 must be finite with dec in [-90, 90] (got Infinity, " // &
+            "0.0000000E+00)")
+    end subroutine test_sphere_polygon_nonfinite_vertex_aborts
+    !
+    !> See scenario_sphere_polygon_dec_out_of_range.
+    subroutine test_sphere_polygon_dec_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_dec_out_of_range", expect_abort=.true., &
+            failure_message="a polygon with a vertex at declination 90.5 was expected to abort", &
+            required_stderr="pf_sky_polygon%init: vertex 3 must be finite with dec in [-90, 90] (got 1.0000000E+01, " // &
+            "9.0500000E+01)")
+    end subroutine test_sphere_polygon_dec_out_of_range_aborts
+    !
+    !> See scenario_sphere_polygon_bad_edge_rule.
+    subroutine test_sphere_polygon_bad_edge_rule_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_bad_edge_rule", expect_abort=.true., &
+            failure_message="edge rule 2 was expected to abort", &
+            required_stderr="pf_sky_polygon%init: edges must be PF_EDGE_RADEC (0) or PF_EDGE_GREAT_CIRCLE (1), got 2")
+    end subroutine test_sphere_polygon_bad_edge_rule_aborts
+    !
+    !> See scenario_sphere_polygon_ra_extent_over_360.
+    subroutine test_sphere_polygon_ra_extent_over_360_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_ra_extent_over_360", expect_abort=.true., &
+            failure_message="a polygon spanning 360.5 degrees of RA was expected to abort", &
+            required_stderr="pf_sky_polygon%init: the vertices span 3.6050000E+02 degrees of RA; write a polygon " // &
+            "crossing RA = 0 continuously (350, 370), and no polygon may span more than 360")
+    end subroutine test_sphere_polygon_ra_extent_over_360_aborts
+    !
+    !> See scenario_sphere_polygon_not_in_hemisphere.
+    subroutine test_sphere_polygon_not_in_hemisphere_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_not_in_hemisphere", expect_abort=.true., &
+            failure_message="a great-circle polygon spanning 200 degrees was expected to abort", &
+            required_stderr="pf_sky_polygon%init: vertex 1 is 1.0000000E+02 degrees from the vertices' mean direction; " // &
+            "every vertex must be within 89.9 degrees of it (the polygon must fit an open hemisphere) " // &
+            "-- split it")
+    end subroutine test_sphere_polygon_not_in_hemisphere_aborts
+    !
+    !> See scenario_sphere_polygon_vertices_cancel.
+    subroutine test_sphere_polygon_vertices_cancel_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_vertices_cancel", expect_abort=.true., &
+            failure_message="a polygon whose vertex directions sum to zero was expected to abort", &
+            required_stderr="pf_sky_polygon%init: vertex 1 is 9.0000000E+01 degrees from the vertices' mean direction; " // &
+            "every vertex must be within 89.9 degrees of it (the polygon must fit an open hemisphere) " // &
+            "-- split it")
+    end subroutine test_sphere_polygon_vertices_cancel_aborts
+    !
+    !> See scenario_sphere_polygon_zero_area.
+    subroutine test_sphere_polygon_zero_area_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_zero_area", expect_abort=.true., &
+            failure_message="a polygon with every vertex at one declination was expected to abort", &
+            required_stderr="pf_sky_polygon%init: the polygon has zero area")
+    end subroutine test_sphere_polygon_zero_area_aborts
+    !
+    !> See scenario_sphere_polygon_below_acceptance_floor.
+    subroutine test_sphere_polygon_below_acceptance_floor_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_below_acceptance_floor", expect_abort=.true., &
+            failure_message="a sliver covering 2.5e-4 of its box was expected to abort", &
+            required_stderr="of its bounding box, below the 1e-3 floor; split it into pieces")
+    end subroutine test_sphere_polygon_below_acceptance_floor_aborts
+    !
+    !> See scenario_sphere_polygon_init_twice.
+    subroutine test_sphere_polygon_init_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_init_twice", expect_abort=.true., &
+            failure_message="a second %init was expected to abort", &
+            required_stderr="pf_sky_polygon%init: already initialised; call %clear first")
+    end subroutine test_sphere_polygon_init_twice_aborts
+    !
+    !> See scenario_sphere_polygon_contains_before_init.
+    subroutine test_sphere_polygon_contains_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_contains_before_init", expect_abort=.true., &
+            failure_message="%contains on an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%contains: %init has not run")
+    end subroutine test_sphere_polygon_contains_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_area_before_init.
+    subroutine test_sphere_polygon_area_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_area_before_init", expect_abort=.true., &
+            failure_message="%area on an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%area: %init has not run")
+    end subroutine test_sphere_polygon_area_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_area_deg2_before_init.
+    subroutine test_sphere_polygon_area_deg2_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_area_deg2_before_init", expect_abort=.true., &
+            failure_message="%area_deg2 on an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%area_deg2: %init has not run")
+    end subroutine test_sphere_polygon_area_deg2_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_acceptance_before_init.
+    subroutine test_sphere_polygon_acceptance_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_acceptance_before_init", expect_abort=.true., &
+            failure_message="%acceptance on an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%acceptance: %init has not run")
+    end subroutine test_sphere_polygon_acceptance_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_bounds_before_init.
+    subroutine test_sphere_polygon_bounds_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_bounds_before_init", expect_abort=.true., &
+            failure_message="%bounds on an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%bounds: %init has not run")
+    end subroutine test_sphere_polygon_bounds_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_random_before_init.
+    subroutine test_sphere_polygon_random_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_random_before_init", expect_abort=.true., &
+            failure_message="a draw from an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%random_at: %init has not run")
+    end subroutine test_sphere_polygon_random_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_fill_before_init.
+    subroutine test_sphere_polygon_fill_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_fill_before_init", expect_abort=.true., &
+            failure_message="a fill from an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%random_fill: %init has not run")
+    end subroutine test_sphere_polygon_fill_before_init_aborts
+    !
+    !> See scenario_sphere_polygon_fill_size_mismatch.
+    subroutine test_sphere_polygon_fill_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_fill_size_mismatch", expect_abort=.true., &
+            failure_message="a polygon fill into arrays of sizes 3 and 2 was expected to abort", &
+            required_stderr="pf_sky_polygon%random_fill: ra and dec must have the same size (got 3 and 2)")
+    end subroutine test_sphere_polygon_fill_size_mismatch_aborts
+    !
+    !> See scenario_sphere_polygon_fill_draw_overflow.
+    subroutine test_sphere_polygon_fill_draw_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_fill_draw_overflow", expect_abort=.true., &
+            failure_message="a polygon fill ending past huge(int64) was expected to abort", &
+            required_stderr="pf_sky_polygon%random_fill: draw + n - 1 must not exceed huge(int64) (got " // &
+            "9223372036854775807 + 2 - 1)")
+    end subroutine test_sphere_polygon_fill_draw_overflow_aborts
+    !
+    !> See scenario_sphere_polygon_candidate_cap_reached.
+    subroutine test_sphere_polygon_candidate_cap_reached_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_candidate_cap_reached", expect_abort=.true., &
+            failure_message="a draw from a sliver below the floor was expected to reach the candidate cap and abort", &
+            required_stderr="pf_sky_polygon%random_at: 100000 candidates rejected -- the acceptance rate %init " // &
+            "admitted cannot produce this; report it")
+    end subroutine test_sphere_polygon_candidate_cap_reached_aborts
+    !
+    !> See scenario_sphere_stream_exhausted.
+    subroutine test_sphere_stream_exhausted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_stream_exhausted", expect_abort=.true., &
+            failure_message="a region draw from an exhausted stream was expected to abort", &
+            required_stderr="pf_sky_polygon%random_next: the stream is exhausted -- it addresses at most 2**63 words")
+    end subroutine test_sphere_stream_exhausted_aborts
+    !
+    !> See scenario_sphere_pixel_grid_not_built.
+    subroutine test_sphere_pixel_grid_not_built_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_pixel_grid_not_built", expect_abort=.true., &
+            failure_message="a pixel draw on an unbuilt grid was expected to abort", &
+            required_stderr="pf_random_pixel_at: the grid has not been built; call %init(nside, scheme) first")
+    end subroutine test_sphere_pixel_grid_not_built_aborts
+    !
+    !> See scenario_sphere_pixel_nside_over_limit.
+    subroutine test_sphere_pixel_nside_over_limit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_pixel_nside_over_limit", expect_abort=.true., &
+            failure_message="a pixel draw at nside 2**25 was expected to abort", &
+            required_stderr="pf_random_pixel_at: nside 33554432 exceeds 2**24, above which a unit vector cannot name a " // &
+            "pixel near a pole (see the HEALPix page)")
+    end subroutine test_sphere_pixel_nside_over_limit_aborts
+    !
+    !> See scenario_sphere_pixel_ipix_out_of_range.
+    subroutine test_sphere_pixel_ipix_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_pixel_ipix_out_of_range", expect_abort=.true., &
+            failure_message="a draw in pixel 768 of nside 8 was expected to abort", &
+            required_stderr="pf_random_pixel_radec_at: ipix 768 is outside [0, 768)")
+    end subroutine test_sphere_pixel_ipix_out_of_range_aborts
+    !
+    !> See scenario_sphere_mask_empty_list.
+    subroutine test_sphere_mask_empty_list_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_mask_empty_list", expect_abort=.true., &
+            failure_message="a mask draw over no pixels was expected to abort", &
+            required_stderr="pf_random_mask_at: pixels must be non-empty with every entry in [0, 768) (the list is " // &
+            "empty)")
+    end subroutine test_sphere_mask_empty_list_aborts
+    !
+    !> See scenario_sphere_mask_entry_out_of_range.
+    subroutine test_sphere_mask_entry_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_mask_entry_out_of_range", expect_abort=.true., &
+            failure_message="a mask draw choosing pixel 768 of nside 8 was expected to abort", &
+            required_stderr="pf_random_mask_at: pixels must be non-empty with every entry in [0, 768) (entry 1 is 768)")
+    end subroutine test_sphere_mask_entry_out_of_range_aborts
+    !
+    !> See scenario_sphere_mask_entry_out_of_range_int32.
+    subroutine test_sphere_mask_entry_out_of_range_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_mask_entry_out_of_range_int32", expect_abort=.true., &
+            failure_message="a mask draw choosing pixel -1 was expected to abort", &
+            required_stderr="pf_random_mask_radec_at: pixels must be non-empty with every entry in [0, 768) (entry 1 " // &
+            "is -1)")
+    end subroutine test_sphere_mask_entry_out_of_range_int32_aborts
+    !
+    !> See scenario_sphere_fill_mask_bad_shape.
+    subroutine test_sphere_fill_mask_bad_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_bad_shape", expect_abort=.true., &
+            failure_message="a mask fill into two rows was expected to abort", &
+            required_stderr="pf_random_fill_mask: v must be shaped (3, n) (got 2 rows)")
+    end subroutine test_sphere_fill_mask_bad_shape_aborts
+    !
+    !> See scenario_sphere_fill_mask_radec_size_mismatch.
+    subroutine test_sphere_fill_mask_radec_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_radec_size_mismatch", expect_abort=.true., &
+            failure_message="a mask RA/Dec fill into arrays of sizes 4 and 3 was expected to abort", &
+            required_stderr="pf_random_fill_mask_radec: ra and dec must have the same size (got 4 and 3)")
+    end subroutine test_sphere_fill_mask_radec_size_mismatch_aborts
+    !
+    !> See scenario_sphere_fill_mask_bad_shape_int32.
+    subroutine test_sphere_fill_mask_bad_shape_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_bad_shape_int32", expect_abort=.true., &
+            failure_message="a mask fill into two rows was expected to abort", &
+            required_stderr="pf_random_fill_mask: v must be shaped (3, n) (got 2 rows)")
+    end subroutine test_sphere_fill_mask_bad_shape_int32_aborts
+    !
+    !> See scenario_sphere_fill_mask_radec_size_mismatch_int32.
+    subroutine test_sphere_fill_mask_radec_size_mismatch_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_radec_size_mismatch_int32", expect_abort=.true., &
+            failure_message="a mask RA/Dec fill into arrays of sizes 4 and 3 was expected to abort", &
+            required_stderr="pf_random_fill_mask_radec: ra and dec must have the same size (got 4 and 3)")
+    end subroutine test_sphere_fill_mask_radec_size_mismatch_int32_aborts
+    !
+    !> See scenario_sphere_fill_mask_entry_out_of_range.
+    subroutine test_sphere_fill_mask_entry_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_entry_out_of_range", expect_abort=.true., &
+            failure_message="a mask fill over a list holding pixel 768 was expected to abort", &
+            required_stderr="pf_random_fill_mask: pixels must be non-empty with every entry in [0, 768) (entry 1000 is " // &
+            "768)")
+    end subroutine test_sphere_fill_mask_entry_out_of_range_aborts
+    !
+    !> See scenario_sphere_fill_mask_radec_entry_out_of_range.
+    subroutine test_sphere_fill_mask_radec_entry_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_radec_entry_out_of_range", expect_abort=.true., &
+            failure_message="a mask RA/Dec fill over a list holding pixel -3 was expected to abort", &
+            required_stderr="pf_random_fill_mask_radec: pixels must be non-empty with every entry in [0, 768) (entry 3 " // &
+            "is -3)")
+    end subroutine test_sphere_fill_mask_radec_entry_out_of_range_aborts
+    !
+    !> See scenario_sphere_fill_mask_draw_overflow.
+    subroutine test_sphere_fill_mask_draw_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fill_mask_draw_overflow", expect_abort=.true., &
+            failure_message="a mask fill ending past huge(int64) was expected to abort", &
+            required_stderr="pf_random_fill_mask: draw + n - 1 must not exceed huge(int64) (got 9223372036854775807 + " // &
+            "2 - 1)")
+    end subroutine test_sphere_fill_mask_draw_overflow_aborts
+    !
+    !> See scenario_sphere_offset_dec_out_of_range.
+    subroutine test_sphere_offset_dec_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_offset_dec_out_of_range", expect_abort=.true., &
+            failure_message="an offset from declination 90.5 was expected to abort", &
+            required_stderr="pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite and " // &
+            "at least 0 (got ra0 = 1.0000000E+01, dec0 = 9.0500000E+01, pa_deg = 0.0000000E+00, " // &
+            "sep_deg = 1.0000000E+00)")
+    end subroutine test_sphere_offset_dec_out_of_range_aborts
+    !
+    !> See scenario_sphere_offset_nonfinite.
+    subroutine test_sphere_offset_nonfinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_offset_nonfinite", expect_abort=.true., &
+            failure_message="an offset at a NaN position angle was expected to abort", &
+            required_stderr="pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite and " // &
+            "at least 0 (got ra0 = 1.0000000E+01, dec0 = 2.0000000E+01, pa_deg = NaN, sep_deg = " // &
+            "1.0000000E+00)")
+    end subroutine test_sphere_offset_nonfinite_aborts
+    !
+    !> See scenario_sphere_offset_negative_separation.
+    subroutine test_sphere_offset_negative_separation_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_offset_negative_separation", expect_abort=.true., &
+            failure_message="an offset by -1 degree was expected to abort", &
+            required_stderr="pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite and " // &
+            "at least 0 (got ra0 = 1.0000000E+01, dec0 = 2.0000000E+01, pa_deg = 3.0000000E+01, " // &
+            "sep_deg = -1.0000000E+00)")
+    end subroutine test_sphere_offset_negative_separation_aborts
+    !
+    !> See scenario_sphere_fibonacci_n_not_positive.
+    subroutine test_sphere_fibonacci_n_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fibonacci_n_not_positive", expect_abort=.true., &
+            failure_message="a Fibonacci grid of no points was expected to abort", &
+            required_stderr="pf_fibonacci_grid: n must be at least 1 and vec shaped (3, n) (got n = 0, 3 x 0)")
+    end subroutine test_sphere_fibonacci_n_not_positive_aborts
+    !
+    !> See scenario_sphere_fibonacci_bad_shape.
+    subroutine test_sphere_fibonacci_bad_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fibonacci_bad_shape", expect_abort=.true., &
+            failure_message="a five-point grid into four columns was expected to abort", &
+            required_stderr="pf_fibonacci_grid: n must be at least 1 and vec shaped (3, n) (got n = 5, 3 x 4)")
+    end subroutine test_sphere_fibonacci_bad_shape_aborts
+    !
+    !> See scenario_sphere_fibonacci_bad_frame.
+    subroutine test_sphere_fibonacci_bad_frame_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fibonacci_bad_frame", expect_abort=.true., &
+            failure_message="a Fibonacci grid in frame 2 was expected to abort", &
+            required_stderr="pf_fibonacci_grid: frame must be PF_HP_DEC_NORTH (0) or PF_HP_DEC_SOUTH (1), got 2")
+    end subroutine test_sphere_fibonacci_bad_frame_aborts
+    !
+    !> See scenario_sphere_fibonacci_radec_bad_size.
+    subroutine test_sphere_fibonacci_radec_bad_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_fibonacci_radec_bad_size", expect_abort=.true., &
+            failure_message="a three-point RA/Dec grid into a declination array of 2 was expected to abort", &
+            required_stderr="pf_fibonacci_grid_radec: n must be at least 1 and ra and dec sized n (got n = 3, 3 and 2)")
+    end subroutine test_sphere_fibonacci_radec_bad_size_aborts
+    !
+    !> See scenario_sphere_radec2vec_bad_frame.
+    subroutine test_sphere_radec2vec_bad_frame_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_radec2vec_bad_frame", expect_abort=.true., &
+            failure_message="a conversion in frame -1 was expected to abort", &
+            required_stderr="pf_radec2vec: frame must be PF_HP_DEC_NORTH (0) or PF_HP_DEC_SOUTH (1), got -1")
+    end subroutine test_sphere_radec2vec_bad_frame_aborts
+    !
+    !> See scenario_sphere_vec2radec_bad_frame.
+    subroutine test_sphere_vec2radec_bad_frame_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_vec2radec_bad_frame", expect_abort=.true., &
+            failure_message="a conversion in frame 7 was expected to abort", &
+            required_stderr="pf_vec2radec: frame must be PF_HP_DEC_NORTH (0) or PF_HP_DEC_SOUTH (1), got 7")
+    end subroutine test_sphere_vec2radec_bad_frame_aborts
     !
 end module test_errors

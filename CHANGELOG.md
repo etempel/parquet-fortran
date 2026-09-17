@@ -99,6 +99,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   costing one block; the direction and RA/Dec forms have draw-axis fills, and `%address` returns a
   stream's seed and stream index. `pf_sphere_algorithm` freezes the family's values. See
   [Random numbers](doc/pages/utilities/random.md).
+- **Random points in sky regions, and sky geometry: `parquet_sphere`.** `pf_sky_polygon` holds a
+  polygon given by `(ra, dec)` vertices, with straight edges in the RA/Dec chart or great-circle
+  edges, answers `%contains`, `%area` and `%acceptance`, and draws points uniform per solid angle
+  inside it by coordinate (`%random_at`, `%random_fill`) or along a `pf_random_stream`
+  (`%random_next`). `pf_random_pixel_at` and `pf_random_mask_at` draw uniformly inside one HEALPix
+  pixel or over a list of them on a `pf_healpix_grid`, with `_radec`, fill and stream forms.
+  `pf_radec2vec` and `pf_vec2radec` convert between degrees and unit vectors in a named declination
+  frame, `pf_offset_radec` and `pf_position_angle_deg` offset a position by a separation at a
+  position angle and recover the angle, and `pf_fibonacci_grid` places `n` quasi-uniform
+  directions. `pf_sky_region_algorithm` freezes the samplers' values. An Arrow-free entry module.
+  See [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
 
 ### Changed
 

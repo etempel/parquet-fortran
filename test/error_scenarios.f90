@@ -1452,6 +1452,94 @@ program error_scenarios
         call scenario_random_fill_direction_draw_beyond_2p62()
     case ("random_stream_disc_inner_exceeds_radius")
         call scenario_random_stream_disc_inner_exceeds_radius()
+    case ("sphere_polygon_too_few_vertices")
+        call scenario_sphere_polygon_too_few_vertices()
+    case ("sphere_polygon_size_mismatch")
+        call scenario_sphere_polygon_size_mismatch()
+    case ("sphere_polygon_nonfinite_vertex")
+        call scenario_sphere_polygon_nonfinite_vertex()
+    case ("sphere_polygon_dec_out_of_range")
+        call scenario_sphere_polygon_dec_out_of_range()
+    case ("sphere_polygon_bad_edge_rule")
+        call scenario_sphere_polygon_bad_edge_rule()
+    case ("sphere_polygon_ra_extent_over_360")
+        call scenario_sphere_polygon_ra_extent_over_360()
+    case ("sphere_polygon_not_in_hemisphere")
+        call scenario_sphere_polygon_not_in_hemisphere()
+    case ("sphere_polygon_vertices_cancel")
+        call scenario_sphere_polygon_vertices_cancel()
+    case ("sphere_polygon_zero_area")
+        call scenario_sphere_polygon_zero_area()
+    case ("sphere_polygon_below_acceptance_floor")
+        call scenario_sphere_polygon_below_acceptance_floor()
+    case ("sphere_polygon_init_twice")
+        call scenario_sphere_polygon_init_twice()
+    case ("sphere_polygon_contains_before_init")
+        call scenario_sphere_polygon_contains_before_init()
+    case ("sphere_polygon_area_before_init")
+        call scenario_sphere_polygon_area_before_init()
+    case ("sphere_polygon_area_deg2_before_init")
+        call scenario_sphere_polygon_area_deg2_before_init()
+    case ("sphere_polygon_acceptance_before_init")
+        call scenario_sphere_polygon_acceptance_before_init()
+    case ("sphere_polygon_bounds_before_init")
+        call scenario_sphere_polygon_bounds_before_init()
+    case ("sphere_polygon_random_before_init")
+        call scenario_sphere_polygon_random_before_init()
+    case ("sphere_polygon_fill_before_init")
+        call scenario_sphere_polygon_fill_before_init()
+    case ("sphere_polygon_fill_size_mismatch")
+        call scenario_sphere_polygon_fill_size_mismatch()
+    case ("sphere_polygon_fill_draw_overflow")
+        call scenario_sphere_polygon_fill_draw_overflow()
+    case ("sphere_polygon_candidate_cap_reached")
+        call scenario_sphere_polygon_candidate_cap_reached()
+    case ("sphere_stream_exhausted")
+        call scenario_sphere_stream_exhausted()
+    case ("sphere_pixel_grid_not_built")
+        call scenario_sphere_pixel_grid_not_built()
+    case ("sphere_pixel_nside_over_limit")
+        call scenario_sphere_pixel_nside_over_limit()
+    case ("sphere_pixel_ipix_out_of_range")
+        call scenario_sphere_pixel_ipix_out_of_range()
+    case ("sphere_mask_empty_list")
+        call scenario_sphere_mask_empty_list()
+    case ("sphere_mask_entry_out_of_range")
+        call scenario_sphere_mask_entry_out_of_range()
+    case ("sphere_mask_entry_out_of_range_int32")
+        call scenario_sphere_mask_entry_out_of_range_int32()
+    case ("sphere_fill_mask_bad_shape")
+        call scenario_sphere_fill_mask_bad_shape()
+    case ("sphere_fill_mask_radec_size_mismatch")
+        call scenario_sphere_fill_mask_radec_size_mismatch()
+    case ("sphere_fill_mask_bad_shape_int32")
+        call scenario_sphere_fill_mask_bad_shape_int32()
+    case ("sphere_fill_mask_radec_size_mismatch_int32")
+        call scenario_sphere_fill_mask_radec_size_mismatch_int32()
+    case ("sphere_fill_mask_entry_out_of_range")
+        call scenario_sphere_fill_mask_entry_out_of_range()
+    case ("sphere_fill_mask_radec_entry_out_of_range")
+        call scenario_sphere_fill_mask_radec_entry_out_of_range()
+    case ("sphere_fill_mask_draw_overflow")
+        call scenario_sphere_fill_mask_draw_overflow()
+    case ("sphere_offset_dec_out_of_range")
+        call scenario_sphere_offset_dec_out_of_range()
+    case ("sphere_offset_nonfinite")
+        call scenario_sphere_offset_nonfinite()
+    case ("sphere_offset_negative_separation")
+        call scenario_sphere_offset_negative_separation()
+    case ("sphere_fibonacci_n_not_positive")
+        call scenario_sphere_fibonacci_n_not_positive()
+    case ("sphere_fibonacci_bad_shape")
+        call scenario_sphere_fibonacci_bad_shape()
+    case ("sphere_fibonacci_bad_frame")
+        call scenario_sphere_fibonacci_bad_frame()
+    case ("sphere_fibonacci_radec_bad_size")
+        call scenario_sphere_fibonacci_radec_bad_size()
+    case ("sphere_radec2vec_bad_frame")
+        call scenario_sphere_radec2vec_bad_frame()
+    case ("sphere_vec2radec_bad_frame")
+        call scenario_sphere_vec2radec_bad_frame()
     case ("sort_unknown_column")
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
@@ -23386,6 +23474,486 @@ contains
         call rng%disc([0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, v, r_inner=0.6_real64)   ! -> aborts
         print '(a,3es12.4)', "unexpectedly drew an inverted ring from a stream: ", v
     end subroutine scenario_random_stream_disc_inner_exceeds_radius
+
+    !> A polygon needs three vertices. The control is a triangle.
+    subroutine scenario_sphere_polygon_too_few_vertices()
+        type(pf_sky_polygon) :: tri, two
+        call tri%init([0.0_real64, 10.0_real64, 10.0_real64], [0.0_real64, 0.0_real64, 10.0_real64])
+        print '(a,es12.4)', "built a triangle of area ", tri%area()
+        call two%init([0.0_real64, 10.0_real64], [0.0_real64, 0.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon of vertex count ", two%size()
+    end subroutine scenario_sphere_polygon_too_few_vertices
+
+    !> The vertex arrays must be of one size. The control is a rectangle.
+    subroutine scenario_sphere_polygon_size_mismatch()
+        type(pf_sky_polygon) :: rect, bad
+        call rect%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        print '(a,es12.4)', "built a rectangle of area ", rect%area()
+        call bad%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon from mismatched arrays, vertex count ", bad%size()
+    end subroutine scenario_sphere_polygon_size_mismatch
+
+    !> A non-finite vertex names no position. The control writes its right ascensions far below 0,
+    !! which is legal.
+    subroutine scenario_sphere_polygon_nonfinite_vertex()
+        use ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        type(pf_sky_polygon) :: far, bad
+        call far%init([-400.0_real64, -390.0_real64, -390.0_real64], [0.0_real64, 0.0_real64, 10.0_real64])
+        print '(a,es12.4)', "built a triangle written at ra -400 of area ", far%area()
+        call bad%init([0.0_real64, ieee_value(0.0_real64, ieee_positive_inf), 10.0_real64], &
+                      [0.0_real64, 0.0_real64, 10.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon with an infinite vertex, vertex count ", bad%size()
+    end subroutine scenario_sphere_polygon_nonfinite_vertex
+
+    !> A declination beyond a pole is refused. The control is the whole sky, both poles included.
+    subroutine scenario_sphere_polygon_dec_out_of_range()
+        type(pf_sky_polygon) :: whole, bad
+        call whole%init([0.0_real64, 360.0_real64, 360.0_real64, 0.0_real64], &
+                        [-90.0_real64, -90.0_real64, 90.0_real64, 90.0_real64])
+        print '(a,es12.4)', "built the whole sky, area ", whole%area()
+        call bad%init([0.0_real64, 10.0_real64, 10.0_real64], [80.0_real64, 80.0_real64, 90.5_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon past the pole, vertex count ", bad%size()
+    end subroutine scenario_sphere_polygon_dec_out_of_range
+
+    !> The edge rule is one of two constants. The control uses the other one.
+    subroutine scenario_sphere_polygon_bad_edge_rule()
+        type(pf_sky_polygon) :: gc, bad
+        call gc%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], &
+                     [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64], PF_EDGE_GREAT_CIRCLE)
+        print '(a,es12.4)', "built a great-circle quadrilateral of area ", gc%area()
+        call bad%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], &
+                      [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64], 2)   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon with edge rule ", bad%edges()
+    end subroutine scenario_sphere_polygon_bad_edge_rule
+
+    !> Vertices are read as written, so an RA extent above a turn is refused. The control spans exactly
+    !! 360, a band round the sky.
+    subroutine scenario_sphere_polygon_ra_extent_over_360()
+        type(pf_sky_polygon) :: band, bad
+        call band%init([0.0_real64, 360.0_real64, 360.0_real64, 0.0_real64], [-10.0_real64, -10.0_real64, 10.0_real64, 10.0_real64])
+        print '(a,es12.4)', "built a band round the sky of area ", band%area()
+        call bad%init([0.0_real64, 360.5_real64, 360.5_real64, 0.0_real64], &
+                      [-10.0_real64, -10.0_real64, 10.0_real64, 10.0_real64])   ! -> aborts
+        print '(a,es12.4)', "unexpectedly built a polygon spanning 360.5 degrees, area ", bad%area()
+    end subroutine scenario_sphere_polygon_ra_extent_over_360
+
+    !> Great-circle edges need the polygon inside an open hemisphere. The control spans 160 degrees.
+    subroutine scenario_sphere_polygon_not_in_hemisphere()
+        type(pf_sky_polygon) :: wide, bad
+        call wide%init([0.0_real64, 80.0_real64, 160.0_real64], [0.0_real64, 30.0_real64, 0.0_real64], PF_EDGE_GREAT_CIRCLE)
+        print '(a,es12.4)', "built a great-circle triangle spanning 160 degrees, area ", wide%area()
+        call bad%init([0.0_real64, 100.0_real64, 200.0_real64], [0.0_real64, 0.0_real64, 0.0_real64], &
+                      PF_EDGE_GREAT_CIRCLE)   ! -> aborts
+        print '(a,es12.4)', "unexpectedly built a great-circle polygon spanning 200 degrees, area ", bad%area()
+    end subroutine scenario_sphere_polygon_not_in_hemisphere
+
+    !> Vertices whose unit vectors sum to exactly zero have no mean direction. The control is a small
+    !! polygon at a pole.
+    subroutine scenario_sphere_polygon_vertices_cancel()
+        type(pf_sky_polygon) :: cap, bad
+        call cap%init([0.0_real64, 90.0_real64, 180.0_real64, 270.0_real64], [80.0_real64, 81.0_real64, 82.0_real64, 83.0_real64], &
+                      PF_EDGE_GREAT_CIRCLE)
+        print '(a,es12.4)', "built a great-circle polygon about the pole, area ", cap%area()
+        call bad%init([0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64], [90.0_real64, -90.0_real64, 90.0_real64, -90.0_real64], &
+                      PF_EDGE_GREAT_CIRCLE)   ! -> aborts
+        print '(a,es12.4)', "unexpectedly built a polygon from cancelling directions, area ", bad%area()
+    end subroutine scenario_sphere_polygon_vertices_cancel
+
+    !> Every vertex at one declination is a polygon of no area. The control is a slanted triangle.
+    subroutine scenario_sphere_polygon_zero_area()
+        type(pf_sky_polygon) :: tri, flat
+        call tri%init([0.0_real64, 10.0_real64, 20.0_real64], [10.0_real64, 11.0_real64, 10.0_real64])
+        print '(a,es12.4)', "built a slanted triangle of area ", tri%area()
+        call flat%init([0.0_real64, 10.0_real64, 20.0_real64], [10.0_real64, 10.0_real64, 10.0_real64])   ! -> aborts
+        print '(a,es12.4)', "unexpectedly built a flat polygon, area ", flat%area()
+    end subroutine scenario_sphere_polygon_zero_area
+
+    !> A thin diagonal sliver would take thousands of candidates a point. The control covers 5e-3 of
+    !! its box.
+    subroutine scenario_sphere_polygon_below_acceptance_floor()
+        type(pf_sky_polygon) :: thin, sliver
+        call thin%init([0.0_real64, 10.0_real64, 10.0_real64], [0.0_real64, 10.0_real64, 9.9_real64])
+        print '(a,es12.4)', "built a thin triangle of acceptance ", thin%acceptance()
+        call sliver%init([0.0_real64, 10.0_real64, 10.0_real64], [0.0_real64, 10.0_real64, 9.995_real64])   ! -> aborts
+        print '(a,es12.4)', "unexpectedly built a sliver of acceptance ", sliver%acceptance()
+    end subroutine scenario_sphere_polygon_below_acceptance_floor
+
+    !> `%init` on a built polygon is refused. The control clears it first, which is legal.
+    subroutine scenario_sphere_polygon_init_twice()
+        type(pf_sky_polygon) :: poly
+        call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call poly%clear()
+        call poly%init([0.0_real64, 10.0_real64, 10.0_real64], [0.0_real64, 0.0_real64, 10.0_real64])
+        print '(a,i0)', "built, cleared and rebuilt a polygon of vertex count ", poly%size()
+        call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], &
+                       [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly rebuilt a polygon without clearing it, vertex count ", poly%size()
+    end subroutine scenario_sphere_polygon_init_twice
+
+    !> `%contains` needs a built polygon. The control asks a built one.
+    subroutine scenario_sphere_polygon_contains_before_init()
+        type(pf_sky_polygon) :: built, poly
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        print '(a,l1)', "a built polygon answers ", built%contains(20.0_real64, 0.0_real64)
+        print '(a,l1)', "unexpectedly, an unbuilt polygon answers ", poly%contains(20.0_real64, 0.0_real64)   ! -> aborts
+    end subroutine scenario_sphere_polygon_contains_before_init
+
+    !> `%area` needs a built polygon. The control asks a built one.
+    subroutine scenario_sphere_polygon_area_before_init()
+        type(pf_sky_polygon) :: built, poly
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        print '(a,es12.4)', "a built polygon answers ", built%area()
+        print '(a,es12.4)', "unexpectedly, an unbuilt polygon answers ", poly%area()   ! -> aborts
+    end subroutine scenario_sphere_polygon_area_before_init
+
+    !> `%area_deg2` needs a built polygon. The control asks a built one.
+    subroutine scenario_sphere_polygon_area_deg2_before_init()
+        type(pf_sky_polygon) :: built, poly
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        print '(a,es12.4)', "a built polygon answers ", built%area_deg2()
+        print '(a,es12.4)', "unexpectedly, an unbuilt polygon answers ", poly%area_deg2()   ! -> aborts
+    end subroutine scenario_sphere_polygon_area_deg2_before_init
+
+    !> `%acceptance` needs a built polygon. The control asks a built one.
+    subroutine scenario_sphere_polygon_acceptance_before_init()
+        type(pf_sky_polygon) :: built, poly
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        print '(a,es12.4)', "a built polygon answers ", built%acceptance()
+        print '(a,es12.4)', "unexpectedly, an unbuilt polygon answers ", poly%acceptance()   ! -> aborts
+    end subroutine scenario_sphere_polygon_acceptance_before_init
+
+    !> `%bounds` needs a built polygon. The control asks a built one.
+    subroutine scenario_sphere_polygon_bounds_before_init()
+        type(pf_sky_polygon) :: built, poly
+        real(real64) :: ra_lo, ra_hi, dec_lo, dec_hi
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call built%bounds(ra_lo, ra_hi, dec_lo, dec_hi)
+        print '(a,4f8.2)', "a built polygon's box is ", ra_lo, ra_hi, dec_lo, dec_hi
+        call poly%bounds(ra_lo, ra_hi, dec_lo, dec_hi)   ! -> aborts
+        print '(a,4f8.2)', "unexpectedly, an unbuilt polygon's box is ", ra_lo, ra_hi, dec_lo, dec_hi
+    end subroutine scenario_sphere_polygon_bounds_before_init
+
+    !> A draw needs a built polygon. The control draws from a built one.
+    subroutine scenario_sphere_polygon_random_before_init()
+        type(pf_sky_polygon) :: built, poly
+        real(real64) :: ra, dec
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call built%random_at(1_int64, 1_int64, ra, dec)
+        print '(a,2f10.4)', "drew from a built polygon: ", ra, dec
+        call poly%random_at(1_int64, 1_int64, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly drew from an unbuilt polygon: ", ra, dec
+    end subroutine scenario_sphere_polygon_random_before_init
+
+    !> A fill needs a built polygon, through its own check, even when it would fill nothing. The
+    !! control fills from a built one.
+    subroutine scenario_sphere_polygon_fill_before_init()
+        type(pf_sky_polygon) :: built, poly
+        real(real64) :: ra(2), dec(2)
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call built%random_fill(1_int64, 1_int64, ra, dec)
+        print '(a,2f10.4)', "filled from a built polygon, the last ", ra(2), dec(2)
+        call poly%random_fill(1_int64, 1_int64, ra(1:0), dec(1:0))   ! -> aborts
+        print '(a)', "unexpectedly filled nothing from an unbuilt polygon"
+        print '(a,2f10.4)', "the arrays hold ", ra(1), dec(1)
+    end subroutine scenario_sphere_polygon_fill_before_init
+
+    !> A fill needs arrays of one size. The control fills two of size 3.
+    subroutine scenario_sphere_polygon_fill_size_mismatch()
+        type(pf_sky_polygon) :: poly
+        real(real64) :: ra(3), dec(3), dec2(2)
+        call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call poly%random_fill(1_int64, 1_int64, ra, dec)
+        print '(a,2f10.4)', "filled three points, the last ", ra(3), dec(3)
+        call poly%random_fill(1_int64, 1_int64, ra, dec2)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly filled arrays of sizes 3 and 2: ", ra(1), dec2(1)
+    end subroutine scenario_sphere_polygon_fill_size_mismatch
+
+    !> A fill's last draw must be representable. The control ends exactly on `huge(int64)`.
+    subroutine scenario_sphere_polygon_fill_draw_overflow()
+        type(pf_sky_polygon) :: poly
+        real(real64) :: ra(2), dec(2)
+        call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call poly%random_fill(1_int64, 1_int64, ra, dec, huge(1_int64) - 1_int64)
+        print '(a,2f10.4)', "filled up to draw huge(int64), the last ", ra(2), dec(2)
+        call poly%random_fill(1_int64, 1_int64, ra, dec, huge(1_int64))   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly filled past huge(int64): ", ra(2), dec(2)
+    end subroutine scenario_sphere_polygon_fill_draw_overflow
+
+    !> The candidate cap, reached through the test-only floor override. The control draws once with the
+    !! hook clear; then the floor drops to 1e-13, a sliver covering about 5e-12 of its box is admitted,
+    !! and its first draw misses 100000 times.
+    subroutine scenario_sphere_polygon_candidate_cap_reached()
+        type(pf_sky_polygon) :: rect, sliver
+        real(real64) :: ra, dec
+        call rect%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call rect%random_at(1_int64, 1_int64, ra, dec)
+        print '(a,2f10.4)', "drew from a rectangle with the floor at its default: ", ra, dec
+        call parquet_debug_set_sphere_acceptance_floor(1.0e-13_real64)
+        call sliver%init([0.0_real64, 10.0_real64, 10.0_real64], [0.0_real64, 10.0_real64, 10.0_real64 - 1.0e-10_real64])
+        print '(a,es12.4)', "admitted a sliver of acceptance ", sliver%acceptance()
+        call sliver%random_at(1_int64, 1_int64, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly drew from the sliver: ", ra, dec
+    end subroutine scenario_sphere_polygon_candidate_cap_reached
+
+    !> A stream near the end of its 2**63 words cannot give a block. The control takes the last block
+    !! this form admits.
+    subroutine scenario_sphere_stream_exhausted()
+        type(pf_sky_polygon) :: poly
+        type(pf_random_stream) :: rng
+        real(real64) :: ra, dec
+        call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call rng%seed(1_int64, 1_int64)
+        call rng%rewind(huge(1_int64) - 7_int64)
+        call poly%random_next(rng, ra, dec)
+        print '(a,2f10.4,a,i0)', "drew near the stream's end: ", ra, dec, ", now at word ", rng%position()
+        call poly%random_next(rng, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly drew from an exhausted stream: ", ra, dec
+    end subroutine scenario_sphere_stream_exhausted
+
+    !> A pixel means nothing without a grid. The control draws on a built one.
+    subroutine scenario_sphere_pixel_grid_not_built()
+        type(pf_healpix_grid) :: built, grid
+        real(real64) :: v(3)
+        call built%init(8_int64, PF_HP_RING)
+        v = pf_random_pixel_at(built, 1_int64, 1_int64, 5_int64)
+        print '(a,3es12.4)', "drew in a pixel of a built grid: ", v
+        v = pf_random_pixel_at(grid, 1_int64, 1_int64, 5_int64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew on an unbuilt grid: ", v
+    end subroutine scenario_sphere_pixel_grid_not_built
+
+    !> Above `nside = 2**24` a direction cannot name a pixel near a pole. The control draws at `2**24`.
+    subroutine scenario_sphere_pixel_nside_over_limit()
+        type(pf_healpix_grid) :: fine, finer
+        real(real64) :: v(3)
+        call fine%init(16777216_int64, PF_HP_NEST)
+        v = pf_random_pixel_at(fine, 1_int64, 1_int64, 5_int64)
+        print '(a,3es12.4)', "drew in a pixel at nside 2**24: ", v
+        call finer%init(33554432_int64, PF_HP_NEST)
+        v = pf_random_pixel_at(finer, 1_int64, 1_int64, 5_int64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew at nside 2**25: ", v
+    end subroutine scenario_sphere_pixel_nside_over_limit
+
+    !> The pixel index runs 0 to npix - 1. The control draws in the last pixel, through the elemental
+    !! RA/Dec form.
+    subroutine scenario_sphere_pixel_ipix_out_of_range()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: ra, dec
+        call grid%init(8_int64, PF_HP_RING)
+        call pf_random_pixel_radec_at(grid, 1_int64, 1_int64, 767_int32, ra, dec)
+        print '(a,2f10.4)', "drew in the last pixel: ", ra, dec
+        call pf_random_pixel_radec_at(grid, 1_int64, 1_int64, 768_int32, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly drew in pixel 768: ", ra, dec
+    end subroutine scenario_sphere_pixel_ipix_out_of_range
+
+    !> A mask of no pixels has no points. The control lists one.
+    subroutine scenario_sphere_mask_empty_list()
+        type(pf_healpix_grid) :: grid
+        integer(int64) :: none(0)
+        real(real64) :: v(3)
+        call grid%init(8_int64, PF_HP_RING)
+        v = pf_random_mask_at(grid, 1_int64, 1_int64, [5_int64])
+        print '(a,3es12.4)', "drew over a one-pixel mask: ", v
+        v = pf_random_mask_at(grid, 1_int64, 1_int64, none)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew over an empty mask: ", v
+    end subroutine scenario_sphere_mask_empty_list
+
+    !> A mask draw checks the entry it chooses, an `int64` list. The control lists the last pixel.
+    subroutine scenario_sphere_mask_entry_out_of_range()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: v(3)
+        call grid%init(8_int64, PF_HP_RING)
+        v = pf_random_mask_at(grid, 1_int64, 1_int64, [767_int64])
+        print '(a,3es12.4)', "drew over the last pixel: ", v
+        v = pf_random_mask_at(grid, 1_int64, 1_int64, [768_int64])   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew over pixel 768: ", v
+    end subroutine scenario_sphere_mask_entry_out_of_range
+
+    !> The `int32` list's own entry check, through the RA/Dec form. The control lists pixel 0.
+    subroutine scenario_sphere_mask_entry_out_of_range_int32()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: ra, dec
+        call grid%init(8_int64, PF_HP_NEST)
+        call pf_random_mask_radec_at(grid, 1_int64, 1_int32, [0_int32], ra, dec)
+        print '(a,2f10.4)', "drew over pixel 0: ", ra, dec
+        call pf_random_mask_radec_at(grid, 1_int64, 1_int32, [-1_int32], ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly drew over pixel -1: ", ra, dec
+    end subroutine scenario_sphere_mask_entry_out_of_range_int32
+
+    !> A mask fill needs three rows, for an `int64` list. The controls are a (3, 0) fill -- a no-op --
+    !! and a (3, 2) one.
+    subroutine scenario_sphere_fill_mask_bad_shape()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: none(3, 0), good(3, 2), bad(2, 4)
+        call grid%init(8_int64, PF_HP_RING)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int64, 6_int64], none)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int64, 6_int64], good)
+        print '(a,3es12.4)', "filled three rows: ", good(:, 2)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int64, 6_int64], bad)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly filled two rows: ", bad(:, 1)
+    end subroutine scenario_sphere_fill_mask_bad_shape
+
+    !> A mask RA/Dec fill needs arrays of one size, for an `int64` list. The control fills two of size
+    !! 4.
+    subroutine scenario_sphere_fill_mask_radec_size_mismatch()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: ra(4), dec(4), dec3(3)
+        call grid%init(8_int64, PF_HP_RING)
+        call pf_random_fill_mask_radec(grid, 1_int64, 1_int64, [5_int64, 6_int64], ra, dec)
+        print '(a,2f10.4)', "filled four positions, the last ", ra(4), dec(4)
+        call pf_random_fill_mask_radec(grid, 1_int64, 1_int64, [5_int64, 6_int64], ra, dec3)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly filled arrays of sizes 4 and 3: ", ra(1), dec3(1)
+    end subroutine scenario_sphere_fill_mask_radec_size_mismatch
+
+    !> A mask fill needs three rows, for an `int32` list. The controls are a (3, 0) fill -- a no-op --
+    !! and a (3, 2) one.
+    subroutine scenario_sphere_fill_mask_bad_shape_int32()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: none(3, 0), good(3, 2), bad(2, 4)
+        call grid%init(8_int64, PF_HP_RING)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int32, 6_int32], none)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int32, 6_int32], good)
+        print '(a,3es12.4)', "filled three rows: ", good(:, 2)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int32, 6_int32], bad)   ! -> aborts
+        print '(a,2es12.4)', "unexpectedly filled two rows: ", bad(:, 1)
+    end subroutine scenario_sphere_fill_mask_bad_shape_int32
+
+    !> A mask RA/Dec fill needs arrays of one size, for an `int32` list. The control fills two of size
+    !! 4.
+    subroutine scenario_sphere_fill_mask_radec_size_mismatch_int32()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: ra(4), dec(4), dec3(3)
+        call grid%init(8_int64, PF_HP_RING)
+        call pf_random_fill_mask_radec(grid, 1_int64, 1_int64, [5_int32, 6_int32], ra, dec)
+        print '(a,2f10.4)', "filled four positions, the last ", ra(4), dec(4)
+        call pf_random_fill_mask_radec(grid, 1_int64, 1_int64, [5_int32, 6_int32], ra, dec3)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly filled arrays of sizes 4 and 3: ", ra(1), dec3(1)
+    end subroutine scenario_sphere_fill_mask_radec_size_mismatch_int32
+
+    !> A fill checks every entry before it draws, although a scalar draw would reach entry 1000 only
+    !! when it chose it. The control is a scalar draw over the same list that chooses another entry.
+    subroutine scenario_sphere_fill_mask_entry_out_of_range()
+        type(pf_healpix_grid) :: grid
+        integer(int32) :: list(1000)
+        real(real64) :: v(3), fill(3, 1)
+        integer :: k
+        call grid%init(8_int64, PF_HP_RING)
+        do k = 1, 999
+            list(k) = int(modulo(k, 768), int32)
+        end do
+        list(1000) = 768_int32
+        v = pf_random_mask_at(grid, 1_int64, 1_int64, list, 2_int64)
+        print '(a,3es12.4)', "drew over the list, choosing a valid entry: ", v
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, list, fill, 2_int64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly filled over a list holding pixel 768: ", fill(:, 1)
+    end subroutine scenario_sphere_fill_mask_entry_out_of_range
+
+    !> The `int64` list's whole-list check, through the RA/Dec fill. The control fills over the valid
+    !! prefix.
+    subroutine scenario_sphere_fill_mask_radec_entry_out_of_range()
+        type(pf_healpix_grid) :: grid
+        integer(int64) :: list(3)
+        real(real64) :: ra(2), dec(2)
+        call grid%init(8_int64, PF_HP_RING)
+        list = [10_int64, 20_int64, -3_int64]
+        call pf_random_fill_mask_radec(grid, 1_int64, 1_int64, list(1:2), ra, dec)
+        print '(a,2f10.4)', "filled over the valid prefix, the last ", ra(2), dec(2)
+        call pf_random_fill_mask_radec(grid, 1_int64, 1_int64, list, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly filled over a list holding pixel -3: ", ra(1), dec(1)
+    end subroutine scenario_sphere_fill_mask_radec_entry_out_of_range
+
+    !> A mask fill's last draw must be representable. The control ends exactly on `huge(int64)`.
+    subroutine scenario_sphere_fill_mask_draw_overflow()
+        type(pf_healpix_grid) :: grid
+        real(real64) :: v(3, 2)
+        call grid%init(8_int64, PF_HP_RING)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int64, 6_int64], v, huge(1_int64) - 1_int64)
+        print '(a,3es12.4)', "filled up to draw huge(int64), the last ", v(:, 2)
+        call pf_random_fill_mask(grid, 1_int64, 1_int64, [5_int64, 6_int64], v, huge(1_int64))   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly filled past huge(int64): ", v(:, 2)
+    end subroutine scenario_sphere_fill_mask_draw_overflow
+
+    !> A centre's declination must lie in [-90, 90]. The control offsets from the pole itself.
+    subroutine scenario_sphere_offset_dec_out_of_range()
+        real(real64) :: ra, dec
+        call pf_offset_radec(10.0_real64, 90.0_real64, 0.0_real64, 1.0_real64, ra, dec)
+        print '(a,2f10.4)', "offset from the pole: ", ra, dec
+        call pf_offset_radec(10.0_real64, 90.5_real64, 0.0_real64, 1.0_real64, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly offset from declination 90.5: ", ra, dec
+    end subroutine scenario_sphere_offset_dec_out_of_range
+
+    !> A non-finite argument names no position. The control uses a position angle of several turns,
+    !! which is legal.
+    subroutine scenario_sphere_offset_nonfinite()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: ra, dec
+        call pf_offset_radec(10.0_real64, 20.0_real64, 1000.0_real64, 1.0_real64, ra, dec)
+        print '(a,2f10.4)', "offset at position angle 1000: ", ra, dec
+        call pf_offset_radec(10.0_real64, 20.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), 1.0_real64, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly offset at a NaN position angle: ", ra, dec
+    end subroutine scenario_sphere_offset_nonfinite
+
+    !> A separation is at least 0. The control offsets by 0.
+    subroutine scenario_sphere_offset_negative_separation()
+        real(real64) :: ra, dec
+        call pf_offset_radec(10.0_real64, 20.0_real64, 30.0_real64, 0.0_real64, ra, dec)
+        print '(a,2f10.4)', "offset by 0: ", ra, dec
+        call pf_offset_radec(10.0_real64, 20.0_real64, 30.0_real64, -1.0_real64, ra, dec)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly offset by -1 degree: ", ra, dec
+    end subroutine scenario_sphere_offset_negative_separation
+
+    !> A grid of no points has no answer. The control is a grid of one.
+    subroutine scenario_sphere_fibonacci_n_not_positive()
+        real(real64) :: one(3, 1), none(3, 0)
+        call pf_fibonacci_grid(1_int32, one)
+        print '(a,3es12.4)', "built a one-point grid: ", one(:, 1)
+        call pf_fibonacci_grid(0_int32, none)   ! -> aborts
+        print '(a,i0)', "unexpectedly built a grid of no points, columns ", size(none, 2)
+    end subroutine scenario_sphere_fibonacci_n_not_positive
+
+    !> The array must hold exactly `n` columns of three. The control fills four into four.
+    subroutine scenario_sphere_fibonacci_bad_shape()
+        real(real64) :: vec(3, 4)
+        call pf_fibonacci_grid(4_int64, vec)
+        print '(a,3es12.4)', "built a four-point grid, the last ", vec(:, 4)
+        call pf_fibonacci_grid(5_int64, vec)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly built a five-point grid into four columns: ", vec(:, 4)
+    end subroutine scenario_sphere_fibonacci_bad_shape
+
+    !> The frame is one of two selectors. The control uses the mirrored one.
+    subroutine scenario_sphere_fibonacci_bad_frame()
+        real(real64) :: vec(3, 3)
+        call pf_fibonacci_grid(3_int64, vec, frame=PF_HP_DEC_SOUTH)
+        print '(a,3es12.4)', "built a grid in the mirrored frame, the first ", vec(:, 1)
+        call pf_fibonacci_grid(3_int64, vec, frame=2)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly built a grid in frame 2: ", vec(:, 1)
+    end subroutine scenario_sphere_fibonacci_bad_frame
+
+    !> Both arrays must be sized `n`. The control fills three into three.
+    subroutine scenario_sphere_fibonacci_radec_bad_size()
+        real(real64) :: ra(3), dec(3), dec2(2)
+        call pf_fibonacci_grid_radec(3_int32, ra, dec)
+        print '(a,2f10.4)', "built a three-point grid, the last ", ra(3), dec(3)
+        call pf_fibonacci_grid_radec(3_int32, ra, dec2)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly built a grid into a short declination array: ", ra(1), dec2(1)
+    end subroutine scenario_sphere_fibonacci_radec_bad_size
+
+    !> The frame is one of two selectors. The control names the standard one.
+    subroutine scenario_sphere_radec2vec_bad_frame()
+        real(real64) :: v(3)
+        call pf_radec2vec(10.0_real64, 20.0_real64, v, frame=PF_HP_DEC_NORTH)
+        print '(a,3es12.4)', "converted in the standard frame: ", v
+        call pf_radec2vec(10.0_real64, 20.0_real64, v, frame=-1)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly converted in frame -1: ", v
+    end subroutine scenario_sphere_radec2vec_bad_frame
+
+    !> The frame is one of two selectors. The control names the mirrored one.
+    subroutine scenario_sphere_vec2radec_bad_frame()
+        real(real64) :: ra, dec
+        call pf_vec2radec([1.0_real64, 1.0_real64, 1.0_real64], ra, dec, frame=PF_HP_DEC_SOUTH)
+        print '(a,2f10.4)', "converted in the mirrored frame: ", ra, dec
+        call pf_vec2radec([1.0_real64, 1.0_real64, 1.0_real64], ra, dec, frame=7)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly converted in frame 7: ", ra, dec
+    end subroutine scenario_sphere_vec2radec_bad_frame
 
     !> A typed keyword makes the writer synthesize a "<KEY>.datatype" entry, so a caller's own
     !! entry of that name would be a second writer of the same key and the file would carry two,

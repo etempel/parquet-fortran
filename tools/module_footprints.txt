@@ -110,6 +110,24 @@ parquet_healpix_query.f90
 parquet_settings_base.f90
 parquet_wrapper.cpp
 
+[parquet_sphere]
+parquet_expkey.f90
+parquet_healpix.f90
+parquet_healpix_arith.f90
+parquet_healpix_bulk.f90
+parquet_healpix_core.f90
+parquet_healpix_grid.f90
+parquet_healpix_query.f90
+parquet_random.f90
+parquet_settings_base.f90
+parquet_sphere.f90
+parquet_sphere_geom.f90
+parquet_sphere_pixel.f90
+parquet_sphere_polygon.f90
+parquet_utils.f90
+parquet_wrapper.cpp
+parquet_ziggurat.f90
+
 [parquet_columns]
 parquet_columns.f90
 parquet_columns_access.f90
@@ -551,6 +569,10 @@ parquet_spatial_build.f90
 parquet_spatial_bulk.f90
 parquet_spatial_query.f90
 parquet_spatial_tune.f90
+parquet_sphere.f90
+parquet_sphere_geom.f90
+parquet_sphere_pixel.f90
+parquet_sphere_polygon.f90
 parquet_stats.f90
 parquet_stats_bin.f90
 parquet_stats_core.f90

@@ -10,7 +10,7 @@
 ! GCOVR_EXCL_FUNCTION
 !
 !> Test driver (a): the `pf_`-prefixed utility tier — sorting, statistics, random numbers and
-!> sampling, spatial indexing, HEALPix, logging and path/string helpers.
+!> sampling, spatial indexing, HEALPix and points on the sphere, logging and path/string helpers.
 !!
 !! **This program executes no `bind(C)` call at all**, which is the property the split exists to
 !! create: it can therefore be built and run under `nagfor -C=undefined`, where an executed
@@ -44,6 +44,8 @@ program run_tester_pf
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_random_weighted, only : collect_tests_parquet_random_weighted
     use test_spatial, only : collect_tests_parquet_spatial
+    use test_sphere, only : collect_tests_sphere
+    use test_sphere_omp, only : collect_tests_sphere_omp
     use test_stats, only : collect_tests_parquet_stats
     use test_toml, only : collect_tests_toml, collect_tests_toml_serial
     use test_utils, only : collect_tests_utils
@@ -76,6 +78,8 @@ program run_tester_pf
         new_testsuite("healpix_reference", collect_tests_healpix_reference), &
         new_testsuite("healpix_tier_b", collect_tests_healpix_tier_b), &
         new_testsuite("healpix_grid", collect_tests_healpix_grid), &
+        new_testsuite("sphere", collect_tests_sphere), &
+        new_testsuite("sphere_omp", collect_tests_sphere_omp), &
         new_testsuite("random", collect_tests_parquet_random), &
         new_testsuite("random_perm", collect_tests_parquet_random_perm), &
         new_testsuite("random_omp", collect_tests_parquet_random_omp), &

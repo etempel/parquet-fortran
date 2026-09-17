@@ -34,6 +34,11 @@ parquet_argsort                 (module — ARGSORT TIER: pf_argsort over intrin
 parquet_sorting                 (module — FULL sorting tier over the argsort tier)
 parquet_sorting_oracle          (module — TEST-ONLY C++ sort engine behind procedure pointers)
 parquet_sampling                (module — permutations/subsets/resampling/weighted draws)
+parquet_sphere                  (module — sky polygons, pixel and mask samplers, RA/Dec geometry; reaches
+                                 parquet_random, parquet_healpix and parquet_utils only)
+├─ parquet_sphere_geom          (conversions, offsets, the Fibonacci grid, the shared helpers)
+├─ parquet_sphere_polygon       (pf_sky_polygon)
+└─ parquet_sphere_pixel         (the pixel and mask samplers)
 parquet_spatial / parquet_healpix / parquet_index / parquet_stats / parquet_utils / parquet_logging
                                 (Arrow-free utility tiers, each with submodules)
 parquet_toml                    (module — pf_toml; the only module reaching a third-party package)

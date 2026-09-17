@@ -524,6 +524,11 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   `-C=undefined` an implicitly invoked finalizer indexes a null definedness map and segfaults on
   the first scalar store, with no diagnostic. Do not re-add the finalizers removed from
   `parquet_string` and `parquet_string_column`; the remaining ones release C++ handles and locks.
+- **A procedure-local array PARAMETER passed as an actual argument inside an OpenMP parallel region
+  does not compile** (`-openmp`, every profile): the generated C names an undeclared
+  `<module>_MP_<procedure>Param_<name>_`. An intrinsic reading it there (`sum(LIST)`) is fine.
+  Declare a variable and assign it before the region (`test_region_fill_schedule`,
+  `test/test_sphere_omp.f90`).
 - **A written `ASSOCIATE` name whose selector is a pointer-valued function reference panics the
   compiler at `-O1`+** (`find_node_sym -- invalid tree`); bind the result to a local pointer and
   associate on that, for every such construct.

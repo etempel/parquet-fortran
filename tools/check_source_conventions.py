@@ -271,6 +271,7 @@ GENERATED_FILES = [
     # an edited value in one is a lie the implementation is then written to match.
     TEST / "test_path_vectors.f90",
     TEST / "test_interpolate_golden.f90",
+    TEST / "test_sphere_vectors.f90",
     # test/test_healpix_vectors.f90 BELONGS here and is deliberately not listed yet. Adding it
     # fails immediately on a real gap -- its `end module` line carries no `! GCOVR_EXCL_LINE`,
     # which is fixed in tools/generate_healpix_reference.py but only reaches the file when
@@ -2418,6 +2419,20 @@ def check_parquet_healpix_stays_arrow_free():
         "The healpix tier exists so that a downstream project can drop its GPL libhealpix "
         "dependency without acquiring an Arrow one; an import reaching the reader/writer stack "
         "would defeat that.")
+
+
+def check_parquet_sphere_stays_arrow_free():
+    """`use parquet_sphere` must not drag the Arrow/Parquet C++ stack into a consumer's build.
+
+    The region samplers and the RA/Dec geometry sit on `parquet_random`, `parquet_healpix` and
+    `parquet_utils` and nothing else, so a program drawing a mock catalogue in a sky footprint
+    compiles a handful of files. It reaches two other Arrow-free tiers, and this check is its own
+    rather than theirs: a stray import added here would pass both of theirs.
+    """
+    return _check_stays_arrow_free(
+        "parquet_sphere",
+        "The sphere tier exists so that sampling a sky footprint needs no reader, no writer and no "
+        "Arrow; an import reaching the reader/writer stack would defeat that.")
 
 
 def check_parquet_version_stays_arrow_free():
@@ -7643,6 +7658,7 @@ CHECKS = (
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
     ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
+    ("parquet_sphere stays Arrow-free", check_parquet_sphere_stays_arrow_free),
     ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
     ("parquet_toml stays Arrow-free", check_parquet_toml_stays_arrow_free),
     ("every parquet_toml entry takes the module guard", check_parquet_toml_takes_the_guard),

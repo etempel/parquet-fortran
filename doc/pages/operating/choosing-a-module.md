@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **139** of this library's Fortran files.
+also the largest: a project that imports it compiles **143** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -48,6 +48,7 @@ in every one of them.
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 15 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |
 | `parquet_healpix` | 7 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
+| `parquet_sphere` | 15 | no | `pf_sky_polygon`, `pf_random_pixel_at` and `pf_random_mask_at`: uniform random points in sky polygons and HEALPix pixels and masks, and RA/Dec conversions, offsets and the Fibonacci grid |
 | `parquet_index` | 13 | no | `pf_index_map`: which row holds this key, over a single integer key, a tuple of them or a string, with three storage backends, two chosen from the keys and one opt-in; `pf_index_multimap`: every row holding a key that repeats, as ranges; and `pf_index_pool`, which hands out and recycles unique index values |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
@@ -65,7 +66,7 @@ in every one of them.
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 139 | **yes** | everything above, through one `use` |
+| `parquet` | 143 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -83,11 +84,11 @@ facade buys little beyond a narrower namespace. The table layer sits on the read
 container, the sorting engine and the statistics tier (`parquet_grouping%agg` is that tier's
 vocabulary called once per group), which between them are almost the whole library; what it
 leaves behind is the two facades themselves and the utility tiers nothing in the table layer
-reaches — `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_logging`,
-`parquet_toml` and `parquet_version`.
+reaches — `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_sphere`,
+`parquet_logging`, `parquet_toml` and `parquet_version`.
 
 **`parquet_io` is the one real saving on the Arrow side** — see the table above for the two
-counts: it drops the entire table layer, the outer facade, the statistics tier and the six
+counts: it drops the entire table layer, the outer facade, the statistics tier and the seven
 utility modules listed just above. Reach for it when your program opens files, moves columns in and out,
 and never builds a `parquet_table`.
 
@@ -143,6 +144,7 @@ anything else.
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, the four sorting knobs, plus `verbosity` and `message_stream` |
 | `parquet_healpix` | `healpix_threads`, plus `verbosity` and `message_stream` — it can warn from a thread clamp |
+| `parquet_sphere` | none — it reads none, and prints nothing at all |
 | `parquet_index` | `index_threads`, the four sorting knobs (a `method="sorted"` build sorts through `pf_argsort`), plus `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |

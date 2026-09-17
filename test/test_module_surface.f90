@@ -401,6 +401,63 @@ contains
 
 end module test_module_surface_healpix
 
+!> `parquet_sphere` alone: a polygon and its draw, a pixel draw on a grid, a conversion and an offset,
+!> and the deliberate ABSENCE of any settings re-export.
+!!
+!! **One library import, and it must stay that way.** The module reads no knob and prints nothing, so
+!! what it must carry is the vocabulary its procedures take: the HEALPix scheme and frame selectors and
+!! the grid and stream types, without which a program importing only this module could not call half
+!! of it. Declaring a `pf_healpix_grid` and a `pf_random_stream` here is what asserts those re-exports.
+module test_module_surface_sphere
+    use parquet_sphere                 ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_sphere_surface
+
+contains
+
+    !> Uses one procedure of each family through `use parquet_sphere` alone.
+    subroutine check_sphere_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        type(pf_sky_polygon) :: poly
+        type(pf_healpix_grid) :: grid
+        type(pf_random_stream) :: rng
+        real(real64) :: ra, dec, v(3)
+        integer(int64) :: ipix
+        character(len=:), allocatable :: algo
+
+        what = ""
+        call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        call poly%random_at(20260917_int64, 1_int64, ra, dec)
+        if (.not. poly%contains(ra, dec)) what = "pf_sky_polygon%random_at drew a point outside the polygon"
+        call rng%seed(20260917_int64, 1_int64)
+        call poly%random_next(rng, ra, dec)
+        if (what == "" .and. rng%position() /= 5_int64) what = "pf_sky_polygon%random_next did not take one block"
+
+        ! The scheme and frame selectors are separate re-exports, so each is named.
+        call grid%init(8_int64, PF_HP_RING)
+        v = pf_random_pixel_at(grid, 20260917_int64, 1_int64, 100_int64)
+        call grid%vec2pix(v, ipix)
+        if (what == "" .and. ipix /= 100_int64) what = "pf_random_pixel_at drew a point outside its pixel"
+        call grid%init(8_int64, PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
+        if (what == "" .and. grid%frame() /= PF_HP_DEC_SOUTH) what = "PF_HP_NEST and PF_HP_DEC_SOUTH"
+
+        ! The conversions against values the geometry fixes, so a procedure answering nonsense is caught.
+        call pf_radec2vec(90.0_real64, 0.0_real64, v, frame=PF_HP_DEC_NORTH)
+        if (what == "" .and. abs(v(2) - 1.0_real64) > 1.0e-12_real64) what = "pf_radec2vec"
+        call pf_offset_radec(10.0_real64, 0.0_real64, 90.0_real64, 5.0_real64, ra, dec)
+        if (what == "" .and. (abs(ra - 15.0_real64) > 1.0e-12_real64 .or. abs(dec) > 1.0e-12_real64)) &
+            what = "pf_offset_radec"
+
+        ! The frozen contract identifier is a parameter, and naming it is what keeps it re-exported.
+        algo = pf_sky_region_algorithm
+        if (what == "" .and. len_trim(algo) == 0) what = "pf_sky_region_algorithm is empty"
+        if (what == "" .and. PF_EDGE_GREAT_CIRCLE == PF_EDGE_RADEC) what = "the edge rules"
+    end subroutine check_sphere_surface
+
+end module test_module_surface_sphere
+
 module test_module_surface_spatial
     use parquet_spatial                ! THE ONLY library import.
     use iso_fortran_env, only : int32, int64, real64
@@ -1826,6 +1883,7 @@ module test_module_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_healpix, only : check_healpix_surface
+    use test_module_surface_sphere, only : check_sphere_surface
     use test_module_surface_columns, only : check_columns_surface
     use test_module_surface_list, only : check_list_surface
     use test_module_surface_struct, only : check_struct_surface
@@ -1938,6 +1996,8 @@ contains
                 test_spatial_surface), &
             new_unittest("parquet_healpix alone pixelises the sphere and exposes the output pair", &
                          test_healpix_surface), &
+            new_unittest("parquet_sphere alone draws in a polygon and a pixel, and exposes no setting", &
+                         test_sphere_surface), &
             new_unittest("parquet_utils alone folds text and takes a path apart", &
                          test_utils_surface), &
             new_unittest("parquet_integrate alone integrates and hands back its record", &
@@ -2042,6 +2102,16 @@ contains
         call check(error, what == "", &
             "the pixelisation was not usable through `use parquet_healpix` alone: " // what)
     end subroutine test_healpix_surface
+
+    !> The test-drive wrapper over check_sphere_surface.
+    subroutine test_sphere_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_sphere_surface(what)
+        call check(error, what == "", &
+            "points on the sphere were not usable through `use parquet_sphere` alone: " // what)
+    end subroutine test_sphere_surface
 
     !> The test-drive wrapper over check_utils_surface.
     subroutine test_utils_surface(error)

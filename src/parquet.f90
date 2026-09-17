@@ -32,6 +32,9 @@
 !>                          lookup over single or composite integer keys, and a
 !>                          recycling allocator for unique index values.
 !>   * `parquet_healpix` -- the HEALPix sphere pixelisation.
+!>   * `parquet_sphere`  -- `pf_sky_polygon`, random points in sky polygons and
+!>                          HEALPix pixels and masks, and RA/Dec geometry:
+!>                          conversions, offsets and the Fibonacci grid.
 !>   * `parquet_toml`   -- `pf_toml`: reading and writing TOML configuration
 !>                          files on top of `toml-f`, with checked types, a
 !>                          report for every key nobody read, and diagnostics
@@ -106,6 +109,7 @@ module parquet
     use parquet_spatial
     use parquet_index
     use parquet_healpix
+    use parquet_sphere
     use parquet_logging
     use parquet_toml
     use parquet_utils

@@ -9,6 +9,7 @@ ordered_subpage: prima.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
+ordered_subpage: sphere.md
 ordered_subpage: index-maps.md
 ordered_subpage: logging.md
 ordered_subpage: configuration-files.md
@@ -22,6 +23,7 @@ arrays and this library's own column types, statistical reductions over those sa
 interpolation of tabulated data,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
+random points in sky polygons and HEALPix masks with the RA/Dec geometry they need,
 fast key-to-index lookup and a recycling allocator for index values,
 leveled logging for your own program, TOML configuration files, small numeric, text and path
 helpers, and the two generators meant to be copied into your own project.
@@ -95,6 +97,12 @@ helpers, and the two generators meant to be copied into your own project.
   arithmetic, and a `_bulk` form of every conversion that threads internally. Equal-area pixels on
   rings of constant latitude, both integer kinds, and no floating-point exception raised — so a
   program running under `-ffpe-trap` needs no guard around a disc query.
+- [Random points and geometry on the sphere with parquet_sphere](sphere.html) — points uniform per
+  solid angle inside a sky polygon, with straight RA/Dec edges or great-circle edges, inside one
+  HEALPix pixel or over a list of them; the polygon's containment, area and acceptance; RA/Dec
+  conversions that name their declination frame, offsets by a separation at a position angle, and
+  the Fibonacci grid. Every draw is addressed like `pf_random_at`, so a catalogue reproduces under
+  any schedule.
 - [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key, a tuple of them when no one column
   is unique, or a string. Three storage backends behind one API — an array indexed by the key, an

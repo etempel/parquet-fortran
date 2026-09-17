@@ -18,6 +18,14 @@ module test_openmp
     !
     integer, parameter :: nfiles = 8
     !
+    !> The per-thread sinks of `test_sink_per_thread_allowed`, an allocatable component of a scalar
+    !! rather than a local array: nagfor 7.2 under `-C=undefined` cannot compile the finalization of an
+    !! unsaved local array of a type finalizable only through a component, which `parquet_table_writer`
+    !! is (`.claude/rules/fortran-gotchas.md`).
+    type :: sink_set
+        type(parquet_table_writer), allocatable :: s(:) !! one sink per chunk
+    end type sink_set
+    !
 contains
     !
     !> testdrive's own run_testsuite runs every test *within one collection*
@@ -603,7 +611,7 @@ contains
     !> The negative control for the sink's shared-use refusal (`sink_shared_in_parallel`,
     !! test/error_scenarios.f90): a sink this thread opened inside the region is its own, so one
     !! sink per thread, each writing its own file, must go through. The sinks are elements of an
-    !! array declared BEFORE the region, not block-locals and not `private()` copies: the type has
+    !! array allocated BEFORE the region, not block-locals and not `private()` copies: the type has
     !! allocatable components (ifx cannot privatize such a type in a block) and is finalizable
     !! through them (gfortran's `private()` copy is not reliably initialised) -- see
     !! doc/pages/operating/thread-safety.md.
@@ -611,7 +619,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: fname = "test_run/test_openmp_sink_src.parquet"
         integer, parameter :: nrows = 200, nchunk = 4
-        type(parquet_table_writer) :: sinks(nchunk)
+        type(sink_set) :: sinks
         integer(int64) :: counts(nchunk)
         character(len=48) :: outs(nchunk)
         integer :: g
@@ -619,6 +627,7 @@ contains
 
         call write_table_fixture(fname, nrows)
         counts = -1_int64
+        allocate (sinks%s(nchunk))
         do g = 1, nchunk
             write(outs(g), '(a, i0, a)') "test_run/test_openmp_sink_", g, ".parquet"
         end do
@@ -632,11 +641,11 @@ contains
                 hi = int(g*(nrows/nchunk), int64)
                 call parquet_open_table(mine, fname, lo, hi)
                 call mine%materialize_all()
-                call parquet_open_table_writer(sinks(g), trim(outs(g)), mine, chunk_size=10)
-                call sinks(g)%append(mine)
-                call sinks(g)%append(mine)
-                counts(g) = sinks(g)%nrows()
-                call parquet_close_table_writer(sinks(g))
+                call parquet_open_table_writer(sinks%s(g), trim(outs(g)), mine, chunk_size=10)
+                call sinks%s(g)%append(mine)
+                call sinks%s(g)%append(mine)
+                counts(g) = sinks%s(g)%nrows()
+                call parquet_close_table_writer(sinks%s(g))
             end block
         end do
         !$omp end parallel do

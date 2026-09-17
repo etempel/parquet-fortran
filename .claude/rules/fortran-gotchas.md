@@ -517,13 +517,27 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   `character(len=size(xq))`): the dummies arrive with wrong sizes and garbage addresses, so the
   body aborts in a guard on valid input, segfaults, or dies with
   `Cannot allocate array temporary - out of memory`. A result sized from the first dummy or a
-  scalar one, or an allocatable result, compiles correctly. Restate the full interface in the body, or
-  make the result allocatable (`interp_1d_oneshot_array`, `src/parquet_interpolate_1d.f90`, does
-  both). Nothing but a nagfor `fpm test` sees it.
+  scalar one, or an allocatable result, compiles correctly -- except under `-C=undefined`, which
+  cannot compile the abbreviated body of ANY function with an allocatable result (array or scalar)
+  and an array dummy other than an assumed-size one, referenced or not (`use of undeclared
+  identifier 'xq_'`). So restate the full interface in the body (`interp_1d_oneshot_array` and the
+  `%eval` array specifics, `src/parquet_interpolate_1d.f90`). Nothing but a nagfor `fpm test` sees
+  the miscompilation; `check_no_shape_nagfor_undefined_cannot_compile` enforces the
+  `-C=undefined` half.
 - **Keep finalizers deallocate-only; never assign a scalar component in one.** Under
   `-C=undefined` an implicitly invoked finalizer indexes a null definedness map and segfaults on
   the first scalar store, with no diagnostic. Do not re-add the finalizers removed from
   `parquet_string` and `parquet_string_column`; the remaining ones release C++ handles and locks.
+- **`-C=undefined` cannot compile two more shapes, and one of either anywhere in `src/`, `test/`,
+  `app/` or `bench/` stops `tools/check_nag_undefined.sh`** (`fpm test` compiles every file). A
+  FUNCTION whose result is a procedure pointer panics the compiler (`No mapinfo.sym?`): hand the
+  pointer back through a subroutine's `pointer, intent(out)` dummy (`pick`,
+  `bench/benchmark_optimize.f90`). An unsaved LOCAL array -- explicit-shape, automatic, allocatable
+  or `block`-local -- of a type with a non-allocatable, non-pointer component that is finalizable,
+  at any depth (`parquet_table_writer`), generates C that does not compile at `end`: hold the array
+  in an allocatable component of a local scalar (`sink_set`, `test/test_openmp.f90`). A dummy, a
+  `save` or module array, a scalar, and an array of a type finalizable only by its own `final` or
+  its parent's compile. `check_no_shape_nagfor_undefined_cannot_compile` enforces both.
 - **A procedure-local array PARAMETER passed as an actual argument inside an OpenMP parallel region
   does not compile** (`-openmp`, every profile): the generated C names an undeclared
   `<module>_MP_<procedure>Param_<name>_`. An intrinsic reading it there (`sum(LIST)`) is fine.

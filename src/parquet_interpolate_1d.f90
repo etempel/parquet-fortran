@@ -27,6 +27,10 @@ contains
     !
     ! nagfor rejects a separate module procedure whose body appears BELOW a call to it in the same
     ! submodule (`code-style.md`), so the evaluator sits above the one-shot specifics that use it.
+    !
+    ! The array specifics restate their interfaces in FULL: nagfor 7.2 under `-C=undefined` cannot
+    ! compile the abbreviated `module procedure` body of a function with an allocatable result and an
+    ! array dummy (`fortran-gotchas.md`; `check_no_shape_nagfor_undefined_cannot_compile`).
 
     module procedure interp_1d_eval
 
@@ -40,7 +44,11 @@ contains
 
     end procedure interp_1d_eval
 
-    module procedure interp_1d_eval_rank1
+    pure module function interp_1d_eval_rank1(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this  !! the interpolant
+        real(real64), intent(in)        :: xq(:) !! the query points
+        real(real64), allocatable       :: v(:)  !! the interpolated value at each, in order
 
         real(real64) :: q, c0, c1
         integer      :: i, k, n, kend, found
@@ -113,9 +121,13 @@ contains
             end select
         end do
 
-    end procedure interp_1d_eval_rank1
+    end function interp_1d_eval_rank1
 
-    module procedure interp_1d_eval_rank2
+    pure module function interp_1d_eval_rank2(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this     !! the interpolant
+        real(real64), intent(in)        :: xq(:, :) !! the query points
+        real(real64), allocatable       :: v(:, :)  !! the interpolated value at each
 
         integer :: i1, i2, k
         logical :: near
@@ -130,9 +142,13 @@ contains
             end do
         end do
 
-    end procedure interp_1d_eval_rank2
+    end function interp_1d_eval_rank2
 
-    module procedure interp_1d_eval_rank3
+    pure module function interp_1d_eval_rank3(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this        !! the interpolant
+        real(real64), intent(in)        :: xq(:, :, :) !! the query points
+        real(real64), allocatable       :: v(:, :, :)  !! the interpolated value at each
 
         integer :: i1, i2, i3, k
         logical :: near
@@ -149,9 +165,13 @@ contains
             end do
         end do
 
-    end procedure interp_1d_eval_rank3
+    end function interp_1d_eval_rank3
 
-    module procedure interp_1d_eval_rank4
+    pure module function interp_1d_eval_rank4(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this           !! the interpolant
+        real(real64), intent(in)        :: xq(:, :, :, :) !! the query points
+        real(real64), allocatable       :: v(:, :, :, :)  !! the interpolated value at each
 
         integer :: i1, i2, i3, i4, k
         logical :: near
@@ -170,9 +190,13 @@ contains
             end do
         end do
 
-    end procedure interp_1d_eval_rank4
+    end function interp_1d_eval_rank4
 
-    module procedure interp_1d_eval_rank5
+    pure module function interp_1d_eval_rank5(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this              !! the interpolant
+        real(real64), intent(in)        :: xq(:, :, :, :, :) !! the query points
+        real(real64), allocatable       :: v(:, :, :, :, :)  !! the interpolated value at each
 
         integer :: i1, i2, i3, i4, i5, k
         logical :: near
@@ -193,9 +217,13 @@ contains
             end do
         end do
 
-    end procedure interp_1d_eval_rank5
+    end function interp_1d_eval_rank5
 
-    module procedure interp_1d_eval_rank6
+    pure module function interp_1d_eval_rank6(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this                 !! the interpolant
+        real(real64), intent(in)        :: xq(:, :, :, :, :, :) !! the query points
+        real(real64), allocatable       :: v(:, :, :, :, :, :)  !! the interpolated value at each
 
         integer :: i1, i2, i3, i4, i5, i6, k
         logical :: near
@@ -218,9 +246,13 @@ contains
             end do
         end do
 
-    end procedure interp_1d_eval_rank6
+    end function interp_1d_eval_rank6
 
-    module procedure interp_1d_eval_rank7
+    pure module function interp_1d_eval_rank7(this, xq) result(v)
+        implicit none
+        class(pf_interp_1d), intent(in) :: this                    !! the interpolant
+        real(real64), intent(in)        :: xq(:, :, :, :, :, :, :) !! the query points
+        real(real64), allocatable       :: v(:, :, :, :, :, :, :)  !! the interpolated value at each
 
         integer :: i1, i2, i3, i4, i5, i6, i7, k
         logical :: near
@@ -246,7 +278,7 @@ contains
             end do
         end do
 
-    end procedure interp_1d_eval_rank7
+    end function interp_1d_eval_rank7
 
     module procedure interp_1d_derivative
 
@@ -456,8 +488,8 @@ contains
     ! (`test_large_tables_on_worker_threads`, test/test_interpolate_omp.f90). And the interface is
     ! restated in FULL rather than abbreviated to `module procedure interp_1d_oneshot_array`: nagfor 7.2
     ! compiles the abbreviated form of a result shaped by `xq`, an assumed-shape dummy that is not the
-    ! first argument, with every dummy's descriptor wrong -- so a result given an explicit shape again
-    ! needs this form (`fortran-gotchas.md`).
+    ! first argument, with every dummy's descriptor wrong, and under `-C=undefined` cannot compile the
+    ! abbreviated form of this allocatable result at all (`fortran-gotchas.md`).
     module function interp_1d_oneshot_array(x, y, xq, method, bc, slopes, outside, is_valid, &
                                             context) result(yq)
         implicit none

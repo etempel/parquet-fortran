@@ -174,9 +174,13 @@ contains
         ! test and release on exit, and on this path every one of those tests fails. Keep this arm
         ! and the general one below in step -- they allocate the same arrays under the same
         ! `work%record` condition, and only the copying differs.
+        !
+        ! `iord` is allocated zero-filled, in both arms: `qpsrt` keeps only a prefix of it in order once
+        ! more than half the subdivisions are spent (its `jupbn`), so the slots past that prefix are
+        ! never written, and a later growth copies `1:last` of them. A zero is an index no list has.
         if (last <= 0 .and. .not. allocated(work%alist)) then
             allocate (work%alist(cap), work%blist(cap), work%rlist(cap), work%elist(cap))
-            allocate (work%iord(cap))
+            allocate (work%iord(cap), source=0)
             if (work%record) then
                 allocate (work%rx(GK_POINTS, cap), work%rw(GK_POINTS, cap))
                 allocate (work%rf(GK_POINTS, cap))
@@ -186,7 +190,7 @@ contains
         end if
 
         allocate (bigger%alist(cap), bigger%blist(cap), bigger%rlist(cap), bigger%elist(cap))
-        allocate (bigger%iord(cap))
+        allocate (bigger%iord(cap), source=0)
         if (last > 0) then
             bigger%alist(1:last) = work%alist(1:last)
             bigger%blist(1:last) = work%blist(1:last)

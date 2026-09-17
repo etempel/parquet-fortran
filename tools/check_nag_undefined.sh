@@ -21,6 +21,12 @@
 #   pass. It never moves one: membership there is decided by a person after looking at why the
 #   result changed (feature_tests.md decision 8).
 #
+# A COMPILE FAILURE HERE IS USUALLY A SHAPE, NOT A DEFECT
+#   `fpm test` compiles every file of src/, test/, app/ and bench/ under this option, and nagfor 7.2
+#   cannot compile a few legal source shapes under it -- one anywhere stops the run before a test
+#   starts. The lint check `check_no_shape_nagfor_undefined_cannot_compile`
+#   (tools/check_source_conventions.py) keeps the known ones out; a new one belongs in it.
+#
 # OMP_STACKSIZE IS LOAD-BEARING, NOT A TUNING KNOB
 #   `healpix_tier_b` exhausts an OpenMP WORKER thread's stack under a checked build. A worker's
 #   stack is `OMP_STACKSIZE`, not the process limit, so `ulimit -s` does not help and the default

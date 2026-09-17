@@ -6800,6 +6800,244 @@ def check_no_leadz():
     return problems
 
 
+def check_no_shape_nagfor_undefined_cannot_compile():
+    """No source shape that nagfor 7.2 cannot compile under `-C=undefined`.
+
+    Only `tools/check_nag_undefined.sh` builds that profile and nothing in CI runs it, while `fpm test`
+    compiles every file of `src/`, `test/`, `app/` and `bench/`: one such shape anywhere stops the
+    whole gate, and this check is the one place it is seen before someone runs that script. Three
+    shapes, each matched by shape (`.claude/rules/fortran-gotchas.md`, "nagfor-specific gotchas"):
+
+    1. the abbreviated `module procedure NAME` body of a separate module FUNCTION whose result is
+       `allocatable` and which has an array dummy other than an assumed-size one (the C names the
+       dummy's descriptor and definedness map without declaring them). The header is read from the
+       interface block, the body from outside one.
+    2. a FUNCTION whose result is a procedure pointer (the compiler panics, `No mapinfo.sym?`).
+    3. an unsaved LOCAL array -- explicit-shape, automatic or allocatable, in a procedure or a
+       `block` -- of a derived type with a non-allocatable, non-pointer component that is
+       finalizable, at any depth (the C finalizing it at `end` mixes pointer types). The set of such
+       types is derived from every type definition scanned; a type with no such component is not in
+       it, whether or not it is finalizable itself.
+
+    Every procedure frame must close by its own name, and none may be left open: a header this
+    walker cannot read would otherwise misattribute every later declaration in the file.
+    """
+    prefix_word = (r"(?:pure|impure|elemental|recursive|non_recursive|module|integer|real|logical"
+                   r"|complex|character|double\s+precision|type|class)(?:\s*\([^()]*\))?")
+    procedure_start = re.compile(r"^((?:" + prefix_word + r"\s+)*)(function|subroutine)\s+(\w+)\s*(\(|$)",
+                                 re.I)
+    header_suffix = re.compile(r"^(?:\s*(?:result\s*\(\s*\w+\s*\)|bind\s*\((?:[^()\"']|\"[^\"]*\"|'[^']*')*\)))*\s*$",
+                               re.I)
+    procedure_close = re.compile(r"^end\s*(function|subroutine|procedure)\b\s*(\w*)", re.I)
+    interface_open = re.compile(r"^(?:abstract\s+)?interface\b", re.I)
+    interface_close = re.compile(r"^end\s*interface\b", re.I)
+    body_open = re.compile(r"^module\s+procedure\s+(\w+)\s*$", re.I)
+    block_open = re.compile(r"^(?:\w+\s*:\s*)?block\s*$", re.I)
+    block_close = re.compile(r"^end\s*block\b", re.I)
+    type_open = re.compile(r"^type\s*(?:,\s*(.*?))?\s*::\s*(\w+)\s*$|^type\s+(?!is\b)(\w+)\s*$", re.I)
+    type_close = re.compile(r"^end\s*type\b", re.I)
+    derived = re.compile(r"^(?:type|class)\s*\(\s*(\w+)\s*\)(.*)$", re.I)
+    paths = []
+    for directory in ("src", "test", "app", "bench"):
+        base = REPO_ROOT / directory
+        if base.is_dir():
+            paths.extend(sorted(base.glob("*.f90")))
+
+    def statements(path):
+        """Every statement of `path`, a `;`-separated logical line split outside quotes."""
+        for lineno, line in _logical_lines(path):
+            quote, start = None, 0
+            for i, ch in enumerate(line + ";"):
+                if quote:
+                    quote = None if ch == quote else quote
+                elif ch in ("'", '"'):
+                    quote = ch
+                elif ch == ";":
+                    if line[start:i].strip():
+                        yield lineno, line[start:i].strip()
+                    start = i + 1
+
+    def procedure_header(code):
+        """(prefix, kind, name, dummy list, result name or None) for a procedure header, else None."""
+        opened = procedure_start.match(code)
+        if not opened:
+            return None
+        if opened.group(4) != "(":
+            tail, dummies = code[opened.end():], ""
+        else:
+            depth = 1
+            for i in range(opened.end(), len(code)):
+                depth += {"(": 1, ")": -1}.get(code[i], 0)
+                if depth == 0:
+                    break
+            else:
+                return None
+            tail, dummies = code[i + 1:], code[opened.end():i]
+        if not header_suffix.match(tail):
+            return None
+        result = re.search(r"\bresult\s*\(\s*(\w+)\s*\)", tail, re.I)
+        return (opened.group(1), opened.group(2).lower(), opened.group(3).lower(), dummies,
+                result.group(1).lower() if result else None)
+
+    problems = []
+    types = {}       # type name -> {"final", "parent", "components"}
+    shaped = {}      # function name -> array dummies of a `module` interface with an allocatable result
+    interfaces = 0
+    bodies = []      # (where, lineno, name): every abbreviated body
+    locals_ = []     # (where, lineno, type name, entity): every unsaved local array of a derived type
+    for path in paths:
+        where = path.relative_to(REPO_ROOT)
+        depth = 0
+        type_def = None
+        in_contains = False
+        stack = []   # frames: {kind, name, line, interface, dummies, result, allocatable, arrays}
+        for lineno, code in statements(path):
+            if type_def is not None:
+                if type_close.match(code):
+                    type_def = None
+                elif re.match(r"^contains\s*$", code, re.I):
+                    in_contains = True
+                elif in_contains:
+                    type_def["final"] = type_def["final"] or bool(re.match(r"^final\b", code, re.I))
+                else:
+                    component = derived.match(code)
+                    if component and "::" in component.group(2) and not re.search(
+                            r"\b(?:allocatable|pointer)\b", component.group(2).split("::", 1)[0], re.I):
+                        type_def["components"].append(component.group(1).lower())
+                continue
+            opened = type_open.match(code)
+            if opened:
+                name = (opened.group(2) or opened.group(3)).lower()
+                parent = re.search(r"\bextends\s*\(\s*(\w+)\s*\)", opened.group(1) or "", re.I)
+                type_def = types.setdefault(name, {"final": False, "parent": None, "components": []})
+                if parent:
+                    type_def["parent"] = parent.group(1).lower()
+                in_contains = False
+                continue
+            closed = procedure_close.match(code)
+            if closed:
+                kind = {"function": "function", "subroutine": "subroutine", "procedure": "body"}[
+                    closed.group(1).lower()]
+                if not stack or stack[-1]["kind"] != kind or (
+                        closed.group(2) and closed.group(2).lower() != stack[-1]["name"]):
+                    problems.append("%s:%d: `%s` closes no procedure this walker opened -- a header "
+                                    "shape it cannot read; fix the walker" % (where, lineno, code))
+                    break
+                frame = stack.pop()
+                if frame["kind"] == "function" and frame["interface"] and frame["module"]:
+                    interfaces += 1
+                    if frame["allocatable"] and frame["arrays"]:
+                        shaped.setdefault(frame["name"], []).extend(frame["arrays"])
+                continue
+            if block_close.match(code):
+                if not stack or stack[-1]["kind"] != "block":
+                    problems.append("%s:%d: `end block` closes no block this walker opened -- fix the "
+                                    "walker" % (where, lineno))
+                    break
+                stack.pop()
+                continue
+            header = procedure_header(code)
+            if header:
+                prefix, kind, name, dummies, result = header
+                stack.append({
+                    "kind": kind, "name": name, "line": lineno, "interface": depth > 0,
+                    "module": bool(re.search(r"\bmodule\b", prefix, re.I)),
+                    "dummies": [d.strip().lower() for d in _split_args(dummies) if d.strip()],
+                    "result": result or name, "allocatable": False, "arrays": []})
+                continue
+            if interface_open.match(code):
+                depth += 1
+                continue
+            if interface_close.match(code):
+                depth = max(depth - 1, 0)
+                continue
+            if depth > 0 and not stack:
+                continue    # a generic's `module procedure` list
+            opened = body_open.match(code)
+            if opened:
+                bodies.append((where, lineno, opened.group(1).lower()))
+                stack.append({"kind": "body", "name": opened.group(1).lower(), "line": lineno,
+                              "interface": False, "module": True, "dummies": [], "result": None,
+                              "allocatable": False, "arrays": []})
+                continue
+            if block_open.match(code) and stack:
+                stack.append({"kind": "block", "name": "", "line": lineno, "interface": stack[-1]["interface"],
+                              "module": False, "dummies": [], "result": None, "allocatable": False,
+                              "arrays": []})
+                continue
+            if not stack or "::" not in code:
+                continue
+            frame = stack[-1]
+            attrs, entities = code.split("::", 1)
+            attr_dims = re.search(r"\bdimension\s*\(([^)]*)\)", attrs, re.I)
+            declared_type = derived.match(attrs)
+            for entity in _split_args(entities):
+                found = re.match(r"\s*(\w+)\s*(?:\(([^)]*)\))?", entity)
+                if not found:
+                    continue
+                name = found.group(1).lower()
+                dims = found.group(2) if found.group(2) is not None else (
+                    attr_dims.group(1) if attr_dims else None)
+                if frame["kind"] == "function" and name == frame["result"]:
+                    if re.search(r"\ballocatable\b", attrs, re.I):
+                        frame["allocatable"] = True
+                    if re.search(r"^\s*procedure\s*\(", attrs, re.I) and re.search(r"\bpointer\b", attrs, re.I):
+                        problems.append(
+                            "%s:%d: function `%s` returns a procedure pointer -- nagfor -C=undefined "
+                            "panics on it (`No mapinfo.sym?`); hand the pointer back through an "
+                            "intent(out) dummy of a subroutine (fortran-gotchas.md, nagfor-specific "
+                            "gotchas)" % (where, frame["line"], frame["name"]))
+                if name in frame["dummies"]:
+                    if dims is not None and not dims.strip().endswith("*"):
+                        frame["arrays"].append(name)
+                    continue
+                if (declared_type and dims is not None and not frame["interface"]
+                        and name != frame["result"]
+                        and not re.search(r"\b(?:save|pointer|parameter|intent)\b", attrs, re.I)):
+                    locals_.append((where, lineno, declared_type.group(1).lower(), name))
+        else:
+            if stack:
+                problems.append("%s: %d procedure or block frame(s) left open (%s) -- fix the walker"
+                                % (where, len(stack), ", ".join(f["name"] or "block" for f in stack[:3])))
+
+    def finalizable(name, seen=()):
+        entry = types.get(name)
+        if entry is None or name in seen:
+            return False
+        seen = seen + (name,)
+        return (entry["final"] or bool(entry["parent"] and finalizable(entry["parent"], seen))
+                or any(finalizable(c, seen) for c in entry["components"]))
+
+    def through_a_component(name, seen=()):
+        entry = types.get(name)
+        if entry is None or name in seen:
+            return False
+        seen = seen + (name,)
+        return (any(finalizable(c, seen) for c in entry["components"])
+                or bool(entry["parent"] and through_a_component(entry["parent"], seen)))
+
+    if interfaces == 0 or not bodies or not any(finalizable(t) for t in types):
+        problems.append(
+            "found %d separate module function interface(s), %d abbreviated body(ies) and %d "
+            "finalizable type(s) -- a pattern has gone stale, so this check is testing nothing"
+            % (interfaces, len(bodies), sum(1 for t in types if finalizable(t))))
+    for where, lineno, name in bodies:
+        if name in shaped:
+            problems.append(
+                "%s:%d: `module procedure %s` abbreviates a function with an allocatable result and "
+                "an array dummy (%s) -- nagfor -C=undefined cannot compile that form; restate the "
+                "interface in full (fortran-gotchas.md, nagfor-specific gotchas)"
+                % (where, lineno, name, ", ".join(sorted(set(shaped[name])))))
+    for where, lineno, type_name, entity in locals_:
+        if through_a_component(type_name):
+            problems.append(
+                "%s:%d: local array `%s` of `%s`, a type with a finalizable component -- nagfor "
+                "-C=undefined cannot compile its finalization; hold the array in an allocatable "
+                "component of a local scalar (fortran-gotchas.md, nagfor-specific gotchas)"
+                % (where, lineno, entity, type_name))
+    return problems
+
+
 def _pure_callable_names():
     """Names a scenario can call that a compiler is entitled to DELETE when the result is unused.
 
@@ -7596,6 +7834,8 @@ CHECKS = (
     ("feature_risks.md is a short register of open risks, and only open ones are cited",
      check_risk_register_shape),
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
+    ("no source shape nagfor -C=undefined cannot compile",
+     check_no_shape_nagfor_undefined_cannot_compile),
     ("pf_index_map components are adopted and reset",
      check_index_map_components_are_adopted_and_reset),
     ("every impure parquet_index abort goes through ix_abort",

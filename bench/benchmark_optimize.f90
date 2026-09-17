@@ -134,16 +134,17 @@ contains
 
     end function spin_sphere
 
-    !> Selects one of the module's objectives by name, as a procedure pointer.
+    !> Selects one of the module's objectives by name, into a procedure pointer.
     !!
-    !! A `select case` returning a pointer rather than four copies of each measurement loop. Every
+    !! A `select case` setting a pointer rather than four copies of each measurement loop. Every
     !! callback in this library is a module procedure, never an internal one, so these are the
     !! program's own contained procedures reached through a pointer rather than passed directly --
-    !! which is the same thing at the call site and keeps the tables to one loop each.
-    function pick(name) result(f)
+    !! which is the same thing at the call site and keeps the tables to one loop each. A subroutine
+    !! rather than a function returning the pointer: nagfor 7.2 panics on a procedure-pointer
+    !! function result under `-C=undefined` (`.claude/rules/fortran-gotchas.md`).
+    subroutine pick(name, f)
         character(len=*), intent(in) :: name !! the objective's name
-
-        procedure(pf_objective_func), pointer :: f !! the objective
+        procedure(pf_objective_func), pointer, intent(out) :: f !! the objective
 
         select case (name)
         case ("rosenbrock")
@@ -159,7 +160,7 @@ contains
             error stop 1
         end select
 
-    end function pick
+    end subroutine pick
 
 end module benchmark_optimize_kernels
 
@@ -303,12 +304,10 @@ contains
         type(boxed_objective)  :: boxed
         real(real64) :: x(n), lower(n), upper(n), fmin, best
         integer :: ev(seeds), s, np
-        !> The objective, bound to a local pointer rather than passed as `pick(name)` directly:
-        !! a pointer-valued function result used straight as an actual argument is rejected by ifx
-        !! (`error #6637`) and miscompiled by nagfor (`.claude/rules/fortran-gotchas.md`).
+        !> The objective named `name`, as `pick` selects it.
         procedure(pf_objective_func), pointer :: fobj
 
-        fobj => pick(name)
+        call pick(name, fobj)
         lower = lo1
         upper = hi1
 

@@ -161,7 +161,21 @@ contains
 
     end procedure interp_2d_oneshot_scalar
 
-    module procedure interp_2d_oneshot_array
+    ! The FULLY RESTATED form, not `module procedure interp_2d_oneshot_array`, for the reason
+    ! `interp_1d_oneshot_array` gives: a result shaped by a later assumed-shape dummy is miscompiled
+    ! by nagfor 7.2 in the abbreviated form.
+    module function interp_2d_oneshot_array(x, y, z, xq, yq, method, bc, outside, context) result(zq)
+        implicit none
+        real(real64), intent(in)               :: x(:)          !! the grid lines along `x`
+        real(real64), intent(in)               :: y(:)          !! the grid lines along `y`
+        real(real64), intent(in)               :: z(:, :)       !! the values, shaped `(size(x), size(y))`
+        real(real64), intent(in)               :: xq(:)         !! the queries' `x`
+        real(real64), intent(in)               :: yq(:)         !! the queries' `y`, one per `xq`
+        character(len=*), intent(in), optional :: method        !! `"linear"` or `"cubic"`
+        character(len=*), intent(in), optional :: bc            !! the spline's end condition
+        character(len=*), intent(in), optional :: outside       !! the out-of-range policy
+        character(len=*), intent(in), optional :: context       !! call-site text
+        real(real64)                           :: zq(size(xq))  !! the interpolated values
 
         type(pf_interp_2d) :: g
 
@@ -174,7 +188,7 @@ contains
         call interp_2d_build(g, "pf_interp", x, y, z, method, bc, outside, context)
         zq = g%eval(xq, yq)
 
-    end procedure interp_2d_oneshot_array
+    end function interp_2d_oneshot_array
 
     !> Validates a grid and its options, in the order of the guide page's table, and builds the
     !! interpolant over it.

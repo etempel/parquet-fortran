@@ -485,6 +485,13 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   `(a < b) .neqv. ((a < 0) .neqv. (b < 0))`. A most-negative constant whose `ieor` result is stored
   rather than compared (`SORT_SIGN_BIT`) is safe. Printing the expression shows the right value
   (`temporal_ts_to_unix_overflow_negative` scenario).
+- **An abbreviated `module procedure` body is miscompiled when the FUNCTION RESULT is shaped by an
+  assumed-shape dummy that is not the first argument** (`yq(size(xq))` with `xq` third, or
+  `character(len=size(xq))`): the dummies arrive with wrong sizes and garbage addresses, so the
+  body aborts in a guard on valid input, segfaults, or dies with
+  `Cannot allocate array temporary - out of memory`. A result sized from the first dummy or a
+  scalar one, or an allocatable result, compiles correctly. Restate the full interface in the body (`interp_1d_oneshot_array`,
+  `src/parquet_interpolate_1d.f90`). Nothing but a nagfor `fpm test` sees it.
 - **Keep finalizers deallocate-only; never assign a scalar component in one.** Under
   `-C=undefined` an implicitly invoked finalizer indexes a null definedness map and segfaults on
   the first scalar store, with no diagnostic. Do not re-add the finalizers removed from

@@ -26,7 +26,11 @@ of the toolchains wherever they are installed.
 ## Stale build cache
 
 - **`fpm build` does not build `test/`**; use `fpm build --tests` before running a test binary by
-  hand. A `print` marker on the first executable statement of a block not appearing means the
+  hand.
+- **A failed LINK leaves the previous executables in place, and fpm then reports `Project is up to
+  date`**: every later `fpm test` runs the old binary against the new library. After any link error
+  delete that tree's test executables (`find build/<tree>/test -type f -perm -u+x ! -name "*.*"
+  -delete`) and rebuild before reading a result. A `print` marker on the first executable statement of a block not appearing means the
   binary is old.
 - `fpm clean --skip` forces a clean rebuild without touching dependencies. Reach for it first when a
   gate change appears not to take effect, when a mutation's symptom persists after the source was

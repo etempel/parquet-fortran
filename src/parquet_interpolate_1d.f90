@@ -265,14 +265,30 @@ contains
 
     end procedure interp_1d_oneshot_scalar
 
-    module procedure interp_1d_oneshot_array
+    ! The FULLY RESTATED form, not `module procedure interp_1d_oneshot_array`: the result's shape is
+    ! taken from `xq`, an assumed-shape dummy that is not the first argument, and nagfor 7.2 compiles
+    ! the abbreviated form of that with every dummy's descriptor wrong -- `x` and `y` arrive with
+    ! the wrong sizes and `xq` at a garbage address.
+    module function interp_1d_oneshot_array(x, y, xq, method, bc, slopes, outside, is_valid, &
+                                            context) result(yq)
+        implicit none
+        real(real64), intent(in)               :: x(:)          !! abscissae, strictly monotonic
+        real(real64), intent(in)               :: y(:)          !! ordinates, one per abscissa
+        real(real64), intent(in)               :: xq(:)         !! the query points
+        character(len=*), intent(in), optional :: method        !! `"linear"`, `"cubic"` or `"pchip"`
+        character(len=*), intent(in), optional :: bc            !! the spline's end condition
+        real(real64), intent(in), optional     :: slopes(:)     !! end slopes for `bc="clamped"`
+        character(len=*), intent(in), optional :: outside       !! the out-of-range policy
+        logical, intent(in), optional          :: is_valid(:)   !! `.false.` drops that point
+        character(len=*), intent(in), optional :: context       !! call-site text
+        real(real64)                           :: yq(size(xq))  !! the interpolated values
 
         type(pf_interp_1d) :: c
 
         call interp_1d_build(c, "pf_interp", x, y, method, bc, slopes, outside, is_valid, context)
         yq = c%eval(xq)
 
-    end procedure interp_1d_oneshot_array
+    end function interp_1d_oneshot_array
 
     !> Validates a table and its options, in the order of the guide page's table, and builds the
     !! interpolant over it.

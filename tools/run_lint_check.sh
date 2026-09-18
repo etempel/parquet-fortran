@@ -30,12 +30,13 @@
 # The `CHECKS` array below is the list; it is not enumerated here as well, because a second copy of
 # it would go stale the first time one was added.
 #
-# ONE ENTRY NEEDS A PYTHON LIBRARY RATHER THAN JUST THE INTERPRETER: `generate_stats_vectors.py
-# --check` re-derives `parquet_stats`' golden expectations at 50 digits, so it needs `mpmath`
-# (`pip install mpmath`; CI's lint job installs Ubuntu's `python3-mpmath` for the same reason).
-# Without it that one check fails and the rest still run. Its `--self-test`, which validates the
-# model against numpy/pandas/scipy, is heavier still and is deliberately in neither list -- it is a
-# step to run when the MODEL changes, not on every push.
+# TWO ENTRIES NEED A PYTHON LIBRARY RATHER THAN JUST THE INTERPRETER: `generate_stats_vectors.py
+# --check` and `generate_kde_vectors.py --check` re-derive `parquet_stats`' and `parquet_kde`'s golden
+# expectations at 50 digits, so they need `mpmath` (`pip install mpmath`; CI's lint job installs
+# Ubuntu's `python3-mpmath` for the same reason). Without it those two checks fail and the rest
+# still run. Their `--self-test`s, which validate each model against the Python libraries, are
+# heavier still and are deliberately in neither list -- steps to run when a MODEL changes, not on
+# every push.
 #
 # Apart from that one dependency it needs nothing but `python3` and
 # `bash` -- no fpm, no gfortran, no Arrow -- and takes about ten seconds, so it is worth running
@@ -86,6 +87,7 @@ CHECKS=(
     "python3 tools/generate_parquet_stats.py --self-test"
     "python3 tools/generate_parquet_stats.py --check"
     "python3 tools/generate_stats_vectors.py --check"
+    "python3 tools/generate_kde_vectors.py --check"
     "python3 tools/generate_interpolate_vectors.py --check"
     "bash tools/generate_parquet_maml.sh base --check"
     "python3 tools/generate_user_table_code.py --self-test"

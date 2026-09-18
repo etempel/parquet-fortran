@@ -4055,6 +4055,62 @@ program error_scenarios
         call scenario_transform_context_reported()
     case ("transform_context_capped")
         call scenario_transform_context_capped()
+    case ("kde_bandwidth_zero")
+        call scenario_kde_bandwidth_zero()
+    case ("kde_bandwidth_nan")
+        call scenario_kde_bandwidth_nan()
+    case ("kde_bandwidth_and_rule")
+        call scenario_kde_bandwidth_and_rule()
+    case ("kde_unknown_rule")
+        call scenario_kde_unknown_rule()
+    case ("kde_adjust_negative")
+        call scenario_kde_adjust_negative()
+    case ("kde_unknown_kernel")
+        call scenario_kde_unknown_kernel()
+    case ("kde_bound_infinite")
+        call scenario_kde_bound_infinite()
+    case ("kde_lower_not_below_upper")
+        call scenario_kde_lower_not_below_upper()
+    case ("kde_boundary_without_bound")
+        call scenario_kde_boundary_without_bound()
+    case ("kde_unknown_boundary")
+        call scenario_kde_unknown_boundary()
+    case ("kde_weights_size")
+        call scenario_kde_weights_size()
+    case ("kde_is_valid_size")
+        call scenario_kde_is_valid_size()
+    case ("kde_negative_weight")
+        call scenario_kde_negative_weight()
+    case ("kde_weight_type")
+        call scenario_kde_weight_type()
+    case ("kde_real32_weights_size")
+        call scenario_kde_real32_weights_size()
+    case ("kde_threads_zero")
+        call scenario_kde_threads_zero()
+    case ("kde_query_unfitted")
+        call scenario_kde_query_unfitted()
+    case ("kde_query_after_clear")
+        call scenario_kde_query_after_clear()
+    case ("kde_accessor_unfitted")
+        call scenario_kde_accessor_unfitted()
+    case ("kde_pdf_size")
+        call scenario_kde_pdf_size()
+    case ("kde_cdf_size")
+        call scenario_kde_cdf_size()
+    case ("kde_quantile_size")
+        call scenario_kde_quantile_size()
+    case ("kde_quantile_p_above_one")
+        call scenario_kde_quantile_p_above_one()
+    case ("kde_quantile_p_nan")
+        call scenario_kde_quantile_p_nan()
+    case ("kde_curve_size")
+        call scenario_kde_curve_size()
+    case ("kde_curve_reversed_range")
+        call scenario_kde_curve_reversed_range()
+    case ("kde_curve_negative_cut")
+        call scenario_kde_curve_negative_cut()
+    case ("kde_curve_nonfinite_end")
+        call scenario_kde_curve_nonfinite_end()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -34268,5 +34324,369 @@ contains
         call pf_dct(x, y(1:4), context=repeat("abcdefghij", 15))
         print '(a)', "accepted y shorter than x with a long context"
     end subroutine scenario_transform_context_capped
+    !
+    ! ---- pf_kde: every caller contract it refuses -----------------------------------------
+    !
+    !> Each `pf_kde` scenario first makes the nearest LEGAL call and prints a "kde control" line,
+    !> then makes the smallest call that provokes exactly one abort and prints what it accepted.
+    !> The control is what shows the guard refuses the bad value rather than the whole call.
+    !
+    !> Proves that pf_kde%fit refuses a zero bandwidth.
+    subroutine scenario_kde_bandwidth_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=1.0e-300_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, bandwidth=0.0_real64)
+        print '(a)', "accepted a zero bandwidth"
+    end subroutine scenario_kde_bandwidth_zero
+    !
+    !> Proves that pf_kde%fit refuses a NaN bandwidth.
+    subroutine scenario_kde_bandwidth_nan()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
+            ieee_negative_inf
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=1.0_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, bandwidth=ieee_value(1.0_real64, ieee_quiet_nan))
+        print '(a)', "accepted a NaN bandwidth"
+    end subroutine scenario_kde_bandwidth_nan
+    !
+    !> Proves that pf_kde%fit refuses bandwidth= and rule= together.
+    subroutine scenario_kde_bandwidth_and_rule()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, rule="scott")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, bandwidth=1.0_real64, rule="scott")
+        print '(a)', "accepted a bandwidth and a rule"
+    end subroutine scenario_kde_bandwidth_and_rule
+    !
+    !> Proves that pf_kde%fit refuses an unknown rule.
+    subroutine scenario_kde_unknown_rule()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, rule="Scott")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, rule="sheather")
+        print '(a)', "accepted an unknown rule"
+    end subroutine scenario_kde_unknown_rule
+    !
+    !> Proves that pf_kde%fit refuses a negative adjust.
+    subroutine scenario_kde_adjust_negative()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, adjust=0.5_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, adjust=-1.0_real64)
+        print '(a)', "accepted a negative adjust"
+    end subroutine scenario_kde_adjust_negative
+    !
+    !> Proves that pf_kde%fit refuses an unknown kernel.
+    subroutine scenario_kde_unknown_kernel()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, kernel="Box")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, kernel="triangle")
+        print '(a)', "accepted an unknown kernel"
+    end subroutine scenario_kde_unknown_kernel
+    !
+    !> Proves that pf_kde%fit refuses an infinite bound.
+    subroutine scenario_kde_bound_infinite()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
+            ieee_negative_inf
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, lower=0.0_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, upper=ieee_value(1.0_real64, ieee_positive_inf))
+        print '(a)', "accepted an infinite bound"
+    end subroutine scenario_kde_bound_infinite
+    !
+    !> Proves that pf_kde%fit refuses lower >= upper.
+    subroutine scenario_kde_lower_not_below_upper()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, lower=0.0_real64, upper=5.0_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, lower=5.0_real64, upper=5.0_real64)
+        print '(a)', "accepted lower equal to upper"
+    end subroutine scenario_kde_lower_not_below_upper
+    !
+    !> Proves that pf_kde%fit refuses boundary= without a bound.
+    subroutine scenario_kde_boundary_without_bound()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, lower=0.0_real64, boundary="reflect")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, boundary="reflect")
+        print '(a)', "accepted boundary= without a bound"
+    end subroutine scenario_kde_boundary_without_bound
+    !
+    !> Proves that pf_kde%fit refuses an unknown boundary.
+    subroutine scenario_kde_unknown_boundary()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, lower=0.0_real64, boundary="Reflect")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, lower=0.0_real64, boundary="mirror")
+        print '(a)', "accepted an unknown boundary"
+    end subroutine scenario_kde_unknown_boundary
+    !
+    !> Proves that pf_kde%fit refuses weights of the wrong length, in the family's words.
+    subroutine scenario_kde_weights_size()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, weights=[1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, weights=[1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a)', "accepted three weights for four values"
+    end subroutine scenario_kde_weights_size
+    !
+    !> Proves that pf_kde%fit refuses is_valid of the wrong length, in the family's words.
+    subroutine scenario_kde_is_valid_size()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, is_valid=[.true., .true., .true., .true.])
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, is_valid=[.true., .true., .true., .true., .true.])
+        print '(a)', "accepted five flags for four values"
+    end subroutine scenario_kde_is_valid_size
+    !
+    !> Proves that pf_kde%fit refuses a negative weight, in the family's words.
+    subroutine scenario_kde_negative_weight()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, weights=[1.0_real64, 0.0_real64, 1.0_real64, 1.0_real64])
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, weights=[1.0_real64, -1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a)', "accepted a negative weight"
+    end subroutine scenario_kde_negative_weight
+    !
+    !> Proves that pf_kde%fit refuses an unknown weight_type, in the family's words.
+    subroutine scenario_kde_weight_type()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, weights=[1.0_real64, 2.0_real64, 1.0_real64, 1.0_real64], weight_type="frequency")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, weights=[1.0_real64, 2.0_real64, 1.0_real64, 1.0_real64], weight_type="bogus")
+        print '(a)', "accepted an unknown weight_type"
+    end subroutine scenario_kde_weight_type
+    !
+    !> Proves that pf_kde%fit's real32 form refuses weights of the wrong length.
+    subroutine scenario_kde_real32_weights_size()
+        type(pf_kde) :: k
+        real(real32) :: x(4)
+
+        x = [1.0, 2.0, 3.0, 4.0]
+        call k%fit(x, weights=[1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, weights=[1.0_real64, 1.0_real64])
+        print '(a)', "accepted two weights for four values"
+    end subroutine scenario_kde_real32_weights_size
+    !
+    !> Proves that pf_kde%fit refuses threads=0.
+    subroutine scenario_kde_threads_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, threads=1)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, threads=0)
+        print '(a)', "accepted threads=0"
+    end subroutine scenario_kde_threads_zero
+    !
+    !> Proves that pf_kde%pdf refuses an object that was never fitted.
+    subroutine scenario_kde_query_unfitted()
+        type(pf_kde) :: k, fresh
+        real(real64) :: x(4), f
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%pdf(2.0_real64, f)
+        print '(a, es22.15)', "kde control density: ", f
+        call fresh%pdf(2.0_real64, f)
+        print '(a, es22.15)', "answered an unfitted query: ", f
+    end subroutine scenario_kde_query_unfitted
+    !
+    !> Proves that pf_kde%cdf refuses an object that %clear unfitted.
+    subroutine scenario_kde_query_after_clear()
+        type(pf_kde) :: k
+        real(real64) :: x(4), p
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%cdf(2.0_real64, p)
+        print '(a, es22.15)', "kde control probability: ", p
+        call k%clear()
+        call k%cdf(2.0_real64, p)
+        print '(a, es22.15)', "answered a query after %clear: ", p
+    end subroutine scenario_kde_query_after_clear
+    !
+    !> Proves that pf_kde%bandwidth refuses an object that was never fitted.
+    subroutine scenario_kde_accessor_unfitted()
+        type(pf_kde) :: k, fresh
+        real(real64) :: x(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        print '(a, es22.15)', "answered an unfitted bandwidth: ", fresh%bandwidth()
+    end subroutine scenario_kde_accessor_unfitted
+    !
+    !> Proves that pf_kde%pdf refuses an output of the wrong size.
+    subroutine scenario_kde_pdf_size()
+        type(pf_kde) :: k
+        real(real64) :: x(4), q(3), f(3)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        q = [1.0_real64, 2.0_real64, 3.0_real64]
+        call k%pdf(q, f)
+        print '(a, es22.15)', "kde control density: ", f(1)
+        call k%pdf(q, f(1:2))
+        print '(a)', "accepted two outputs for three points"
+    end subroutine scenario_kde_pdf_size
+    !
+    !> Proves that pf_kde%cdf refuses an output of the wrong size.
+    subroutine scenario_kde_cdf_size()
+        type(pf_kde) :: k
+        real(real64) :: x(4), q(3), p(3)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        q = [1.0_real64, 2.0_real64, 3.0_real64]
+        call k%cdf(q, p)
+        print '(a, es22.15)', "kde control probability: ", p(1)
+        call k%cdf(q, p(1:2))
+        print '(a)', "accepted two outputs for three points"
+    end subroutine scenario_kde_cdf_size
+    !
+    !> Proves that pf_kde%quantile refuses an output of the wrong size.
+    subroutine scenario_kde_quantile_size()
+        type(pf_kde) :: k
+        real(real64) :: x(4), p(3), q(3)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        p = [0.1_real64, 0.5_real64, 0.9_real64]
+        call k%quantile(p, q)
+        print '(a, es22.15)', "kde control quantile: ", q(1)
+        call k%quantile(p, q(1:2))
+        print '(a)', "accepted two outputs for three probabilities"
+    end subroutine scenario_kde_quantile_size
+    !
+    !> Proves that pf_kde%quantile refuses p above one.
+    subroutine scenario_kde_quantile_p_above_one()
+        type(pf_kde) :: k
+        real(real64) :: x(4), q
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%quantile(1.0_real64, q)
+        print '(a, es22.15)', "kde control quantile: ", q
+        call k%quantile(1.5_real64, q)
+        print '(a, es22.15)', "accepted p = 1.5: ", q
+    end subroutine scenario_kde_quantile_p_above_one
+    !
+    !> Proves that pf_kde%quantile refuses a NaN p.
+    subroutine scenario_kde_quantile_p_nan()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
+            ieee_negative_inf
+        type(pf_kde) :: k
+        real(real64) :: x(4), q
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%quantile(0.0_real64, q)
+        print '(a, es22.15)', "kde control quantile: ", q
+        call k%quantile(ieee_value(1.0_real64, ieee_quiet_nan), q)
+        print '(a, es22.15)', "accepted a NaN p: ", q
+    end subroutine scenario_kde_quantile_p_nan
+    !
+    !> Proves that pf_kde%curve refuses x and f of different sizes.
+    subroutine scenario_kde_curve_size()
+        type(pf_kde) :: k
+        real(real64) :: x(4), xg(5), fg(5)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%curve(xg, fg)
+        print '(a, es22.15)', "kde control curve: ", fg(3)
+        call k%curve(xg, fg(1:4))
+        print '(a)', "accepted a curve of mismatched sizes"
+    end subroutine scenario_kde_curve_size
+    !
+    !> Proves that pf_kde%curve refuses xmin >= xmax.
+    subroutine scenario_kde_curve_reversed_range()
+        type(pf_kde) :: k
+        real(real64) :: x(4), xg(5), fg(5)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%curve(xg, fg, xmin=0.0_real64, xmax=5.0_real64)
+        print '(a, es22.15)', "kde control curve: ", fg(3)
+        call k%curve(xg, fg, xmin=5.0_real64, xmax=5.0_real64)
+        print '(a)', "accepted an empty range"
+    end subroutine scenario_kde_curve_reversed_range
+    !
+    !> Proves that pf_kde%curve refuses a negative cut.
+    subroutine scenario_kde_curve_negative_cut()
+        type(pf_kde) :: k
+        real(real64) :: x(4), xg(5), fg(5)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%curve(xg, fg, cut=0.0_real64)
+        print '(a, es22.15)', "kde control curve: ", fg(3)
+        call k%curve(xg, fg, cut=-1.0_real64)
+        print '(a)', "accepted a negative cut"
+    end subroutine scenario_kde_curve_negative_cut
+    !
+    !> Proves that pf_kde%curve refuses an infinite end.
+    subroutine scenario_kde_curve_nonfinite_end()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
+            ieee_negative_inf
+        type(pf_kde) :: k
+        real(real64) :: x(4), xg(5), fg(5)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x)
+        call k%curve(xg, fg, xmin=-10.0_real64)
+        print '(a, es22.15)', "kde control curve: ", fg(3)
+        call k%curve(xg, fg, xmin=ieee_value(1.0_real64, ieee_negative_inf))
+        print '(a)', "accepted an infinite end"
+    end subroutine scenario_kde_curve_nonfinite_end
     !
 end program error_scenarios

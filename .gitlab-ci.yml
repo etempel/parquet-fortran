@@ -100,14 +100,15 @@ stages:
 # file that never made it back into the generator's template (see CLAUDE.md's "Some src/*.f90
 # files are generated" for why this class of bug is easy to introduce silently).
 #
-# generate_stats_vectors.py --check is the one entry here that needs a python LIBRARY (mpmath,
-# installed by this job's own before_script above) rather than nothing but the interpreter. It is
-# not a generated-source check like its neighbours: what it re-derives is test/test_stats_golden.f90,
-# the 50-digit oracle parquet_stats' accuracy claims are asserted against, so a hand-edit that
+# generate_stats_vectors.py --check and generate_kde_vectors.py --check are the two entries here that
+# need a python LIBRARY (mpmath, installed by this job's own before_script above) rather than nothing
+# but the interpreter. They are not generated-source checks like their neighbours: what they
+# re-derive is test/test_stats_golden.f90 and test/test_kde_golden.f90, the 50-digit oracles
+# parquet_stats' and parquet_kde's accuracy claims are asserted against, so a hand-edit that
 # loosened one of those expectations would otherwise be invisible -- every test would still pass,
-# against numbers nobody computed. Its --self-test (which validates the model against
-# numpy/pandas/scipy) is deliberately NOT here: it needs three more heavyweight packages and is a
-# step to run when the model changes, not on every push.
+# against numbers nobody computed. Their --self-tests (which validate each model against the Python
+# libraries) are deliberately NOT here: they need heavyweight packages and are steps to run when a
+# model changes, not on every push.
 #
 # `tools/run_lint_check.sh` runs this same list locally (see CONTRIBUTING.md's "Other tools/
 # helpers"). Its own CHECKS array is kept in sync with the `script:` below BY HAND -- adding a
@@ -118,9 +119,9 @@ lint:
   before_script:
     - apt-get update -y
     # python3-mpmath is the ONE library dependency this job has, and it exists solely for
-    # generate_stats_vectors.py --check below: that check re-derives parquet_stats' golden
-    # expectations at 50 decimal digits rather than comparing against a stored copy, so the
-    # oracle has to be present for it to mean anything. Ubuntu's own package is used rather
+    # generate_stats_vectors.py --check and generate_kde_vectors.py --check below: they re-derive
+    # the golden expectations at 50 decimal digits rather than comparing against a stored copy, so
+    # the oracle has to be present for them to mean anything. Ubuntu's own package is used rather
     # than a pip/pipx install because it needs no network beyond apt and no venv; if a future
     # image drops it, `pipx install --include-deps` cannot supply a LIBRARY -- use
     # `apt-get install -y python3-pip && pip install --break-system-packages mpmath` instead.
@@ -136,6 +137,7 @@ lint:
     - python3 tools/generate_parquet_stats.py --self-test
     - python3 tools/generate_parquet_stats.py --check
     - python3 tools/generate_stats_vectors.py --check
+    - python3 tools/generate_kde_vectors.py --check
     - python3 tools/generate_interpolate_vectors.py --check
     - bash tools/generate_parquet_maml.sh base --check
     - python3 tools/generate_user_table_code.py --self-test

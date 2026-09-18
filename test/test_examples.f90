@@ -276,6 +276,7 @@ contains
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
     !> parquet_root (pf_find_root/pf_bracket_expansion/pf_root_info/PF_ROOT_OK),
     !> parquet_transform (pf_dct/pf_is_pow2),
+    !> parquet_kde (pf_kde),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
@@ -521,6 +522,17 @@ contains
             call pf_dct(seq, coef)
             call check(error, pf_is_pow2(size(seq)) .and. abs(coef(1) - 20.0_real64) <= 1.0e-13_real64, &
                 "pf_dct must be reachable from use parquet alone, with y(1) twice the sum")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_kde: the estimator, fitted and queried.
+        block
+            type(pf_kde) :: dens
+            real(real64) :: p
+            call dens%fit([1.0_real64, 2.0_real64, 3.0_real64], bandwidth=0.5_real64)
+            call dens%cdf(2.0_real64, p)
+            call check(error, abs(p - 0.5_real64) <= 1.0e-15_real64, &
+                "pf_kde must be reachable from use parquet alone, with the CDF of a symmetric sample 0.5 at its centre")
             if (allocated(error)) return
         end block
 

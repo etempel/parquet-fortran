@@ -2003,6 +2003,58 @@ contains
 
 end module test_module_surface_transform
 
+!> `parquet_kde` alone: a fit, a query, and the output pair `%print` reads.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! makes two claims nothing else checks: that `use parquet_kde` compiles what the footprint file
+!! says, and that it re-exports the verbosity and message-stream pair its `%print` reads -- without
+!! them a program importing only this module could not silence the printer.
+module test_module_surface_kde
+    use parquet_kde                      ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_kde_surface
+
+contains
+
+    !> Exercises the estimator and the re-exported output pair through `use parquet_kde` alone.
+    subroutine check_kde_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_kde) :: k
+        real(real64) :: f
+        logical :: ok
+        character(len=:), allocatable :: saved, now
+
+        what = ""
+        call k%fit([-1.0_real64, 0.0_real64, 1.0_real64], bandwidth=1.0_real64, ok=ok)
+        call k%pdf(0.0_real64, f)
+        ! Three unit Gaussians at -1, 0 and 1, read at 0: (phi(1) + phi(0) + phi(1))/3, over the
+        ! mass the five-sd cut keeps.
+        if (.not. ok .or. abs(f - (2.0_real64*0.24197072451914337_real64 + 0.3989422804014327_real64) &
+            /3.0_real64/(1.0_real64 - 5.7330314375838782e-7_real64)) > 1.0e-15_real64) what = "pf_kde%pdf"
+
+        ! The output pair, round-tripped: the module re-exports both halves.
+        if (what == "") then
+            call parquet_get_verbosity(saved)
+            call parquet_set_verbosity("silent")
+            call parquet_get_verbosity(now)
+            call parquet_set_verbosity(saved)
+            if (now /= "silent") what = "parquet_set_verbosity"
+        end if
+        if (what == "") then
+            call parquet_get_message_stream(saved)
+            call parquet_set_message_stream("stderr")
+            call parquet_get_message_stream(now)
+            call parquet_set_message_stream(saved)
+            if (now /= "stderr") what = "parquet_set_message_stream"
+        end if
+
+    end subroutine check_kde_surface
+
+end module test_module_surface_kde
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -2018,6 +2070,7 @@ module test_module_surface
     use test_module_surface_prima, only : check_prima_surface
     use test_module_surface_root, only : check_root_surface
     use test_module_surface_transform, only : check_transform_surface
+    use test_module_surface_kde, only : check_kde_surface
     use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
@@ -2151,6 +2204,8 @@ contains
                          test_root_surface), &
             new_unittest("parquet_transform alone transforms, inverts and chooses a length", &
                          test_transform_surface), &
+            new_unittest("parquet_kde alone fits, queries and round-trips its output pair", &
+                         test_kde_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
             new_unittest("parquet_toml alone reads a whole configuration", &
@@ -2324,6 +2379,16 @@ contains
         call check(error, what == "", &
             "the transform was not usable through `use parquet_transform` alone: " // what)
     end subroutine test_transform_surface
+
+    !> The test-drive wrapper over check_kde_surface.
+    subroutine test_kde_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_kde_surface(what)
+        call check(error, what == "", &
+            "the estimator was not usable through `use parquet_kde` alone: " // what)
+    end subroutine test_kde_surface
 
     !> The test-drive wrapper over check_logging_surface.
     subroutine test_logging_surface(error)

@@ -99,6 +99,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pf_optimize_info` and `pf_optimize_history` with `parquet_optimize` and re-exports them. An
   Arrow-free entry module. See
   [Powell's derivative-free solvers](doc/pages/utilities/prima.md).
+- **Kernel density estimation: `parquet_kde`.** `pf_kde` fits a one-dimensional density to an
+  array it retains and answers `%pdf`, `%cdf` and `%quantile` exactly anywhere and `%curve` on
+  equally spaced points. Four kernels (`gaussian`, `epanechnikov`, `bspline`, `box`), with the
+  bandwidth the kernel's standard deviation; Silverman's and Scott's rules, a number, and
+  `adjust=`; per-element weights and nulls under the `pf_*` family's rules, with `n_eff` in the
+  rules; `lower=`/`upper=` for a bounded support, corrected by renormalisation or reflection. An
+  Arrow-free entry module. See [Kernel density estimation](doc/pages/utilities/kernel-density.md).
 - **A direction inside a HEALPix pixel, not just at its centre**:
   `pf_healpix_grid%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised to any position in the
   pixel's square in the equal-area projection, so a `(dx, dy)` uniform over the unit square is a

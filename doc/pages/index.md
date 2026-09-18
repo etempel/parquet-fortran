@@ -16,14 +16,14 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the list/struct/map container columns, the date/time/timestamp types, sorting,
-array statistics, random numbers and sampling, spatial neighbour search, key-to-index lookup,
+array statistics, kernel density estimation, random numbers and sampling, spatial neighbour search, key-to-index lookup,
 sphere pixelisation, random points in sky regions, logging for your own program, TOML configuration
 files, numeric, text and path helpers, and the process-global settings. Every page below assumes
 that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
-`parquet_argsort`, `parquet_stats`, `parquet_integrate`, `parquet_interpolate`, `parquet_optimize`,
+`parquet_argsort`, `parquet_stats`, `parquet_kde`, `parquet_integrate`, `parquet_interpolate`, `parquet_optimize`,
 `parquet_prima`, `parquet_root`, `parquet_transform`,
 `parquet_sampling`, `parquet_spatial`,
 `parquet_healpix`, `parquet_sphere`,
@@ -60,7 +60,7 @@ point in the library.
   touched — or built in memory and written out; then changed in place, joined against another table
   on one or more key columns, and grouped by key columns for one answer per group.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
-  statistics, numerical integration, interpolation of tabulated data, function minimisation,
+  statistics, kernel density estimation, numerical integration, interpolation of tabulated data, function minimisation,
   Powell's derivative-free solvers, root finding in one variable,
   the discrete cosine transform,
   reproducible random numbers and the sampling built on them,
@@ -75,7 +75,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 44 pages, in reading order. (This list, each group's own page list and the
+All 45 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -115,6 +115,7 @@ All 44 pages, in reading order. (This list, each group's own page list and the
 
 - [Sorting, ranking and selection](utilities/sorting.html)
 - [Array statistics with the `pf_` reduction family](utilities/statistics.html)
+- [Kernel density estimation with `parquet_kde`](utilities/kernel-density.html)
 - [Numerical integration with pf_integrate](utilities/integration.html)
 - [Interpolation of tabulated data with parquet_interpolate](utilities/interpolation.html)
 - [Optimisation: minimising a function of one or many variables](utilities/optimization.html)

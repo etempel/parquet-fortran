@@ -272,6 +272,7 @@ GENERATED_FILES = [
     TEST / "test_path_vectors.f90",
     TEST / "test_interpolate_golden.f90",
     TEST / "test_sphere_vectors.f90",
+    TEST / "test_kde_golden.f90",
     # test/test_healpix_vectors.f90 BELONGS here and is deliberately not listed yet. Adding it
     # fails immediately on a real gap -- its `end module` line carries no `! GCOVR_EXCL_LINE`,
     # which is fixed in tools/generate_healpix_reference.py but only reaches the file when
@@ -1248,7 +1249,7 @@ DIRECT_PRINT_ALLOWED = {
     # stream is named anywhere in it.
     "parquet_print_settings", "print_one", "print_text", "print_big",
     "table_print_stat", "display_rows", "schema_print_schema_info", "col_print", "psv_print",
-    "obj_print",
+    "obj_print", "kde_print",
     # ---- parquet_logging: the separate system described above ----
     # `machinery_warning` reports a failure of the logging machinery ITSELF, which is why it
     # bypasses sinks, layout and the output critical section alike and writes straight to
@@ -2651,6 +2652,22 @@ def check_parquet_transform_stays_arrow_free():
         "Transforming a sequence must not require the Arrow stack.")
 
 
+def check_parquet_kde_stays_arrow_free():
+    """`use parquet_kde` must not reach parquet_bindings.
+
+    Kernel density estimation reaches no reader, no writer and no C++ setting: its one library
+    tier edge is `parquet_stats` (the rules' scale and the family's population rules), and what it
+    prints it prints through `parquet_settings_base`, which is Arrow-free by construction. The
+    obvious import to add is `parquet_settings` for the verbosity pair -- which would put the C++
+    boundary under every density estimate; `parquet_settings_base` already carries the pair.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_kde",
+        "Estimating a density must not require the Arrow stack.")
+
+
 def check_parquet_interpolate_stays_arrow_free():
     """`use parquet_interpolate` must not reach parquet_bindings.
 
@@ -2856,6 +2873,19 @@ STATS_OPTIONAL_ORDER = (
     + ["unit", "name"]
 )
 
+#: `parquet_kde`'s own canonical sequence (feature_kde.md, 5.2): the estimator's settings, then the
+#: queries' range and output arguments, then the `pf_*` family's population run from `is_valid` to
+#: `threads` in the family's own order, then `%print`'s `unit`. A later stage's argument is inserted
+#: where it belongs here, which is safe exactly when every existing procedure stays a subsequence.
+KDE_OPTIONAL_ORDER = (
+    ["bandwidth", "rule", "adjust", "kernel", "adaptive", "pilot", "alpha", "bandwidth_max",
+     "lower", "upper", "boundary"]
+    + ["xmin", "xmax", "cut", "x", "normalise", "stream"]
+    + ["is_valid", "weights", "weight_type", "skipnan", "n_null", "n_nan", "n_outside", "ok",
+       "threads"]
+    + ["unit"]
+)
+
 #: Where each block of STATS_OPTIONAL_ORDER starts, by name, so the documentation check can slice
 #: it without repeating the names. Derived positions, never hardcoded indices.
 STATS_OPTIONAL_BLOCKS = ("n_valid", "retain", "sigma", "is_valid", "unit")
@@ -2919,9 +2949,20 @@ def check_stats_optional_argument_order():
     #
     # Neither name was taken by any existing procedure when it was inserted, so every signature
     # that passed before still passes -- which is the condition an insertion has to meet.
-    canonical = STATS_OPTIONAL_ORDER
+    bad = []
+    # `parquet_kde` keeps the same contract with a sequence of its own (KDE_OPTIONAL_ORDER), whose
+    # population run is the family's; the same subsequence rule is applied to its spec file.
+    for path, canonical, matrix in ((SRC / "parquet_stats.f90", STATS_OPTIONAL_ORDER,
+                                     "feature_pandas_S4.md's signature matrix"),
+                                    (SRC / "parquet_kde.f90", KDE_OPTIONAL_ORDER,
+                                     "feature_kde.md, section 5.2")):
+        bad += _optional_order_problems(path, canonical, matrix)
+    return bad
+
+
+def _optional_order_problems(path, canonical, matrix):
+    """The subsequence rule of `check_stats_optional_argument_order`, over one spec file."""
     rank = {name: i for i, name in enumerate(canonical)}
-    path = SRC / "parquet_stats.f90"
     if not path.exists():
         return ["%s: expected file is missing" % path.name]
 
@@ -2962,8 +3003,8 @@ def check_stats_optional_argument_order():
         unknown = [nm for nm in optional if nm not in rank]
         if unknown:
             bad.append("%s: optional argument(s) %s are not in the canonical sequence; add them "
-                       "there (and to feature_pandas_S4.md's signature matrix) or rename them"
-                       % (proc, ", ".join(unknown)))
+                       "there (and to %s) or rename them"
+                       % (proc, ", ".join(unknown), matrix))
             continue
         # Declaration order need not match the argument list, so compare against the dummy order.
         in_arg_order = [nm for nm in args if nm in optional]
@@ -2973,8 +3014,9 @@ def check_stats_optional_argument_order():
                        % (proc, ", ".join(in_arg_order),
                           ", ".join(sorted(in_arg_order, key=lambda nm: rank[nm]))))
     if seen == 0:
-        bad.append("src/parquet_stats.f90: no `module subroutine`/`module function` declaration "
-                   "was recognised -- this check has gone blind and is passing vacuously")
+        bad.append("src/%s: no `module subroutine`/`module function` declaration "
+                   "was recognised -- this check has gone blind and is passing vacuously"
+                   % path.name)
     return bad
 
 
@@ -8342,8 +8384,10 @@ CHECKS = (
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),
     ("parquet_transform stays Arrow-free", check_parquet_transform_stays_arrow_free),
+    ("parquet_kde stays Arrow-free", check_parquet_kde_stays_arrow_free),
     ("every sum in the vendored PRIMA tier is the ordered one", check_prima_sums_are_the_ordered_sum),
-    ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
+    ("parquet_stats and parquet_kde optionals each follow one canonical order",
+     check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",
      check_facade_inventory_matches_its_use_lines),
     ("parquet_get_version has exactly one home", check_get_version_has_one_home),

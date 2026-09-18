@@ -82,6 +82,9 @@
 !>                          length is a power of two, and its inverse,
 !>                          unnormalised or orthonormal, with `pf_is_pow2` and
 !>                          `pf_next_pow2` for choosing that length.
+!>   * `parquet_kde`     -- `pf_kde`: a one-dimensional kernel density estimate
+!>                          over a retained sample, with its density, CDF,
+!>                          quantiles and a curve answered exactly anywhere.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -128,6 +131,7 @@ module parquet
     use parquet_prima
     use parquet_root
     use parquet_transform
+    use parquet_kde
     ! Only the test hook: the exp-key transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings
@@ -198,6 +202,10 @@ module parquet
     ! Not part of that per-cell tier, hidden here for the same reason: it is the non-mutating
     ! `any_null` the table's read accessors must use, and a user already has `%any_null()`.
     private :: parquet_column_any_null
+    ! parquet_stats' exclusion pass and three argument checkers, published so that parquet_kde
+    ! applies the family's population rules and aborts with the family's own texts. They are
+    ! plumbing for that sibling, not API: every public `pf_*` procedure already runs them.
+    private :: stats_compact, stats_check_sizes, stats_check_weight, stats_weight_kind
     ! Its ranged sibling, which %print_stat's statistics scan reads a column's nulls through a
     ! block at a time; a user already has `%row_validity_range`.
     private :: parquet_column_row_validity_range

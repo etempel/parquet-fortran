@@ -86,7 +86,7 @@ contains
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
                                             p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
-                                            p35(:), p36(:), p37(:)
+                                            p35(:), p36(:), p37(:), p38(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3542,8 +3542,67 @@ contains
             new_unittest("pf_bin_linear refuses a logical column by name", &
                 test_stats_bin_linear_logical_column_aborts) &
             ]
+        ! ---- parquet_kde ----
+        p38 = [ &
+            new_unittest("pf_kde%fit refuses a zero bandwidth", &
+                test_kde_bandwidth_zero_aborts), &
+            new_unittest("pf_kde%fit refuses a NaN bandwidth", &
+                test_kde_bandwidth_nan_aborts), &
+            new_unittest("pf_kde%fit refuses bandwidth= and rule= together", &
+                test_kde_bandwidth_and_rule_aborts), &
+            new_unittest("pf_kde%fit refuses an unknown rule", &
+                test_kde_unknown_rule_aborts), &
+            new_unittest("pf_kde%fit refuses a negative adjust", &
+                test_kde_adjust_negative_aborts), &
+            new_unittest("pf_kde%fit refuses an unknown kernel", &
+                test_kde_unknown_kernel_aborts), &
+            new_unittest("pf_kde%fit refuses an infinite bound", &
+                test_kde_bound_infinite_aborts), &
+            new_unittest("pf_kde%fit refuses lower >= upper", &
+                test_kde_lower_not_below_upper_aborts), &
+            new_unittest("pf_kde%fit refuses boundary= without a bound", &
+                test_kde_boundary_without_bound_aborts), &
+            new_unittest("pf_kde%fit refuses an unknown boundary", &
+                test_kde_unknown_boundary_aborts), &
+            new_unittest("pf_kde%fit refuses weights of the wrong length, in the family's words", &
+                test_kde_weights_size_aborts), &
+            new_unittest("pf_kde%fit refuses is_valid of the wrong length, in the family's words", &
+                test_kde_is_valid_size_aborts), &
+            new_unittest("pf_kde%fit refuses a negative weight, in the family's words", &
+                test_kde_negative_weight_aborts), &
+            new_unittest("pf_kde%fit refuses an unknown weight_type, in the family's words", &
+                test_kde_weight_type_aborts), &
+            new_unittest("pf_kde%fit's real32 form refuses weights of the wrong length", &
+                test_kde_real32_weights_size_aborts), &
+            new_unittest("pf_kde%fit refuses threads=0", &
+                test_kde_threads_zero_aborts), &
+            new_unittest("pf_kde%pdf refuses an object that was never fitted", &
+                test_kde_query_unfitted_aborts), &
+            new_unittest("pf_kde%cdf refuses an object that %clear unfitted", &
+                test_kde_query_after_clear_aborts), &
+            new_unittest("pf_kde%bandwidth refuses an object that was never fitted", &
+                test_kde_accessor_unfitted_aborts), &
+            new_unittest("pf_kde%pdf refuses an output of the wrong size", &
+                test_kde_pdf_size_aborts), &
+            new_unittest("pf_kde%cdf refuses an output of the wrong size", &
+                test_kde_cdf_size_aborts), &
+            new_unittest("pf_kde%quantile refuses an output of the wrong size", &
+                test_kde_quantile_size_aborts), &
+            new_unittest("pf_kde%quantile refuses p above one", &
+                test_kde_quantile_p_above_one_aborts), &
+            new_unittest("pf_kde%quantile refuses a NaN p", &
+                test_kde_quantile_p_nan_aborts), &
+            new_unittest("pf_kde%curve refuses x and f of different sizes", &
+                test_kde_curve_size_aborts), &
+            new_unittest("pf_kde%curve refuses xmin >= xmax", &
+                test_kde_curve_reversed_range_aborts), &
+            new_unittest("pf_kde%curve refuses a negative cut", &
+                test_kde_curve_negative_cut_aborts), &
+            new_unittest("pf_kde%curve refuses an infinite end", &
+                test_kde_curve_nonfinite_end_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38]
     end subroutine collect_tests_parquet_errors
 
 
@@ -20938,5 +20997,209 @@ contains
             failure_message="a conversion in frame 7 was expected to abort", &
             required_stderr="pf_vec2radec: frame must be PF_HP_DEC_NORTH (0) or PF_HP_DEC_SOUTH (1), got 7")
     end subroutine test_sphere_vec2radec_bad_frame_aborts
+    !
+    ! ---- pf_kde abort paths --------------------------------------------------------------------
+    !
+    !> Runs one `parquet_kde` scenario and asserts its whole shape from the one run: it aborted,
+    !! its control call succeeded first (the "kde control" line), and the abort carried the
+    !! library's own message, binding and all. The control is what makes the abort evidence that
+    !! the guard refuses the bad value rather than the whole call.
+    subroutine check_kde_scenario(error, scenario, required)
+        type(error_type), allocatable, intent(out) :: error    !! test-drive's error handle
+        character(len=*), intent(in)               :: scenario !! the scenario's name
+        character(len=*), intent(in)               :: required !! the message, from the binding's name
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        ! 97 is error_scenarios.f90's unknown-name exit; 124 and 137 are the timeout cap's, which
+        ! would otherwise read as an abort (see check_scenario_exit_status_and_stderr).
+        call check(error, exitstat /= 97, "scenario name not recognized by error_scenarios.f90: "//scenario)
+        if (allocated(error)) return
+        call check(error, exitstat /= 124 .and. exitstat /= 137, "scenario TIMED OUT and was killed: "//scenario)
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario "//scenario//" was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "kde control", found)
+        call check(error, found, scenario//": the control call must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, required, found)
+        call check(error, found, scenario//": expected the message '"//required//"'")
+    end subroutine check_kde_scenario
+    !
+    !> Every one of `pf_kde`'s refusals, asserted by the exact text the guide page's table
+    !> publishes; see `test/error_scenarios.f90` for each control and the call refused. The
+    !> three written in the family's words prove `parquet_stats`' checkers are called with
+    !> `what = "pf_kde%fit"`.
+    subroutine test_kde_bandwidth_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidth_zero", &
+            "pf_kde%fit: bandwidth must be a finite, positive number")
+    end subroutine test_kde_bandwidth_zero_aborts
+    !
+    subroutine test_kde_bandwidth_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidth_nan", &
+            "pf_kde%fit: bandwidth must be a finite, positive number")
+    end subroutine test_kde_bandwidth_nan_aborts
+    !
+    subroutine test_kde_bandwidth_and_rule_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidth_and_rule", &
+            "pf_kde%fit: bandwidth= and rule= cannot both be given; use adjust= to scale a rule")
+    end subroutine test_kde_bandwidth_and_rule_aborts
+    !
+    subroutine test_kde_unknown_rule_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_unknown_rule", &
+            "pf_kde%fit: rule must be ""silverman"" or ""scott""")
+    end subroutine test_kde_unknown_rule_aborts
+    !
+    subroutine test_kde_adjust_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_adjust_negative", &
+            "pf_kde%fit: adjust must be a finite, positive number")
+    end subroutine test_kde_adjust_negative_aborts
+    !
+    subroutine test_kde_unknown_kernel_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_unknown_kernel", &
+            "pf_kde%fit: kernel must be ""gaussian"", ""epanechnikov"", ""bspline"" or ""box""")
+    end subroutine test_kde_unknown_kernel_aborts
+    !
+    subroutine test_kde_bound_infinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bound_infinite", &
+            "pf_kde%fit: lower and upper must be finite")
+    end subroutine test_kde_bound_infinite_aborts
+    !
+    subroutine test_kde_lower_not_below_upper_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_lower_not_below_upper", &
+            "pf_kde%fit: lower must be below upper")
+    end subroutine test_kde_lower_not_below_upper_aborts
+    !
+    subroutine test_kde_boundary_without_bound_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_boundary_without_bound", &
+            "pf_kde%fit: boundary= needs lower= or upper=")
+    end subroutine test_kde_boundary_without_bound_aborts
+    !
+    subroutine test_kde_unknown_boundary_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_unknown_boundary", &
+            "pf_kde%fit: boundary must be ""renormalise"" or ""reflect""")
+    end subroutine test_kde_unknown_boundary_aborts
+    !
+    subroutine test_kde_weights_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_weights_size", &
+            "pf_kde%fit: weights has 3 elements but values has 4")
+    end subroutine test_kde_weights_size_aborts
+    !
+    subroutine test_kde_is_valid_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_is_valid_size", &
+            "pf_kde%fit: is_valid has 5 elements but values has 4")
+    end subroutine test_kde_is_valid_size_aborts
+    !
+    subroutine test_kde_negative_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_negative_weight", &
+            "pf_kde%fit: weight 2 is negative; weights must be finite and non-negative")
+    end subroutine test_kde_negative_weight_aborts
+    !
+    subroutine test_kde_weight_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_weight_type", &
+            "pf_kde%fit: weight_type ""bogus"" is not recognised")
+    end subroutine test_kde_weight_type_aborts
+    !
+    subroutine test_kde_real32_weights_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_real32_weights_size", &
+            "pf_kde%fit: weights has 2 elements but values has 4")
+    end subroutine test_kde_real32_weights_size_aborts
+    !
+    subroutine test_kde_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_threads_zero", &
+            "pf_kde%fit: threads must be positive")
+    end subroutine test_kde_threads_zero_aborts
+    !
+    subroutine test_kde_query_unfitted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_query_unfitted", &
+            "pf_kde%pdf: the estimate has not been fitted")
+    end subroutine test_kde_query_unfitted_aborts
+    !
+    subroutine test_kde_query_after_clear_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_query_after_clear", &
+            "pf_kde%cdf: the estimate has not been fitted")
+    end subroutine test_kde_query_after_clear_aborts
+    !
+    subroutine test_kde_accessor_unfitted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_accessor_unfitted", &
+            "pf_kde%bandwidth: the estimate has not been fitted")
+    end subroutine test_kde_accessor_unfitted_aborts
+    !
+    subroutine test_kde_pdf_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_pdf_size", &
+            "pf_kde%pdf: f must have one element per point of x")
+    end subroutine test_kde_pdf_size_aborts
+    !
+    subroutine test_kde_cdf_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_cdf_size", &
+            "pf_kde%cdf: p must have one element per point of x")
+    end subroutine test_kde_cdf_size_aborts
+    !
+    subroutine test_kde_quantile_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_quantile_size", &
+            "pf_kde%quantile: x must have one element per element of p")
+    end subroutine test_kde_quantile_size_aborts
+    !
+    subroutine test_kde_quantile_p_above_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_quantile_p_above_one", &
+            "pf_kde%quantile: p must lie in [0, 1]")
+    end subroutine test_kde_quantile_p_above_one_aborts
+    !
+    subroutine test_kde_quantile_p_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_quantile_p_nan", &
+            "pf_kde%quantile: p must lie in [0, 1]")
+    end subroutine test_kde_quantile_p_nan_aborts
+    !
+    subroutine test_kde_curve_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_size", &
+            "pf_kde%curve: x and f must have the same size")
+    end subroutine test_kde_curve_size_aborts
+    !
+    subroutine test_kde_curve_reversed_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_reversed_range", &
+            "pf_kde%curve: xmin must be below xmax")
+    end subroutine test_kde_curve_reversed_range_aborts
+    !
+    subroutine test_kde_curve_negative_cut_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_negative_cut", &
+            "pf_kde%curve: cut must not be negative")
+    end subroutine test_kde_curve_negative_cut_aborts
+    !
+    subroutine test_kde_curve_nonfinite_end_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_nonfinite_end", &
+            "pf_kde%curve: xmin and xmax must be finite")
+    end subroutine test_kde_curve_nonfinite_end_aborts
     !
 end module test_errors

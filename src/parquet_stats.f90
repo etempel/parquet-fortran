@@ -132,6 +132,10 @@ module parquet_stats
     public :: pf_sigma_clipped_stats
     public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
     public :: pf_bucketize, pf_histogram, pf_bin_edges, pf_bin_linear
+    ! Plumbing for parquet_kde, not API: the family's exclusion pass and argument checkers, so
+    ! that a sibling module applies the family's population rules and aborts with its texts.
+    ! The `parquet` facade hides them.
+    public :: stats_compact, stats_check_sizes, stats_check_weight, stats_weight_kind
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: pf_stats

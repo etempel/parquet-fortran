@@ -2,6 +2,7 @@
 title: Utilities and code generation
 ordered_subpage: sorting.md
 ordered_subpage: statistics.md
+ordered_subpage: kernel-density.md
 ordered_subpage: integration.md
 ordered_subpage: interpolation.md
 ordered_subpage: optimization.md
@@ -21,7 +22,8 @@ ordered_subpage: embedding-maml-schemas.md
 ---
 
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
-arrays and this library's own column types, statistical reductions over those same arrays, minimisation of a function you supply,
+arrays and this library's own column types, statistical reductions over those same arrays, kernel density estimates of
+a sample's distribution, minimisation of a function you supply,
 finding where a function of one variable crosses zero, the discrete cosine transform,
 interpolation of tabulated data,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
@@ -46,6 +48,12 @@ helpers, and the two generators meant to be copied into your own project.
   population (a null, a NaN and a zero weight all leave it, in that order), what aborts and what
   quietly returns nothing, and the fixed optional-argument order every procedure in the family
   shares.
+- [Kernel density estimation with `parquet_kde`](kernel-density.html) — `pf_kde`: the density a
+  one-dimensional sample was drawn from, fitted over a retained sorted copy and answered exactly
+  anywhere as a density, a distribution function or a quantile, and on a grid for plotting. Four
+  kernels with the bandwidth always the kernel's standard deviation, Silverman's and Scott's rules
+  or a number, `adjust=`, weights and nulls under the statistics family's rules with the effective
+  sample size in the rules, and a bounded support corrected by renormalisation or reflection.
 - [Numerical integration with pf_integrate](integration.html) — adaptive quadrature of a
   function of one variable over a finite or infinite range, with the integrand supplied as an
   object carrying its own parameters or as a plain function. Tolerances as `rtol` or as a

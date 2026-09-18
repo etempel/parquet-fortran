@@ -3617,6 +3617,10 @@ def gen_spec():
     out.append("    public :: pf_sigma_clipped_stats")
     out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
     out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges, pf_bin_linear")
+    out.append("    ! Plumbing for parquet_kde, not API: the family's exclusion pass and argument checkers, so")
+    out.append("    ! that a sibling module applies the family's population rules and aborts with its texts.")
+    out.append("    ! The `parquet` facade hides them.")
+    out.append("    public :: stats_compact, stats_check_sizes, stats_check_weight, stats_weight_kind")
     # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
     # and CLAUDE.md's standing rule is that a module re-exports, getter and setter both, every
     # knob its own code reads, so that a narrow `use parquet_stats` program can silence it

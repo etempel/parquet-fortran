@@ -115,7 +115,10 @@ scl enable gcc-toolset-15 -- bash -c 'gfortran --version | head -1; fpm test'
 
 ## Python: what needs `conda activate astro`
 
-The `astro` environment (mpmath) is needed by exactly one lint entry, `tools/generate_stats_vectors.py`
-(the 50-digit oracle behind `test/test_stats_golden.f90`); every other entry needs a bare `python3`.
-Required on B and C; already active on A. Without it `tools/run_lint_check.sh` reports one failed
-check with `needs mpmath (pip install mpmath)`: an environment gap, not a stale golden file.
+The `astro` environment (mpmath) is needed by two lint entries, `tools/generate_stats_vectors.py`
+and `tools/generate_kde_vectors.py` (the 50-digit oracles behind `test/test_stats_golden.f90` and
+`test/test_kde_golden.f90`); every other entry needs a bare `python3`. Required on B and C; already
+active on A. Without it `tools/run_lint_check.sh` reports those two checks failed with `needs mpmath
+(pip install mpmath)`: an environment gap, not a stale golden file. `generate_kde_vectors.py
+--self-test` also needs scipy and KDEpy, which `astro` carries, so a reported KDEpy skip there is an
+environment fault; it uses statsmodels when present and reports its absence by name.

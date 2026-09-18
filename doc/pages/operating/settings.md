@@ -385,16 +385,15 @@ setting in this library that governed exactly one line of output.
 ## Threads for a bulk HEALPix conversion
 
 `parquet_set_healpix_threads(n)` caps the threads one bulk HEALPix call — `pf_ang2pix_ring_bulk`
-and its siblings — may use. Like every other per-area cap it is a cap rather than a request, read
-per call, with `0` meaning automatic, `1` forcing serial, and an explicit `threads=` on the call
-itself still winning.
+and its siblings — may use. It is read per call, with `1` forcing serial and an explicit `threads=`
+on the call itself still winning.
 
-**This one lowers a ceiling that is already there, which the others do not.** The automatic answer
-for this tier is not simply "as many as OpenMP offers": it is bounded by a measured internal
-ceiling, above which the cost of opening another thread grows faster than the work it removes for a
-tier whose per-element work is tens of nanoseconds. This setting lowers that bound and cannot raise
-it. To ask for more than the ceiling, pass `threads=` on the call — a caller who names a count means
-it, and that path is not capped.
+**It replaces a ceiling that is already there, as `index_threads` does.** Left at `0`, the automatic
+answer for this tier is not simply "as many as OpenMP offers": it is held to **64**, above which the
+cost of opening another thread grows faster than the work it removes for a tier whose per-element
+work is tens of nanoseconds. A positive `n` holds it to `n` instead, above 64 as well as below. It
+is still a cap, never a request: the automatic answer stays serial inside a parallel region and
+bounded by the work and by the CPU affinity mask.
 
 **The answer does not depend on the thread count.** Every element is a pure function of its own
 inputs and each thread writes its own disjoint slice of the output, so the serial and threaded
@@ -415,7 +414,7 @@ probed with this one's (see
 [How the match is built](../tables/table-join.html#how-the-match-is-built)). It is read per call,
 with `1` forcing serial and an explicit `threads=` on the call itself still winning.
 
-**Unlike the other per-area caps, it replaces a ceiling rather than lowering one.** Left at `0`,
+**Like `healpix_threads`, and unlike the other per-area caps, it replaces a ceiling.** Left at `0`,
 the automatic answer is held to **64** threads, however many the machine offers: past a team of
 about that size these paths get slower rather than faster, and one thread per four thousand keys
 would otherwise ask for hundreds on a large build. A positive `n` holds it to `n` instead —

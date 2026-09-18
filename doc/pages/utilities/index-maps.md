@@ -384,13 +384,19 @@ row numbers of the rows that were kept — which is how a nullable key column is
 The backend is the map's automatic choice, applied to the **distinct** keys: a dense id column
 that repeats takes the direct backend, a sparse one the hash table, and `method=` overrides as on
 the map. The choice is made in two steps, so ten thousand keys spread over a billion and repeated
-a thousand times each still go to a 0.5 MB hash table rather than a 320 MB direct array. The
-grouping pass is the map's `%get_or_add_many`, and threads as it does; `threads=` reaches it and
-the map built over the distinct keys alike.
+a thousand times each still go to a 0.5 MB hash table rather than a 320 MB direct array.
+
+**Only a hash (or sorted) build's grouping pass threads.** There the grouping pass is the map's
+`%get_or_add_many`, and threads as it does. On a **dense** key column — the direct backend — the
+grouping is one pass over a slot array, one load and one store per row, which is serial at every
+team size and already cheaper per row than the threaded hash pass; so a team does not speed it up,
+and `threads=` reaches only the map built over the distinct keys. The layout that follows, which
+counts the rows per group and places each one, is serial on every backend.
 
 **Group ids are dense in `1 .. ngroups` and rows are ascending within a group; nothing else about
-the ids is a contract.** On the serial pass (`threads=1`, or a small build) they follow first
-appearance among the unmasked rows; on a team they are numbered partition by partition. Rely on
+the ids is a contract.** On the serial pass (`threads=1`, a small build, or any direct build)
+they follow first appearance among the unmasked rows; on a team they are numbered partition by
+partition. Rely on
 an id being stable for the life of one build, never on its order.
 
 ### Looking up a key that repeats
@@ -636,8 +642,10 @@ partitioned pass in which each thread fills its own range of the table, and the 
 probe chains reach the end of a range are placed once every range is done; a `%get_many` threads
 its probe, one contiguous chunk of the keys per thread; a `%get_or_add_many` looks its keys up on
 the team and inserts the ones not found by that same partitioned pass. All resolve their team by
-the same rule, over the rows they are handed, and so do the multimap's build, `%get_first_many`,
-`%get_many` and `%probe_many`. A string build threads the same way: the hash of every key and the
+the same rule, over the rows they are handed, and so do the multimap's `%get_first_many`,
+`%get_many` and `%probe_many`, and its build's hash grouping pass (a dense key column groups
+serially: see [Building a multimap](#building-a-multimap)). A string build threads the same way:
+the hash of every key and the
 copy into the store on the team, then the partitioned insert.
 
 ```fortran

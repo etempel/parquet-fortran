@@ -159,6 +159,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The index tier's automatic thread count stops at 64** (`pf_index_map`, `pf_index_multimap`,
   and a table's `%build_index`, `%find_many` and hash join), and `parquet_set_index_threads(n)`
   replaces that ceiling, raising the automatic answer as well as lowering it.
+  `parquet_set_healpix_threads(n)` likewise replaces the bulk HEALPix forms' ceiling of 64 rather
+  than only lowering it.
 - **String keys in `pf_index_map` and `pf_index_multimap` hash each 8-byte word whole, with the
   hash's two chains cross-fed**, so keys differing only in bytes 5-8, 13-16, ... no longer share
   hashes. `%probe_stats` reports the longest run of string keys sharing one hash

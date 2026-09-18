@@ -658,13 +658,13 @@ ten-thousand-element array, entirely in libgomp's fork and join, while 64 thread
 noise of the best figure at every size measured. An explicit `threads=` overrides all of it,
 including the ceiling, on the rule that an explicit argument always wins.
 
-**The process-wide cap is `parquet_set_healpix_threads(n)`, and it lowers that ceiling rather than
-replacing the rule.** The team is still derived from the work in front of it — one thread per
-thousand elements — and this bounds the result, so it can take the ceiling below 64 and never above
-it. Its purpose is that `parquet_set_threads(n)`, the "give this library `n` threads and no more"
-convenience, actually reaches this tier; without it a program that capped the library at four
-threads still got up to 64 here. A caller who wants *more* than the ceiling says so at the call site
-with `threads=`, which is not capped by either. See
+**The process-wide cap is `parquet_set_healpix_threads(n)`, and it replaces that ceiling rather
+than the rule.** The team is still derived from the work in front of it — one thread per thousand
+elements — and bounded by the affinity mask, and `n` takes the place of 64 as the bound, so it can
+lower the ceiling or raise it. That is how `parquet_set_threads(n)`, the "give this library `n`
+threads and no more" convenience, reaches this tier, and how a machine whose best team is larger
+than 64 says so once. It is a cap, never a request; a caller who wants a team outright names it at
+the call site with `threads=`, which is not capped by either. See
 [Settings](../operating/settings.html#threads-for-a-bulk-healpix-conversion).
 
 `pf_healpix_threads(n)` reports what a bulk call over `n` elements would resolve to, after every

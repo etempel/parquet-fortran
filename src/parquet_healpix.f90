@@ -94,8 +94,9 @@ module parquet_healpix
     !
     !> The thread cap this tier's bulk forms read, on the same argument: a program whose only import
     !! is `use parquet_healpix` must be able to bound what a bulk conversion opens without naming
-    !! `parquet_settings`. Note it LOWERS the automatic answer and cannot raise it above this tier's
-    !! own measured ceiling -- pass `threads=` on the call for that.
+    !! `parquet_settings`. Unset, the automatic answer is held to this tier's measured ceiling of
+    !! 64; a positive value replaces that ceiling, so it can raise the automatic answer as well as
+    !! lower it.
     public :: parquet_set_healpix_threads, parquet_get_healpix_threads
     !
     !> The resolved count, as `pf_sort_threads` and `parquet_string_threads` report theirs for their

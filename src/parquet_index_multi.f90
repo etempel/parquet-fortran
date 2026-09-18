@@ -17,10 +17,14 @@
 !! `goff`. Pass 3 scatters each row's value into its group's range with a per-group cursor,
 !! walking the rows in order, which is what makes every group's values ascending by position
 !! without a sort. The cursors are `goff` itself, shifted back afterwards, so the layout allocates
-!! nothing beyond the pair it keeps. Pass 1 threads through the map's `%get_or_add_many` -- on a
-!! team, its partitioned pass, which numbers the groups partition by partition rather than by
-!! first appearance, as the spec's note on the group ids allows; passes 2 and 3 are serial because
-!! they cost a few nanoseconds per row against the hash pass's tens.
+!! nothing beyond the pair it keeps. On the hash and sorted backends pass 1 threads through the
+!! map's `%get_or_add_many` -- on a team, its partitioned pass, which numbers the groups partition
+!! by partition rather than by first appearance, as the spec's note on the group ids allows. On
+!! the direct backend (a dense key column) pass 1 is the slot array, SERIAL at every team size and
+!! first-appearance numbered: one load and one store per row, already cheaper than the threaded
+!! hash pass, so `threads=` reaches only the map built over the distinct keys there. Passes 2 and 3
+!! are serial on every backend because they cost a few nanoseconds per row against the hash
+!! pass's tens.
 !!
 !! **The automatic backend is the map's own rule, applied to the DISTINCT keys.** A rule applied
 !! to the rows presented would take a 320 MB direct table for ten thousand keys spread over a

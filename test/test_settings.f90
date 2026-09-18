@@ -2682,16 +2682,15 @@ contains
             if (allocated(error)) return
         end if
         !
-        ! The cap LOWERS this tier's own ceiling and may not raise it -- what makes it a cap rather
-        ! than a request, and the one way this knob differs from its siblings.
+        ! A positive cap REPLACES this tier's ceiling of 64, raising the automatic answer as well
+        ! as lowering it -- the rule `index_threads` follows too (`test_index_threads_effect`).
         !
         ! **This needs a machine wider than the ceiling, so it is SIMULATED rather than skipped.**
         ! The ceiling is 64 and an ordinary machine offers far fewer, so at the counts above it never
         ! binds and the assertion would hold against a knob that ignored the ceiling entirely --
         ! vacuous, not passing. Raising the OpenMP ICV above the processor count and overriding what
         ! the affinity clamp believes is the only way to reach the state from a test; both are
-        ! restored below. Verified by mutation: taking the user's value outright instead of the
-        ! smaller of the two survives every other assertion here and fails this one.
+        ! restored below.
 #ifdef _OPENMP
         if (avail >= 1) then
             was_omp = omp_get_max_threads()
@@ -2702,9 +2701,14 @@ contains
             call check(error, wide_auto == 64, &
                 "on a machine wider than the ceiling, the automatic answer IS the ceiling")
             if (.not. allocated(error)) then
+                call parquet_set_healpix_threads(128)
+                call check(error, pf_healpix_threads(big) == 128, &
+                    "a healpix cap above the tier's ceiling raises the automatic answer to it")
+            end if
+            if (.not. allocated(error)) then
                 call parquet_set_healpix_threads(100000)
-                call check(error, pf_healpix_threads(big) == wide_auto, &
-                    "a healpix cap above the tier's ceiling must not raise the automatic answer")
+                call check(error, pf_healpix_threads(big) == wide, &
+                    "a healpix cap above what OpenMP offers is bounded by what OpenMP offers")
             end if
             if (.not. allocated(error)) then
                 call parquet_set_healpix_threads(8)

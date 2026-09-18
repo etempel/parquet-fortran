@@ -1608,8 +1608,9 @@ contains
     !> The cap the automatic answer is handed: `index_threads` when the user has set one, whether
     !! above or below `IX_MAX_AUTO_THREADS`, and that ceiling otherwise.
     !!
-    !! **Replacing rather than `min`-ing is deliberate, and it is where this differs from
-    !! `hpx_auto_cap`.** The ceiling is this module's default, not a limit the user is held to: a
+    !! **Replacing rather than `min`-ing is deliberate, and `hpx_auto_cap`
+    !! (src/parquet_healpix_bulk.f90) follows the same rule.** The ceiling is this module's
+    !! default, not a limit the user is held to: a
     !! program on a machine whose sweet spot lies above it says so once with
     !! `parquet_set_index_threads` rather than passing `threads=` to every call.
     function ix_auto_cap() result(cap)

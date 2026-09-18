@@ -50,8 +50,8 @@ submodule(parquet_healpix) parquet_healpix_bulk
     !!
     !! Measured rather than assumed: see `feature_healpix_tier_b.md` section 15. Past this size
     !! libgomp's own fork/join cost grows faster than the work another thread removes, for a tier
-    !! whose per-element work is tens of nanoseconds. A caller who wants the whole machine can
-    !! still ask for it with `threads=`.
+    !! whose per-element work is tens of nanoseconds. A positive `healpix_threads` replaces it, in
+    !! either direction (`hpx_auto_cap`), and an explicit `threads=` bypasses both.
     integer, parameter :: hpx_max_auto_threads = 64
 
 contains
@@ -68,20 +68,20 @@ contains
         nmin = hpx_min_elements_per_thread * int(nt, int64)
     end function hpx_parallel_min_elements
 
-    !> The cap the automatic path hands to `parquet_auto_thread_count`: this tier's measured
-    !! ceiling, lowered by `healpix_threads` when the user has set one.
+    !> The cap the automatic path hands to `parquet_auto_thread_count`: `healpix_threads` when the
+    !! user has set one, above or below `hpx_max_auto_threads`, and that ceiling otherwise.
     !!
-    !! **The `min` is what makes the knob a cap rather than a request.** Taking the user's value
-    !! outright would let `parquet_set_healpix_threads(1024)` raise the ceiling that
-    !! `hpx_max_auto_threads` exists to impose. The index tier's `index_threads` does replace its
-    !! tier's ceiling (`ix_auto_cap`, src/parquet_index_map.f90), because there the ceiling is a
-    !! default the user may move; here it is a limit. A caller who genuinely wants more passes
-    !! `threads=` on the call, which bypasses this path entirely.
+    !! **Replacing rather than `min`-ing is deliberate, and `ix_auto_cap`
+    !! (src/parquet_index_map.f90) follows the same rule.** The ceiling is a default measured on one
+    !! machine, not a limit the user is held to: a program on a machine whose sweet spot lies above
+    !! it says so once with `parquet_set_healpix_threads` rather than passing `threads=` to every
+    !! call. It stays a cap on the automatic answer, which is still serial inside a parallel
+    !! region and still bounded by the work and by the affinity mask.
     pure function hpx_auto_cap() result(cap)
         integer :: cap !! cap to pass on; always >= 1.
 
         cap = hpx_max_auto_threads
-        if (cfg_healpix_threads > 0 .and. cfg_healpix_threads < cap) cap = cfg_healpix_threads
+        if (cfg_healpix_threads > 0) cap = cfg_healpix_threads
     end function hpx_auto_cap
 
     module procedure hpx_threads_n64
@@ -115,10 +115,9 @@ contains
         ! own and is passed through the same helper rather than applied afterwards, so that the
         ! affinity clamp still has the last word.
         !
-        ! The cap is the SMALLER of this tier's measured ceiling and the user's `healpix_threads`,
-        ! which is what makes the knob a cap rather than a request: it can only lower the automatic
-        ! answer. `cfg_healpix_threads == 0` means automatic and leaves the ceiling alone. Asking
-        ! for more than the ceiling is done with an explicit `threads=`, handled above.
+        ! The cap is the user's `healpix_threads` when set, and this tier's measured ceiling
+        ! otherwise (`hpx_auto_cap`); either way it bounds the automatic answer and never
+        ! requests a team. An explicit `threads=` is handled above.
         n_req = parquet_auto_thread_count(hpx_auto_cap(), "healpix")
         ! Bound the team by the work available. Asking for one thread per full block of
         ! `hpx_min_elements_per_thread` is the same statement as requiring at least

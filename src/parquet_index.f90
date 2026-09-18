@@ -184,7 +184,8 @@ module parquet_index
     !! no faster -- the fork/join cost and the contention on the shared table outgrow the work a
     !! thread removes -- while the work floor above would otherwise hand a large build one thread
     !! per four thousand keys, hundreds of them. `hpx_max_auto_threads`
-    !! (src/parquet_healpix_bulk.f90) is the same ceiling for the same reason. A positive
+    !! (src/parquet_healpix_bulk.f90) is the same ceiling for the same reason, replaced the same way
+    !! by `healpix_threads`. A positive
     !! `index_threads` REPLACES it, in either direction (`ix_auto_cap`), and an explicit `threads=`
     !! bypasses both. Not a setting: `index_threads` is the setting, and this is its unset value.
     integer, parameter :: IX_MAX_AUTO_THREADS = 64

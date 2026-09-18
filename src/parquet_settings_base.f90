@@ -162,7 +162,8 @@ module parquet_settings_base
     !> Cap on the threads one bulk HEALPix conversion may use internally. `0` means "auto", which
     !! for this tier is NOT simply "as many as OpenMP offers": the automatic answer is additionally
     !! bounded by `hpx_max_auto_threads`, a measured ceiling of its own
-    !! (src/parquet_healpix_bulk.f90). Written by `parquet_set_healpix_threads` below; read only by
+    !! (src/parquet_healpix_bulk.f90), which a positive value replaces, above or below it.
+    !! Written by `parquet_set_healpix_threads` below; read only by
     !! `hpx_threads` (same file), for the same single-reader reason as cfg_sort_threads and
     !! cfg_string_threads (feature_risks.md Risk-40).
     !!
@@ -520,11 +521,12 @@ contains
     !> Caps the threads one bulk HEALPix conversion (`pf_ang2pix_ring_bulk` and its siblings) may
     !> use when the call itself does not name a `threads=`. `0` restores automatic behaviour.
     !>
-    !> **It is a cap, not a request, and it does not lift this tier's own ceiling.** The automatic
-    !> answer is the smaller of what OpenMP offers and a measured internal ceiling, and this lowers
-    !> that further; it never raises it, never overrides the rule that an unqualified bulk call
-    !> inside an OpenMP parallel region runs serially, and never overrides an explicit `threads=`.
-    !> To ask for more than the internal ceiling, pass `threads=` on the call.
+    !> **It sets the ceiling of the automatic answer, and can raise it as well as lower it.** The
+    !> automatic answer is what OpenMP offers, bounded by the work and by the CPU affinity mask.
+    !> `0` holds it to this tier's own ceiling of 64; a value of `n` holds it to `n` instead, above
+    !> 64 as well as below -- the rule `parquet_set_index_threads` follows too. It is still a cap,
+    !> never a request: it never overrides the rule that an unqualified bulk call inside an OpenMP
+    !> parallel region runs serially, and never overrides an explicit `threads=`.
     !>
     !> **Threading a HEALPix conversion changes how fast it answers and never what it answers.**
     !> Every element is a pure function of its own inputs and each thread writes its own disjoint

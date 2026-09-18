@@ -1658,11 +1658,13 @@ module parquet_stats
     !> **The edges are ALWAYS strictly increasing, which is a contract rather than an**
     !> **observation**: they exist to be passed to `pf_histogram`, which aborts on a pair that is
     !> not, so a degenerate population must not produce edges that abort one call later.
-    !> `ok = .false.` says the edges do not describe the data's own range, and there are three
+    !> `ok = .false.` says the edges do not describe the data's own range, and there are four
     !> ways to get it -- an EMPTY population, which falls back to `[0, 1]` as numpy does; a
-    !> CONSTANT one, which widens to `[x - 0.5, x + 0.5]`, also as numpy does; and an `nbins`
-    !> finer than double precision can resolve over the range, where the spacing would collapse
-    !> and neighbouring edges are nudged apart instead. In all three the edges are still usable.
+    !> CONSTANT one, which widens to `[x - 0.5, x + 0.5]`, also as numpy does; an `nbins` finer
+    !> than double precision can resolve over the range, where the spacing would collapse and
+    !> neighbouring edges are nudged apart instead; and a population holding an infinity, or a
+    !> NaN kept by `skipnan = .false.`, whose edges span its finite values alone. In all four the
+    !> edges are still usable.
     !>
     !> **There is no explicit range pair.** A caller who already knows the bounds can write the
     !> `nbins + 1` values directly; what is worth a procedure is finding the range under this
@@ -3335,9 +3337,10 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
@@ -3349,8 +3352,9 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone.
         end subroutine bucketize_f64
         !> `pf_histogram` over a 64-bit real array: how much weight lands in each bin.
         !!
@@ -3388,9 +3392,10 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
@@ -3402,8 +3407,10 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined.
         end subroutine histogram_f64
         !> `pf_bin_edges` over a 64-bit real array: `nbins` equal-width bins spanning the data.
         !!
@@ -3421,16 +3428,21 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it in the population, where, like an infinity, it is left out of the
+            !! range the edges span and turns `ok` false. Either way the edges stay finite and
+            !! strictly increasing.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty.
         end subroutine bin_edges_f64
         !> `pf_bin_linear` over a 64-bit real array: each value's weight split between the two grid
         !! points around it.
@@ -4632,8 +4644,9 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone.
         end subroutine bucketize_i32
         !> `pf_histogram` over a 32-bit integer array.
         module subroutine histogram_i32(values, edges, counts, right, density, is_valid, weights, n_null, n_outside, &
@@ -4674,8 +4687,10 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined.
         end subroutine histogram_i32
         !> `pf_bin_edges` over a 32-bit integer array.
         module subroutine bin_edges_i32(values, nbins, edges, is_valid, weights, n_null, ok)
@@ -4691,8 +4706,12 @@ module parquet_stats
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty.
         end subroutine bin_edges_i32
         !> `pf_bin_linear` over a 32-bit integer array.
         module subroutine bin_linear_i32(values, grid, mass, is_valid, weights, n_null, n_outside, ok)
@@ -5821,8 +5840,9 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone.
         end subroutine bucketize_i64
         !> `pf_histogram` over a 64-bit integer array.
         module subroutine histogram_i64(values, edges, counts, right, density, is_valid, weights, n_null, n_outside, &
@@ -5863,8 +5883,10 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined.
         end subroutine histogram_i64
         !> `pf_bin_edges` over a 64-bit integer array.
         module subroutine bin_edges_i64(values, nbins, edges, is_valid, weights, n_null, ok)
@@ -5880,8 +5902,12 @@ module parquet_stats
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty.
         end subroutine bin_edges_i64
         !> `pf_bin_linear` over a 64-bit integer array.
         module subroutine bin_linear_i64(values, grid, mass, is_valid, weights, n_null, n_outside, ok)
@@ -7070,9 +7096,10 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
@@ -7084,8 +7111,9 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone.
         end subroutine bucketize_f32
         !> `pf_histogram` over a 32-bit real array.
         module subroutine histogram_f32(values, edges, counts, right, density, is_valid, weights, skipnan, n_null, &
@@ -7118,9 +7146,10 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
@@ -7132,8 +7161,10 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined.
         end subroutine histogram_f32
         !> `pf_bin_edges` over a 32-bit real array.
         module subroutine bin_edges_f32(values, nbins, edges, is_valid, weights, skipnan, n_null, n_nan, ok)
@@ -7147,16 +7178,21 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it in the population, where, like an infinity, it is left out of the
+            !! range the edges span and turns `ok` false. Either way the edges stay finite and
+            !! strictly increasing.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty.
         end subroutine bin_edges_f32
         !> `pf_bin_linear` over a 32-bit real array.
         module subroutine bin_linear_f32(values, grid, mass, is_valid, weights, skipnan, n_null, n_nan, n_outside, ok)
@@ -8251,8 +8287,9 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone.
         end subroutine bucketize_bool
         !> `pf_histogram` over a logical array.
         module subroutine histogram_bool(values, edges, counts, right, density, is_valid, weights, n_null, n_outside, &
@@ -8293,8 +8330,10 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined.
         end subroutine histogram_bool
         !> `pf_bin_edges` over a logical array.
         module subroutine bin_edges_bool(values, nbins, edges, is_valid, weights, n_null, ok)
@@ -8310,8 +8349,12 @@ module parquet_stats
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty.
         end subroutine bin_edges_bool
         !> `pf_sum` over a scalar numeric `parquet_column`.
         !>
@@ -9616,9 +9659,10 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
@@ -9630,8 +9674,9 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone.
         end subroutine bucketize_col
         !> `pf_histogram` over a scalar numeric `parquet_column`.
         module subroutine histogram_col(values, edges, counts, right, density, is_valid, weights, skipnan, n_null, &
@@ -9664,9 +9709,10 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
@@ -9678,8 +9724,10 @@ module parquet_stats
             !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
             !! is then a value, and it matches no bin.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined.
         end subroutine histogram_col
         !> `pf_bin_edges` over a scalar numeric `parquet_column`.
         module subroutine bin_edges_col(values, nbins, edges, is_valid, weights, skipnan, n_null, n_nan, ok)
@@ -9693,16 +9741,21 @@ module parquet_stats
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
-            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
-            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
-            !! which one NaN makes every answer NaN.
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it in the population, where, like an infinity, it is left out of the
+            !! range the edges span and turns `ok` false. Either way the edges stay finite and
+            !! strictly increasing.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
             logical, intent(out), optional :: ok
-            !! .false. when the statistic is undefined for this population -- the result is then a
-            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty.
         end subroutine bin_edges_col
         !> `pf_bin_linear` over a scalar numeric `parquet_column`.
         module subroutine bin_linear_col(values, grid, mass, is_valid, weights, skipnan, n_null, n_nan, n_outside, ok)

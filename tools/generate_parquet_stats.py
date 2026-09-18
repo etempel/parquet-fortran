@@ -2057,11 +2057,13 @@ BIN_DOC["pf_bin_edges"] = [
     "**The edges are ALWAYS strictly increasing, which is a contract rather than an**",
     "**observation**: they exist to be passed to `pf_histogram`, which aborts on a pair that is",
     "not, so a degenerate population must not produce edges that abort one call later.",
-    "`ok = .false.` says the edges do not describe the data's own range, and there are three",
+    "`ok = .false.` says the edges do not describe the data's own range, and there are four",
     "ways to get it -- an EMPTY population, which falls back to `[0, 1]` as numpy does; a",
-    "CONSTANT one, which widens to `[x - 0.5, x + 0.5]`, also as numpy does; and an `nbins`",
-    "finer than double precision can resolve over the range, where the spacing would collapse",
-    "and neighbouring edges are nudged apart instead. In all three the edges are still usable.",
+    "CONSTANT one, which widens to `[x - 0.5, x + 0.5]`, also as numpy does; an `nbins` finer",
+    "than double precision can resolve over the range, where the spacing would collapse and",
+    "neighbouring edges are nudged apart instead; and a population holding an infinity, or a",
+    "NaN kept by `skipnan = .false.`, whose edges span its finite values alone. In all four the",
+    "edges are still usable.",
     "",
     "**There is no explicit range pair.** A caller who already knows the bounds can write the",
     "`nbins + 1` values directly; what is worth a procedure is finding the range under this",
@@ -2085,6 +2087,44 @@ _BIN_COMMON = """    !>
     !> `logical` array, or a scalar numeric `type(parquet_column)`. `edges` is always
     !> `real(real64)`: it states a rule rather than carrying data, and one type for it keeps the
     !> generic resolving on `values` alone."""
+
+#: The binning family's `ok` and `skipnan` tags, in its own words. The module-wide ones describe a
+#: REDUCTION -- an undefined statistic comes back a quiet NaN, partial nullness is no failure, and a
+#: kept NaN makes every answer NaN -- and none of that is what a binner does: `pf_bucketize` and
+#: `pf_histogram` report every element that failed to reach a bin, nulls included, and a kept NaN
+#: reaches no bin rather than poisoning one; `pf_bin_edges` always returns usable edges, and its
+#: `ok` says whether they span the population's own range. Each tag restates its procedure's body.
+BUCKETIZE_D = dict(D)
+BUCKETIZE_D["skipnan"] = """            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which matches no bin and is counted in `n_outside`
+            !! instead. Either way a NaN reaches no bin: the argument decides only which count it
+            !! lands in."""
+BUCKETIZE_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone."""
+HISTOGRAM_D = dict(BUCKETIZE_D)
+HISTOGRAM_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when any element failed to reach a bin -- a null, a NaN or a value outside
+            !! the edges, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population rather than failing, so it leaves this alone. With `density`,
+            !! also .false. when nothing was binned, the density then being undefined."""
+EDGES_D = dict(D)
+EDGES_D["skipnan"] = """            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it in the population, where, like an infinity, it is left out of the
+            !! range the edges span and turns `ok` false. Either way the edges stay finite and
+            !! strictly increasing."""
+EDGES_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when the edges do not span the population's own range: it is empty (the
+            !! edges are then `[0, 1]` split `nbins` ways) or constant (widened by 0.5 either side),
+            !! `nbins` is finer than double precision resolves over it (neighbouring edges nudged
+            !! apart), or it holds an infinity or a NaN kept by `skipnan = .false.` (the edges span
+            !! its finite values). The edges are strictly increasing and usable in every case. A
+            !! null or a zero-weighted element affects this only by leaving the population empty."""
+#: Which tag table each `BIN_FAMILY` procedure's per-kind interfaces read.
+BIN_TAGS = {"bucketize": BUCKETIZE_D, "histogram": HISTOGRAM_D}
 
 #: What `pf_bin_linear`'s own doc-comment says, on the generic's page. It carries no share of
 #: `_BIN_COMMON`, which says two things that are false here: that an infinite outer edge is
@@ -2834,7 +2874,7 @@ def bin_iface(base, out_name, out_decl, out_doc, opts, tag, decl, has_nan, kindw
     for line in _wrap_doc(out_doc):
         lines.append("            !! " + line)
     for key in mine:
-        lines.append(D[key])
+        lines.append(BIN_TAGS[base][key])
     lines.append("        end subroutine %s_%s" % (base, tag))
     return "\n".join(lines)
 
@@ -2868,7 +2908,7 @@ def edges_iface(tag, decl, has_nan, kindword):
     lines.append("            real(real64), intent(out) :: edges(:)")
     lines.append("            !! the `nbins + 1` boundaries, strictly increasing.")
     for key in mine:
-        lines.append(D[key])
+        lines.append(EDGES_D[key])
     lines.append("        end subroutine bin_edges_%s" % tag)
     return "\n".join(lines)
 
@@ -3739,9 +3779,11 @@ def gen_spec():
     out.append("    ! ---- The real64 binning core (implemented in parquet_stats_bin) ----")
     out.append("    interface")
     binning = BIN_IFACES
-    binning = binning.replace("@@bucketize_opts@@", "\n".join(D[k] for k in BUCKETIZE_OPTS))
-    binning = binning.replace("@@histogram_opts@@", "\n".join(D[k] for k in HISTOGRAM_OPTS))
-    binning = binning.replace("@@bin_edges_opts@@", "\n".join(D[k] for k in BIN_EDGES_OPTS))
+    binning = binning.replace("@@bucketize_opts@@",
+                              "\n".join(BUCKETIZE_D[k] for k in BUCKETIZE_OPTS))
+    binning = binning.replace("@@histogram_opts@@",
+                              "\n".join(HISTOGRAM_D[k] for k in HISTOGRAM_OPTS))
+    binning = binning.replace("@@bin_edges_opts@@", "\n".join(EDGES_D[k] for k in BIN_EDGES_OPTS))
     binning = binning.replace("@@bin_linear_opts@@",
                               "\n".join(BIN_LINEAR_D[k] for k in BIN_LINEAR_OPTS))
     out.append(binning)

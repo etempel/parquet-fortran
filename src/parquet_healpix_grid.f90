@@ -185,6 +185,24 @@ contains
         end if
     end procedure hpx_grid_pix2vec_i64
 
+    module procedure hpx_grid_pix2vec_off_i32
+        call hpx_grid_pix2vec_off_i64(this, int(ipix, int64), dx, dy, vec)
+    end procedure hpx_grid_pix2vec_off_i32
+
+    module procedure hpx_grid_pix2vec_off_i64
+        integer(int64) :: ipn
+
+        if (this%nside_v <= 0_int64) then
+            vec = hpx_grid_unset_real
+        else
+            ! The projection is defined on the NEST layout: a RING index is converted first, exactly
+            ! as `pf_pix2vec_nest` goes the other way for its own centre.
+            ipn = ipix
+            if (this%scheme_id /= PF_HP_NEST) call pf_ring2nest(this%nside_v, ipix, ipn)
+            call hpx_pix2vec_offset_nest(this%nside_v, ipn, dx, dy, vec)
+        end if
+    end procedure hpx_grid_pix2vec_off_i64
+
     ! ---- The RA/Dec layer ----
 
     module procedure hpx_grid_radec2pix_i32

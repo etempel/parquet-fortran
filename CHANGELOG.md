@@ -76,6 +76,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pf_optimize_info` and `pf_optimize_history` with `parquet_optimize` and re-exports them. An
   Arrow-free entry module. See
   [Powell's derivative-free solvers](doc/pages/utilities/prima.md).
+- **A direction inside a HEALPix pixel, not just at its centre**:
+  `pf_healpix_grid%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised to any position in the
+  pixel's square in the equal-area projection, so a `(dx, dy)` uniform over the unit square is a
+  direction uniform over the pixel.
 - **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
   pixel's eight neighbours (`-1` at a missing corner). See
   [HEALPix](doc/pages/utilities/healpix.md).
@@ -98,14 +102,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   by `kappa` or by `sigma_deg`; `pf_random_rotation_at` draws a uniform rotation matrix. Each is
   addressed by seed, stream and draw like every other draw and has a `pf_random_stream` producer
   costing one block; the direction and RA/Dec forms have draw-axis fills, and `%address` returns a
-  stream's seed and stream index. `pf_sphere_algorithm` freezes the family's values. See
+  stream's seed and stream index. `pf_random_disc_cap` prepares one disc or ring once, so a loop
+  over it pays the radius validation, the centre's normalisation and the frame once instead of per
+  draw; `%at` is `pf_random_disc_at` to the bit. An `r_inner` above `pi` is refused rather than
+  clamped. `pf_sphere_algorithm` freezes the family's values. See
   [Random numbers](doc/pages/utilities/random.md).
 - **Random points in sky regions, and sky geometry: `parquet_sphere`.** `pf_sky_polygon` holds a
   polygon given by `(ra, dec)` vertices, with straight edges in the RA/Dec chart or great-circle
-  edges, answers `%contains`, `%area` and `%acceptance`, and draws points uniform per solid angle
-  inside it by coordinate (`%random_at`, `%random_fill`) or along a `pf_random_stream`
-  (`%random_next`). `pf_random_pixel_at` and `pf_random_mask_at` draw uniformly inside one HEALPix
-  pixel or over a list of them on a `pf_healpix_grid`, with `_radec`, fill and stream forms.
+  edges, answers `%contains`, `%area`, `%acceptance` and `%is_simple`, and draws points uniform per
+  solid angle inside it by coordinate (`%random_at`, `%random_fill`) or along a `pf_random_stream`
+  (`%random_next`). A self-intersecting polygon's `%area` and `%acceptance` are the even-odd
+  quantities the sampler actually uses, measured on a fixed lattice, rather than a signed sum, and
+  the acceptance floor `%init` applies is that same quantity. `%init(..., strict=.true.)` refuses a
+  chart polygon that looks like an RA band written the short way across `ra = 0`.
+  `pf_random_pixel_at` and `pf_random_mask_at` draw uniformly inside one HEALPix pixel or over a
+  list of them on a `pf_healpix_grid`, with `_radec`, fill and stream forms; a point in a pixel
+  costs one block and rejects nothing, read through `%pix2vec_offset`.
   `pf_radec2vec` and `pf_vec2radec` convert between degrees and unit vectors in a named declination
   frame, `pf_offset_radec` and `pf_position_angle_deg` offset a position by a separation at a
   position angle and recover the angle, and `pf_fibonacci_grid` places `n` quasi-uniform

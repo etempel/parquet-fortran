@@ -63,6 +63,139 @@ contains
         inside = sky_even_odd(this%px, this%py, x / z, y / z)
     end function sky_gc_inside
 
+    !> Which side of the line `a -> b` the point `c` lies: `+1`, `-1`, or 0 when collinear.
+    pure function sky_side(ax, ay, bx, by, cx, cy) result(s)
+        real(real64), intent(in) :: ax !! the line's first point, abscissa.
+        real(real64), intent(in) :: ay !! the line's first point, ordinate.
+        real(real64), intent(in) :: bx !! the line's second point, abscissa.
+        real(real64), intent(in) :: by !! the line's second point, ordinate.
+        real(real64), intent(in) :: cx !! the tested point's abscissa.
+        real(real64), intent(in) :: cy !! the tested point's ordinate.
+        integer :: s !! the sign of the cross product `(b - a) x (c - a)`.
+        real(real64) :: d
+
+        d = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        s = 0
+        if (d > 0.0_real64) s = 1
+        if (d < 0.0_real64) s = -1
+    end function sky_side
+
+    !> Whether the closed polygon `(px, py)` has two non-adjacent edges that cross.
+    !!
+    !! One test serves both edge rules, exactly as `sky_even_odd` does: under `PF_EDGE_RADEC` the
+    !! edges are straight in the chart, and under `PF_EDGE_GREAT_CIRCLE` the gnomonic projection maps
+    !! every great circle to a straight line, so the crossings of the projected edges are the
+    !! crossings of the arcs. Only a PROPER crossing counts -- the two ends of each segment strictly
+    !! either side of the other's line -- so a vertex merely touching another edge, which the even-odd
+    !! rule already resolves arbitrarily, is not one.
+    !!
+    !! `O(n^2)` over the edge pairs, paid once by `%init`; a polygon of a few thousand vertices is
+    !! the point where that becomes noticeable.
+    pure function sky_self_intersects(px, py) result(crosses)
+        real(real64), intent(in) :: px(:) !! the vertices' abscissae, in the containment test's plane.
+        real(real64), intent(in) :: py(:) !! the vertices' ordinates, the size of `px`.
+        logical :: crosses !! whether two non-adjacent edges cross.
+        integer(int64) :: n, k, j, kn, jn
+        integer :: s1, s2, s3, s4
+
+        n = size(px, kind=int64)
+        crosses = .false.
+        if (n < 4_int64) return                     ! a triangle's three edges are pairwise adjacent
+        do k = 1_int64, n - 1_int64
+            kn = k + 1_int64
+            do j = k + 2_int64, n
+                jn = j + 1_int64
+                if (j == n) jn = 1_int64
+                ! Edges k and j are adjacent when they share a vertex; the wrap makes edge n adjacent
+                ! to edge 1, which is why the outer loop stops one short.
+                if (jn == k) cycle
+                s1 = sky_side(px(k), py(k), px(kn), py(kn), px(j), py(j))
+                s2 = sky_side(px(k), py(k), px(kn), py(kn), px(jn), py(jn))
+                if (s1 * s2 >= 0) cycle
+                s3 = sky_side(px(j), py(j), px(jn), py(jn), px(k), py(k))
+                s4 = sky_side(px(j), py(j), px(jn), py(jn), px(kn), py(kn))
+                if (s3 * s4 < 0) then
+                    crosses = .true.
+                    return
+                end if
+            end do
+        end do
+    end function sky_self_intersects
+
+    !> The fraction of the bounding region a self-intersecting polygon's even-odd interior covers.
+    !!
+    !! Neither exact area is that fraction: both are signed sums, which cancel to nothing when the
+    !! lobes balance. It is measured instead, over the same candidate distribution `sky_polygon_walk`
+    !! draws from -- `ra` uniform and `sin(dec)` uniform over the vertex box, or the cap's uniform
+    !! `(h, phi)` -- sampled on the `R2` low-discrepancy lattice rather than from the generator:
+    !! the lattice is a pure function of the polygon, needs no key, and converges far faster than a
+    !! pseudo-random sample of the same size.
+    !!
+    !! **The lattice steps in `int64` modulo `2**53`**, so every point is exact in both arithmetics
+    !! and a model in another language reproduces it without matching a libm.
+    !!
+    !! The cap arm needs no unit vector: a candidate at offset `h` and azimuth `phi` has gnomonic
+    !! coordinates `(sin*cos(phi), sin*sin(phi))` over `1 - h` in the cap's own frame, which is what
+    !! `sky_gc_inside` would compute from the vector anyway. `this` carries the geometry `%init` has
+    !! filled in but is not yet `%set`.
+    pure function sky_polygon_measure(this, rule) result(f)
+        class(pf_sky_polygon), intent(in) :: this !! the polygon, its geometry filled in.
+        integer, intent(in) :: rule !! the edge rule being built.
+        real(real64) :: f !! the measured fraction inside, in `[0, 1]`.
+        integer(int64) :: k, nin, x1, x2
+        real(real64) :: u1, u2, s, ra_c, dec_c, h, zc, sn, phi, scale
+
+        nin = 0_int64
+        x1 = 0_int64
+        x2 = 0_int64
+        scale = 1.0_real64 / real(sky_lattice_mod, real64)
+        do k = 1_int64, sky_area_samples
+            x1 = mod(x1 + sky_lattice_a1, sky_lattice_mod)
+            x2 = mod(x2 + sky_lattice_a2, sky_lattice_mod)
+            u1 = real(x1, real64) * scale
+            u2 = real(x2, real64) * scale
+            if (rule == PF_EDGE_RADEC) then
+                ra_c = this%ra_lo + u1 * (this%ra_hi - this%ra_lo)
+                s = min(max(this%sin_lo + u2 * this%sin_span, -1.0_real64), 1.0_real64)
+                dec_c = asin(s) * sky_rad2deg
+                if (sky_even_odd(this%px, this%py, ra_c, dec_c)) nin = nin + 1_int64
+            else
+                h = u1 * 2.0_real64 * sin(0.5_real64 * this%cap_radius)**2
+                zc = 1.0_real64 - h
+                sn = sqrt(h * (2.0_real64 - h))
+                phi = 2.0_real64 * sky_pi * u2
+                if (zc > 0.5_real64 * sky_hemisphere_cos) then
+                    if (sky_even_odd(this%px, this%py, sn * cos(phi) / zc, sn * sin(phi) / zc)) nin = nin + 1_int64
+                end if
+            end if
+        end do
+        f = real(nin, real64) / real(sky_area_samples, real64)
+    end function sky_polygon_measure
+
+    !> Whether a chart polygon looks like a band written the short way across `ra = 0`.
+    !!
+    !! The shape that names the complement of what the caller meant: an RA extent above 180 degrees
+    !! whose vertices all sit in two narrow clusters, one within `margin` of each end of the span.
+    !! A legitimate whole-sky band (`0, 360, 360, 0`) has its extent exactly 360 and its clusters at
+    !! the ends too, so the test also requires the extent to fall SHORT of 360 by more than `margin`.
+    pure function sky_looks_short_way(ra, ra_lo, ra_hi) result(suspect)
+        real(real64), intent(in) :: ra(:) !! the vertices' right ascensions, degrees, as written.
+        real(real64), intent(in) :: ra_lo !! the smallest of them.
+        real(real64), intent(in) :: ra_hi !! the largest of them.
+        logical :: suspect !! whether the polygon is probably a short-way band.
+        real(real64), parameter :: margin = 90.0_real64
+        real(real64) :: span
+        integer(int64) :: k
+
+        suspect = .false.
+        span = ra_hi - ra_lo
+        if (span <= 180.0_real64 .or. span > 360.0_real64 - margin) return
+        do k = 1_int64, size(ra, kind=int64)
+            if (ra(k) - ra_lo > margin .and. ra_hi - ra(k) > margin) return
+        end do
+        suspect = .true.
+    end function sky_looks_short_way
+
     !> `sin(h)/h`, 1 at 0.
     pure function sky_sinc(h) result(r)
         real(real64), intent(in) :: h !! an angle, radians, in `[-pi/2, pi/2]`.
@@ -138,6 +271,7 @@ contains
         integer(int64), intent(out) :: ncand !! candidates drawn, the accepted one included.
         integer(int64) :: key, k
         real(real64) :: uv(2), s, ra_c, dec_c, v(3)
+        type(pf_random_disc_cap) :: cap
 
         ra = 0.0_real64
         dec = 0.0_real64
@@ -159,8 +293,10 @@ contains
                 end if
             end do
         else
+            ! The cap is fixed across candidates; `%at` is `pf_random_disc_at` to the bit.
+            call cap%prepare(this%centre, this%cap_radius)
             do k = 1_int64, sky_candidate_cap
-                v = pf_random_disc_at(key, i, this%centre, this%cap_radius, k)
+                v = cap%at(key, i, k)
                 if (sky_gc_inside(this, v)) then
                     call sky_unit_radec(v, ra, dec)
                     ncand = k
@@ -180,13 +316,15 @@ contains
         real(real64) :: area, bound, f, floor, lo, hi, sc, cc, total, c(3), w(3), scale, ang
         integer(int64) :: n, k, j
         integer :: rule, m
-        logical :: bad
+        logical :: bad, want_strict
         character(len=3) :: what
         character(len=24) :: floor_text
 
         if (this%set) error stop who // ": already initialised; call %clear first"
         rule = PF_EDGE_RADEC
         if (present(edges)) rule = edges
+        want_strict = .false.
+        if (present(strict)) want_strict = strict
         if (rule /= PF_EDGE_RADEC .and. rule /= PF_EDGE_GREAT_CIRCLE) then
             error stop who // ": edges must be PF_EDGE_RADEC (0) or PF_EDGE_GREAT_CIRCLE (1), got " // &
                 trim(sky_int_text(int(rule, int64)))
@@ -220,6 +358,14 @@ contains
                     " degrees of RA; write a polygon crossing RA = 0 continuously (350, 370), and no " // &
                     "polygon may span more than 360"
             end if
+            if (want_strict) then
+                if (sky_looks_short_way(ra, this%ra_lo, this%ra_hi)) then
+                    error stop who // ": the vertices span " // trim(sky_real_text(this%ra_hi - this%ra_lo)) // &
+                        " degrees of RA in two clusters at the ends of that span, which names the band the " // &
+                        "LONG way round; write a polygon crossing RA = 0 continuously (350, 370), or drop " // &
+                        "strict= to take it as written"
+                end if
+            end if
             this%px = ra
             this%py = dec
             call sky_dec_sin_cos(this%dec_lo, sc, cc)
@@ -241,8 +387,10 @@ contains
             ! sum that nearly cancels still normalises; one that cancels exactly names no direction.
             scale = max(abs(w(1)), abs(w(2)), abs(w(3)))
             if (scale <= 0.0_real64) then
-                error stop who // ": vertex 1 is 9.0000000E+01 degrees from the vertices' mean direction; every " // &
-                    "vertex must be within 89.9 degrees of it (the polygon must fit an open hemisphere) -- split it"
+                ! No angle can be reported here: the sum names no direction to measure a vertex against.
+                error stop who // ": the vertices' unit vectors sum to exactly zero, so they name no mean " // &
+                    "direction; every vertex must be within 89.9 degrees of it (the polygon must fit an open " // &
+                    "hemisphere) -- split it"
             end if
             c = w / scale
             c = c / sqrt(c(1) * c(1) + c(2) * c(2) + c(3) * c(3))
@@ -297,7 +445,19 @@ contains
             what = "cap"
         end if
 
+        ! The exact areas above are signed sums. On a self-intersecting polygon that is not the
+        ! region the even-odd rule samples -- on one whose lobes balance it is zero -- so both the
+        ! floor below and the accessors take the measured even-odd fraction instead.
+        this%self_int = sky_self_intersects(this%px, this%py)
+        if (this%self_int) then
+            f = sky_polygon_measure(this, rule)
+            area = f * bound
+        end if
         if (.not. (area > 0.0_real64 .and. bound > 0.0_real64)) then
+            if (this%self_int) then
+                error stop who // ": the polygon's edges cross and not one of 262144 candidates fell " // &
+                    "inside its even-odd interior, which is too small to sample; split it into pieces"
+            end if
             error stop who // ": the polygon has zero area"
         end if
         f = area / bound
@@ -336,6 +496,7 @@ contains
         this%cap_radius = 0.0_real64
         this%area_v = 0.0_real64
         this%bound_area = 0.0_real64
+        this%self_int = .false.
     end procedure sky_polygon_clear
 
     ! ---- Accessors ----
@@ -352,6 +513,11 @@ contains
     module procedure sky_polygon_edges
         rule = this%rule
     end procedure sky_polygon_edges
+
+    module procedure sky_polygon_is_simple
+        if (.not. this%set) error stop "pf_sky_polygon%is_simple: %init has not run"
+        simple = .not. this%self_int
+    end procedure sky_polygon_is_simple
 
     module procedure sky_polygon_area
         if (.not. this%set) error stop "pf_sky_polygon%area: %init has not run"

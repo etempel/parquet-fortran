@@ -12,9 +12,11 @@
 !! * **Deterministic geometry**: `pf_radec2vec`/`pf_vec2radec` in a named declination frame,
 !!   `pf_offset_radec` and `pf_position_angle_deg`, and the Fibonacci grid.
 !!
-!! **Every sampler here rejects**: a candidate is drawn uniformly over a region bounding the
-!! target -- the polygon's RA/Dec box or its cap, the pixel's bounding cap -- and kept when it lies
-!! inside. The candidates of draw `d` are draws `1, 2, 3, ...` of the per-draw key
+!! **A polygon rejects; a pixel does not.** A polygon's candidate is drawn uniformly over a region
+!! bounding it -- the RA/Dec box, or the cap about the vertices' mean direction -- and kept when it
+!! lies inside. A HEALPix pixel needs no such thing: it is a square in the equal-area projection, so
+!! two uniforms read as a position inside that square ARE a point uniform over the pixel. Either
+!! way the candidates of draw `d` are draws `1, 2, 3, ...` of the per-draw key
 !! `pf_random_key(pf_random_key(seed, <family label>), d)` on stream `i`, so a value is a pure
 !! function of its coordinates however many candidates it took, a fill splits anywhere, and a
 !! stream form takes exactly one block per value. `pf_sky_region_algorithm` names all of it.
@@ -40,7 +42,7 @@
 module parquet_sphere
     use, intrinsic :: iso_fortran_env, only: int32, int64, real64
     use parquet_random, only: pf_random_stream, pf_random_key, pf_random_fill_draws, pf_random_int_at, &
-        pf_random_disc_at
+        pf_random_disc_cap
     use parquet_healpix, only: pf_healpix_grid, PF_HP_RING, PF_HP_NEST, PF_HP_DEC_NORTH, PF_HP_DEC_SOUTH
     use parquet_utils, only: pf_wrap_deg
     implicit none
@@ -94,8 +96,8 @@ module parquet_sphere
     !! and `pf_random_disc_at` over a cap, whose own values `pf_sphere_algorithm` freezes), the
     !! per-draw key and the candidate order, the containment rules (even-odd in the chart, and
     !! even-odd on the gnomonic projection about the cap centre with the far hemisphere excluded),
-    !! the pixel cap (`pf_healpix_grid%max_pixrad`), the mask's choice draw, the 1e-3 acceptance
-    !! floor and the 100000-candidate cap. The deterministic geometry has no identifier: it is
+    !! the pixel's own square in the equal-area projection (`pf_healpix_grid%pix2vec_offset`), the
+    !! mask's choice draw, the 1e-3 acceptance floor and the 100000-candidate cap. The deterministic geometry has no identifier: it is
     !! arithmetic, and its accuracy is asserted rather than frozen.
     character(len=*), parameter :: pf_sky_region_algorithm = "region:box+cap/gnomonic-evenodd/1e-3/v1"
 
@@ -120,11 +122,23 @@ module parquet_sphere
     real(real64), parameter :: sky_acceptance_floor = 1.0e-3_real64
     !> The candidates a walk may reject before it aborts. At the floor that is `exp(-100)` per draw.
     integer(int64), parameter :: sky_candidate_cap = 100000_int64
+    !> The candidates `%init` measures a self-intersecting polygon's even-odd area with, `2**18`.
+    integer(int64), parameter :: sky_area_samples = 262144_int64
+    !> The modulus of the measurement lattice, `2**53`: every step is exact in `int64` and in `real64`.
+    integer(int64), parameter :: sky_lattice_mod = 9007199254740992_int64
+    !> The lattice's first increment, `2**53` over the plastic number, made odd so its period is full.
+    integer(int64), parameter :: sky_lattice_a1 = 6799333552837831_int64
+    !> The lattice's second increment, `2**53` over the plastic number squared.
+    integer(int64), parameter :: sky_lattice_a2 = 5132665044399055_int64
     !> The largest `pf_healpix_grid` resolution order the pixel and mask samplers accept, `2**24`:
     !! from about `2**25` a unit vector can no longer name a pixel near a pole.
     integer(int32), parameter :: sky_pixel_order_max = 24_int32
     !> `cos(89.9 degrees)`, the hemisphere rule's bound on a vertex's cosine from the mean direction.
     real(real64), parameter :: sky_hemisphere_cos = 1.7453283658983088e-3_real64
+    !> The component magnitude above which `x*x + y*y` cannot go subnormal, so `hypot` is not needed.
+    !!
+    !! The squares underflow below about `1.5e-154`; this sits four decades clear of it.
+    real(real64), parameter :: sky_hypot_safe = 1.0e-150_real64
 
     ! ---- Mathematical constants ----
 
@@ -162,12 +176,14 @@ module parquet_sphere
     !!   `PF_EDGE_GREAT_CIRCLE` joins the vertices by minor great-circle arcs, and needs every vertex
     !!   within 89.9 degrees of the vertices' mean direction.
     !! * **Containment is the even-odd rule**, so a self-intersecting polygon is accepted and sampled
-    !!   by it. `%area` is exact for a simple polygon; for a self-intersecting one it is the signed
-    !!   sum, which is not the area the even-odd rule samples. A point on an edge is in or out
-    !!   arbitrarily.
+    !!   by it. `%area` is exact for a simple polygon; for a self-intersecting one (`%is_simple()` is
+    !!   `.false.`) it is the even-odd area, measured by a fixed Monte Carlo, because both exact
+    !!   integrals are signed sums that cancel to nothing when the lobes balance. A point on an edge
+    !!   is in or out arbitrarily.
     !! * **The acceptance floor.** `%init` refuses a polygon covering less than 1e-3 of its bounding
     !!   region (the RA/Dec box, or the cap about the vertices' mean direction): a thin diagonal
-    !!   strip is split into pieces instead.
+    !!   strip is split into pieces instead. The floor is applied to the same quantity `%acceptance`
+    !!   returns, so a self-intersecting polygon is judged on what it actually samples.
     !!
     !! **Allocatable components, and so an ifx rule**: never declare one in a `block` inside an
     !! OpenMP parallel region. Build it before the region and read it inside; every reading binding
@@ -210,12 +226,15 @@ module parquet_sphere
         real(real64) :: area_v = 0.0_real64
         !> The bounding region's area, steradians: the box, or the cap.
         real(real64) :: bound_area = 0.0_real64
+        !> Whether two non-adjacent edges cross, so `%area` is measured rather than integrated.
+        logical :: self_int = .false.
     contains
         procedure, non_overridable :: init => sky_polygon_init        !! Builds the polygon; validates.
         procedure, non_overridable :: clear => sky_polygon_clear      !! Releases it; `%init` may run again.
         procedure, non_overridable :: is_set => sky_polygon_is_set    !! Whether `%init` has run.
         procedure, non_overridable :: size => sky_polygon_size        !! The vertex count, or 0.
         procedure, non_overridable :: edges => sky_polygon_edges      !! The edge rule, or -1.
+        procedure, non_overridable :: is_simple => sky_polygon_is_simple  !! Whether no two edges cross.
         procedure, non_overridable :: area => sky_polygon_area        !! Area, steradians.
         procedure, non_overridable :: area_deg2 => sky_polygon_area_deg2  !! Area, square degrees.
         procedure, non_overridable :: acceptance => sky_polygon_acceptance  !! Area over bounding area.
@@ -237,10 +256,14 @@ module parquet_sphere
     !! `v = pf_random_pixel_at(grid, seed, i, ipix, [draw])`. `grid` is a built `pf_healpix_grid` of
     !! `nside` at most `2**24`, whose scheme names the pixel; `seed` and `draw` are `integer(int64)`;
     !! `i` is `integer(int32)` or `integer(int64)`, and so, independently, is `ipix`, which must lie
-    !! in `[0, npix)`. The result is a HEALPix-native unit vector, as `%pix2vec` returns. Candidates
-    !! are uniform over the cap of radius `%max_pixrad` about the pixel centre and kept when
-    !! `%vec2pix` names `ipix` -- about 3.4 per point. `draw` below 1 clamps to 1. An unbuilt grid,
-    !! a finer one and an index out of range abort, naming this procedure. `pure`, not `elemental`
+    !! in `[0, npix)`. The result is a HEALPix-native unit vector, as `%pix2vec` returns. **Nothing
+    !! is rejected**: the two uniforms of one block are read through `%pix2vec_offset` as a position
+    !! inside the pixel's own square in the equal-area projection, so one enciphering is one point.
+    !! At the finest resolutions `%vec2pix` may name an immediate neighbour for a point within
+    !! rounding of a pixel boundary near a pole, where a unit vector no longer resolves which pixel
+    !! it is in; the point is uniform over the pixel regardless, and stays within `%max_pixrad` of
+    !! its centre. `draw` below 1 clamps to 1. An unbuilt grid, a finer one and an index out of
+    !! range abort, naming this procedure. `pure`, not `elemental`
     !! (a rank-1 result cannot be); `pf_random_pixel_radec_at` is elemental.
     interface pf_random_pixel_at
         module procedure sky_pixel_at_i32_i32
@@ -558,18 +581,26 @@ module parquet_sphere
     interface
         !> Builds the polygon from vertices in degrees, in order.
         !!
-        !! `call poly%init(ra, dec, [edges])`: `ra` and `dec` are rank-1 `real(real64)` arrays of one
-        !! size, at least 3; `edges` is `PF_EDGE_RADEC` (default) or `PF_EDGE_GREAT_CIRCLE`. **It
-        !! aborts**, naming itself, on: a polygon already built (`%clear` first); an unknown edge
-        !! rule; fewer than 3 vertices or arrays of different sizes; a non-finite vertex or a
-        !! declination outside `[-90, 90]`; under `PF_EDGE_RADEC` an RA extent above 360; under
-        !! `PF_EDGE_GREAT_CIRCLE` a vertex 89.9 degrees or more from the vertices' mean direction; a
-        !! polygon of zero area; and a polygon covering less than 1e-3 of its bounding region.
-        module subroutine sky_polygon_init(this, ra, dec, edges)
+        !! `call poly%init(ra, dec, [edges], [strict])`: `ra` and `dec` are rank-1 `real(real64)`
+        !! arrays of one size, at least 3; `edges` is `PF_EDGE_RADEC` (default) or
+        !! `PF_EDGE_GREAT_CIRCLE`. **It aborts**, naming itself, on: a polygon already built
+        !! (`%clear` first); an unknown edge rule; fewer than 3 vertices or arrays of different
+        !! sizes; a non-finite vertex or a declination outside `[-90, 90]`; under `PF_EDGE_RADEC` an
+        !! RA extent above 360; under `PF_EDGE_GREAT_CIRCLE` a vertex 89.9 degrees or more from the
+        !! vertices' mean direction; a polygon of zero area; and a polygon covering less than 1e-3 of
+        !! its bounding region.
+        !!
+        !! **`strict = .true.` adds one refusal**: a chart polygon that looks like a band written the
+        !! short way across `ra = 0` -- an RA extent above 180 whose vertices take only two clusters,
+        !! one at each end of `[0, 360]` -- is refused rather than read as its own complement. It is
+        !! off by default because the same shape is how a legitimate whole-sky band is written; see
+        !! the "Vertices are read as written" section of the guide page.
+        module subroutine sky_polygon_init(this, ra, dec, edges, strict)
             class(pf_sky_polygon), intent(inout) :: this !! the polygon; must not be built yet.
             real(real64), intent(in) :: ra(:) !! the vertices' right ascensions, degrees, as written.
             real(real64), intent(in) :: dec(:) !! the vertices' declinations, degrees, in `[-90, 90]`.
             integer, intent(in), optional :: edges !! `PF_EDGE_RADEC` (default) or `PF_EDGE_GREAT_CIRCLE`.
+            logical, intent(in), optional :: strict !! `.true.` refuses a suspected short-way RA band; default `.false.`.
         end subroutine sky_polygon_init
 
         !> Releases the polygon's arrays and resets it, so `%init` may run again. Safe on an unbuilt one.
@@ -595,13 +626,30 @@ module parquet_sphere
             integer :: rule !! the edge rule `%init` was given.
         end function sky_polygon_edges
 
+        !> Whether no two non-adjacent edges of the polygon cross. Aborts before `%init`.
+        !!
+        !! `.false.` says the polygon is self-intersecting, and so that `%area` and `%acceptance` are
+        !! the Monte Carlo measurements described there rather than exact integrals. Decided once by
+        !! `%init`, by an `O(n^2)` test over the edge pairs in the plane the containment test uses.
+        pure elemental module function sky_polygon_is_simple(this) result(simple)
+            class(pf_sky_polygon), intent(in) :: this !! the polygon.
+            logical :: simple !! `.true.` when no two non-adjacent edges cross.
+        end function sky_polygon_is_simple
+
         !> The polygon's area in steradians. Aborts before `%init`.
         !!
         !! Exact to rounding for a simple polygon. `PF_EDGE_RADEC`: Green's theorem on
         !! `cos(dec) d(dec) d(ra)`, taken about the lowest vertex declination so a small polygon
         !! near a pole keeps its digits. `PF_EDGE_GREAT_CIRCLE`: the signed sum of the spherical
         !! excesses of the triangles from the cap centre, by the triple-product form in the cap's
-        !! own frame. A self-intersecting polygon's value is the signed sum.
+        !! own frame.
+        !!
+        !! **For a self-intersecting polygon (`%is_simple()` is `.false.`) it is the area the
+        !! even-odd rule samples, measured**: neither integral answers that question -- both are
+        !! signed sums, which cancel to nothing on a polygon whose lobes balance -- so `%init` counts
+        !! how many of `2**18` candidates uniform over the bounding region fall inside. The value is
+        !! a pure function of the polygon (the measurement takes a fixed key of its own, no caller's
+        !! seed), and its relative standard error is about 0.3 % at an acceptance of 0.3.
         pure elemental module function sky_polygon_area(this) result(a)
             class(pf_sky_polygon), intent(in) :: this !! the polygon.
             real(real64) :: a !! the area, steradians.
@@ -618,7 +666,9 @@ module parquet_sphere
         !! The bounding region is the vertex box `(ra_hi - ra_lo)*(sin(dec_hi) - sin(dec_lo))` for
         !! `PF_EDGE_RADEC`, and the cap about the vertices' mean direction through the farthest
         !! vertex for `PF_EDGE_GREAT_CIRCLE`. At least 1e-3 on any polygon `%init` built; a draw
-        !! averages `1/%acceptance()` candidates. Aborts before `%init`.
+        !! averages `1/%acceptance()` candidates. **That identity holds for a self-intersecting
+        !! polygon too**, because `%area` is then the measured even-odd area rather than a signed
+        !! sum. Aborts before `%init`.
         pure elemental module function sky_polygon_acceptance(this) result(f)
             class(pf_sky_polygon), intent(in) :: this !! the polygon.
             real(real64) :: f !! the acceptance, in `[1e-3, 1]`.
@@ -1070,10 +1120,12 @@ module parquet_sphere
             real(real64), intent(out) :: dec !! declination, degrees, grid's frame.
         end subroutine sky_mask_radec_next_i64
 
-        !> Runs `pf_random_pixel_at`'s walk and reports how many candidates it took. **Test-only.**
+        !> Runs `pf_random_pixel_at`'s draw and reports how many candidates it took. **Test-only.**
         !!
         !! Public for the reason `parquet_debug_sphere_polygon_draw` gives; the point equals
-        !! `pf_random_pixel_at`'s exactly. `pure`, holds no state, and is called from no library code.
+        !! `pf_random_pixel_at`'s exactly. **`ncand` is 1 for every draw**, because this family does
+        !! not reject; the argument is what lets a test assert that rather than assume it. `pure`,
+        !! holds no state, and is called from no library code.
         pure module subroutine parquet_debug_sphere_pixel_draw(grid, seed, i, ipix, draw, v, ncand)
             type(pf_healpix_grid), intent(in) :: grid !! a built grid, `nside` at most `2**24`.
             integer(int64), intent(in) :: seed !! the stream family's seed.
@@ -1081,7 +1133,7 @@ module parquet_sphere
             integer(int64), intent(in) :: ipix !! a pixel index in the grid's scheme, in `[0, npix)`.
             integer(int64), intent(in) :: draw !! 1-based value index; below 1 clamps to 1.
             real(real64), intent(out) :: v(3) !! the point, as `pf_random_pixel_at` gives it.
-            integer(int64), intent(out) :: ncand !! candidates drawn, the accepted one included.
+            integer(int64), intent(out) :: ncand !! candidates drawn; always 1, since none is rejected.
         end subroutine parquet_debug_sphere_pixel_draw
     end interface
 

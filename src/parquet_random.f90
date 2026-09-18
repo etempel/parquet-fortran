@@ -342,6 +342,10 @@ module parquet_random
     real(real64), parameter :: sphere_rad2deg = 180.0_real64 / sphere_pi
     !> The exponent of the ball's cube root.
     real(real64), parameter :: sphere_third = 1.0_real64 / 3.0_real64
+    !> The component magnitude above which `x*x + y*y` cannot go subnormal, so `hypot` is not needed.
+    !!
+    !! The squares underflow below about `1.5e-154`; this sits four decades clear of it.
+    real(real64), parameter :: sphere_hypot_safe = 1.0e-150_real64
     !> The last draw a sphere family can address, `2**62`: one block per draw, and block `2**62` would
     !! set bit 62 of the block index and read another word space silently.
     integer(int64), parameter :: sphere_draw_max = 4611686018427387904_int64
@@ -904,14 +908,16 @@ module parquet_random
     !!
     !! `v = pf_random_disc_at(seed, i, centre, radius, [draw], [r_inner])`. `centre` is a
     !! `real(real64)` vector of length 3, any nonzero finite length, normalised internally; `radius`
-    !! is at least 0 and a value above `pi` is the whole sphere; `r_inner` in `[0, radius]` (default
-    !! 0) excludes the directions closer than it, so a ring between two angles costs no extra name
-    !! and `r_inner = radius` is the circle itself. The result is a unit vector in the caller's own
-    !! frame. `radius = 0` returns the normalised centre exactly. The cosine of the angle from the
-    !! centre is exactly uniform over the ring, and the azimuth about the centre is measured in a
-    !! right-handed frame fixed by `pf_sphere_algorithm`. A NaN, negative or infinite radius, an
-    !! `r_inner` outside `[0, radius]`, a centre that is zero, NaN or infinite, and a `draw` above
-    !! `2**62` abort, naming this procedure. `seed`, `i` and `draw` as for `pf_random_direction_at`.
+    !! is at least 0 and a value above `pi` is the whole sphere; `r_inner` in `[0, min(radius, pi)]`
+    !! (default 0) excludes the directions closer than it, so a ring between two angles costs no
+    !! extra name and `r_inner = radius` is the circle itself. The result is a unit vector in the
+    !! caller's own frame. `radius = 0` returns the normalised centre exactly. The cosine of the
+    !! angle from the centre is exactly uniform over the ring, and the azimuth about the centre is
+    !! measured in a right-handed frame fixed by `pf_sphere_algorithm`. **An `r_inner` above `pi` is
+    !! refused, not clamped**: clamping would leave a ring of zero width whose every draw is the
+    !! antipode exactly. A NaN, negative or infinite radius, an `r_inner` outside `[0, radius]` or
+    !! above `pi`, a centre that is zero, NaN or infinite, and a `draw` above `2**62` abort, naming
+    !! this procedure. `seed`, `i` and `draw` as for `pf_random_direction_at`.
     interface pf_random_disc_at
         module procedure pf_random_disc_at_i32
         module procedure pf_random_disc_at_i64
@@ -925,7 +931,8 @@ module parquet_random
     !! is refused outside it rather than read as the direction it names, because a cap about a
     !! mirrored position is a plausible wrong answer nothing downstream could see; `dec0 = +/-90` is
     !! the pole exactly, whatever `ra0` says. `radius_deg` above 180 is the whole sky;
-    !! `r_inner_deg` in `[0, radius_deg]` (default 0). `ra` in `[0, 360)` and `dec` in `[-90, 90]`
+    !! `r_inner_deg` in `[0, min(radius_deg, 180)]` (default 0), an inner radius above 180 being
+    !! refused rather than clamped. `ra` in `[0, 360)` and `dec` in `[-90, 90]`
     !! are `intent(out)`. `pure elemental`, so an index array draws a whole catalogue about one
     !! centre, or about a centre per row.
     interface pf_random_disc_radec_at
@@ -1111,6 +1118,40 @@ module parquet_random
     !!
     !! **`pf_random_fill_draws` is still cheaper again** (1.87x / 1.67x against this type), so bulk
     !! work whose length is known in advance belongs there, not in a loop over a stream.
+    !> One disc or ring, prepared once, so a loop over it pays the setup once instead of per draw.
+    !!
+    !! ```fortran
+    !! type(pf_random_disc_cap) :: cap
+    !! call cap%prepare([0.0_real64, 0.0_real64, 1.0_real64], 0.05_real64)
+    !! do k = 1, n
+    !!     v = cap%at(seed, 1_int64, k)          ! == pf_random_disc_at(seed, 1, centre, 0.05, k)
+    !! end do
+    !! ```
+    !!
+    !! **`%at` is `pf_random_disc_at` exactly**, to the bit, at the same coordinates: the scalar form
+    !! is written as `%prepare` followed by `%at`, so the two cannot drift apart. What `%prepare`
+    !! lifts out of the loop is the radius validation, the centre's normalisation, the right-handed
+    !! frame and the two sines bounding the ring -- everything the scalar form redoes from unchanged
+    !! arguments. A rejection walk over a fixed cap is where that matters, since it pays them per
+    !! CANDIDATE.
+    !!
+    !! `%prepare` validates exactly as `pf_random_disc_at` does, aborting on the same arguments and
+    !! naming itself. `%at` on an unprepared cap aborts. All three bindings are `pure`, and the
+    !! object is read-only once prepared, so one cap built before a parallel region serves the team.
+    type, public :: pf_random_disc_cap
+        private
+        real(real64) :: c(3) = 0.0_real64           !! the normalised centre
+        real(real64) :: e1(3) = 0.0_real64          !! the frame's first vector, perpendicular to `c`
+        real(real64) :: e2(3) = 0.0_real64          !! `c x e1`
+        real(real64) :: h_in = 0.0_real64           !! `1 - cos(r_inner)`, where the ring starts
+        real(real64) :: dh = 0.0_real64             !! the ring's width in `1 - cos`
+        logical :: set = .false.                    !! whether `%prepare` has run
+    contains
+        procedure :: prepare => disc_cap_prepare    !! Validates and prepares the cap; may be re-run.
+        procedure :: at => disc_cap_at              !! The direction at `(seed, i, draw)`; one block.
+        procedure :: is_set => disc_cap_is_set      !! Whether `%prepare` has run.
+    end type pf_random_disc_cap
+
     type, public :: pf_random_stream
         private
         integer(int64) :: key = 0_int64             !! the stream family's seed
@@ -2622,11 +2663,18 @@ contains
     !> `(radius, r_inner)` validated: `radius` finite and at least 0, `r_inner` in `[0, radius]`.
     !!
     !! `suffix` is `""` or `"_deg"`, so a message names the arguments as the caller spelled them.
-    pure function sph_radii(who, suffix, radius, r_inner) result(r)
+    !!
+    !! **Where the radii are ANGLES, `half_turn` is present and `r_inner` above it is refused rather
+    !! than clamped.** `radius` above the half turn is the whole sphere and clamping it loses
+    !! nothing, but an inner radius clamped to `pi` leaves a ring of zero width whose every draw is
+    !! the antipode exactly -- a point mass returned silently for what the caller wrote as an
+    !! annulus. The ball's radii are DISTANCES, so it passes no `half_turn` and has no such bound.
+    pure function sph_radii(who, suffix, radius, r_inner, half_turn) result(r)
         character(len=*), intent(in) :: who          !! the entry point, for the message
         character(len=*), intent(in) :: suffix       !! `""` for radians, `"_deg"` for degrees
         real(real64), intent(in) :: radius           !! the outer radius
         real(real64), intent(in) :: r_inner          !! the inner radius
+        real(real64), intent(in), optional :: half_turn !! `pi` or 180 for an angle; absent for a distance
         real(real64) :: r(2)                         !! `[radius, r_inner]`, unchanged
         if (radius /= radius) then
             error stop who // ": radius" // suffix // " must be finite and at least 0 (got NaN)"
@@ -2642,6 +2690,13 @@ contains
         if (.not. (r_inner >= 0.0_real64 .and. r_inner <= radius)) then
             error stop who // ": r_inner" // suffix // " must lie in [0, radius" // suffix // "] (got " // &
                 trim(sph_real_text(r_inner)) // " against " // trim(sph_real_text(radius)) // ")"
+        end if
+        if (present(half_turn)) then
+            if (r_inner > half_turn) then
+                error stop who // ": r_inner" // suffix // " must not exceed " // trim(sph_real_text(half_turn)) // &
+                    " (got " // trim(sph_real_text(r_inner)) // "); a ring whose inner radius passes the half " // &
+                    "turn is the antipode alone"
+            end if
         end if
         r = [radius, r_inner]
     end function sph_radii
@@ -2713,7 +2768,16 @@ contains
             if (ra < 0.0_real64) ra = ra + 360.0_real64
             if (ra >= 360.0_real64) ra = 0.0_real64
         end if
-        dec = atan2(v(3), hypot(v(1), v(2))) * sphere_rad2deg
+        ! `hypot` is scaled against an overflow a unit vector cannot reach and an underflow it can:
+        ! within about 1e-162 radians of a pole the squares go subnormal. Above the guard the plain
+        ! square root is the same value to a rounding and costs less than half as much; below it
+        ! `hypot` still answers, so no direction gains an `IEEE_UNDERFLOW` it did not raise before.
+        ! `v` is a unit vector by contract, so neither component can be NaN here.
+        if (abs(v(1)) >= sphere_hypot_safe .or. abs(v(2)) >= sphere_hypot_safe) then
+            dec = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * sphere_rad2deg
+        else
+            dec = atan2(v(3), hypot(v(1), v(2))) * sphere_rad2deg
+        end if
     end subroutine sph_radec
 
     !> The direction of draw `d` of `(key, stream)`: Archimedes' construction. `key` is derived.
@@ -2755,21 +2819,76 @@ contains
         real(real64), intent(in) :: radius           !! the angular radius, radians
         real(real64), intent(in), optional :: r_inner !! the inner angular radius, radians; absent means 0
         real(real64) :: v(3)                         !! a unit vector in the disc or ring
-        real(real64) :: c(3), e1(3), e2(3), rr(2), ro, ri, s, h_in, dh, u1, u2, h
+        type(pf_random_disc_cap) :: cap
+        ! The prepared form IS this body's first half; going through it is what keeps the two equal
+        ! to the bit, rather than two listings written to match (`fortran-gotchas.md`).
+        call disc_prepare(cap, who, centre, radius, r_inner)
+        v = disc_at_prepared(cap, seed, stream, d)
+    end function disc_draw
+
+    !> `pf_random_disc_cap%prepare`'s body: everything about a disc that no draw index can change.
+    !!
+    !! `intent(inout)` rather than `intent(out)`: a `pure` procedure may not take a polymorphic
+    !! `intent(out)` dummy at all, and every component is assigned on every path that returns.
+    pure subroutine disc_prepare(cap, who, centre, radius, r_inner)
+        class(pf_random_disc_cap), intent(inout) :: cap !! the cap to fill in
+        character(len=*), intent(in) :: who          !! the entry point, for the message
+        real(real64), intent(in) :: centre(3)        !! the disc's centre; any nonzero finite length
+        real(real64), intent(in) :: radius           !! the angular radius, radians
+        real(real64), intent(in), optional :: r_inner !! the inner angular radius, radians; absent means 0
+        real(real64) :: rr(2), ro, ri, s
         rr(2) = 0.0_real64
         if (present(r_inner)) rr(2) = r_inner
-        rr = sph_radii(who, "", radius, rr(2))
-        c = sph_unit(who, centre)
-        call sph_frame(centre, c, e1, e2)
+        rr = sph_radii(who, "", radius, rr(2), sphere_pi)
+        cap%c = sph_unit(who, centre)
+        call sph_frame(centre, cap%c, cap%e1, cap%e2)
         ro = min(rr(1), sphere_pi)
         ri = min(rr(2), sphere_pi)
         s = sin(0.5_real64 * ri)
-        h_in = 2.0_real64 * s * s
-        dh = 2.0_real64 * sin(0.5_real64 * (ro + ri)) * sin(0.5_real64 * (ro - ri))
+        cap%h_in = 2.0_real64 * s * s
+        cap%dh = 2.0_real64 * sin(0.5_real64 * (ro + ri)) * sin(0.5_real64 * (ro - ri))
+        cap%set = .true.
+    end subroutine disc_prepare
+
+    !> `pf_random_disc_cap%at`'s body at a validated draw: the block and the placement, nothing else.
+    pure function disc_at_prepared(cap, seed, stream, d) result(v)
+        class(pf_random_disc_cap), intent(in) :: cap !! a prepared cap
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: stream         !! the stream index
+        integer(int64), intent(in) :: d              !! the draw, validated
+        real(real64) :: v(3)                         !! a unit vector in the disc or ring
+        real(real64) :: u1, u2, h
         call sph_pair(key_from(seed, sphere_disc_label), stream, d, u1, u2)
-        h = min(max(h_in + u1 * dh, 0.0_real64), 2.0_real64)
-        v = sph_place(c, e1, e2, h, u2)
-    end function disc_draw
+        h = min(max(cap%h_in + u1 * cap%dh, 0.0_real64), 2.0_real64)
+        v = sph_place(cap%c, cap%e1, cap%e2, h, u2)
+    end function disc_at_prepared
+
+    !> `pf_random_disc_cap%prepare`: validates and prepares, naming itself in any refusal.
+    pure subroutine disc_cap_prepare(self, centre, radius, r_inner)
+        class(pf_random_disc_cap), intent(inout) :: self !! the cap; any previous preparation is dropped
+        real(real64), intent(in) :: centre(3)        !! the disc's centre; any nonzero finite length
+        real(real64), intent(in) :: radius           !! the angular radius, radians; at least 0
+        real(real64), intent(in), optional :: r_inner !! the inner angular radius, radians; absent means 0
+        call disc_prepare(self, "pf_random_disc_cap%prepare", centre, radius, r_inner)
+    end subroutine disc_cap_prepare
+
+    !> `pf_random_disc_cap%at`: `pf_random_disc_at`'s value at the same coordinates, to the bit.
+    pure function disc_cap_at(self, seed, i, draw) result(v)
+        class(pf_random_disc_cap), intent(in) :: self !! a prepared cap
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int64), intent(in) :: i              !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: v(3)                         !! a unit vector in the disc or ring
+        if (.not. self%set) error stop "pf_random_disc_cap%at: %prepare has not run"
+        v = disc_at_prepared(self, seed, i, sph_draw("pf_random_disc_cap%at", draw))
+    end function disc_cap_at
+
+    !> `pf_random_disc_cap%is_set`: whether `%prepare` has run.
+    pure elemental function disc_cap_is_set(self) result(ok)
+        class(pf_random_disc_cap), intent(in) :: self !! the cap
+        logical :: ok                                !! `.true.` once prepared
+        ok = self%set
+    end function disc_cap_is_set
 
     !> `pf_random_disc_radec_at`'s value at a validated draw: `disc_draw` in degrees and the standard frame.
     pure subroutine disc_radec_draw(who, seed, stream, d, ra0, dec0, radius_deg, ra, dec, r_inner_deg)
@@ -2786,7 +2905,7 @@ contains
         real(real64) :: rr(2), c(3), v(3)           ! `c` and `v` named for the explicit-shape dummies they reach
         rr(2) = 0.0_real64
         if (present(r_inner_deg)) rr(2) = r_inner_deg
-        rr = sph_radii(who, "_deg", radius_deg, rr(2))
+        rr = sph_radii(who, "_deg", radius_deg, rr(2), 180.0_real64)
         c = sph_centre_radec(who, ra0, dec0)
         v = disc_draw(who, seed, stream, d, c, rr(1) * sphere_deg2rad, rr(2) * sphere_deg2rad)
         call sph_radec(v, ra, dec)

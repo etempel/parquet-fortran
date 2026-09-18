@@ -2824,11 +2824,14 @@ contains
             if (allocated(error)) return
         end do
 
-        ! Both radii past the half turn clamp to it, so the ring between them is the antipode alone.
+        ! An outer radius past the half turn clamps to it; an INNER one is refused instead, because
+        ! clamping it leaves a ring of zero width whose every draw is the antipode, returned silently
+        ! for what the caller wrote as an annulus (scenario random_disc_inner_above_half_turn). The
+        ! largest legal inner radius is the half turn itself, and that ring IS the antipode alone.
         do k = 1_int64, 50_int64
-            v = pf_random_disc_at(dist_seed, 37_int64, ZAXIS, 4.0_real64, k, 3.5_real64)
+            v = pf_random_disc_at(dist_seed, 37_int64, ZAXIS, 4.0_real64, k, PI)
             call check(error, maxval(abs(v - [0.0_real64, 0.0_real64, -1.0_real64])) <= SPH_SAME, &
-                "a ring whose two radii both pass the half turn is not the antipode: both must clamp to pi")
+                "a ring whose inner radius is exactly the half turn is not the antipode")
             if (allocated(error)) return
         end do
 

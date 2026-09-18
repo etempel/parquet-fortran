@@ -1,10 +1,16 @@
 !> Points in HEALPix pixels and masks: `pf_random_pixel_*` and `pf_random_mask_*`.
 !!
-!! **One walk serves both families.** A candidate is `pf_random_disc_at` over the cap of radius
-!! `%max_pixrad` about the pixel centre, kept when `%vec2pix` names the pixel; every point of a
-!! pixel lies within `%max_pixrad` of its centre, the bound being attained at a corner, so the cap
-!! covers the pixel. The pixel family and the mask's point family run the same walk under different
-!! labels, and the mask's choice of a listed pixel is a fixed-cost `pf_random_int_at` under a third.
+!! **One draw serves both families, and neither rejects.** A HEALPix pixel is a square in the
+!! projection plane and that projection is equal-area, so the two uniforms of one block, read
+!! through `%pix2vec_offset` as a position across and along that square, are a direction uniform
+!! over the pixel per unit solid angle. The pixel family and the mask's point family make the same
+!! draw under different labels, and the mask's choice of a listed pixel is a fixed-cost
+!! `pf_random_int_at` under a third.
+!!
+!! **A cap and a rejection test would be both slower and, at the finest resolutions, less correct.**
+!! Accepting a candidate on `%vec2pix(v) == ipix` samples the set that test admits rather than the
+!! pixel, and within a pixel of a pole at `nside` above about `2**21` those differ: `z` there sits
+!! closer to 1 than a double resolves, so `%vec2pix` cannot name the pixel a direction is in.
 !!
 !! **A grid is read only through its public bindings**, `%is_set`, `%order`, `%pix2vec`, `%vec2pix`,
 !! `%max_pixrad` and `%vec2radec`, all `pure`; the pixel count comes from `%order` because
@@ -37,7 +43,13 @@ contains
         npix = 12_int64 * nside * nside
     end function sky_grid_npix
 
-    !> The pixel walk: the point of draw `d` inside pixel `ipix`, under `label`, and its candidate count.
+    !> The point of draw `d` inside pixel `ipix`, under `label`, and the candidates it took.
+    !!
+    !! **This family does not reject.** A HEALPix pixel is a square in the projection plane and that
+    !! projection is equal-area, so the two uniforms of one block, read as a position across and
+    !! along that square, ARE a direction uniform over the pixel per unit solid angle --
+    !! `%pix2vec_offset` is the inverse projection. Nothing is drawn that has to be thrown away, so
+    !! `ncand` is 1 for every draw and exists only for the debug hook, which reports it.
     pure subroutine sky_pixel_walk(who, grid, label, seed, i, ipix, d, v, ncand)
         character(len=*), intent(in) :: who !! the entry point, for the messages.
         type(pf_healpix_grid), intent(in) :: grid !! the grid.
@@ -47,9 +59,9 @@ contains
         integer(int64), intent(in) :: ipix !! the pixel, in the grid's scheme.
         integer(int64), intent(in) :: d !! the draw, at least 1.
         real(real64), intent(out) :: v(3) !! a unit vector uniform inside the pixel.
-        integer(int64), intent(out) :: ncand !! candidates drawn, the accepted one included.
-        real(real64) :: centre(3), radius
-        integer(int64) :: npix, key, k, jpix
+        integer(int64), intent(out) :: ncand !! candidates drawn; always 1, since none is rejected.
+        real(real64) :: uv(2)
+        integer(int64) :: npix, key
 
         ncand = 0_int64
         npix = sky_grid_npix(who, grid)
@@ -57,19 +69,12 @@ contains
             error stop who // ": ipix " // trim(sky_int_text(ipix)) // " is outside [0, " // &
                 trim(sky_int_text(npix)) // ")"
         end if
-        call grid%pix2vec(ipix, centre)
-        radius = grid%max_pixrad()
+        ! The two halves of block 0 of the per-draw key: one enciphering, as every other family's
+        ! first candidate is.
         key = pf_random_key(pf_random_key(seed, label), d)
-        do k = 1_int64, sky_candidate_cap
-            v = pf_random_disc_at(key, i, centre, radius, k)
-            call grid%vec2pix(v, jpix)
-            if (jpix == ipix) then
-                ncand = k
-                return
-            end if
-        end do
-        ! About 29% of a pixel's bounding cap is the pixel at every resolution, so no draw reaches this.
-        error stop who // ": 100000 candidates rejected -- a pixel's bounding cap cannot produce this" ! GCOVR_EXCL_LINE
+        call pf_random_fill_draws(key, i, uv, 1_int64)
+        call grid%pix2vec_offset(ipix, uv(1), uv(2), v)
+        ncand = 1_int64
     end subroutine sky_pixel_walk
 
     !> A pixel list's length, checked to be at least 1 against a grid of `npix` pixels.

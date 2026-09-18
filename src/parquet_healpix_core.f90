@@ -1025,6 +1025,55 @@ contains
         call hpx_pix2vec_nest_i64(int(nside, int64), int(ipix, int64), vec)
     end procedure hpx_pix2vec_nest_i32
 
+    module procedure hpx_pix2vec_offset_nest
+        ! The continuous inverse of the HEALPix projection. A NEST index splits into a base face and
+        ! a pair of coordinates along that face's two edges; `(x, y)` in `[0, 1)**2` are those
+        ! coordinates made continuous, and the face's `jr`/`jp` tables turn them into a ring
+        ! coordinate and a longitude. The integer pixel-centre path is this with `x` and `y` at the
+        ! half-integer, which is why `(0.5, 0.5)` comes back as `%pix2vec`.
+        !
+        ! The projection is EQUAL-AREA, so uniform `(x, y)` is uniform solid angle -- the whole point
+        ! of preferring it to a cap and a rejection test.
+        integer(int64), parameter :: JRLL(0:11) = [2_int64, 2_int64, 2_int64, 2_int64, 3_int64, 3_int64, &
+                                                   3_int64, 3_int64, 4_int64, 4_int64, 4_int64, 4_int64]
+        integer(int64), parameter :: JPLL(0:11) = [1_int64, 3_int64, 5_int64, 7_int64, 0_int64, 2_int64, &
+                                                   4_int64, 6_int64, 1_int64, 3_int64, 5_int64, 7_int64]
+        integer(int64) :: face, low, ix, iy
+        real(real64) :: x, y, jr, nr, z, st, tmp, phi
+
+        face = ipix / (nside * nside)
+        low = ipix - face * nside * nside
+        ix = hpx_compact_bits(low)
+        iy = hpx_compact_bits(ishft(low, -1))
+        x = (real(ix, real64) + dx) / real(nside, real64)
+        y = (real(iy, real64) + dy) / real(nside, real64)
+        jr = real(JRLL(face), real64) - x - y
+        if (jr < 1.0_real64) then
+            ! North polar cap. `sin(theta)` is formed as `nr*sqrt((1 + z)/3)` rather than
+            ! `sqrt(1 - z*z)`: `1 - z` IS `nr*nr/3` there, so this cancels nothing where the plain
+            ! form would lose half its digits within a pixel of the pole.
+            nr = jr
+            z = 1.0_real64 - nr * nr / 3.0_real64
+            st = nr * sqrt((1.0_real64 + z) / 3.0_real64)
+        else if (jr > 3.0_real64) then
+            nr = 4.0_real64 - jr
+            z = nr * nr / 3.0_real64 - 1.0_real64
+            st = nr * sqrt((1.0_real64 - z) / 3.0_real64)
+        else
+            ! The equatorial belt, where `|z| <= 2/3` and the plain form cancels nothing.
+            nr = 1.0_real64
+            z = (2.0_real64 - jr) * 2.0_real64 / 3.0_real64
+            st = sqrt((1.0_real64 - z) * (1.0_real64 + z))
+        end if
+        tmp = real(JPLL(face), real64) * nr + x - y
+        if (tmp < 0.0_real64) tmp = tmp + 8.0_real64
+        if (tmp >= 8.0_real64) tmp = tmp - 8.0_real64
+        phi = 0.5_real64 * hpx_halfpi * tmp / nr
+        vec(1) = st * cos(phi)
+        vec(2) = st * sin(phi)
+        vec(3) = z
+    end procedure hpx_pix2vec_offset_nest
+
     ! ---- Message helpers ----
     !
     ! The only impure procedures in this file: both perform an internal write, and both are reached

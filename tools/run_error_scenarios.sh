@@ -1105,6 +1105,7 @@ scenarios=(
     "random_disc_centre_zero:1"
     "random_disc_centre_nan:1"
     "random_disc_inner_exceeds_radius:1"
+    "random_disc_inner_above_half_turn:1"
     "random_disc_inner_nan:1"
     "random_disc_radec_dec_out_of_range:1"
     "random_disc_radec_centre_nan:1"

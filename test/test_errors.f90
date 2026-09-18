@@ -3338,6 +3338,8 @@ contains
                 test_random_disc_centre_nan_aborts), &
             new_unittest("a disc refuses an inner radius beyond its outer", &
                 test_random_disc_inner_exceeds_radius_aborts), &
+            new_unittest("a disc refuses an inner radius past the half turn", &
+                test_random_disc_inner_above_half_turn_aborts), &
             new_unittest("a disc refuses a NaN inner radius", &
                 test_random_disc_inner_nan_aborts), &
             new_unittest("a sky disc refuses a declination outside [-90, 90]", &
@@ -19986,6 +19988,15 @@ contains
             "against 5.0000000E-01)")
     end subroutine test_random_disc_inner_exceeds_radius_aborts
     !
+    !> See scenario_random_disc_inner_above_half_turn.
+    subroutine test_random_disc_inner_above_half_turn_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_inner_above_half_turn", expect_abort=.true., &
+            failure_message="a ring whose inner radius passes the half turn was expected to abort", &
+            required_stderr="pf_random_disc_at: r_inner must not exceed 3.1415927E+00 (got 4.0000000E+00); " // &
+            "a ring whose inner radius passes the half turn is the antipode alone")
+    end subroutine test_random_disc_inner_above_half_turn_aborts
+    !
     !> See scenario_random_disc_inner_nan.
     subroutine test_random_disc_inner_nan_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -20192,9 +20203,9 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "sphere_polygon_vertices_cancel", expect_abort=.true., &
             failure_message="a polygon whose vertex directions sum to zero was expected to abort", &
-            required_stderr="pf_sky_polygon%init: vertex 1 is 9.0000000E+01 degrees from the vertices' mean direction; " // &
-            "every vertex must be within 89.9 degrees of it (the polygon must fit an open hemisphere) " // &
-            "-- split it")
+            required_stderr="pf_sky_polygon%init: the vertices' unit vectors sum to exactly zero, so they name " // &
+            "no mean direction; every vertex must be within 89.9 degrees of it (the polygon must fit an open " // &
+            "hemisphere) -- split it")
     end subroutine test_sphere_polygon_vertices_cancel_aborts
     !
     !> See scenario_sphere_polygon_zero_area.

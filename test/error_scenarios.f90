@@ -1420,6 +1420,8 @@ program error_scenarios
         call scenario_random_disc_centre_nan()
     case ("random_disc_inner_exceeds_radius")
         call scenario_random_disc_inner_exceeds_radius()
+    case ("random_disc_inner_above_half_turn")
+        call scenario_random_disc_inner_above_half_turn()
     case ("random_disc_inner_nan")
         call scenario_random_disc_inner_nan()
     case ("random_disc_radec_dec_out_of_range")
@@ -23333,6 +23335,19 @@ contains
         v = pf_random_disc_at(1_int64, 1_int64, NORTH, 0.5_real64, 1_int64, 0.6_real64)   ! -> aborts
         print '(a,3es12.4)', "unexpectedly drew a ring whose inner radius exceeds its outer: ", v
     end subroutine scenario_random_disc_inner_exceeds_radius
+
+    !> An inner radius past the half turn is refused rather than clamped: clamping leaves a ring of
+    !! zero width whose every draw is the antipode. The control is `r_inner = pi`, the antipode
+    !! circle, which is the largest legal one.
+    subroutine scenario_random_disc_inner_above_half_turn()
+        real(real64) :: v(3)
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+        real(real64), parameter :: PI = 3.14159265358979323846264338327950288_real64
+        v = pf_random_disc_at(1_int64, 1_int64, NORTH, PI, 1_int64, PI)
+        print '(a,3es12.4)', "drew the antipode circle r_inner = radius = pi: ", v
+        v = pf_random_disc_at(1_int64, 1_int64, NORTH, 5.0_real64, 1_int64, 4.0_real64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew a ring whose inner radius passes the half turn: ", v
+    end subroutine scenario_random_disc_inner_above_half_turn
 
     !> A NaN inner radius is refused by its own screen, ahead of the range test it would slip through.
     subroutine scenario_random_disc_inner_nan()

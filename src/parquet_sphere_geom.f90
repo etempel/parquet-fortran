@@ -90,7 +90,16 @@ contains
             if (ra < 0.0_real64) ra = ra + 360.0_real64
             if (ra >= 360.0_real64) ra = 0.0_real64
         end if
-        dec = atan2(v(3), hypot(v(1), v(2))) * sky_rad2deg
+        ! `hypot` is scaled against an overflow that a unit vector cannot reach and an underflow it
+        ! can: within about 1e-162 radians of a pole the squares go subnormal. Above the guard the
+        ! plain square root is the same value to a rounding and costs less than half as much; below
+        ! it `hypot` still answers, so no direction gains an `IEEE_UNDERFLOW` it did not raise
+        ! before. `v` is a unit vector by contract, so neither component can be NaN here.
+        if (abs(v(1)) >= sky_hypot_safe .or. abs(v(2)) >= sky_hypot_safe) then
+            dec = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * sky_rad2deg
+        else
+            dec = atan2(v(3), hypot(v(1), v(2))) * sky_rad2deg
+        end if
     end procedure sky_unit_radec
 
     module procedure sky_draw

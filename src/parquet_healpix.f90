@@ -387,6 +387,10 @@ module parquet_healpix
         procedure, private, non_overridable :: hpx_grid_pix2vec_i64 !! %pix2vec from an int64.
         !> Unit vector of a pixel centre.
         generic :: pix2vec => hpx_grid_pix2vec_i32, hpx_grid_pix2vec_i64
+        procedure, private, non_overridable :: hpx_grid_pix2vec_off_i32 !! %pix2vec_offset from an int32.
+        procedure, private, non_overridable :: hpx_grid_pix2vec_off_i64 !! %pix2vec_offset from an int64.
+        !> Unit vector at a fractional position inside a pixel; `(0.5, 0.5)` is the centre.
+        generic :: pix2vec_offset => hpx_grid_pix2vec_off_i32, hpx_grid_pix2vec_off_i64
 
         ! ---- The RA/Dec layer: DEGREES, this grid's declination convention ----
         procedure, private, non_overridable :: hpx_grid_radec2pix_i32 !! %radec2pix into an int32.
@@ -842,6 +846,23 @@ module parquet_healpix
             integer(int64), intent(in) :: ipix !! NEST pixel index, 0-based.
             real(real64), intent(out) :: vec(3) !! unit vector of the pixel centre.
         end subroutine hpx_pix2vec_nest_i64
+
+        !> The unit vector at fractional position `(dx, dy)` inside a NEST pixel.
+        !!
+        !! The pixel's own square in the HEALPix projection plane, with `(0, 0)` one corner and
+        !! `(1, 1)` the opposite one; `(0.5, 0.5)` is the centre and reproduces
+        !! `hpx_pix2vec_nest_i64` to rounding. **The projection is equal-area**, so `(dx, dy)`
+        !! uniform over the unit square is a direction uniform over the pixel per unit solid angle --
+        !! which is what makes this the primitive a sampler wants. Total: `dx` and `dy` outside
+        !! `[0, 1]` name a direction outside the pixel rather than aborting, and no argument is
+        !! validated.
+        pure module subroutine hpx_pix2vec_offset_nest(nside, ipix, dx, dy, vec)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix !! NEST pixel index, 0-based.
+            real(real64), intent(in) :: dx !! position across the pixel, `[0, 1)`.
+            real(real64), intent(in) :: dy !! position along the pixel, `[0, 1)`.
+            real(real64), intent(out) :: vec(3) !! the unit vector there.
+        end subroutine hpx_pix2vec_offset_nest
     end interface
 
     ! ---- Interfaces: scheme conversion ----
@@ -2293,6 +2314,34 @@ module parquet_healpix
             integer(int64), intent(in) :: ipix !! a pixel index in this grid's scheme.
             real(real64), intent(out) :: vec(3) !! its centre's unit vector, or -999 in each component.
         end subroutine hpx_grid_pix2vec_i64
+
+        !> `%pix2vec_offset` from an `int32` pixel index. See the int64 specific for the contract.
+        pure module subroutine hpx_grid_pix2vec_off_i32(this, ipix, dx, dy, vec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(in) :: dx !! position across the pixel, `[0, 1)`.
+            real(real64), intent(in) :: dy !! position along the pixel, `[0, 1)`.
+            real(real64), intent(out) :: vec(3) !! the unit vector there, or -999 in each component.
+        end subroutine hpx_grid_pix2vec_off_i32
+
+        !> The unit vector at fractional position `(dx, dy)` inside a pixel of this grid's scheme.
+        !>
+        !> `(0.5, 0.5)` is the centre and reproduces `%pix2vec` to rounding; `(0, 0)` and `(1, 1)`
+        !> are opposite corners of the pixel's square in the HEALPix projection plane. **That
+        !> projection is equal-area**, so `(dx, dy)` uniform over the unit square gives a direction
+        !> uniform over the pixel per unit solid angle, in one step and with nothing rejected --
+        !> which is what `pf_random_pixel_at` is built on. The result is HEALPix-native, as
+        !> `%pix2vec` is: this grid's declination frame enters only where a position in degrees does.
+        !> Total, like `%pix2vec`: an unbuilt grid answers -999 in each component, an out-of-range
+        !> `ipix` is not diagnosed, and `dx` or `dy` outside `[0, 1]` names a direction outside the
+        !> pixel.
+        pure module subroutine hpx_grid_pix2vec_off_i64(this, ipix, dx, dy, vec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(in) :: dx !! position across the pixel, `[0, 1)`.
+            real(real64), intent(in) :: dy !! position along the pixel, `[0, 1)`.
+            real(real64), intent(out) :: vec(3) !! the unit vector there, or -999 in each component.
+        end subroutine hpx_grid_pix2vec_off_i64
     end interface
 
     ! ---- The RA/Dec layer: DEGREES, in this grid's declination convention ----

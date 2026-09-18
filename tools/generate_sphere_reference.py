@@ -96,6 +96,20 @@ ALGORITHM = "region:box+cap/gnomonic-evenodd/1e-3/v1"
 CANDIDATE_CAP = 100000
 HEMISPHERE_DEG = D("89.9")
 
+# The measurement `%init` replaces a self-intersecting polygon's signed-sum area with: the fraction
+# of an `R2` low-discrepancy lattice falling inside the even-odd interior. The lattice steps in
+# integers modulo 2**53, so this model reproduces the library's points exactly rather than
+# approximately, and the whole measurement is float64 arithmetic mirroring the Fortran statement for
+# statement. `AREA_TOL` is the relative tolerance the golden rows carry for a measured area: the
+# lattice's own discretisation error at 2**18 points is about 1e-4 (measured against 2**22), so a
+# tighter pin would be pinning noise rather than the contract.
+AREA_SAMPLES = 262144
+LAT_M = 9007199254740992
+LAT_A1 = 6799333552837831
+LAT_A2 = 5132665044399055
+AREA_TOL = 1.0e-4
+EXACT_AREA_TOL = 1.0e-12
+
 EDGE_RADEC = 0
 EDGE_GREAT_CIRCLE = 1
 HP_RING = 0
@@ -291,6 +305,107 @@ GC_POLYGONS = [
 ]
 
 
+def fside(ax, ay, bx, by, cx, cy):
+    """The sign of `(b - a) x (c - a)`, as `sky_side` computes it."""
+    d = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    return 1 if d > 0.0 else (-1 if d < 0.0 else 0)
+
+
+def self_intersects(px, py):
+    """Whether two non-adjacent edges of the closed polygon cross, as `sky_self_intersects` decides.
+
+    The plane is the containment test's: `(ra, dec)` for a chart polygon, the gnomonic `(x, y)` for
+    a great-circle one, in which every great circle is a straight line."""
+    n = len(px)
+    if n < 4:
+        return False
+    for k in range(n - 1):
+        kn = k + 1
+        for j in range(k + 2, n):
+            jn = 0 if j == n - 1 else j + 1
+            if jn == k:
+                continue
+            s1 = fside(px[k], py[k], px[kn], py[kn], px[j], py[j])
+            s2 = fside(px[k], py[k], px[kn], py[kn], px[jn], py[jn])
+            if s1 * s2 >= 0:
+                continue
+            s3 = fside(px[j], py[j], px[jn], py[jn], px[k], py[k])
+            s4 = fside(px[j], py[j], px[jn], py[jn], px[kn], py[kn])
+            if s3 * s4 < 0:
+                return True
+    return False
+
+
+def lattice_uniforms():
+    """The `R2` lattice `sky_polygon_measure` walks: `AREA_SAMPLES` pairs in `[0, 1)`."""
+    x1 = x2 = 0
+    sc = 1.0 / LAT_M
+    for _ in range(AREA_SAMPLES):
+        x1 = (x1 + LAT_A1) % LAT_M
+        x2 = (x2 + LAT_A2) % LAT_M
+        yield x1 * sc, x2 * sc
+
+
+def fdec_sin_cos(dec):
+    """`sky_dec_sin_cos` in float64: the pole exact, everything else the libm's sine and cosine."""
+    if dec == 90.0:
+        return 1.0, 0.0
+    if dec == -90.0:
+        return -1.0, 0.0
+    d = dec * (math.pi / 180.0)
+    return math.sin(d), math.cos(d)
+
+
+def feven_odd(px, py, x, y):
+    """`sky_even_odd` in float64."""
+    inside = False
+    n = len(px)
+    j = n - 1
+    for k in range(n):
+        if (py[k] > y) != (py[j] > y):
+            if x < px[k] + (y - py[k]) * (px[j] - px[k]) / (py[j] - py[k]):
+                inside = not inside
+        j = k
+    return inside
+
+
+def measure_chart(ra, dec):
+    """`sky_polygon_measure`'s `PF_EDGE_RADEC` arm, statement for statement."""
+    ra_lo, ra_hi = min(ra), max(ra)
+    dec_lo, dec_hi = min(dec), max(dec)
+    sin_lo = fdec_sin_cos(dec_lo)[0]
+    lo = dec_lo * (math.pi / 180.0)
+    hi = dec_hi * (math.pi / 180.0)
+    sin_span = 2.0 * math.cos(0.5 * (hi + lo)) * math.sin(0.5 * (hi - lo))
+    nin = 0
+    for u1, u2 in lattice_uniforms():
+        ra_c = ra_lo + u1 * (ra_hi - ra_lo)
+        s = min(max(sin_lo + u2 * sin_span, -1.0), 1.0)
+        dec_c = math.asin(s) * (180.0 / math.pi)
+        if feven_odd(ra, dec, ra_c, dec_c):
+            nin += 1
+    return nin / AREA_SAMPLES
+
+
+def measure_cap(px, py, cap_radius):
+    """`sky_polygon_measure`'s `PF_EDGE_GREAT_CIRCLE` arm, statement for statement.
+
+    The candidate never becomes a unit vector: at offset `h` and azimuth `phi` its gnomonic
+    coordinates in the cap's own frame are `(sin*cos(phi), sin*sin(phi))` over `1 - h`."""
+    hemi_cos = 1.7453283658983088e-3              # sky_hemisphere_cos, cos(89.9 degrees)
+    dh = 2.0 * math.sin(0.5 * cap_radius) ** 2
+    nin = 0
+    for u1, u2 in lattice_uniforms():
+        h = u1 * dh
+        zc = 1.0 - h
+        sn = math.sqrt(h * (2.0 - h))
+        phi = 2.0 * math.pi * u2
+        if zc > 0.5 * hemi_cos:
+            if feven_odd(px, py, sn * math.cos(phi) / zc, sn * math.sin(phi) / zc):
+                nin += 1
+    return nin / AREA_SAMPLES
+
+
 class ChartPolygon:
     """A `PF_EDGE_RADEC` polygon: containment exact in rationals, area and box in decimal."""
 
@@ -307,6 +422,14 @@ class ChartPolygon:
             self.box = deg2rad(D(self.ra_hi) - D(self.ra_lo)) * (self.sin_hi - self.sin_lo)
             self.area = self.exact_area()
             self.acceptance = min(self.area / self.box, D(1))
+        # A self-intersecting polygon's exact area is a signed sum, which is not the region the
+        # even-odd rule samples; `%init` measures that instead, and so does this.
+        self.simple = not self_intersects(self.ra, self.dec)
+        if not self.simple:
+            with dctx():
+                f = D(repr(measure_chart(self.ra, self.dec)))
+                self.area = f * self.box
+                self.acceptance = min(f, D(1))
 
     def exact_area(self):
         """Green's theorem, `sum (ra2 - ra1)*(cos(d1) - cos(d2))/(d2 - d1)`, level edges
@@ -398,6 +521,15 @@ class GreatCirclePolygon:
             self.acceptance = min(self.area / self.box, D(1))
         self.fu = [[float(x) for x in v] for v in self.u]
         self.fc = [float(x) for x in self.c]
+        e1, e2 = frame_of(self.fc)
+        self.fpx = [fdot(v, e1) / fdot(v, self.fc) for v in self.fu]
+        self.fpy = [fdot(v, e2) / fdot(v, self.fc) for v in self.fu]
+        self.simple = not self_intersects(self.fpx, self.fpy)
+        if not self.simple:
+            with dctx():
+                f = D(repr(measure_cap(self.fpx, self.fpy, float(self.radius))))
+                self.area = f * self.box
+                self.acceptance = min(f, D(1))
         self.normals = []
         for k in range(len(self.fu)):
             nk = fcross(self.fu[k], self.fu[(k + 1) % len(self.fu)])
@@ -631,21 +763,75 @@ def polygon_walk(poly, seed, stream, draw):
     raise SystemExit("%s: a walk reached the candidate cap" % poly.name)
 
 
+JRLL = [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
+JPLL = [1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7]
+
+
+def compact_bits(v):
+    """The exact inverse of the bit spread: gathers the even bits of `v`."""
+    v &= 0x5555555555555555
+    v = (v | (v >> 1)) & 0x3333333333333333
+    v = (v | (v >> 2)) & 0x0F0F0F0F0F0F0F0F
+    v = (v | (v >> 4)) & 0x00FF00FF00FF00FF
+    v = (v | (v >> 8)) & 0x0000FFFF0000FFFF
+    v = (v | (v >> 16)) & 0x00000000FFFFFFFF
+    return v
+
+
+def pix_point(nside, scheme, ipix, dx, dy):
+    """`%pix2vec_offset`: the direction at fractional position `(dx, dy)` inside a pixel.
+
+    The continuous inverse of the HEALPix projection, in decimal. `dx` and `dy` are library
+    uniforms, so they are exact dyadic rationals and the whole expression is exact to the working
+    precision -- this is a reference, not a re-derivation of the float64 path. `(0.5, 0.5)` must
+    reproduce `pix2vec`, which `self_test` checks."""
+    ipn = hpr.ring2nest(nside, ipix) if scheme == HP_RING else ipix
+    face, low = divmod(ipn, nside * nside)
+    ix = compact_bits(low)
+    iy = compact_bits(low >> 1)
+    with dctx():
+        n = D(nside)
+        x = (D(ix) + D(dx)) / n
+        y = (D(iy) + D(dy)) / n
+        jr = D(JRLL[face]) - x - y
+        if jr < 1:
+            nr = jr
+            z = 1 - nr * nr / 3
+            st = nr * ((1 + z) / 3).sqrt()
+        elif jr > 3:
+            nr = 4 - jr
+            z = nr * nr / 3 - 1
+            st = nr * ((1 - z) / 3).sqrt()
+        else:
+            nr = D(1)
+            z = (2 - jr) * 2 / 3
+            st = ((1 - z) * (1 + z)).sqrt()
+        tmp = D(JPLL[face]) * nr + x - y
+        if tmp < 0:
+            tmp += 8
+        if tmp >= 8:
+            tmp -= 8
+        phi = DPI * tmp / (4 * nr)
+        sp, cp = dsin_cos(phi)
+        return [st * cp, st * sp, z]
+
+
 def pixel_walk(nside, scheme, label, seed, stream, ipix, d):
-    """The pixel walk under `label`: `(v, ncand)`, or `Unstable`."""
-    centre = pix2vec(nside, scheme, ipix)
-    if not axis_ok(centre):
-        raise Unstable
-    radius = max_pixrad(nside)
-    delta = min(1e-12, 1e-4 * float(radius))
+    """`pf_random_pixel_at` under `label`: `(v, ncand)`, or `Unstable`.
+
+    **Nothing is rejected.** The pixel is a square in the equal-area projection, so the two uniforms
+    of one block, read as a position across and along that square, ARE a point uniform over the
+    pixel; `ncand` is 1 for every draw. A row whose point lies within rounding of a pixel boundary
+    is still refused, so the suite's `%vec2pix` assertions on the mask rows stay decidable."""
     key = rgv.random_key(rgv.random_key(seed, label), d)
-    for k in range(1, CANDIDATE_CAP + 1):
-        v = rgv.sphere_disc(key, stream, k, centre, radius, 0.0)[0]
-        if not pixel_stable(nside, scheme, v, delta):
-            raise Unstable
-        if vec2pix(nside, scheme, v) == ipix:
-            return v, k
-    raise SystemExit("a pixel walk reached the candidate cap")
+    c = rgv.block(key, stream, 0)
+    u1 = float(((c[1] << 32) | c[0]) >> 11) * 2.0 ** -53
+    u2 = float(((c[3] << 32) | c[2]) >> 11) * 2.0 ** -53
+    v = pix_point(nside, scheme, ipix, u1, u2)
+    delta = min(1e-12, 1e-4 * float(max_pixrad(nside)))
+    if not pixel_stable(nside, scheme, v, delta):
+        raise Unstable
+    return v, 1
 
 
 def pixel_draw(nside, scheme, seed, stream, ipix, draw):
@@ -951,6 +1137,9 @@ def gen_module():
     L += array("integer(int64)", "spoly_dec_bits", "n_spoly_vertex", [bits64(x) for x in flat_dec])
     L += array("integer(int64)", "spoly_area_bits", "n_spoly", [bits64(p.area) for p in polys])
     L += array("integer(int64)", "spoly_acceptance_bits", "n_spoly", [bits64(p.acceptance) for p in polys])
+    L += array("logical", "spoly_simple", "n_spoly", [logical(p.simple) for p in polys])
+    L += array("integer(int64)", "spoly_area_tol_bits", "n_spoly",
+               [bits64(D(repr(EXACT_AREA_TOL if p.simple else AREA_TOL))) for p in polys])
     L.append("")
 
     L.append("    ! ---- Containment: probes kept at least 1e-6 (degrees in the chart, radians on the")
@@ -1135,6 +1324,19 @@ def self_test():
             check(vec2pix(nside, HP_RING, got) == p, "vec2pix of the centre of ring pixel %d/%d" % (nside, p))
             q = hpr.ring2nest(nside, p)
             check(vec2pix(nside, HP_NEST, pix2vec(nside, HP_NEST, q)) == q, "nest centre %d/%d" % (nside, q))
+            # `%pix2vec_offset` at the half-integer IS the pixel centre: the one anchor that pins
+            # the continuous inverse projection against the integer path it generalises.
+            mid = pix_point(nside, HP_RING, p, 0.5, 0.5)
+            check(all(abs(mid[j] - got[j]) <= D("1e-30") for j in range(3)),
+                  "pix2vec_offset(.5,.5) is not the centre, ring %d/%d" % (nside, p))
+            check(all(abs(pix_point(nside, HP_NEST, q, 0.5, 0.5)[j] - pix2vec(nside, HP_NEST, q)[j]) <= D("1e-30")
+                      for j in range(3)), "pix2vec_offset(.5,.5) is not the centre, nest %d/%d" % (nside, q))
+            # Every corner of the square stays in the pixel, which is what makes the offset form a
+            # sampler rather than an approximation.
+            for ax in (0.02, 0.5, 0.98):
+                for ay in (0.02, 0.5, 0.98):
+                    check(vec2pix(nside, HP_RING, pix_point(nside, HP_RING, p, ax, ay)) == p,
+                          "pix2vec_offset(%g,%g) left ring pixel %d/%d" % (ax, ay, nside, p))
     rng = random.Random(11)
     for _ in range(3000):
         z = 2 * rng.random() - 1

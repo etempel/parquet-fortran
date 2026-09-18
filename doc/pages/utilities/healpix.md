@@ -101,6 +101,20 @@ call sky%ang2pix(theta(:), phi(:), ipix(:))    ! the same binding, over a millio
 `%ang2pix_bulk` and its siblings exist only to carry `threads=`, which an elemental procedure
 cannot take. Everything else about them is the free bulk forms' behaviour.
 
+### Inside a pixel, not just at its centre
+
+`call sky%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised from the centre to any
+position within the pixel. `(dx, dy)` runs over the unit square: `(0.5, 0.5)` is the centre and
+reproduces `%pix2vec`, and `(0, 0)` and `(1, 1)` are opposite corners of the pixel's own square in
+the HEALPix projection plane.
+
+**That projection is equal-area, which is what makes this useful**: `(dx, dy)` uniform over the
+square is a direction uniform over the pixel per unit solid angle, in one step and with nothing
+rejected. It is what [the sphere samplers](sphere.html#points-in-healpix-pixels-and-masks) draw a
+random point in a pixel with. Like `%pix2vec` it is total and HEALPix-native — an unbuilt grid
+answers `-999` in each component, an out-of-range `ipix` is not diagnosed, and a `dx` or `dy`
+outside `[0, 1]` names a direction outside the pixel rather than an error.
+
 ### RA and Dec, in degrees, in a convention you named
 
 This is the layer the object exists for, and the only place this module offers it.

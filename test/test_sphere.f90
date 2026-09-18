@@ -117,12 +117,17 @@ contains
         real(real64), parameter :: POLY_TOL = 1.0e-11_real64
         type(pf_sky_polygon), allocatable :: polys(:)
         type(pf_healpix_grid) :: grid
-        real(real64) :: ra, dec, want_ra, want_dec, v(3), got, want, worst
+        real(real64) :: ra, dec, want_ra, want_dec, v(3), got, want, worst, tol
+        logical :: differs
         real(real64), allocatable :: fra(:), fdec(:)
         integer(int64) :: ncand, ipix, choice
         integer(int32), allocatable :: list(:)
         integer :: k, p, f, l, m
         character(len=160) :: msg
+
+        ! Vacuity guard, accumulated over every tolerance-pinned group below and asserted at the
+        ! end: a table generated FROM the implementation would agree with it to the bit everywhere.
+        differs = .false.
 
         call check(error, pf_sky_region_algorithm == ssph_algorithm, &
             "pf_sky_region_algorithm is not the identifier the golden rows were generated for")
@@ -134,14 +139,23 @@ contains
             l = f + spoly_count(p) - 1
             call polys(p)%init(transfer(spoly_ra_bits(f:l), [0.0_real64]), transfer(spoly_dec_bits(f:l), [0.0_real64]), &
                                spoly_rule(p))
+            write (msg, '(a,i0,a,l1,a,l1)') "polygon ", p, ": %is_simple ", polys(p)%is_simple(), &
+                " against ", spoly_simple(p)
+            call check(error, polys(p)%is_simple() .eqv. spoly_simple(p), trim(msg))
+            if (allocated(error)) return
+            ! A self-intersecting polygon's area is measured on a lattice, not integrated, so its
+            ! row carries a tolerance of its own: the lattice's discretisation error, not an ulp.
+            tol = transfer(spoly_area_tol_bits(p), 0.0_real64)
             want = transfer(spoly_area_bits(p), 0.0_real64)
             write (msg, '(a,i0,a,es24.16,a,es24.16)') "polygon ", p, ": %area ", polys(p)%area(), " against ", want
-            call check(error, abs(polys(p)%area() - want) <= 1.0e-12_real64 * want, trim(msg))
+            call check(error, abs(polys(p)%area() - want) <= tol * want, trim(msg))
+            differs = differs .or. polys(p)%area() /= want
             if (allocated(error)) return
             want = transfer(spoly_acceptance_bits(p), 0.0_real64)
             write (msg, '(a,i0,a,es24.16,a,es24.16)') "polygon ", p, ": %acceptance ", polys(p)%acceptance(), &
                 " against ", want
-            call check(error, abs(polys(p)%acceptance() - want) <= 1.0e-12_real64 * want, trim(msg))
+            call check(error, abs(polys(p)%acceptance() - want) <= tol * want, trim(msg))
+            differs = differs .or. polys(p)%acceptance() /= want
             if (allocated(error)) return
         end do
 
@@ -161,6 +175,8 @@ contains
                                  ra, dec)
             worst = max(worst, sky_gap(ra, dec, transfer(soff_out_bits(2 * k - 1), 0.0_real64), &
                                        transfer(soff_out_bits(2 * k), 0.0_real64)))
+            differs = differs .or. ra /= transfer(soff_out_bits(2 * k - 1), 0.0_real64) .or. &
+                dec /= transfer(soff_out_bits(2 * k), 0.0_real64)
         end do
         write (msg, '(a,es10.3,a)') "pf_offset_radec misses the model by ", worst, " degrees on the sky (at most 1e-11)"
         call check(error, worst <= 1.0e-11_real64, trim(msg))
@@ -173,6 +189,7 @@ contains
             want = transfer(spa_out_bits(k), 0.0_real64)
             write (msg, '(a,i0,a,es24.16,a,es24.16)') "position-angle row ", k, ": ", got, " against ", want
             call check(error, turn_gap(got, want) <= transfer(spa_tol_bits(k), 0.0_real64), trim(msg))
+            differs = differs .or. got /= want
             if (allocated(error)) return
         end do
 
@@ -185,6 +202,7 @@ contains
                 fra(sfib_k(k)), fdec(sfib_k(k))
             call check(error, abs(fdec(sfib_k(k)) - want_dec) <= 1.0e-12_real64 .and. &
                 turn_gap(fra(sfib_k(k)), want_ra) <= transfer(sfib_tol_bits(k), 0.0_real64), trim(msg))
+            differs = differs .or. fra(sfib_k(k)) /= want_ra .or. fdec(sfib_k(k)) /= want_dec
             deallocate(fra, fdec)
             if (allocated(error)) return
         end do
@@ -197,6 +215,8 @@ contains
             call check(error, ncand == spd_ncand(k), trim(msg))
             if (allocated(error)) return
             worst = max(worst, sky_gap(ra, dec, transfer(spd_ra_bits(k), 0.0_real64), transfer(spd_dec_bits(k), 0.0_real64)))
+            differs = differs .or. ra /= transfer(spd_ra_bits(k), 0.0_real64) .or. &
+                dec /= transfer(spd_dec_bits(k), 0.0_real64)
         end do
         write (msg, '(a,es10.3,a)') "a polygon draw misses the model by ", worst, " degrees on the sky"
         call check(error, worst <= POLY_TOL, trim(msg))
@@ -211,6 +231,7 @@ contains
             call check(error, ncand == spx_ncand(k), trim(msg))
             if (allocated(error)) return
             worst = max(worst, maxval(abs(v - transfer(spx_v_bits(3 * k - 2:3 * k), [0.0_real64]))))
+            differs = differs .or. any(v /= transfer(spx_v_bits(3 * k - 2:3 * k), [0.0_real64]))
         end do
         write (msg, '(a,es10.3)') "a pixel draw misses the model by ", worst
         call check(error, worst <= VEC_TOL, trim(msg))
@@ -231,9 +252,18 @@ contains
             call check(error, ipix == int(list(choice), int64), "a mask draw is not in the entry the model chose")
             if (allocated(error)) return
             worst = max(worst, maxval(abs(v - transfer(smd_v_bits(3 * k - 2:3 * k), [0.0_real64]))))
+            differs = differs .or. any(v /= transfer(smd_v_bits(3 * k - 2:3 * k), [0.0_real64]))
         end do
         write (msg, '(a,es10.3)') "a mask draw misses the model by ", worst
         call check(error, worst <= VEC_TOL, trim(msg))
+        if (allocated(error)) return
+
+        ! Vacuity guard. Every group above is pinned to a tolerance, so a table READ BACK out of a
+        ! Fortran run would pass each of them while agreeing to the bit everywhere -- which is what
+        ! a table derived for the implementation, in 60-digit decimal, never does.
+        call check(error, differs, &
+            "not one golden value differs from its 60-digit reference by even an ulp, which is what a table " // &
+            "generated FROM the implementation would look like rather than one generated for it")
     end subroutine test_sphere_golden
 
     ! ================================================================================
@@ -812,7 +842,7 @@ contains
         integer, parameter :: FAMILY(NSTAT) = [1, 2, 3, 3, 4, 5]
         type(pf_sky_polygon) :: rect
         type(pf_healpix_grid) :: grid
-        real(real64), allocatable :: stat(:, :), coupled(:)
+        real(real64), allocatable :: stat(:, :), coupled(:), serial(:)
         real(real64) :: ra, dec, v(3), c(3), limit, chi2
         integer(int64), parameter :: LIST(8) = [100_int64, 200_int64, 300_int64, 400_int64, 500_int64, 600_int64, &
                                                 700_int64, 800_int64]
@@ -822,7 +852,7 @@ contains
         call rect%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
         call grid%init(64_int64, PF_HP_NEST)
         call grid%pix2vec(1000_int64, c)
-        allocate(stat(NSTAT, NDRAW), coupled(NDRAW))
+        allocate(stat(NSTAT, NDRAW), coupled(NDRAW), serial(NDRAW))
         do k = 1_int64, NDRAW
             ! A box keeps its first candidate, so its right ascension is the polygon family's first uniform.
             call rect%random_at(SKY_SEED, k, ra, dec)
@@ -857,6 +887,28 @@ contains
                 if (allocated(error)) return
             end do
         end do
+
+        ! Lag-1 SERIAL independence, along the DRAW axis. Every pairing above varies the STREAM index
+        ! at one draw, so between them they measure label separation and say nothing about consecutive
+        ! draws of ONE family: a defect making the block a draw addresses a function of `d/2` would
+        ! leave each draw equal to its neighbour and pass all of them. The box keeps its first
+        ! candidate, so its right ascension is the polygon family's first uniform at that draw.
+        do k = 1_int64, NDRAW
+            call rect%random_at(SKY_SEED, 1_int64, ra, dec, k)
+            serial(k) = (ra - 10.0_real64) / 20.0_real64
+            ! CONTROL: exactly that defect, consecutive draws sharing one block.
+            call rect%random_at(SKY_SEED, 1_int64, ra, dec, (k + 1_int64) / 2_int64)
+            coupled(k) = (ra - 10.0_real64) / 20.0_real64
+        end do
+        chi2 = independence(coupled(1:NDRAW - 1_int64), coupled(2:NDRAW), NBIN)
+        call check(error, chi2 > 100.0_real64 * limit, &
+            "the lag-1 control -- consecutive draws sharing one block -- passes the serial independence test, " // &
+            "so that test has no power")
+        if (allocated(error)) return
+        chi2 = independence(serial(1:NDRAW - 1_int64), serial(2:NDRAW), NBIN)
+        call check(error, chi2 <= limit, &
+            "consecutive draws of the polygon family are dependent: the block a draw addresses is not a " // &
+            "one-to-one function of the draw index")
     end subroutine test_region_families_independent
 
     !> `%contains` and `%random_at` inside `do concurrent` give the serial values.
@@ -902,7 +954,7 @@ contains
         integer, parameter :: SCHEMES(4) = [PF_HP_RING, PF_HP_NEST, PF_HP_RING, PF_HP_NEST]
         type(pf_healpix_grid) :: grid, south
         integer(int64) :: pix(3), ipix, jpix, nest, k, ncand, total, outside, child(4), grand(16), cgrand(16)
-        real(real64) :: v(3), c(3), f1(3), f2(3), ra, dec, ra2, dec2, radius, mean, theta, phi
+        real(real64) :: v(3), c(3), f1(3), f2(3), ra, dec, ra2, dec2, radius, mean, theta, phi, sh, expect
         integer :: g, q
         character(len=160) :: msg
 
@@ -951,10 +1003,18 @@ contains
                         cgrand(jpix - 16_int64 * nest + 1_int64) = cgrand(jpix - 16_int64 * nest + 1_int64) + 1_int64
                     end if
                 end do
+                ! This family does not reject: it reads one block as a position inside the pixel's
+                ! own square in the equal-area projection, so EVERY draw takes exactly one candidate.
+                ! `expect` is what a walk over the bounding cap would have cost instead --
+                ! caparea/pixarea = npix*sin(R/2)**2, derived rather than banded -- and is asserted
+                ! to exceed 1 so the gate above is telling two different samplers apart rather than
+                ! recording what this one happens to do.
                 mean = real(total, real64) / real(NDRAW, real64)
-                write (msg, '(a,i0,a,i0,a,f8.4,a)') "nside ", NSIDES(g), " pixel ", ipix, ": ", mean, &
-                    " candidates per draw, outside [1.5, 5]"
-                call check(error, mean >= 1.5_real64 .and. mean <= 5.0_real64, trim(msg))
+                sh = sin(0.5_real64 * radius)
+                expect = real(12_int64 * NSIDES(g) * NSIDES(g), real64) * sh * sh
+                write (msg, '(a,i0,a,i0,a,f9.5,a,f9.5)') "nside ", NSIDES(g), " pixel ", ipix, ": ", mean, &
+                    " candidates per draw, where a cap-rejection walk would take ", expect
+                call check(error, mean == 1.0_real64 .and. expect > 1.5_real64, trim(msg))
                 if (allocated(error)) return
                 call check(error, outside > NDRAW / 4_int64, &
                     "control: a walk accepting its first candidate would put fewer than a quarter of its draws outside the pixel")
@@ -1040,10 +1100,18 @@ contains
                     end do
                     call check(error, kept > 2000_int64, "vacuity guard: too few directions landed in the polar pixel")
                     if (allocated(error)) return
+                    ! The invariant asserted here is GEOMETRIC -- every point of a pixel lies within
+                    ! `%max_pixrad` of its centre -- rather than `%vec2pix(v) == ipix`. At these
+                    ! resolutions the two are not the same claim: within a pixel of a pole `z` sits
+                    ! closer to 1 than a double can resolve, so `%vec2pix` cannot name the pixel a
+                    ! direction is in, and it misnames a drawn point about 0.6 % of the time at
+                    ! nside 2**24. The draw is right and the round trip is what runs out of digits;
+                    ! `test_pix2vec_round_trip` says the same of pixel CENTRES above 2**20.
                     do k = 1_int64, 2000_int64
                         v = pf_random_pixel_at(grid, SKY_SEED, 1_int64, ipix, k)
-                        call grid%vec2pix(v, jpix)
-                        call check(error, jpix == ipix, "a draw in a polar pixel is outside it")
+                        call pf_angdist(c, v, theta)
+                        call check(error, theta <= radius, &
+                            "a draw in a polar pixel is farther from the pixel centre than %max_pixrad")
                         if (allocated(error)) return
                     end do
                 end do
@@ -1260,7 +1328,10 @@ contains
         call pf_random_pixel_radec_next(grid, r64, 999_int64, ra(2), dec(2))
         call pf_random_mask_radec_next(grid, r32, L32, ra(3), dec(3))
         call pf_random_mask_radec_next(grid, r64, L64, ra(4), dec(4))
-        call check(error, abs(ra(1) - ra(2)) <= SAME * 360.0_real64 .and. abs(dec(3) - dec(4)) <= SAME * 90.0_real64, &
+        ! All four pairs, not one from each form: asserting only the pixel form's RA and the mask
+        ! form's declination leaves half of what the four calls produced unpinned.
+        call check(error, abs(ra(1) - ra(2)) <= SAME * 360.0_real64 .and. abs(dec(1) - dec(2)) <= SAME * 90.0_real64 .and. &
+            abs(ra(3) - ra(4)) <= SAME * 360.0_real64 .and. abs(dec(3) - dec(4)) <= SAME * 90.0_real64, &
             "the RA/Dec stream forms' int32 and int64 pixel kinds disagree")
         if (allocated(error)) return
 

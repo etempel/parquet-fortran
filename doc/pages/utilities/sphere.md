@@ -109,6 +109,13 @@ ascension. `%contains(ra, dec)` accepts any right ascension and reads it within 
 range, so `-5`, `355` and `715` are one position; a non-finite argument or a declination outside
 `[-90, 90]` is outside.
 
+Writing that band the short way — `350, 10, 10, 350` — is accepted and names the 340-degree
+complement of what was probably meant, because the vertices are read as written and nothing else
+would let a whole declination band be expressed. `%init(ra, dec, [edges], [strict])` with
+`strict = .true.` refuses the shapes that look like that mistake: an RA extent above 180 degrees
+whose vertices sit in two clusters, one at each end of the extent. It is off by default, and a
+legitimate whole-sky band passes it either way.
+
 ### Great circles and the hemisphere rule
 
 A great-circle polygon must fit an open hemisphere: **every vertex within 89.9 degrees of the
@@ -122,21 +129,30 @@ direction and its antipode to one point.
 
 `%area()` is the area in steradians and `%area_deg2()` in square degrees, exact to rounding for a
 simple polygon: Green's theorem on `cos(dec) d(dec) d(ra)` for chart edges, a sum of spherical
-excesses for great-circle edges. For a self-intersecting polygon it is the signed sum of its lobes,
-which is not the area the even-odd rule samples. `%bounds(ra_lo, ra_hi, dec_lo, dec_hi)` is the
-vertex box, right ascension as written; a great-circle edge may bulge beyond its declinations.
+excesses for great-circle edges. `%bounds(ra_lo, ra_hi, dec_lo, dec_hi)` is the vertex box, right
+ascension as written; a great-circle edge may bulge beyond its declinations.
+
+`%is_simple()` says whether any two non-adjacent edges cross. **For a self-intersecting polygon
+`%area()` is the area the even-odd rule samples, measured rather than integrated**: both exact
+formulas are signed sums, which are not that area and cancel to nothing when the lobes balance, so
+`%init` counts instead how many points of a fixed low-discrepancy lattice over the bounding region
+fall inside. The answer is a pure function of the polygon — no seed enters it — and is accurate to
+about one part in ten thousand. `%init` costs more on such a polygon, once.
 
 A draw takes candidates uniformly over a **bounding region** and keeps the first inside: the RA/Dec
 box for `PF_EDGE_RADEC` — right ascension uniform, and the sine of the declination uniform, so the
 candidates are uniform per unit solid angle — or the cap about the mean direction through the
 farthest vertex for `PF_EDGE_GREAT_CIRCLE`. `%acceptance()` is the fraction kept, the area over the
-bounding region's area, and a draw averages `1/%acceptance()` candidates.
+bounding region's area, and a draw averages `1/%acceptance()` candidates — on a self-intersecting
+polygon too, since `%area()` there is the area actually sampled.
 
 **`%init` refuses a polygon with an acceptance below 1e-3**, and the message says to split it. A
 thin strip running diagonally across its own box is the shape that does this; a handful of boxes
-following the strip is the same region at a fraction of the cost. A polygon of zero area is refused
-as well. `%area`, `%area_deg2`, `%acceptance`, `%bounds`, `%contains` and every draw stop the program
-on a polygon `%init` has not built.
+following the strip is the same region at a fraction of the cost. The floor is applied to the same
+quantity `%acceptance()` reports, so a self-intersecting polygon is judged on what it samples rather
+than on a signed sum. A polygon of zero area is refused as well. `%area`, `%area_deg2`,
+`%acceptance`, `%is_simple`, `%bounds`, `%contains` and every draw stop the program on a polygon
+`%init` has not built.
 
 ### Drawing points
 
@@ -173,11 +189,19 @@ carries the resolution, the numbering scheme a pixel index means, and the declin
 `_radec` forms answer in. The vector forms return HEALPix-native unit vectors, as `%pix2vec` does.
 `ipix` and the list share one integer kind, `int32` or `int64`, independently of `i`.
 
-A point in a pixel is drawn from the cap of radius `%max_pixrad` about the pixel's centre and kept
-when `%vec2pix` names the pixel, which is about **3.4 candidates** a point.
-`pf_random_pixel_radec_at` is elemental over `i`, `ipix` and `draw`, so one statement draws a point
-in every pixel of a list. **The grid's `nside` must be at most 2²⁴**: beyond that a unit vector can
-no longer name a pixel near a pole, and the samplers stop the program rather than bias the draws.
+**A point in a pixel costs one block and rejects nothing.** A HEALPix pixel is a square in the
+projection plane and that projection is equal-area, so two uniforms read as a position across and
+along that square are already a direction uniform over the pixel per unit solid angle —
+`pf_healpix_grid%pix2vec_offset` is that reading. `pf_random_pixel_radec_at` is elemental over `i`,
+`ipix` and `draw`, so one statement draws a point in every pixel of a list. **The grid's `nside`
+must be at most 2²⁴**: beyond that a unit vector can no longer name a pixel near a pole, and the
+samplers stop the program rather than bias the draws.
+
+Near a pole that limit is reached earlier than the refusal is. Above about `nside = 2²¹`, `z` within
+a pixel of a pole sits closer to 1 than a double resolves, so `%vec2pix` may name an immediate
+neighbour for a drawn point that lies within rounding of a boundary — at 2²⁴ that is a fraction of a
+percent of draws. The point is uniform over the pixel either way, and always within `%max_pixrad` of
+the pixel centre; it is the round trip back to an index that runs out of digits, not the draw.
 
 A **mask** is a non-empty list of pixel indices. The pixel is chosen uniformly from the list —
 uniform over the union, since every pixel has one area — and **a pixel listed twice counts twice**,

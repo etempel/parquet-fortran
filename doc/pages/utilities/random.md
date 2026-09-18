@@ -956,6 +956,11 @@ them, or use the draw-axis fills for the shape a mock catalogue wants:
 convenience rather than a speed-up: a direction already uses a whole enciphering. Like every fill
 here they split at any boundary with identical results, and take no `threads=`.
 
+**Ask for vectors if vectors are what you want.** Every `_radec` form is its vector twin plus an
+arctangent and a square root, and costs a good deal more for it; the fills do not amortise that,
+since the conversion is per value rather than per block. Converting once at the end of a pipeline is
+cheaper than carrying degrees through it. `bench/benchmark_sphere.sh` measures the pair.
+
 At a pole the right ascension is **0 by rule**: the declination alone says where a pole is, and
 the arctangent that would otherwise name a right ascension there is undefined.
 
@@ -975,9 +980,11 @@ v = pf_random_disc_at(seed, i, axis, 0.3_real64, r_inner=0.3_real64)   ! on the 
 v = pf_random_disc_at(seed, i, axis, pi/2, r_inner=pi/2)              ! in the plane normal to axis
 ```
 
-`radius = 0` returns the centre, and a radius above `pi` is the whole sphere; an `r_inner` above
-`pi` clamps there too. The cosine of the angle from the centre is exactly uniform between the two
-bounds, which is what uniform per unit solid angle means. A flat disc of offsets in RA and Dec
+`radius = 0` returns the centre, and a radius above `pi` is the whole sphere. **An `r_inner` above
+`pi` is refused rather than clamped**: clamping it leaves a ring of zero width whose every draw is
+the antipode exactly, which is a surprising answer to give silently for what was written as an
+annulus. The cosine of the angle from the centre is exactly uniform between the two bounds, which is
+what uniform per unit solid angle means. A flat disc of offsets in RA and Dec
 rotated onto the centre — the construction it is tempting to write by hand — is not: its density
 at the rim of a 30-degree disc is 15 % above its density at the centre.
 
@@ -987,6 +994,21 @@ same on the sky, and a disc may cross a pole or straddle `ra = 0` freely.
 These are the drawing counterparts of two searches in
 [Spatial neighbour search](spatial.html#search-on-the-sky): `pf_spatial_index%within_sky` finds the
 catalogue points already inside such a cap, and `%within_cone` the points inside a cone in space.
+
+**Many draws from one disc: `pf_random_disc_cap`.** Each scalar call validates the radii, normalises
+the centre and builds a frame about it from scratch. Where the disc is fixed, prepare it once:
+
+```fortran
+type(pf_random_disc_cap) :: cap
+call cap%prepare(axis, 0.3_real64)              ! validates exactly as pf_random_disc_at does
+v = cap%at(seed, i, k)                          ! the same value pf_random_disc_at(seed, i, axis, 0.3, k) gives
+```
+
+`%at` is `pf_random_disc_at` to the bit at the same coordinates, because the scalar form is written
+as `%prepare` followed by `%at`. `%is_set()` says whether `%prepare` has run, and `%at` before it
+stops the program. All three are `pure` and the object is read-only once prepared, so one cap built
+before a parallel region serves the whole team. A rejection walk over a fixed cap is where this
+pays, since it would otherwise repeat the setup per candidate rather than per draw.
 
 **Small discs keep their size.** The offset from the centre is formed directly rather than as the
 difference of two cosines, so a disc of a thousandth of an arcsecond is as uniform as a disc of ten
@@ -1010,6 +1032,14 @@ microradian.
 `pf_random_vmf_radec_at(seed, i, ra0, dec0, sigma_deg, ra, dec, [draw])` takes the width an error
 ellipse is quoted in instead. It is `pf_random_vmf_at` with `kappa = 1/sigma**2`, `sigma` in
 radians, so a caller holding `kappa` uses the vector form.
+
+**`sigma_deg` names the concentration, not the dispersion the draws achieve**, and the two part
+company once the scatter stops being small. Up to about 20 degrees the Gaussian reading holds: at
+`sigma_deg = 5` the rms separation from the centre is 7.1 degrees against the `5*sqrt(2) = 7.07` a
+two-dimensional Gaussian predicts. Beyond that the sphere closes on itself and the rms saturates —
+79.5 degrees at `sigma_deg = 60` against a predicted 84.9, and 96.1 at 180, where the distribution
+is uniform and the widest rms possible is 98.1. A width above 20 degrees is still a valid
+concentration; it is just no longer the width of anything.
 
 ### Rotations
 

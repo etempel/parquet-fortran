@@ -69,7 +69,7 @@ submodule (parquet_index) parquet_index_map
     use iso_fortran_env, only: int32, int64, real64
     use parquet_utils, only: pf_to_lower
     use parquet_settings_base, only: parquet_auto_thread_count, parquet_clamp_to_affinity, &
-        cfg_index_threads
+        cfg_index_threads, parquet_emit_warning
     implicit none
 
     !> `method="auto"`: let `ix_choose_direct` decide. Never stored in `self%backend`.
@@ -83,6 +83,12 @@ submodule (parquet_index) parquet_index_map
     !! before any string has been seen. A guess, corrected by doubling; it only decides how
     !! many reallocations a build of average-length keys pays.
     integer(int64), parameter :: IX_STR_BYTES_PER_KEY = 16_int64
+    !> Stored string keys sharing one hash at which a map warns, once (`sdeep`). A lookup of the
+    !! last key of such a run walks and compares every key before it, so a key set built to
+    !! collide costs time quadratic in its size while every answer stays right. Far above anything
+    !! a 64-bit hash produces by chance, far below where the cost hurts. Never a setting: it
+    !! changes what is said, and nothing a map answers.
+    integer(int64), parameter :: IX_STR_CHAIN_WARN = 32_int64
 
     !> Keys one call of a bulk probe kernel takes: the home slots of a whole block are computed
     !! first and the walks follow, which is what lets a block's DRAM misses overlap
@@ -99,15 +105,20 @@ submodule (parquet_index) parquet_index_map
     !! no answer.
     integer, parameter :: IX_PART_MIN_LG = 8
 
-    !> First multiplicative constant of the 32-bit mixing step: murmur3's `0x85ebca6b` with its
-    !! top bit cleared, so it is below 2**31 and every product stays below 2**63.
+    !> First multiplicative constant of the 32-bit mixing step, `0x05EA5A6B`: odd and below 2**31,
+    !! so every product of it with a 32-bit value stays below 2**63.
+    !!
+    !! **Not murmur3's constant, and not to be "corrected" into it.** The step has murmur3's
+    !! finalizer SHAPE, but neither constant is murmur3's `0x85ebca6b`/`0xc2b2ae35` with its top bit
+    !! cleared (that would be `0x05EBCA6B`/`0x42B2AE35`), so murmur3's avalanche measurements do
+    !! not transfer here. Changing either value changes every hash the module computes.
     !!
     !! **Odd, which is what matters about it.** Multiplication by an odd constant modulo 2**32 is a
     !! bijection, so the step loses no information; the exact value only has to avalanche well, and
     !! the clustering tests in `test/test_index.f90` are what hold it to that.
     integer(int64), parameter :: IX_C1 = 99244651_int64
-    !> Second multiplicative constant: murmur3's `0xc2b2ae35` with its top bit cleared. Odd, for
-    !! the reason given on `IX_C1`.
+    !> Second multiplicative constant, `0x42BAF435`. Odd and below 2**31, for the reasons given on
+    !! `IX_C1`, and likewise not murmur3's.
     integer(int64), parameter :: IX_C2 = 1119548469_int64
     !> Seed the scalar key hash starts from, so that a hash of zero is not zero. The golden ratio
     !! constant `0x9E3779B9`; only ever XOR-ed, never multiplied, so its width is free.
@@ -542,14 +553,14 @@ contains
         integer(int64) :: v
 
         !$omp critical (pf_index_map_guard)
-        call ix_goa_scalar(self, int(key, int64), v, .true.)
+        call ix_goa_scalar(self, int(key, int64), v, .true., "get_or_add")
         !$omp end critical (pf_index_map_guard)
         idx = int(v, int32)
     end procedure goa_k32_i32
 
     module procedure goa_k32_i64
         !$omp critical (pf_index_map_guard)
-        call ix_goa_scalar(self, int(key, int64), idx, .false.)
+        call ix_goa_scalar(self, int(key, int64), idx, .false., "get_or_add")
         !$omp end critical (pf_index_map_guard)
     end procedure goa_k32_i64
 
@@ -557,14 +568,14 @@ contains
         integer(int64) :: v
 
         !$omp critical (pf_index_map_guard)
-        call ix_goa_scalar(self, key, v, .true.)
+        call ix_goa_scalar(self, key, v, .true., "get_or_add")
         !$omp end critical (pf_index_map_guard)
         idx = int(v, int32)
     end procedure goa_k64_i32
 
     module procedure goa_k64_i64
         !$omp critical (pf_index_map_guard)
-        call ix_goa_scalar(self, key, idx, .false.)
+        call ix_goa_scalar(self, key, idx, .false., "get_or_add")
         !$omp end critical (pf_index_map_guard)
     end procedure goa_k64_i64
 
@@ -757,9 +768,11 @@ contains
 
     module procedure map_probe_stats
         real(real64) :: mp
+        integer(int64) :: t
 
         max_probe = 0_int64
         if (present(mean_probe)) mean_probe = 0.0_real64
+        if (present(max_hash_chain)) max_hash_chain = 0_int64
         if (self%nk == 0_int64) return
         select case (self%backend)
         case (IX_DIRECT)
@@ -778,6 +791,15 @@ contains
             ! a copy of the walk for a saving of one division on a cold path.
             call ix_hash_probe_stats(self, max_probe, mp)
             if (present(mean_probe)) mean_probe = mp
+            ! A string key's tuple is `(hash, occurrence)` and the chain is dense (a removal moves
+            ! the last occurrence into the gap), so the deepest occurrence stored, plus one, is
+            ! the longest run of keys sharing a hash.
+            if (present(max_hash_chain) .and. self%is_str) then
+                do t = 1_int64, self%hcap
+                    if (self%hrec(3, t) == 0_int64) cycle
+                    if (self%hrec(2, t) + 1_int64 > max_hash_chain) max_hash_chain = self%hrec(2, t) + 1_int64
+                end do
+            end if
         end select
     end procedure map_probe_stats
 
@@ -941,6 +963,7 @@ contains
         self%nstr = fresh%nstr
         self%nchr = fresh%nchr
         self%snext = fresh%snext
+        self%sdeep = fresh%sdeep
         !$omp end critical (pf_index_map_guard)
         !$omp atomic update
         dbg_index_builds_in_flight = dbg_index_builds_in_flight - 1
@@ -1263,6 +1286,7 @@ contains
         self%nstr = 0_int64
         self%nchr = 0_int64
         self%snext = 0_int64
+        self%sdeep = .false.
     end subroutine ix_reset_storage
 
     !> Empties the map without releasing anything.
@@ -1290,6 +1314,7 @@ contains
             self%nchr = 0_int64
             self%snext = 0_int64
             self%soff(1) = 0_int64
+            self%sdeep = .false.
         end if
     end subroutine ix_do_reset
 
@@ -1556,9 +1581,9 @@ contains
     !! want -- but is still clamped to what this process's CPU affinity allows, because opening
     !! more threads than there are processors is slower than not threading at all. Otherwise the
     !! automatic answer comes from `parquet_auto_thread_count`, which is where the
-    !! serial-inside-a-parallel-region rule and the affinity clamp live, and is then bounded by the
-    !! work available so that a mid-sized build gets the few threads that pay rather than a full
-    !! team that does not.
+    !! serial-inside-a-parallel-region rule and the affinity clamp live, capped by `ix_auto_cap`,
+    !! and is then bounded by the work available so that a mid-sized build gets the few threads
+    !! that pay rather than a full team that does not.
     function ix_threads_rule(n, threads, what) result(nt)
         integer(int64), intent(in) :: n              !! rows the build or lookup will process.
         integer, intent(in), optional :: threads     !! the caller's request, or absent.
@@ -1571,7 +1596,7 @@ contains
             nt = parquet_clamp_to_affinity(threads, "index")
             return
         end if
-        nt = parquet_auto_thread_count(cfg_index_threads, "index")
+        nt = parquet_auto_thread_count(ix_auto_cap(), "index")
         if (n < 2_int64 * IX_MIN_KEYS_PER_THREAD) then
             nt = 1
         else
@@ -1579,6 +1604,20 @@ contains
             if (nt_work < int(nt, int64)) nt = int(nt_work)
         end if
     end function ix_threads_rule
+
+    !> The cap the automatic answer is handed: `index_threads` when the user has set one, whether
+    !! above or below `IX_MAX_AUTO_THREADS`, and that ceiling otherwise.
+    !!
+    !! **Replacing rather than `min`-ing is deliberate, and it is where this differs from
+    !! `hpx_auto_cap`.** The ceiling is this module's default, not a limit the user is held to: a
+    !! program on a machine whose sweet spot lies above it says so once with
+    !! `parquet_set_index_threads` rather than passing `threads=` to every call.
+    function ix_auto_cap() result(cap)
+        integer :: cap !! cap to pass on; always >= 1.
+
+        cap = IX_MAX_AUTO_THREADS
+        if (cfg_index_threads > 0) cap = cfg_index_threads
+    end function ix_auto_cap
 
     !> The rule, and a record of what it answered for `parquet_debug_index_threads_used`.
     !!
@@ -1815,37 +1854,83 @@ contains
         h = ix_chain_finish(a, b)
     end function ix_hash_tuple
 
-    !> The hash of a string's bytes: the tuple hash's two chains over the string's 8-byte words,
-    !! with the length as the first component, so that no second hash family enters the module,
-    !! a string and its own zero-padded extension never share a hash, and the clustering tests
-    !! hold it to the integer mixer's standard. Each word is assembled little-endian from the
-    !! bytes, read as unsigned, so the result is the same on every platform. Narrowed by the debug
+    !> The hash of a string's bytes: two 32-bit chains over the string's 8-byte words, with the
+    !! length as the first word, so that a string and its own zero-padded extension never share a
+    !! hash, and the clustering tests hold it to the integer mixer's standard. Narrowed by the debug
     !! hook `parquet_debug_set_index_string_hash_bits`, which is read here and nowhere else.
+    !!
+    !! **The two chains are CROSS-FED, which is what separates this from the tuple hash.** Each
+    !! word's low half enters the first chain XOR-ed with the second chain's state, and its high half
+    !! (with the low half rotated) enters the second: `a' = mix(a ^ lo ^ b)`, `b' = mix(b ^ hi ^
+    !! rot16(lo))`. Kept apart, as `ix_chain_step` keeps them, the first chain would read only low
+    !! halves -- so keys agreeing in bytes 1-4, 9-12, ... of every word would share it outright and
+    !! hash with 32 bits of entropy, the low half of the result being fixed by the high. Cross-fed,
+    !! the state after the last word is a one-to-one function of the high halves for such keys, so
+    !! they share no hash at all (`test_str_high_half_keys_spread`). The old `b` is read, not the
+    !! new one, so the two mixes of a word stay independent and a core runs them side by side.
+    !!
+    !! **A 64-bit state absorbing 64 bits per word is invertible in each word**, so a key set
+    !! built to collide can still be solved for, word by word, by anyone who has this source; what
+    !! the cross-feed closes is the structural 32-bit weakness, not that. A long run of keys sharing
+    !! a hash is therefore reported rather than prevented (`IX_STR_CHAIN_WARN`), and never answered
+    !! wrongly (every hit is compared byte for byte).
+    !!
+    !! **A whole word is read with one `transfer`**, in the machine's byte order -- little-endian on
+    !! every target this library supports -- and only a partial last word is assembled byte by byte,
+    !! little-endian, into its low bytes. No hash is ever stored or compared across processes, so
+    !! nothing depends on two platforms agreeing about it.
+    !!
+    !! **`ix_mix32` is written out, twice per word**, for the reason `ix_probe_1_block` gives: under
+    !! `-fPIC` gfortran inlines no module procedure, and a call per mix was a third of a
+    !! cache-resident string probe. Keep the copies in step with `ix_mix32`, editing it first.
     !!
     !! **`bytes` is an EXPLICIT-SHAPE dummy on purpose.** A scalar `character` actual associates
     !! with an explicit-shape `character(len=1)` array dummy by character sequence association
     !! (F2018 15.5.2.11), so this one function hashes a scalar key, an element of a `character`
-    !! array and a slice of a packed payload alike, with no copy and no `transfer`. An
-    !! assumed-shape dummy would refuse the scalar.
+    !! array and a slice of a packed payload alike, with no copy. An assumed-shape dummy would
+    !! refuse the scalar.
     pure function ix_hash_str(bytes, n) result(h)
         integer(int64), intent(in) :: n              !! bytes to hash; may be 0.
         character(len=1), intent(in) :: bytes(n)     !! the bytes.
         integer(int64) :: h                          !! a mixed bit pattern; only its low bits are used.
-        integer(int64) :: a, b, w, i, nb
+        integer(int64) :: a, b, w, i, nb, lo, hi, r, t
         integer :: k
 
         a = IX_SEED_S
         b = IX_SEED_U
-        call ix_chain_step(a, b, n)
-        do i = 0_int64, n - 1_int64, 8_int64
-            nb = min(8_int64, n - i)
-            w = 0_int64
-            do k = 1, int(nb)
-                w = ior(w, ishft(int(iand(iachar(bytes(i + k)), 255), int64), 8 * (k - 1)))
-            end do
-            call ix_chain_step(a, b, w)
+        w = n
+        i = 0_int64
+        do
+            ! One word: `t` takes the first chain's input before `b` moves on, then both mix.
+            lo = iand(w, IX_MASK32)
+            hi = iand(ishft(w, -32), IX_MASK32)
+            t = ieor(a, ieor(lo, b))
+            r = ieor(b, ieor(hi, ior(ishft(iand(lo, 65535_int64), 16), ishft(lo, -16))))
+            r = ieor(r, ishft(r, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            b = ieor(r, ishft(r, -16))
+            r = ieor(t, ishft(t, -16))
+            r = iand(r * IX_C1, IX_MASK32)
+            r = ieor(r, ishft(r, -13))
+            r = iand(r * IX_C2, IX_MASK32)
+            a = ieor(r, ishft(r, -16))
+            ! The next word, or the end.
+            nb = n - i
+            if (nb <= 0_int64) exit
+            if (nb >= 8_int64) then
+                w = transfer(bytes(i + 1_int64 : i + 8_int64), 0_int64)
+                i = i + 8_int64
+            else
+                w = 0_int64
+                do k = 1, int(nb)
+                    w = ior(w, ishft(int(iand(iachar(bytes(i + k)), 255), int64), 8 * (k - 1)))
+                end do
+                i = n
+            end if
         end do
-        h = ix_chain_finish(a, b)
+        h = ior(ishft(b, 32), ix_mix32(ieor(a, b)))
         ! The hook narrows the RESULT rather than the mixer's input, so the narrowed hashes are
         ! as evenly spread over their few bits as the full ones are over 64 -- which is what
         ! makes a test at 2 bits a test of the collision chain and not of a degenerate mixer.
@@ -3052,16 +3137,22 @@ contains
     end subroutine ix_set_tuple_i32
 
     !> `%get_or_add` for a single-component key.
-    subroutine ix_goa_scalar(self, key, idx, want32)
+    !!
+    !! **A sorted map answers a key it holds and refuses only a new one**: the lookup mutates
+    !! nothing, and only the insert would unfreeze the map. The refusal is made here, before the
+    !! insert, so that it names the entry the caller used rather than `%set`.
+    subroutine ix_goa_scalar(self, key, idx, want32, what)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: key         !! the key, already widened.
         integer(int64), intent(out) :: idx        !! the key's index.
         logical, intent(in) :: want32             !! whether the answer must fit `int32`.
+        character(len=*), intent(in) :: what      !! the public procedure, for a refusal.
 
-        call ix_check_scalar_shape(self, "get_or_add")
+        call ix_check_scalar_shape(self, what)
         call ix_autoinit(self, 1)
         idx = ix_get_scalar(self, key)
         if (idx <= 0_int64) then
+            if (self%backend == IX_SORTED) call ix_check_mutable(self, 1_int64, what)
             idx = self%next_auto + 1_int64
             call ix_set_scalar(self, key, idx)
         end if
@@ -3080,6 +3171,7 @@ contains
         nc = ix_tuple_width(self, size(key), "get_or_add")
         idx = ix_get_tuple(self, key(1:nc))
         if (idx <= 0_int64) then
+            if (self%backend == IX_SORTED) call ix_check_mutable(self, 1_int64, "get_or_add")
             idx = self%next_auto + 1_int64
             call ix_set_tuple(self, key(1:nc), idx)
         end if
@@ -3142,7 +3234,7 @@ contains
                     cycle
                 end if
             end if
-            call ix_goa_scalar(self, keys(i), idx, want32)
+            call ix_goa_scalar(self, keys(i), idx, want32, "get_or_add_many")
             codes(i) = idx
         end do
     end subroutine ix_goam_1

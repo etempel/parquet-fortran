@@ -2735,7 +2735,8 @@ contains
     subroutine test_index_threads_effect(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int64), parameter :: big = 10000000_int64
-        integer :: auto_n, capped_n, avail
+        integer, parameter :: wide = 200
+        integer :: auto_n, capped_n, avail, was_omp, wide_auto
         !
         avail = 1
 #ifdef _OPENMP
@@ -2780,6 +2781,39 @@ contains
         call check(error, pf_index_threads(10_int64) == 1, &
             "a build over ten keys is not worth a team whatever the cap allows")
         if (allocated(error)) return
+        !
+        ! Unset, the automatic answer is held to the tier's ceiling of 64; set, the cap REPLACES
+        ! that ceiling, above it as well as below -- the one way this knob differs from
+        ! `healpix_threads`, whose cap may only lower its tier's ceiling. SIMULATED on a machine
+        ! wider than the ceiling, for the reason `test_healpix_threads_effect` gives: an ordinary
+        ! runner offers fewer than 64, where neither half binds. Both overrides are restored below.
+#ifdef _OPENMP
+        was_omp = omp_get_max_threads()
+        call omp_set_num_threads(wide)
+        call parquet_debug_set_affinity_procs(wide)
+        call parquet_set_index_threads(0)
+        wide_auto = pf_index_threads(big)
+        call check(error, wide_auto == 64, &
+            "on a machine wider than the ceiling, the automatic answer IS the ceiling of 64")
+        if (.not. allocated(error)) then
+            call parquet_set_index_threads(128)
+            call check(error, pf_index_threads(big) == 128, &
+                "an index cap above the ceiling raises the automatic answer to it")
+        end if
+        if (.not. allocated(error)) then
+            call parquet_set_index_threads(100000)
+            call check(error, pf_index_threads(big) == wide, &
+                "an index cap above what OpenMP offers is bounded by what OpenMP offers")
+        end if
+        if (.not. allocated(error)) then
+            call parquet_set_index_threads(8)
+            call check(error, pf_index_threads(big) == 8, &
+                "an index cap below the ceiling lowers the automatic answer to it")
+        end if
+        call parquet_debug_set_affinity_procs(0)
+        call omp_set_num_threads(was_omp)
+        if (allocated(error)) return
+#endif
         !
         call parquet_reset_settings()
         call check(error, parquet_get_index_threads() == 0, "reset restores index_threads")

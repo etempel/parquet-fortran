@@ -171,15 +171,16 @@ module parquet_settings_base
     !! asked the library for four threads still got up to `min(omp_get_max_threads(), 64)` of them
     !! here -- silently, which is the failure that convenience exists to prevent.
     integer, save :: cfg_healpix_threads = 0
-    !> Cap on the threads one `pf_index_map%build` may use internally. `0` means "auto".
+    !> Cap on the threads the index tier's AUTOMATIC answer opens -- a `pf_index_map` or
+    !! `pf_index_multimap` build, bulk lookup or `%get_or_add_many`. `0` means "auto", which for
+    !! this tier is a measured ceiling of its own (`IX_MAX_AUTO_THREADS`, src/parquet_index.f90);
+    !! a positive value replaces that ceiling, above or below it.
     !!
-    !! Written by `parquet_set_index_threads` below; read only by `ix_threads`
+    !! Written by `parquet_set_index_threads` below; read only by `ix_auto_cap`
     !! (src/parquet_index_map.f90), for the same single-reader reason as cfg_sort_threads and
     !! cfg_string_threads (feature_risks.md Risk-40).
     !!
-    !! **It bounds the BUILD and nothing else.** A lookup is a few nanoseconds of straight-line
-    !! code with no team to open, so there is nothing here for this knob to govern; what it caps is
-    !! the min/max key scan and the direct-backend scatter. The sorted backend's `pf_argsort` call
+    !! A scalar `%get` opens no team and is untouched. The sorted backend's `pf_argsort` call
     !! answers to `sort_threads` instead, because that is the sort's own work being done -- so a
     !! sorted build reads both knobs, each for the phase it owns.
     integer, save :: cfg_index_threads = 0
@@ -547,11 +548,12 @@ contains
     !> Caps the threads one `pf_index_map%build` may use internally. `0` (the default) means
     !> automatic.
     !>
-    !> **It caps the automatic answer and never raises it.** `0` leaves the build to
-    !> `parquet_auto_thread_count`, which is `omp_get_max_threads()` outside a parallel region, 1
-    !> inside one, and always bounded by what this process's CPU affinity allows. A value of `n`
-    !> lowers that; it never overrides the serial-inside-a-region rule, and never overrides an
-    !> explicit `threads=` on the `%build` call.
+    !> **It sets the ceiling of the automatic answer, and can raise it as well as lower it.** The
+    !> automatic answer is `omp_get_max_threads()` outside a parallel region and 1 inside one,
+    !> bounded by the work available and by what this process's CPU affinity allows. `0` holds it
+    !> to the index tier's own ceiling of 64; a value of `n` holds it to `n` instead, above 64 as
+    !> well as below. It never overrides the serial-inside-a-region rule, the work bound or the
+    !> affinity clamp, and never overrides an explicit `threads=` on the call.
     !>
     !> **Threading a build changes how fast it answers and never what it answers.** The scan is a
     !> min/max reduction and the scatter writes one distinct slot per unique key, so a threaded

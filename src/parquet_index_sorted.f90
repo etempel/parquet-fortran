@@ -7,10 +7,13 @@
 !! the prefix table below -- and the automatic choice still never selects it, because it is
 !! frozen once built: it has to be asked for with `method="sorted"`.
 !!
-!! **Frozen once built.** `%set`, `%get_or_add` and `%remove` all refuse a sorted map, because
-!! keeping the array sorted through an insertion is `O(n)` per key -- and the exact fit that buys
-!! the footprint is exactly what makes an insertion expensive. That refusal is what the footprint
-!! is bought with, so it is a property rather than a limitation to be lifted.
+!! **Frozen once built.** `%set` and `%remove` refuse a sorted map, and so does `%get_or_add` (or
+!! `%get_or_add_many`) of a key the map does not hold, because keeping the array sorted through an
+!! insertion is `O(n)` per key -- and the exact fit that buys the footprint is exactly what makes
+!! an insertion expensive. `%get_or_add` of a key the map DOES hold answers its value, as `%get`
+!! would: nothing is mutated, so nothing is refused (`test_sorted_get_or_add_present`). The
+!! refusal is what the footprint is bought with, so it is a property rather than a limitation to
+!! be lifted.
 !!
 !! **Single-component keys only in v1.** A composite sorted backend needs a lexicographic order
 !! over the tuple, which means either confirming `pf_argsort` is stable and chaining one pass per

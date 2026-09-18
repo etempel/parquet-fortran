@@ -24,7 +24,7 @@ program error_scenarios
     use parquet_healpix, only : pf_query_disc_runs
     use parquet_index, only : pf_index_map, pf_index_pool, pf_index_max_components, pf_index_multimap, &
         parquet_debug_index_partition, parquet_debug_index_spills, &
-        parquet_debug_set_index_pair_limit
+        parquet_debug_set_index_pair_limit, parquet_debug_set_index_string_hash_bits
     use parquet_table_example, only : parquet_table_test
     ! The quadrature scenarios' integrands: module procedures shared with test_integrate.f90,
     ! so a scenario and a test can name the same integrand and neither reaches an internal one.
@@ -3361,6 +3361,10 @@ program error_scenarios
         call scenario_index_sorted_set()
     case ("index_sorted_remove")
         call scenario_index_sorted_remove()
+    case ("index_sorted_get_or_add_absent")
+        call scenario_index_sorted_get_or_add_absent(many=.false.)
+    case ("index_sorted_get_or_add_many_absent")
+        call scenario_index_sorted_get_or_add_absent(many=.true.)
     case ("index_sorted_composite")
         call scenario_index_sorted_composite()
     case ("index_init_direct")
@@ -3555,6 +3559,10 @@ program error_scenarios
         call scenario_index_get_or_add_many_threaded_int32_overflow()
     case ("index_string_control")
         call scenario_index_string_control()
+    case ("index_string_chain_warning")
+        call scenario_index_string_chain(narrow=.true.)
+    case ("index_string_chain_quiet")
+        call scenario_index_string_chain(narrow=.false.)
     case ("table_index_string_key_on_int")
         call scenario_table_index_string_key_on_int()
     case ("table_index_int_key_on_string")
@@ -29139,6 +29147,24 @@ contains
         print '(a)', "a sorted map accepted a removal"
     end subroutine scenario_index_sorted_remove
     !
+    !> A sorted map answers `%get_or_add` for a key it holds (`test_sorted_get_or_add_present`,
+    !> test/test_index.f90) and refuses only a NEW key, which would unfreeze it -- naming the entry
+    !> the caller used, not the `%set` that would have stored the key.
+    subroutine scenario_index_sorted_get_or_add_absent(many)
+        logical, intent(in) :: many !! whether to ask through `%get_or_add_many`.
+        type(pf_index_map) :: m
+        integer(int64) :: idx, codes(2)
+
+        call m%build([1_int64, 2_int64, 3_int64], method="sorted")
+        if (many) then
+            call m%get_or_add_many([2_int64, 4_int64], codes, threads=1)
+            print '(a,i0)', "a sorted map added a new key through get_or_add_many, code=", codes(2)
+        else
+            call m%get_or_add(4_int64, idx)
+            print '(a,i0)', "a sorted map added a new key through get_or_add, idx=", idx
+        end if
+    end subroutine scenario_index_sorted_get_or_add_absent
+    !
     !> The sorted backend is single-component in v1 and says so, rather than silently indexing on
     !> the first component alone.
     subroutine scenario_index_sorted_composite()
@@ -30533,6 +30559,29 @@ contains
             error stop "control: string multimap lookups"
         print '(a)', "string index control finished"
     end subroutine scenario_index_string_control
+    !
+    !> A hundred string keys hashed to ONE bit share two hashes, fifty-odd keys each: the build
+    !> warns once, as the run reaches 32, naming the procedure -- and only once, although both runs
+    !> pass 32 and every later insert lengthens one. At full width (`narrow=.false.`) the same keys
+    !> share no hash and nothing is said. The longest run is printed after the hook is put back,
+    !> so the wrapper can see both that the run was long and that the control's was not.
+    subroutine scenario_index_string_chain(narrow)
+        logical, intent(in) :: narrow !! whether to narrow the hash to one bit first.
+        type(pf_index_map) :: m
+        character(len=8) :: keys(100)
+        integer(int64) :: maxp, chain
+        integer :: i
+
+        do i = 1, size(keys)
+            write (keys(i), "(a,i0)") "key", i
+        end do
+        call parquet_set_message_stream("stderr")
+        if (narrow) call parquet_debug_set_index_string_hash_bits(1)
+        call m%build(keys, threads=1)
+        call m%probe_stats(maxp, max_hash_chain=chain)
+        call parquet_debug_set_index_string_hash_bits(0)
+        print '(a,i0)', "max_hash_chain=", chain
+    end subroutine scenario_index_string_chain
 
     ! ---- parquet_index: pf_index_pool ----
     !

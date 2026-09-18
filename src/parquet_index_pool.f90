@@ -1,15 +1,19 @@
 !> `pf_index_pool`: hands out and recycles unique index values, and its OpenMP guard.
 !!
-!! Three pieces of state, and every operation is O(1) in terms of them:
+!! Four pieces of state:
 !!
 !! * a **bitmap**, one bit per index, set while that index is held. This is what lets
 !!   `%free_index` reject a double free and `%is_used` answer at all, and it is what `%compact`
-!!   walks to rebuild the free list.
+!!   walks for the new watermark and `%get_index` scans for a hole after it.
 !! * a **free list**, a stack of released indexes. Push on free, pop on get -- so ordinary
 !!   operation hands back the most recently freed index, which is the cheapest thing to do and
 !!   keeps the recently-used indexes hot in cache.
+!! * a **cursor** into the bitmap, which is how the holes `%compact` leaves are handed out: the
+!!   free list is released, and once it is empty again `%get_index` scans forward from the cursor
+!!   for the next clear bit. So a compacted pool costs its bitmap and nothing per free index.
 !! * two **counters**, `max_used` and `n_used`, which is what makes `%get_free_index_count` O(1)
-!!   rather than a bitmap scan.
+!!   rather than a bitmap scan. Every operation but `%compact` and the cursor's scan is O(1); the
+!!   scan is O(1) amortised, since the cursor only moves forward between compacts.
 !!
 !! **Every public entry takes one process-wide named critical**, `pf_index_pool_guard`, including
 !! the queries -- they read counters a concurrent mutation is writing. The shape is always the
@@ -234,7 +238,8 @@ contains
         self%flist(self%nfree) = idx
     end subroutine pool_push_free
 
-    !> Hands out an index: the top of the free list if there is one, else `max_used + 1`.
+    !> Hands out an index: the top of the free list if there is one, else the next clear bit at
+    !! or after the cursor, else `max_used + 1`.
     !!
     !! Reuse before growth is the original specification's rule, and it is what keeps the issued
     !! set dense: the internal arrays only ever grow when every index up to the watermark is out.
@@ -246,15 +251,56 @@ contains
             idx = self%flist(self%nfree)
             self%nfree = self%nfree - 1_int64
         else
-            if (self%max_used == huge(0_int64)) &
-                call ix_abort("pf_index_pool%get_index: the index space is exhausted") ! GCOVR_EXCL_LINE
-            idx = self%max_used + 1_int64
-            self%max_used = idx
-            call pool_ensure_bits(self, idx)
+            ! The cursor test is inline so that plain growth -- the cursor always past the
+            ! watermark -- pays one comparison rather than a call.
+            idx = 0_int64
+            if (self%cursor <= self%max_used) idx = pool_scan(self)
+            if (idx == 0_int64) then
+                if (self%max_used == huge(0_int64)) &
+                    call ix_abort("pf_index_pool%get_index: the index space is exhausted") ! GCOVR_EXCL_LINE
+                idx = self%max_used + 1_int64
+                self%max_used = idx
+                self%cursor = idx + 1_int64
+                call pool_ensure_bits(self, idx)
+            end if
         end if
         self%bits(pool_blk(idx)) = ibset(self%bits(pool_blk(idx)), pool_pos(idx))
         self%n_used = self%n_used + 1_int64
     end function pool_take
+
+    !> The smallest clear bit in `cursor .. max_used`, or 0 when there is none; the cursor moves
+    !! past what it answers, or past the watermark when it answers 0.
+    !!
+    !! One block at a time: the block holding the cursor with the bits below it masked off, then
+    !! each following block whole, stopping at the first that is not all ones. A clear bit above
+    !! the watermark in the top block is not a free index, and is refused by the final test rather
+    !! than by masking the top block.
+    function pool_scan(self) result(idx)
+        type(pf_index_pool), intent(inout) :: self !! the pool.
+        integer(int64) :: idx                      !! the free index found, or 0.
+        integer(int64) :: b, topblk, w
+
+        idx = 0_int64
+        if (self%cursor > self%max_used) return
+        b = pool_blk(self%cursor)
+        topblk = pool_blk(self%max_used)
+        w = iand(not(self%bits(b)), ishft(not(0_int64), pool_pos(self%cursor)))
+        do while (w == 0_int64)
+            b = b + 1_int64
+            if (b > topblk) then
+                self%cursor = self%max_used + 1_int64
+                return
+            end if
+            w = not(self%bits(b))
+        end do
+        idx = ishft(b - 1_int64, 6) + int(trailz(w), int64) + 1_int64
+        if (idx > self%max_used) then
+            self%cursor = self%max_used + 1_int64
+            idx = 0_int64
+            return
+        end if
+        self%cursor = idx + 1_int64
+    end function pool_scan
 
     !> Releases one index back to the pool, rejecting anything that is not currently held.
     !!
@@ -314,37 +360,36 @@ contains
         end do
     end subroutine pool_used_list
 
-    !> Lowers the watermark to the highest index actually held, rebuilds the free list so the
-    !! smallest free index comes out next, and gives back storage the pool grew.
+    !> Lowers the watermark to the highest index actually held, releases the free list so that
+    !! the holes below the watermark are handed out smallest first from the bitmap, and gives back
+    !! bitmap storage the watermark has fallen behind.
     !!
-    !! The rebuild walks the bitmap ASCENDING and fills the free-list stack from its top downward,
-    !! so popping (which takes the last entry) yields the free indexes smallest first. That is why
-    !! there is no sort call here at all: the walk order and the stack discipline do it between
-    !! them.
+    !! **The free list is RELEASED, not rebuilt.** After a compact the free indexes are exactly the
+    !! clear bits in `1 .. max_used`, which the bitmap already records; listing them again would
+    !! cost 8 bytes per hole -- more than the bitmap's eighth of a byte per index by a factor of
+    !! 64 -- in the one call a user makes to reduce memory. So `cursor` goes back to 1 and
+    !! `pool_scan` enumerates the clear bits ascending, which is the order a sorted list would
+    !! have popped them in. Indexes freed afterwards go on the stack as usual and come back first,
+    !! exactly as they would have come back off the top of a rebuilt list.
     !!
-    !! Bits above the new watermark read as free in the complement and are filtered by the
-    !! `i <= newmax` test rather than by masking the top word, which keeps the loop identical for
-    !! every block.
-    !!
-    !! **Both bit walks here use `trailz`, and neither may be rewritten with `leadz`** -- however
+    !! **The watermark walk uses `trailz`, and must never be rewritten with `leadz`** -- however
     !! natural `63 - leadz(w)` is for finding a highest set bit. nagfor 7.2 miscompiles `LEADZ` on
     !! an `integer(int64)` at `-O1` and above: the result is exactly 2 too small whenever the true
     !! answer is 2 or more (62 of the 64 single-bit values are wrong), while `leadz` on `int32`,
-    !! `trailz` and `popcnt` are all correct. Under `--profile release` that turned the free-list
-    !! walk into an infinite loop -- `j` came back 63 instead of 61, so `ibclr` cleared a bit that
-    !! was already clear and `w` stopped shrinking -- inside the `pf_index_pool_guard` critical
-    !! region, hanging every other caller behind it. The watermark walk above has the same defect
-    !! with a quieter failure: a `max_used` up to 2 too high, and nothing to report it. See
-    !! `feature_risks.md` Risk-186.
+    !! `trailz` and `popcnt` are all correct. A `max_used` up to 2 too high would follow, with
+    !! nothing to report it; a `leadz` walk over a free bitmap once turned into an infinite loop
+    !! inside the `pf_index_pool_guard` critical region. `check_no_leadz` bans it outright.
     subroutine pool_do_compact(self)
         type(pf_index_pool), intent(inout) :: self !! the pool.
         integer(int64), allocatable :: grown(:)
-        integer(int64) :: b, w, i, k, newmax, nb, topblk, need
+        integer(int64) :: b, w, newmax, nb, need
         integer :: j
 
+        if (allocated(self%flist)) deallocate(self%flist)
+        self%nfree = 0_int64
+        self%cursor = 1_int64
         if (.not. allocated(self%bits)) then
             self%max_used = 0_int64
-            self%nfree = 0_int64
             return
         end if
         nb = size(self%bits, kind=int64)
@@ -363,38 +408,6 @@ contains
             end if
         end do
         self%max_used = newmax
-        ! Rebuild the free list over 1 .. newmax, filling the stack top-down, so popping ascends.
-        k = 0_int64
-        if (newmax > 0_int64) then
-            need = newmax - self%n_used
-            if (need > 0_int64) then
-                if (allocated(self%flist)) deallocate(self%flist)
-                allocate(self%flist(need))
-                self%flist = 0_int64
-                topblk = pool_blk(newmax)
-                ! `need` is exactly the number of clear bits in 1 .. newmax, so this walk fills
-                ! flist(need) down to flist(1) and ends with k == need. Both halves matter: the
-                ! descending SLOT is what makes the ascending walk pop smallest-first, and the
-                ! count is what makes `self%nfree = k` below name the top of a full stack.
-                do b = 1_int64, topblk
-                    w = not(self%bits(b))
-                    do while (w /= 0_int64)
-                        j = trailz(w)
-                        w = ibclr(w, j)
-                        i = ishft(b - 1_int64, 6) + int(j, int64) + 1_int64
-                        if (i <= newmax) then
-                            k = k + 1_int64
-                            self%flist(need - k + 1_int64) = i
-                        end if
-                    end do
-                end do
-            else if (allocated(self%flist)) then
-                deallocate(self%flist)
-            end if
-        else if (allocated(self%flist)) then
-            deallocate(self%flist)
-        end if
-        self%nfree = k
         ! Give back the bitmap storage the watermark has fallen behind, on the specification's own
         ! condition: shrink once the allocation exceeds the watermark by more than the growth
         ! factor, so an ordinary run of growth is not undone by every compact.
@@ -431,6 +444,7 @@ contains
         self%n_used = 0_int64
         self%nfree = 0_int64
         self%nbits = 0_int64
+        self%cursor = 1_int64
     end subroutine pool_do_clear
 
 end submodule parquet_index_pool

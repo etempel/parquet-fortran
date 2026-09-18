@@ -110,6 +110,10 @@ contains
             new_unittest("without compact the pool stays LIFO", test_pool_lifo_control), &
             new_unittest("compact keeps every held index and lowers the watermark", test_pool_compact_state), &
             new_unittest("compact gives storage back", test_pool_compact_shrinks), &
+            new_unittest("a sorted map answers get_or_add for a key it holds", &
+                test_sorted_get_or_add_present), &
+            new_unittest("compact over holes below the watermark keeps only the bitmap", &
+                test_pool_compact_holes), &
             new_unittest("the watermark tightens only at compact", test_pool_watermark_monotone), &
             new_unittest("a cleared pool issues 1 again", test_pool_clear), &
             new_unittest("an empty pool answers every query", test_pool_empty), &
@@ -2139,6 +2143,93 @@ contains
         call check(error, p%get_index() == 13_int64, &
             "and then growth resumes above the new watermark")
     end subroutine test_pool_compact_state
+
+    !> `%compact` over a pool whose holes lie BELOW its watermark: the storage left is the bitmap's
+    !! alone, the holes still come back smallest first, a free after the compact still comes back
+    !! next, and every hole is issued exactly once before the pool grows.
+    !!
+    !! `test_pool_compact_shrinks` frees the top of the range, so its watermark falls and there is
+    !! nothing left to list; here every tenth index stays held, the watermark cannot fall, and the
+    !! ninety thousand holes are what a free list of one entry per hole would cost 720 kB for.
+    subroutine test_pool_compact_holes(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64), parameter :: n = 100000_int64
+        type(pf_index_pool) :: p
+        integer(int64) :: i, idx, bitmap, issued
+        logical, allocatable :: held(:)
+
+        do i = 1_int64, n
+            idx = p%get_index()
+        end do
+        do i = 1_int64, n
+            if (mod(i, 10_int64) /= 0_int64) call p%free_index(i)
+        end do
+        call p%compact()
+        call check(error, p%get_max_index() == n .and. p%get_free_index_count() == 90000_int64, &
+            "the watermark cannot fall, and ninety thousand holes lie below it (vacuity guard)")
+        if (allocated(error)) return
+        ! The bitmap's exact size, and the half again its geometric growth may have left on it.
+        bitmap = 8_int64 * ((n + 63_int64) / 64_int64)
+        call check(error, p%memory_bytes() <= bitmap + bitmap / 2_int64, &
+            "after compact the pool holds its bitmap and nothing per free index")
+        if (allocated(error)) return
+        call check(error, p%get_index() == 1_int64 .and. p%get_index() == 2_int64, &
+            "the holes come back smallest first")
+        if (allocated(error)) return
+        call p%free_index(20_int64)
+        call check(error, p%get_index() == 20_int64, "an index freed after the compact comes back next")
+        if (allocated(error)) return
+        call check(error, p%get_index() == 3_int64, "and then the holes resume where they left off")
+        if (allocated(error)) return
+        ! Drain the rest: each index handed out must be one not held a moment before, and the
+        ! pool must grow only once every hole below the watermark is out.
+        allocate(held(n + 1_int64))
+        do i = 1_int64, n
+            held(i) = p%is_used(i)
+        end do
+        held(n + 1_int64) = .false.
+        issued = 0_int64
+        do while (p%get_free_index_count() > 0_int64)
+            idx = p%get_index()
+            call check(error, idx >= 1_int64 .and. idx <= n, "a hole is issued before the pool grows")
+            if (allocated(error)) return
+            call check(error, .not. held(idx), "no index is issued twice")
+            if (allocated(error)) return
+            held(idx) = .true.
+            issued = issued + 1_int64
+        end do
+        call check(error, issued == 90000_int64 - 3_int64 .and. all(held(1:n)), &
+            "every hole is issued exactly once")
+        if (allocated(error)) return
+        call check(error, p%get_index() == n + 1_int64, "and only then does the pool grow")
+    end subroutine test_pool_compact_holes
+
+    !> A sorted map answers `%get_or_add` and `%get_or_add_many` for keys it holds -- the stored
+    !! value, nothing mutated -- as `%get` would. The other half, a NEW key aborting, is the
+    !! `index_sorted_get_or_add_absent` scenario (test/error_scenarios.f90).
+    subroutine test_sorted_get_or_add_present(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: idx, codes(3)
+        integer(int32) :: idx32
+        character(len=:), allocatable :: tok
+
+        call m%build([10_int64, 20_int64, 30_int64], [7_int64, 8_int64, 9_int64], method="sorted")
+        call m%get_method(tok)
+        call check(error, tok == "sorted", "the fixture is a sorted map (vacuity guard)")
+        if (allocated(error)) return
+        call m%get_or_add(20_int64, idx)
+        call check(error, idx == 8_int64, "get_or_add answers the stored value of a key it holds")
+        if (allocated(error)) return
+        call m%get_or_add(30_int32, idx32)
+        call check(error, idx32 == 9_int32, "and so does the int32 spelling")
+        if (allocated(error)) return
+        call m%get_or_add_many([30_int64, 10_int64, 20_int64], codes, threads=1)
+        call check(error, all(codes == [9_int64, 7_int64, 8_int64]), &
+            "get_or_add_many answers the stored values of keys it holds")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == 3_int64 .and. m%get(20_int64) == 8_int64, "and nothing was mutated")
+    end subroutine test_sorted_get_or_add_present
 
     !> `%compact` gives storage back when the watermark has fallen far behind it.
     subroutine test_pool_compact_shrinks(error)

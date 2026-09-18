@@ -86,7 +86,7 @@ reports the choice.
 | `%build` | yes | yes | single-component keys only |
 | `%init` (fill as you go) | no | yes | no |
 | composite keys | yes | yes | no |
-| `%set` / `%get_or_add` | inside the built key range | yes | aborts |
+| `%set` / `%get_or_add` | inside the built key range | yes | aborts on a new key |
 | `%remove` | yes | yes | aborts |
 
 The hash row is for a single-component key. A composite one keeps each tuple and its value as one
@@ -99,6 +99,10 @@ larger than the hash table would have been.
 
 **hash** is open addressing with linear probing. The general case, and the only backend you can add
 keys to one at a time.
+
+A sorted map answers `%get_or_add` (and `%get_or_add_many`) for a key it already holds, as
+`%get` would, since nothing is mutated; only a key it does not hold aborts, naming the call. `%set`
+and `%remove` abort for any key.
 
 **sorted** is sorted keys plus a binary search, narrowed by a prefix table: the key range is cut
 into buckets (at most an eighth as many as there are keys, and never more than 65536), the table
@@ -224,7 +228,10 @@ cannot be what you meant — the rule every character array argument of this lib
 `parquet_string_column`'s elements are taken verbatim, since the column holds exactly the bytes
 that were appended to it, and a **null** element is never a key: a build skips it (the other rows
 keep their row numbers, exactly as `valid=` does), a bulk lookup answers 0 for it, and
-`%get_or_add_many` neither looks it up nor adds it.
+`%get_or_add_many` neither looks it up nor adds it. So a column key that ends in a blank cannot be
+reached from a `character` array at all — its trimmed elements find the key without the blank —
+only from a scalar or another column; and `%get_or_add_many` over an array counts `"abc"` and
+`"abc "` as one key, where `%build` over the same array aborts on the duplicate.
 
 **Underneath, every string map is the hash backend**, with the strings kept beside the table:
 a key is hashed to 64 bits by the module's own mixer, stored under the tuple `(hash, occurrence)`,
@@ -234,6 +241,12 @@ and 1. `method=` therefore accepts only `"auto"` and `"hash"`; asking for `"dire
 `"sorted"` aborts, naming the rule. `%ncomponents()` reports 1 (one string is one key), and
 `%memory_bytes()` counts the table and the strings, a removed key's bytes included until the map is
 rebuilt or cleared.
+
+**Keys from real data share a 64-bit hash about once in 2^64 pairs; keys built to share one are
+another matter.** The hash is not keyed, so a run of keys sharing one can be constructed, and an
+insert or lookup of such a key compares the run's keys one by one: every answer stays right, and
+the time grows with the run. A map warns once when 32 of its keys share a hash, and
+`%probe_stats` reports the longest run (see [Introspection](#introspection)).
 
 **A map holds one kind of key for its whole life.** An integer lookup on a string map, or a string
 lookup on an integer map, aborts naming which kind the map holds, and so does `%keys` asked for
@@ -307,7 +320,7 @@ w = m%ncomponents()                  ! components per key; 0 if never built
 b = m%memory_bytes()                 ! heap held
 call m%get_method(token)             ! "direct", "hash", "sorted", or "" if never built
 call m%keys(list)                    ! every stored key
-call m%probe_stats(max_probe)        ! mean_probe is an optional second answer
+call m%probe_stats(max_probe)        ! mean_probe= and max_hash_chain= are optional answers
 ```
 
 `%keys` gives a rank-1 list for a single-component map, a rank-2 `(nkeys, ncomp)` array for a
@@ -322,6 +335,12 @@ load plus the binary search's depth inside the widest bucket for sorted (and the
 of the same), and the real probe lengths for hash. On the hash backend it scans the whole
 table, so it is a diagnostic rather than something to call in a loop; the other two answer without
 touching the keys. An empty map reports 0.
+
+On a string map the probe lengths are half the story. Keys sharing a hash are stored under the
+tuples `(hash, 0)`, `(hash, 1)`, …, which the table spreads like any others, so the probes stay
+short while a lookup of the last such key compares every one before it. `max_hash_chain=` reports
+that run: the most keys sharing one hash, 1 when no two do, and 0 for an integer-keyed or empty
+map.
 
 ## A key that repeats: `pf_index_multimap`
 
@@ -395,7 +414,9 @@ call mm%probe_many(keys, offsets, matches)       ! EVERY match, as a CSR pair
 ```
 
 All three take `valid=` (a masked key answers 0, or an empty range, unprobed), `threads=`, and a
-count: `n_found=` on the first two, `n_matched=` on the third. `rows`, `groups` and `matches` may
+count: `n_found=` on the first two, `n_matched=` on the third. `n_matched=` counts the **probes
+that matched**, not the pairs: the pair total is `offsets(size(keys) + 1) - 1`.
+`rows`, `groups` and `matches` may
 be `int32` or `int64`; an `int32` answer aborts up front, rather than truncating, if any stored
 value would not fit.
 
@@ -409,7 +430,7 @@ position within it. Two threaded passes over the probes: the group and count of 
 prefix-summed into `offsets`; then each probe's range copied into place.
 
 ```fortran
-call mm%probe_many(keys, offsets, matches, n_matched=nm, group_hit=hit)
+call mm%probe_many(keys, offsets, matches, n_matched=nm, group_hit=hit)   ! nm: probes that matched
 do i = 1, size(keys)
     do p = offsets(i), offsets(i+1) - 1
         ! key i matches stored row matches(p)
@@ -457,7 +478,9 @@ call p%free_index(slot)              ! give it back
 ```
 
 Reuse always precedes growth, so the indexes stay as dense as your live set allows: the pool only
-grows its internal storage when every index up to its watermark is out. Freeing an index the pool
+grows its internal storage when every index up to its watermark is out. It costs one bit per index
+up to its watermark, plus 8 bytes per index freed since its last `%compact` and not yet handed out
+again. Freeing an index the pool
 never issued, or freeing one twice, aborts — a double free would put the same index on the free
 list twice and hand it to two owners who each believed they held the slot.
 
@@ -492,16 +515,19 @@ call p%compact()       ! storage comes back, and allocation resumes low
 Precisely, after `%compact`:
 
 - **every index you still hold is still held** — `%is_used` answers exactly as it did before;
-- **`%get_max_index()` becomes the highest index you actually hold**, and the free list holds
-  exactly the free indexes below it, handed out smallest first, ascending;
-- **the internal arrays shrink** once the watermark has fallen far enough behind them.
+- **`%get_max_index()` becomes the highest index you actually hold**, and the free indexes below
+  it are handed out smallest first, ascending;
+- **the list of freed indexes is released**, since the pool's bitmap already records which
+  indexes below the watermark are free; what remains is one bit per index;
+- **the bitmap shrinks** once the watermark has fallen far enough behind it.
 
 That ordering is the point: a pool that lost most of its content converges back onto a dense
 `1 .. n` as it keeps allocating, instead of continuing upward from the old watermark. Indexes above
 the new watermark come back through ordinary growth, in the same ascending order.
 
-Later `%free_index` calls push onto the top of the rebuilt list, so the newly freed values come
-back first again. `%compact` re-sorts; ordinary operation does not pay for sorting.
+An index freed after `%compact` comes back before any of the older free ones, exactly as it would
+between compacts; the older ones then resume, smallest first. Ordinary operation pays for no
+ordering.
 
 **Between compacts the watermark only rises.** Freeing the top index does not lower
 `%get_max_index()`, because doing so would have to prune every free-list entry above the new mark
@@ -572,8 +598,8 @@ would cost it the few nanoseconds it exists for, so it is not guarded. Two patte
   correctly for a key that is already present. An **absent** key is *added* rather than reported
   missing, so this suits a workload that would insert the key anyway — it is not a drop-in for
   `%get` on a read-mostly map, where it would grow the map on every miss and answer with a fresh
-  index where `%get` answers 0. It also needs the hash backend: a sorted map refuses it, and a
-  direct map refuses a key outside its built range.
+  index where `%get` answers 0. It also needs the hash backend: a sorted map refuses a key it
+  does not hold, and a direct map a key outside its built range.
 
 The serialization is a single lock per type across the whole process, so two unrelated shared maps
 take turns with each other as well — for their inserts, removals and `%get_or_add`s; a `%build`, as
@@ -625,14 +651,15 @@ nt = pf_index_threads(size(keys, kind=int64))   ! what an automatic build or loo
 
 **The automatic answer and an explicit `threads=` are resolved differently, and only one of them is
 bounded.** The automatic one is `omp_get_max_threads()` outside a parallel region and **1** inside
-one — nested teams are the caller's business — capped by `parquet_set_index_threads`, then
-bounded by the work available. An explicit `threads=` bypasses all three: it is honoured whatever
+one — nested teams are the caller's business — capped at **64**, or at `parquet_set_index_threads`
+when that is set, then bounded by the work available.
+An explicit `threads=` bypasses all three: it is honoured whatever
 the size of the build and wherever it is called from, including inside somebody else's parallel
 region.
 
 | situation | threads used |
 |---|---|
-| automatic, ordinary serial code | `omp_get_max_threads()`, capped by `parquet_set_index_threads` |
+| automatic, ordinary serial code | `omp_get_max_threads()`, at most 64, or at most `parquet_set_index_threads` when set |
 | automatic, inside any `!$omp parallel` region | **1** — serial |
 | automatic, fewer than about 8000 keys (or rows probed) | **1** — below the work floor |
 | automatic, above it | about one thread per 4000 keys (or rows), up to the cap |
@@ -643,10 +670,13 @@ The affinity clamp is the one rule with no exception: it applies to an explicit 
 lowering a request to the processors actually available is a performance decision that never changes
 the answer. `threads=0` is refused rather than read as "automatic".
 
-`parquet_set_index_threads(n)` caps the automatic answer process-wide, and
+Left alone, the automatic answer stops at 64 threads however many the machine offers: past a team
+of about that size these paths get slower rather than faster. `parquet_set_index_threads(n)`
+replaces that ceiling process-wide, above 64 as well as below, and
 `PARQUET_FORTRAN_INDEX_THREADS` does the same from the environment — see
-[Settings](../operating/settings.html). A cap only ever lowers the automatic answer; pass
-`threads=` to ask for more. A `method="sorted"` build sorts through `pf_argsort`, so that phase
+[Settings](../operating/settings.html). It stays a cap on the automatic answer, never a request;
+pass `threads=` on the call to ask for a team outright.
+A `method="sorted"` build sorts through `pf_argsort`, so that phase
 answers to the sorting thread knobs instead, while the key scan around it follows the rule above.
 
 **Two passes of a build have a work floor of their own**, because a team costs them more than it
@@ -701,5 +731,5 @@ your own hardware.
   incremental filling that is not amortised `O(1)`.
 - **The sorted backend trades mutability for memory**, and is the one to reach for when a map has
   to fit somewhere the others will not: with its prefix table a lookup costs about what a hash
-  probe does, at half the hash table's bytes, and what it gives up is `%set`, `%get_or_add` and
-  `%remove`.
+  probe does, at half the hash table's bytes, and what it gives up is `%set`, `%remove`, and
+  `%get_or_add` of a new key.

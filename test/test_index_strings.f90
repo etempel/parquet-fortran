@@ -59,6 +59,12 @@ contains
             new_unittest("set, get_or_add, get_or_add_many, remove and reset", test_str_mutation), &
             new_unittest("a forced hash collision chain answers every key and survives removal", &
                 test_str_collision_chain), &
+            new_unittest("max_hash_chain reports a forced collision run, and 1 without one", &
+                test_str_hash_chain_reported), &
+            new_unittest("keys differing only in each word's high half do not share a hash", &
+                test_str_high_half_keys_spread), &
+            new_unittest("a column key ending in a blank is reached by a scalar, never by an array", &
+                test_str_trailing_blank_key), &
             new_unittest("near-identical strings do not cluster", test_str_clustering), &
             new_unittest("an unbuilt map answers 0, empty, and not found", test_str_unbuilt), &
             new_unittest("init(strings=) and reserve start an incremental string map", &
@@ -378,6 +384,148 @@ contains
         call check(error, m%memory_bytes() == 0_int64 .and. m%ncomponents() == 0 .and. m%get("delta") == 0_int64, &
             "clear releases everything and the map answers as a fresh one")
     end subroutine test_str_mutation
+
+    !> `%probe_stats`' `max_hash_chain` against a run of colliding keys forced by the hook: sixty
+    !! keys over four hash values put at least fifteen on one value (pigeonhole), while the probe
+    !! lengths -- which see the tuples `(hash, 0)`, `(hash, 1)`, ... spread over the table -- stay
+    !! short. Without the hook the same keys share no hash, and an integer or empty map reports 0.
+    subroutine test_str_hash_chain_reported(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+
+        call parquet_debug_set_index_string_hash_bits(2)
+        call hash_chain_reported_body(error)
+        call parquet_debug_set_index_string_hash_bits(0)
+    end subroutine test_str_hash_chain_reported
+
+    !> The checked body of `test_str_hash_chain_reported`, run with the hook set.
+    subroutine hash_chain_reported_body(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, wide, ints
+        type(parquet_string_column) :: keys
+        integer(int64), parameter :: n = 60_int64
+        integer(int64) :: maxp, chain, chain_after, i
+        character(len=16) :: txt
+        logical :: found
+
+        call ident_column(n, keys)
+        call m%build(keys)
+        call m%probe_stats(maxp, max_hash_chain=chain)
+        call check(error, chain >= 15_int64 .and. chain <= n, &
+            "sixty keys over four hashes report a run of at least fifteen")
+        if (allocated(error)) return
+        ! Remove all but the first fifteen: the chains stay dense, and fifteen keys over four hashes
+        ! leave a longest run of four to fifteen (pigeonhole, and the keys left).
+        do i = 16_int64, n
+            write (txt, "(a,i0)") "k", i
+            call m%remove(trim(txt), found)
+            call check(error, found, "a colliding key can be removed: " // trim(txt))
+            if (allocated(error)) return
+        end do
+        call m%probe_stats(maxp, max_hash_chain=chain_after)
+        call check(error, chain_after >= 4_int64 .and. chain_after <= 15_int64, &
+            "fifteen keys left over four hashes report a run of four to fifteen")
+        if (allocated(error)) return
+        ! Negative control: at full width the same sixty keys share no hash.
+        call parquet_debug_set_index_string_hash_bits(0)
+        call wide%build(keys)
+        call wide%probe_stats(maxp, max_hash_chain=chain)
+        call parquet_debug_set_index_string_hash_bits(2)
+        call check(error, chain == 1_int64, "at full width no two of the keys share a hash")
+        if (allocated(error)) return
+        call ints%build([10_int64, 20_int64, 30_int64])
+        call ints%probe_stats(maxp, max_hash_chain=chain)
+        call check(error, chain == 0_int64, "an integer map reports no string run")
+        if (allocated(error)) return
+        call m%clear()
+        call m%probe_stats(maxp, max_hash_chain=chain)
+        call check(error, chain == 0_int64, "an empty map reports no string run")
+    end subroutine hash_chain_reported_body
+
+    !> Keys that agree in bytes 1-4 and 9-12 and differ only in bytes 5-8 and 13-16 -- the high
+    !! half of each 8-byte word -- must not share a hash. With the word's two halves feeding two
+    !! chains that never meet until the end, such keys all shared the low-half chain and so hashed
+    !! with 32 bits of entropy, and this family of 2**18 held twenty hashes shared by two or three
+    !! keys. The two printable keys below are one such pair, constructed rather than found. With
+    !! the chains cross-fed, keys agreeing in every low half map one-to-one onto the state, so the
+    !! answer is exactly 1. Each four-character word is `k * 1000003` in base 62 rather than `k`,
+    !! so that all four of its bytes vary: `k` alone would move only the last two.
+    subroutine test_str_high_half_keys_spread(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, pair
+        type(parquet_string_column) :: keys
+        character(len=*), parameter :: DIGITS = &
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        integer, parameter :: NW = 512
+        integer(int64) :: maxp, chain
+        character(len=4) :: w1, w2, wl
+        integer :: i, j
+
+        call keys%clear()
+        do i = 0, NW - 1
+            call word_of(i, w1)
+            do j = 0, NW - 1
+                call word_of(j, w2)
+                call keys%append_string("ABCD" // w1 // "EFGH" // w2)
+            end do
+        end do
+        call m%build(keys, threads=1)
+        call check(error, m%nkeys() == int(NW, int64)**2, "every key of the family is stored (vacuity guard)")
+        if (allocated(error)) return
+        call word_of(NW - 1, wl)
+        call check(error, m%get("ABCD0000EFGH0000") == 1_int64 .and. &
+            m%get("ABCD" // wl // "EFGH" // wl) == int(NW, int64)**2, "the family answers lookups (vacuity guard)")
+        if (allocated(error)) return
+        call m%probe_stats(maxp, max_hash_chain=chain)
+        call check(error, chain == 1_int64, "keys differing only in each word's high half share no hash")
+        if (allocated(error)) return
+        call pair%build([character(len=16) :: "dcba!!!!mogeFFFF", "dcba+!!!moge-4o6"])
+        call pair%probe_stats(maxp, max_hash_chain=chain)
+        call check(error, chain == 1_int64, "two keys solved to collide under uncoupled chains do not")
+    contains
+        !> Four characters of DIGITS naming `k * 1000003 mod 62**4` in base 62.
+        subroutine word_of(k, w)
+            integer, intent(in) :: k             !! the word's number, `0 .. NW - 1`.
+            character(len=4), intent(out) :: w   !! its four digits.
+            integer(int64) :: r
+            integer :: d, q
+
+            r = mod(int(k, int64) * 1000003_int64, 14776336_int64)
+            do d = 4, 1, -1
+                q = int(mod(r, 62_int64)) + 1
+                w(d:d) = DIGITS(q:q)
+                r = r / 62_int64
+            end do
+        end subroutine word_of
+    end subroutine test_str_high_half_keys_spread
+
+    !> The trimming contract where it bites: a `parquet_string_column` holds `"abc"` and `"abc "`
+    !! as two keys, verbatim; a scalar key is taken as written and reaches either; an element of a
+    !! `character` ARRAY is trimmed, so it reaches the first whichever spelling it holds, and the
+    !! second is unreachable from any array. `%get_or_add_many` over an array folds the two
+    !! spellings into one code by the same rule.
+    subroutine test_str_trailing_blank_key(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, codes_map
+        type(parquet_string_column) :: sc
+        integer(int64) :: rows(2), codes(2)
+
+        call sc%clear()
+        call sc%append_string("abc")
+        call sc%append_string("abc ")
+        call m%build(sc)
+        call check(error, m%nkeys() == 2_int64, "a column holds ""abc"" and ""abc "" as two keys")
+        if (allocated(error)) return
+        call check(error, m%get("abc") == 1_int64 .and. m%get("abc ") == 2_int64, &
+            "a scalar key is taken as written and reaches either")
+        if (allocated(error)) return
+        call m%get_many([character(len=4) :: "abc ", "abc"], rows)
+        call check(error, all(rows == 1_int64), &
+            "an array element is trimmed: both spellings reach the first key, neither the second")
+        if (allocated(error)) return
+        call codes_map%get_or_add_many([character(len=4) :: "abc", "abc "], codes)
+        call check(error, codes(1) == codes(2) .and. codes_map%nkeys() == 1_int64, &
+            "get_or_add_many over an array folds the two spellings into one key")
+    end subroutine test_str_trailing_blank_key
 
     !> Sixty keys hashed to four values: every key still found with its own value, every miss a
     !! miss, and after removing a third of them -- first, middle and last occurrences of their

@@ -412,9 +412,16 @@ or one bulk lookup — `pf_index_map%get_many`, or `pf_index_multimap`'s `%get_f
 `parquet_table_index`'s `%find_many`, which are those calls behind a wrapper, and
 `parquet_table%join`'s hash engine, which is a multimap built over the other table's keys and
 probed with this one's (see
-[How the match is built](../tables/table-join.html#how-the-match-is-built)). Like every other
-per-area cap it is a cap rather than a request, read per call, with `0` meaning automatic, `1`
-forcing serial, and an explicit `threads=` on the call itself still winning.
+[How the match is built](../tables/table-join.html#how-the-match-is-built)). It is read per call,
+with `1` forcing serial and an explicit `threads=` on the call itself still winning.
+
+**Unlike the other per-area caps, it replaces a ceiling rather than lowering one.** Left at `0`,
+the automatic answer is held to **64** threads, however many the machine offers: past a team of
+about that size these paths get slower rather than faster, and one thread per four thousand keys
+would otherwise ask for hundreds on a large build. A positive `n` holds it to `n` instead —
+above 64 as well as below — so a machine whose best team is larger says so once here rather than
+passing `threads=` to every call. It is still a cap, never a request: the automatic answer stays
+serial inside a parallel region and bounded by the work and by the CPU affinity mask.
 
 **It bounds the build's key scan, scatter and hash insert, the bulk lookup's probe, and
 `%get_or_add_many`'s lookup and insert, and nothing else.** A scalar `%get` is a few nanoseconds

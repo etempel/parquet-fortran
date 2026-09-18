@@ -73,9 +73,10 @@ contains
     !!
     !! **The `min` is what makes the knob a cap rather than a request.** Taking the user's value
     !! outright would let `parquet_set_healpix_threads(1024)` raise the ceiling that
-    !! `hpx_max_auto_threads` exists to impose, which is the opposite of what every other per-area
-    !! cap in this library does. A caller who genuinely wants more passes `threads=` on the call,
-    !! which bypasses this path entirely.
+    !! `hpx_max_auto_threads` exists to impose. The index tier's `index_threads` does replace its
+    !! tier's ceiling (`ix_auto_cap`, src/parquet_index_map.f90), because there the ceiling is a
+    !! default the user may move; here it is a limit. A caller who genuinely wants more passes
+    !! `threads=` on the call, which bypasses this path entirely.
     pure function hpx_auto_cap() result(cap)
         integer :: cap !! cap to pass on; always >= 1.
 

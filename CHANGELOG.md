@@ -156,6 +156,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   times faster. **A 3D index whose points fill part of their bounding box gets a finer grid**: the
   cells-per-point ceiling counts occupied cells (0.3 per point), with 4 cells of the bounding box
   per point as the bound.
+- **The index tier's automatic thread count stops at 64** (`pf_index_map`, `pf_index_multimap`,
+  and a table's `%build_index`, `%find_many` and hash join), and `parquet_set_index_threads(n)`
+  replaces that ceiling, raising the automatic answer as well as lowering it.
+- **String keys in `pf_index_map` and `pf_index_multimap` hash each 8-byte word whole, with the
+  hash's two chains cross-fed**, so keys differing only in bytes 5-8, 13-16, ... no longer share
+  hashes. `%probe_stats` reports the longest run of string keys sharing one hash
+  (`max_hash_chain=`), and a map warns once when 32 of its keys share one.
 
 ### Fixed
 
@@ -170,6 +177,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `parquet_read_column`, `parquet_read_column_chunk`, `parquet_read_array_row_mode`,
   `parquet_read_array_element_mode`, and the character-array `%set_all`, `%append_values` and
   `%build_from` of `parquet_column` and `parquet_string_column`.
+- `pf_index_pool%compact` releases the pool's list of freed indexes: a compacted pool holds one bit
+  per index below its watermark instead of 8 bytes per free index.
 - Many other minor fixes and improvements.
 
 ## [v2.4.0] - 2026-09-14

@@ -2466,6 +2466,8 @@ contains
                 test_index_sorted_set_aborts), &
             new_unittest("removing a key from a sorted map aborts", &
                 test_index_sorted_remove_aborts), &
+            new_unittest("get_or_add of a new key on a sorted map aborts, naming get_or_add", &
+                test_index_sorted_get_or_add_absent_aborts), &
             new_unittest("a composite sorted build aborts", &
                 test_index_sorted_composite_aborts), &
             new_unittest("init with method=direct aborts", &
@@ -2620,6 +2622,8 @@ contains
                 test_multimap_csr_int32_value_aborts), &
             new_unittest("every legal string-key path of both types completes", &
                 test_index_string_control_completes), &
+            new_unittest("a long run of string keys sharing a hash is reported once", &
+                test_index_string_chain_warning), &
             new_unittest("a string key on an integer index aborts", &
                 test_table_index_string_key_on_int_aborts), &
             new_unittest("an integer key on a string index aborts", &
@@ -3968,6 +3972,19 @@ contains
             required_stderr="frozen once built")
     end subroutine test_index_sorted_remove_aborts
     !
+    !> See `scenario_index_sorted_get_or_add_absent` (test/error_scenarios.f90).
+    subroutine test_index_sorted_get_or_add_absent_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_sorted_get_or_add_absent", expect_abort=.true., &
+            failure_message="get_or_add of a new key on a sorted map was expected to abort", &
+            required_stderr="pf_index_map%get_or_add: a sorted map is frozen once built")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "index_sorted_get_or_add_many_absent", &
+            expect_abort=.true., &
+            failure_message="get_or_add_many of a new key on a sorted map was expected to abort", &
+            required_stderr="pf_index_map%get_or_add_many: a sorted map is frozen once built")
+    end subroutine test_index_sorted_get_or_add_absent_aborts
+    !
     !> See `scenario_index_sorted_composite` (test/error_scenarios.f90) for why this is refused.
     subroutine test_index_sorted_composite_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4820,6 +4837,32 @@ contains
             failure_message="every legal string-key call was expected to complete", &
             required_stderr="string index control finished")
     end subroutine test_index_string_control_completes
+    !
+    !> See `scenario_index_string_chain` (test/error_scenarios.f90). The depth in the message is
+    !> what proves the warning is said once: the run passes 32 by some twenty keys, and every
+    !> insert past the first crossing would otherwise report "33", "34", ...
+    subroutine test_index_string_chain_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_chain_warning", expect_abort=.false., &
+            failure_message="a run of 32 string keys sharing a hash was expected to be reported", &
+            required_stderr="WARNING: pf_index_map%build: 32 string keys share one 64-bit hash")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "index_string_chain_warning", expect_abort=.false., &
+            failure_message="the long-run warning was expected once per map, not once per insert", &
+            forbidden_text="33 string keys share one")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "index_string_chain_warning", expect_abort=.false., &
+            failure_message="max_hash_chain was expected to report the run of fifty-odd keys", &
+            required_stderr="max_hash_chain=50")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "index_string_chain_quiet", expect_abort=.false., &
+            failure_message="keys sharing no hash were expected to raise no warning", &
+            forbidden_text="share one 64-bit hash")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "index_string_chain_quiet", expect_abort=.false., &
+            failure_message="at full width the hundred keys were expected to share no hash", &
+            required_stderr="max_hash_chain=1")
+    end subroutine test_index_string_chain_warning
     !
     !> See `scenario_table_index_string_key_on_int` (test/error_scenarios.f90).
     subroutine test_table_index_string_key_on_int_aborts(error)

@@ -94,8 +94,9 @@ module parquet_index
     !
     !> The thread cap `%build` reads, so that a program whose only import is `use parquet_index`
     !! can bound what a build opens without naming `parquet_settings` -- which would put the C++
-    !! boundary, and with it Arrow, back into an otherwise Arrow-free build. It LOWERS the
-    !! automatic answer and never raises it; pass `threads=` on the call for that.
+    !! boundary, and with it Arrow, back into an otherwise Arrow-free build. Unset (0), the
+    !! automatic answer is held to `IX_MAX_AUTO_THREADS`; a positive value replaces that ceiling,
+    !! so it can raise the automatic answer as well as lower it.
     public :: parquet_set_index_threads, parquet_get_index_threads
     !
     !> The output pair, because the affinity clamp inside the build's thread rule emits a warning
@@ -175,6 +176,18 @@ module parquet_index
     !! test-sized fixture of a few tens of thousands reaches the threaded scan and scatter without
     !! anything having to force it. Keep that true if the number is ever raised.
     integer(int64), parameter :: IX_MIN_KEYS_PER_THREAD = 4096_int64
+
+    !> Most threads the AUTOMATIC answer opens when `index_threads` is unset (0): the ceiling an
+    !! automatic build or bulk lookup is held to on a machine offering more.
+    !!
+    !! Past a team of about this size every threaded path of this module gets SLOWER, not merely
+    !! no faster -- the fork/join cost and the contention on the shared table outgrow the work a
+    !! thread removes -- while the work floor above would otherwise hand a large build one thread
+    !! per four thousand keys, hundreds of them. `hpx_max_auto_threads`
+    !! (src/parquet_healpix_bulk.f90) is the same ceiling for the same reason. A positive
+    !! `index_threads` REPLACES it, in either direction (`ix_auto_cap`), and an explicit `threads=`
+    !! bypasses both. Not a setting: `index_threads` is the setting, and this is its unset value.
+    integer, parameter :: IX_MAX_AUTO_THREADS = 64
 
     !> Keys an AUTOMATIC hash build insists on before it takes the partitioned insert.
     !!
@@ -469,6 +482,10 @@ module parquet_index
         integer(int64), allocatable :: soff(:)
         character(len=1), allocatable :: sdat(:) !! see `soff`.
         integer(int64), allocatable :: sval(:) !! see `soff`.
+        !> `.true.` once this map has warned that `IX_STR_CHAIN_WARN` of its string keys share one
+        !! hash, so that a key set built to collide is reported once per map rather than once per
+        !! insert. Cleared with the storage; never read by a lookup.
+        logical :: sdeep = .false.
     contains
         !
         ! ---- Lifecycle ----
@@ -549,7 +566,7 @@ module parquet_index
         procedure :: ncomponents => map_ncomponents     !! Components per key; 0 if never built.
         procedure :: get_method => map_get_method       !! The resolved backend, as a token.
         procedure :: memory_bytes => map_memory_bytes   !! Heap this map holds, in bytes.
-        procedure :: probe_stats => map_probe_stats     !! Hash probe lengths, for tuning and tests.
+        procedure :: probe_stats => map_probe_stats     !! Hash probe lengths and string-hash runs.
         !> The stored keys: rank 1 for a single-component map, rank 2 for a composite one, a
         !! parquet_string_column for a string-keyed one.
         procedure, private :: map_keys_r1_i32, map_keys_r2_i32
@@ -590,14 +607,20 @@ module parquet_index
         !> One bit per index, set while that index is held. What makes `%free_index` able to reject
         !! a double free and `%is_used` able to answer at all.
         integer(int64), allocatable :: bits(:)
-        !> The free list, as a stack of released indexes. LIFO in ordinary operation; `%compact`
-        !! rebuilds it so that popping yields the smallest free index first.
+        !> The free list, as a stack of indexes released since the last `%compact`. LIFO; popped
+        !! before `cursor` is consulted. `%compact` releases it rather than listing its holes in it.
         !!
         !! **`nfree` is read before this is touched, which is why an uninitialised copy of this
         !! type is fatal rather than merely wrong.** See the note on `pf_index_map` about
         !! per-thread instances: a `private()` copy under gfortran carries a garbage `nfree`, and
         !! `pool_take` then indexes this array at that offset.
         integer(int64), allocatable :: flist(:)
+        !> Where the next scan of the bitmap for a free index starts: every clear bit in
+        !! `cursor .. max_used` is a free index held in no list. Set to 1 by `%compact`, which is
+        !! what hands the holes out smallest first with no list at all, and to `max_used + 1`
+        !! whenever the pool grows. Read only while `nfree == 0`, so an index on the stack -- its
+        !! bit clear too -- is always popped before the scan could reach it.
+        integer(int64) :: cursor = 1_int64
     contains
         procedure :: get_index => pool_get_index        !! Take an index nobody else holds.
         !> Give an index back.
@@ -1933,10 +1956,19 @@ module parquet_index
         !! wants as much as what the clustering tests assert. Cold path: it walks every slot.
         !! Reports 1 for the direct backend (there is no probing) and the binary search's worst
         !! depth for the sorted one.
-        pure module subroutine map_probe_stats(self, max_probe, mean_probe)
+        !!
+        !! **`max_hash_chain` is the string map's second cost, which the probe lengths cannot
+        !! see.** Keys sharing a 64-bit hash are stored under the distinct tuples `(hash, 0)`,
+        !! `(hash, 1)`, ..., which the table spreads like any other tuples -- so the probe lengths
+        !! stay short while a lookup of the last of such a run walks and compares every one before
+        !! it. That run's length is what this reports.
+        pure module subroutine map_probe_stats(self, max_probe, mean_probe, max_hash_chain)
         class(pf_index_map), intent(in) :: self !! the map.
             integer(int64), intent(out) :: max_probe !! longest probe any stored key needs; 0 when empty.
             real(real64), intent(out), optional :: mean_probe !! mean over stored keys; 0 when empty.
+            !> String keys: the most stored keys sharing one hash, 1 when no two do; 0 for an
+            !! integer-keyed or empty map.
+            integer(int64), intent(out), optional :: max_hash_chain
         end subroutine map_probe_stats
         !> The stored keys of a single-component map, ascending for direct and sorted, in
         !! unspecified order for hash.
@@ -2356,18 +2388,18 @@ module parquet_index
         !! Pure memory optimisation as far as the ACTIVE indexes are concerned: every index
         !! currently held is still held, and `%is_used` answers identically before and after. What
         !! does change is bookkeeping and order. `get_max_index()` becomes the highest index
-        !! actually held; the free list is rebuilt to hold exactly the free indexes below it,
-        !! handed out **smallest first**; and the arrays shrink when the watermark has fallen far
-        !! enough behind the allocation.
+        !! actually held; the free indexes below it are handed out **smallest first**, read from
+        !! the bitmap rather than listed, so the list of freed indexes is released and the pool
+        !! keeps one bit per index; and the bitmap shrinks when the watermark has fallen far enough
+        !! behind the allocation.
         !!
         !! That ordering is the point of it: a pool that issued a great many indexes and then
         !! released most of them converges back onto a dense `1 .. n` as it keeps allocating,
         !! rather than continuing upward from the old watermark. Indexes above the new watermark
         !! come back through the increment path, in the same ascending order.
         !!
-        !! Later `%free_index` calls push onto the top of the rebuilt list, so the newly freed
-        !! values come back first again: `%compact` re-sorts, and ordinary operation does not pay
-        !! for sorting.
+        !! Later `%free_index` calls push onto the free list as usual, and those indexes come back
+        !! before the older free ones resume; ordinary operation pays for no ordering.
         module subroutine pool_compact(self)
         class(pf_index_pool), intent(inout) :: self !! the pool.
         end subroutine pool_compact
@@ -3855,8 +3887,9 @@ module parquet_index
     !> would open.
     !!
     !! The resolved count, where `parquet_get_index_threads()` is only the cap that was asked for:
-    !! the answer also depends on the rows available, on this process's CPU affinity, and on
-    !! whether the caller is already inside a parallel region (in which case it is 1). This is what
+    !! the answer also depends on the rows available, on this process's CPU affinity, on the
+    !! ceiling of 64 when no cap was set, and on whether the caller is already inside a parallel
+    !! region (in which case it is 1). This is what
     !! makes `index_threads` observable, and it is a pass-through onto the very rule `%build` and
     !! `%get_many` run, never a second copy of it.
     interface pf_index_threads

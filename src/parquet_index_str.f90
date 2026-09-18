@@ -14,8 +14,11 @@
 !! `(hash, 1)`, and so on until a miss. One probe and one compare in the overwhelming case; no
 !! lookup ever answers on a hash match alone, and no legitimate key set is ever refused, however
 !! the hashes fall. That is answer F3 of feature_pandas_S7.md as written, and the reason the
-!! debug hook `parquet_debug_set_index_string_hash_bits` exists: a collision at 64 bits is a
-!! once-in-2**64 event, so the chain is exercised by narrowing the hash in a test.
+!! debug hook `parquet_debug_set_index_string_hash_bits` exists: two keys found in real data share
+!! a 64-bit hash about once in 2**64 pairs, so the chain is exercised by narrowing the hash in a
+!! test. Keys BUILT to collide are another matter -- the hash is unkeyed, so they can be solved for
+!! (`ix_hash_str`) -- and cost a lookup one compare per key of their run: correct, but slow,
+!! which is why a run reaching `IX_STR_CHAIN_WARN` is reported and `%probe_stats` measures it.
 !!
 !! **The occurrence chain is DENSE, and removal keeps it so.** `occurrence` counts `0, 1, 2, ...`
 !! with no gaps, because a lookup stops at the first miss: a removal that left a gap would hide
@@ -876,7 +879,12 @@ contains
     !!
     !! One walk down the occurrence chain serves both the lookup and the insert: a miss at
     !! `(hash, k)` is exactly the tuple the new string is stored under.
-    subroutine ix_str_insert(self, b, n, value, replace, p, is_new)
+    !!
+    !! **Every string that lengthens a chain comes through here**: the threaded build and the
+    !! threaded `%get_or_add_many` fall back to the serial loops, which call this, the moment two
+    !! keys share a hash. So this is where a chain reaching `IX_STR_CHAIN_WARN` is noticed, once
+    !! per map. Nothing is refused: the answers stay right, and only the time they take grows.
+    subroutine ix_str_insert(self, b, n, value, replace, p, is_new, what)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: n           !! bytes in the key.
         character(len=1), intent(in) :: b(n)      !! the key.
@@ -884,8 +892,10 @@ contains
         logical, intent(in) :: replace            !! whether a stored key's value is overwritten.
         integer(int64), intent(out) :: p          !! the key's store position.
         logical, intent(out) :: is_new            !! `.true.` when the key was not already stored.
+        character(len=*), intent(in) :: what      !! the public procedure, for the warning.
         integer(int64) :: kb(2)
         logical :: was_new
+        character(len=24) :: depth
 
         kb(1) = ix_hash_str(b, n)
         kb(2) = 0_int64
@@ -902,6 +912,14 @@ contains
         call ix_str_append(self, b, n, value, p)
         call ix_hash_insert(self, kb, p, was_new)
         is_new = .true.
+        if (kb(2) + 1_int64 >= IX_STR_CHAIN_WARN .and. .not. self%sdeep) then
+            self%sdeep = .true.
+            write (depth, "(i0)") kb(2) + 1_int64
+            call parquet_emit_warning(SP // what // ": " // trim(depth) // " string keys share one " // &
+                "64-bit hash, so a lookup of the last of them compares every one before it; keys this " // &
+                "alike are almost certainly constructed, and inserting or finding them costs time " // &
+                "growing with their number (%probe_stats reports the longest such run as max_hash_chain)")
+        end if
     end subroutine ix_str_insert
 
     !> Removes the string `b(1:n)`: its tuple leaves the table with the chain kept dense, and its
@@ -1115,7 +1133,7 @@ contains
         call ix_str_check_mutate(self, "set")
         call ix_check_value(value, "set")
         call ix_str_autoinit(self)
-        call ix_str_insert(self, key, len(key, kind=int64), value, .true., p, is_new)
+        call ix_str_insert(self, key, len(key, kind=int64), value, .true., p, is_new, "set")
         if (value > self%snext) self%snext = value
     end subroutine ix_str_set
 
@@ -1128,21 +1146,22 @@ contains
 
         call ix_str_check_mutate(self, "get_or_add")
         call ix_str_autoinit(self)
-        call ix_str_goa(self, key, len(key, kind=int64), idx, want32)
+        call ix_str_goa(self, key, len(key, kind=int64), idx, want32, "get_or_add")
     end subroutine ix_str_goa_entry
 
     !> `%get_or_add` for the bytes `b(1:n)`: one chain walk, inserting the next watermark value
     !! when the key is new.
-    subroutine ix_str_goa(self, b, n, idx, want32)
+    subroutine ix_str_goa(self, b, n, idx, want32, what)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: n           !! bytes in the key.
         character(len=1), intent(in) :: b(n)      !! the key.
         integer(int64), intent(out) :: idx        !! the key's index.
         logical, intent(in) :: want32             !! whether the answer must fit `int32`.
+        character(len=*), intent(in) :: what      !! the public procedure, for the warning.
         integer(int64) :: p
         logical :: is_new
 
-        call ix_str_insert(self, b, n, self%snext + 1_int64, .false., p, is_new)
+        call ix_str_insert(self, b, n, self%snext + 1_int64, .false., p, is_new, what)
         if (is_new) self%snext = self%snext + 1_int64
         idx = self%sval(p)
         if (want32) idx = ix_narrow_check(idx)
@@ -1190,7 +1209,7 @@ contains
                     if (hv) then
                         if (.not. valid(i)) cycle
                     end if
-                    call ix_str_goa(self, keys(i), len_trim(keys(i), kind=int64), idx, want32)
+                    call ix_str_goa(self, keys(i), len_trim(keys(i), kind=int64), idx, want32, "get_or_add_many")
                     codes(i) = idx
                 end do
                 return
@@ -1205,7 +1224,7 @@ contains
                     cycle
                 end if
             end if
-            call ix_str_goa(self, keys(i), len_trim(keys(i), kind=int64), idx, want32)
+            call ix_str_goa(self, keys(i), len_trim(keys(i), kind=int64), idx, want32, "get_or_add_many")
             codes(i) = idx
         end do
     end subroutine ix_str_goam_chr
@@ -1260,9 +1279,9 @@ contains
                     a = v%off(i)
                     nb = v%off(i + 1_int64) - a
                     if (nb > 0_int64) then
-                        call ix_str_goa(self, v%dat(a + 1_int64 : a + nb), nb, idx, want32)
+                        call ix_str_goa(self, v%dat(a + 1_int64 : a + nb), nb, idx, want32, "get_or_add_many")
                     else
-                        call ix_str_goa(self, IX_NO_BYTES, 0_int64, idx, want32)
+                        call ix_str_goa(self, IX_NO_BYTES, 0_int64, idx, want32, "get_or_add_many")
                     end if
                     codes(i) = idx
                 end do
@@ -1282,9 +1301,9 @@ contains
             a = v%off(i)
             nb = v%off(i + 1_int64) - a
             if (nb > 0_int64) then
-                call ix_str_goa(self, v%dat(a + 1_int64 : a + nb), nb, idx, want32)
+                call ix_str_goa(self, v%dat(a + 1_int64 : a + nb), nb, idx, want32, "get_or_add_many")
             else
-                call ix_str_goa(self, IX_NO_BYTES, 0_int64, idx, want32)
+                call ix_str_goa(self, IX_NO_BYTES, 0_int64, idx, want32, "get_or_add_many")
             end if
             codes(i) = idx
         end do
@@ -1442,7 +1461,7 @@ contains
             nb = len_trim(keys(i), kind=int64)
             val = i
             if (has_v) val = values(i)
-            call ix_str_insert(self, keys(i), nb, val, .false., p, is_new)
+            call ix_str_insert(self, keys(i), nb, val, .false., p, is_new, "build")
             if (.not. is_new) call ix_str_report_duplicate(keys(i), nb, i)
         end do
     end subroutine ix_str_insert_chr
@@ -1469,10 +1488,10 @@ contains
             val = i
             if (has_v) val = values(i)
             if (nb > 0_int64) then
-                call ix_str_insert(self, v%dat(a + 1_int64 : a + nb), nb, val, .false., p, is_new)
+                call ix_str_insert(self, v%dat(a + 1_int64 : a + nb), nb, val, .false., p, is_new, "build")
                 if (.not. is_new) call ix_str_report_duplicate(v%dat(a + 1_int64 : a + nb), nb, i)
             else
-                call ix_str_insert(self, IX_NO_BYTES, 0_int64, val, .false., p, is_new)
+                call ix_str_insert(self, IX_NO_BYTES, 0_int64, val, .false., p, is_new, "build")
                 if (.not. is_new) call ix_str_report_duplicate(IX_NO_BYTES, 0_int64, i)
             end if
         end do

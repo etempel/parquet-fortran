@@ -3121,6 +3121,8 @@ contains
                 test_optimize_tolerance_nonfinite_aborts), &
             new_unittest("a reversed bracket is refused", &
                 test_optimize_scalar_bad_bracket_aborts), &
+            new_unittest("a bracket whose width overflows is refused", &
+                test_optimize_scalar_bracket_width_aborts), &
             new_unittest("a non-finite objective value is refused by Brent", &
                 test_optimize_scalar_nonfinite_value_aborts), &
             new_unittest("Brent refuses a constrained objective", &
@@ -3148,6 +3150,8 @@ contains
                 test_optimize_de_bounds_order_aborts), &
             new_unittest("an infinite bound is refused", &
                 test_optimize_de_bounds_nonfinite_aborts), &
+            new_unittest("a box whose width overflows is refused", &
+                test_optimize_de_box_width_aborts), &
             new_unittest("a population below four is refused", &
                 test_optimize_de_np_small_aborts), &
             new_unittest("a differential weight outside its range is refused", &
@@ -3171,8 +3175,14 @@ contains
                 test_prima_size_zero_aborts), &
             new_unittest("BOBYQA refuses a NaN in the start point", &
                 test_prima_start_nan_aborts), &
+            new_unittest("BOBYQA refuses an infinity in the start point", &
+                test_prima_start_infinite_aborts), &
             new_unittest("BOBYQA refuses bounds of the wrong length", &
                 test_prima_bounds_size_aborts), &
+            new_unittest("a NaN bound is refused rather than dropped", &
+                test_prima_bound_nan_aborts), &
+            new_unittest("a rhobeg wider than half the box is refused rather than reduced", &
+                test_prima_rhobeg_too_wide_aborts), &
             new_unittest("a bound pair with no room between them is refused", &
                 test_prima_no_space_between_bounds_aborts), &
             new_unittest("a start outside the bounds is refused rather than moved", &
@@ -19229,6 +19239,13 @@ contains
             required_stderr="the bracket must satisfy a < b with finite ends")
     end subroutine test_optimize_scalar_bad_bracket_aborts
     !
+    subroutine test_optimize_scalar_bracket_width_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_scalar_bracket_width", expect_abort=.true., &
+            failure_message="a bracket whose width overflows was expected to error stop", &
+            required_stderr="the bracket width must be finite")
+    end subroutine test_optimize_scalar_bracket_width_aborts
+    !
     subroutine test_optimize_scalar_nonfinite_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "optimize_scalar_nonfinite_value", expect_abort=.true., &
@@ -19313,6 +19330,13 @@ contains
             required_stderr="bounds must be finite")
     end subroutine test_optimize_de_bounds_nonfinite_aborts
     !
+    subroutine test_optimize_de_box_width_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_box_width", expect_abort=.true., &
+            failure_message="a box whose width overflows was expected to error stop", &
+            required_stderr="every box width must be finite")
+    end subroutine test_optimize_de_box_width_aborts
+    !
     subroutine test_optimize_de_np_small_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "optimize_de_np_small", expect_abort=.true., &
@@ -19386,6 +19410,27 @@ contains
             failure_message="a NaN start was expected to error stop", &
             required_stderr="the start point must not contain NaN")
     end subroutine test_prima_start_nan_aborts
+    !
+    subroutine test_prima_start_infinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_start_infinite", expect_abort=.true., &
+            failure_message="an infinite start was expected to error stop", &
+            required_stderr="the start point must be finite")
+    end subroutine test_prima_start_infinite_aborts
+    !
+    subroutine test_prima_bound_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_bound_nan", expect_abort=.true., &
+            failure_message="a NaN bound was expected to error stop", &
+            required_stderr="the bounds must not contain NaN")
+    end subroutine test_prima_bound_nan_aborts
+    !
+    subroutine test_prima_rhobeg_too_wide_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_rhobeg_too_wide", expect_abort=.true., &
+            failure_message="a rhobeg wider than half the box was expected to error stop", &
+            required_stderr="rhobeg must not exceed half the narrowest distance between the bounds")
+    end subroutine test_prima_rhobeg_too_wide_aborts
     !
     subroutine test_prima_bounds_size_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -3886,6 +3886,8 @@ program error_scenarios
         call scenario_optimize_tolerance_nonfinite()
     case ("optimize_scalar_bad_bracket")
         call scenario_optimize_scalar_bad_bracket()
+    case ("optimize_scalar_bracket_width")
+        call scenario_optimize_scalar_bracket_width()
     case ("optimize_scalar_nonfinite_value")
         call scenario_optimize_scalar_nonfinite_value()
     case ("optimize_scalar_constraints_not_honoured")
@@ -3910,6 +3912,8 @@ program error_scenarios
         call scenario_optimize_de_bounds_order()
     case ("optimize_de_bounds_nonfinite")
         call scenario_optimize_de_bounds_nonfinite()
+    case ("optimize_de_box_width")
+        call scenario_optimize_de_box_width()
     case ("optimize_de_np_small")
         call scenario_optimize_de_np_small()
     case ("optimize_de_f_weight_range")
@@ -3932,8 +3936,14 @@ program error_scenarios
         call scenario_prima_size_zero()
     case ("prima_start_nan")
         call scenario_prima_start_nan()
+    case ("prima_start_infinite")
+        call scenario_prima_start_infinite()
     case ("prima_bounds_size")
         call scenario_prima_bounds_size()
+    case ("prima_bound_nan")
+        call scenario_prima_bound_nan()
+    case ("prima_rhobeg_too_wide")
+        call scenario_prima_rhobeg_too_wide()
     case ("prima_no_space_between_bounds")
         call scenario_prima_no_space_between_bounds()
     case ("prima_start_outside_bounds")
@@ -33213,6 +33223,18 @@ contains
         print '(a, 2es22.15)', "accepted a reversed bracket: ", x, fmin
     end subroutine scenario_optimize_scalar_bad_bracket
 
+    !> A bracket whose ends are finite but whose WIDTH is not, which `b - a` overflows on.
+    !!
+    !! The engine's own tolerance is measured against that width, and every quantity it forms from
+    !! the bracket inherits the infinity; the objective is then blamed for a value it never
+    !! returned. Refused before the first evaluation instead.
+    subroutine scenario_optimize_scalar_bracket_width()
+        real(real64) :: x, fmin
+
+        call pf_minimize_scalar(quad1d, -1.0e308_real64, 1.0e308_real64, x, fmin)
+        print '(a, 2es22.15)', "accepted a bracket whose width overflows: ", x, fmin
+    end subroutine scenario_optimize_scalar_bracket_width
+
     !> An objective that is NaN everywhere, refused by the scalar engine before it compares.
     subroutine scenario_optimize_scalar_nonfinite_value()
         real(real64) :: x, fmin
@@ -33332,6 +33354,20 @@ contains
         call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin)
         print '(a, es22.15)', "accepted an infinite bound: ", fmin
     end subroutine scenario_optimize_de_bounds_nonfinite
+
+    !> Bounds that are finite but whose WIDTH is not, which no population can be laid out over.
+    !!
+    !! Every stratum of the Latin hypercube is a fraction of `upper - lower`, so an infinite width
+    !! puts the whole population at infinity, where every value is equal: the spread test fires at
+    !! once and the run reports convergence at a point no objective was meaningfully asked about.
+    subroutine scenario_optimize_de_box_width()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -1.0e308_real64
+        hi = 1.0e308_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin)
+        print '(a, es22.15)', "accepted a box whose width overflows: ", fmin
+    end subroutine scenario_optimize_de_box_width
 
     !> A population too small for DE/rand/1, which needs three donors distinct from the target.
     subroutine scenario_optimize_de_np_small()
@@ -33454,6 +33490,21 @@ contains
         print '(a, es22.15)', "accepted a NaN start in BOBYQA: ", fmin
     end subroutine scenario_prima_start_nan
 
+    !> An infinite coordinate in the start point, which the driver would clamp to `BOUNDMAX`.
+    !!
+    !! Clamped, it becomes a start the caller did not ask for, the objective is evaluated at a
+    !! number of order `1e307`, and a value that overflows there is reported as the objective's
+    !! fault.
+    subroutine scenario_prima_start_infinite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        real(real64) :: x(2), fmin
+
+        x(1) = 0.5_real64
+        x(2) = ieee_value(1.0_real64, ieee_positive_inf)
+        call pf_minimize_bobyqa(sphere, x, fmin)
+        print '(a, es22.15)', "accepted an infinite start in BOBYQA: ", fmin
+    end subroutine scenario_prima_start_infinite
+
     !> Bounds of a different length from the start point.
     subroutine scenario_prima_bounds_size()
         real(real64) :: x(2), fmin, lo(3), hi(3)
@@ -33464,6 +33515,39 @@ contains
         call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi)
         print '(a, es22.15)', "accepted bounds of the wrong length in BOBYQA: ", fmin
     end subroutine scenario_prima_bounds_size
+
+    !> A NaN bound, which every range test answers "false" for and so lets through.
+    !!
+    !! Upstream treats it as an absent bound; here it is refused, because a bound the caller wrote
+    !! and the engine dropped is a different problem from the one they posed -- and the NaN
+    !! otherwise reaches the objective, or comes back as `info%cstrv`.
+    subroutine scenario_prima_bound_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        x = 0.5_real64
+        lo(1) = ieee_value(1.0_real64, ieee_quiet_nan)
+        lo(2) = -5.0_real64
+        hi = 5.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi)
+        print '(a, es22.15)', "accepted a NaN bound in BOBYQA: ", fmin
+    end subroutine scenario_prima_bound_nan
+
+    !> An initial trust-region radius wider than half the narrowest side of the box.
+    !!
+    !! BOBYQA's model needs two distinct points per coordinate within the bounds, so upstream
+    !! quietly reduces such a `rhobeg` to a quarter of that width and warns. Refused here: from a
+    !! start ON a bound the initial points coincide and the run ends after a handful of
+    !! evaluations, at the start, reporting rounding error.
+    subroutine scenario_prima_rhobeg_too_wide()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        x = 0.0_real64
+        lo = 0.0_real64
+        hi = 1.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi, rhobeg=1.0_real64)
+        print '(a, es22.15)', "accepted a rhobeg wider than half the box: ", fmin
+    end subroutine scenario_prima_rhobeg_too_wide
 
     !> A bound pair with no room between them, PRIMA's `NO_SPACE_BETWEEN_BOUNDS`.
     !!

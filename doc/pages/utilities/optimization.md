@@ -105,10 +105,13 @@ Three things to know about either form:
 call pf_minimize_scalar(f, a, b, x, fmin, [tol], [max_neval], [info], [history], [context])
 ```
 
-`a` and `b` are the bracket, finite with `a < b`; `x` and `fmin` come back as the minimiser found
-and its value. `tol` is an absolute tolerance on `x`, defaulting to `0`, which does not mean "no
-tolerance": the effective tolerance is `tol/3 + sqrt(epsilon)*abs(x)`, Brent's own floor, so `0`
-asks for as much accuracy as the arithmetic allows. `max_neval` defaults to 500.
+`a` and `b` are the bracket, finite with `a < b` and with a finite width; `x` and `fmin` come back
+as the minimiser found and its value. `tol` is an absolute tolerance on `x`, defaulting to `0`,
+which does not mean "no tolerance": the effective tolerance is
+`tol/3 + sqrt(epsilon)*abs(x) + epsilon*(b - a)`, so `0` asks for as much accuracy as the
+arithmetic allows. The last term matters only where the other two vanish, which is a minimiser at
+or very near zero: without it the stopping test there recedes as fast as the bracket narrows and
+the run spends its whole budget on an answer it reached early. `max_neval` defaults to 500.
 
 The method needs only a bracket, not a single minimum inside it. Given several it converges to one
 of them; given none — a minimiser outside `[a, b]` — it narrows towards the nearer end and reports
@@ -146,8 +149,10 @@ in. There is no start point to get wrong: `lower` and `upper` are the box, finit
 The initial population is a **Latin hypercube** — the box divided into `np` strata per coordinate,
 one point per stratum, the strata permuted independently per coordinate — so every coordinate is
 covered evenly however small `np` is. Each generation then builds one trial point per individual
-from three others (`a + F*(b - c)`, clipped back into the box), crosses it with the incumbent at
-probability `cr`, and keeps whichever is better.
+from three others (`a + F*(b - c)`), crosses it with the incumbent at probability `cr`, and keeps
+whichever is better. A trial coordinate that lands outside the box is replaced by the midpoint
+between its parent's own coordinate and the bound it crossed, so nothing is ever placed on a bound
+and the spread that drives the search survives.
 
 `np` defaults to `max(20, 10n)` and may not be below 4: the mutation needs three donors distinct
 from the individual being improved. `f_weight` is `F`, default `0.8`, in `(0, 2]`; `cr` is the
@@ -166,7 +171,9 @@ individual of each generation — one record per generation, not one per evaluat
 `polish` (off by default) finishes by running `pf_minimize_simplex` from the best individual, with
 a step of a thousandth of each coordinate's width and the same tolerances, and counts its
 evaluations in `info%neval`. It is worth reaching for when DE has found the right basin and you
-want the last few digits, which DE itself spends many generations on. **It inherits the simplex's
+want the last few digits, which DE itself spends many generations on. **The polish minimises the
+objective seen through the box**, so the point it answers with is a point of the box even though
+the simplex itself is unbounded, and `fmin` is the value there. **It inherits the simplex's
 non-finite policy**: if the objective is NaN anywhere the polish step can reach, the process
 aborts, where DE alone would have stepped around it.
 
@@ -218,10 +225,12 @@ the box on its way to a minimum; a bounded solver would not. Which one you have 
 result outside the box is possible.
 
 `xtol` decides what counts as one minimum: two results within `xtol*(upper - lower)` of each other
-in **every** coordinate are merged, walking the starts in index order. It defaults to `1e-6`, which
-is tighter than a local engine's own accuracy, so the default usually counts each start
-separately; a value near the scale you care about (`1e-2`, say) is what makes `info%nminima` mean
-"distinct basins".
+in **every** coordinate are merged, walking the starts in index order. It defaults to `1e-3`.
+`info%nminima` counts basins only while `xtol` sits between the local solver's own accuracy
+relative to the box — about `1e-5` for the simplex — and the distance between two genuine minima:
+tighter, and one basin reached by several starts is counted several times; wider, and two basins
+are counted once. Set it to the scale you care about, and read `history` when the count has to be
+exact.
 
 `history` is the map: one record per start, its own minimum and value, before any merging. A row
 whose value is not one of the distinct minima is a start whose run hit its budget, and
@@ -249,6 +258,13 @@ The count is clamped to what this process's CPU affinity allows, which can emit 
 process naming `optimisation`; `parquet_set_verbosity("silent")` quiets it. A call from inside your
 own parallel region is honoured: with nesting off the team collapses to one thread, and the answer
 does not change.
+
+**What a team is worth depends on the objective's own cost.** `pf_minimize_de` synchronises the
+whole team once per generation and `pf_minimize_multistart` once per call, so a team pays for
+itself from an objective costing tens of microseconds upwards; below that the barriers dominate and
+a serial run is faster. On a machine shared with other work, keep the team well inside the cores
+actually free — a first call on a wide team whose cores are busy can stall for a fraction of a
+second before it settles. `MODE=threads bench/benchmark_optimize.sh` is what measures this here.
 
 ## What is reproducible, and what is not
 
@@ -283,8 +299,9 @@ exactly that case, and `ftol = 0.0` with a positive `atol` is the pair for it.
 
 `info%spread` reports the spread the run ended on, so you can see which test fired and by how much.
 
-`pf_minimize_de` defaults to `ftol = 1e-6`, which is why an objective whose minimum is zero usually
-wants `ftarget=` or a positive `atol` there too. `pf_minimize_simplex` has no `ftol` default at
+`pf_minimize_de` defaults to `ftol = 1e-6` and `atol = 0`, which is why an objective whose minimum
+is zero usually wants `ftarget=` or a positive `atol` there too: without one such a run ends on its
+generation budget rather than on a convergence test. `pf_minimize_simplex` has no `ftol` default at
 all: it is a required argument, so the "at least one of the two must be positive" refusal cannot be
 reached by leaving an argument out.
 
@@ -366,7 +383,9 @@ best individual to the simplex, or DE followed by your own local run from the po
   is not `a < b` with finite ends, fewer than one variable, a `step` of the wrong size or
   containing zero or NaN, a NaN in the start point, a negative or non-finite tolerance, both
   tolerances zero, a budget that is not positive or exceeds `huge(1)/2`, a box whose sizes disagree
-  or whose bounds are not finite and ordered, `np` below 4, `f_weight` outside `(0, 2]`, `cr`
+  or whose bounds are not finite and ordered, a bracket or a box whose WIDTH is not finite
+  (`+/-1e308` is two finite bounds and an infinite width), `np` below 4, `f_weight` outside
+  `(0, 2]`, `cr`
   outside `[0, 1]`, a `max_gen` or `nstart` below 1, a negative `xtol`, and a `threads` below 1.
   Failure to converge is **not** one of these — it is reported through `info`. `context=` adds your
   own text to any such message, capped at 100 characters.
@@ -389,5 +408,8 @@ The simplex is a port, and the mapping is mechanical:
 | `mlog_init` before use | nothing |
 
 `ftol` keeps its position, so only the trailing arguments move. The algorithm is unchanged step for
-step, so a migrated call reaches the same minimum by the same path; what changed is that a
-non-finite value from the objective now aborts mid-run rather than only in the starting simplex.
+step, so a migrated call reaches the same minimum by the same path — under a value-safe
+floating-point model, which every profile this library builds selects, and not under a model that
+reassociates arithmetic, where the two can part at one accept/reject decision and thereafter
+entirely. What changed is that a non-finite value from the objective now aborts mid-run rather than
+only in the starting simplex.

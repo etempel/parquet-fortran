@@ -7,6 +7,13 @@
 !! bracket is cut in the golden ratio. Written here rather than vendored: it is about a hundred
 !! lines and has no upstream worth tracking.
 !!
+!! **One deviation from `fmin.f`**: the effective tolerance carries a floor of `epsilon` times the
+!! caller's own bracket width. Without it the tolerance vanishes as the best point approaches zero
+!! and a minimiser AT zero can never be converged on -- `fmin.f` itself does not stop on `x**2`
+!! over `[-1, 1]`, and neither does SciPy's bounded method at `xatol = 0`. So the evaluations of a
+!! run here can differ from `fmin.f`'s by a few, while the minimiser agrees to the last few units
+!! in the last place.
+!!
 !! **The method assumes only a bracket, not unimodality.** On a function with several minima in
 !! `[a, b]` it converges to one of them and reports success, which is what `info%converged` means
 !! everywhere in this module.
@@ -45,6 +52,16 @@ contains
         if (.not. bad) bad = (a >= b)
         if (bad) call optimize_abort("pf_minimize_scalar", &
             "the bracket must satisfy a < b with finite ends", context)
+
+        ! Two finite ends can still have an infinite WIDTH, and the width is what every tolerance
+        ! and every golden section here is measured against. Tested as `b > huge + a` rather than
+        ! by forming `b - a`: the subtraction is the overflow, and under nagfor's default
+        ! `-ieee=stop` it ends the process before this line could refuse it. `a < 0` makes
+        ! `huge + a` finite, so the guard cannot overflow either.
+        if (a < 0.0_real64) then
+            if (b > huge(1.0_real64) + a) call optimize_abort("pf_minimize_scalar", &
+                "the bracket width must be finite", context)
+        end if
 
         tol_use = 0.0_real64
         if (present(tol)) then
@@ -86,7 +103,16 @@ contains
         search: do
 
             xm = 0.5_real64*(lo + hi)
-            tol1 = sqrt(epsilon(1.0_real64))*abs(xb) + tol_use/3.0_real64
+            ! **The last term is a floor, and it is this library's rather than `fmin.f`'s.** The
+            ! other two vanish as the best point approaches zero -- `sqrt(epsilon)*abs(x)` with it,
+            ! and `tol/3` when the caller asks for all the accuracy the arithmetic allows -- so on
+            ! a minimiser AT zero the stopping test chases a target that recedes as fast as the
+            ! bracket narrows, and the run spends its whole budget on an answer it reached early.
+            ! A floor proportional to the ORIGINAL bracket keeps the test meetable there while
+            ! staying far below what any caller asks for: over the reference suite it moved no
+            ! answer by more than a few units in the last place.
+            tol1 = sqrt(epsilon(1.0_real64))*abs(xb) + tol_use/3.0_real64 &
+                 + epsilon(1.0_real64)*(b - a)
             tol2 = 2.0_real64*tol1
 
             ! Brent's stopping rule: the best point is within tol2 of the bracket's midpoint,

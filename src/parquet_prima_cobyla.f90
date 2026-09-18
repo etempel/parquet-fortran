@@ -8,6 +8,18 @@
 !! upstream's default and an INVALID one is refused with the message of `feature_optimizer.md`
 !! 5.6, through the shared `refuse_bad_call`.
 !!
+!! **Where this driver's defaults differ from upstream's**, beyond those refusals:
+!!
+!! 1. The radii are used as given. Upstream floors both for every solver
+!!    (`rhobeg = max(rhobeg, EPS)`, `rhoend = min(max(rhoend, EPS), rhobeg)`), and
+!!    `pf_minimize_bobyqa`'s driver does; here a pair below `epsilon` is honoured, which is what
+!!    lets a problem stated in very small units converge at all.
+!! 2. `maxfun` is used as given; upstream raises one below `n + 2` to `n + 2`. COBYLA takes no
+!!    `npt`, so upstream's reset of that has no counterpart here.
+!! 3. `rhoend` is silently lowered to a `rhobeg` this driver defaulted below it, and a `rhoend`
+!!    above `1` with no `rhobeg` beside it is refused although the default `rhobeg` would have been
+!!    `max(10*rhoend, 1)` and so above it.
+!!
 !! **How the constraints are laid out.** COBYLA sees one vector `constr` of `m = m_lcon + m_nlcon`
 !! values, all in PRIMA's sign convention `c <= 0`: the linear half first -- the caller's bounds,
 !! equalities and inequalities folded into `amat^T y <= bvec`, evaluated inside the engine -- and
@@ -24,7 +36,7 @@ submodule (parquet_prima) parquet_prima_cobyla
 
     use, intrinsic :: iso_fortran_env, only : int64
     use parquet_prima_common, only : prima_state, refuse_bad_call, caller_violation, finish_run, &
-        evaluate_fc
+        evaluate_fc, bounds_in_engine_units
     use parquet_prima_cobylb, only : cobylb
     use parquet_prima_linalg, only : eye, trueloc, matprod, &
         ZERO, ONE, TEN, EPS, BOUNDMAX, &
@@ -66,10 +78,10 @@ contains
         allocate(y(n))
         y = x / sc
         allocate(lo(n), hi(n))
-        lo = -BOUNDMAX
-        hi = BOUNDMAX
-        if (present(lower)) lo = lower / sc
-        if (present(upper)) hi = upper / sc
+        ! An absent bound -- and one at or beyond `BOUNDMAX` in the engine's units, which means the
+        ! same thing -- is `+/-BOUNDMAX` in the ENGINE's units, never the caller's divided by the
+        ! scale: `BOUNDMAX/sc` overflows to +Infinity for any scale below one.
+        call bounds_in_engine_units(sc, lo, hi, lower, upper)
         call scale_rows(a_ineq, b_ineq, sc, ain, bin)
         call scale_rows(a_eq, b_eq, sc, aeq, beq)
         call build_lincon(lo, hi, ain, bin, aeq, beq, amat, bvec)

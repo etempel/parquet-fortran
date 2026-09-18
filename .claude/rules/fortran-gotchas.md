@@ -424,6 +424,11 @@ done | sort | uniq -c | sort -rn
   over subnormal inputs therefore reports the BUILD, not the kernel: detect it with
   `ieee_get_underflow_mode` and skip, naming the flag (`subnormals_are_flushed`,
   `test/test_utils.f90`). `-no-ftz` or `-fp-model=precise` restores it.
+- **WHICH IEEE exception a site raises is not portable, so assert THAT one is raised, never which.**
+  The same division by a subnormal raises overflow under gfortran and divide-by-zero under ifx,
+  whose flush-to-zero turned the divisor into zero first (`BOBYQA runs the configuration whose
+  geometry step overflows`, `test/test_prima.f90`). A test that must show a site is still reached
+  reads the flags with halting held off and asserts `any(raised)`.
 - **An ABSENT optional allocatable dummy passed into an OpenMP region and on to an optional dummy
   segfaults at `-O0 -check all`** (`SIGSEGV` at the call; clean on gfortran and ifx release). Never
   pass an optional array dummy into a parallel region: fill a local that always exists and

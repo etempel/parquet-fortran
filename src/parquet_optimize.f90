@@ -130,7 +130,12 @@ module parquet_optimize
     real(real64), parameter :: DE_POLISH_STEP = 1.0e-3_real64
 
     !> Default merge radius of `pf_minimize_multistart`, as a fraction of each coordinate's width.
-    real(real64), parameter :: MULTISTART_XTOL = 1.0e-6_real64
+    !!
+    !! Wide enough to exceed a local solver's own accuracy relative to the box, which is what makes
+    !! `nminima` a count of BASINS: two starts that reached the same minimum agree to about `1e-5`
+    !! of the box, so a radius tighter than that counts them twice and the number becomes a count
+    !! of starts wearing the name of a count of minima.
+    real(real64), parameter :: MULTISTART_XTOL = 1.0e-3_real64
 
     ! ---- the objective ------------------------------------------------------------------------
 
@@ -447,12 +452,18 @@ module parquet_optimize
     !! `intent(out)`; `np` the population size, default `max(20, 10n)` and at least 4; `f_weight`
     !! the differential weight, default `0.8`, in `(0, 2]`; `cr` the crossover probability, default
     !! `0.9`, in `[0, 1]`; `ftol` and `atol` the fractional and absolute tolerances on the
-    !! population's value spread, default `1e-6` and `0`, at least one positive; `ftarget` a value
-    !! to stop at; `max_gen` the generation budget, default 1000; `max_neval` the evaluation
+    !! population's value spread, default `1e-6` and `0`, at least one positive -- **the fractional
+    !! test cannot fire on a minimum of exactly zero**, where `atol` or `ftarget` is what ends the
+    !! run; `ftarget` a value to stop at, and the argument to reach for when the minimum's value is
+    !! known in advance; `max_gen` the generation budget, default 1000; `max_neval` the evaluation
     !! budget, default `np*(max_gen + 1)`; `threads` the team the population is evaluated on,
-    !! default 1; `polish` to finish with `pf_minimize_simplex` from the best individual, default
-    !! false; then `info`, `history` (the best of each generation), `population` (the final
-    !! population, one individual per column) and `context`.
+    !! default 1; `polish` to finish with `pf_minimize_simplex` from the best individual, inside
+    !! the box, default false; then `info`, `history` (the best of each generation), `population`
+    !! (the final population, one individual per column) and `context`.
+    !!
+    !! **A trial component outside the box is placed half way between its parent's component and
+    !! the bound it crossed**, so no individual is ever put ON a bound and the population keeps the
+    !! spread that drives the search.
     interface pf_minimize_de
 
         !> Differential evolution with the objective as an object.
@@ -527,9 +538,15 @@ module parquet_optimize
     !! best point found and `fmin` its value, both `intent(out)`; `nstart` the number of starts,
     !! default `max(10, 2n)`; `solver` the local engine and its options, default
     !! `pf_simplex_solver()`; `xtol` the merge radius as a fraction of each coordinate's width,
-    !! default `1e-6`; `threads` the team the starts run on, default 1; then `info` (whose
+    !! default `1e-3`; `threads` the team the starts run on, default 1; then `info` (whose
     !! `nminima` counts the distinct minima and whose `nlimit` counts the runs that ran out of
     !! budget), `history` (every start's own minimum, before merging) and `context`.
+    !!
+    !! **`nminima` counts basins only while `xtol` exceeds the local solver's own accuracy** as a
+    !! fraction of the box: below that, two starts that reached the same minimum are counted twice,
+    !! and above the distance between two genuine minima, two basins are counted once. The default
+    !! suits a solver converging to about `1e-5` of the box; `history` carries every start's own
+    !! answer, which is what to read when the count has to be exact.
     interface pf_minimize_multistart
 
         !> The multistart driver with the objective as an object.

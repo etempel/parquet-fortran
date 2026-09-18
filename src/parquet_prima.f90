@@ -113,7 +113,7 @@ module parquet_prima
     !! statement about magnitudes, and the radii are then in the caller's own units.
     type, extends(pf_local_solver) :: pf_bobyqa_solver
         logical      :: scale_from_box = .true.       !! `scale = upper - lower`
-        real(real64) :: rhobeg_fraction = 0.1_real64  !! initial radius, as a fraction of the box
+        real(real64) :: rhobeg_fraction = 0.1_real64  !! initial radius, as a fraction of the box; at most `0.5`
         real(real64) :: rhoend = 1.0e-6_real64        !! final radius, in the same units
         integer      :: max_neval = 0                 !! evaluation budget; `0` means `500*n`
     contains
@@ -197,8 +197,14 @@ module parquet_prima
     !!
     !! Powell's LINCOA, the same quadratic model as `pf_minimize_bobyqa` with an active-set
     !! trust-region step: the step is taken inside the constraints rather than projected onto them
-    !! afterwards, so the iterates stay feasible and every value the objective is asked for is a
-    !! value at a feasible point.
+    !! afterwards, so the iterates it accepts stay feasible and the point it answers with is the
+    !! best FEASIBLE point it evaluated, feasible to `ctol`.
+    !!
+    !! **It does evaluate infeasible points on the way.** The initial interpolation set is the start
+    !! displaced by `+/-rhobeg` in each coordinate, feasible or not, and a geometry step need not be
+    !! feasible either; what makes the answer sound is the filter that keeps only feasible points as
+    !! candidates. So the objective must be defined wherever `rhobeg` can reach from a feasible
+    !! point -- `pf_minimize_bobyqa` is the engine that asks about nothing outside its bounds.
     !!
     !! **The constraints are arrays**: `a_ineq*x <= b_ineq` and `a_eq*x = b_eq`, one ROW per
     !! constraint and one column per variable, with `lower`/`upper` folded in as two more

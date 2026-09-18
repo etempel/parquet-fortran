@@ -27,12 +27,12 @@ every step. COBYLA is local too, but its models — of the objective AND of ever
 LINEAR, which is what lets it handle a constraint of any shape and also why it converges slowly.
 
 - **A smooth objective in a handful of variables, with bounds** — `pf_minimize_bobyqa`. On smooth
-  test problems it costs of the order of a tenth to a twentieth of what the Nelder-Mead simplex
-  costs and a hundredth to a thousandth of what differential evolution costs, and the gap widens
-  with the number of variables. Reach for it first when each evaluation is expensive.
+  test problems it costs a fraction of what the Nelder-Mead simplex costs — a small fraction on a
+  smooth convex one, a thirtieth on a sphere in ten variables, and about half on Rosenbrock — and a
+  hundredth to a thousandth of what differential evolution costs. Reach for it first when each
+  evaluation is expensive.
 - **The same, with linear constraints** — `pf_minimize_lincoa`, which is the same quadratic model
-  with an active-set trust-region step. It costs a little more per iteration than BOBYQA and is in
-  the same class.
+  with an active-set trust-region step. It is in the same class and no dearer per evaluation.
 - **A constraint that is not linear** — `pf_minimize_cobyla`, and only then. A linear model has no
   curvature, so it needs many more evaluations than the other two on the same objective; give it
   the work no other engine here can do.
@@ -124,11 +124,13 @@ a non-finite value as "outside my domain" and carries on.
 
 ## Bounds
 
-`lower` and `upper` are optional and independent; absent means unbounded in that direction. When
-given, **the bounds are honoured throughout**, not just at the end: no point the engine evaluates
-lies outside them, so an objective that is undefined outside its box is never asked about the
-outside. Each pair must leave real room — `upper - lower` greater than `2*epsilon` — and the start
-point must lie inside.
+`lower` and `upper` are optional and independent; absent means unbounded in that direction, and so
+does a magnitude at or beyond about `4e307`, which is what `+/-huge()` means here. With
+`pf_minimize_bobyqa`, **the bounds are honoured throughout**, not just at the end: no point that
+engine evaluates lies outside them, so an objective that is undefined outside its box is never
+asked about the outside. The other two engines are the subject of the paragraph below. Each pair
+must leave real room — `upper - lower` greater than `2*epsilon` — and the start point must lie
+inside.
 
 **The start point is used exactly as given.** BOBYQA needs the start to be at least `rhobeg` away
 from every bound it is not already on; PRIMA satisfies that by default by MOVING the start and
@@ -138,11 +140,14 @@ does the other thing PRIMA offers: it reduces `rhobeg` to the room actually avai
 `info%rho` than the `rhoend` asked for — which is the only visible sign, and the reason `info%rho`
 is worth reading.
 
-**LINCOA and COBYLA treat a bound as one more linear constraint**, not as a box they stay inside.
-For LINCOA that is nearly the same thing — its iterates are feasible by construction — but for
-COBYLA it is not: it drives towards feasibility rather than starting there, so it may evaluate the
-objective outside the bounds on the way. An objective that is undefined outside its box therefore
-wants `pf_minimize_bobyqa`, or a reformulation that is defined everywhere.
+**LINCOA and COBYLA treat a bound as one more linear constraint**, not as a box they stay inside,
+and NEITHER keeps every evaluation inside it. LINCOA's trust-region iterates are feasible, but the
+points it builds its first model from are the start displaced by `+/-rhobeg`, feasible or not, and
+a geometry step need not be feasible either; COBYLA drives towards feasibility rather than starting
+there. **An objective that is undefined outside its box therefore wants `pf_minimize_bobyqa`**,
+which does keep every evaluation inside the bounds, or a reformulation that is defined everywhere.
+What LINCOA guarantees is the ANSWER: it returns the best FEASIBLE point it evaluated, feasible to
+`ctol`.
 
 ## Linear constraints: `pf_minimize_lincoa`
 
@@ -166,9 +171,12 @@ Each matrix goes with its right-hand side: give one without the other and the ca
 An all-zero row is refused too — it is either no constraint at all or an infeasible problem
 written by accident, and neither is what anyone means to write.
 
-**The start point must be feasible**, and a start that is not is refused. LINCOA's iterates are
-feasible by construction, which is what makes it worth using: the objective is never asked for a
-value at a point the constraints forbid. PRIMA admits an infeasible start by RELAXING the
+**The start point must be feasible**, and a start that is not is refused. What LINCOA is worth
+using for is the step: it moves inside the constraints rather than stepping out and projecting
+back, so the iterates it accepts are feasible and the point it answers with is the best feasible
+point it evaluated. It does evaluate infeasible points on the way — its initial model and its
+geometry steps — so the objective must be defined wherever `rhobeg` can reach. PRIMA admits an
+infeasible start by RELAXING the
 right-hand sides to include it, and warns; this library refuses instead, because a relaxed `b` is
 a different problem and every violation reported afterwards would be measured against it. `x = 0`
 satisfies any system with a non-negative `b_ineq` and a zero `b_eq`, which is why the examples
@@ -303,6 +311,32 @@ matrix are rescaled to match, so the feasible region is the one you wrote. What 
 measured again in your own units, against your own constraints, so `info%cstrv` and the
 `PF_OPT_INFEASIBLE` verdict taken from it mean what they would have meant without `scale=`.
 
+## Scale the objective and the variables
+
+`scale=` is half the story. All three engines decide that a trust-region step has failed by
+comparing a predicted reduction — in the OBJECTIVE's units — against a threshold built from the
+trust-region radius, which is in the VARIABLES' units. The comparison is against an absolute
+constant, so it is a statement that both are of order one, and there is no warning when they are
+not.
+
+**What it looks like when they are not**: every step is declared a failure, the radius falls
+straight to `rhoend`, and the run ends after a handful of evaluations with `PF_OPT_OK` — at
+essentially the start point, and with `info%rho` at `rhoend`. It is a converged-looking answer to a
+problem that was never searched. The cases that do it are objectives whose values are uniformly
+tiny (of order `1e-20` and below) or enormous (of order `1e50` and above), and variables of the
+same extremes, `scale=` included: a `scale` of `1e-8` for variables of order one is such a case.
+
+**The two remedies, both one line at the call site:**
+
+1. **The variables** — `scale=`, as above: give the characteristic magnitude of each coordinate.
+2. **The values** — divide the objective by a typical one, `abs(f(x0))` say, inside your `eval`.
+   The minimiser is unchanged by a positive constant factor; multiply `fmin` back afterwards if you
+   want the value in your own units.
+
+A chi-square in metres, or a likelihood of order `1e-12`, is the realistic case for the second, and
+it is worth the line: an objective of order one converges where the same objective scaled by
+`1e-20` stops at its start.
+
 ## BOBYQA under the multistart driver
 
 `pf_bobyqa_solver` is a `pf_local_solver`, which is what
@@ -330,7 +364,7 @@ Its four components carry the options:
 | Component | Default | Meaning |
 |---|---|---|
 | `scale_from_box` | `.true.` | scale each coordinate by `upper - lower`, so the radii below are fractions of the box |
-| `rhobeg_fraction` | `0.1` | the initial radius: in the scaled units when `scale_from_box`, else this fraction of the narrowest side |
+| `rhobeg_fraction` | `0.1` | the initial radius: in the scaled units when `scale_from_box`, else this fraction of the narrowest side; at most `0.5`, above which the call is refused |
 | `rhoend` | `1e-6` | the final radius, in the same units |
 | `max_neval` | `0` | evaluations per start; `0` means `500*n` |
 
@@ -368,9 +402,13 @@ The status codes, and what PRIMA reported to produce each:
 
 Every one of these is an `error stop` carrying the entry point, the reason and your `context=`:
 
-- a start containing a NaN, or lying outside the bounds;
+- a start that is not finite, or lies outside the bounds;
+- a bound that is a NaN;
 - a bound pair with no room between them;
 - `rhoend` above `rhobeg`, or either not finite and positive;
+- a `rhobeg` above half the narrowest distance between the bounds (`pf_minimize_bobyqa` only,
+  which is where BOBYQA's model needs two distinct points per coordinate inside the box; a
+  `pf_bobyqa_solver` whose `rhobeg_fraction` is above `0.5` meets the same refusal);
 - an `npt` outside `[n+2, (n+1)(n+2)/2]`;
 - a `scale` of the wrong length, or with an element that is not finite and positive;
 - a `max_neval` below one or above `huge(1)/2`;
@@ -384,11 +422,18 @@ Every one of these is an `error stop` carrying the entry point, the reason and y
 - an `n_constraints()` below zero;
 - a `constraints` binding returning a non-finite value.
 
-**PRIMA adjusts where this refuses.** Upstream swaps a reversed pair of radii, clamps an `npt`
-out of range, moves a start, drops a zero constraint row, relaxes the constraints to admit an
-infeasible start and treats a bound wider than a threshold as absent, warning each time. Each of those is a good decision for a library that can warn. This tier prints nothing by
-design, so an adjustment would be silent, and a silently adjusted argument is how a caller comes
-to believe they asked for something they did not.
+**PRIMA adjusts where this refuses.** Upstream swaps a reversed pair of radii, clamps an `npt` out
+of range, moves a start, reduces an oversized `rhobeg`, drops a zero constraint row, relaxes the
+constraints to admit an infeasible start and treats a NaN bound as absent, warning each time. Each
+of those is a good decision for a library that can warn. This tier prints nothing by design, so an
+adjustment would be silent, and a silently adjusted argument is how a caller comes to believe they
+asked for something they did not.
+
+**The one adjustment kept, besides `honour_x0`**, is upstream's own reading of a bound at or beyond
+about `4e307` in the engine's units: it means "no bound", and `+/-huge()` is the spelling a caller
+reaches for when their own bound argument is not optional. That is a sentinel rather than a number
+someone means literally, and recognising it before any arithmetic is also what keeps
+`upper - lower` from overflowing.
 
 ## Attribution and licence
 

@@ -38,7 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with
   fractional and absolute tolerances on the value spread. `pf_minimize_de` searches a whole box by
   differential evolution from a seed rather than a start point, with a Latin-hypercube initial
-  population, `ftarget=`, an optional final simplex (`polish=`) and the final population on
+  population, `ftarget=`, an optional final simplex inside the box (`polish=`) and the final
+  population on
   request; `pf_minimize_multistart` runs a local solver (`pf_simplex_solver`, or one a caller
   supplies) from a Latin hypercube of starts and counts the distinct minima. Both take `threads=`,
   evaluate through one clone of the objective per thread, and give the same answer at every thread

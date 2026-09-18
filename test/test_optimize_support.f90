@@ -23,7 +23,8 @@ module test_optimize_support
     private
 
     public :: shifted_quadratic, line_fit, unit_disc, table_sphere
-    public :: rosenbrock, sphere, quad1d, quad1d_min, one_dim, one_dim_min
+    public :: rosenbrock, rosenbrock_1e300, brown_almost_linear
+    public :: sphere, origin_sphere, quad1d, quad1d_min, one_dim, one_dim_min
     public :: constant_one, shifted_norm, quartic, quartic_derivative
     public :: always_nan, always_inf, nan_beyond_two
     public :: rastrigin, rastrigin_gradient, twin_wells, nan_corner
@@ -341,6 +342,18 @@ contains
 
     end function rosenbrock
 
+    !> Sum of squares about the ORIGIN; minimum `0` at `x = 0` in every coordinate.
+    !!
+    !! The minimiser is exactly zero, which `sphere`'s is not: a tolerance proportional to `abs(x)`
+    !! alone vanishes there, so this is the objective the scalar engine's tolerance floor is about.
+    function origin_sphere(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        f = sum(x**2)
+
+    end function origin_sphere
+
     !> Sum of squares about `1`; minimum `0` at `x = 1` in every coordinate.
     function sphere(x) result(f)
         real(real64), intent(in) :: x(:) !! the point
@@ -411,6 +424,42 @@ contains
         d = 4.0_real64*(x - 0.5_real64)**3 + 2.0_real64*x
 
     end function quartic_derivative
+
+    !> Rosenbrock's function multiplied by `1e300`, whose values fill the top of the exponent range.
+    !!
+    !! The engines compare a predicted reduction in the OBJECTIVE's units against a radius in the
+    !! variables', and they form sums of squares of model gradients; at this magnitude those sums
+    !! overflow although every value the objective returns is finite. The minimiser is
+    !! Rosenbrock's own, `(1, 1)`: multiplying by a positive constant moves no minimum.
+    function rosenbrock_1e300(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! `1e300` times `rosenbrock(x)`
+
+        f = 1.0e300_real64*rosenbrock(x)
+
+    end function rosenbrock_1e300
+
+    !> Brown's almost-linear function, More-Garbow-Hillstrom problem 27, in any dimension.
+    !!
+    !! The last term is a product of every coordinate, so the model's own geometry step can find
+    !! itself with almost no free curvature to work with -- which is the configuration
+    !! `BOBYQA runs the configuration whose geometry step overflows` exists to reach.
+    function brown_almost_linear(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! objective value at `x`
+
+        real(real64) :: s
+        integer :: i, n
+
+        n = size(x)
+        f = 0.0_real64
+        s = sum(x) - real(n + 1, real64)
+        do i = 1, n - 1
+            f = f + (x(i) + s)**2
+        end do
+        f = f + (product(x) - 1.0_real64)**2
+
+    end function brown_almost_linear
 
     !> An objective that is NaN everywhere, for the non-finite abort.
     function always_nan(x) result(f)

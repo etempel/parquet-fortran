@@ -36,6 +36,8 @@ contains
         testsuite = [ &
             new_unittest("Brent finds each closed-form minimiser on its bracket", &
                          test_scalar_closed_forms), &
+            new_unittest("a minimiser at zero converges at the default tolerance", &
+                         test_scalar_zero_minimiser), &
             new_unittest("a looser tol gives a looser answer, and tol=0 the arithmetic's own floor", &
                          test_scalar_tolerance), &
             new_unittest("a scalar budget stops at PF_OPT_LIMIT with the best point so far", &
@@ -78,6 +80,12 @@ contains
                          test_de_population), &
             new_unittest("polish lowers the value and adds its evaluations to the count", &
                          test_de_polish), &
+            new_unittest("polish minimises inside the box and answers inside it", &
+                         test_de_polish_stays_in_the_box), &
+            new_unittest("a mutant outside the box lands between its parent and the bound", &
+                         test_de_out_of_box_rule), &
+            new_unittest("max_gen at huge(1) runs generations rather than stopping at once", &
+                         test_de_max_gen_ceiling), &
             new_unittest("no finite value anywhere is PF_OPT_NONFINITE, the box centre and +Inf", &
                          test_de_nothing_finite), &
             new_unittest("the multistart driver ends every start on a stationary point", &
@@ -86,6 +94,8 @@ contains
                          test_multistart_tie_rule), &
             new_unittest("xtol decides how many minima count as distinct", &
                          test_multistart_xtol), &
+            new_unittest("the default merge radius counts one minimum on a one-basin objective", &
+                         test_multistart_default_xtol), &
             new_unittest("the solver object's own budget reaches every local run", &
                          test_multistart_solver_options), &
             new_unittest("no finite start is PF_OPT_NONFINITE, the box centre and +Inf", &
@@ -139,6 +149,40 @@ contains
         call check(error, info%converged, "a flat objective should report converged")
 
     end subroutine test_scalar_closed_forms
+
+    !> A minimiser AT ZERO converges, at the default tolerance and at an explicit `tol = 0`.
+    !!
+    !! The relative part of the effective tolerance, `sqrt(epsilon)*abs(x)`, vanishes as `x`
+    !! approaches zero, so without the bracket-width floor the stopping test chases a target that
+    !! keeps receding: the run spends its whole budget and reports `PF_OPT_LIMIT` although its
+    !! answer is excellent. `sphere` is used as a one-variable objective -- `sum(x**2)` over a
+    !! one-element array -- because its minimiser is exactly zero, which is the case in question.
+    subroutine test_scalar_zero_minimiser(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        real(real64) :: x, fmin
+        type(pf_optimize_info) :: info
+
+        call pf_minimize_scalar(origin_sphere, -1.0_real64, 1.0_real64, x, fmin, info=info)
+        call check(error, info%converged, &
+            "a minimum at zero must meet the stopping test, not run out of budget")
+        if (allocated(error)) return
+        call check(error, info%status, PF_OPT_OK, "and its status is convergence")
+        if (allocated(error)) return
+        call check(error, info%neval <= 40, &
+            "converging on x**2 should cost a few dozen evaluations, not the whole budget")
+        if (allocated(error)) return
+        call check(error, abs(x) <= 1.0e-7_real64, "and the answer is still the minimiser")
+        if (allocated(error)) return
+
+        ! An explicit `tol = 0` asks for as much accuracy as the arithmetic allows, which is what
+        ! the floor supplies; it must not be the one spelling that cannot stop.
+        call pf_minimize_scalar(origin_sphere, -1.0_real64, 1.0_real64, x, fmin, tol=0.0_real64, &
+                                info=info)
+        call check(error, info%converged, "tol = 0 must converge on the same minimum")
+        if (allocated(error)) return
+        call check(error, abs(x) <= 1.0e-7_real64, "and reach it")
+
+    end subroutine test_scalar_zero_minimiser
 
     !> `tol` is honoured, and `tol = 0` means the arithmetic's own floor rather than no tolerance.
     subroutine test_scalar_tolerance(error)
@@ -849,6 +893,92 @@ contains
 
     end subroutine test_de_polish
 
+    !> `polish` minimises the objective seen through the box, so its answer is inside the box.
+    !!
+    !! The simplex itself is unbounded, so polishing an objective whose unconstrained minimum lies
+    !! OUTSIDE the box would walk out of it and report a point and a value the box forbids -- with
+    !! `PF_OPT_OK`, since nothing in the run says otherwise. `sphere` is centred at `(1, 1)` and the
+    !! box starts at `2`, so the box minimum is the corner `(2, 2)` where the value is `2` and the
+    !! free minimum is two units outside.
+    subroutine test_de_polish_stays_in_the_box(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x(2), plain(2), fmin, fplain, lo(2), hi(2)
+
+        lo = 2.0_real64
+        hi = 3.0_real64
+        call pf_minimize_de(sphere, lo, hi, 3_int64, x, fmin, np=8, max_gen=6, polish=.true., &
+                            info=info)
+        call pf_minimize_de(sphere, lo, hi, 3_int64, plain, fplain, np=8, max_gen=6)
+
+        call check(error, all(x >= lo) .and. all(x <= hi), &
+            "the point a polished run reports must lie inside the box it was given")
+        if (allocated(error)) return
+        call check(error, fmin, 2.0_real64, thr=1.0e-6_real64)
+        if (allocated(error)) return
+        ! The value reported is the value AT the point reported -- the assertion that fails when a
+        ! projection is applied to the point and not to the value.
+        call check(error, fmin == sphere(x), &
+            "fmin must be the objective's value at the x that comes back")
+        if (allocated(error)) return
+        call check(error, fmin <= fplain, &
+            "and polishing inside the box must not be worse than not polishing at all")
+
+    end subroutine test_de_polish_stays_in_the_box
+
+    !> A mutant component outside the box is put half way between its parent and the bound.
+    !!
+    !! **The observable is that no individual ever sits exactly ON a bound.** Clipping assigns the
+    !! bound itself, so a run pressed against one leaves individuals bit-equal to it; the midpoint
+    !! of a parent strictly inside the box and the bound never is the bound. The box starts two
+    !! units above `sphere`'s minimiser, so the population crowds into the lower corner and the
+    !! rule is exercised on nearly every trial.
+    subroutine test_de_out_of_box_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        real(real64), allocatable :: pop(:,:)
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = 2.0_real64
+        hi = 3.0_real64
+        call pf_minimize_de(sphere, lo, hi, 11_int64, x, fmin, np=16, max_gen=25, population=pop)
+
+        call check(error, minval(abs(pop(1,:) - lo(1))) < 1.0e-2_real64 .and. &
+                          minval(abs(pop(2,:) - lo(2))) < 1.0e-2_real64, &
+            "vacuity guard: the population never reached the bound, so no out-of-box rule ran")
+        if (allocated(error)) return
+        call check(error, count(pop(1,:) == lo(1)) + count(pop(2,:) == lo(2)), 0, &
+            "an individual exactly on a bound is what clipping leaves and the midpoint cannot")
+        if (allocated(error)) return
+        call check(error, all(pop >= 2.0_real64) .and. all(pop <= 3.0_real64), &
+            "and every individual is still inside the box")
+
+    end subroutine test_de_out_of_box_rule
+
+    !> `max_gen = huge(1)` is a budget, not a way to stop before the first generation.
+    !!
+    !! The default evaluation budget is `np*(max_gen + 1)`, and forming `max_gen + 1` in default
+    !! integer overflows at `huge(1)`: the budget comes out at or below zero and the very first
+    !! budget test ends the run with the starting population's best point.
+    subroutine test_de_max_gen_ceiling(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+        call pf_minimize_de(sphere, lo, hi, 7_int64, x, fmin, np=12, max_gen=huge(1), info=info)
+
+        call check(error, info%niter > 1, "a run at the largest max_gen must run generations")
+        if (allocated(error)) return
+        call check(error, info%neval > 12, "and pay for more than its starting population")
+        if (allocated(error)) return
+        call check(error, info%converged, "the spread test is what ends it, not the budget")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-3_real64, &
+            "and it reaches sphere's minimiser at 1 in every coordinate")
+
+    end subroutine test_de_max_gen_ceiling
+
     !> An objective that is NaN everywhere ends the run without a point to report.
     subroutine test_de_nothing_finite(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
@@ -984,6 +1114,29 @@ contains
             "xtol decides only the counting; the runs themselves are the same")
 
     end subroutine test_multistart_xtol
+
+    !> The DEFAULT merge radius counts basins: one objective with one basin counts one minimum.
+    !!
+    !! `nminima` is only a count of distinct minima where the merge radius exceeds the local
+    !! solver's own accuracy: a radius tighter than that splits one basin's answers into several
+    !! and the count becomes a count of starts. The sphere has exactly one minimum, so any count
+    !! above one here is that failure and nothing else.
+    subroutine test_multistart_default_xtol(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: info
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -3.0_real64
+        hi = 3.0_real64
+        call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, info=info)
+
+        call check(error, info%nminima, 1, &
+            "twelve starts on a single-basin objective are one minimum at the default xtol")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-4_real64, &
+            "and the basin they all found is the sphere's own minimiser")
+
+    end subroutine test_multistart_default_xtol
 
     !> The solver object's options reach every local run, `max_neval` included.
     subroutine test_multistart_solver_options(error)

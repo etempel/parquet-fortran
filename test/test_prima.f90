@@ -27,6 +27,14 @@ module test_prima
     use test_optimize_support
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use iso_fortran_env, only : real64, int64
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_overflow, &
+                                             ieee_invalid, ieee_divide_by_zero
+#ifndef __flang__
+    ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
+    ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
+                                             ieee_set_halting_mode
+#endif
 
     implicit none
     private
@@ -50,6 +58,12 @@ contains
                          test_bobyqa_minimum_outside_the_box), &
             new_unittest("the start point is never moved, and rhobeg shrinks instead", &
                          test_bobyqa_honours_the_start), &
+            new_unittest("bounds at +/-huge() are no bounds, and nothing overflows reaching that", &
+                         test_bobyqa_bounds_beyond_boundmax), &
+            new_unittest("BOBYQA runs the configuration whose geometry step overflows", &
+                         test_bobyqa_geometry_step_overflow), &
+            new_unittest("BOBYQA runs an objective whose values are near 1e300", &
+                         test_bobyqa_huge_objective_values), &
             new_unittest("a scale= run reproduces the hand-scaled objective bit for bit", &
                          test_bobyqa_scale_matches_hand_scaling), &
             new_unittest("scale= reaches a badly conditioned minimum the unscaled run misses", &
@@ -255,6 +269,246 @@ contains
                    "rhobeg was not reduced to the distance from the bound, or rhoend did not follow")
 
     end subroutine test_bobyqa_honours_the_start
+
+    !> A bound at `+/-huge()` means "no bound", and reaching that verdict costs no arithmetic.
+    !!
+    !! `huge()` is the sentinel a caller reaches for when the bound argument is not optional in
+    !! their own code, and it is a NUMBER: `upper - lower` and `lower/scale` overflow on it. The
+    !! overflow delivers the infinity that was meant, so the run looks right under gfortran and ifx
+    !! and ends a build that halts on the flag. The bounds are therefore recognised as absent
+    !! BEFORE any arithmetic on them.
+    !!
+    !! **The flag assertion is comparative, against the same run with no bounds at all.** The
+    !! engines carry the absent sentinel `+/-BOUNDMAX` through their own arithmetic, and under ifx
+    !! that arithmetic raises overflow on an UNBOUNDED run already -- upstream's code, unchanged
+    !! here, and nothing this driver can avoid. What the driver owns, and what this pins, is that
+    !! naming the bounds explicitly adds no flag the same call without them does not raise.
+    subroutine test_bobyqa_bounds_beyond_boundmax(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: free(2), bounded(2), f_free, f_bounded, lo(2), hi(2), sc(2)
+        type(pf_optimize_info) :: i_free, i_bounded
+        logical :: halting(3), saved(3), base(3), raised(3)
+
+        lo = -huge(1.0_real64)
+        hi = huge(1.0_real64)
+        call hold_ieee_traps(halting, saved)
+
+        ! The baseline: the same call with no bounds, whose flags are the engine's own.
+        free = [-1.2_real64, 1.0_real64]
+        call pf_minimize_bobyqa(rosenbrock, free, f_free, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=i_free)
+        call read_ieee_traps(base)
+
+        call clear_ieee_traps()
+        bounded = [-1.2_real64, 1.0_real64]
+        call pf_minimize_bobyqa(rosenbrock, bounded, f_bounded, lower=lo, upper=hi, &
+                                rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=i_bounded)
+        call read_ieee_traps(raised)
+
+        call check(error, all(raised .eqv. (raised .and. base)), &
+            "forming the box from +/-huge() bounds raised a flag the unbounded run does not")
+        if (allocated(error)) return
+
+        ! Absent and beyond-BOUNDMAX are the same problem, so they are the same run: not a
+        ! tolerance, every bit of it.
+        call check(error, all(bounded == free) .and. f_bounded == f_free, &
+            "a run inside +/-huge() bounds must be the unbounded run, point for point")
+        if (allocated(error)) return
+        call check(error, i_bounded%neval, i_free%neval, "and evaluation for evaluation")
+        if (allocated(error)) return
+
+        ! A scale below one is the second overflow, and the one the driver's own comment guards
+        ! against for ABSENT bounds only: `lower/scale` is `-1e311` before it is anything else.
+        ! Its baseline is the same scaled call with no bounds.
+        sc = 1.0e-3_real64
+        call clear_ieee_traps()
+        free = [-1.2_real64, 1.0_real64]*sc
+        call pf_minimize_bobyqa(rosenbrock, free, f_free, scale=sc, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=i_free)
+        call read_ieee_traps(base)
+
+        call clear_ieee_traps()
+        bounded = [-1.2_real64, 1.0_real64]*sc
+        call pf_minimize_bobyqa(rosenbrock, bounded, f_bounded, lower=lo, upper=hi, scale=sc, &
+                                rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=i_bounded)
+        call read_ieee_traps(raised)
+        call release_ieee_traps(halting, saved)
+
+        call check(error, all(raised .eqv. (raised .and. base)), &
+            "dividing a +/-huge() bound by a scale below one raised a flag the same call without " // &
+            "bounds does not")
+        if (allocated(error)) return
+        call check(error, i_bounded%neval, i_free%neval, &
+            "and the scaled run is the same run with the bounds named or left out")
+
+    end subroutine test_bobyqa_bounds_beyond_boundmax
+
+    !> The one battery configuration whose geometry step raises IEEE overflow and invalid.
+    !!
+    !! **This is a reproducer, not a demand that the site keep raising one particular flag.** Inside
+    !! `geostep` the engine forms `sqrt(resis/ggfree)` with a `ggfree` of order `1e-300`, and then a
+    !! curvature from the result; both are upstream's own arithmetic, and upstream's `bobyqa` trips
+    !! the same configuration. WHICH exception that is depends on the build: gfortran raises
+    !! overflow and invalid, while ifx flushes the tiny `ggfree` to zero at `-O1` and above and
+    !! raises divide-by-zero and invalid instead. Both complete the run; a build that halts on the
+    !! flags (nagfor's default) stops there, which is why the halting mode is held off around the
+    !! call rather than left to end the runner.
+    !!
+    !! The fixture is Brown's almost-linear function in twelve variables with `npt = n + 2`, the
+    !! bounded second start of the verification battery; it is written out as literals because one
+    !! ulp in any of them is a different search path. WHEN THE SITE IS GUARDED, this test asserts
+    !! the opposite -- that neither flag is raised -- rather than being deleted.
+    subroutine test_bobyqa_geometry_step_overflow(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64), parameter :: START(12) = [ &
+            -2.2094910695261749E-01_real64, -1.4343417097974296E+00_real64, -1.1086736317298718E+00_real64, &
+            -7.8487723264139020E-01_real64, 1.1911031674552257E+00_real64, -2.5900376879563725E-01_real64, &
+            1.6290764657915924E+00_real64, 1.1500802259659770E+00_real64, -4.7741239633290666E-01_real64, &
+            -1.1737833857414235E+00_real64, 3.0218687574480985E-01_real64, -1.1373209222859335E+00_real64]
+        real(real64), parameter :: LOWER(12) = [ &
+            -1.9118292748051833E+00_real64, -2.5439127488266271E+00_real64, -3.1900051975110566E+00_real64, &
+            -1.4316137865798613E+00_real64, -2.4965516373033414E-01_real64, -7.8725789500738386E-01_real64, &
+            -2.1595744193343647E-02_real64, 1.1204627464155048E-01_real64, -1.8579666574289866E+00_real64, &
+            -1.6813163762825152E+00_real64, -1.9167636546384372E+00_real64, -2.0846749011355801E+00_real64]
+        real(real64), parameter :: UPPER(12) = [ &
+            1.2556333042474619E+00_real64, -3.3071673141360103E-01_real64, -1.5266180813902142E-01_real64, &
+            8.3531793129412368E-01_real64, 3.0365078256169835E+00_real64, 2.0959225984271259E+00_real64, &
+            2.2273246486332847E+00_real64, 3.0869446073597970E+00_real64, 1.2573249725426199E+00_real64, &
+            9.5120302329361595E-01_real64, 2.2632390054702940E+00_real64, -4.1340787099367371E-01_real64]
+        real(real64), parameter :: RHOBEG = 4.1781675753547659E-01_real64
+
+        real(real64) :: x(12), fmin, f_start
+        type(pf_optimize_info) :: info
+        logical :: halting(3), saved(3), raised(3)
+
+        x = START
+        f_start = brown_almost_linear(START)
+        call hold_ieee_traps(halting, saved)
+        call pf_minimize_bobyqa(brown_almost_linear, x, fmin, lower=LOWER, upper=UPPER, &
+                                rhobeg=RHOBEG, rhoend=1.0e-6_real64, npt=14, max_neval=6000, &
+                                info=info)
+        call read_ieee_traps(raised)
+        call release_ieee_traps(halting, saved)
+
+        call check(error, any(raised), &
+            "the configuration no longer trips the geometry step's arithmetic: re-aim the reproducer")
+        if (allocated(error)) return
+        call check(error, fmin < f_start, "the run must still improve on its own start")
+        if (allocated(error)) return
+        call check(error, all(x >= LOWER) .and. all(x <= UPPER), &
+            "and answer inside the bounds it was given")
+        if (allocated(error)) return
+        call check(error, info%neval > 100, "vacuity guard: the run stopped before the site")
+
+    end subroutine test_bobyqa_geometry_step_overflow
+
+    !> An objective of order `1e300` runs to an answer, raising overflow inside the model.
+    !!
+    !! The other half of the same reproducer: every value the objective returns is finite, and the
+    !! sums of squares the model forms from them are not. **Scaling the objective is the caller's
+    !! job** and `prima.md` says so; what this pins is that the engine still returns a usable point
+    !! rather than a NaN, and that a build which halts on the flags meets them here. As above, the
+    !! assertion is that SOME exception is raised, not which one.
+    subroutine test_bobyqa_huge_objective_values(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin
+        type(pf_optimize_info) :: info
+        logical :: halting(3), saved(3), raised(3)
+
+        x = [-1.2_real64, 1.0_real64]
+        call hold_ieee_traps(halting, saved)
+        call pf_minimize_bobyqa(rosenbrock_1e300, x, fmin, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=info)
+        call read_ieee_traps(raised)
+        call release_ieee_traps(halting, saved)
+
+        call check(error, any(raised), &
+            "an objective near 1e300 no longer trips the model's arithmetic: re-aim the reproducer")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-2_real64, &
+            "the answer is still Rosenbrock's minimiser, which scaling the values does not move")
+        if (allocated(error)) return
+        call check(error, fmin >= 0.0_real64 .and. fmin < 1.0e297_real64, &
+            "and the value there is the scaled zero, not a NaN or the starting value")
+        if (allocated(error)) return
+        call check(error, info%neval > 50, "vacuity guard: the run stopped before the model site")
+
+    end subroutine test_bobyqa_huge_objective_values
+
+    !> Clears the three flags a reproducer can raise and turns halting on them off, saving both.
+    !!
+    !! nagfor halts on overflow, invalid and divide-by-zero by default, so a test running a
+    !! configuration known to raise one would take the whole runner down before it could assert
+    !! anything; bracketing the call keeps the finding a test result. `ieee_set_halting_mode` does
+    !! not link under flang on macOS (`.claude/rules/fortran-gotchas.md`), which is what the
+    !! preprocessor guard is for.
+    subroutine hold_ieee_traps(halting, saved)
+        logical, intent(out) :: halting(3) !! halting modes on entry: overflow, invalid, divide
+        logical, intent(out) :: saved(3)   !! the flags themselves on entry, to be put back
+
+        halting = .false.
+        saved = .false.
+        call read_ieee_traps(saved)
+#ifndef __flang__
+        if (ieee_support_halting(ieee_overflow)) then
+            call ieee_get_halting_mode(ieee_overflow, halting(1))
+            call ieee_set_halting_mode(ieee_overflow, .false.)
+        end if
+        if (ieee_support_halting(ieee_invalid)) then
+            call ieee_get_halting_mode(ieee_invalid, halting(2))
+            call ieee_set_halting_mode(ieee_invalid, .false.)
+        end if
+        if (ieee_support_halting(ieee_divide_by_zero)) then
+            call ieee_get_halting_mode(ieee_divide_by_zero, halting(3))
+            call ieee_set_halting_mode(ieee_divide_by_zero, .false.)
+        end if
+#endif
+        call clear_ieee_traps()
+
+    end subroutine hold_ieee_traps
+
+    !> Clears the three flags, so that the next call's own are what a test reads.
+    subroutine clear_ieee_traps()
+
+        call ieee_set_flag(ieee_overflow, .false.)
+        call ieee_set_flag(ieee_invalid, .false.)
+        call ieee_set_flag(ieee_divide_by_zero, .false.)
+
+    end subroutine clear_ieee_traps
+
+    !> Reads the three flags without clearing them, so a test can assert what a call raised.
+    subroutine read_ieee_traps(raised)
+        logical, intent(out) :: raised(3) !! overflow, invalid, divide by zero
+
+        call ieee_get_flag(ieee_overflow, raised(1))
+        call ieee_get_flag(ieee_invalid, raised(2))
+        call ieee_get_flag(ieee_divide_by_zero, raised(3))
+
+    end subroutine read_ieee_traps
+
+    !> Puts the halting modes and the flags back as `hold_ieee_traps` found them.
+    !!
+    !! The flags are RESTORED rather than left raised: what a test deliberately provoked is not a
+    !! finding for whatever runs next on this thread.
+    subroutine release_ieee_traps(halting, saved)
+        logical, intent(in) :: halting(3) !! halting modes to restore
+        logical, intent(in) :: saved(3)   !! flag state to restore
+
+        call ieee_set_flag(ieee_overflow, saved(1))
+        call ieee_set_flag(ieee_invalid, saved(2))
+        call ieee_set_flag(ieee_divide_by_zero, saved(3))
+#ifndef __flang__
+        if (ieee_support_halting(ieee_overflow)) call ieee_set_halting_mode(ieee_overflow, halting(1))
+        if (ieee_support_halting(ieee_invalid)) call ieee_set_halting_mode(ieee_invalid, halting(2))
+        if (ieee_support_halting(ieee_divide_by_zero)) then
+            call ieee_set_halting_mode(ieee_divide_by_zero, halting(3))
+        end if
+#endif
+
+    end subroutine release_ieee_traps
 
     !> A `scale=` run and a run on the hand-scaled objective agree bit for bit.
     !!

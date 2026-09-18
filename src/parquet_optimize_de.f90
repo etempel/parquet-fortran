@@ -35,7 +35,38 @@ submodule (parquet_optimize) parquet_optimize_de
 
     implicit none
 
+    !> The caller's objective seen through the box: `f(min(upper, max(lower, y)))`.
+    !!
+    !! **`polish` runs the unbounded simplex, and this is what keeps its answer inside the box.**
+    !! Minimising the projected objective is flat outside the box rather than forbidden there, so
+    !! the simplex neither walks away down a slope the box excludes nor has to be taught about
+    !! bounds; the point that comes back is the projection, which is a point of the box, and the
+    !! value is the value there. The alternative -- polishing the objective itself -- answers
+    !! outside the box with `PF_OPT_OK`, or walks to `-Infinity` on a linear objective and aborts
+    !! inside `pf_minimize_simplex`, an entry point the caller never called.
+    type, extends(pf_objective) :: boxed_objective
+        class(pf_objective), pointer :: inner => null() !! the caller's own objective
+        real(real64), allocatable    :: lower(:)        !! the box, lower corner
+        real(real64), allocatable    :: upper(:)        !! the box, upper corner
+    contains
+        procedure :: eval => boxed_objective_eval !! Value at the point projected into the box.
+    end type boxed_objective
+
 contains
+
+    !> Evaluates the caller's objective at `x` projected into the box.
+    !!
+    !! The projection is `min`/`max` on values the simplex formed from finite vertices, so neither
+    !! sees a NaN -- which matters, since both compile to instructions that raise IEEE invalid on
+    !! one.
+    function boxed_objective_eval(this, x) result(f)
+        class(boxed_objective), intent(inout) :: this !! the wrapper, holding the box
+        real(real64), intent(in)              :: x(:) !! the point the simplex chose
+        real(real64)                          :: f    !! objective value at the projected point
+
+        f = this%inner%eval(min(this%upper, max(this%lower, x)))
+
+    end function boxed_objective_eval
 
     module procedure minimize_de_obj
 
@@ -128,8 +159,12 @@ contains
 
         ! The default budget is the product of two validated counts, formed in `int64` and capped:
         ! `np*(max_gen + 1)` overflows a default integer for a large population, and the overflow
-        ! would deliver a negative budget that stops the run at once.
-        budget = int(min(int(np_use, int64)*int(gen_budget + 1, int64), int(huge(1)/2, int64)))
+        ! would deliver a negative budget that stops the run at once. **The `+ 1` is added in
+        ! `int64` as well**: added before the conversion it overflows at `max_gen = huge(1)`, which
+        ! is a budget of zero and a run that ends before its first generation
+        ! (`max_gen at huge(1) runs generations rather than stopping at once`).
+        budget = int(min(int(np_use, int64)*(int(gen_budget, int64) + 1_int64), &
+                         int(huge(1)/2, int64)))
         if (present(max_neval)) then
             call validate_budget("pf_minimize_de", max_neval, context)
             budget = max_neval
@@ -265,11 +300,11 @@ contains
             fmin = fpop(ib)
 
             if (do_polish) then
-                ! The local engine from the best individual. It aborts on a non-finite value, so
-                ! `polish=` and an objective with a NaN region inside the box do not mix; the guide
-                ! page says so.
-                call pf_minimize_simplex(f, x, fpolish, DE_POLISH_STEP*(upper - lower), ftol_use, &
-                                         atol=atol_use, info=polish_info, context=context)
+                ! The local engine from the best individual, minimising the objective seen through
+                ! the box so that its answer is a point of the box. It aborts on a non-finite
+                ! value, so `polish=` and an objective with a NaN region inside the box do not
+                ! mix; the guide page says so.
+                call polish_in_box(f, x, fpolish, polish_info)
                 neval = neval + polish_info%neval
                 if (fpolish < fmin) then
                     fmin = fpolish
@@ -294,6 +329,32 @@ contains
         end if
 
     contains
+
+        !> Runs the simplex from the best individual on the objective seen through the box.
+        !!
+        !! **`obj` is `target` here although the caller's own actual argument is not**: the
+        !! language allows that and only makes the pointer undefined once this procedure returns,
+        !! which is after the wrapper is gone. It is what lets the polish evaluate the caller's OWN
+        !! objective rather than a copy of it, so a counter or a cache the objective keeps records
+        !! the polish too, exactly as it records a serial run's generations.
+        subroutine polish_in_box(obj, xp, fp, ip)
+            class(pf_objective), intent(inout), target :: obj !! the caller's objective
+            real(real64), intent(inout)         :: xp(:) !! best individual in, polished point out
+            real(real64), intent(out)           :: fp    !! value at the point that comes back
+            type(pf_optimize_info), intent(out) :: ip    !! what the simplex did
+
+            type(boxed_objective) :: bx !! `obj` seen through the box
+
+            bx%inner => obj
+            bx%lower = lower
+            bx%upper = upper
+            call pf_minimize_simplex(bx, xp, fp, DE_POLISH_STEP*(upper - lower), ftol_use, &
+                                     atol=atol_use, info=ip, context=context)
+            ! `fp` is already the value AT this projection -- every evaluation the simplex made was
+            ! of the projected point -- so the two come back consistent with each other.
+            xp(:) = min(upper, max(lower, xp))
+
+        end subroutine polish_in_box
 
         !> Evaluates the whole population once, serially or on `nt` threads.
         !!
@@ -355,7 +416,7 @@ contains
             class(pf_objective), intent(inout) :: obj     !! this thread's objective
 
             type(pf_random_stream) :: rng !! this individual's own stream
-            real(real64) :: u             !! one uniform draw
+            real(real64) :: mutant        !! one coordinate of the mutant vector
             integer :: r1, r2, r3         !! the three donors, distinct from each other and from `i`
             integer :: jrand              !! the coordinate crossover always takes from the mutant
             integer :: j                  !! coordinate
@@ -383,11 +444,22 @@ contains
             do j = 1, npar
                 if (u_or_forced(j, jrand, rng)) then
                     ! The mutant is finite by construction -- three points inside a finite box,
-                    ! combined with a weight of at most 2 -- so the clamp's `min`/`max` never sees
-                    ! a NaN. That matters: those compile to `minsd`/`maxsd`, which raise IEEE
-                    ! invalid on one.
-                    trial(j,i) = pop(j,r1) + fw*(pop(j,r2) - pop(j,r3))
-                    trial(j,i) = min(upper(j), max(lower(j), trial(j,i)))
+                    ! combined with a weight of at most 2 -- so these comparisons never see a NaN.
+                    ! That matters: an ordered comparison raises IEEE invalid on one.
+                    !
+                    ! **A component outside the box is placed half way between its parent's own
+                    ! component and the bound it crossed**, not clipped to the bound. Clipping
+                    ! piles individuals onto the boundary, where they are identical and the
+                    ! differences that drive the search collapse; the midpoint keeps the
+                    ! population's spread and needs no extra draw, so the addressing of
+                    ! `(seed, generation, individual)` is untouched.
+                    mutant = pop(j,r1) + fw*(pop(j,r2) - pop(j,r3))
+                    if (mutant < lower(j)) then
+                        mutant = 0.5_real64*(pop(j,i) + lower(j))
+                    else if (mutant > upper(j)) then
+                        mutant = 0.5_real64*(pop(j,i) + upper(j))
+                    end if
+                    trial(j,i) = mutant
                 else
                     trial(j,i) = pop(j,i)
                 end if

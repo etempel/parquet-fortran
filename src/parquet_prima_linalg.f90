@@ -64,7 +64,12 @@
 !!    sites are gone. `norm` keeps upstream's generic name over two specifics -- the Euclidean
 !!    norm and the named one -- of which `norm_2` is the one name in this file that upstream does
 !!    not have, because upstream's `p_norm` takes an exponent this one does not.
-!! 7. Every procedure and dummy carries its `!>`/`!!`; upstream's rationale comments are kept as
+!! 7. `trueloc` counts and fills in one pass instead of `pack(linspace(1, n, n), mask=x)`. The
+!!    array it returns is the same array -- the same indices in the same order, so no arithmetic
+!!    anywhere changes -- and it is the one deviation here made for speed: the two intermediate
+!!    arrays upstream's form allocates dominated a small BOBYQA run, which calls `trueloc` several
+!!    times per iteration on masks of the length of `x`.
+!! 8. Every procedure and dummy carries its `!>`/`!!`; upstream's rationale comments are kept as
 !!    plain `!` blocks, its `!====! Calculation starts !====!` decoration is not, and every line
 !!    is inside 132 columns with no `/` immediately followed by `*` (cpp runs over this file).
 !!
@@ -699,14 +704,23 @@ contains
     !!
     !! Fortran has no logical indexing, so `y(trueloc(mask))` is how upstream writes what MATLAB,
     !! Python, Julia and R write `y(mask)`.
+    !! **Written as a counting loop, which is deviation 7 of the header**: upstream's
+    !! `pack(linspace(1, n, n), mask=x)` allocates the index vector and the packed result on every
+    !! call, and the engines call this several times per iteration. The indices are the same
+    !! indices in the same order, so nothing downstream can tell the two forms apart.
     function trueloc(x) result(loc)
         logical, intent(in) :: x(:)       !! the mask
         integer, allocatable :: loc(:)    !! the indices where `x` is true
-        integer :: n
+        integer :: i, k
 
         allocate(loc(int(count(x), int64)))
-        n = int(size(x))
-        loc = pack(linspace(1, n, n), mask=x)
+        k = 0
+        do i = 1, size(x)
+            if (x(i)) then
+                k = k + 1
+                loc(k) = i
+            end if
+        end do
 
     end function trueloc
 

@@ -38,8 +38,8 @@ module parquet_prima_common
         PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, PF_OPT_ROUNDING, PF_OPT_INFEASIBLE
     use parquet_prima_linalg, only : ZERO, HALF, QUART, INFO_DFT, NAN_INF_X, NAN_INF_F, &
         FTARGET_ACHIEVED, MAXFUN_REACHED, TENTH, prima_abort, is_nan, is_inf, is_posinf, &
-        is_neginf, is_finite, REALMAX, ONE, TWO, TEN, EPS, inprod, matprod, outprod, trueloc, &
-        linspace, int, maximum, FUNCMAX, CONSTRMAX, &
+        is_neginf, is_finite, REALMAX, BOUNDMAX, ONE, TWO, TEN, EPS, inprod, matprod, outprod, &
+        trueloc, linspace, int, maximum, FUNCMAX, CONSTRMAX, &
         SMALL_TR_RADIUS, FTARGET_ACHIEVED, MAXFUN_REACHED, MAXTR_REACHED
 
     implicit none
@@ -48,7 +48,7 @@ module parquet_prima_common
     public :: prima_state, FUNC_WITH_ARGS
     public :: evaluate, evaluate_fc, checkexit, redrat, redrho, xinbd, shiftbase, interval_max
     public :: savefilt, selectx, isbetter
-    public :: refuse_bad_call, caller_violation, finish_run
+    public :: refuse_bad_call, caller_violation, finish_run, bounds_in_engine_units
 
     interface checkexit
         module procedure checkexit, checkexit_con
@@ -781,6 +781,75 @@ contains
 
     end function isbetter01
 
+    ! ---- the bounds, in the units the engines work in -------------------------------------------
+
+    !> The caller's bounds in the engine's units: `bound/scale`, or `+/-BOUNDMAX` where absent.
+    !!
+    !! **This procedure is this library's, not upstream's**, and it is where upstream's rule that a
+    !! bound at or beyond `BOUNDMAX` is no bound at all is applied -- before any arithmetic on the
+    !! bound rather than after. Two overflows live at that arithmetic: `upper - lower` for a box of
+    !! `+/-huge()`, and `bound/scale` for a large bound and a scale below one, the case each
+    !! driver's own comment guards against for ABSENT bounds only. Both deliver the infinity that
+    !! was meant, so gfortran and ifx look correct while a build that halts on the flag stops on a
+    !! documented call: a `huge()` sentinel is a NUMBER, and centring, scaling or differencing it
+    !! overflows.
+    !!
+    !! A NaN bound never reaches here: `refuse_bad_call` refuses one, which is where this library
+    !! parts from upstream, and it runs before any driver forms these.
+    subroutine bounds_in_engine_units(sc, lo, hi, lower, upper)
+        real(real64), intent(in)           :: sc(:)    !! the per-coordinate scale, finite and positive
+        real(real64), intent(out)          :: lo(:)    !! lower bounds as the engine will see them
+        real(real64), intent(out)          :: hi(:)    !! upper bounds as the engine will see them
+        real(real64), intent(in), optional :: lower(:) !! the caller's bounds; absent is none
+        real(real64), intent(in), optional :: upper(:) !! the caller's bounds; absent is none
+
+        integer :: j
+
+        lo = -BOUNDMAX
+        hi = BOUNDMAX
+        do j = 1, size(sc)
+            if (present(lower)) then
+                if (.not. bound_is_absent(lower(j), sc(j))) lo(j) = lower(j) / sc(j)
+            end if
+            if (present(upper)) then
+                if (.not. bound_is_absent(upper(j), sc(j))) hi(j) = upper(j) / sc(j)
+            end if
+        end do
+
+    end subroutine bounds_in_engine_units
+
+    !> Whether one bound is "no bound" once divided by its scale, decided without dividing.
+    !!
+    !! The comparisons are ordered so that neither can overflow: `BOUNDMAX*sc` is formed only where
+    !! `sc` is below one, where the product is below `BOUNDMAX`, and where the answer is `.false.`
+    !! the quotient `b/sc` is below `BOUNDMAX` in magnitude and therefore finite.
+    pure function bound_is_absent(b, sc) result(absent)
+        real(real64), intent(in) :: b      !! one of the caller's bounds, not a NaN
+        real(real64), intent(in) :: sc     !! that coordinate's scale, finite and positive
+        logical                  :: absent !! `b/sc` is at or beyond `BOUNDMAX`
+
+        if (abs(b) >= BOUNDMAX) then
+            absent = .true.
+        else if (sc < ONE) then
+            absent = (abs(b) >= BOUNDMAX * sc)
+        else
+            absent = .false.
+        end if
+
+    end function bound_is_absent
+
+    !> One bound held inside `[-BOUNDMAX, BOUNDMAX]`, so that a difference of two cannot overflow.
+    !!
+    !! Used by `refuse_bad_call` for its width test, and only after its own NaN refusal: `min` and
+    !! `max` compile to instructions that raise IEEE invalid on a NaN operand.
+    elemental function clamp_to_boundmax(v) result(w)
+        real(real64), intent(in) :: v !! one of the caller's bounds, not a NaN
+        real(real64)             :: w !! `v`, or the sentinel it is at or beyond
+
+        w = min(BOUNDMAX, max(-BOUNDMAX, v))
+
+    end function clamp_to_boundmax
+
     ! ---- the validation that replaces PRIMA's preproc.f90 --------------------------------------
 
     !> Refuses every call `feature_optimizer.md` 5.6 says is refused, before anything is allocated.
@@ -847,6 +916,10 @@ contains
 
         if (n < 1) call abort_here("at least one variable is required")
         if (any(is_nan(x))) call abort_here("the start point must not contain NaN")
+        ! An infinity in the start is refused for the same reason the NaN is: the driver would
+        ! clamp it to `BOUNDMAX`, evaluate the objective at a number of order `1e307`, and report a
+        ! value that overflows there as the objective's fault.
+        if (.not. all(is_finite(x))) call abort_here("the start point must be finite")
 
         if (present(scale)) then
             if (size(scale) /= n) call abort_here("scale and x must have the same size")
@@ -856,13 +929,26 @@ contains
 
         if (present(lower)) then
             if (size(lower) /= n) call abort_here("lower, upper and x must have the same size")
+            ! Upstream treats a NaN bound as an absent one. Refused here, with every other
+            ! silently-adjusted argument: a bound the caller wrote and the engine dropped is a
+            ! different problem from the one they posed, and each engine fails differently on it --
+            ! BOBYQA and LINCOA carry the NaN into the objective and then blame the objective for
+            ! the value it gives back, while COBYLA drops the bound and reports `info%cstrv` as a
+            ! NaN beside `PF_OPT_OK`, since `cstrv > ctol` is false for a NaN.
+            if (any(is_nan(lower))) call abort_here("the bounds must not contain NaN")
         end if
         if (present(upper)) then
             if (size(upper) /= n) call abort_here("lower, upper and x must have the same size")
+            if (any(is_nan(upper))) call abort_here("the bounds must not contain NaN")
         end if
         if (present(lower) .and. present(upper)) then
-            if (any(upper - lower <= TWO * EPS)) call abort_here( &
-                "every upper bound must exceed its lower bound by more than 2*epsilon")
+            ! Measured on the bounds AS THE ENGINE WILL SEE THEM: a magnitude at or beyond
+            ! `BOUNDMAX` is "no bound" (`bound_in_engine_units`), so `+/-huge()` is a box of width
+            ! `REALMAX/2` here rather than the overflow that forming `upper - lower` on the
+            ! caller's own numbers would be -- an overflow that ends a build halting on it, on
+            ! input this procedure exists to pass.
+            if (any(clamp_to_boundmax(upper) - clamp_to_boundmax(lower) <= TWO * EPS)) &
+                call abort_here("every upper bound must exceed its lower bound by more than 2*epsilon")
         end if
         ! The start is never moved (Q9), so a start outside the bounds is the caller's mistake
         ! rather than something to project away.

@@ -157,6 +157,8 @@ contains
 
     module procedure validate_box
 
+        integer :: j !! coordinate
+
         if (size(lower) /= n .or. size(upper) /= n) call optimize_abort(entry_point, &
             "lower, upper and x must have the same size", context)
 
@@ -169,6 +171,20 @@ contains
         ! Only reached with every bound finite, so this comparison cannot see a NaN.
         if (any(lower >= upper)) call optimize_abort(entry_point, &
             "every lower bound must be below its upper bound", context)
+
+        ! Two finite bounds can still have an infinite WIDTH, and the width is what the population
+        ! tier lays its points out on: every stratum is a fraction of it, so an infinite one puts
+        ! the whole population at infinity, where every value is equal and the spread test reports
+        ! convergence at once. Tested one coordinate at a time as `upper > huge + lower` rather
+        ! than by forming the difference: the subtraction is the overflow, fatal under nagfor's
+        ! default `-ieee=stop`, and the guard is nested inside the sign test that makes
+        ! `huge + lower` finite.
+        do j = 1, n
+            if (lower(j) < 0.0_real64) then
+                if (upper(j) > huge(1.0_real64) + lower(j)) call optimize_abort(entry_point, &
+                    "every box width must be finite", context)
+            end if
+        end do
 
     end procedure validate_box
 
@@ -220,8 +236,12 @@ contains
             do i = 1, m
                 s = pf_random_perm_at(keyj, m, i)
                 u = pf_random_at(keyj, i, 1_int64)
+                ! The stratum's position is formed FIRST and the width multiplies a number in
+                ! `[0, 1)`: multiplying the width by `s - 1 + u` before dividing by `m` overflows
+                ! for a box wide enough that `m` times its width is not finite, and puts the whole
+                ! population at infinity.
                 design(j, i) = lower(j) &
-                    + (upper(j) - lower(j))*(real(s - 1, real64) + u)/real(m, real64)
+                    + (upper(j) - lower(j))*((real(s - 1, real64) + u)/real(m, real64))
             end do
         end do
 

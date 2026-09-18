@@ -8,6 +8,19 @@
 !! upstream's default and an INVALID one is refused with the message of `feature_optimizer.md`
 !! 5.6, through the shared `refuse_bad_call`, because this library has no channel for a warning.
 !!
+!! **Where this driver's defaults differ from upstream's**, beyond those refusals:
+!!
+!! 1. The radii are used as given. Upstream floors both for every solver
+!!    (`rhobeg = max(rhobeg, EPS)`, `rhoend = min(max(rhoend, EPS), rhobeg)`), and
+!!    `pf_minimize_bobyqa`'s driver does; here a pair below `epsilon` is honoured, which is what
+!!    lets a problem stated in very small units converge at all.
+!! 2. `maxfun` is used as given; upstream raises one below `n + 3` to `n + 3`, and resets `npt`
+!!    when `npt >= maxfun`. A budget below `npt` therefore ends the run with `PF_OPT_LIMIT` after
+!!    that many evaluations.
+!! 3. `rhoend` is silently lowered to a `rhobeg` this driver defaulted below it, and a `rhoend`
+!!    above `1` with no `rhobeg` beside it is refused although the default `rhobeg` would have been
+!!    `max(10*rhoend, 1)` and so above it.
+!!
 !! **The two warnings upstream raises from this driver are made unreachable rather than silenced**
 !! (6.5 item 2): a linear constraint with an all-zero gradient is refused by `refuse_bad_call`
 !! where upstream drops it and warns, and an infeasible start is refused here where upstream
@@ -23,7 +36,8 @@
 submodule (parquet_prima) parquet_prima_lincoa
 
     use, intrinsic :: iso_fortran_env, only : int64
-    use parquet_prima_common, only : prima_state, refuse_bad_call, caller_violation, finish_run
+    use parquet_prima_common, only : prima_state, refuse_bad_call, caller_violation, finish_run, &
+        bounds_in_engine_units
     use parquet_prima_lincob, only : lincob
     use parquet_prima_linalg, only : prima_abort, is_finite, eye, trueloc, maximum, norm, &
         ZERO, ONE, TWO, TEN, EPS, BOUNDMAX, MAXPOW10, &
@@ -64,12 +78,10 @@ contains
         allocate(y(n))
         y = x / sc
         allocate(lo(n), hi(n))
-        ! An absent bound is BOUNDMAX in the ENGINE's units, never the caller's divided by the
+        ! An absent bound -- and one at or beyond `BOUNDMAX` in the engine's units, which means the
+        ! same thing -- is `+/-BOUNDMAX` in the ENGINE's units, never the caller's divided by the
         ! scale: `BOUNDMAX/sc` overflows to +Infinity for any scale below one.
-        lo = -BOUNDMAX
-        hi = BOUNDMAX
-        if (present(lower)) lo = lower / sc
-        if (present(upper)) hi = upper / sc
+        call bounds_in_engine_units(sc, lo, hi, lower, upper)
         y = max(lo, min(hi, y))
         call scale_rows(a_ineq, b_ineq, sc, ain, bin)
         call scale_rows(a_eq, b_eq, sc, aeq, beq)
@@ -207,9 +219,10 @@ contains
     !! for the reason the file header gives.
     !!
     !! WHAT THIS FORBIDS: accepting an infeasible start by relaxing `bvec`, as upstream does.
-    !! LINCOA's iterates are feasible by construction, so a relaxed `bvec` does not merely admit
-    !! the start -- it moves the whole feasible region, and every later `info%cstrv` would be
-    !! measured against the moved one. The scenario `prima_lincoa_infeasible_start` is what holds
+    !! `bvec` is what the engine's trust-region step keeps its iterates inside and what the filter
+    !! measures a candidate against, so a relaxed `bvec` does not merely admit the start -- it
+    !! moves the whole feasible region, and every later `info%cstrv` would be measured against the
+    !! moved one. The scenario `prima_lincoa_infeasible_start` is what holds
     !! this here.
     subroutine refuse_infeasible_start(y, lo, hi, ain, bin, aeq, beq, rhoend_use, context)
         real(real64), intent(in) :: y(:)        !! the start, in engine units

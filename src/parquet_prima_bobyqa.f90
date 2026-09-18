@@ -12,6 +12,22 @@
 !! `parquet_prima_common`, shared with the other two drivers so that one set of abort sites serves
 !! all three.
 !!
+!! **Where this driver's defaults differ from upstream's**, beyond those refusals:
+!!
+!! 1. The default `rhobeg` is `max(EPS, min(1, minval(hi - lo)/4))`. Upstream's is `1`, or
+!!    `max(10*rhoend, 1)` when only `rhoend` was given, reduced to a quarter of the narrowest width
+!!    only when it exceeds half of it. The two part when the narrowest width is between 2 and 4,
+!!    and whenever `rhoend` alone is given.
+!! 2. `maxfun` is used as given; upstream raises one below `n + 3` to `n + 3`. A budget below `npt`
+!!    therefore ends the run with `PF_OPT_LIMIT` after that many evaluations.
+!! 3. `npt` is used as given; upstream resets it when `npt >= maxfun`.
+!! 4. `rhoend` is silently lowered to a `rhobeg` this driver defaulted below it. An explicit pair
+!!    in the wrong order is refused; a defaulted `rhobeg` cannot be, since the caller did not write
+!!    it.
+!!
+!! The `epsilon` floors on the two radii are upstream's own, and this is the one driver of the
+!! three that applies them -- `pf_minimize_lincoa` and `pf_minimize_cobyla` say so in their headers.
+!!
 !! **The one adjustment kept** is PRIMA's `honour_x0` reduction of `rhobeg`. BOBYQA requires the
 !! start to be at least `rhobeg` from every inactive bound; upstream can satisfy that by moving
 !! the start or by shrinking `rhobeg`, and this library fixes `honour_x0` at `.true.` (Q9), so the
@@ -19,10 +35,11 @@
 !! The radius the run ended at comes back in `info%rho`.
 submodule (parquet_prima) parquet_prima_bobyqa
 
-    use parquet_prima_common, only : prima_state, refuse_bad_call, finish_run
+    use parquet_prima_common, only : prima_state, refuse_bad_call, finish_run, &
+        bounds_in_engine_units
     use parquet_prima_bobyqb, only : bobyqb
-    use parquet_prima_linalg, only : is_finite, trueloc, &
-        ZERO, ONE, EPS, BOUNDMAX, ETA1_DFT, ETA2_DFT, GAMMA1_DFT, GAMMA2_DFT, &
+    use parquet_prima_linalg, only : is_finite, trueloc, prima_abort, &
+        ZERO, ONE, HALF, EPS, ETA1_DFT, ETA2_DFT, GAMMA1_DFT, GAMMA2_DFT, &
         RHOBEG_DFT, RHOEND_DFT, FTARGET_DFT, MAXFUN_DIM_DFT
 
     implicit none
@@ -61,17 +78,25 @@ contains
         allocate(y(n))
         y = x / sc
         allocate(lo(n), hi(n))
-        ! An absent bound is BOUNDMAX in the ENGINE's units, never the caller's divided by the
+        ! An absent bound -- and one at or beyond `BOUNDMAX` in the engine's units, which means the
+        ! same thing -- is `+/-BOUNDMAX` in the ENGINE's units, never the caller's divided by the
         ! scale: `BOUNDMAX/sc` overflows to +Infinity for any scale below one, and an infinite
         ! bound puts an infinity into `su - sl` inside the engine.
-        lo = -BOUNDMAX
-        hi = BOUNDMAX
-        if (present(lower)) lo = lower / sc
-        if (present(upper)) hi = upper / sc
+        call bounds_in_engine_units(sc, lo, hi, lower, upper)
         y = max(lo, min(hi, y))
 
         ! ---- upstream's defaults, for the arguments the caller left out ------------------------
+        !
+        ! BOBYQA's model needs two DISTINCT points per coordinate inside the bounds, so `rhobeg`
+        ! may not exceed half the narrowest width; upstream reduces a larger one to a quarter of
+        ! that width and warns. Refused here with every other argument upstream adjusts: from a
+        ! start ON a bound the two initial points of that coordinate coincide, and the run ends
+        ! after a handful of evaluations, at the start, reporting rounding error. The widths are
+        ! the engine's, so `pf_bobyqa_solver` meets the same rule as a `rhobeg_fraction` above
+        ! `0.5`, whichever way it scales.
         if (present(rhobeg)) then
+            if (rhobeg > HALF * minval(hi - lo)) call abort_here( &
+                "rhobeg must not exceed half the narrowest distance between the bounds")
             rhobeg_use = rhobeg
         else
             rhobeg_use = max(EPS, min(RHOBEG_DFT, minval(hi - lo) / 4.0_real64))
@@ -128,6 +153,20 @@ contains
         ! No `cstrv`: BOBYQA honours its bounds at every point it evaluates, so a bound violation
         ! is not a thing the caller has to be told about and `PF_OPT_INFEASIBLE` cannot arise.
         call finish_run(prima_info, st, n, info, history)
+
+    contains
+
+        !> Aborts with this entry point and the caller's context, whether or not one was given.
+        subroutine abort_here(text)
+            character(len=*), intent(in) :: text !! what went wrong
+
+            if (present(context)) then
+                call prima_abort(EP, text, context)
+            else
+                call prima_abort(EP, text)
+            end if
+
+        end subroutine abort_here
 
     end procedure minimize_bobyqa_obj
 

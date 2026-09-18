@@ -241,6 +241,28 @@ die   = pf_random_int_at(seed, i, 1, 6)
 index = pf_random_int_at(seed, i, 1_int64, huge(1_int64))    ! any width, still exact
 ```
 
+### Two uniforms and an integer for the price of one: `pf_random_pair_spare_at`
+
+A composite draw often needs a couple of uniforms *and* a choice — a point somewhere, and which
+somewhere. Done the obvious way that is two encipherings. It need not be:
+
+```fortran
+call pf_random_pair_spare_at(seed, i, 1_int64, n, u1, u2, j, ok, [draw])
+if (.not. ok) j = pf_random_int_at(other_key, i, 1_int64, n, draw)   ! the caller's own exact draw
+```
+
+One block carries 128 bits, and converting each half to a `real64` keeps the top 53 and **throws
+away 11** — 22 bits across the block that are free for the taking. `u1` and `u2` are exactly the
+uniforms `pf_random_at` gives at those coordinates, **whatever the integer does**, so the pair a
+caller was going to draw anyway is untouched. `j` is exactly uniform in `[lo, hi]` when `ok`.
+
+`ok` is `.false.` when 22 bits cannot decide the range exactly — a width above 2²², or the rejection
+rule firing, which happens with probability `mod(2**22, width)/2**22`. **The caller must then draw
+`j` itself**, by any exact means independent of those bits. Mixing a rejection-rule result with an
+independent uniform is still uniform, so nothing is approximated. This is how a HEALPix mask draw
+costs one enciphering rather than two; see
+[Random points and geometry on the sphere](sphere.html#points-in-healpix-pixels-and-masks).
+
 ## When you don't know how many numbers you need: `pf_random_stream`
 
 Everything above answers "what is the value at this coordinate?". Some programs cannot ask that,

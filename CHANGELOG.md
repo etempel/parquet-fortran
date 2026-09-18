@@ -105,7 +105,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stream's seed and stream index. `pf_random_disc_cap` prepares one disc or ring once, so a loop
   over it pays the radius validation, the centre's normalisation and the frame once instead of per
   draw; `%at` is `pf_random_disc_at` to the bit. An `r_inner` above `pi` is refused rather than
-  clamped. `pf_sphere_algorithm` freezes the family's values. See
+  clamped. `pf_random_pair_spare_at` returns two uniforms of one enciphering plus an exactly uniform
+  integer drawn from the 22 bits their conversions discard, so a composite draw need not encipher
+  twice. `pf_sphere_algorithm` freezes the family's values. See
   [Random numbers](doc/pages/utilities/random.md).
 - **Random points in sky regions, and sky geometry: `parquet_sphere`.** `pf_sky_polygon` holds a
   polygon given by `(ra, dec)` vertices, with straight edges in the RA/Dec chart or great-circle
@@ -117,7 +119,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   chart polygon that looks like an RA band written the short way across `ra = 0`.
   `pf_random_pixel_at` and `pf_random_mask_at` draw uniformly inside one HEALPix pixel or over a
   list of them on a `pf_healpix_grid`, with `_radec`, fill and stream forms; a point in a pixel
-  costs one block and rejects nothing, read through `%pix2vec_offset`.
+  costs one block and rejects nothing, read through `%pix2vec_offset`, and a mask draw costs the
+  same one block by taking its choice of a listed pixel from the bits the point leaves spare.
   `pf_radec2vec` and `pf_vec2radec` convert between degrees and unit vectors in a named declination
   frame, `pf_offset_radec` and `pf_position_angle_deg` offset a position by a separation at a
   position angle and recover the angle, and `pf_fibonacci_grid` places `n` quasi-uniform

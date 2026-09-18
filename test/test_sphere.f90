@@ -20,7 +20,7 @@ module test_sphere
     ! runner that reaches no `bind(C)` call.
     use parquet_sphere
     use parquet_random, only: pf_random_at, pf_random_key, pf_random_int_at, pf_random_direction_at, &
-        pf_random_radec_at, pf_random_disc_at, pf_random_disc_radec_at
+        pf_random_radec_at, pf_random_disc_at, pf_random_disc_radec_at, pf_random_pair_spare_at
     use parquet_healpix, only: pf_vec2pix_nest, pf_ring2nest, pf_angdist, pf_angdist_deg
     use test_sphere_vectors
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf, &
@@ -94,7 +94,9 @@ contains
             new_unittest("the position angle inverts the offset, at the poles and the cardinal points too", &
                          test_offset_and_position_angle), &
             new_unittest("the Fibonacci grid is unit, spaced as astropy's, and its two forms are one grid", &
-                         test_fibonacci_grid) &
+                         test_fibonacci_grid), &
+            new_unittest("a mask too long for the spare bits falls back and still spans its list", &
+                         test_mask_choice_fallback) &
             ]
     end subroutine collect_tests_sphere
 
@@ -117,10 +119,10 @@ contains
         real(real64), parameter :: POLY_TOL = 1.0e-11_real64
         type(pf_sky_polygon), allocatable :: polys(:)
         type(pf_healpix_grid) :: grid
-        real(real64) :: ra, dec, want_ra, want_dec, v(3), got, want, worst, tol
-        logical :: differs
+        real(real64) :: ra, dec, want_ra, want_dec, v(3), got, want, worst, tol, u1, u2
+        logical :: differs, spare_ok
         real(real64), allocatable :: fra(:), fdec(:)
-        integer(int64) :: ncand, ipix, choice
+        integer(int64) :: ncand, ipix, choice, dd
         integer(int32), allocatable :: list(:)
         integer :: k, p, f, l, m
         character(len=160) :: msg
@@ -242,10 +244,19 @@ contains
             m = smd_mask(k)
             call grid%init(smask_nside(m), smask_scheme(m))
             list = smask_pixels(smask_first(m):smask_first(m) + smask_count(m) - 1)
-            choice = pf_random_int_at(pf_random_key(smd_seed(k), ssph_label_mask_choice), smd_stream(k), 1_int64, &
-                                      int(size(list), int64), smd_draw(k))
+            ! The choice is recomputed the way the library makes it, not merely read back: the
+            ! point's own block spares 22 bits and the choice comes out of those, so ONE enciphering
+            ! carries both. `smd_draw` includes 0, which every entry point clamps to 1, so the key
+            ! is derived from the clamped value here too.
+            dd = max(smd_draw(k), 1_int64)
+            call pf_random_pair_spare_at(pf_random_key(pf_random_key(smd_seed(k), ssph_label_mask_point), dd), &
+                                         smd_stream(k), 1_int64, int(size(list), int64), u1, u2, choice, spare_ok)
+            if (.not. spare_ok) then
+                choice = pf_random_int_at(pf_random_key(smd_seed(k), ssph_label_mask_choice), smd_stream(k), &
+                                          1_int64, int(size(list), int64), dd)
+            end if
             call check(error, choice == smd_choice(k), &
-                "the mask's choice of an entry is not the model's: its label or its draw moved")
+                "the mask's choice of an entry is not the model's: its label, its draw or its packing moved")
             if (allocated(error)) return
             v = pf_random_mask_at(grid, smd_seed(k), smd_stream(k), list, smd_draw(k))
             call grid%vec2pix(v, ipix)
@@ -1118,6 +1129,58 @@ contains
             end do
         end do
     end subroutine polar_cap_coverage
+
+    !> A mask longer than the 22 spare bits can span: the choice falls back, and still spans the list.
+    !!
+    !! **The only route to `sky_mask_choose`'s fallback branch.** A mask draw takes its choice from
+    !! the 22 bits the point's two uniforms leave over, which can decide a list of at most `2**22`
+    !! entries; a longer one falls back to the choice family. Lemire's rejection reaches the same
+    !! branch, but only with probability `mod(2**22, n)/2**22`, which for any list small enough to
+    !! build quickly is far too rare to reach it in a test.
+    !!
+    !! The list is `0 .. 2**22`, so membership is a range test rather than a search. **The spread
+    !! assertion is the load-bearing one**: a fallback that failed to draw at all would leave the
+    !! chosen entry at the bottom of the range, giving pixel 0 every time, which lands in the list
+    !! and would satisfy every other check here.
+    subroutine test_mask_choice_fallback(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NLIST = 4194305_int64    ! 2**22 + 1: one past what 22 bits span
+        integer(int64), parameter :: NDRAW = 20000_int64
+        type(pf_healpix_grid) :: grid
+        integer(int32), allocatable :: list(:)
+        integer(int64) :: k, ipix, lo_seen, hi_seen, distinct(16), b
+        real(real64) :: v(3)
+        character(len=160) :: msg
+
+        call grid%init(1024_int64, PF_HP_NEST)
+        allocate(list(NLIST))
+        do k = 1_int64, NLIST
+            list(k) = int(k - 1_int64, int32)
+        end do
+        lo_seen = NLIST
+        hi_seen = -1_int64
+        distinct = 0_int64
+        do k = 1_int64, NDRAW
+            v = pf_random_mask_at(grid, SKY_SEED, 2_int64, list, k)
+            call grid%vec2pix(v, ipix)
+            call check(error, ipix >= 0_int64 .and. ipix < NLIST, &
+                "a mask draw over a list longer than 2**22 left the list: the fallback choice is wrong")
+            if (allocated(error)) return
+            lo_seen = min(lo_seen, ipix)
+            hi_seen = max(hi_seen, ipix)
+            b = min(15_int64, ipix * 16_int64 / NLIST)
+            distinct(b + 1_int64) = distinct(b + 1_int64) + 1_int64
+        end do
+        write (msg, '(a,i0,a,i0)') "the fallback choice spans only [", lo_seen, ", ", hi_seen
+        call check(error, lo_seen < NLIST / 100_int64 .and. hi_seen > NLIST - NLIST / 100_int64, trim(msg))
+        if (allocated(error)) return
+        call check(error, all(distinct > 0_int64), &
+            "some sixteenth of the list was never chosen: the fallback is not uniform over it")
+        if (allocated(error)) return
+        call check(error, sph_chi2(distinct) <= chi2_999(15), &
+            "the fallback choice is not uniform over the list at the 0.999 level")
+        deallocate(list)
+    end subroutine test_mask_choice_fallback
 
     !> A mask of 50 pixels with one listed twice: counts per pixel follow the list, the duplicate
     !! twice; every point in a listed pixel; an `int32` list is the `int64` one. The control draws over

@@ -65,17 +65,53 @@ contains
 
         ncand = 0_int64
         npix = sky_grid_npix(who, grid)
-        if (ipix < 0_int64 .or. ipix >= npix) then
-            error stop who // ": ipix " // trim(sky_int_text(ipix)) // " is outside [0, " // &
-                trim(sky_int_text(npix)) // ")"
-        end if
         ! The two halves of block 0 of the per-draw key: one enciphering, as every other family's
         ! first candidate is.
         key = pf_random_key(pf_random_key(seed, label), d)
         call pf_random_fill_draws(key, i, uv, 1_int64)
-        call grid%pix2vec_offset(ipix, uv(1), uv(2), v)
+        call sky_pixel_place(who, grid, npix, ipix, uv(1), uv(2), v)
         ncand = 1_int64
     end subroutine sky_pixel_walk
+
+    !> The point at `(u1, u2)` inside pixel `ipix`, the index checked against `npix` first.
+    pure subroutine sky_pixel_place(who, grid, npix, ipix, u1, u2, v)
+        character(len=*), intent(in) :: who !! the entry point, for the message.
+        type(pf_healpix_grid), intent(in) :: grid !! the grid.
+        integer(int64), intent(in) :: npix !! the grid's pixel count.
+        integer(int64), intent(in) :: ipix !! the pixel, in the grid's scheme.
+        real(real64), intent(in) :: u1 !! position across the pixel, `[0, 1)`.
+        real(real64), intent(in) :: u2 !! position along the pixel, `[0, 1)`.
+        real(real64), intent(out) :: v(3) !! a unit vector uniform inside the pixel.
+
+        if (ipix < 0_int64 .or. ipix >= npix) then
+            error stop who // ": ipix " // trim(sky_int_text(ipix)) // " is outside [0, " // &
+                trim(sky_int_text(npix)) // ")"
+        end if
+        call grid%pix2vec_offset(ipix, u1, u2, v)
+    end subroutine sky_pixel_place
+
+    !> The mask's draw at `d`: the chosen entry's 1-based position, and the point's two uniforms.
+    !!
+    !! **One enciphering carries both.** The point needs the block's two halves, whose conversions
+    !! discard 22 bits between them; `pf_random_pair_spare_at` chooses from the list out of those.
+    !! It cannot when the list is longer than `2**22` or when Lemire's rejection fires, and the
+    !! choice then falls back to its own family -- `pf_random_int_at` under `sky_mask_choice_label`,
+    !! an independent word space -- which keeps the result exactly uniform over the list.
+    pure subroutine sky_mask_choose(seed, i, nlist, d, u1, u2, j)
+        integer(int64), intent(in) :: seed !! the stream family's seed.
+        integer(int64), intent(in) :: i !! the stream index.
+        integer(int64), intent(in) :: nlist !! the list's length, at least 1.
+        integer(int64), intent(in) :: d !! the draw, at least 1.
+        real(real64), intent(out) :: u1 !! position across the chosen pixel, `[0, 1)`.
+        real(real64), intent(out) :: u2 !! position along the chosen pixel, `[0, 1)`.
+        integer(int64), intent(out) :: j !! the chosen entry's 1-based position in the list.
+        integer(int64) :: key
+        logical :: ok
+
+        key = pf_random_key(pf_random_key(seed, sky_mask_point_label), d)
+        call pf_random_pair_spare_at(key, i, 1_int64, nlist, u1, u2, j, ok)
+        if (.not. ok) j = pf_random_int_at(pf_random_key(seed, sky_mask_choice_label), i, 1_int64, nlist, d)
+    end subroutine sky_mask_choose
 
     !> A pixel list's length, checked to be at least 1 against a grid of `npix` pixels.
     pure function sky_mask_nonempty(who, npix, n) result(nlist)
@@ -108,7 +144,7 @@ contains
 
     !> The mask's point at draw `d` from an `int32` list of checked length `nlist`: the choice, the
     !! chosen entry's check, then the point family's walk inside it.
-    pure function sky_mask_pick_l32(who, grid, npix, seed, i, pixels, nlist, d) result(v)
+    pure subroutine sky_mask_pick_l32(who, grid, npix, seed, i, pixels, nlist, d, v)
         character(len=*), intent(in) :: who !! the entry point, for the messages.
         type(pf_healpix_grid), intent(in) :: grid !! the grid.
         integer(int64), intent(in) :: npix !! the grid's pixel count.
@@ -117,16 +153,17 @@ contains
         integer(int32), intent(in) :: pixels(:) !! the pixel list.
         integer(int64), intent(in) :: nlist !! `size(pixels)`, at least 1.
         integer(int64), intent(in) :: d !! the draw, at least 1.
-        real(real64) :: v(3) !! a unit vector uniform over the listed pixels.
-        integer(int64) :: j, ipix, ncand
+        real(real64), intent(out) :: v(3) !! a unit vector uniform over the listed pixels.
+        integer(int64) :: j, ipix
+        real(real64) :: u1, u2
 
-        j = pf_random_int_at(pf_random_key(seed, sky_mask_choice_label), i, 1_int64, nlist, d)
+        call sky_mask_choose(seed, i, nlist, d, u1, u2, j)
         ipix = sky_mask_entry_ok(who, npix, j, int(pixels(j), int64))
-        call sky_pixel_walk(who, grid, sky_mask_point_label, seed, i, ipix, d, v, ncand)
-    end function sky_mask_pick_l32
+        call sky_pixel_place(who, grid, npix, ipix, u1, u2, v)
+    end subroutine sky_mask_pick_l32
 
     !> The mask's point at draw `d` from an `int64` list. See `sky_mask_pick_l32`.
-    pure function sky_mask_pick_l64(who, grid, npix, seed, i, pixels, nlist, d) result(v)
+    pure subroutine sky_mask_pick_l64(who, grid, npix, seed, i, pixels, nlist, d, v)
         character(len=*), intent(in) :: who !! the entry point, for the messages.
         type(pf_healpix_grid), intent(in) :: grid !! the grid.
         integer(int64), intent(in) :: npix !! the grid's pixel count.
@@ -135,44 +172,45 @@ contains
         integer(int64), intent(in) :: pixels(:) !! the pixel list.
         integer(int64), intent(in) :: nlist !! `size(pixels)`, at least 1.
         integer(int64), intent(in) :: d !! the draw, at least 1.
-        real(real64) :: v(3) !! a unit vector uniform over the listed pixels.
-        integer(int64) :: j, ipix, ncand
+        real(real64), intent(out) :: v(3) !! a unit vector uniform over the listed pixels.
+        integer(int64) :: j, ipix
+        real(real64) :: u1, u2
 
-        j = pf_random_int_at(pf_random_key(seed, sky_mask_choice_label), i, 1_int64, nlist, d)
+        call sky_mask_choose(seed, i, nlist, d, u1, u2, j)
         ipix = sky_mask_entry_ok(who, npix, j, pixels(j))
-        call sky_pixel_walk(who, grid, sky_mask_point_label, seed, i, ipix, d, v, ncand)
-    end function sky_mask_pick_l64
+        call sky_pixel_place(who, grid, npix, ipix, u1, u2, v)
+    end subroutine sky_mask_pick_l64
 
     !> A scalar mask form's point for an `int32` list: the grid and the list's length checked, then
     !! the pick, which checks only the entry it chooses -- so a long list costs nothing per draw.
-    pure function sky_mask_l32(who, grid, seed, i, pixels, d) result(v)
+    pure subroutine sky_mask_l32(who, grid, seed, i, pixels, d, v)
         character(len=*), intent(in) :: who !! the entry point, for the messages.
         type(pf_healpix_grid), intent(in) :: grid !! the grid.
         integer(int64), intent(in) :: seed !! the stream family's seed.
         integer(int64), intent(in) :: i !! the stream index.
         integer(int32), intent(in) :: pixels(:) !! the pixel list.
         integer(int64), intent(in) :: d !! the draw, at least 1.
-        real(real64) :: v(3) !! a unit vector uniform over the listed pixels.
+        real(real64), intent(out) :: v(3) !! a unit vector uniform over the listed pixels.
         integer(int64) :: npix
 
         npix = sky_grid_npix(who, grid)
-        v = sky_mask_pick_l32(who, grid, npix, seed, i, pixels, sky_mask_nonempty(who, npix, size(pixels, kind=int64)), d)
-    end function sky_mask_l32
+        call sky_mask_pick_l32(who, grid, npix, seed, i, pixels, sky_mask_nonempty(who, npix, size(pixels, kind=int64)), d, v)
+    end subroutine sky_mask_l32
 
     !> A scalar mask form's point for an `int64` list. See `sky_mask_l32`.
-    pure function sky_mask_l64(who, grid, seed, i, pixels, d) result(v)
+    pure subroutine sky_mask_l64(who, grid, seed, i, pixels, d, v)
         character(len=*), intent(in) :: who !! the entry point, for the messages.
         type(pf_healpix_grid), intent(in) :: grid !! the grid.
         integer(int64), intent(in) :: seed !! the stream family's seed.
         integer(int64), intent(in) :: i !! the stream index.
         integer(int64), intent(in) :: pixels(:) !! the pixel list.
         integer(int64), intent(in) :: d !! the draw, at least 1.
-        real(real64) :: v(3) !! a unit vector uniform over the listed pixels.
+        real(real64), intent(out) :: v(3) !! a unit vector uniform over the listed pixels.
         integer(int64) :: npix
 
         npix = sky_grid_npix(who, grid)
-        v = sky_mask_pick_l64(who, grid, npix, seed, i, pixels, sky_mask_nonempty(who, npix, size(pixels, kind=int64)), d)
-    end function sky_mask_l64
+        call sky_mask_pick_l64(who, grid, npix, seed, i, pixels, sky_mask_nonempty(who, npix, size(pixels, kind=int64)), d, v)
+    end subroutine sky_mask_l64
 
     !> A fill's check of every entry of an `int32` list, before anything is drawn. Returns the list's
     !! length, which the fill draws its choices over.
@@ -235,7 +273,7 @@ contains
         nlist = sky_mask_list_l32(who, npix, pixels)
         d0 = sky_fill_start(who, draw, n)
         do k = 1_int64, n
-            v(:, k) = sky_mask_pick_l32(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64))
+            call sky_mask_pick_l32(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64), v(:, k))
         end do
     end subroutine sky_fill_mask_l32
 
@@ -259,7 +297,7 @@ contains
         nlist = sky_mask_list_l64(who, npix, pixels)
         d0 = sky_fill_start(who, draw, n)
         do k = 1_int64, n
-            v(:, k) = sky_mask_pick_l64(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64))
+            call sky_mask_pick_l64(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64), v(:, k))
         end do
     end subroutine sky_fill_mask_l64
 
@@ -286,7 +324,7 @@ contains
         nlist = sky_mask_list_l32(who, npix, pixels)
         d0 = sky_fill_start(who, draw, n)
         do k = 1_int64, n
-            v = sky_mask_pick_l32(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64))
+            call sky_mask_pick_l32(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64), v)
             call grid%vec2radec(v, ra(k), dec(k))
         end do
     end subroutine sky_fill_mask_radec_l32
@@ -314,7 +352,7 @@ contains
         nlist = sky_mask_list_l64(who, npix, pixels)
         d0 = sky_fill_start(who, draw, n)
         do k = 1_int64, n
-            v = sky_mask_pick_l64(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64))
+            call sky_mask_pick_l64(who, grid, npix, seed, i, pixels, nlist, d0 + (k - 1_int64), v)
             call grid%vec2radec(v, ra(k), dec(k))
         end do
     end subroutine sky_fill_mask_radec_l64
@@ -387,46 +425,46 @@ contains
     ! ---- Points over a pixel list ----
 
     module procedure sky_mask_at_i32_i32
-        v = sky_mask_l32("pf_random_mask_at", grid, seed, int(i, int64), pixels, sky_draw(draw))
+        call sky_mask_l32("pf_random_mask_at", grid, seed, int(i, int64), pixels, sky_draw(draw), v)
     end procedure sky_mask_at_i32_i32
 
     module procedure sky_mask_at_i32_i64
-        v = sky_mask_l64("pf_random_mask_at", grid, seed, int(i, int64), pixels, sky_draw(draw))
+        call sky_mask_l64("pf_random_mask_at", grid, seed, int(i, int64), pixels, sky_draw(draw), v)
     end procedure sky_mask_at_i32_i64
 
     module procedure sky_mask_at_i64_i32
-        v = sky_mask_l32("pf_random_mask_at", grid, seed, i, pixels, sky_draw(draw))
+        call sky_mask_l32("pf_random_mask_at", grid, seed, i, pixels, sky_draw(draw), v)
     end procedure sky_mask_at_i64_i32
 
     module procedure sky_mask_at_i64_i64
-        v = sky_mask_l64("pf_random_mask_at", grid, seed, i, pixels, sky_draw(draw))
+        call sky_mask_l64("pf_random_mask_at", grid, seed, i, pixels, sky_draw(draw), v)
     end procedure sky_mask_at_i64_i64
 
     module procedure sky_mask_radec_at_i32_i32
         real(real64) :: v(3)
 
-        v = sky_mask_l32("pf_random_mask_radec_at", grid, seed, int(i, int64), pixels, sky_draw(draw))
+        call sky_mask_l32("pf_random_mask_radec_at", grid, seed, int(i, int64), pixels, sky_draw(draw), v)
         call grid%vec2radec(v, ra, dec)
     end procedure sky_mask_radec_at_i32_i32
 
     module procedure sky_mask_radec_at_i32_i64
         real(real64) :: v(3)
 
-        v = sky_mask_l64("pf_random_mask_radec_at", grid, seed, int(i, int64), pixels, sky_draw(draw))
+        call sky_mask_l64("pf_random_mask_radec_at", grid, seed, int(i, int64), pixels, sky_draw(draw), v)
         call grid%vec2radec(v, ra, dec)
     end procedure sky_mask_radec_at_i32_i64
 
     module procedure sky_mask_radec_at_i64_i32
         real(real64) :: v(3)
 
-        v = sky_mask_l32("pf_random_mask_radec_at", grid, seed, i, pixels, sky_draw(draw))
+        call sky_mask_l32("pf_random_mask_radec_at", grid, seed, i, pixels, sky_draw(draw), v)
         call grid%vec2radec(v, ra, dec)
     end procedure sky_mask_radec_at_i64_i32
 
     module procedure sky_mask_radec_at_i64_i64
         real(real64) :: v(3)
 
-        v = sky_mask_l64("pf_random_mask_radec_at", grid, seed, i, pixels, sky_draw(draw))
+        call sky_mask_l64("pf_random_mask_radec_at", grid, seed, i, pixels, sky_draw(draw), v)
         call grid%vec2radec(v, ra, dec)
     end procedure sky_mask_radec_at_i64_i64
 
@@ -501,14 +539,14 @@ contains
         integer(int64) :: seed, stream, d
 
         call sky_take_block("pf_random_mask_next", rng, seed, stream, d)
-        v = sky_mask_l32("pf_random_mask_next", grid, seed, stream, pixels, d)
+        call sky_mask_l32("pf_random_mask_next", grid, seed, stream, pixels, d, v)
     end procedure sky_mask_next_i32
 
     module procedure sky_mask_next_i64
         integer(int64) :: seed, stream, d
 
         call sky_take_block("pf_random_mask_next", rng, seed, stream, d)
-        v = sky_mask_l64("pf_random_mask_next", grid, seed, stream, pixels, d)
+        call sky_mask_l64("pf_random_mask_next", grid, seed, stream, pixels, d, v)
     end procedure sky_mask_next_i64
 
     module procedure sky_mask_radec_next_i32
@@ -516,7 +554,7 @@ contains
         real(real64) :: v(3)
 
         call sky_take_block("pf_random_mask_radec_next", rng, seed, stream, d)
-        v = sky_mask_l32("pf_random_mask_radec_next", grid, seed, stream, pixels, d)
+        call sky_mask_l32("pf_random_mask_radec_next", grid, seed, stream, pixels, d, v)
         call grid%vec2radec(v, ra, dec)
     end procedure sky_mask_radec_next_i32
 
@@ -525,7 +563,7 @@ contains
         real(real64) :: v(3)
 
         call sky_take_block("pf_random_mask_radec_next", rng, seed, stream, d)
-        v = sky_mask_l64("pf_random_mask_radec_next", grid, seed, stream, pixels, d)
+        call sky_mask_l64("pf_random_mask_radec_next", grid, seed, stream, pixels, d, v)
         call grid%vec2radec(v, ra, dec)
     end procedure sky_mask_radec_next_i64
 

@@ -838,11 +838,55 @@ def pixel_draw(nside, scheme, seed, stream, ipix, draw):
     return pixel_walk(nside, scheme, LABELS["pixel"], seed, stream, ipix, rgv.clamp_draw(draw))
 
 
+SPARE_BITS = 11
+SPARE_MASK = (1 << SPARE_BITS) - 1
+SPARE_CAP = 1 << (2 * SPARE_BITS)
+
+
+def pair_spare(key, stream, lo, hi, d):
+    """`pf_random_pair_spare_at`: one block as two uniforms and, where it can, an integer.
+
+    `to_real64` keeps the top 53 bits of each 64-bit half, so 22 bits go spare across the block.
+    Those choose from a list by Lemire, which is what lets a mask draw take ONE enciphering. The
+    guard below is Lemire's lazy one, as the library writes it: a low word at or above the width
+    cannot lie in the last partial block, so the exact threshold -- a division -- is only computed
+    for the rest."""
+    c = rgv.block(key, stream, d - 1)
+    b1 = (c[1] << 32) | c[0]
+    b2 = (c[3] << 32) | c[2]
+    u1 = float(b1 >> 11) * 2.0 ** -53
+    u2 = float(b2 >> 11) * 2.0 ** -53
+    a, b = min(lo, hi), max(lo, hi)
+    s = b - a + 1
+    if s <= 0 or s > SPARE_CAP:
+        return u1, u2, a, False
+    cand = ((b1 & SPARE_MASK) << SPARE_BITS) | (b2 & SPARE_MASK)
+    m = cand * s
+    hi22 = m >> (2 * SPARE_BITS)
+    lo22 = m & (SPARE_CAP - 1)
+    if lo22 >= s:
+        return u1, u2, a + hi22, True
+    if lo22 < SPARE_CAP % s:
+        return u1, u2, a, False
+    return u1, u2, a + hi22, True
+
+
 def mask_draw(nside, scheme, seed, stream, pixels, draw):
-    """`pf_random_mask_at`: `(v, j)` with `j` the 1-based chosen entry."""
+    """`pf_random_mask_at`: `(v, j)` with `j` the 1-based chosen entry.
+
+    **One enciphering carries both.** The point's block spares 22 bits, and the choice comes out of
+    those; when they cannot decide it exactly the choice falls back to its own family, which is the
+    construction this draw used throughout before the spare bits were put to work."""
     d = rgv.clamp_draw(draw)
-    j, _ = rgv.int_at(rgv.random_key(seed, LABELS["mask_choice"]), stream, 1, len(pixels), d)
-    v, _ = pixel_walk(nside, scheme, LABELS["mask_point"], seed, stream, pixels[j - 1], d)
+    key = rgv.random_key(rgv.random_key(seed, LABELS["mask_point"]), d)
+    u1, u2, j, ok = pair_spare(key, stream, 1, len(pixels), 1)
+    if not ok:
+        j, _ = rgv.int_at(rgv.random_key(seed, LABELS["mask_choice"]), stream, 1, len(pixels), d)
+    ipix = pixels[j - 1]
+    v = pix_point(nside, scheme, ipix, u1, u2)
+    delta = min(1e-12, 1e-4 * float(max_pixrad(nside)))
+    if not pixel_stable(nside, scheme, v, delta):
+        raise Unstable
     return v, j
 
 

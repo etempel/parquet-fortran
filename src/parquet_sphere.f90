@@ -42,7 +42,7 @@
 module parquet_sphere
     use, intrinsic :: iso_fortran_env, only: int32, int64, real64
     use parquet_random, only: pf_random_stream, pf_random_key, pf_random_fill_draws, pf_random_int_at, &
-        pf_random_disc_cap
+        pf_random_pair_spare_at, pf_random_disc_cap
     use parquet_healpix, only: pf_healpix_grid, PF_HP_RING, PF_HP_NEST, PF_HP_DEC_NORTH, PF_HP_DEC_SOUTH
     use parquet_utils, only: pf_wrap_deg
     implicit none

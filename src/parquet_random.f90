@@ -130,6 +130,7 @@ module parquet_random
     public :: pf_random32_at
     public :: pf_random_bits_at
     public :: pf_random_int_at
+    public :: pf_random_pair_spare_at
     public :: pf_random_fill_draws
     public :: pf_random_fill_streams
     public :: pf_random_exp_at
@@ -372,6 +373,12 @@ module parquet_random
     !! the cap is on the width `hi - lo + 1`, never on `size(idx)`, which are the same number for a
     !! resample and different for everything else.
     integer(int64), parameter :: NARROW32_CAP = 16777216_int64
+    !> The bits each half of a block keeps back from `to_real64`, which reads the top 53 of 64.
+    integer, parameter :: SPARE_BITS = 11
+    !> The mask selecting one half's spare bits, `2**SPARE_BITS - 1`.
+    integer(int64), parameter :: SPARE_MASK = 2047_int64
+    !> The largest range width the two halves' spare bits together can decide, `2**22`.
+    integer(int64), parameter :: SPARE_CAP = 4194304_int64
 
     ! ---- Per-generic word spaces (domain tags) ----
     !
@@ -577,6 +584,31 @@ module parquet_random
         module procedure pf_random_int_at_i32
         module procedure pf_random_int_at_i64
     end interface pf_random_int_at
+
+    !> Two uniforms of one enciphering, and an integer drawn from the bits they leave over.
+    !!
+    !! `call pf_random_pair_spare_at(seed, i, lo, hi, u1, u2, j, ok [, draw])`. One block carries
+    !! 128 bits; `u1` and `u2` are its two halves converted exactly as `pf_random_at` converts them,
+    !! which keeps the top 53 bits of each and **discards 22**. Those 22 are enough to choose from a
+    !! list, so a composite draw -- a point somewhere, and which somewhere -- costs ONE enciphering
+    !! rather than two.
+    !!
+    !! * `u1` and `u2` are exactly `pf_random_at(seed, i, 2*draw-1)` and `pf_random_at(seed, i, 2*draw)`,
+    !!   whatever `lo`, `hi` and `ok` turn out to be. The integer cannot disturb the pair.
+    !! * `ok` is `.true.` when `j` is an exactly uniform integer in `[lo, hi]`. It is `.false.`
+    !!   when the 22 bits cannot decide the range exactly -- a width above `2**22`, or Lemire's
+    !!   rejection firing, which for a width `w` happens with probability below `w/2**22`. **The
+    !!   caller must then draw `j` itself**, by any exact means independent of these bits;
+    !!   `pf_random_int_at` at the same coordinates on its own key is the obvious one. A mixture of
+    !!   Lemire-on-acceptance and an independent uniform is uniform, so the result stays exact.
+    !! * `lo > hi` is swapped rather than refused, as in `pf_random_int_at`. When `ok` is `.false.`
+    !!   `j` is `min(lo, hi)`, a defined value rather than a wild one.
+    !!
+    !! `seed`, `i`, `lo`, `hi` and `draw` are `integer(int64)`; `draw` below 1 clamps to 1. `pure`,
+    !! and a pure function of its coordinates like every other `_at` form.
+    interface pf_random_pair_spare_at
+        module procedure pf_random_pair_spare_at_i64
+    end interface pf_random_pair_spare_at
 
     !> Fills `v` with consecutive values of one stream, starting at `draw` (default 1).
     !!
@@ -1298,6 +1330,20 @@ contains
         integer(int64) :: r                         !! a uniform integer in `[min(lo,hi), max(lo,hi)]`
         r = int_at_impl(seed, i, lo, hi, draw_or_1(draw))
     end function pf_random_int_at_i64
+
+    !> `pf_random_pair_spare_at` for an `integer(int64)` stream index. See the generic.
+    pure subroutine pf_random_pair_spare_at_i64(seed, i, lo, hi, u1, u2, j, ok, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        real(real64), intent(out) :: u1             !! the block's first uniform, in `[0, 1)`
+        real(real64), intent(out) :: u2             !! the block's second uniform, in `[0, 1)`
+        integer(int64), intent(out) :: j            !! a uniform integer in the closed range, when `ok`
+        logical, intent(out) :: ok                  !! whether the spare bits decided `j`
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        call pair_spare_draw(seed, i, lo, hi, draw_or_1(draw), u1, u2, j, ok)
+    end subroutine pf_random_pair_spare_at_i64
 
     !> `pf_random_exp_at` for an `integer(int32)` stream index.
     pure elemental function pf_random_exp_at_i32(seed, i, draw) result(r)
@@ -2593,6 +2639,67 @@ contains
                 " - 1); the sphere family addresses one block per draw"
         end if
     end function sph_fill_start
+
+    !> `pf_random_pair_spare_at`'s body: one enciphering read as two uniforms AND an integer.
+    !!
+    !! `to_real64` keeps the top 53 bits of each 64-bit half, so each half discards 11 -- 22 bits
+    !! across the block that cost nothing and are otherwise thrown away. They are enough to choose
+    !! from a list, which is what lets a composite draw (a point in a pixel, and which pixel) take
+    !! ONE enciphering instead of two.
+    !!
+    !! **`u1` and `u2` do not depend on whether the integer was decided**: they are the block's two
+    !! uniforms unconditionally, exactly as `sph_pair` reads them. So the caller's point is
+    !! unaffected by the choice and the two can be reasoned about separately.
+    !!
+    !! **`ok` is `.false.` when 22 bits cannot decide the range exactly** -- a width above `2**22`,
+    !! or Lemire's rejection firing -- and the caller then draws the integer some other exact way.
+    !! That keeps the result exactly uniform: conditional on acceptance Lemire is uniform, the
+    !! caller's fallback is uniform, and a mixture of two uniforms is uniform. The rejection test
+    !! reads only the spare bits, which live in a different field of the block from the uniforms.
+    pure subroutine pair_spare_draw(seed, stream, lo, hi, d, u1, u2, j, ok)
+        integer(int64), intent(in) :: seed          !! the family's derived key
+        integer(int64), intent(in) :: stream        !! the stream index
+        integer(int64), intent(in) :: lo            !! the range's low end
+        integer(int64), intent(in) :: hi            !! the range's high end
+        integer(int64), intent(in) :: d             !! the draw, at least 1
+        real(real64), intent(out) :: u1             !! the block's first uniform, in `[0, 1)`
+        real(real64), intent(out) :: u2             !! the block's second uniform, in `[0, 1)`
+        integer(int64), intent(out) :: j            !! a uniform integer in `[lo, hi]`, when `ok`
+        logical, intent(out) :: ok                  !! whether the spare bits decided it
+        integer(int64) :: w0, w1, w2, w3, b1, b2, cand, a, s, m, hi22, lo22, t
+        call random_block(seed, stream, ior(DOM_REAL64, d - 1_int64), w0, w1, w2, w3)
+        b1 = ior(ishft(w1, 32), w0)
+        b2 = ior(ishft(w3, 32), w2)
+        u1 = to_real64(b1)
+        u2 = to_real64(b2)
+        a = min(lo, hi)
+        j = a
+        ok = .false.
+        s = width_of(a, max(lo, hi))
+        ! `s` is unsigned with 0 meaning the whole int64 range; a width above `2**22` reads as a
+        ! large positive or as negative, and both are refused by this one test.
+        if (s <= 0_int64 .or. s > SPARE_CAP) return
+        cand = ior(ishft(iand(b1, SPARE_MASK), SPARE_BITS), iand(b2, SPARE_MASK))
+        ! Lemire over a 22-bit candidate. `cand*s` is below `2**44`, so nothing overflows.
+        m = cand * s
+        hi22 = ishft(m, -(2 * SPARE_BITS))
+        lo22 = iand(m, SPARE_CAP - 1_int64)
+        ! Lemire's LAZY GUARD, as `int_reduce` uses it and for the same reason: the exact threshold
+        ! is `mod(2**22, s)`, a division by a RUNTIME value, and paying it per draw costs more than
+        ! the enciphering this routine exists to save. A low word at or above `s` cannot lie in the
+        ! last partial block whatever the threshold is, so it is accepted without computing one;
+        ! only the remaining `s/2**22` of draws divide. Both operands are below `2**22` and
+        ! non-negative, so these are ordinary signed comparisons.
+        if (lo22 >= s) then
+            j = offset_by(a, hi22)
+            ok = .true.
+            return
+        end if
+        t = mod(SPARE_CAP, s)
+        if (lo22 < t) return
+        j = offset_by(a, hi22)
+        ok = .true.
+    end subroutine pair_spare_draw
 
     !> The two uniforms of one sphere draw: the halves of block `d - 1` of `(key, stream)`.
     !!

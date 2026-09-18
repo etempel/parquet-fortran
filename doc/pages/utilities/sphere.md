@@ -205,7 +205,12 @@ the pixel centre; it is the round trip back to an index that runs out of digits,
 
 A **mask** is a non-empty list of pixel indices. The pixel is chosen uniformly from the list —
 uniform over the union, since every pixel has one area — and **a pixel listed twice counts twice**,
-so a list built by repetition is a mask with integer weights. A scalar mask draw checks only the
+so a list built by repetition is a mask with integer weights. **A mask draw costs the same one
+enciphering as a pixel draw**: converting the block's two halves to the point's coordinates leaves
+22 bits spare, and the choice comes out of those
+([`pf_random_pair_spare_at`](random.html#two-uniforms-and-an-integer-for-the-price-of-one-pf_random_pair_spare_at)).
+A list longer than 2²², and the rare draw the spare bits cannot decide exactly, fall back to a
+second block — the choice stays exactly uniform over the list either way. A scalar mask draw checks only the
 entry it chooses, so a long list costs nothing per draw; the fills check every entry before drawing
 anything. For real-valued weights, choose the pixel yourself and draw in it:
 

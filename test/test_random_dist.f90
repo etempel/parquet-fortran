@@ -166,9 +166,103 @@ contains
             new_unittest("the int32 and int64 stream-index specifics of every sphere form agree", &
                          test_sphere_kinds_agree), &
             new_unittest("draw 2**62 is the last a sphere form or fill accepts, and a draw below 1 clamps", &
-                         test_sphere_draw_bound) &
+                         test_sphere_draw_bound), &
+            new_unittest("the spare-bit pair keeps its uniforms exact and its integer unbiased", &
+                         test_pair_spare) &
             ]
     end subroutine collect_tests_parquet_random_dist
+
+    !> `pf_random_pair_spare_at`: the pair is untouched, the integer is exactly uniform, and the
+    !! fallback fires exactly where the 22 spare bits cannot decide.
+    !!
+    !! **The pair assertion is the load-bearing one.** The whole point of the routine is that a
+    !! caller's two uniforms do not move when an integer is taken from the bits their conversions
+    !! discard; if they did, every mask point would shift and no distributional test would say so.
+    !! It is asserted TO THE BIT against `pf_random_fill_draws` at the same coordinates, which is
+    !! where those uniforms are defined.
+    !!
+    !! The uniformity gate has a control: the rejection rate is required to sit near `w/2**22`,
+    !! which fails if the lazy guard were widened into accepting everything (that would bias the
+    !! integer while leaving it in range, so a range check alone would pass).
+    subroutine test_pair_spare(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: NDRAW = 400000_int64
+        integer(int64), parameter :: WIDTHS(4) = [2_int64, 7_int64, 501_int64, 1000_int64]
+        integer(int64) :: k, j, w, cnt(1000), tot, nfall
+        real(real64) :: u1, u2, uv(2), worst, expect, chi2, rate, bound
+        logical :: ok
+        character(len=160) :: msg
+
+        ! 1. The pair is exactly the block's two uniforms, whatever the integer does.
+        worst = 0.0_real64
+        do k = 1_int64, 20000_int64
+            call pf_random_pair_spare_at(dist_seed, 3_int64, 1_int64, 1000_int64, u1, u2, j, ok, k)
+            call pf_random_fill_draws(dist_seed, 3_int64, uv, k + k - 1_int64)
+            worst = max(worst, max(abs(u1 - uv(1)), abs(u2 - uv(2))))
+            call check(error, j >= 1_int64 .and. j <= 1000_int64, "the spare-bit integer left its range")
+            if (allocated(error)) return
+        end do
+        call check(error, worst == 0.0_real64, &
+            "pf_random_pair_spare_at's uniforms are not pf_random_fill_draws' pair to the bit: taking the " // &
+            "integer from the spare bits moved the caller's point")
+        if (allocated(error)) return
+
+        ! 2. The integer is uniform over the draws the spare bits decided.
+        do w = 1_int64, int(size(WIDTHS), int64)
+            cnt = 0_int64
+            tot = 0_int64
+            do k = 1_int64, NDRAW
+                call pf_random_pair_spare_at(dist_seed, 5_int64, 1_int64, WIDTHS(w), u1, u2, j, ok, k)
+                if (ok) then
+                    cnt(j) = cnt(j) + 1_int64
+                    tot = tot + 1_int64
+                end if
+            end do
+            expect = real(tot, real64) / real(WIDTHS(w), real64)
+            chi2 = sum((real(cnt(1:WIDTHS(w)), real64) - expect) ** 2 / expect)
+            write (msg, '(a,i0,a,f12.3)') "the spare-bit integer is not uniform at width ", WIDTHS(w), ": chi2 = ", chi2
+            call check(error, chi2 <= chi2_999(int(WIDTHS(w) - 1_int64)), trim(msg))
+            if (allocated(error)) return
+        end do
+
+        ! 3. A width the 22 bits cannot span never decides; the largest they can always does.
+        nfall = 0_int64
+        do k = 1_int64, 2000_int64
+            call pf_random_pair_spare_at(dist_seed, 7_int64, 1_int64, 4194305_int64, u1, u2, j, ok, k)
+            if (.not. ok) nfall = nfall + 1_int64
+        end do
+        call check(error, nfall == 2000_int64, "a width above 2**22 was decided from 22 bits")
+        if (allocated(error)) return
+        nfall = 0_int64
+        do k = 1_int64, 2000_int64
+            call pf_random_pair_spare_at(dist_seed, 7_int64, 1_int64, 4194304_int64, u1, u2, j, ok, k)
+            if (.not. ok) nfall = nfall + 1_int64
+        end do
+        call check(error, nfall == 0_int64, "a width of exactly 2**22 divides the 22 bits evenly and cannot reject")
+        if (allocated(error)) return
+
+        ! 4. CONTROL: the rejection rate is not merely small, it is Lemire's EXACT one,
+        ! `mod(2**22, w)/2**22`. A lazy guard widened into accepting everything would bias the
+        ! integer while leaving it in range, and the uniformity gate above is too weak to catch
+        ! that on its own; this pins the threshold itself.
+        w = 3000000_int64
+        nfall = 0_int64
+        do k = 1_int64, NDRAW
+            call pf_random_pair_spare_at(dist_seed, 9_int64, 1_int64, w, u1, u2, j, ok, k)
+            if (.not. ok) nfall = nfall + 1_int64
+        end do
+        rate = real(nfall, real64) / real(NDRAW, real64)
+        expect = real(mod(4194304_int64, w), real64) / 4194304.0_real64
+        bound = 4.0_real64 * sqrt(expect * (1.0_real64 - expect) / real(NDRAW, real64))
+        write (msg, '(a,f8.5,a,f8.5,a,f8.5,a)') "the spare-bit rejection rate is ", rate, ", not Lemire's ", &
+            expect, " (4 SE = ", bound, ")"
+        call check(error, abs(rate - expect) <= bound, trim(msg))
+        if (allocated(error)) return
+
+        ! 5. `lo > hi` swaps rather than failing, as pf_random_int_at does.
+        call pf_random_pair_spare_at(dist_seed, 11_int64, 40_int64, 10_int64, u1, u2, j, ok, 1_int64)
+        call check(error, j >= 10_int64 .and. j <= 40_int64, "a reversed range was not swapped")
+    end subroutine test_pair_spare
 
     !> Every row of the exponential golden table, against the oracle appropriate to each column.
     !!

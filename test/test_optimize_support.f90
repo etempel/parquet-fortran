@@ -453,7 +453,13 @@ contains
 
         n = size(x)
         f = 0.0_real64
-        s = sum(x) - real(n + 1, real64)
+        ! Added in index order, not by the intrinsic: flang's runtime `SUM` compensates its rounding
+        ! at `-O0`, and one ulp here puts the reproducer on a search path that misses its site.
+        s = 0.0_real64
+        do i = 1, n
+            s = s + x(i)
+        end do
+        s = s - real(n + 1, real64)
         do i = 1, n - 1
             f = f + (x(i) + s)**2
         end do

@@ -2670,6 +2670,60 @@ def check_parquet_prima_stays_arrow_free():
         "Powell's derivative-free methods must not require the Arrow stack.")
 
 
+def check_prima_sums_are_the_ordered_sum():
+    """Every `sum(...)` in the vendored PRIMA tier reaches `parquet_prima_linalg`'s ordered `sum`.
+
+    `parquet_prima_linalg` extends the intrinsic `sum` over real vectors, and real matrices with
+    `dim=`, by specifics adding in index order (its header, deviation 9). A file that calls `sum`
+    without importing it gets the intrinsic, whose order is the processor's: flang's runtime `SUM`
+    compensates its rounding at `-O0`, so that one call site rounds differently there, and a
+    trust-region method's search path turns on the last bit. Nothing else notices -- only a flang
+    run of a path-sensitive reproducer in `test/test_prima.f90` does. A `mask=` form is not
+    extended, so it is refused in every file of the tier, `parquet_prima_linalg` included.
+
+    See `.claude/rules/fortran-gotchas.md`, "flang-specific gotchas".
+    """
+    problems = []
+    callers = 0
+    for path in sorted((REPO_ROOT / "src").glob("parquet_prima*.f90")):
+        rel = path.relative_to(REPO_ROOT)
+        first_call, imports_sum = None, False
+        for n, stmt in _joined_statements(path):
+            use = re.match(r"\s*use\s+parquet_prima_linalg\s*,\s*only\s*:(.*)$", stmt, re.I)
+            if use and any(name.strip().lower() == "sum" for name in use.group(1).split(",")):
+                imports_sum = True
+            for call in re.finditer(r"\bsum\s*\(", stmt, re.I):
+                if first_call is None:
+                    first_call = n
+                depth, args = 0, ""
+                for ch in stmt[call.end() - 1:]:
+                    depth += (ch == "(") - (ch == ")")
+                    args += ch
+                    if depth == 0:
+                        break
+                top, depth = "", 0
+                for ch in args[1:-1]:
+                    depth += (ch == "(") - (ch == ")")
+                    top += ch if depth == 0 else " "
+                if re.search(r"\bmask\s*=", top, re.I):
+                    problems.append(
+                        "%s:%d: `sum(..., mask=)` is the intrinsic, whose order is the processor's; "
+                        "parquet_prima_linalg's ordered `sum` has no mask form (header deviation 9)"
+                        % (rel, n))
+        if first_call is None:
+            continue
+        callers += 1
+        if path.name != "parquet_prima_linalg.f90" and not imports_sum:
+            problems.append(
+                "%s:%d: calls `sum` without importing it from parquet_prima_linalg, so it gets the "
+                "intrinsic, which flang sums in another order at -O0 -- add `sum` to the only: list "
+                "(parquet_prima_linalg's header, deviation 9)" % (rel, first_call))
+    if callers == 0:
+        problems.append("no src/parquet_prima*.f90 calls `sum`: this check has come up empty -- "
+                        "re-aim it before trusting its silence")
+    return problems
+
+
 def check_parquet_utils_is_total():
     """Every `parquet_utils` procedure is `pure`, and the module contains no `error stop`.
 
@@ -8254,6 +8308,7 @@ CHECKS = (
     ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
+    ("every sum in the vendored PRIMA tier is the ordered one", check_prima_sums_are_the_ordered_sum),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",
      check_facade_inventory_matches_its_use_lines),

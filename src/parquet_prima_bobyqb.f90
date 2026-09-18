@@ -35,7 +35,7 @@ module parquet_prima_bobyqb
     use parquet_optimize, only : pf_objective
     use parquet_prima_common, only : prima_state, evaluate, checkexit, redrat, redrho, xinbd, &
         shiftbase, interval_max
-    use parquet_prima_linalg, only : ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, REALMAX, REALMIN, &
+    use parquet_prima_linalg, only : sum, ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, REALMAX, REALMIN, &
         QUART, is_nan, is_finite, is_posinf, is_inf, inprod, matprod, outprod, trueloc, norm, &
         diag, planerot, r1update, r2update, symmetrize, linspace, INFO_DFT, SMALL_TR_RADIUS, &
         MAXTR_REACHED, DAMAGING_ROUNDING, NAN_INF_MODEL, MAXFUN_REACHED, FTARGET_ACHIEVED

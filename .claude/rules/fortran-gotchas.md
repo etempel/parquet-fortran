@@ -141,6 +141,15 @@ done | sort | uniq -c | sort -rn
   see the difference. Both forms are quiet on a quiet NaN. `-Wcompare-reals` hits on exact-equality checks
   (`value == anint(value)`) are accepted, not epsilon-ised.
 - **`-ffast-math`/`-Ofast` fold every `ieee_is_nan` guard to `.false.`**; never build with them.
+- **An IEEE halting mode set inside a helper is undone when the helper returns, and a flag read
+  inside one reads quiet** (F2018 17.3: the halting modes are restored on return from every
+  procedure but `ieee_set_halting_mode`/`ieee_set_status`, and a flag signalling on entry is
+  quietened until return). nagfor does both, so a `hold_traps()`/`read_traps()` pair leaves
+  `-ieee=stop` armed and reports nothing raised; flang 22 does the flag half; gfortran does
+  neither. Save, hold off, clear, read
+  and restore in the test's own body; only an inquiry may live in a helper (`traps_can_be_held`,
+  `test/test_prima.f90`). `ieee_get_status`/`ieee_set_status` would do it in two lines, but flang
+  22 does not implement them.
 - **A DIFFERENCE of two nearly-equal doubles carries ~8 digits, the rest is the compiler.** Form
   small quantities directly (exact rational, `(a²-b²)/(a+b)`, half-angle sine); a test asserting
   such a value below ~1e-8 relative pins one toolchain's rounding. An external reference computed
@@ -458,6 +467,14 @@ flang builds here are serial only and `--profile release` does not link (`build.
   `ulimit -s 65520`, scale the fixture, print the counter. **Hoist**: build each message once above
   the loop into a `character(len=:), allocatable`; never raise the limit (`-fno-stack-arrays` does
   not help).
+- **The runtime `SUM` of a `real` array compensates its rounding, and `-O0` calls it**, with or
+  without `dim=`/`mask=`: `1 + 4*1e-16` sums to `1.0000000000000004` at `-O0` and to `1.0` at
+  `-O1` and above, where the intrinsic is inlined as a loop in index order, as gfortran and nagfor
+  do at every level. The default profile passes flang no `-O`, so a plain `fpm test` is the arm
+  that differs, and an algorithm whose path turns on the last bit follows another path there. The
+  vendored PRIMA engines sum through `parquet_prima_linalg`'s ordered `sum` (its header, deviation
+  9; `check_prima_sums_are_the_ordered_sum`), and a test objective feeding a path-sensitive
+  reproducer loops (`brown_almost_linear`, `test/test_optimize_support.f90`).
 - **An INTERNAL procedure passed as an actual argument to a `procedure(...)` dummy SIGSEGVs
   before the callee runs** (flang 22.1.8 on arm64 macOS, with or without a host reference; a
   module procedure passed the same way runs, and gfortran, ifx and nagfor run both forms). Every

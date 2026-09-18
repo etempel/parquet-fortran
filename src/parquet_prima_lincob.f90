@@ -44,7 +44,7 @@ module parquet_prima_lincob
     use parquet_optimize, only : pf_objective
     use parquet_prima_common, only : prima_state, evaluate, checkexit, redrat, redrho, &
         shiftbase, savefilt, selectx, isbetter
-    use parquet_prima_linalg, only : ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, REALMAX, REALMIN, &
+    use parquet_prima_linalg, only : sum, ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, REALMAX, REALMIN, &
         BOUNDMAX, TINYCV, is_nan, is_finite, is_posinf, inprod, matprod, outprod, trueloc, norm, &
         planerot, eye, maximum, isminor, lsqr, solve, linspace, int, r1update, &
         INFO_DFT, SMALL_TR_RADIUS, MAXTR_REACHED, DAMAGING_ROUNDING, NAN_INF_MODEL

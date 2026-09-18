@@ -39,7 +39,7 @@ submodule (parquet_prima) parquet_prima_lincoa
     use parquet_prima_common, only : prima_state, refuse_bad_call, caller_violation, finish_run, &
         bounds_in_engine_units
     use parquet_prima_lincob, only : lincob
-    use parquet_prima_linalg, only : prima_abort, is_finite, eye, trueloc, maximum, norm, &
+    use parquet_prima_linalg, only : sum, prima_abort, is_finite, eye, trueloc, maximum, norm, &
         ZERO, ONE, TWO, TEN, EPS, BOUNDMAX, MAXPOW10, &
         ETA1_DFT, ETA2_DFT, GAMMA1_DFT, GAMMA2_DFT, &
         RHOBEG_DFT, RHOEND_DFT, FTARGET_DFT, MAXFUN_DIM_DFT, CTOL_DFT, CWEIGHT_DFT, MAXFILT_DFT, &

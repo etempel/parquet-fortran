@@ -36,7 +36,7 @@ module parquet_prima_common
     use parquet_optimize, only : pf_objective, pf_constrained_objective, pf_optimize_history, &
         pf_optimize_info, &
         PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, PF_OPT_ROUNDING, PF_OPT_INFEASIBLE
-    use parquet_prima_linalg, only : ZERO, HALF, QUART, INFO_DFT, NAN_INF_X, NAN_INF_F, &
+    use parquet_prima_linalg, only : sum, ZERO, HALF, QUART, INFO_DFT, NAN_INF_X, NAN_INF_F, &
         FTARGET_ACHIEVED, MAXFUN_REACHED, TENTH, prima_abort, is_nan, is_inf, is_posinf, &
         is_neginf, is_finite, REALMAX, BOUNDMAX, ONE, TWO, TEN, EPS, inprod, matprod, outprod, &
         trueloc, linspace, int, maximum, FUNCMAX, CONSTRMAX, &

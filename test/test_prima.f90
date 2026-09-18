@@ -27,13 +27,13 @@ module test_prima
     use test_optimize_support
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use iso_fortran_env, only : real64, int64
-    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_overflow, &
-                                             ieee_invalid, ieee_divide_by_zero
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_usual, ieee_underflow
 #ifndef __flang__
     ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
     ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
     use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
-                                             ieee_set_halting_mode
+                                             ieee_set_halting_mode, ieee_overflow, ieee_invalid, &
+                                             ieee_divide_by_zero
 #endif
 
     implicit none
@@ -288,23 +288,33 @@ contains
 
         real(real64) :: free(2), bounded(2), f_free, f_bounded, lo(2), hi(2), sc(2)
         type(pf_optimize_info) :: i_free, i_bounded
-        logical :: halting(3), saved(3), base(3), raised(3)
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), base(size(ieee_usual)), &
+                   raised(size(ieee_usual))
 
         lo = -huge(1.0_real64)
         hi = huge(1.0_real64)
-        call hold_ieee_traps(halting, saved)
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
 
         ! The baseline: the same call with no bounds, whose flags are the engine's own.
         free = [-1.2_real64, 1.0_real64]
         call pf_minimize_bobyqa(rosenbrock, free, f_free, rhobeg=0.5_real64, &
                                 rhoend=1.0e-8_real64, info=i_free)
-        call read_ieee_traps(base)
+        call ieee_get_flag(ieee_usual, base)
 
-        call clear_ieee_traps()
+        call ieee_set_flag(ieee_usual, .false.)
         bounded = [-1.2_real64, 1.0_real64]
         call pf_minimize_bobyqa(rosenbrock, bounded, f_bounded, lower=lo, upper=hi, &
                                 rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=i_bounded)
-        call read_ieee_traps(raised)
+        call ieee_get_flag(ieee_usual, raised)
 
         call check(error, all(raised .eqv. (raised .and. base)), &
             "forming the box from +/-huge() bounds raised a flag the unbounded run does not")
@@ -322,18 +332,21 @@ contains
         ! against for ABSENT bounds only: `lower/scale` is `-1e311` before it is anything else.
         ! Its baseline is the same scaled call with no bounds.
         sc = 1.0e-3_real64
-        call clear_ieee_traps()
+        call ieee_set_flag(ieee_usual, .false.)
         free = [-1.2_real64, 1.0_real64]*sc
         call pf_minimize_bobyqa(rosenbrock, free, f_free, scale=sc, rhobeg=0.5_real64, &
                                 rhoend=1.0e-8_real64, info=i_free)
-        call read_ieee_traps(base)
+        call ieee_get_flag(ieee_usual, base)
 
-        call clear_ieee_traps()
+        call ieee_set_flag(ieee_usual, .false.)
         bounded = [-1.2_real64, 1.0_real64]*sc
         call pf_minimize_bobyqa(rosenbrock, bounded, f_bounded, lower=lo, upper=hi, scale=sc, &
                                 rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=i_bounded)
-        call read_ieee_traps(raised)
-        call release_ieee_traps(halting, saved)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
 
         call check(error, all(raised .eqv. (raised .and. base)), &
             "dividing a +/-huge() bound by a scale below one raised a flag the same call without " // &
@@ -381,16 +394,32 @@ contains
 
         real(real64) :: x(12), fmin, f_start
         type(pf_optimize_info) :: info
-        logical :: halting(3), saved(3), raised(3)
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+        logical :: underflow_saved
 
         x = START
         f_start = brown_almost_linear(START)
-        call hold_ieee_traps(halting, saved)
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        ! The `1e-300` curvature raises underflow as well, which is put back with the rest.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+        call ieee_get_flag(ieee_underflow, underflow_saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
         call pf_minimize_bobyqa(brown_almost_linear, x, fmin, lower=LOWER, upper=UPPER, &
                                 rhobeg=RHOBEG, rhoend=1.0e-6_real64, npt=14, max_neval=6000, &
                                 info=info)
-        call read_ieee_traps(raised)
-        call release_ieee_traps(halting, saved)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved)
+        call ieee_set_flag(ieee_underflow, underflow_saved)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
 
         call check(error, any(raised), &
             "the configuration no longer trips the geometry step's arithmetic: re-aim the reproducer")
@@ -416,14 +445,26 @@ contains
 
         real(real64) :: x(2), fmin
         type(pf_optimize_info) :: info
-        logical :: halting(3), saved(3), raised(3)
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
 
         x = [-1.2_real64, 1.0_real64]
-        call hold_ieee_traps(halting, saved)
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
         call pf_minimize_bobyqa(rosenbrock_1e300, x, fmin, rhobeg=0.5_real64, &
                                 rhoend=1.0e-8_real64, info=info)
-        call read_ieee_traps(raised)
-        call release_ieee_traps(halting, saved)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
 
         call check(error, any(raised), &
             "an objective near 1e300 no longer trips the model's arithmetic: re-aim the reproducer")
@@ -438,77 +479,28 @@ contains
 
     end subroutine test_bobyqa_huge_objective_values
 
-    !> Clears the three flags a reproducer can raise and turns halting on them off, saving both.
+#ifndef __flang__
+    !> The processor can turn halting off for every flag in `ieee_usual`.
     !!
     !! nagfor halts on overflow, invalid and divide-by-zero by default, so a test running a
     !! configuration known to raise one would take the whole runner down before it could assert
-    !! anything; bracketing the call keeps the finding a test result. `ieee_set_halting_mode` does
-    !! not link under flang on macOS (`.claude/rules/fortran-gotchas.md`), which is what the
-    !! preprocessor guard is for.
-    subroutine hold_ieee_traps(halting, saved)
-        logical, intent(out) :: halting(3) !! halting modes on entry: overflow, invalid, divide
-        logical, intent(out) :: saved(3)   !! the flags themselves on entry, to be put back
+    !! anything; holding halting off around the call keeps the finding a test result. **That bracket
+    !! is written out in each test's own body, and this inquiry is the only part a helper may
+    !! carry**: F2018 17.3 restores the halting modes on return from any procedure other than
+    !! `ieee_set_halting_mode`, and quietens a flag signalling on entry to a procedure until it
+    !! returns. nagfor does both, so a helper that set the modes changed nothing its caller ran
+    !! under, and one that read the flags reported none raised (flang does the flag half too). The
+    !! flags are restored afterwards rather than left raised: what a test deliberately provoked is
+    !! not a finding for whatever runs next on this thread. `ieee_set_halting_mode` does not link
+    !! under flang on macOS, which is what the preprocessor guard is for.
+    function traps_can_be_held() result(can)
+        logical :: can !! `ieee_support_halting` holds for overflow, invalid and divide-by-zero
 
-        halting = .false.
-        saved = .false.
-        call read_ieee_traps(saved)
-#ifndef __flang__
-        if (ieee_support_halting(ieee_overflow)) then
-            call ieee_get_halting_mode(ieee_overflow, halting(1))
-            call ieee_set_halting_mode(ieee_overflow, .false.)
-        end if
-        if (ieee_support_halting(ieee_invalid)) then
-            call ieee_get_halting_mode(ieee_invalid, halting(2))
-            call ieee_set_halting_mode(ieee_invalid, .false.)
-        end if
-        if (ieee_support_halting(ieee_divide_by_zero)) then
-            call ieee_get_halting_mode(ieee_divide_by_zero, halting(3))
-            call ieee_set_halting_mode(ieee_divide_by_zero, .false.)
-        end if
+        can = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid) &
+            .and. ieee_support_halting(ieee_divide_by_zero)
+
+    end function traps_can_be_held
 #endif
-        call clear_ieee_traps()
-
-    end subroutine hold_ieee_traps
-
-    !> Clears the three flags, so that the next call's own are what a test reads.
-    subroutine clear_ieee_traps()
-
-        call ieee_set_flag(ieee_overflow, .false.)
-        call ieee_set_flag(ieee_invalid, .false.)
-        call ieee_set_flag(ieee_divide_by_zero, .false.)
-
-    end subroutine clear_ieee_traps
-
-    !> Reads the three flags without clearing them, so a test can assert what a call raised.
-    subroutine read_ieee_traps(raised)
-        logical, intent(out) :: raised(3) !! overflow, invalid, divide by zero
-
-        call ieee_get_flag(ieee_overflow, raised(1))
-        call ieee_get_flag(ieee_invalid, raised(2))
-        call ieee_get_flag(ieee_divide_by_zero, raised(3))
-
-    end subroutine read_ieee_traps
-
-    !> Puts the halting modes and the flags back as `hold_ieee_traps` found them.
-    !!
-    !! The flags are RESTORED rather than left raised: what a test deliberately provoked is not a
-    !! finding for whatever runs next on this thread.
-    subroutine release_ieee_traps(halting, saved)
-        logical, intent(in) :: halting(3) !! halting modes to restore
-        logical, intent(in) :: saved(3)   !! flag state to restore
-
-        call ieee_set_flag(ieee_overflow, saved(1))
-        call ieee_set_flag(ieee_invalid, saved(2))
-        call ieee_set_flag(ieee_divide_by_zero, saved(3))
-#ifndef __flang__
-        if (ieee_support_halting(ieee_overflow)) call ieee_set_halting_mode(ieee_overflow, halting(1))
-        if (ieee_support_halting(ieee_invalid)) call ieee_set_halting_mode(ieee_invalid, halting(2))
-        if (ieee_support_halting(ieee_divide_by_zero)) then
-            call ieee_set_halting_mode(ieee_divide_by_zero, halting(3))
-        end if
-#endif
-
-    end subroutine release_ieee_traps
 
     !> A `scale=` run and a run on the hand-scaled objective agree bit for bit.
     !!

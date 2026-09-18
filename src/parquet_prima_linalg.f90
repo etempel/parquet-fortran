@@ -62,8 +62,8 @@
 !!    alone use is not here and is not to be added (Q15). `qr`, `istriu`, `istril` and `isbanded`
 !!    are private, because nothing outside this module calls them once upstream's `call assert`
 !!    sites are gone. `norm` keeps upstream's generic name over two specifics -- the Euclidean
-!!    norm and the named one -- of which `norm_2` is the one name in this file that upstream does
-!!    not have, because upstream's `p_norm` takes an exponent this one does not.
+!!    norm and the named one -- of which `norm_2` is not upstream's name, because upstream's
+!!    `p_norm` takes an exponent this one does not.
 !! 7. `trueloc` counts and fills in one pass instead of `pack(linspace(1, n, n), mask=x)`. The
 !!    array it returns is the same array -- the same indices in the same order, so no arithmetic
 !!    anywhere changes -- and it is the one deviation here made for speed: the two intermediate
@@ -72,8 +72,15 @@
 !! 8. Every procedure and dummy carries its `!>`/`!!`; upstream's rationale comments are kept as
 !!    plain `!` blocks, its `!====! Calculation starts !====!` decoration is not, and every line
 !!    is inside 132 columns with no `/` immediately followed by `*` (cpp runs over this file).
+!! 9. `sum` is extended over real vectors and real matrices with `dim=`, as upstream extends
+!!    `int`, by `sum_1` and `sum_2`, which add in index order. Every engine file calling `sum`
+!!    imports it, so the call sites keep upstream's text. The intrinsic's order is the
+!!    processor's: flang's runtime `SUM` compensates its rounding when it is not inlined (`-O0`),
+!!    which moved upstream's text onto another search path there from identical input, and a
+!!    trust-region method's path turns on the last bit. Any other `sum` is still the intrinsic.
 !!
-!! **Every public name here is upstream's**, unprefixed: `inprod`, `trueloc`, `ZERO`, `EPS`.
+!! **Every public name here is upstream's**, unprefixed: `inprod`, `trueloc`, `ZERO`, `EPS` --
+!! and `sum`, the intrinsic's own name (deviation 9).
 !! That is deliberate -- the value of a vendored engine is that it can be diffed against the
 !! commit it came from -- and it is why `choosing-a-module.md` puts the `parquet_prima_*` engine
 !! modules outside the stability promise and the guide tells nobody to import them. Everything in
@@ -105,7 +112,7 @@ module parquet_prima_linalg
     public :: prima_abort
     public :: inprod, matprod, outprod, r1update, r2update, symmetrize
     public :: diag, planerot, hypotenuse, trueloc, norm, linspace, smat_mul_vec, int
-    public :: eye, inv, solve, lsqr, isminor, maximum
+    public :: eye, inv, solve, lsqr, isminor, maximum, sum
 
     ! ---- PRIMA's named constants (`common/consts.F90`) ----
 
@@ -239,6 +246,10 @@ module parquet_prima_linalg
     interface int
         module procedure logical_to_int
     end interface int
+
+    interface sum
+        module procedure sum_1, sum_2
+    end interface sum
 
 contains
 
@@ -782,6 +793,46 @@ contains
         y = merge(tsource=1, fsource=0, mask=x)
 
     end function logical_to_int
+
+    !> The sum of a vector, added in index order: the rank-one specific behind the generic `sum`.
+    !!
+    !! Header deviation 9 says why the intrinsic is extended; the order is the whole point, so
+    !! this is the plain loop and nothing cleverer.
+    pure function sum_1(x) result(s)
+        real(real64), intent(in) :: x(:)  !! the vector
+        real(real64)             :: s     !! `x(1) + x(2) + ...` in that order; zero when empty
+        integer :: i
+
+        s = ZERO
+        do i = 1, int(size(x))
+            s = s + x(i)
+        end do
+
+    end function sum_1
+
+    !> The sums of a matrix along `dim`, each added in index order: the rank-two specific behind
+    !! the generic `sum`, for the `dim=` form.
+    pure function sum_2(x, dim) result(s)
+        real(real64), intent(in) :: x(:, :)              !! the matrix
+        integer, intent(in)      :: dim                  !! `1` sums each column, `2` each row
+        real(real64)             :: s(size(x, 3 - dim))  !! one sum per column, or per row
+        integer :: i, j
+
+        if (dim == 1) then
+            do j = 1, int(size(x, 2))
+                s(j) = ZERO
+                do i = 1, int(size(x, 1))
+                    s(j) = s(j) + x(i, j)
+                end do
+            end do
+        else
+            s = ZERO
+            do j = 1, int(size(x, 2))
+                s = s + x(:, j)
+            end do
+        end if
+
+    end function sum_2
 
     ! ---- What LINCOA and COBYLA add: the factorisations and the two constrained tests ----------
     !

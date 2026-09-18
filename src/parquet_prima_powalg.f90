@@ -23,7 +23,7 @@
 module parquet_prima_powalg
 
     use, intrinsic :: iso_fortran_env, only : real64
-    use parquet_prima_linalg, only : ZERO, HALF, ONE, EPS, REALMAX, inprod, matprod, outprod, &
+    use parquet_prima_linalg, only : sum, ZERO, HALF, ONE, EPS, REALMAX, inprod, matprod, outprod, &
         trueloc, is_finite, DAMAGING_ROUNDING, INFO_DFT, &
         diag, planerot, symmetrize, hypotenuse, isminor, norm
 

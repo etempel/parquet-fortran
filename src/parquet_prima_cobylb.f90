@@ -51,7 +51,7 @@ module parquet_prima_cobylb
     use parquet_optimize, only : pf_constrained_objective
     use parquet_prima_common, only : prima_state, evaluate_fc, checkexit, redrat, redrho, &
         savefilt, selectx, isbetter
-    use parquet_prima_linalg, only : ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, REALMAX, REALMIN, &
+    use parquet_prima_linalg, only : sum, ZERO, ONE, TWO, HALF, TEN, TENTH, EPS, REALMAX, REALMIN, &
         is_nan, is_posinf, is_finite, inprod, matprod, outprod, trueloc, norm, eye, inv, &
         maximum, isminor, lsqr, linspace, int, prima_abort, &
         INFO_DFT, SMALL_TR_RADIUS, MAXTR_REACHED, DAMAGING_ROUNDING

@@ -131,7 +131,7 @@ module parquet_stats
     public :: pf_probit_fit, pf_probit_scale
     public :: pf_sigma_clipped_stats
     public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
-    public :: pf_bucketize, pf_histogram, pf_bin_edges
+    public :: pf_bucketize, pf_histogram, pf_bin_edges, pf_bin_linear
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: pf_stats
@@ -1692,6 +1692,62 @@ module parquet_stats
         module procedure bin_edges_bool
         module procedure bin_edges_col
     end interface pf_bin_edges
+    !
+    !> Deposits each value's weight onto the two grid points around it, in proportion to how near
+    !> it lies to each -- linear binning, which particle-mesh and power-spectrum work calls
+    !> cloud-in-cell (CIC) assignment.
+    !>
+    !> A value `v` in the cell between `grid(i)` and `grid(i+1)` lies a fraction
+    !> `t = (v - grid(i)) / (grid(i+1) - grid(i))` of the way across it, and gives `w*(1 - t)` of
+    !> its weight `w` to `grid(i)` and `w*t` to `grid(i+1)`, so a value exactly on a grid point
+    !> gives that point everything. `mass(k)` is the total deposited on `grid(k)`; unweighted,
+    !> every `w` is 1. This is the mass-conserving adjoint of linear interpolation:
+    !> `pf_interp_1d` reads a grid at a point, and this writes a point onto a grid.
+    !>
+    !> **The two shares of one value sum to its weight EXACTLY**, not to within a rounding: the
+    !> larger share is the product and the smaller is what the weight leaves, and that subtraction
+    !> is exact in floating point. Nothing is lost or created in the split, so `sum(mass)` differs
+    !> from the total weight deposited only by the rounding of the additions into each grid point.
+    !>
+    !> **`grid` holds POINTS, not bin edges**, which is the difference from `pf_histogram` a caller
+    !> will get wrong: `mass` has `size(grid)` entries, one per point, where `counts` has
+    !> `size(edges) - 1`, one per interval. There is no `right=` -- a value exactly on an interior
+    !> point gives it everything whichever cell it is taken to be in -- and no `density=`, because
+    !> the two end points have no defined outer half-cell. A caller who wants a density divides by
+    !> `sum(mass)` and by their own spacing.
+    !>
+    !> `grid` must hold at least two points and be **strictly increasing** and **finite**, or the
+    !> call aborts naming the offending index. **An infinite point is refused**, although
+    !> `pf_histogram` accepts an infinite outer edge: an open-ended bin is meaningful, a share of
+    !> the distance to an infinite point is not. Two neighbours so far apart that their difference
+    !> overflows a `real64` abort too, since the fraction `t` cannot be formed between them, and so
+    !> does a NaN point.
+    !>
+    !> The optional arguments are `pf_histogram`'s and mean what they mean there. `is_valid`
+    !> marks nulls; `weights` are non-negative, a zero weight removing the element and a negative,
+    !> NaN or infinite one aborting; `skipnan` (`.true.` by default) excludes a NaN. `n_null`,
+    !> `n_nan` and `n_outside` count the elements that reached no grid point, one count per reason,
+    !> and `ok` is `.false.` when any element did. Nothing here aborts on a data condition: a value
+    !> outside `[grid(1), grid(size(grid))]`, a NaN, a null and an empty population are all
+    !> reported through those counts. A sample with nothing in it, or whose every weight is zero,
+    !> leaves `mass` all zeros with `ok` `.true.`; an all-null one leaves `mass` all zeros too, but
+    !> its nulls are counted, so `ok` is `.false.`. A zero-weighted element is in none of the counts
+    !> and leaves `ok` alone, as in `pf_histogram`: it left the population rather than failing to
+    !> land.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)` or `integer(int64)`
+    !> array, or a scalar numeric `type(parquet_column)`. **There is no `logical` form**:
+    !> depositing `.true.` and `.false.` onto a continuous grid answers no question, so a logical
+    !> array does not compile and a logical column aborts naming its kind. `grid` and `mass` are
+    !> always `real(real64)`. The search is binary, so the cost is `O(n log size(grid))`, in one
+    !> pass over the values.
+    interface pf_bin_linear
+        module procedure bin_linear_f64
+        module procedure bin_linear_i32
+        module procedure bin_linear_i64
+        module procedure bin_linear_f32
+        module procedure bin_linear_col
+    end interface pf_bin_linear
     !
     !> The most common value of a population -- pandas' `mode()`, scipy's `stats.mode`.
     !>
@@ -3376,6 +3432,42 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bin_edges_f64
+        !> `pf_bin_linear` over a 64-bit real array: each value's weight split between the two grid
+        !! points around it.
+        !!
+        !! Every other specific widens its values to `real64` and calls this one, so the split is
+        !! written once and the kinds cannot disagree about it.
+        module subroutine bin_linear_f64(values, grid, mass, is_valid, weights, skipnan, n_null, &
+                n_nan, n_outside, ok)
+            real(real64), intent(in) :: values(:) !! the values to deposit.
+            real(real64), intent(in) :: grid(:) !! the grid POINTS: finite, strictly increasing, at least two.
+            real(real64), intent(out) :: mass(:)
+            !! the weight deposited on each grid point, so `size(grid)` entries -- one per POINT,
+            !! where `pf_histogram`'s `counts` has one per interval.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which lies between no two grid points and is counted
+            !! in `n_outside` instead. Either way a NaN is deposited nowhere.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[grid(1), grid(size(grid))]` and so were
+            !! deposited nowhere. An ordinary data condition rather than an error, but the one
+            !! thing a caller cannot recover from `mass`, so it is reported. An infinity is
+            !! counted here, and so is a NaN under `skipnan = .false.`.
+            logical, intent(out), optional :: ok
+            !! .false. when any element failed to be deposited -- a null, a NaN or a value outside
+            !! the grid, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population instead and leaves this alone. A sample with nothing in it is
+            !! `.true.`: depositing nothing is well defined, and `mass` is then all zeros.
+        end subroutine bin_linear_f64
     end interface
     !
     ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----
@@ -4602,6 +4694,30 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bin_edges_i32
+        !> `pf_bin_linear` over a 32-bit integer array.
+        module subroutine bin_linear_i32(values, grid, mass, is_valid, weights, n_null, n_outside, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: grid(:) !! the grid POINTS: finite, strictly increasing, at least two.
+            real(real64), intent(out) :: mass(:)
+            !! the weight deposited on each grid point, so `size(grid)` of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[grid(1), grid(size(grid))]` and so were
+            !! deposited nowhere. An ordinary data condition rather than an error, but the one
+            !! thing a caller cannot recover from `mass`, so it is reported. An infinity is
+            !! counted here, and so is a NaN under `skipnan = .false.`.
+            logical, intent(out), optional :: ok
+            !! .false. when any element failed to be deposited -- a null, a NaN or a value outside
+            !! the grid, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population instead and leaves this alone. A sample with nothing in it is
+            !! `.true.`: depositing nothing is well defined, and `mass` is then all zeros.
+        end subroutine bin_linear_i32
         !> `pf_sum` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -5767,6 +5883,30 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bin_edges_i64
+        !> `pf_bin_linear` over a 64-bit integer array.
+        module subroutine bin_linear_i64(values, grid, mass, is_valid, weights, n_null, n_outside, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: grid(:) !! the grid POINTS: finite, strictly increasing, at least two.
+            real(real64), intent(out) :: mass(:)
+            !! the weight deposited on each grid point, so `size(grid)` of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[grid(1), grid(size(grid))]` and so were
+            !! deposited nowhere. An ordinary data condition rather than an error, but the one
+            !! thing a caller cannot recover from `mass`, so it is reported. An infinity is
+            !! counted here, and so is a NaN under `skipnan = .false.`.
+            logical, intent(out), optional :: ok
+            !! .false. when any element failed to be deposited -- a null, a NaN or a value outside
+            !! the grid, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population instead and leaves this alone. A sample with nothing in it is
+            !! `.true.`: depositing nothing is well defined, and `mass` is then all zeros.
+        end subroutine bin_linear_i64
         !> `pf_sum` over a 32-bit real array.
         module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -7018,6 +7158,36 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bin_edges_f32
+        !> `pf_bin_linear` over a 32-bit real array.
+        module subroutine bin_linear_f32(values, grid, mass, is_valid, weights, skipnan, n_null, n_nan, n_outside, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: grid(:) !! the grid POINTS: finite, strictly increasing, at least two.
+            real(real64), intent(out) :: mass(:)
+            !! the weight deposited on each grid point, so `size(grid)` of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which lies between no two grid points and is counted
+            !! in `n_outside` instead. Either way a NaN is deposited nowhere.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[grid(1), grid(size(grid))]` and so were
+            !! deposited nowhere. An ordinary data condition rather than an error, but the one
+            !! thing a caller cannot recover from `mass`, so it is reported. An infinity is
+            !! counted here, and so is a NaN under `skipnan = .false.`.
+            logical, intent(out), optional :: ok
+            !! .false. when any element failed to be deposited -- a null, a NaN or a value outside
+            !! the grid, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population instead and leaves this alone. A sample with nothing in it is
+            !! `.true.`: depositing nothing is well defined, and `mass` is then all zeros.
+        end subroutine bin_linear_f32
         !> `pf_sum` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -9534,6 +9704,36 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bin_edges_col
+        !> `pf_bin_linear` over a scalar numeric `parquet_column`.
+        module subroutine bin_linear_col(values, grid, mass, is_valid, weights, skipnan, n_null, n_nan, n_outside, ok)
+            type(parquet_column), intent(in) :: values !! the column; int32, int64, float32 or float64 -- a logical one aborts.
+            real(real64), intent(in) :: grid(:) !! the grid POINTS: finite, strictly increasing, at least two.
+            real(real64), intent(out) :: mass(:)
+            !! the weight deposited on each grid point, so `size(grid)` of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which lies between no two grid points and is counted
+            !! in `n_outside` instead. Either way a NaN is deposited nowhere.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[grid(1), grid(size(grid))]` and so were
+            !! deposited nowhere. An ordinary data condition rather than an error, but the one
+            !! thing a caller cannot recover from `mass`, so it is reported. An infinity is
+            !! counted here, and so is a NaN under `skipnan = .false.`.
+            logical, intent(out), optional :: ok
+            !! .false. when any element failed to be deposited -- a null, a NaN or a value outside
+            !! the grid, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population instead and leaves this alone. A sample with nothing in it is
+            !! `.true.`: depositing nothing is well defined, and `mass` is then all zeros.
+        end subroutine bin_linear_col
         !> `%compute` over a 32-bit integer array.
         module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self

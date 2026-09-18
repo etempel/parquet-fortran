@@ -65,8 +65,9 @@ contains
     !> Registers this module's tests with test-drive.
     subroutine collect_tests_parquet_stats(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite to fill.
+        type(unittest_type), allocatable :: general(:), linear(:)
 
-        testsuite = [ &
+        general = [ &
             new_unittest("pf_count_valid counts every element of a clean array", test_plain_count), &
             new_unittest("pf_count_valid spans every numeric kind", test_every_kind), &
             new_unittest("pf_count_valid excludes the nulls is_valid marks", test_nulls_excluded), &
@@ -319,6 +320,40 @@ contains
             new_unittest("no reduction raises an IEEE exception on a non-finite population", &
                 test_no_reduction_raises_on_a_non_finite_population) &
             ]
+        ! A second constructor, because one statement may carry at most 255 continuation lines
+        ! (nagfor enforces it; `check_statement_continuation_lines`) and the one above is at 252.
+        ! Add a further part rather than growing either.
+        linear = [ &
+            new_unittest("pf_bin_linear matches its definition written out, to the bit where exact", &
+                test_bin_linear_matches_the_direct_definition), &
+            new_unittest("pf_bin_linear splits every value into shares summing to it exactly", &
+                test_bin_linear_conserves_mass), &
+            new_unittest("pf_bin_linear gives the nearer grid point the larger share", &
+                test_bin_linear_splits_by_distance), &
+            new_unittest("a value on a grid point gives that point all of its weight", &
+                test_bin_linear_lands_on_a_grid_point), &
+            new_unittest("a value on the top grid point lands on it rather than outside", &
+                test_bin_linear_closes_at_the_top), &
+            new_unittest("pf_bin_linear reports the values outside its grid and deposits none", &
+                test_bin_linear_reports_outside), &
+            new_unittest("pf_bin_linear's mass has one entry per grid point", &
+                test_bin_linear_size_contract), &
+            new_unittest("pf_bin_linear excludes nulls and NaNs exactly as pf_histogram does", &
+                test_bin_linear_nulls_and_nans), &
+            new_unittest("pf_bin_linear never examines the weight of a null or NaN element", &
+                test_bin_linear_null_beside_bad_weight), &
+            new_unittest("a zero weight removes the element from pf_bin_linear's population", &
+                test_bin_linear_zero_weight_removes), &
+            new_unittest("a sample on the grid points bins as pf_histogram bins it", &
+                test_bin_linear_agrees_with_histogram_at_cell_centres), &
+            new_unittest("every pf_bin_linear specific answers what the real64 one does", &
+                test_bin_linear_every_specific), &
+            new_unittest("an empty population deposits nothing, and that is ok", &
+                test_bin_linear_empty_population), &
+            new_unittest("pf_bin_linear accounts for every element exactly once", &
+                test_bin_linear_accounts_for_every_element) &
+            ]
+        testsuite = [general, linear]
     end subroutine collect_tests_parquet_stats
 
     !> Deferring pass one's compaction changes no answer, wherever the first exclusion falls.
@@ -8177,5 +8212,553 @@ contains
             "these raised IEEE_INVALID on a population they answer rather than refuse:" // &
             trim(culprits))
     end subroutine test_no_reduction_raises_on_a_non_finite_population
+
+    ! ==================================================================================
+    ! pf_bin_linear: linear (cloud-in-cell) binning onto a grid of points
+    !
+    ! No external golden exists -- numpy, scipy and pandas have no linear binning -- so the
+    ! expectations are the definition written out (`bin_linear_reference`) and `pf_histogram`,
+    ! wherever the two procedures must agree about the population. Every fixture on which an
+    ! EQUALITY is asserted is chosen so that each share and each sum is exact: values on a dyadic
+    ! lattice over a grid whose spacings are powers of two, so the assertion holds on every
+    ! compiler and in every profile rather than on the rounding of one of them.
+    ! ==================================================================================
+
+    !> `pf_bin_linear`'s definition written out: a LINEAR scan for the cell, and the two shares as
+    !! a textbook writes them, `w*(1 - t)` and `w*t`.
+    !!
+    !! It shares nothing with the library but the formula for `t` -- no `bin_of`, no binary
+    !! search, and not the library's larger-share-first split -- which is what makes it worth
+    !! comparing against. Where every share is exact the two agree to the bit; elsewhere they
+    !! differ by the textbook split's rounding, which the caller allows for. Values outside the
+    !! grid are skipped, and the caller passes no NaN.
+    subroutine bin_linear_reference(x, w, grid, mass)
+        real(real64), intent(in) :: x(:)       !! the values, none of them NaN.
+        real(real64), intent(in) :: w(:)       !! their weights, same size as `x`.
+        real(real64), intent(in) :: grid(:)    !! the grid points, strictly increasing.
+        real(real64), intent(out) :: mass(:)   !! the deposit, one entry per grid point.
+        integer :: i, k, n
+        real(real64) :: t
+
+        n = size(grid)
+        mass = 0.0_real64
+        do i = 1, size(x)
+            if (x(i) < grid(1)) cycle
+            if (x(i) > grid(n)) cycle
+            ! The first cell whose upper point lies above the value. None does for the top point
+            ! itself, which closes the last cell, so the scan's exit value is clamped to it.
+            do k = 1, n - 1
+                if (x(i) < grid(k + 1)) exit
+            end do
+            k = min(k, n - 1)
+            t = (x(i) - grid(k)) / (grid(k + 1) - grid(k))
+            mass(k) = mass(k) + w(i) * (1.0_real64 - t)
+            mass(k + 1) = mass(k + 1) + w(i) * t
+        end do
+    end subroutine bin_linear_reference
+
+    !> `pf_bin_linear` against its definition written out, over uneven grids.
+    !!
+    !! Two fixtures. On the DYADIC one -- values on sixty-fourths, weights on quarters, a grid
+    !! whose spacings are powers of two from a quarter to four -- every share and every sum is
+    !! exact under either split, so the library and the textbook must agree to the bit, and a
+    !! search, index or weight error of any size shows. It opens with the grid points themselves,
+    !! so a value exactly on a point and the top point are both in it, and a tenth of its values
+    !! fall outside the grid. On the RANDOM one, over a grid no power of two describes, the two
+    !! splits round differently, and agreement is asserted to a bound far below any misplaced
+    !! share.
+    subroutine test_bin_linear_matches_the_direct_definition(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: NX = 400, NG = 9, NR = 600, NGR = 20
+        integer(int64), parameter :: SEED = 20260918_int64
+        real(real64) :: grid(NG), x(NX), w(NX), ones(NX), mass(NG), ref(NG)
+        real(real64) :: gr(NGR), xr(NR), wr(NR), massr(NGR), refr(NGR), total
+        integer :: i
+
+        grid = [-4.0_real64, -2.0_real64, -1.0_real64, 0.0_real64, 0.5_real64, 0.75_real64, &
+                1.0_real64, 3.0_real64, 7.0_real64]
+        do i = 1, NX
+            x(i) = -5.0_real64 + &
+                real(int(832.0_real64 * pf_random_at(SEED, int(i, int64))), real64) / 64.0_real64
+            w(i) = real(int(16.0_real64 * pf_random_at(SEED + 1_int64, int(i, int64))), real64) &
+                / 4.0_real64
+        end do
+        x(1:NG) = grid
+        ones = 1.0_real64
+
+        call pf_bin_linear(x, grid, mass)
+        call bin_linear_reference(x, ones, grid, ref)
+        call check(error, all(mass == ref), "unweighted, on the dyadic fixture: bit for bit")
+        if (allocated(error)) return
+        call pf_bin_linear(x, grid, mass, weights=w)
+        call bin_linear_reference(x, w, grid, ref)
+        call check(error, all(mass == ref), "weighted, on the dyadic fixture: bit for bit")
+        if (allocated(error)) return
+
+        gr(1) = -1.3_real64
+        do i = 2, NGR
+            gr(i) = gr(i - 1) + 0.01_real64 + 1.7_real64 * pf_random_at(SEED + 2_int64, int(i, int64))
+        end do
+        do i = 1, NR
+            xr(i) = gr(1) - 0.5_real64 + (gr(NGR) - gr(1) + 1.0_real64) * &
+                pf_random_at(SEED + 3_int64, int(i, int64))
+            wr(i) = 0.1_real64 + 3.0_real64 * pf_random_at(SEED + 4_int64, int(i, int64))
+        end do
+        total = sum(wr)
+        call pf_bin_linear(xr, gr, massr, weights=wr)
+        call bin_linear_reference(xr, wr, gr, refr)
+        call check(error, all(abs(massr - refr) <= 1.0e-12_real64 * total), &
+            "weighted, on the random fixture: within the rounding of the textbook split")
+    end subroutine test_bin_linear_matches_the_direct_definition
+
+    !> Every value's two shares sum to its weight EXACTLY, and the grid holds what was deposited.
+    !!
+    !! **The first half is the property the larger-share-first split exists for**, asserted one
+    !! value at a time so that no accumulation can hide it: each call deposits a single value, and
+    !! its two shares must sum to its weight with no rounding at all. The test reads that off the
+    !! larger share, which lies in `[w/2, w]`, so `w - larger` is itself computed exactly and must
+    !! equal the smaller share. The textbook split `w*(1 - t)`, `w*t` fails that on roughly two
+    !! values in five, and taking `w*(1 - t)`'s residual at every `t` fails it on one in five, so
+    !! four thousand draws over weights spanning sixty binary orders of magnitude cannot miss
+    !! either.
+    !!
+    !! The second half is the whole-sample statement the guide makes: `sum(mass)` is the total
+    !! weight of the values inside the grid, to the rounding of the additions that formed each.
+    subroutine test_bin_linear_conserves_mass(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: NG = 12, NDRAW = 4000, NS = 3000
+        integer(int64), parameter :: SEED = 20260919_int64
+        real(real64) :: grid(NG), mass(NG), v, w, big, small, xs(NS), ws(NS), inside, bound
+        ! Stored and read back, so the comparison below sees the one IEEE subtraction it names.
+        real(real64), volatile :: rest
+        integer :: i, k, nbad, nstray
+
+        grid(1) = -3.7_real64
+        do k = 2, NG
+            grid(k) = grid(k - 1) + 0.05_real64 + 2.0_real64 * pf_random_at(SEED, int(k, int64))
+        end do
+
+        nbad = 0
+        nstray = 0
+        do i = 1, NDRAW
+            v = grid(1) + (grid(NG) - grid(1)) * pf_random_at(SEED + 1_int64, int(i, int64))
+            w = scale(1.0_real64 + pf_random_at(SEED + 2_int64, int(i, int64)), &
+                int(60.0_real64 * pf_random_at(SEED + 3_int64, int(i, int64))) - 30)
+            call pf_bin_linear([v], grid, mass, weights=[w])
+            do k = 1, NG - 1
+                if (v < grid(k + 1)) exit
+            end do
+            k = min(k, NG - 1)
+            if (any(mass(1:k - 1) /= 0.0_real64) .or. any(mass(k + 2:NG) /= 0.0_real64)) &
+                nstray = nstray + 1
+            big = max(mass(k), mass(k + 1))
+            small = min(mass(k), mass(k + 1))
+            rest = w - big
+            if (.not. (big <= w .and. 2.0_real64 * big >= w .and. rest == small)) nbad = nbad + 1
+        end do
+        call check(error, nstray == 0, "a single value deposits on the two ends of its own cell only")
+        if (allocated(error)) return
+        call check(error, nbad == 0, "every single value's two shares sum to its weight exactly")
+        if (allocated(error)) return
+
+        do i = 1, NS
+            xs(i) = grid(1) - 1.0_real64 + (grid(NG) - grid(1) + 2.0_real64) * &
+                pf_random_at(SEED + 4_int64, int(i, int64))
+            ws(i) = 0.5_real64 + 2.0_real64 * pf_random_at(SEED + 5_int64, int(i, int64))
+        end do
+        inside = 0.0_real64
+        do i = 1, NS
+            if (xs(i) < grid(1)) cycle
+            if (xs(i) > grid(NG)) cycle
+            inside = inside + ws(i)
+        end do
+        call pf_bin_linear(xs, grid, mass, weights=ws)
+        ! `inside` and every `mass(k)` are running sums of at most NS positive terms, each within
+        ! NS roundings of the truth, and `sum(mass)` adds NG more. Nothing is lost in the split.
+        bound = 2.0_real64 * real(NS + NG, real64) * epsilon(1.0_real64) * inside
+        call check(error, abs(sum(mass) - inside) <= bound, &
+            "the grid holds the weight of every value inside it, to the rounding of the sums")
+    end subroutine test_bin_linear_conserves_mass
+
+    !> A value a quarter of the way across its cell gives three quarters of its weight to the
+    !! NEARER point.
+    !!
+    !! Asymmetric on purpose: a value in the middle of its cell gives each end half, so swapping
+    !! the two deposits would change nothing there. A quarter and three quarters also send the two
+    !! values down the two arms of the split (`t <= 1/2` and above), in cells of different widths.
+    subroutine test_bin_linear_splits_by_distance(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(3), mass(3)
+
+        grid = [10.0_real64, 14.0_real64, 22.0_real64]
+        call pf_bin_linear([11.0_real64], grid, mass)
+        call check(error, all(mass == [0.75_real64, 0.25_real64, 0.0_real64]), &
+            "a quarter across the first cell: three quarters to the nearer, lower point")
+        if (allocated(error)) return
+        call pf_bin_linear([20.0_real64], grid, mass)
+        call check(error, all(mass == [0.0_real64, 0.25_real64, 0.75_real64]), &
+            "three quarters across the wider second cell: three quarters to the upper point")
+        if (allocated(error)) return
+        call pf_bin_linear([11.0_real64, 20.0_real64], grid, mass, weights=[2.0_real64, 4.0_real64])
+        call check(error, all(mass == [1.5_real64, 1.5_real64, 3.0_real64]), &
+            "weighted, each share scales and the two deposits on the middle point add")
+    end subroutine test_bin_linear_splits_by_distance
+
+    !> A value exactly on a grid point gives that point its whole weight and its neighbours none.
+    !!
+    !! `t` is then exactly 0, and the share its neighbour receives is `w - w`, which is exactly 0
+    !! -- not a residue of a rounded `w*(1 - t)`. The top point is its own test
+    !! (`test_bin_linear_closes_at_the_top`).
+    subroutine test_bin_linear_lands_on_a_grid_point(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(5), mass(5)
+        integer :: k
+
+        grid = [0.0_real64, 1.0_real64, 3.0_real64, 6.0_real64, 10.0_real64]
+        do k = 1, 4
+            call pf_bin_linear([grid(k)], grid, mass, weights=[5.0_real64])
+            call check(error, mass(k) == 5.0_real64 .and. count(mass /= 0.0_real64) == 1, &
+                "a value on the first or an interior point gives it all its weight and no neighbour any")
+            if (allocated(error)) return
+        end do
+    end subroutine test_bin_linear_lands_on_a_grid_point
+
+    !> The top grid point closes the last cell, as the top edge closes `pf_histogram`'s last bin.
+    !!
+    !! The spacings are chosen so that no power of two describes them: `t` is then `h/h`, which is
+    !! 1 exactly because an IEEE division of a number by itself is exact, and the whole weight
+    !! must land on the top point with nothing counted outside. One ulp above it is outside.
+    subroutine test_bin_linear_closes_at_the_top(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(4), mass(4)
+        integer(int64) :: nout
+        logical :: ok
+
+        grid = [0.0_real64, 0.1_real64, 0.35_real64, 0.7_real64]
+        call pf_bin_linear([0.7_real64], grid, mass, weights=[3.0_real64], n_outside=nout, ok=ok)
+        call check(error, nout == 0_int64 .and. ok, "a value on the top point is inside the grid")
+        if (allocated(error)) return
+        call check(error, all(mass == [0.0_real64, 0.0_real64, 0.0_real64, 3.0_real64]), &
+            "and its whole weight lands on that point")
+        if (allocated(error)) return
+        call pf_bin_linear([nearest(0.7_real64, 1.0_real64)], grid, mass, n_outside=nout, ok=ok)
+        call check(error, nout == 1_int64 .and. (.not. ok) .and. all(mass == 0.0_real64), &
+            "one ulp above the top point is outside, and deposits nothing")
+    end subroutine test_bin_linear_closes_at_the_top
+
+    !> A value outside `[grid(1), grid(n)]` is counted and deposited nowhere -- never clamped onto
+    !! the nearer end point.
+    !!
+    !! Both infinities are among them, and so are the two values one ulp outside each end. The grid
+    !! starts at 1 rather than 0 so that the value below it is a NORMAL number: one ulp below 0 is
+    !! subnormal, and ifx's flush-to-zero at `-O1` and above would read it as 0 and inside.
+    subroutine test_bin_linear_reports_outside(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(3), mass(3), x(8), inf
+        integer(int64) :: nout
+        logical :: ok
+
+        inf = ieee_value(0.0_real64, ieee_positive_inf)
+        grid = [1.0_real64, 2.0_real64, 3.0_real64]
+        x = [0.5_real64, 3.5_real64, -inf, inf, nearest(1.0_real64, -1.0_real64), &
+             nearest(3.0_real64, 1.0_real64), 1.0_real64, 2.5_real64]
+        call pf_bin_linear(x, grid, mass, n_outside=nout, ok=ok)
+        call check(error, nout == 6_int64 .and. .not. ok, &
+            "six values lie outside [1, 3], two of them infinite, and ok says so")
+        if (allocated(error)) return
+        call check(error, all(mass == [1.0_real64, 0.5_real64, 0.5_real64]), &
+            "only the two inside are deposited: the end points gain nothing from the outliers")
+    end subroutine test_bin_linear_reports_outside
+
+    !> `mass` holds one entry per grid POINT -- `size(grid)`, not `pf_histogram`'s
+    !! `size(edges) - 1`.
+    !!
+    !! The accepted half: a `mass` the size of the grid is written in full, its last entry by the
+    !! top point alone. The refused half, a `mass` one entry short, aborts and is the
+    !! `stats_bin_linear_mass_size` scenario (test/error_scenarios.f90).
+    subroutine test_bin_linear_size_contract(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(5), mass(5)
+
+        grid = [0.0_real64, 1.0_real64, 2.0_real64, 4.0_real64, 8.0_real64]
+        mass = -1.0_real64
+        call pf_bin_linear([0.0_real64, 3.0_real64, 8.0_real64], grid, mass)
+        call check(error, all(mass == [1.0_real64, 0.0_real64, 0.5_real64, 0.5_real64, 1.0_real64]), &
+            "five points, five entries, every one written and the last by the top point")
+    end subroutine test_bin_linear_size_contract
+
+    !> Nulls and NaNs leave `pf_bin_linear`'s population exactly as they leave `pf_histogram`'s.
+    !!
+    !! Both run over the same values with the grid as the edges, under both `skipnan` arms, and
+    !! must report the same three counts, the same `ok` and the same total. A kept NaN is a value
+    !! in no cell, so it moves from `n_nan` to `n_outside` and is still deposited nowhere. The
+    !! counts are then asserted outright, since the comparison alone would pass if both
+    !! procedures moved together.
+    subroutine test_bin_linear_nulls_and_nans(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(4), x(8), mass(4), counts(3), nan
+        logical :: valid(8), ok_b, ok_h
+        integer(int64) :: nn_b, nn_h, na_b, na_h, no_b, no_h
+        integer :: arm
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        grid = [0.0_real64, 2.0_real64, 4.0_real64, 8.0_real64]
+        x = [1.0_real64, nan, 3.0_real64, -1.0_real64, 9.0_real64, 5.0_real64, nan, 2.0_real64]
+        valid = [.true., .true., .false., .true., .true., .true., .false., .true.]
+
+        do arm = 1, 2
+            call pf_bin_linear(x, grid, mass, is_valid=valid, skipnan=(arm == 1), n_null=nn_b, &
+                n_nan=na_b, n_outside=no_b, ok=ok_b)
+            call pf_histogram(x, grid, counts, is_valid=valid, skipnan=(arm == 1), n_null=nn_h, &
+                n_nan=na_h, n_outside=no_h, ok=ok_h)
+            call check(error, nn_b == nn_h .and. na_b == na_h .and. no_b == no_h .and. &
+                (ok_b .eqv. ok_h), "the same three counts and the same ok as pf_histogram")
+            if (allocated(error)) return
+            call check(error, sum(mass) == sum(counts), "and the same total weight placed")
+            if (allocated(error)) return
+            call check(error, all(mass == [0.5_real64, 1.5_real64, 0.75_real64, 0.25_real64]), &
+                "the three usable values, split, whichever way a NaN is accounted for")
+            if (allocated(error)) return
+        end do
+
+        call pf_bin_linear(x, grid, mass, is_valid=valid, n_null=nn_b, n_nan=na_b, n_outside=no_b, &
+            ok=ok_b)
+        call check(error, nn_b == 2_int64 .and. na_b == 1_int64 .and. no_b == 2_int64 .and. &
+            .not. ok_b, "two nulls (one of them a NaN), one NaN, two outside, so not ok")
+        if (allocated(error)) return
+        call pf_bin_linear(x, grid, mass, is_valid=valid, skipnan=.false., n_nan=na_b, n_outside=no_b)
+        call check(error, na_b == 0_int64 .and. no_b == 3_int64, &
+            "a kept NaN moves from n_nan to n_outside")
+    end subroutine test_bin_linear_nulls_and_nans
+
+    !> A weight is never examined for an element that has already left the population.
+    !!
+    !! The module's exclusion order is null, then NaN, then weight: a weight column computed as
+    !! `1/err**2` is routinely negative or NaN exactly where the value is missing, and a caller
+    !! doing nothing wrong would otherwise have the call abort on it. Were the order changed this
+    !! test would not fail -- the whole runner would abort, which reports it just as surely.
+    subroutine test_bin_linear_null_beside_bad_weight(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(3), mass(3), x(4), w(4), nan
+        logical :: valid(4)
+        integer(int64) :: nnull, nnan
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        grid = [0.0_real64, 1.0_real64, 2.0_real64]
+        x = [0.5_real64, 1.0_real64, nan, 1.5_real64]
+        w = [2.0_real64, -5.0_real64, nan, 1.0_real64]
+        valid = [.true., .false., .true., .true.]
+        call pf_bin_linear(x, grid, mass, is_valid=valid, weights=w, n_null=nnull, n_nan=nnan)
+        call check(error, nnull == 1_int64 .and. nnan == 1_int64, &
+            "a negative weight on a null and a NaN weight on a NaN value are never looked at")
+        if (allocated(error)) return
+        call check(error, all(mass == [1.0_real64, 1.5_real64, 0.5_real64]), &
+            "and the two usable values are deposited as usual")
+    end subroutine test_bin_linear_null_beside_bad_weight
+
+    !> A zero weight removes the element from the population: it deposits nothing, and even
+    !! outside the grid it is not counted there, because it did not fail to land -- it left.
+    !!
+    !! A negative zero does the same; it reads negative to the fast weight screen and is excluded
+    !! one branch later, so it is included, built at run time with its sign asserted first.
+    subroutine test_bin_linear_zero_weight_removes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(4), mass(4), x(5), w(5)
+        integer(int64) :: nout
+        logical :: ok
+
+        grid = [0.0_real64, 2.0_real64, 4.0_real64, 6.0_real64]
+        x = [1.0_real64, 5.0_real64, 100.0_real64, 3.0_real64, -7.0_real64]
+        w = [1.0_real64, 0.0_real64, 0.0_real64, 2.0_real64, 0.0_real64]
+        w(5) = -w(3)
+        call check(error, transfer(w(5), 0_int64) < 0_int64, "precondition: w(5) is a negative zero")
+        if (allocated(error)) return
+        call pf_bin_linear(x, grid, mass, weights=w, n_outside=nout, ok=ok)
+        call check(error, nout == 0_int64 .and. ok, &
+            "two zero-weighted values outside the grid are out of the population, not outside it")
+        if (allocated(error)) return
+        call check(error, all(mass == [0.5_real64, 1.5_real64, 1.0_real64, 0.0_real64]), &
+            "and the zero-weighted value inside deposits nothing")
+    end subroutine test_bin_linear_zero_weight_removes
+
+    !> A sample sitting exactly on the grid points is binned as `pf_histogram` bins it over cells
+    !! centred on those points.
+    !!
+    !! On a grid point the linear split degenerates to whole-point assignment, so the deposit must
+    !! equal a histogram whose bins are centred on the points: edges at the midpoints, and half a
+    !! cell beyond each end. A systematic half-cell shift -- depositing on the point above or
+    !! below -- is invisible to a test that looks only at a total or only at a single value; here
+    !! it shows point by point, over an uneven grid, unweighted and weighted.
+    subroutine test_bin_linear_agrees_with_histogram_at_cell_centres(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(5), edges(6), mass(5), counts(5), x(10), w(10)
+
+        grid = [0.0_real64, 1.0_real64, 3.0_real64, 4.0_real64, 8.0_real64]
+        edges = [-0.5_real64, 0.5_real64, 2.0_real64, 3.5_real64, 6.0_real64, 10.0_real64]
+        x = [0.0_real64, 1.0_real64, 1.0_real64, 3.0_real64, 4.0_real64, 4.0_real64, 4.0_real64, &
+             8.0_real64, 3.0_real64, 0.0_real64]
+        w = [1.0_real64, 2.0_real64, 0.5_real64, 3.0_real64, 1.0_real64, 1.0_real64, 0.25_real64, &
+             4.0_real64, 1.0_real64, 2.0_real64]
+        call pf_bin_linear(x, grid, mass)
+        call pf_histogram(x, edges, counts)
+        call check(error, all(mass == counts), "unweighted, point for bin")
+        if (allocated(error)) return
+        call pf_bin_linear(x, grid, mass, weights=w)
+        call pf_histogram(x, edges, counts, weights=w)
+        call check(error, all(mass == counts), "weighted, point for bin")
+    end subroutine test_bin_linear_agrees_with_histogram_at_cell_centres
+
+    !> Every `pf_bin_linear` specific answers what the `real64` one answers over the same values.
+    !!
+    !! The per-kind layer is generated and forwards every argument, so what can go wrong there is a
+    !! widening that loses a value or an argument wired to the wrong dummy. Integer-valued data
+    !! widens exactly from every kind, so each specific must agree with `real64` to the bit, with
+    !! the counts and `ok` forwarded too. The `real32` and column forms can hold a NaN, so they are
+    !! also run with one under both `skipnan` arms, and the column form with a null, which arrives
+    !! through the column's own validity.
+    subroutine test_bin_linear_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(5), xd(8), wd(8), want(5), got(5), nan
+        real(real32) :: xs(8)
+        integer(int32) :: xi(8)
+        integer(int64) :: xl(8), nout_w, nout_g, nnan_w, nnan_g, nnull_w, nnull_g
+        type(parquet_column) :: cd, ci
+        logical :: ok_w, ok_g, valid(8)
+        integer :: arm
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        grid = [0.0_real64, 2.5_real64, 5.0_real64, 7.5_real64, 10.0_real64]
+        xd = [0.0_real64, 2.0_real64, 3.0_real64, 7.0_real64, 9.0_real64, 12.0_real64, &
+              -1.0_real64, 10.0_real64]
+        wd = [1.0_real64, 2.0_real64, 0.5_real64, 3.0_real64, 1.0_real64, 1.0_real64, &
+              2.0_real64, 0.25_real64]
+        xs = real(xd, real32)
+        xi = int(xd, int32)
+        xl = int(xd, int64)
+
+        call pf_bin_linear(xd, grid, want, weights=wd, n_outside=nout_w, ok=ok_w)
+        call check(error, nout_w == 2_int64 .and. sum(want) > 0.0_real64, &
+            "precondition: the fixture deposits something and leaves two values outside")
+        if (allocated(error)) return
+        call pf_bin_linear(xs, grid, got, weights=wd, n_outside=nout_g, ok=ok_g)
+        call check(error, all(got == want) .and. nout_g == nout_w .and. (ok_g .eqv. ok_w), &
+            "pf_bin_linear over real32")
+        if (allocated(error)) return
+        call pf_bin_linear(xi, grid, got, weights=wd, n_outside=nout_g, ok=ok_g)
+        call check(error, all(got == want) .and. nout_g == nout_w .and. (ok_g .eqv. ok_w), &
+            "pf_bin_linear over int32")
+        if (allocated(error)) return
+        call pf_bin_linear(xl, grid, got, weights=wd, n_outside=nout_g, ok=ok_g)
+        call check(error, all(got == want) .and. nout_g == nout_w .and. (ok_g .eqv. ok_w), &
+            "pf_bin_linear over int64")
+        if (allocated(error)) return
+        call ci%init(PK_INT32, 8_int64)
+        call ci%set_all(xi)
+        call pf_bin_linear(ci, grid, got, weights=wd, n_outside=nout_g, ok=ok_g)
+        call check(error, all(got == want) .and. nout_g == nout_w .and. (ok_g .eqv. ok_w), &
+            "pf_bin_linear over an int32 column")
+        if (allocated(error)) return
+
+        ! A NaN in the real32 array and in a float64 column, which also carries a null.
+        xd(5) = nan
+        xs(5) = ieee_value(0.0_real32, ieee_quiet_nan)
+        valid = .true.
+        valid(3) = .false.
+        call cd%init(PK_FLOAT64, 8_int64)
+        call cd%set_all(xd)
+        call cd%set_null(3_int64)
+        do arm = 1, 2
+            call pf_bin_linear(xd, grid, want, is_valid=valid, weights=wd, skipnan=(arm == 1), &
+                n_null=nnull_w, n_nan=nnan_w, n_outside=nout_w, ok=ok_w)
+            call check(error, nnull_w == 1_int64 .and. nnan_w == merge(1_int64, 0_int64, arm == 1), &
+                "precondition: the null and the NaN are really in the population's accounts")
+            if (allocated(error)) return
+            call pf_bin_linear(cd, grid, got, weights=wd, skipnan=(arm == 1), n_null=nnull_g, &
+                n_nan=nnan_g, n_outside=nout_g, ok=ok_g)
+            call check(error, all(got == want) .and. nnull_g == nnull_w .and. nnan_g == nnan_w .and. &
+                nout_g == nout_w .and. (ok_g .eqv. ok_w), "pf_bin_linear over a float64 column")
+            if (allocated(error)) return
+            call pf_bin_linear(xd, grid, want, weights=wd, skipnan=(arm == 1), n_nan=nnan_w, &
+                n_outside=nout_w)
+            call pf_bin_linear(xs, grid, got, weights=wd, skipnan=(arm == 1), n_nan=nnan_g, &
+                n_outside=nout_g)
+            call check(error, all(got == want) .and. nnan_g == nnan_w .and. nout_g == nout_w, &
+                "pf_bin_linear over real32 holding a NaN")
+            if (allocated(error)) return
+        end do
+    end subroutine test_bin_linear_every_specific
+
+    !> An empty population deposits nothing: `mass` is all zeros, written in full, and `ok` is
+    !! `.true.`, as an empty `pf_histogram` is.
+    !!
+    !! Empty three ways: no values at all, and every weight zero, are both `ok` -- nothing failed to
+    !! land. Every value null is empty too, but `ok` is `.false.` there, because the nulls are
+    !! elements that did not land; that is `pf_histogram`'s rule, and pinned here so the two
+    !! procedures cannot drift apart on it.
+    subroutine test_bin_linear_empty_population(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: grid(3), mass(3), x(4), zeros(4)
+        logical :: none(4), ok
+        integer(int64) :: nnull, nnan, nout
+
+        grid = [0.0_real64, 1.0_real64, 2.0_real64]
+        x = [0.5_real64, 1.5_real64, 5.0_real64, -1.0_real64]
+        mass = 99.0_real64
+        call pf_bin_linear(x(1:0), grid, mass, n_null=nnull, n_nan=nnan, n_outside=nout, ok=ok)
+        call check(error, all(mass == 0.0_real64) .and. ok .and. nnull == 0_int64 .and. &
+            nnan == 0_int64 .and. nout == 0_int64, &
+            "no values: every point written as zero, nothing counted, and ok")
+        if (allocated(error)) return
+        zeros = 0.0_real64
+        mass = 99.0_real64
+        call pf_bin_linear(x, grid, mass, weights=zeros, n_outside=nout, ok=ok)
+        call check(error, all(mass == 0.0_real64) .and. ok .and. nout == 0_int64, &
+            "every weight zero: the population is empty, not failed")
+        if (allocated(error)) return
+        none = .false.
+        mass = 99.0_real64
+        call pf_bin_linear(x, grid, mass, is_valid=none, n_null=nnull, ok=ok)
+        call check(error, all(mass == 0.0_real64) .and. nnull == 4_int64 .and. .not. ok, &
+            "every value null: nothing deposited, and ok is .false. as in pf_histogram")
+    end subroutine test_bin_linear_empty_population
+
+    !> Unweighted, every element is deposited or counted once, and none twice:
+    !! `sum(mass) + n_outside + n_null + n_nan == size(values)`, EXACTLY.
+    !!
+    !! The binning family's cheapest whole-family invariant, carried over. It is exact here
+    !! because every value sits on an eighth and the grid on the integers, so each share is a
+    !! multiple of an eighth and every addition into `mass` is exact; on a general sample it holds
+    !! to the rounding of those additions. Both `skipnan` arms, because they move a NaN between two
+    !! of the four terms.
+    subroutine test_bin_linear_accounts_for_every_element(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: NX = 300, NG = 17
+        integer(int64), parameter :: SEED = 20260920_int64
+        real(real64) :: grid(NG), x(NX), mass(NG), nan
+        logical :: valid(NX)
+        integer(int64) :: nnull, nnan, nout
+        integer :: i, arm
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        do i = 1, NG
+            grid(i) = real(i - 1, real64)
+        end do
+        do i = 1, NX
+            x(i) = -2.0_real64 + &
+                real(int(161.0_real64 * pf_random_at(SEED, int(i, int64))), real64) / 8.0_real64
+            if (mod(i, 17) == 0) x(i) = nan
+            valid(i) = mod(i, 13) /= 0
+        end do
+        do arm = 1, 2
+            call pf_bin_linear(x, grid, mass, is_valid=valid, skipnan=(arm == 1), n_null=nnull, &
+                n_nan=nnan, n_outside=nout)
+            call check(error, nnull > 0_int64 .and. nout > 0_int64 .and. (arm == 2 .or. nnan > 0_int64), &
+                "precondition: the fixture reaches every term of the identity")
+            if (allocated(error)) return
+            call check(error, sum(mass) + real(nnull + nnan + nout, real64) == real(NX, real64), &
+                "every element is deposited or counted, exactly once")
+            if (allocated(error)) return
+        end do
+    end subroutine test_bin_linear_accounts_for_every_element
 
 end module test_stats

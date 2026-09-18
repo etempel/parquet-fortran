@@ -9,12 +9,14 @@ so nothing here needs a second import.
 
 The family is broad: counts and moments, order statistics and quantiles, the median absolute
 deviation and the mode, two-sample covariance and correlation, the normal-probability family
-(rankits, the probit mean, the straight-line fit), the sigma clip, the running folds, and bins.
-`pf_stats` is the object that answers many of them off one pass and one ordering.
+(rankits, the probit mean, the straight-line fit), the sigma clip, the running folds, bins, and
+linear (cloud-in-cell) binning onto a grid. `pf_stats` is the object that answers many of them off
+one pass and one ordering.
 
-Every procedure here accepts the same six inputs — see
+Almost every procedure here accepts the same six inputs — see
 [What `values` may be](#what-values-may-be) — so the kind of array you happen to have is not a
-reason to convert anything first.
+reason to convert anything first. The two exceptions say so in their own sections: `pf_mode` takes
+the integer, logical and string kinds, and `pf_bin_linear` every kind but `logical`.
 
 ## `pf_count_valid` — how many elements are in the population
 
@@ -113,6 +115,8 @@ Three things are refused rather than guessed at, each with a message saying what
 - **`is_valid=` alongside a column** — the column carries its own validity, and two sources of
   truth that can disagree is exactly what this refuses. The column's nulls are excluded either
   way, and `n_null=` reports them.
+
+`pf_bin_linear` refuses a fourth, a logical column, for the reason its own section gives.
 
 ## The moment family
 
@@ -250,7 +254,8 @@ scipy or pandas offers a weighted form of the same statistic.
 `pf_stddev`, `pf_sem`, `pf_skewness`, `pf_kurtosis`, `pf_moments`, `pf_median`, `pf_quantile`,
 `pf_quantiles`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad`, `pf_describe`,
 `pf_cov`, `pf_corr` (Pearson only), `pf_mode`, `pf_bucketize`, `pf_histogram`, `pf_bin_edges`,
-and `pf_stats%compute`/`%update`.
+`pf_bin_linear` (which no reference library offers; its `weights` are `pf_histogram`'s), and
+`pf_stats%compute`/`%update`.
 
 **Does not, and the argument is absent rather than ignored** — so passing one is a compile error
 rather than something to discover at run time:
@@ -1182,6 +1187,83 @@ exclusion rules, which is the part that is easy to get subtly wrong. `nbins` is 
 `integer` and has no `int64` form — it is bounded by the size of `edges`, so it can never
 legitimately exceed `huge(1_int32)`.
 
+## `pf_bin_linear` — linear (cloud-in-cell) binning onto a grid
+
+```fortran
+real(real64) :: grid(1024)
+real(real64) :: mass(size(grid))
+
+do k = 1, size(grid)
+    grid(k) = zmin + real(k - 1, real64)*(zmax - zmin)/real(size(grid) - 1, real64)
+end do
+grid(size(grid)) = zmax           ! assigned, so a value at zmax is not one ulp outside
+call pf_bin_linear(z, grid, mass)                              ! one entry per grid POINT
+call pf_bin_linear(z, grid, mass, weights=w, n_outside=nout)
+```
+
+`pf_bin_linear` deposits each value onto the **two grid points around it**, in proportion to how
+near it lies to each. A value a quarter of the way from `grid(i)` to `grid(i+1)` gives three
+quarters of its weight to `grid(i)` and a quarter to `grid(i+1)`; a value exactly on a grid point
+gives that point all of it. This is linear binning, and it is the operation that particle-mesh
+and power-spectrum work calls **cloud-in-cell (CIC) assignment**: the first-order scheme for
+putting a point sample onto a regular grid before a convolution or a transform.
+
+```fortran
+real(real64) :: g(3), m(3)
+
+g = [10.0_real64, 14.0_real64, 22.0_real64]
+call pf_bin_linear([11.0_real64, 20.0_real64], g, m, weights=[2.0_real64, 4.0_real64])
+! 11 is 1/4 of the way across [10, 14]:  1.5 to g(1), 0.5 to g(2)
+! 20 is 3/4 of the way across [14, 22]:  1.0 to g(2), 3.0 to g(3)
+! m == [1.5, 1.5, 3.0]
+```
+
+**`grid` holds points, not bin edges.** This is the difference from `pf_histogram` that is easy to
+get wrong: `mass` has `size(grid)` entries, one per point, where `counts` has `size(edges) - 1`,
+one per interval, and a `mass` sized like `counts` aborts. There is no `right=`, because a value
+exactly on an interior point gives it everything whichever cell it is taken to belong to, and no
+`density=`, because the two end points have no defined outer half-cell to divide by. For a
+density, divide by `sum(mass)` and by your own grid spacing.
+
+**Nothing is lost in the split.** The two shares of one value sum to its weight *exactly*, not to
+within a rounding: the larger share is computed as a product and the smaller as what the weight
+leaves, which is an exact subtraction. `sum(mass)` is therefore the total weight of the values
+inside the grid up to the rounding of the additions into each grid point, and exactly that total
+whenever those additions are exact.
+
+**When to reach for it.** A histogram assigns each value wholly to one bin, which leaves an error
+proportional to the bin width in anything smooth computed from the counts — a kernel density
+estimate, a convolution, a spectrum. Linear binning's error on the same data and grid is
+proportional to the width's *square*. Reach for `pf_bin_linear` when the binned sample is an
+intermediate, and for `pf_histogram` when the counts themselves are the answer. It is also the
+mass-conserving counterpart of linear interpolation: `pf_interp_1d` reads a grid at a point, and
+this writes a point onto a grid.
+
+**The grid is checked more strictly than `pf_histogram`'s edges.** It must hold at least two
+points, be strictly increasing and contain no NaN, as edges must, and in addition:
+
+- **every point must be finite.** `pf_histogram` accepts an infinite outer edge as the way to ask
+  for an open-ended bin; a share of the distance to an infinite point means nothing, so
+  `pf_bin_linear` refuses one;
+- **no two neighbours may be further apart than a `real64` can hold.** `[-1e308, 1e308]` is finite
+  and increasing, but the fraction of the way across that cell cannot be formed.
+
+Each of these aborts naming the offending index.
+
+The rest is `pf_histogram`'s. `is_valid`, `weights` (non-negative; a zero weight removes the
+element) and `skipnan` mean what they mean everywhere in this module, and a value that reaches no
+grid point is reported rather than dropped: `n_null`, `n_nan` and `n_outside` count the three
+reasons, and `ok` is `.false.` when any of them is non-zero. A NaN kept by `skipnan = .false.` lies
+between no two grid points, so it is counted in `n_outside`, as an infinity is. A sample with
+nothing in it, or whose every weight is zero, deposits nothing: `mass` is all zeros and `ok` is
+`.true.`. One whose every value is null deposits nothing too, but its nulls are counted, so `ok` is
+`.false.` there, as in `pf_histogram`.
+
+`values` may be any kind on this page but `logical`. Depositing `.true.` and `.false.` onto a
+continuous grid answers no question, so a logical array does not compile and a logical
+`parquet_column` aborts naming its kind. Each value's cell is found by binary search, so the cost
+is `O(n log size(grid))`, in one pass over the values.
+
 ## `pf_stats` — summarise once, query as often as you like
 
 The one-shot procedures above each traverse the population. When a group needs more than one or two
@@ -1348,13 +1430,17 @@ What does abort is a call that cannot be honoured:
 - an order statistic asked of a `retain = .false.` accumulator, which kept no values to order;
 - `is_valid=` passed beside a `parquet_column` or a `parquet_string_column`, both of which carry
   their own validity: two sources of truth that can disagree is not something to resolve silently;
-- an `out`, `z`, `out_valid`, `codes`, `counts` or `keep` array of the wrong size — note `counts`
-  holds one entry per **bin**, so one fewer than the number of edges;
+- an `out`, `z`, `out_valid`, `codes`, `counts`, `mass` or `keep` array of the wrong size — note
+  `counts` holds one entry per **bin**, so one fewer than the number of edges, while `mass` holds
+  one per grid **point**;
 - two samples of different lengths on `pf_cov` or `pf_corr`, which have no pairs to correlate;
 - a `sigma`, `sigma_lower` or `sigma_upper` that is negative or a NaN — a clip width a caller can
   only have got wrong, unlike the data conditions above it;
 - an `edges` array holding fewer than two entries, a NaN, or a pair that is not strictly
   increasing. A value *outside* the edges is a data condition and is reported, not an abort;
+- a `grid` for `pf_bin_linear` that breaks the same rules, holds an infinite point, or has two
+  neighbours whose spacing overflows a `real64`; and a logical `parquet_column` passed to
+  `pf_bin_linear`, which has no logical form;
 - an `nbins` below 1, or an `edges` array that is not exactly `nbins + 1` long, on `pf_bin_edges`.
 
 ## Optional arguments are in one fixed order

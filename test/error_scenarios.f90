@@ -1245,6 +1245,24 @@ program error_scenarios
         call scenario_stats_bin_edges_size()
     case ("stats_bucketize_codes_size")
         call scenario_stats_bucketize_codes_size()
+    case ("stats_bin_linear_grid_too_short")
+        call scenario_stats_bin_linear_grid_too_short()
+    case ("stats_bin_linear_grid_not_increasing")
+        call scenario_stats_bin_linear_grid_not_increasing()
+    case ("stats_bin_linear_nan_grid_point")
+        call scenario_stats_bin_linear_nan_grid_point()
+    case ("stats_bin_linear_infinite_grid_point")
+        call scenario_stats_bin_linear_infinite_grid_point()
+    case ("stats_bin_linear_spacing_overflows")
+        call scenario_stats_bin_linear_spacing_overflows()
+    case ("stats_bin_linear_mass_size")
+        call scenario_stats_bin_linear_mass_size()
+    case ("stats_bin_linear_negative_weight")
+        call scenario_stats_bin_linear_negative_weight()
+    case ("stats_bin_linear_weights_size")
+        call scenario_stats_bin_linear_weights_size()
+    case ("stats_bin_linear_logical_column")
+        call scenario_stats_bin_linear_logical_column()
     case ("stats_zscore_out_valid_size")
         call scenario_stats_zscore_out_valid_size()
     case ("stats_normal_scores_size")
@@ -22157,6 +22175,140 @@ contains
         call pf_bucketize(x, edges, three)  ! -> aborts (three codes for five elements)
         print '(a,i0)', "unexpectedly accepted one code per bin, codes(1)=", three(1)
     end subroutine scenario_stats_bucketize_codes_size
+
+    !> One grid point describes no cell, so there is nothing a value could be split across.
+    subroutine scenario_stats_bin_linear_grid_too_short()
+        real(real64) :: x(3) = [0.5_real64, 2.0_real64, 3.5_real64]
+        real(real64) :: two(2) = [0.0_real64, 4.0_real64]
+        real(real64) :: one(1) = [0.0_real64]
+        real(real64) :: mass2(2), mass1(1)
+
+        call pf_bin_linear(x, two, mass2)   ! two points: one cell, accepted
+        if (sum(mass2) /= 3.0_real64) print '(a)', "all three values should have been deposited"
+        call pf_bin_linear(x, one, mass1)   ! -> aborts (fewer than two points)
+        print '(a,es12.5)', "unexpectedly accepted a single grid point, mass(1)=", mass1(1)
+    end subroutine scenario_stats_bin_linear_grid_too_short
+
+    !> A repeated grid point describes a cell of zero width, across which no value can be split.
+    subroutine scenario_stats_bin_linear_grid_not_increasing()
+        real(real64) :: x(3) = [0.75_real64, 2.0_real64, 3.25_real64]
+        real(real64) :: good(4) = [0.0_real64, 1.5_real64, 2.5_real64, 4.0_real64]
+        real(real64) :: flat(4) = [0.0_real64, 1.5_real64, 1.5_real64, 4.0_real64]
+        real(real64) :: mass(4)
+
+        call pf_bin_linear(x, good, mass)   ! strictly increasing: accepted
+        if (sum(mass) /= 3.0_real64) print '(a)', "all three values should have been deposited"
+        call pf_bin_linear(x, flat, mass)   ! -> aborts (a repeated point)
+        print '(a,es12.5)', "unexpectedly accepted a repeated grid point, mass(1)=", mass(1)
+    end subroutine scenario_stats_bin_linear_grid_not_increasing
+
+    !> A NaN grid point is reported as a NaN, not as "not increasing", which it also is.
+    subroutine scenario_stats_bin_linear_nan_grid_point()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: good(3) = [0.0_real64, 2.0_real64, 4.0_real64]
+        real(real64) :: bad(3), mass(3)
+
+        call pf_bin_linear(x, good, mass)   ! finite points: accepted
+        if (mass(2) /= 2.0_real64) print '(a)', "the middle point should hold two of the three values"
+        bad = good
+        bad(2) = ieee_value(0.0_real64, ieee_quiet_nan)
+        call pf_bin_linear(x, bad, mass)    ! -> aborts (a NaN point)
+        print '(a,es12.5)', "unexpectedly accepted a NaN grid point, mass(1)=", mass(1)
+    end subroutine scenario_stats_bin_linear_nan_grid_point
+
+    !> An infinite grid point is refused, although `pf_histogram` accepts the same array as edges:
+    !! an open-ended bin means something, a share of the distance to an infinite point does not.
+    subroutine scenario_stats_bin_linear_infinite_grid_point()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        real(real64) :: x(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: good(3) = [0.0_real64, 2.0_real64, 4.0_real64]
+        real(real64) :: openended(3), mass(3), counts(2)
+
+        openended = good
+        openended(3) = ieee_value(0.0_real64, ieee_positive_inf)
+        call pf_histogram(x, openended, counts)  ! an infinite outer EDGE: accepted there
+        if (sum(counts) /= 3.0_real64) print '(a)', "the open-ended histogram should count all three"
+        call pf_bin_linear(x, good, mass)        ! finite points: accepted
+        if (mass(2) /= 2.0_real64) print '(a)', "the middle point should hold two of the three values"
+        call pf_bin_linear(x, openended, mass)   ! -> aborts (an infinite point)
+        print '(a,es12.5)', "unexpectedly accepted an infinite grid point, mass(1)=", mass(1)
+    end subroutine scenario_stats_bin_linear_infinite_grid_point
+
+    !> Two finite neighbours whose difference overflows are refused: `[-1e308, 1e308]` passes
+    !! every other grid test, and would still turn each split between them into 0 or NaN.
+    subroutine scenario_stats_bin_linear_spacing_overflows()
+        real(real64) :: x(3) = [-1.0e307_real64, 0.0_real64, 1.0e307_real64]
+        real(real64) :: wide(3) = [-1.0e308_real64, 0.0_real64, 1.0e308_real64]
+        real(real64) :: gap(2) = [-1.0e308_real64, 1.0e308_real64]
+        real(real64) :: mass3(3), mass2(2)
+
+        call pf_bin_linear(x, wide, mass3)            ! spacings of 1e308: accepted
+        if (.not. (mass3(2) > 2.0_real64)) print '(a)', "the middle point should hold most of the weight"
+        call pf_bin_linear([0.0_real64], gap, mass2)  ! -> aborts (a spacing of 2e308)
+        print '(a,es12.5)', "unexpectedly accepted an overflowing spacing, mass(1)=", mass2(1)
+    end subroutine scenario_stats_bin_linear_spacing_overflows
+
+    !> `mass` holds one entry per grid POINT. Sized from the cells, as `pf_histogram`'s `counts`
+    !! is sized from the bins, it is one entry short -- the off-by-one this contract invites.
+    subroutine scenario_stats_bin_linear_mass_size()
+        real(real64) :: x(3) = [0.75_real64, 2.0_real64, 3.25_real64]
+        real(real64) :: grid(4) = [0.0_real64, 1.5_real64, 2.5_real64, 4.0_real64]
+        real(real64) :: four(4), three(3)
+
+        call pf_bin_linear(x, grid, four)    ! four points, four entries: accepted
+        if (sum(four) /= 3.0_real64) print '(a)', "all three values should have been deposited"
+        call pf_bin_linear(x, grid, three)   ! -> aborts (one entry per cell, not per point)
+        print '(a,es12.5)', "unexpectedly accepted one mass entry per cell, mass(1)=", three(1)
+    end subroutine scenario_stats_bin_linear_mass_size
+
+    !> `pf_bin_linear` validates its weights through the module's shared validator.
+    subroutine scenario_stats_bin_linear_negative_weight()
+        real(real64) :: x(3) = [0.5_real64, 1.0_real64, 1.5_real64]
+        real(real64) :: grid(3) = [0.0_real64, 1.0_real64, 2.0_real64]
+        real(real64) :: w(3) = [1.0_real64, 2.0_real64, 1.0_real64]
+        real(real64) :: mass(3)
+
+        call pf_bin_linear(x, grid, mass, weights=w)   ! non-negative weights: accepted
+        if (mass(2) /= 3.0_real64) print '(a)', "the middle point should hold three units of weight"
+        w(2) = -2.0_real64
+        call pf_bin_linear(x, grid, mass, weights=w)   ! -> aborts (a negative weight)
+        print '(a,es12.5)', "unexpectedly accepted a negative weight, mass(2)=", mass(2)
+    end subroutine scenario_stats_bin_linear_negative_weight
+
+    !> One weight per VALUE: a `weights` array of another length aborts before anything is read.
+    subroutine scenario_stats_bin_linear_weights_size()
+        real(real64) :: x(3) = [0.5_real64, 1.0_real64, 1.5_real64]
+        real(real64) :: grid(3) = [0.0_real64, 1.0_real64, 2.0_real64]
+        real(real64) :: w3(3) = [1.0_real64, 1.0_real64, 1.0_real64]
+        real(real64) :: w2(2) = [1.0_real64, 1.0_real64]
+        real(real64) :: mass(3)
+
+        call pf_bin_linear(x, grid, mass, weights=w3)   ! one weight per value: accepted
+        if (mass(2) /= 2.0_real64) print '(a)', "the middle point should hold two units of weight"
+        call pf_bin_linear(x, grid, mass, weights=w2)   ! -> aborts (two weights for three values)
+        print '(a,es12.5)', "unexpectedly accepted a short weights array, mass(2)=", mass(2)
+    end subroutine scenario_stats_bin_linear_weights_size
+
+    !> A logical column is refused by name. `pf_bin_linear` has no logical form, and its column
+    !! form must not deposit the 0s and 1s that every other generic here widens one to -- which
+    !! the `pf_histogram` call below shows it would otherwise do without complaint.
+    subroutine scenario_stats_bin_linear_logical_column()
+        type(parquet_column) :: numeric, flags
+        real(real64) :: grid(3) = [0.0_real64, 1.0_real64, 2.0_real64]
+        real(real64) :: mass(3), counts(2)
+
+        call numeric%init(PK_FLOAT64, 3_int64)
+        call numeric%set_all([0.5_real64, 1.0_real64, 1.5_real64])
+        call pf_bin_linear(numeric, grid, mass)   ! a float64 column: accepted
+        if (mass(2) /= 2.0_real64) print '(a)', "the middle point should hold two of the three values"
+        call flags%init(PK_LOGICAL, 3_int64)
+        call flags%set_all([.true., .false., .true.])
+        call pf_histogram(flags, [-0.5_real64, 0.5_real64, 1.5_real64], counts)   ! accepted there
+        if (counts(2) /= 2.0_real64) print '(a)', "the histogram should count the two .true. values"
+        call pf_bin_linear(flags, grid, mass)     ! -> aborts (a logical column)
+        print '(a,es12.5)', "unexpectedly accepted a logical column, mass(1)=", mass(1)
+    end subroutine scenario_stats_bin_linear_logical_column
 
     !> `out_valid` is a per-element OUTPUT, so a short one would be written past its end or leave
     !! the caller reading exclusions that belong to other elements. Checked separately from `z`

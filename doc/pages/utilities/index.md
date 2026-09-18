@@ -41,8 +41,8 @@ helpers, and the two generators meant to be copied into your own project.
 - [Array statistics with the `pf_` reduction family](statistics.html) — reductions over plain
   Fortran arrays: counts and moments, order statistics and quantiles, the median absolute deviation
   and the mode, two-sample covariance and correlation, the normal-probability family (rankits, the
-  probit mean, the straight-line fit), the sigma clip, the running folds and bins, and `pf_stats`,
-  which answers many of them off one pass. Then the rules they all share: what counts as the
+  probit mean, the straight-line fit), the sigma clip, the running folds and bins, linear
+  (cloud-in-cell) binning onto a grid, and `pf_stats`, which answers many of them off one pass. Then the rules they all share: what counts as the
   population (a null, a NaN and a zero weight all leave it, in that order), what aborts and what
   quietly returns nothing, and the fixed optional-argument order every procedure in the family
   shares.

@@ -6,7 +6,8 @@
 ! (tools/generate_parquet_stats.py), so a signature change means editing that script's template
 ! text while a body change means editing this file.
 !
-!> The binning tier of `parquet_stats`: `pf_bucketize` and `pf_histogram`.
+!> The binning tier of `parquet_stats`: `pf_bucketize`, `pf_histogram`, `pf_bin_edges` and
+!! `pf_bin_linear`.
 !!
 !! **`pf_histogram` IS `pf_bucketize` followed by a tally, and that is a property rather than an
 !! implementation note.** Both reach `bin_of` for every value, so the count in bin k is exactly
@@ -32,6 +33,15 @@
 !! `n_outside`. That is not an inconsistency to be tidied away: every comparison against a NaN is
 !! false, so "which bin does it join" has one answer, and the argument only decides whether the
 !! population was asked the question at all.
+!!
+!! **`pf_bin_linear` is the one procedure here that SPLITS a value.** It finds a value's cell with
+!! the same `bin_of`, the grid points serving as edges, and then divides the value's weight
+!! between the two ends of that cell. Its grid is checked by `check_grid` rather than
+!! `check_edges`, which is stricter in two ways the arithmetic needs -- no infinite point, no
+!! spacing that overflows -- because a whole-bin assignment only ORDERS a value against an edge
+!! while a split needs its DISTANCE from a point. Its version of the invariant above,
+!! `sum(mass) + n_outside + n_null + n_nan == size(values)` unweighted, is exact wherever the
+!! additions into `mass` are, and holds to their rounding otherwise.
 submodule (parquet_stats) parquet_stats_bin
     implicit none
 
@@ -81,7 +91,8 @@ contains
     !> The 1-based bin `v` falls in, or `0` for a value outside `[edges(1), edges(nbins+1)]`.
     !!
     !! **This is the ONE place an edge convention is applied**, which is what makes `pf_histogram`
-    !! and `pf_bucketize` agree by construction rather than by review.
+    !! and `pf_bucketize` agree by construction rather than by review. `pf_bin_linear` reaches it
+    !! too, with its grid points as the edges, to find the cell a value lies in.
     !!
     !! A NaN answers `0`: the two range tests below are both false for it, so it takes the same
     !! exit an out-of-range value does, with no branch of its own.
@@ -126,6 +137,55 @@ contains
         ! `hi - lo == 1` with `hi <= nbins + 1`, so `1 <= lo <= nbins` unconditionally. A guard
         ! against either end would be dead code that looks like the thing making this correct.
     end function bin_of
+
+    !> Aborts unless `grid` can carry a linear deposit: two or more points, every one finite,
+    !! strictly increasing, and no two neighbours further apart than a `real64` can hold.
+    !!
+    !! **Stricter than `check_edges` in two ways, and both are the arithmetic's requirements rather
+    !! than a policy.** An infinite point is refused although an infinite outer EDGE is admitted
+    !! there: a whole-bin assignment only has to ORDER a value against an edge, while a split
+    !! needs the value's DISTANCE from a point, and a distance to an infinite point gives a share
+    !! of 0 or NaN rather than a fraction. A finite pair whose difference overflows is refused for
+    !! the same reason -- `[-1e308, 1e308]` passes every other test here and still makes
+    !! `grid(2) - grid(1)` infinite, which would put NaN in `mass`.
+    !!
+    !! **The NaN screen is a loop of its own and runs first**, as in `check_edges`: `>` on a NaN
+    !! raises IEEE_INVALID, fatal under nagfor's `-ieee=stop`, so no ordered comparison may touch
+    !! an element before every element has been screened. The width test compares HALVES, so it
+    !! cannot overflow in any evaluation order: each half is at most `huge/2` in magnitude, and so
+    !! their difference is at most `huge`.
+    subroutine check_grid(grid, ncells)
+        real(real64), intent(in) :: grid(:)        !! the grid points to validate.
+        integer(int64), intent(out) :: ncells      !! how many cells they describe, `size(grid) - 1`.
+        real(real64), parameter :: HALF_BIG = 0.5_real64*huge(1.0_real64)
+        integer(int64) :: n, i
+
+        n = size(grid, kind=int64)
+        if (n < 2_int64) &
+            error stop "pf_bin_linear: grid must hold at least two points to describe one cell, " // &
+                "but holds " // trim(stats_i2s(n))
+        do i = 1_int64, n
+            ! `x /= x` rather than `ieee_is_nan`: this module's standing rule, as in `check_edges`.
+            if (grid(i) /= grid(i)) &
+                error stop "pf_bin_linear: grid(" // trim(stats_i2s(i)) // ") is a NaN"
+        end do
+        do i = 1_int64, n
+            if (abs(grid(i)) > huge(0.0_real64)) &
+                error stop "pf_bin_linear: grid(" // trim(stats_i2s(i)) // ") is infinite, and a " // &
+                    "value cannot be split in proportion to its distance from an infinite point"
+        end do
+        do i = 2_int64, n
+            if (.not. (grid(i) > grid(i - 1_int64))) &
+                error stop "pf_bin_linear: grid must be strictly increasing, but grid(" // &
+                    trim(stats_i2s(i - 1_int64)) // ") is not less than grid(" // &
+                    trim(stats_i2s(i)) // ")"
+            if (0.5_real64*grid(i) - 0.5_real64*grid(i - 1_int64) > HALF_BIG) &
+                error stop "pf_bin_linear: grid(" // trim(stats_i2s(i - 1_int64)) // ") and grid(" // &
+                    trim(stats_i2s(i)) // ") are further apart than a real64 can hold, so no " // &
+                    "value between them can be split"
+        end do
+        ncells = n - 1_int64
+    end subroutine check_grid
 
     ! ==================================================================================
     ! The public bodies
@@ -426,5 +486,106 @@ contains
         end do
         if (present(ok)) ok = fine
     end procedure bin_edges_f64
+
+    !> `pf_bin_linear`: each value's weight split between the two grid points around it.
+    !!
+    !! `pf_histogram`'s loop with a different last step. The exclusions are the same three in the
+    !! same order and the cell comes from the same `bin_of`, so a value lands outside exactly when
+    !! `pf_histogram` over the grid as edges would put it outside; then, instead of adding the
+    !! whole weight to one bin, the weight is divided between the two ends of the cell by the
+    !! value's position in it.
+    module procedure bin_linear_f64
+        logical :: skip
+        integer(int64) :: n, ncells, nnull, nnan, nout, i, k, wbits
+        real(real64) :: w, t
+        ! The larger of the two shares, formed once per value. `volatile` because the split below
+        ! is exact only if the residual is taken from this ROUNDED product, as stored.
+        real(real64), volatile :: big
+
+        n = size(values, kind=int64)
+        call stats_check_sizes(n, "pf_bin_linear", is_valid, weights)
+        call check_grid(grid, ncells)
+        if (size(mass, kind=int64) /= ncells + 1_int64) &
+            error stop "pf_bin_linear: mass has " // trim(stats_i2s(size(mass, kind=int64))) // &
+                " elements but grid has " // trim(stats_i2s(ncells + 1_int64)) // &
+                " points; mass holds one entry per grid point, not one per cell"
+        skip = .true.
+        if (present(skipnan)) skip = skipnan
+
+        mass = 0.0_real64
+        nnull = 0_int64
+        nnan = 0_int64
+        nout = 0_int64
+        w = 1.0_real64
+        do i = 1_int64, n
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    cycle
+                end if
+            end if
+            if (skip) then
+                if (values(i) /= values(i)) then
+                    nnan = nnan + 1_int64
+                    cycle
+                end if
+            end if
+            if (present(weights)) then
+                ! The same exclusion ORDER the whole module uses: null, then NaN, then weight, so
+                ! garbage sitting where a value is null cannot abort the call.
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_bin_linear")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
+                w = weights(i)
+            end if
+            ! Left-closed, as `pf_histogram`'s default: a value exactly on the top point lands in
+            ! the last cell with `t = 1` rather than outside, and a value exactly on an interior
+            ! point starts its cell with `t = 0` -- which end of which cell it is taken to belong
+            ! to changes nothing, since either way the point receives the whole weight. A NaN
+            ! kept by `skipnan = .false.` and an infinity both answer 0.
+            k = bin_of(values(i), grid, ncells, .false.)
+            if (k == 0_int64) then
+                nout = nout + 1_int64
+                cycle
+            end if
+            ! One division per value, never a reciprocal of the spacing kept across the loop. No
+            ! guard is needed, although one looks required: `check_grid` refused a spacing that is
+            ! zero or overflows, and `0 <= t <= 1` holds because rounding is monotonic and
+            ! `values(i) - grid(k)` cannot exceed the spacing.
+            t = (values(i) - grid(k)) / (grid(k + 1_int64) - grid(k))
+            ! **The split. Do not "simplify" it.** The LARGER share is the product and the smaller
+            ! is what the weight leaves. The larger share lies in `[w/2, w]`, so `w - big` is
+            ! computed EXACTLY (Sterbenz's lemma), and the two shares sum to `w` with no rounding
+            ! at all, for every weight and every `t`. Writing `lo = w*(1 - t)`, `hi = w - lo` for
+            ! every `t` is exact only while `lo >= w/2`, i.e. `t <= 1/2`: over uniformly random
+            ! positions about one value in five is split into shares that miss `w`, every one of
+            ! them with `t > 1/2`, and `hi = w*t` misses twice as often. `big` is `volatile` so
+            ! that the subtraction reads the stored, rounded product: an optimiser may otherwise
+            ! fold `w - w*t` into `w*(1 - t)` (ifx's default fast model rewrites algebra) or fuse
+            ! it into one FMA, and either forms the residual from a product that was never
+            ! rounded, which undoes the exactness.
+            if (t <= 0.5_real64) then
+                big = w * (1.0_real64 - t)
+                mass(k) = mass(k) + big
+                mass(k + 1_int64) = mass(k + 1_int64) + (w - big)
+            else
+                big = w * t
+                mass(k) = mass(k) + (w - big)
+                mass(k + 1_int64) = mass(k + 1_int64) + big
+            end if
+        end do
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        if (present(n_outside)) n_outside = nout
+        ! One flag with three causes, which the three counts separate, as in `pf_histogram`. A
+        ! zero-weight element left the POPULATION, so it is in none of them and leaves this alone.
+        if (present(ok)) ok = (nnull + nnan + nout == 0_int64)
+    end procedure bin_linear_f64
 
 end submodule parquet_stats_bin ! GCOVR_EXCL_LINE

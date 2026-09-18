@@ -1201,6 +1201,11 @@ HISTOGRAM_OPTS = ["right", "density", "is_valid", "weights", "skipnan", "n_null"
 #: than using them, so the convention is the CALLER's later choice and an argument here could only
 #: be ignored. No explicit range pair either -- see its doc-comment for why.
 BIN_EDGES_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok"]
+#: `pf_bin_linear` -- `pf_histogram`'s population block without its rule pair. No `right`: a value
+#: exactly on an interior grid point gives that point its whole weight whichever cell it is taken
+#: to belong to, so there is no side to close. No `density`: the share of the axis belonging to a
+#: grid point is undefined at the two end points, which is where a density would be compared.
+BIN_LINEAR_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "n_outside", "ok"]
 
 CORE_IFACES = [
     iface("sum_f64",
@@ -1571,6 +1576,13 @@ MOMENT_KINDS = [
      None, True, "a scalar numeric `parquet_column`"),
 ]
 
+#: The kinds `pf_bin_linear` offers: every row above but `logical`. Depositing `.true.` and
+#: `.false.` onto a continuous grid answers no question, so the array form is absent -- a compile
+#: error rather than a run-time one -- and the column form refuses a logical column by name
+#: (`bin_linear_body`). Every other generic here carries all six forms, which is why the generic's
+#: own doc-comment says so: removing that sentence would make the gap read as an oversight.
+BIN_LINEAR_KINDS = [k for k in MOMENT_KINDS if k[0] != "bool"]
+
 #: The extra doc paragraph a kind needs beyond "<statistic> over a <kind> array".
 KIND_NOTE = {
     "i64": ["",
@@ -1927,7 +1939,21 @@ BIN_IFACES = """        !> `pf_bucketize` over a 64-bit real array: which bin ea
             integer, intent(in) :: nbins !! how many bins to describe; at least 1.
             real(real64), intent(out) :: edges(:) !! the `nbins + 1` boundaries, strictly increasing.
 @@bin_edges_opts@@
-        end subroutine bin_edges_f64"""
+        end subroutine bin_edges_f64
+        !> `pf_bin_linear` over a 64-bit real array: each value's weight split between the two grid
+        !! points around it.
+        !!
+        !! Every other specific widens its values to `real64` and calls this one, so the split is
+        !! written once and the kinds cannot disagree about it.
+        module subroutine bin_linear_f64(values, grid, mass, is_valid, weights, skipnan, n_null, &
+                n_nan, n_outside, ok)
+            real(real64), intent(in) :: values(:) !! the values to deposit.
+            real(real64), intent(in) :: grid(:) !! the grid POINTS: finite, strictly increasing, at least two.
+            real(real64), intent(out) :: mass(:)
+            !! the weight deposited on each grid point, so `size(grid)` entries -- one per POINT,
+            !! where `pf_histogram`'s `counts` has one per interval.
+@@bin_linear_opts@@
+        end subroutine bin_linear_f64"""
 
 #: What each P9 generic's own doc-comment says, on the generic's page.
 CUM_DOC = {
@@ -2059,6 +2085,91 @@ _BIN_COMMON = """    !>
     !> `logical` array, or a scalar numeric `type(parquet_column)`. `edges` is always
     !> `real(real64)`: it states a rule rather than carrying data, and one type for it keeps the
     !> generic resolving on `values` alone."""
+
+#: What `pf_bin_linear`'s own doc-comment says, on the generic's page. It carries no share of
+#: `_BIN_COMMON`, which says two things that are false here: that an infinite outer edge is
+#: allowed, and that a `logical` array is accepted.
+BIN_LINEAR_DOC = [
+    "Deposits each value's weight onto the two grid points around it, in proportion to how near",
+    "it lies to each -- linear binning, which particle-mesh and power-spectrum work calls",
+    "cloud-in-cell (CIC) assignment.",
+    "",
+    "A value `v` in the cell between `grid(i)` and `grid(i+1)` lies a fraction",
+    "`t = (v - grid(i)) / (grid(i+1) - grid(i))` of the way across it, and gives `w*(1 - t)` of",
+    "its weight `w` to `grid(i)` and `w*t` to `grid(i+1)`, so a value exactly on a grid point",
+    "gives that point everything. `mass(k)` is the total deposited on `grid(k)`; unweighted,",
+    "every `w` is 1. This is the mass-conserving adjoint of linear interpolation:",
+    "`pf_interp_1d` reads a grid at a point, and this writes a point onto a grid.",
+    "",
+    "**The two shares of one value sum to its weight EXACTLY**, not to within a rounding: the",
+    "larger share is the product and the smaller is what the weight leaves, and that subtraction",
+    "is exact in floating point. Nothing is lost or created in the split, so `sum(mass)` differs",
+    "from the total weight deposited only by the rounding of the additions into each grid point.",
+    "",
+    "**`grid` holds POINTS, not bin edges**, which is the difference from `pf_histogram` a caller",
+    "will get wrong: `mass` has `size(grid)` entries, one per point, where `counts` has",
+    "`size(edges) - 1`, one per interval. There is no `right=` -- a value exactly on an interior",
+    "point gives it everything whichever cell it is taken to be in -- and no `density=`, because",
+    "the two end points have no defined outer half-cell. A caller who wants a density divides by",
+    "`sum(mass)` and by their own spacing.",
+    "",
+    "`grid` must hold at least two points and be **strictly increasing** and **finite**, or the",
+    "call aborts naming the offending index. **An infinite point is refused**, although",
+    "`pf_histogram` accepts an infinite outer edge: an open-ended bin is meaningful, a share of",
+    "the distance to an infinite point is not. Two neighbours so far apart that their difference",
+    "overflows a `real64` abort too, since the fraction `t` cannot be formed between them, and so",
+    "does a NaN point.",
+    "",
+    "The optional arguments are `pf_histogram`'s and mean what they mean there. `is_valid`",
+    "marks nulls; `weights` are non-negative, a zero weight removing the element and a negative,",
+    "NaN or infinite one aborting; `skipnan` (`.true.` by default) excludes a NaN. `n_null`,",
+    "`n_nan` and `n_outside` count the elements that reached no grid point, one count per reason,",
+    "and `ok` is `.false.` when any element did. Nothing here aborts on a data condition: a value",
+    "outside `[grid(1), grid(size(grid))]`, a NaN, a null and an empty population are all",
+    "reported through those counts. A sample with nothing in it, or whose every weight is zero,",
+    "leaves `mass` all zeros with `ok` `.true.`; an all-null one leaves `mass` all zeros too, but",
+    "its nulls are counted, so `ok` is `.false.`. A zero-weighted element is in none of the counts",
+    "and leaves `ok` alone, as in `pf_histogram`: it left the population rather than failing to",
+    "land.",
+    "",
+    "`values` may be a `real(real64)`, `real(real32)`, `integer(int32)` or `integer(int64)`",
+    "array, or a scalar numeric `type(parquet_column)`. **There is no `logical` form**:",
+    "depositing `.true.` and `.false.` onto a continuous grid answers no question, so a logical",
+    "array does not compile and a logical column aborts naming its kind. `grid` and `mass` are",
+    "always `real(real64)`. The search is binary, so the cost is `O(n log size(grid))`, in one",
+    "pass over the values."]
+
+#: The argument tags `pf_bin_linear` needs in its own words. Three of the module-wide ones describe
+#: something else here: `n_outside`'s names edges and bins, `ok`'s speaks of an undefined
+#: statistic, and `skipnan`'s says a kept NaN makes every answer NaN -- a kept NaN here is
+#: deposited nowhere and poisons nothing.
+BIN_LINEAR_D = dict(D)
+BIN_LINEAR_D["skipnan"] = """            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population and counts it in `n_nan`;
+            !! .false. keeps it as a value, which lies between no two grid points and is counted
+            !! in `n_outside` instead. Either way a NaN is deposited nowhere."""
+BIN_LINEAR_D["n_outside"] = """            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[grid(1), grid(size(grid))]` and so were
+            !! deposited nowhere. An ordinary data condition rather than an error, but the one
+            !! thing a caller cannot recover from `mass`, so it is reported. An infinity is
+            !! counted here, and so is a NaN under `skipnan = .false.`."""
+BIN_LINEAR_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when any element failed to be deposited -- a null, a NaN or a value outside
+            !! the grid, which `n_null`, `n_nan` and `n_outside` separate. A zero-weighted element
+            !! left the population instead and leaves this alone. A sample with nothing in it is
+            !! `.true.`: depositing nothing is well defined, and `mass` is then all zeros."""
+
+#: The guard `pf_bin_linear`'s column form runs before widening. `col_to_real64` widens a logical
+#: column to 0s and 1s, which every other generic here accepts; this one has no logical form, and
+#: without the guard the column form would quietly deposit the 0s and 1s the absent array form
+#: exists to refuse. It runs before the widening so that nothing is copied first.
+BIN_LINEAR_LOGICAL_COLUMN = [
+    "        ! `col_to_real64` widens a logical column to 0s and 1s, which every other generic here",
+    "        ! accepts. This one has no logical form, so its column form refuses the kind by name.",
+    "        if (values%kindof() == PK_LOGICAL) &",
+    '            error stop "pf_bin_linear: a logical column has no position on a grid to be split " // &',
+    '                "between two points; pf_bin_linear accepts int32, int64, float32 and float64 columns"',
+]
 
 #: What each P8 generic's own doc-comment says, on the generic's page.
 RELATE_DOC = {
@@ -2780,6 +2891,45 @@ def edges_body(tag, widen, has_nan):
     return "\n".join(lines)
 
 
+def bin_linear_iface(tag, decl, has_nan, kindword):
+    """One interface body for `pf_bin_linear`'s per-kind entry point."""
+    mine = kind_opts(BIN_LINEAR_OPTS, has_nan)
+    args = wrap_args(["values", "grid", "mass"] + mine)
+    if tag == "col":
+        decl = ("type(parquet_column), intent(in) :: values "
+                "!! the column; int32, int64, float32 or float64 -- a logical one aborts.")
+    lines = ["        !> `pf_bin_linear` over %s." % kindword]
+    lines.append("        module subroutine bin_linear_%s(%s)" % (tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            real(real64), intent(in) :: grid(:) "
+                 "!! the grid POINTS: finite, strictly increasing, at least two.")
+    lines.append("            real(real64), intent(out) :: mass(:)")
+    lines.append("            !! the weight deposited on each grid point, so `size(grid)` of them.")
+    for key in mine:
+        lines.append(BIN_LINEAR_D[key])
+    lines.append("        end subroutine bin_linear_%s" % tag)
+    return "\n".join(lines)
+
+
+def bin_linear_body(tag, widen, has_nan):
+    """One `module procedure` body for `pf_bin_linear`'s per-kind entry point."""
+    mine = kind_opts(BIN_LINEAR_OPTS, has_nan)
+    lines = ["    module procedure bin_linear_%s" % tag]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.extend(BIN_LINEAR_LOGICAL_COLUMN)
+        lines.append('        call col_to_real64(values, "pf_bin_linear", is_valid, wide, mask)')
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", "grid", "mass"] \
+        + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
+    lines.append("        call " + wrap_call("bin_linear_f64", call))
+    lines.append("    end procedure bin_linear_%s" % tag)
+    return "\n".join(lines)
+
+
 def mode_iface(tag, decl, res_decl, res_doc, kindword, modes_decl):
     """One interface body for a `pf_mode` specific."""
     args = wrap_args(["values", "m"] + MODE_OPTS)
@@ -3426,7 +3576,7 @@ def gen_spec():
     out.append("    public :: pf_probit_fit, pf_probit_scale")
     out.append("    public :: pf_sigma_clipped_stats")
     out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
-    out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges")
+    out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges, pf_bin_linear")
     # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
     # and CLAUDE.md's standing rule is that a module re-exports, getter and setter both, every
     # knob its own code reads, so that a narrow `use parquet_stats` program can silence it
@@ -3541,6 +3691,14 @@ def gen_spec():
             out.append("        module procedure %s_%s" % (name[3:], tag))
         out.append("    end interface %s" % name)
     out.append("    !")
+    for line in BIN_LINEAR_DOC:
+        out.append(("    !> " + line).rstrip())
+    out.append("    interface pf_bin_linear")
+    out.append("        module procedure bin_linear_f64")
+    for tag, _, _, _, _ in BIN_LINEAR_KINDS:
+        out.append("        module procedure bin_linear_%s" % tag)
+    out.append("    end interface pf_bin_linear")
+    out.append("    !")
     for line in MODE_DOC:
         out.append(("    !> " + line).rstrip())
     out.append("    interface pf_mode")
@@ -3584,6 +3742,8 @@ def gen_spec():
     binning = binning.replace("@@bucketize_opts@@", "\n".join(D[k] for k in BUCKETIZE_OPTS))
     binning = binning.replace("@@histogram_opts@@", "\n".join(D[k] for k in HISTOGRAM_OPTS))
     binning = binning.replace("@@bin_edges_opts@@", "\n".join(D[k] for k in BIN_EDGES_OPTS))
+    binning = binning.replace("@@bin_linear_opts@@",
+                              "\n".join(BIN_LINEAR_D[k] for k in BIN_LINEAR_OPTS))
     out.append(binning)
     out.append("    end interface")
     out.append("    !")
@@ -3619,6 +3779,8 @@ def gen_spec():
             out.append(bin_iface(base, out_name, out_decl, out_doc, opts,
                                  tag, decl, has_nan, kindword))
         out.append(edges_iface(tag, decl, has_nan, kindword))
+        if tag in [k[0] for k in BIN_LINEAR_KINDS]:
+            out.append(bin_linear_iface(tag, decl, has_nan, kindword))
     out.append(obj_entry_ifaces())
     out.append("    end interface")
     out.append(object_ifaces())
@@ -3660,6 +3822,8 @@ def gen_kernel():
         for base, out_name, _, _, opts in BIN_FAMILY:
             bodies.append(bin_body(base, out_name, opts, tag, widen, has_nan))
         bodies.append(edges_body(tag, widen, has_nan))
+        if tag in [k[0] for k in BIN_LINEAR_KINDS]:
+            bodies.append(bin_linear_body(tag, widen, has_nan))
     out.append("\n\n".join(bodies))
     out.append("")
     out.append(obj_entry_bodies())

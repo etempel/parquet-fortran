@@ -661,6 +661,14 @@ contains
         call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
     end procedure bin_edges_i32
 
+    module procedure bin_linear_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bin_linear_f64(wide, grid, mass, is_valid=is_valid, weights=weights, n_null=n_null, &
+            n_outside=n_outside, ok=ok)
+    end procedure bin_linear_i32
+
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -920,6 +928,14 @@ contains
         wide = real(values, real64)
         call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
     end procedure bin_edges_i64
+
+    module procedure bin_linear_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bin_linear_f64(wide, grid, mass, is_valid=is_valid, weights=weights, n_null=n_null, &
+            n_outside=n_outside, ok=ok)
+    end procedure bin_linear_i64
 
     module procedure sum_f32
         real(real64), allocatable :: wide(:)
@@ -1192,6 +1208,14 @@ contains
         call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, skipnan=skipnan, &
             n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure bin_edges_f32
+
+    module procedure bin_linear_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bin_linear_f64(wide, grid, mass, is_valid=is_valid, weights=weights, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+    end procedure bin_linear_f32
 
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
@@ -1726,6 +1750,19 @@ contains
         call bin_edges_f64(wide, nbins, edges, is_valid=mask, weights=weights, skipnan=skipnan, &
             n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure bin_edges_col
+
+    module procedure bin_linear_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        ! `col_to_real64` widens a logical column to 0s and 1s, which every other generic here
+        ! accepts. This one has no logical form, so its column form refuses the kind by name.
+        if (values%kindof() == PK_LOGICAL) &
+            error stop "pf_bin_linear: a logical column has no position on a grid to be split " // &
+                "between two points; pf_bin_linear accepts int32, int64, float32 and float64 columns"
+        call col_to_real64(values, "pf_bin_linear", is_valid, wide, mask)
+        call bin_linear_f64(wide, grid, mass, is_valid=mask, weights=weights, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+    end procedure bin_linear_col
 
     module procedure obj_compute_i32
         real(real64), allocatable :: wide(:)

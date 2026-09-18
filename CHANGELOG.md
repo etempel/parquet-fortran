@@ -50,6 +50,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   orthonormal (`norm="ortho"`); `pf_is_pow2` and `pf_next_pow2` choose the length. Nothing is
   printed. An Arrow-free entry module. See
   [Transforms: the discrete cosine transform](doc/pages/utilities/transforms.md).
+- **Linear binning: `pf_bin_linear`.** Deposits a sample onto a grid of points by linear
+  (cloud-in-cell) assignment, splitting each value's weight between the two grid points around it
+  into shares that sum to it exactly. In `parquet_stats` beside `pf_histogram`, with its
+  population arguments (`is_valid`, `weights`, `skipnan` and the three exclusion counts); `mass`
+  holds one entry per grid point. See
+  [Array statistics](doc/pages/utilities/statistics.md#pf_bin_linear--linear-cloud-in-cell-binning-onto-a-grid).
 - **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
   on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
   variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with

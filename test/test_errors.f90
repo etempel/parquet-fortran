@@ -86,7 +86,7 @@ contains
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
                                             p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
-                                            p35(:), p36(:)
+                                            p35(:), p36(:), p37(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3517,8 +3517,29 @@ contains
             new_unittest("pf_dct caps the caller's context at 100 characters", &
                 test_transform_context_capped_aborts) &
             ]
+        ! ---- parquet_stats: pf_bin_linear ----
+        p37 = [ &
+            new_unittest("pf_bin_linear refuses a grid of fewer than two points", &
+                test_stats_bin_linear_grid_too_short_aborts), &
+            new_unittest("pf_bin_linear refuses a grid that is not strictly increasing", &
+                test_stats_bin_linear_grid_not_increasing_aborts), &
+            new_unittest("pf_bin_linear refuses a NaN grid point, naming it as a NaN", &
+                test_stats_bin_linear_nan_grid_point_aborts), &
+            new_unittest("pf_bin_linear refuses an infinite grid point that pf_histogram accepts", &
+                test_stats_bin_linear_infinite_grid_point_aborts), &
+            new_unittest("pf_bin_linear refuses two grid points whose spacing overflows", &
+                test_stats_bin_linear_spacing_overflows_aborts), &
+            new_unittest("pf_bin_linear refuses a mass array of one entry per cell", &
+                test_stats_bin_linear_mass_size_aborts), &
+            new_unittest("pf_bin_linear refuses a negative weight", &
+                test_stats_bin_linear_negative_weight_aborts), &
+            new_unittest("pf_bin_linear refuses weights of the wrong length", &
+                test_stats_bin_linear_weights_size_aborts), &
+            new_unittest("pf_bin_linear refuses a logical column by name", &
+                test_stats_bin_linear_logical_column_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37]
     end subroutine collect_tests_parquet_errors
 
 
@@ -10791,6 +10812,115 @@ contains
             failure_message="one pf_bucketize code per bin was expected to abort", &
             required_stderr="pf_bucketize: codes has")
     end subroutine test_stats_bucketize_codes_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_grid_too_short in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_grid_too_short_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_grid_too_short", &
+            expect_abort=.true., &
+            failure_message="a one-point pf_bin_linear grid was expected to abort", &
+            required_stderr="pf_bin_linear: grid must hold at least two points to describe one " // &
+                "cell, but holds 1")
+    end subroutine test_stats_bin_linear_grid_too_short_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_grid_not_increasing in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_grid_not_increasing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_grid_not_increasing", &
+            expect_abort=.true., &
+            failure_message="a repeated pf_bin_linear grid point was expected to abort", &
+            required_stderr="pf_bin_linear: grid must be strictly increasing, but grid(2) is not " // &
+                "less than grid(3)")
+    end subroutine test_stats_bin_linear_grid_not_increasing_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_nan_grid_point in
+    !> test/error_scenarios.f90.
+    !>
+    !> The required text is what makes this separate from the ordering test: a NaN point fails
+    !> the ordering test too, so a grid check that lost its NaN screen would still abort -- with
+    !> a message pointing at the wrong thing.
+    subroutine test_stats_bin_linear_nan_grid_point_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_nan_grid_point", &
+            expect_abort=.true., &
+            failure_message="a NaN pf_bin_linear grid point was expected to abort", &
+            required_stderr="pf_bin_linear: grid(2) is a NaN")
+    end subroutine test_stats_bin_linear_nan_grid_point_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_infinite_grid_point in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_infinite_grid_point_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_infinite_grid_point", &
+            expect_abort=.true., &
+            failure_message="an infinite pf_bin_linear grid point was expected to abort", &
+            required_stderr="pf_bin_linear: grid(3) is infinite, and a value cannot be split in " // &
+                "proportion to its distance from an infinite point")
+    end subroutine test_stats_bin_linear_infinite_grid_point_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_spacing_overflows in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_spacing_overflows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_spacing_overflows", &
+            expect_abort=.true., &
+            failure_message="an overflowing pf_bin_linear grid spacing was expected to abort", &
+            required_stderr="pf_bin_linear: grid(1) and grid(2) are further apart than a real64 " // &
+                "can hold")
+    end subroutine test_stats_bin_linear_spacing_overflows_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_mass_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_mass_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_mass_size", &
+            expect_abort=.true., &
+            failure_message="one pf_bin_linear mass entry per cell was expected to abort", &
+            required_stderr="pf_bin_linear: mass has 3 elements but grid has 4 points; mass holds " // &
+                "one entry per grid point, not one per cell")
+    end subroutine test_stats_bin_linear_mass_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_negative_weight in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_negative_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_negative_weight", &
+            expect_abort=.true., &
+            failure_message="a negative pf_bin_linear weight was expected to abort", &
+            required_stderr="pf_bin_linear: weight 2 is negative")
+    end subroutine test_stats_bin_linear_negative_weight_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_weights_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_weights_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_weights_size", &
+            expect_abort=.true., &
+            failure_message="a short pf_bin_linear weights array was expected to abort", &
+            required_stderr="pf_bin_linear: weights has 2 elements but values has 3")
+    end subroutine test_stats_bin_linear_weights_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_linear_logical_column in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_bin_linear_logical_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_linear_logical_column", &
+            expect_abort=.true., &
+            failure_message="pf_bin_linear over a logical column was expected to abort", &
+            required_stderr="pf_bin_linear: a logical column has no position on a grid to be " // &
+                "split between two points")
+    end subroutine test_stats_bin_linear_logical_column_aborts
 
     !> parquet_stats abort path: see scenario_stats_zscore_out_valid_size in
     !> test/error_scenarios.f90.

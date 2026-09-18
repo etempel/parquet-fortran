@@ -820,21 +820,22 @@ contains
 
     !> Whether one bound is "no bound" once divided by its scale, decided without dividing.
     !!
-    !! The comparisons are ordered so that neither can overflow: `BOUNDMAX*sc` is formed only where
-    !! `sc` is below one, where the product is below `BOUNDMAX`, and where the answer is `.false.`
-    !! the quotient `b/sc` is below `BOUNDMAX` in magnitude and therefore finite.
+    !! `abs(b) >= BOUNDMAX*min(sc, 1)` is the whole test: at a scale of one or more it reads
+    !! `abs(b) >= BOUNDMAX`, since dividing can only shrink the bound, and below one it is `b/sc`
+    !! compared without the division. Where the answer is `.false.` the quotient is below `BOUNDMAX`
+    !! in magnitude and therefore finite.
+    !!
+    !! **The product is formed from `min(sc, ONE)` rather than guarded by `sc < ONE`**, because a
+    !! guard does not keep an optimiser from forming what it guards: nagfor's `--profile release`
+    !! computed `BOUNDMAX*sc` ahead of the `sc < ONE` test and trapped on the overflow for any scale
+    !! above four (`.claude/rules/fortran-gotchas.md`). Here no evaluation order can overflow, and
+    !! `min` is quiet because `sc` is finite.
     pure function bound_is_absent(b, sc) result(absent)
         real(real64), intent(in) :: b      !! one of the caller's bounds, not a NaN
         real(real64), intent(in) :: sc     !! that coordinate's scale, finite and positive
         logical                  :: absent !! `b/sc` is at or beyond `BOUNDMAX`
 
-        if (abs(b) >= BOUNDMAX) then
-            absent = .true.
-        else if (sc < ONE) then
-            absent = (abs(b) >= BOUNDMAX * sc)
-        else
-            absent = .false.
-        end if
+        absent = abs(b) >= BOUNDMAX * min(sc, ONE)
 
     end function bound_is_absent
 

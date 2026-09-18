@@ -88,12 +88,29 @@ in `code-style.md`.
   and nagfor's `-ieee=stop` aborts on the documented call; a quiet build is no evidence. Under
   nagfor even a power that shrinks it overflows (`huge()**(-0.5)` aborts inside the runtime's
   `**`), so a closed form at an infinite bound is written out, not evaluated at `huge()`. Produce
-  the infinity with `ieee_value` instead, behind a guard formed so it cannot itself overflow
-  (`huge() + ctr` before a subtraction, `huge()*scl` before a division by an `scl` below one),
-  each NESTED inside the sign test that makes its own threshold safe to form -- `tn_standardise`
-  and `tn_width` (`src/parquet_random.f90`). A caller's true `+/-Infinity` needs none of it, so
-  the two spellings diverge unless a test asserts they draw the same values
-  (`test_normal_trunc_unbounded_forms`).
+  the infinity with `ieee_value` instead, behind a guard whose threshold cannot overflow in ANY
+  evaluation order: form it from a clamped operand (`BOUNDMAX*min(sc, ONE)`, `bound_is_absent`).
+  Nesting the threshold inside the sign test that makes it safe (`huge() + ctr` under `ctr < 0`,
+  `huge()*scl` under `scl < 1`) is not enough, because an optimiser may form it before the test
+  (next entry); `tn_standardise` and `tn_width` (`src/parquet_random.f90`) are still written the
+  nested way. A caller's true `+/-Infinity` needs none of it, so the two spellings diverge unless
+  a test asserts they draw the same values (`test_normal_trunc_unbounded_forms`).
+- **A guard does not keep an optimiser from forming what it guards: a short guarded arithmetic
+  branch is compiled without a branch -- if-converted, hoisted, or vectorised under a mask -- the
+  result formed first and selected afterwards.** ifx does it at `-O2` under the default
+  `-fp-model=fast` and under `-fp-model=precise` alike: `if (value == 0) then; v = 0; else;
+  v = width*value; end if` became `mulsd` then a `cmpeqsd`/`andnpd` mask, raising IEEE_INVALID for
+  an infinite `width` while answering zero, and a loop dividing only where two values shared a
+  sign became `divpd` in every lane then an `andpd` mask, raising IEEE_DIVIDE_BY_ZERO. nagfor's
+  `--profile release` does it too: `BOUNDMAX*sc` was hoisted above the `sc < ONE` test meant to
+  keep it finite. The answer is right and the flag ends a program under nagfor's `-ieee=stop`.
+  Make the OPERANDS harmless where the result is not taken, then select or compare
+  (`merge(width, 1.0, width <= huge(width))` in `interp_1d_flat`,
+  `src/parquet_interpolate_1d.f90`; the PCHIP mean in `interp_pchip_slopes`,
+  `src/parquet_interpolate_core.f90`; `BOUNDMAX*min(sc, ONE)` in `bound_is_absent`,
+  `src/parquet_prima_common.f90`), and read the flags around the call in a test
+  (`check_golden_rows`, `test/test_interpolate.f90`). Every `-O0` profile (`debug`, `nag`,
+  `nagdeb`) cannot show it.
 - **A list-directed `read(text, *, iostat=ios) n` is not a strict parse**: `"5 6"` yields 5 with
   `iostat == 0`. Parse caller-supplied text by hand (trim, one optional sign, digits and nothing
   else), then convert (`env_int64`, `src/parquet_settings.f90`; `settings_env_two_numbers` scenario).
@@ -350,18 +367,6 @@ done | sort | uniq -c | sort -rn
   argument reduction). A procedure meant to propagate a NaN quietly returns every NaN argument
   before any transcendental (`pf_angdist_deg`). Reproduce against the built library, not a copy of
   the formula, which vectorises differently.
-- **A guard does not keep ifx from forming what it guards: a short guarded arithmetic branch is
-  compiled without a branch -- if-converted, or vectorised under a mask -- the result formed first
-  and selected afterwards**, at `-O2` under the default `-fp-model=fast` and under
-  `-fp-model=precise` alike. `if (value == 0) then; v = 0; else; v = width*value; end if` became
-  `mulsd` then a `cmpeqsd`/`andnpd` mask, raising IEEE_INVALID for an infinite `width` while
-  answering zero, and a loop dividing only where two values shared a sign became `divpd` in every
-  lane then an `andpd` mask, raising IEEE_DIVIDE_BY_ZERO. The answer is right and the flag ends a
-  program under nagfor's `-ieee=stop`. Make the OPERANDS harmless where the result is not taken,
-  then select (`merge(width, 1.0, width <= huge(width))` in `interp_1d_flat`,
-  `src/parquet_interpolate_1d.f90`; the PCHIP mean in `interp_pchip_slopes`,
-  `src/parquet_interpolate_core.f90`), and read the flags around the call in a test
-  (`check_golden_rows`, `test/test_interpolate.f90`). `--profile debug` is `-O0` and cannot show it.
 - **The same transcendental expression can differ by 1–2 ulp between a bulk loop and a scalar
   evaluation at `-O0`** (identical at `-O2`); assert a re-derived value at a tolerance above the
   round-trip error, never at zero (`test_count_within_sky`, 1e-9 degrees).

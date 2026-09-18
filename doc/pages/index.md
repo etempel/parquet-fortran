@@ -24,7 +24,7 @@ that single import.
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
 `parquet_argsort`, `parquet_stats`, `parquet_integrate`, `parquet_interpolate`, `parquet_optimize`,
-`parquet_prima`,
+`parquet_prima`, `parquet_root`,
 `parquet_sampling`, `parquet_spatial`,
 `parquet_healpix`, `parquet_sphere`,
 `parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`,
@@ -61,7 +61,7 @@ point in the library.
   on one or more key columns, and grouped by key columns for one answer per group.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
   statistics, numerical integration, interpolation of tabulated data, function minimisation,
-  Powell's derivative-free solvers,
+  Powell's derivative-free solvers, root finding in one variable,
   reproducible random numbers and the sampling built on them,
   spatial neighbour search,
   sphere pixelisation, random points and geometry on the sphere, key-to-index lookup, logging for
@@ -74,7 +74,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 42 pages, in reading order. (This list, each group's own page list and the
+All 43 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -118,6 +118,7 @@ All 42 pages, in reading order. (This list, each group's own page list and the
 - [Interpolation of tabulated data with parquet_interpolate](utilities/interpolation.html)
 - [Optimisation: minimising a function of one or many variables](utilities/optimization.html)
 - [Powell's derivative-free solvers with `parquet_prima`](utilities/prima.html)
+- [Root finding: solving f(x) = 0 in one variable](utilities/root-finding.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)

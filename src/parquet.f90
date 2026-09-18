@@ -73,6 +73,10 @@
 !>                          `pf_minimize_cobyla` (nonlinear constraints from a
 !>                          `pf_constrained_objective`), each with a `scale=` for
 !>                          coordinates of different magnitudes.
+!>   * `parquet_root`    -- `pf_find_root`: Brent's method for a root of a
+!>                          function of one real64 variable on a bracket, with
+!>                          the bracket widened first under a growth policy the
+!>                          caller states (`pf_bracket_expansion`).
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -117,6 +121,7 @@ module parquet
     use parquet_interpolate
     use parquet_optimize
     use parquet_prima
+    use parquet_root
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

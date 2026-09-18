@@ -37,6 +37,9 @@ program error_scenarios
     ! internal procedure.
     use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc, &
         dist12, outside_disc, negative_count_disc, nan_constraint_disc
+    ! The root-finding scenarios' functions: module procedures shared with test_root.f90, so a
+    ! scenario and a test name the same function and neither reaches an internal procedure.
+    use test_root_support, only : root_sq2, root_line_03, root_nan_beyond_two
     use parquet_prima, only : pf_minimize_bobyqa, pf_minimize_lincoa, pf_minimize_cobyla
     use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex, pf_minimize_de, &
         pf_minimize_multistart
@@ -3980,6 +3983,34 @@ program error_scenarios
         call scenario_prima_cobyla_negative_count()
     case ("prima_constraint_nonfinite")
         call scenario_prima_constraint_nonfinite()
+    case ("root_reversed_bracket")
+        call scenario_root_reversed_bracket()
+    case ("root_nan_bracket_end")
+        call scenario_root_nan_bracket_end()
+    case ("root_bracket_width")
+        call scenario_root_bracket_width()
+    case ("root_negative_tol")
+        call scenario_root_negative_tol()
+    case ("root_negative_rtol")
+        call scenario_root_negative_rtol()
+    case ("root_bad_max_neval")
+        call scenario_root_bad_max_neval()
+    case ("root_bad_expansion_mode")
+        call scenario_root_bad_expansion_mode()
+    case ("root_bad_expansion_factor")
+        call scenario_root_bad_expansion_factor()
+    case ("root_bad_expansion_tries")
+        call scenario_root_bad_expansion_tries()
+    case ("root_limits_inside_the_bracket")
+        call scenario_root_limits_inside_the_bracket()
+    case ("root_nonfinite_expansion_limit")
+        call scenario_root_nonfinite_expansion_limit()
+    case ("root_function_returns_nan")
+        call scenario_root_function_returns_nan()
+    case ("root_context_reported")
+        call scenario_root_context_reported()
+    case ("root_context_capped")
+        call scenario_root_context_capped()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -33743,5 +33774,177 @@ contains
         call pf_minimize_cobyla(obj, x, fmin)
         print '(a, es22.15)', "accepted a NaN constraint value: ", fmin
     end subroutine scenario_prima_constraint_nonfinite
+    !
+    ! ---- pf_find_root: every caller contract it refuses ------------------------------------
+    !
+    !> Each `pf_find_root` scenario first makes the nearest LEGAL call -- the refused value's
+    !> boundary neighbour -- and prints "root control solved", then makes the smallest call that
+    !> provokes exactly one abort and prints what it accepted. The control is what shows the guard
+    !> refuses the bad value rather than the whole call; the wrapper asserts both lines' evidence.
+    subroutine scenario_root_reversed_bracket()
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 2.0_real64, 1.0_real64, x)
+        print '(a, es22.15)', "accepted a reversed bracket: ", x
+    end subroutine scenario_root_reversed_bracket
+    !
+    !> A NaN end is refused by the bracket guard, built with `ieee_value` so the FIXTURE does not
+    !> trap first.
+    subroutine scenario_root_nan_bracket_end()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), x)
+        print '(a, es22.15)', "accepted a NaN bracket end: ", x
+    end subroutine scenario_root_nan_bracket_end
+    !
+    !> Two finite ends whose difference overflows; the control is a bracket just as wide as the
+    !> arithmetic allows, which must be solved rather than refused.
+    subroutine scenario_root_bracket_width()
+        real(real64) :: x
+
+        call pf_find_root(root_line_03, -0.8e308_real64, 0.8e308_real64, x)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_line_03, -1.0e308_real64, 1.0e308_real64, x)
+        print '(a, es22.15)', "accepted a bracket whose width overflows: ", x
+    end subroutine scenario_root_bracket_width
+    !
+    !> A negative absolute tolerance; the control is zero, the default.
+    subroutine scenario_root_negative_tol()
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, tol=0.0_real64)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, tol=-1.0e-10_real64)
+        print '(a, es22.15)', "accepted a negative tol: ", x
+    end subroutine scenario_root_negative_tol
+    !
+    !> A negative relative tolerance; the control is zero, which is raised to the floor.
+    subroutine scenario_root_negative_rtol()
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, rtol=0.0_real64)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, rtol=-1.0e-10_real64)
+        print '(a, es22.15)', "accepted a negative rtol: ", x
+    end subroutine scenario_root_negative_rtol
+    !
+    !> A budget of no evaluations; the control is one, which evaluates `a` and stops.
+    subroutine scenario_root_bad_max_neval()
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, max_neval=1)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, max_neval=0)
+        print '(a, es22.15)', "accepted a zero max_neval: ", x
+    end subroutine scenario_root_bad_max_neval
+    !
+    !> A mode that is none of the four codes; the control is the highest code there is.
+    subroutine scenario_root_bad_expansion_mode()
+        type(pf_bracket_expansion) :: grow
+        real(real64) :: x
+
+        grow%mode = PF_EXPAND_BOTH
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "root control solved: ", x
+        grow%mode = PF_EXPAND_BOTH + 1
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "accepted an unknown expansion mode: ", x
+    end subroutine scenario_root_bad_expansion_mode
+    !
+    !> A factor of exactly one, which cannot grow anything; the control is the next double up.
+    subroutine scenario_root_bad_expansion_factor()
+        type(pf_bracket_expansion) :: grow
+        real(real64) :: x
+
+        grow%mode = PF_EXPAND_UP
+        grow%factor = nearest(1.0_real64, 2.0_real64)
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "root control solved: ", x
+        grow%factor = 1.0_real64
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "accepted an expansion factor of one: ", x
+    end subroutine scenario_root_bad_expansion_factor
+    !
+    !> A negative try count; the control is zero, which expands nothing.
+    subroutine scenario_root_bad_expansion_tries()
+        type(pf_bracket_expansion) :: grow
+        real(real64) :: x
+
+        grow%mode = PF_EXPAND_UP
+        grow%max_tries = 0
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "root control solved: ", x
+        grow%max_tries = -1
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "accepted a negative max_tries: ", x
+    end subroutine scenario_root_bad_expansion_tries
+    !
+    !> An upper limit below the bracket's upper end; the control puts both limits ON the ends.
+    subroutine scenario_root_limits_inside_the_bracket()
+        type(pf_bracket_expansion) :: grow
+        real(real64) :: x
+
+        grow%mode = PF_EXPAND_BOTH
+        grow%lower_limit = 1.0_real64
+        grow%upper_limit = 2.0_real64
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "root control solved: ", x
+        grow%upper_limit = 1.5_real64
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "accepted an upper limit inside the bracket: ", x
+    end subroutine scenario_root_limits_inside_the_bracket
+    !
+    !> A NaN lower limit, which would pass both comparisons against the bracket; the control keeps
+    !> the default limits. Built with `ieee_value` so the FIXTURE does not trap first.
+    subroutine scenario_root_nonfinite_expansion_limit()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_bracket_expansion) :: grow
+        real(real64) :: x
+
+        grow%mode = PF_EXPAND_DOWN
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "root control solved: ", x
+        grow%lower_limit = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, expand=grow)
+        print '(a, es22.15)', "accepted a NaN expansion limit: ", x
+    end subroutine scenario_root_nonfinite_expansion_limit
+    !
+    !> A function returning a NaN inside the bracket; the control solves the same function on a
+    !> bracket where it has none.
+    subroutine scenario_root_function_returns_nan()
+        real(real64) :: x
+
+        call pf_find_root(root_nan_beyond_two, 0.0_real64, 2.0_real64, x)
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_nan_beyond_two, 0.0_real64, 3.0_real64, x)
+        print '(a, es22.15)', "accepted a NaN from the function: ", x
+    end subroutine scenario_root_function_returns_nan
+    !
+    !> The caller's `context=` is carried into the message, through the PLAIN-FUNCTION form, which
+    !> forwards it to the object form: the one forwarding site between a caller and the abort.
+    subroutine scenario_root_context_reported()
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, context="my_call_site")
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 2.0_real64, 1.0_real64, x, context="my_call_site")
+        print '(a, es22.15)', "accepted a reversed bracket with a context: ", x
+    end subroutine scenario_root_context_reported
+    !
+    !> Caller text inside a message is capped at 100 characters, so that a context built from a
+    !> long path cannot push the message itself out of a terminal or a log line.
+    subroutine scenario_root_context_capped()
+        real(real64) :: x
+
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, context=repeat("abcdefghij", 15))
+        print '(a, es22.15)', "root control solved: ", x
+        call pf_find_root(root_sq2, 2.0_real64, 1.0_real64, x, context=repeat("abcdefghij", 15))
+        print '(a, es22.15)', "accepted a reversed bracket with a long context: ", x
+    end subroutine scenario_root_context_capped
     !
 end program error_scenarios

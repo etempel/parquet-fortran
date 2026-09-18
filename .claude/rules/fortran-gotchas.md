@@ -110,7 +110,12 @@ in `code-style.md`.
   `src/parquet_interpolate_core.f90`; `BOUNDMAX*min(sc, ONE)` in `bound_is_absent`,
   `src/parquet_prima_common.f90`), and read the flags around the call in a test
   (`check_golden_rows`, `test/test_interpolate.f90`). Every `-O0` profile (`debug`, `nag`,
-  `nagdeb`) cannot show it.
+  `nagdeb`) cannot show it. **A clamped operand is harmless only while nothing splits the clamp**:
+  nagfor's optimised build turned `huge + min(a, 0.0)` into a selection between `huge + a` and
+  `huge`, formed both, and overflowed on a large positive `a`. Where the arm a clamp rejects would
+  overflow, store the clamped value in a `volatile` local before arithmetic reads it (`step_up`,
+  `src/parquet_root_solve.f90`), or compare in halves so that no arm can overflow (the width test
+  in `validate_call`, same file). `bound_is_absent` has the unprotected shape.
 - **A list-directed `read(text, *, iostat=ios) n` is not a strict parse**: `"5 6"` yields 5 with
   `iostat == 0`. Parse caller-supplied text by hand (trim, one optional sign, digits and nothing
   else), then convert (`env_int64`, `src/parquet_settings.f90`; `settings_env_two_numbers` scenario).

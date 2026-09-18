@@ -43,6 +43,7 @@ program run_tester_pf
     use test_random_dist, only : collect_tests_parquet_random_dist
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_random_weighted, only : collect_tests_parquet_random_weighted
+    use test_root, only : collect_tests_root
     use test_spatial, only : collect_tests_parquet_spatial
     use test_sphere, only : collect_tests_sphere
     use test_sphere_omp, only : collect_tests_sphere_omp
@@ -66,6 +67,7 @@ program run_tester_pf
         new_testsuite("optimize_omp", collect_tests_optimize_omp), &
         new_testsuite("prima", collect_tests_prima), &
         new_testsuite("prima_omp", collect_tests_prima_omp), &
+        new_testsuite("root", collect_tests_root), &
         new_testsuite("index_omp", collect_tests_index_omp), &
         new_testsuite("index_multimap", collect_tests_index_multimap), &
         new_testsuite("index_strings", collect_tests_index_strings), &

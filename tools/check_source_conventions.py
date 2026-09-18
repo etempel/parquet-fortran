@@ -2619,6 +2619,22 @@ def check_parquet_integrate_stays_arrow_free():
         "Integrating a function of one variable must not require the Arrow stack.")
 
 
+def check_parquet_root_stays_arrow_free():
+    """`use parquet_root` must not reach parquet_bindings.
+
+    Root finding reaches no reader, no writer and no setting: the module imports the INTRINSIC
+    modules `iso_fortran_env` and `ieee_arithmetic` and nothing else, which is what makes
+    `use parquet_root` cost two Fortran files. The obvious import to add is `parquet_settings`,
+    for a verbosity knob -- and the module has nothing to print, by design (it reports through
+    `converged=`, `info=` and the `PF_ROOT_*` codes), so it needs none.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_root",
+        "Finding a root of a function of one variable must not require the Arrow stack.")
+
+
 def check_parquet_interpolate_stays_arrow_free():
     """`use parquet_interpolate` must not reach parquet_bindings.
 
@@ -8308,6 +8324,7 @@ CHECKS = (
     ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
+    ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),
     ("every sum in the vendored PRIMA tier is the ordered one", check_prima_sums_are_the_ordered_sum),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",

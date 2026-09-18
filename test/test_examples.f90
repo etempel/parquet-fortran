@@ -274,6 +274,7 @@ contains
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
     !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
+    !> parquet_root (pf_find_root/pf_bracket_expansion/pf_root_info/PF_ROOT_OK),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
@@ -495,6 +496,20 @@ contains
             call check(error, abs(quad - 1.0_real64/3.0_real64) <= 1.0e-12_real64 .and. &
                 qinfo%status == PF_INT_OK, &
                 "pf_integrate must be reachable from use parquet alone and integrate x*x to 1/3")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_root: the root-finding generic, its growth policy and its record type.
+        block
+            type(pf_root_info)         :: rinfo
+            type(pf_bracket_expansion) :: grow
+            real(real64)               :: root
+            grow%mode = PF_EXPAND_UP
+            call pf_find_root(facade_two_less_square, 0.0_real64, 0.5_real64, root, expand=grow, &
+                              info=rinfo)
+            call check(error, abs(root - sqrt(2.0_real64)) <= 1.0e-14_real64 .and. &
+                rinfo%status == PF_ROOT_OK, &
+                "pf_find_root must be reachable from use parquet alone and solve x*x = 2")
             if (allocated(error)) return
         end block
 
@@ -1862,5 +1877,15 @@ contains
         f = x*x
 
     end function facade_square
+
+    !> `2 - x*x`, for the facade test's `pf_find_root` call: a module procedure, because a
+    !> callback in this library is never an internal one (flang cannot pass one at all).
+    function facade_two_less_square(x) result(y)
+        real(real64), intent(in) :: x !! where to evaluate
+        real(real64)             :: y !! the value there
+
+        y = 2.0_real64 - x*x
+
+    end function facade_two_less_square
 
 end module test_examples

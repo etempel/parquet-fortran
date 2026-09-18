@@ -85,7 +85,8 @@ contains
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
-                                            p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:)
+                                            p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
+                                            p35(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3464,8 +3465,39 @@ contains
             new_unittest("pf_vec2radec refuses an unknown frame", &
                 test_sphere_vec2radec_bad_frame_aborts) &
             ]
+        ! ---- parquet_root ----
+        p35 = [ &
+            new_unittest("pf_find_root refuses a reversed bracket", &
+                test_root_reversed_bracket_aborts), &
+            new_unittest("pf_find_root refuses a NaN bracket end", &
+                test_root_nan_bracket_end_aborts), &
+            new_unittest("pf_find_root refuses a bracket whose width overflows", &
+                test_root_bracket_width_aborts), &
+            new_unittest("pf_find_root refuses a negative tol", &
+                test_root_negative_tol_aborts), &
+            new_unittest("pf_find_root refuses a negative rtol", &
+                test_root_negative_rtol_aborts), &
+            new_unittest("pf_find_root refuses a zero max_neval", &
+                test_root_bad_max_neval_aborts), &
+            new_unittest("pf_find_root refuses an unknown expansion mode", &
+                test_root_bad_expansion_mode_aborts), &
+            new_unittest("pf_find_root refuses an expansion factor of one", &
+                test_root_bad_expansion_factor_aborts), &
+            new_unittest("pf_find_root refuses a negative max_tries", &
+                test_root_bad_expansion_tries_aborts), &
+            new_unittest("pf_find_root refuses an expansion limit inside the bracket", &
+                test_root_limits_inside_the_bracket_aborts), &
+            new_unittest("pf_find_root refuses a NaN expansion limit", &
+                test_root_nonfinite_expansion_limit_aborts), &
+            new_unittest("pf_find_root refuses a function that returns a NaN", &
+                test_root_function_returns_nan_aborts), &
+            new_unittest("pf_find_root carries the caller's context into its message", &
+                test_root_context_reported_aborts), &
+            new_unittest("pf_find_root caps the caller's context at 100 characters", &
+                test_root_context_capped_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19567,6 +19599,120 @@ contains
             failure_message="a 150-character context was expected to abort with a capped message", &
             required_stderr="abcdefghij...")
     end subroutine test_integrate_context_capped_aborts
+    !
+    ! ---- pf_find_root abort paths --------------------------------------------------------------
+    !
+    !> Runs one `pf_find_root` scenario and asserts its whole shape from the one run: it aborted,
+    !! its control call succeeded first (the "root control solved" line), and the abort carried the
+    !! library's own message. The control is what makes the abort evidence that the guard refuses
+    !! the bad value rather than the whole call.
+    subroutine check_root_scenario(error, scenario, required)
+        type(error_type), allocatable, intent(out) :: error    !! test-drive's error handle
+        character(len=*), intent(in)               :: scenario !! the scenario's name
+        character(len=*), intent(in)               :: required !! the message, after `pf_find_root: `
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        ! 97 is error_scenarios.f90's unknown-name exit; 124 and 137 are the timeout cap's, which
+        ! would otherwise read as an abort (see check_scenario_exit_status_and_stderr).
+        call check(error, exitstat /= 97, "scenario name not recognized by error_scenarios.f90: "//scenario)
+        if (allocated(error)) return
+        call check(error, exitstat /= 124 .and. exitstat /= 137, "scenario TIMED OUT and was killed: "//scenario)
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario "//scenario//" was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "root control solved", found)
+        call check(error, found, scenario//": the control call must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "pf_find_root: "//required, found)
+        call check(error, found, scenario//": expected the message 'pf_find_root: "//required//"'")
+    end subroutine check_root_scenario
+    !
+    !> Every one of `pf_find_root`'s refusals, asserted by the exact text the guide page's table
+    !> publishes; see `test/error_scenarios.f90` for each control and the call refused.
+    subroutine test_root_reversed_bracket_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_reversed_bracket", &
+            "the bracket must satisfy a < b with finite ends")
+    end subroutine test_root_reversed_bracket_aborts
+    !
+    subroutine test_root_nan_bracket_end_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_nan_bracket_end", &
+            "the bracket must satisfy a < b with finite ends")
+    end subroutine test_root_nan_bracket_end_aborts
+    !
+    subroutine test_root_bracket_width_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_bracket_width", "the bracket width must be finite")
+    end subroutine test_root_bracket_width_aborts
+    !
+    subroutine test_root_negative_tol_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_negative_tol", "tol must be a non-negative finite number")
+    end subroutine test_root_negative_tol_aborts
+    !
+    subroutine test_root_negative_rtol_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_negative_rtol", "rtol must be a non-negative finite number")
+    end subroutine test_root_negative_rtol_aborts
+    !
+    subroutine test_root_bad_max_neval_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_bad_max_neval", "max_neval must be at least 1")
+    end subroutine test_root_bad_max_neval_aborts
+    !
+    subroutine test_root_bad_expansion_mode_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_bad_expansion_mode", &
+            "expand%mode must be one of PF_EXPAND_NONE, PF_EXPAND_UP, PF_EXPAND_DOWN, PF_EXPAND_BOTH")
+    end subroutine test_root_bad_expansion_mode_aborts
+    !
+    subroutine test_root_bad_expansion_factor_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_bad_expansion_factor", &
+            "expand%factor must be a finite number greater than 1")
+    end subroutine test_root_bad_expansion_factor_aborts
+    !
+    subroutine test_root_bad_expansion_tries_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_bad_expansion_tries", "expand%max_tries must not be negative")
+    end subroutine test_root_bad_expansion_tries_aborts
+    !
+    subroutine test_root_limits_inside_the_bracket_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_limits_inside_the_bracket", &
+            "the expansion limits must be finite and lie outside the initial bracket")
+    end subroutine test_root_limits_inside_the_bracket_aborts
+    !
+    subroutine test_root_nonfinite_expansion_limit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_nonfinite_expansion_limit", &
+            "the expansion limits must be finite and lie outside the initial bracket")
+    end subroutine test_root_nonfinite_expansion_limit_aborts
+    !
+    subroutine test_root_function_returns_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_function_returns_nan", "the function returned a NaN")
+    end subroutine test_root_function_returns_nan_aborts
+    !
+    subroutine test_root_context_reported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_context_reported", &
+            "the bracket must satisfy a < b with finite ends (context: my_call_site)")
+    end subroutine test_root_context_reported_aborts
+    !
+    !> Exactly 100 characters of the caller's text survive, then `...`: ten repetitions, not
+    !> eleven, so a cap moved in either direction fails here.
+    subroutine test_root_context_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_root_scenario(error, "root_context_capped", &
+            "the bracket must satisfy a < b with finite ends (context: "//repeat("abcdefghij", 10)//"...)")
+    end subroutine test_root_context_capped_aborts
     !
     subroutine test_interpolate_size_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

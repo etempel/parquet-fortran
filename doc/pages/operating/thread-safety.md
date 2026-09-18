@@ -340,8 +340,8 @@ teeth**; the rest are here so that "what may I do concurrently" has one answer r
 
 **A tier not listed here needs no rule**, which is why the list is shorter than the set of
 Arrow-free modules. `parquet_temporal`, `parquet_columns`, `parquet_list`, `parquet_map`,
-`parquet_struct`, `parquet_utils`, `parquet_integrate` and `parquet_interpolate` share no state
-between calls and hold nothing a second thread
+`parquet_struct`, `parquet_utils`, `parquet_integrate`, `parquet_interpolate` and `parquet_root`
+share no state between calls and hold nothing a second thread
 can see: one object per thread, or one shared object nobody writes, is safe without anything being
 said about it.
 

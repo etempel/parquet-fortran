@@ -1866,6 +1866,89 @@ contains
 
 end module test_module_surface_prima
 
+!> `parquet_root` alone: the generic in both forms, the growth policy and its four modes, the info
+!! record and its three status codes, the history, and no settings knob at all.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! makes two claims nothing else checks: that `use parquet_root` compiles two Fortran files, and
+!! that it re-exports no setting -- root finding reads none and can print nothing, so there is no
+!! knob for it to re-export.
+module test_module_surface_root
+    use parquet_root                     ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_root_surface
+
+    !> `x*x - 2` as an object, so the object specific is reached through this import alone.
+    type, extends(pf_rootfun) :: surface_sq2
+    contains
+        procedure :: eval => surface_sq2_eval !! Evaluates `x*x - 2`.
+    end type surface_sq2
+
+contains
+
+    !> Exercises each public name through `use parquet_root` alone.
+    subroutine check_root_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_root_info)         :: info
+        type(pf_root_history)      :: hist
+        type(pf_bracket_expansion) :: grow
+        type(surface_sq2)          :: obj
+        real(real64)               :: x
+
+        what = ""
+
+        ! The plain-function specific, with the info record and the history.
+        call pf_find_root(surface_sq2_func, 0.0_real64, 2.0_real64, x, info=info, history=hist)
+        if (abs(x - sqrt(2.0_real64)) > 1.0e-14_real64) what = "pf_find_root"
+        if (what == "" .and. info%status /= PF_ROOT_OK) what = "PF_ROOT_OK"
+        if (what == "" .and. hist%n /= info%neval) what = "pf_root_history%n"
+
+        ! The object specific, grown upward by the policy.
+        if (what == "") then
+            grow%mode = PF_EXPAND_UP
+            call pf_find_root(obj, 0.0_real64, 0.01_real64, x, expand=grow, info=info)
+            if (abs(x - sqrt(2.0_real64)) > 1.0e-14_real64 .or. info%nexpand < 1) &
+                what = "pf_bracket_expansion"
+        end if
+
+        ! A missing sign change is a status reachable by name through this import alone.
+        if (what == "") then
+            call pf_find_root(surface_sq2_func, 2.0_real64, 3.0_real64, x, info=info)
+            if (info%status /= PF_ROOT_NO_BRACKET) what = "PF_ROOT_NO_BRACKET"
+        end if
+
+        ! The remaining codes are reachable by name.
+        if (what == "" .and. PF_ROOT_LIMIT == PF_ROOT_OK) what = "PF_ROOT_LIMIT"
+        if (what == "" .and. (PF_EXPAND_NONE == PF_EXPAND_DOWN .or. PF_EXPAND_BOTH == PF_EXPAND_UP)) &
+            what = "PF_EXPAND_*"
+
+    end subroutine check_root_surface
+
+    !> `x*x - 2`, whose positive root is `sqrt(2)`. A module procedure, because a callback in this
+    !! library is never an internal one.
+    function surface_sq2_func(x) result(y)
+        real(real64), intent(in) :: x !! where to evaluate
+        real(real64)             :: y !! the value there
+
+        y = x*x - 2.0_real64
+
+    end function surface_sq2_func
+
+    !> Evaluates `x*x - 2` for the object form.
+    function surface_sq2_eval(this, x) result(y)
+        class(surface_sq2), intent(inout) :: this !! the function object, which does not change
+        real(real64), intent(in)          :: x    !! where to evaluate
+        real(real64)                      :: y    !! the value there
+
+        y = surface_sq2_func(x)
+
+    end function surface_sq2_eval
+
+end module test_module_surface_root
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -1879,6 +1962,7 @@ module test_module_surface
     use test_module_surface_interpolate, only : check_interpolate_surface
     use test_module_surface_optimize, only : check_optimize_surface
     use test_module_surface_prima, only : check_prima_surface
+    use test_module_surface_root, only : check_root_surface
     use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
@@ -2008,6 +2092,8 @@ contains
                          test_optimize_surface), &
             new_unittest("parquet_prima alone minimises with BOBYQA and hands back its record", &
                          test_prima_surface), &
+            new_unittest("parquet_root alone solves in both forms and expands a bracket", &
+                         test_root_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
             new_unittest("parquet_toml alone reads a whole configuration", &
@@ -2161,6 +2247,16 @@ contains
         call check(error, what == "", &
             "BOBYQA was not usable through `use parquet_prima` alone: " // what)
     end subroutine test_prima_surface
+
+    !> The test-drive wrapper over check_root_surface.
+    subroutine test_root_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_root_surface(what)
+        call check(error, what == "", &
+            "root finding was not usable through `use parquet_root` alone: " // what)
+    end subroutine test_root_surface
 
     !> The test-drive wrapper over check_logging_surface.
     subroutine test_logging_surface(error)

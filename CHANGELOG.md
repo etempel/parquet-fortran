@@ -33,6 +33,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   many threads as you like, one integrand object per thread. An Arrow-free entry module.
   `bench/benchmark_integrate.sh` measures it. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).
+- **Root finding: `parquet_root` and `pf_find_root`.** Solves `f(x) = 0` for one `real64` variable
+  on a bracket by Brent's method, the function given as an object extending `pf_rootfun` or as a
+  plain function. `expand=` (`pf_bracket_expansion`) widens a bracket whose ends have the same sign
+  under a policy the caller states — the upper end, the lower end or both, by a factor, within
+  limits and a number of tries — and stops at the first sign change. `tol` and `rtol` set the
+  tolerances, full precision at any magnitude by default; `max_neval` bounds the evaluations,
+  expansion included; an infinite function value is used as a sign, and a NaN is an `error stop`.
+  `converged=` and `info=` (`pf_root_info`: status, counts, `f` at the root, the bracket) report
+  the outcome, a missing sign change or a spent budget as a status rather than an abort, and
+  nothing is printed; `history=` (`pf_root_history`) records every evaluation. An Arrow-free entry
+  module. See [Root finding](doc/pages/utilities/root-finding.md).
 - **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
   on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
   variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with

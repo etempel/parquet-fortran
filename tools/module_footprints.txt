@@ -297,6 +297,11 @@ parquet_settings_base.f90
 parquet_wrapper.cpp
 parquet_ziggurat.f90
 
+[parquet_root]
+parquet_root.f90
+parquet_root_solve.f90
+parquet_wrapper.cpp
+
 [parquet_logging]
 parquet_logging.f90
 parquet_wrapper.cpp
@@ -552,6 +557,8 @@ parquet_read_sort.f90
 parquet_read_string.f90
 parquet_read_struct.f90
 parquet_read_temporal.f90
+parquet_root.f90
+parquet_root_solve.f90
 parquet_sampling.f90
 parquet_settings.f90
 parquet_settings_base.f90

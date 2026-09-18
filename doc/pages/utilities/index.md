@@ -6,6 +6,7 @@ ordered_subpage: integration.md
 ordered_subpage: interpolation.md
 ordered_subpage: optimization.md
 ordered_subpage: prima.md
+ordered_subpage: root-finding.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
@@ -20,7 +21,7 @@ ordered_subpage: embedding-maml-schemas.md
 
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
 arrays and this library's own column types, statistical reductions over those same arrays, minimisation of a function you supply,
-interpolation of tabulated data,
+finding where a function of one variable crosses zero, interpolation of tabulated data,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
 random points in sky polygons and HEALPix masks with the RA/Dec geometry they need,
@@ -76,6 +77,15 @@ helpers, and the two generators meant to be copied into your own project.
   radii and what each is for, `ctol` and what an infeasible answer looks like, `scale=` for
   coordinates of different magnitudes, and `pf_bobyqa_solver` to drive the multistart driver with
   BOBYQA.
+- [Root finding: solving f(x) = 0 in one variable](root-finding.html) — `pf_find_root`, Brent's
+  method on a bracket, with the function supplied as an object carrying its own parameters or as a
+  plain function. When the bracket does not yet change sign it is widened first under a growth
+  policy you state — upward, downward or both ways, by a factor, within limits — and the
+  expansion stops at the first sign change it meets. Absolute and relative tolerances, full
+  precision at any magnitude under the defaults, an infinite function value used as a sign, a
+  missing sign change or a spent budget reported through a status code rather than an abort,
+  `info%froot` to tell a pole from a root, and a record of every evaluation on request. Nothing
+  is printed.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

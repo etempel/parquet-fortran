@@ -2635,6 +2635,22 @@ def check_parquet_root_stays_arrow_free():
         "Finding a root of a function of one variable must not require the Arrow stack.")
 
 
+def check_parquet_transform_stays_arrow_free():
+    """`use parquet_transform` must not reach parquet_bindings.
+
+    The discrete cosine transform reaches no reader, no writer and no setting: the module imports
+    the INTRINSIC module `iso_fortran_env` and nothing else, which is what makes
+    `use parquet_transform` cost two Fortran files. It has nothing to print -- its only output path
+    is `error stop` -- so the obvious import to add, `parquet_settings` for a verbosity knob, has
+    nothing to govern.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_transform",
+        "Transforming a sequence must not require the Arrow stack.")
+
+
 def check_parquet_interpolate_stays_arrow_free():
     """`use parquet_interpolate` must not reach parquet_bindings.
 
@@ -8325,6 +8341,7 @@ CHECKS = (
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),
+    ("parquet_transform stays Arrow-free", check_parquet_transform_stays_arrow_free),
     ("every sum in the vendored PRIMA tier is the ordered one", check_prima_sums_are_the_ordered_sum),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",

@@ -44,6 +44,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the outcome, a missing sign change or a spent budget as a status rather than an abort, and
   nothing is printed; `history=` (`pf_root_history`) records every evaluation. An Arrow-free entry
   module. See [Root finding](doc/pages/utilities/root-finding.md).
+- **Discrete cosine transform: `parquet_transform`, `pf_dct` and `pf_idct`.** The type-II discrete
+  cosine transform of a `real64` sequence whose length is a power of two, and its exact inverse, in
+  scipy's convention (`scipy.fft.dct` and `idct`, factor of two included), unnormalised or
+  orthonormal (`norm="ortho"`); `pf_is_pow2` and `pf_next_pow2` choose the length. Nothing is
+  printed. An Arrow-free entry module. See
+  [Transforms: the discrete cosine transform](doc/pages/utilities/transforms.md).
 - **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
   on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
   variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with

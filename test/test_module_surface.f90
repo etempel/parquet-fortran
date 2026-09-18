@@ -1949,6 +1949,60 @@ contains
 
 end module test_module_surface_root
 
+!> `parquet_transform` alone: both transforms under both norms, and the two length helpers.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! makes two claims nothing else checks: that `use parquet_transform` compiles two Fortran files,
+!! and that it re-exports no setting -- the transform reads none and can print nothing, so there is
+!! no knob for it to re-export.
+module test_module_surface_transform
+    use parquet_transform                ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_transform_surface
+
+contains
+
+    !> Exercises each public name through `use parquet_transform` alone.
+    subroutine check_transform_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        real(real64) :: x(8), y(8), back(8)
+        integer      :: n
+
+        what = ""
+        x = [1.0_real64, -2.0_real64, 3.5_real64, 0.25_real64, -1.75_real64, 4.0_real64, -0.5_real64, &
+             2.25_real64]
+
+        ! The forward transform: y(1) is twice the sum, the convention's factor of two.
+        call pf_dct(x, y)
+        if (abs(y(1) - 2.0_real64*sum(x)) > 1.0e-13_real64) what = "pf_dct"
+
+        ! The inverse undoes it, under the orthonormal norm too.
+        if (what == "") then
+            call pf_idct(y, back)
+            if (maxval(abs(back - x)) > 1.0e-13_real64) what = "pf_idct"
+        end if
+        if (what == "") then
+            call pf_dct(x, y, norm="ortho")
+            call pf_idct(y, back, norm="ortho")
+            if (maxval(abs(back - x)) > 1.0e-13_real64) what = "norm=""ortho"""
+        end if
+
+        ! The two length helpers.
+        if (what == "") then
+            if (.not. pf_is_pow2(1024) .or. pf_is_pow2(1000)) what = "pf_is_pow2"
+        end if
+        if (what == "") then
+            n = pf_next_pow2(1000)
+            if (n /= 1024) what = "pf_next_pow2"
+        end if
+
+    end subroutine check_transform_surface
+
+end module test_module_surface_transform
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -1963,6 +2017,7 @@ module test_module_surface
     use test_module_surface_optimize, only : check_optimize_surface
     use test_module_surface_prima, only : check_prima_surface
     use test_module_surface_root, only : check_root_surface
+    use test_module_surface_transform, only : check_transform_surface
     use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
@@ -2094,6 +2149,8 @@ contains
                          test_prima_surface), &
             new_unittest("parquet_root alone solves in both forms and expands a bracket", &
                          test_root_surface), &
+            new_unittest("parquet_transform alone transforms, inverts and chooses a length", &
+                         test_transform_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
             new_unittest("parquet_toml alone reads a whole configuration", &
@@ -2257,6 +2314,16 @@ contains
         call check(error, what == "", &
             "root finding was not usable through `use parquet_root` alone: " // what)
     end subroutine test_root_surface
+
+    !> The test-drive wrapper over check_transform_surface.
+    subroutine test_transform_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_transform_surface(what)
+        call check(error, what == "", &
+            "the transform was not usable through `use parquet_transform` alone: " // what)
+    end subroutine test_transform_surface
 
     !> The test-drive wrapper over check_logging_surface.
     subroutine test_logging_surface(error)

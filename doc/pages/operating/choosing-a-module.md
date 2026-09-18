@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **145** of this library's Fortran files.
+also the largest: a project that imports it compiles **147** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -64,10 +64,11 @@ in every one of them.
 | `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
 | `parquet_prima` | 24 | no | `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla`: Powell's derivative-free solvers, vendored from PRIMA — a function of several variables with bounds, linear constraints or nonlinear ones |
 | `parquet_root` | 2 | no | `pf_find_root`: where a function of one variable crosses zero, by Brent's method on a bracket, widened first under a growth policy you state |
+| `parquet_transform` | 2 | no | `pf_dct` and `pf_idct`: the discrete cosine transform of a sequence whose length is a power of two, and its inverse |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 145 | **yes** | everything above, through one `use` |
+| `parquet` | 147 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -155,6 +156,7 @@ anything else.
 | `parquet_prima` | none — it reads none, and prints nothing at all. The one emitter it can reach is the thread clamp inside `pf_minimize_multistart`, which a caller reaches through `parquet_optimize` and silences there |
 | `parquet_optimize` | `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_root` | none — it reads none, and prints nothing at all |
+| `parquet_transform` | none — it reads none, and prints nothing at all |
 | `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |
 
 The output pair (`verbosity`, `message_stream`) appears wherever a module can print something: a

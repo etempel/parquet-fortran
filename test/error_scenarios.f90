@@ -4011,6 +4011,24 @@ program error_scenarios
         call scenario_root_context_reported()
     case ("root_context_capped")
         call scenario_root_context_capped()
+    case ("transform_empty_sequence")
+        call scenario_transform_empty_sequence()
+    case ("transform_length_not_pow2")
+        call scenario_transform_length_not_pow2()
+    case ("transform_size_mismatch")
+        call scenario_transform_size_mismatch()
+    case ("transform_idct_size_mismatch")
+        call scenario_transform_idct_size_mismatch()
+    case ("transform_bad_norm_token")
+        call scenario_transform_bad_norm_token()
+    case ("transform_next_pow2_nonpositive")
+        call scenario_transform_next_pow2_nonpositive()
+    case ("transform_next_pow2_too_large")
+        call scenario_transform_next_pow2_too_large()
+    case ("transform_context_reported")
+        call scenario_transform_context_reported()
+    case ("transform_context_capped")
+        call scenario_transform_context_capped()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -33946,5 +33964,108 @@ contains
         call pf_find_root(root_sq2, 2.0_real64, 1.0_real64, x, context=repeat("abcdefghij", 15))
         print '(a, es22.15)', "accepted a reversed bracket with a long context: ", x
     end subroutine scenario_root_context_capped
+    !
+    ! ---- pf_dct, pf_idct and pf_next_pow2: every caller contract they refuse -------------------
+    !
+    !> Each `parquet_transform` scenario first makes the nearest LEGAL call -- the refused value's
+    !> boundary neighbour -- and prints a "transform control" line, then makes the smallest call
+    !> that provokes exactly one abort and prints what it accepted. The control is what shows the
+    !> guard refuses the bad value rather than the whole call; the wrapper asserts both lines'
+    !> evidence.
+    subroutine scenario_transform_empty_sequence()
+        real(real64) :: x(1), y(1), empty_x(0), empty_y(0)
+
+        x = 2.0_real64
+        call pf_dct(x, y)
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dct(empty_x, empty_y)
+        print '(a)', "accepted an empty sequence"
+    end subroutine scenario_transform_empty_sequence
+    !
+    !> A length of 1000 is refused, and the message names the 1024 `pf_next_pow2` gives; a length
+    !> of 1024 is the control.
+    subroutine scenario_transform_length_not_pow2()
+        real(real64) :: x(1024), y(1024)
+
+        x = 1.0_real64
+        call pf_dct(x, y)
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dct(x(1:1000), y(1:1000))
+        print '(a)', "accepted a length of 1000"
+    end subroutine scenario_transform_length_not_pow2
+    !
+    subroutine scenario_transform_size_mismatch()
+        real(real64) :: x(8), y(8)
+
+        x = 1.0_real64
+        call pf_dct(x, y)
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dct(x, y(1:4))
+        print '(a)', "accepted y shorter than x"
+    end subroutine scenario_transform_size_mismatch
+    !
+    !> `pf_idct` validates too, under its own name: without this scenario, a `pf_idct` that skipped
+    !> its validation would pass every other test in the suite.
+    subroutine scenario_transform_idct_size_mismatch()
+        real(real64) :: y(8), x(8)
+
+        y = 1.0_real64
+        call pf_idct(y, x)
+        print '(a, es22.15)', "transform control transformed: ", x(1)
+        call pf_idct(y, x(1:4))
+        print '(a)', "accepted x shorter than y"
+    end subroutine scenario_transform_idct_size_mismatch
+    !
+    !> scipy's `"forward"`, a token this library does not offer, is refused; `"ORTHO"`, a token it
+    !> does offer in another case, is the control.
+    subroutine scenario_transform_bad_norm_token()
+        real(real64) :: x(8), y(8)
+
+        x = 1.0_real64
+        call pf_dct(x, y, norm="ORTHO")
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dct(x, y, norm="forward")
+        print '(a)', 'accepted norm="forward"'
+    end subroutine scenario_transform_bad_norm_token
+    !
+    subroutine scenario_transform_next_pow2_nonpositive()
+        integer :: n
+
+        n = pf_next_pow2(1)
+        print '(a, i0)', "transform control length: ", n
+        n = pf_next_pow2(0)
+        print '(a, i0)', "accepted a count of 0, giving ", n
+    end subroutine scenario_transform_next_pow2_nonpositive
+    !
+    !> The largest power of two a default integer holds is the control; one more is refused.
+    subroutine scenario_transform_next_pow2_too_large()
+        integer :: n, top
+
+        top = 2**(digits(1) - 1)
+        n = pf_next_pow2(top)
+        print '(a, i0)', "transform control length: ", n
+        n = pf_next_pow2(top + 1)
+        print '(a, i0)', "accepted a count above the largest power of two, giving ", n
+    end subroutine scenario_transform_next_pow2_too_large
+    !
+    subroutine scenario_transform_context_reported()
+        real(real64) :: x(8), y(8)
+
+        x = 1.0_real64
+        call pf_dct(x, y, context="my_call_site")
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dct(x, y(1:4), context="my_call_site")
+        print '(a)', "accepted y shorter than x with a context"
+    end subroutine scenario_transform_context_reported
+    !
+    subroutine scenario_transform_context_capped()
+        real(real64) :: x(8), y(8)
+
+        x = 1.0_real64
+        call pf_dct(x, y, context=repeat("abcdefghij", 15))
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dct(x, y(1:4), context=repeat("abcdefghij", 15))
+        print '(a)', "accepted y shorter than x with a long context"
+    end subroutine scenario_transform_context_capped
     !
 end program error_scenarios

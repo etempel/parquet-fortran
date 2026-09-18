@@ -77,6 +77,11 @@
 !>                          function of one real64 variable on a bracket, with
 !>                          the bracket widened first under a growth policy the
 !>                          caller states (`pf_bracket_expansion`).
+!>   * `parquet_transform` -- `pf_dct` and `pf_idct`: the discrete cosine
+!>                          transform (type II) of a real64 sequence whose
+!>                          length is a power of two, and its inverse,
+!>                          unnormalised or orthonormal, with `pf_is_pow2` and
+!>                          `pf_next_pow2` for choosing that length.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -122,7 +127,8 @@ module parquet
     use parquet_optimize
     use parquet_prima
     use parquet_root
-    ! Only the test hook: the transform itself and its contract check are internal.
+    use parquet_transform
+    ! Only the test hook: the exp-key transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings
     ! The library's own version string, which lives in a leaf module of its own so that a program

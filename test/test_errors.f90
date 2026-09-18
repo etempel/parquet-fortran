@@ -86,7 +86,7 @@ contains
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
                                             p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
-                                            p35(:)
+                                            p35(:), p36(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3496,8 +3496,29 @@ contains
             new_unittest("pf_find_root caps the caller's context at 100 characters", &
                 test_root_context_capped_aborts) &
             ]
+        ! ---- parquet_transform ----
+        p36 = [ &
+            new_unittest("pf_dct refuses an empty sequence", &
+                test_transform_empty_sequence_aborts), &
+            new_unittest("pf_dct refuses a length that is not a power of two", &
+                test_transform_length_not_pow2_aborts), &
+            new_unittest("pf_dct refuses x and y of different sizes", &
+                test_transform_size_mismatch_aborts), &
+            new_unittest("pf_idct refuses y and x of different sizes", &
+                test_transform_idct_size_mismatch_aborts), &
+            new_unittest("pf_dct refuses a norm token it does not offer", &
+                test_transform_bad_norm_token_aborts), &
+            new_unittest("pf_next_pow2 refuses a count below one", &
+                test_transform_next_pow2_nonpositive_aborts), &
+            new_unittest("pf_next_pow2 refuses a count above the largest power of two", &
+                test_transform_next_pow2_too_large_aborts), &
+            new_unittest("pf_dct carries the caller's context into its message", &
+                test_transform_context_reported_aborts), &
+            new_unittest("pf_dct caps the caller's context at 100 characters", &
+                test_transform_context_capped_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36]
     end subroutine collect_tests_parquet_errors
 
 
@@ -19713,6 +19734,95 @@ contains
         call check_root_scenario(error, "root_context_capped", &
             "the bracket must satisfy a < b with finite ends (context: "//repeat("abcdefghij", 10)//"...)")
     end subroutine test_root_context_capped_aborts
+    !
+    ! ---- pf_dct, pf_idct and pf_next_pow2 abort paths ------------------------------------------
+    !
+    !> Runs one `parquet_transform` scenario and asserts its whole shape from the one run: it
+    !! aborted, its control call succeeded first (the "transform control" line), and the abort
+    !! carried the library's own message. The control is what makes the abort evidence that the
+    !! guard refuses the bad value rather than the whole call.
+    subroutine check_transform_scenario(error, scenario, required)
+        type(error_type), allocatable, intent(out) :: error    !! test-drive's error handle
+        character(len=*), intent(in)               :: scenario !! the scenario's name
+        character(len=*), intent(in)               :: required !! the message, from the entry point's name
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        ! 97 is error_scenarios.f90's unknown-name exit; 124 and 137 are the timeout cap's, which
+        ! would otherwise read as an abort (see check_scenario_exit_status_and_stderr).
+        call check(error, exitstat /= 97, "scenario name not recognized by error_scenarios.f90: "//scenario)
+        if (allocated(error)) return
+        call check(error, exitstat /= 124 .and. exitstat /= 137, "scenario TIMED OUT and was killed: "//scenario)
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "scenario "//scenario//" was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "transform control", found)
+        call check(error, found, scenario//": the control call must succeed first, or the abort proves nothing")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, required, found)
+        call check(error, found, scenario//": expected the message '"//required//"'")
+    end subroutine check_transform_scenario
+    !
+    !> Every one of `parquet_transform`'s refusals, asserted by the exact text the guide page's
+    !> table publishes; see `test/error_scenarios.f90` for each control and the call refused.
+    subroutine test_transform_empty_sequence_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_empty_sequence", "pf_dct: the sequence must not be empty")
+    end subroutine test_transform_empty_sequence_aborts
+    !
+    subroutine test_transform_length_not_pow2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_length_not_pow2", &
+            "pf_dct: the sequence length must be a power of two (got 1000; pf_next_pow2 gives 1024)")
+    end subroutine test_transform_length_not_pow2_aborts
+    !
+    subroutine test_transform_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_size_mismatch", "pf_dct: x and y must have the same size")
+    end subroutine test_transform_size_mismatch_aborts
+    !
+    subroutine test_transform_idct_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_idct_size_mismatch", "pf_idct: x and y must have the same size")
+    end subroutine test_transform_idct_size_mismatch_aborts
+    !
+    subroutine test_transform_bad_norm_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_bad_norm_token", 'pf_dct: norm must be "none" or "ortho"')
+    end subroutine test_transform_bad_norm_token_aborts
+    !
+    subroutine test_transform_next_pow2_nonpositive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_next_pow2_nonpositive", "pf_next_pow2: n must be positive")
+    end subroutine test_transform_next_pow2_nonpositive_aborts
+    !
+    !> The limit is printed as a number, the largest power of two a default integer holds.
+    subroutine test_transform_next_pow2_too_large_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=24) :: top
+
+        write (top, '(i0)') 2**(digits(1) - 1)
+        call check_transform_scenario(error, "transform_next_pow2_too_large", &
+            "pf_next_pow2: n must not exceed "//trim(top)//", the largest power of two a default integer holds")
+    end subroutine test_transform_next_pow2_too_large_aborts
+    !
+    subroutine test_transform_context_reported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_context_reported", &
+            "pf_dct: x and y must have the same size (context: my_call_site)")
+    end subroutine test_transform_context_reported_aborts
+    !
+    !> Exactly 100 characters of the caller's text survive, then `...`: ten repetitions, not
+    !> eleven, so a cap moved in either direction fails here.
+    subroutine test_transform_context_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_context_capped", &
+            "pf_dct: x and y must have the same size (context: "//repeat("abcdefghij", 10)//"...)")
+    end subroutine test_transform_context_capped_aborts
     !
     subroutine test_interpolate_size_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

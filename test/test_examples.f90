@@ -275,6 +275,7 @@ contains
     !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
     !> parquet_root (pf_find_root/pf_bracket_expansion/pf_root_info/PF_ROOT_OK),
+    !> parquet_transform (pf_dct/pf_is_pow2),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
@@ -510,6 +511,16 @@ contains
             call check(error, abs(root - sqrt(2.0_real64)) <= 1.0e-14_real64 .and. &
                 rinfo%status == PF_ROOT_OK, &
                 "pf_find_root must be reachable from use parquet alone and solve x*x = 2")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_transform: the discrete cosine transform and a length helper.
+        block
+            real(real64) :: seq(4), coef(4)
+            seq = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+            call pf_dct(seq, coef)
+            call check(error, pf_is_pow2(size(seq)) .and. abs(coef(1) - 20.0_real64) <= 1.0e-13_real64, &
+                "pf_dct must be reachable from use parquet alone, with y(1) twice the sum")
             if (allocated(error)) return
         end block
 

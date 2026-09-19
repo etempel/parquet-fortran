@@ -86,7 +86,8 @@ contains
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
                                             p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
-                                            p35(:), p36(:), p37(:), p38(:), p39(:), p40(:)
+                                            p35(:), p36(:), p37(:), p38(:), p39(:), p40(:), &
+                                            p41(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3692,8 +3693,6 @@ contains
                 test_kde_grid_bandwidth_max_nan_aborts), &
             new_unittest("pf_kde_grid%init refuses a pilot that was never initialised", &
                 test_kde_grid_pilot_uninitialised_aborts), &
-            new_unittest("pf_kde_grid%init refuses a pilot with nothing in it", &
-                test_kde_grid_pilot_empty_aborts), &
             new_unittest("pf_kde_grid%init refuses a pilot that does not cover its range", &
                 test_kde_grid_pilot_not_covering_aborts), &
             new_unittest("pf_kde_grid%merge refuses a grid read from another pilot", &
@@ -3703,9 +3702,27 @@ contains
             new_unittest("pf_kde_grid%merge refuses a grid with another alpha", &
                 test_kde_grid_merge_alpha_aborts) &
             ]
+        p41 = [ &
+            new_unittest("pf_kde%pdf refuses threads=0", &
+                test_kde_pdf_threads_zero_aborts), &
+            new_unittest("pf_kde%cdf refuses threads=0", &
+                test_kde_cdf_threads_zero_aborts), &
+            new_unittest("pf_kde%quantile refuses threads=0", &
+                test_kde_quantile_threads_zero_aborts), &
+            new_unittest("pf_kde%curve refuses threads=0", &
+                test_kde_curve_threads_zero_aborts), &
+            new_unittest("pf_kde%sample refuses threads=0", &
+                test_kde_sample_threads_zero_aborts), &
+            new_unittest("pf_kde%sample refuses an unfitted estimate", &
+                test_kde_sample_unfitted_aborts), &
+            new_unittest("pf_kde_grid%sample refuses threads=0", &
+                test_kde_grid_sample_threads_zero_aborts), &
+            new_unittest("pf_kde_grid%sample refuses an uninitialised grid", &
+                test_kde_grid_sample_uninitialised_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, &
-            p39, p40]
+            p39, p40, p41]
     end subroutine collect_tests_parquet_errors
 
 
@@ -21568,14 +21585,8 @@ contains
     subroutine test_kde_grid_pilot_uninitialised_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_grid_pilot_uninitialised", &
-            "pf_kde_grid%init: pilot must be an initialised grid with points in it")
+            "pf_kde_grid%init: pilot must be an initialised grid")
     end subroutine test_kde_grid_pilot_uninitialised_aborts
-    !
-    subroutine test_kde_grid_pilot_empty_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_kde_scenario(error, "kde_grid_pilot_empty", &
-            "pf_kde_grid%init: pilot must be an initialised grid with points in it")
-    end subroutine test_kde_grid_pilot_empty_aborts
     !
     subroutine test_kde_grid_pilot_not_covering_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -21600,5 +21611,53 @@ contains
         call check_kde_scenario(error, "kde_grid_merge_alpha", &
             "pf_kde_grid%merge: the two grids differ in pilot")
     end subroutine test_kde_grid_merge_alpha_aborts
+    !
+    subroutine test_kde_pdf_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_pdf_threads_zero", &
+            "pf_kde%pdf: threads must be positive")
+    end subroutine test_kde_pdf_threads_zero_aborts
+    !
+    subroutine test_kde_cdf_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_cdf_threads_zero", &
+            "pf_kde%cdf: threads must be positive")
+    end subroutine test_kde_cdf_threads_zero_aborts
+    !
+    subroutine test_kde_quantile_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_quantile_threads_zero", &
+            "pf_kde%quantile: threads must be positive")
+    end subroutine test_kde_quantile_threads_zero_aborts
+    !
+    subroutine test_kde_curve_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_threads_zero", &
+            "pf_kde%curve: threads must be positive")
+    end subroutine test_kde_curve_threads_zero_aborts
+    !
+    subroutine test_kde_sample_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_sample_threads_zero", &
+            "pf_kde%sample: threads must be positive")
+    end subroutine test_kde_sample_threads_zero_aborts
+    !
+    subroutine test_kde_sample_unfitted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_sample_unfitted", &
+            "pf_kde%sample: the estimate has not been fitted")
+    end subroutine test_kde_sample_unfitted_aborts
+    !
+    subroutine test_kde_grid_sample_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_sample_threads_zero", &
+            "pf_kde_grid%sample: threads must be positive")
+    end subroutine test_kde_grid_sample_threads_zero_aborts
+    !
+    subroutine test_kde_grid_sample_uninitialised_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_sample_uninitialised", &
+            "pf_kde_grid%sample: the grid has not been initialised")
+    end subroutine test_kde_grid_sample_uninitialised_aborts
     !
 end module test_errors

@@ -26,6 +26,50 @@ contains
 
     end procedure kde_abort
 
+    module procedure kde_query_team
+
+        integer(int64) :: nt
+        real(real64) :: cap
+
+        team = 1
+        if (present(threads)) then
+            if (threads < 1) call kde_abort(entry, "threads must be positive")
+        end if
+#ifdef _OPENMP
+        if (n < 2_int64) return
+        call resolve_thread_count(threads, n, nt)
+        if (nt <= 1_int64) return
+        ! The team whose every thread gets at least the floor's worth of work; the division first,
+        ! so that the product cannot overflow.
+        cap = real(n, real64)*(work/KDE_QUERY_MIN_WORK)
+        if (cap < real(nt, real64)) nt = int(cap, int64)
+        if (nt >= 2_int64) team = int(nt)
+#else
+        ! No OpenMP: there is no team to open. The locals are assigned so that a serial build does
+        ! not report them unused, and none of them can change the answer.
+        nt = n
+        cap = work
+#endif
+
+    end procedure kde_query_team
+
+    module procedure kde_record_team
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_num_threads
+#endif
+
+        ! The thread that records it is the one every team has; the others wait at the end of the
+        ! construct, so the value is in place before the region's work begins.
+        !$omp single
+#ifdef _OPENMP
+        kde_team_used = omp_get_num_threads()
+#else
+        kde_team_used = 1
+#endif
+        !$omp end single
+
+    end procedure kde_record_team
+
     module procedure kde_fold
 
         character(len=len(token)) :: t

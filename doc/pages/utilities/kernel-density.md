@@ -7,7 +7,8 @@ on every point and adding them up. `pf_kde` fits an array it keeps a sorted copy
 answers the density, the distribution function and its quantiles exactly at any point, and the
 density on a grid of points for plotting. `pf_kde_grid` accumulates the same estimate on a fixed
 grid of cells from points streamed through it in any number of pieces, which it does not keep.
-Both have an adaptive kernel, narrow where the data are dense and wide where they are sparse. The
+Both draw samples from the estimate, and both have an adaptive kernel, narrow where the data are
+dense and wide where they are sparse. The
 module reaches no reader and no writer: a program can
 `use parquet_kde` on its own, compiling the statistics tier it is built on and nothing of the
 Arrow stack. `use parquet` brings it in too. See
@@ -33,10 +34,11 @@ bracket:
 call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [alpha], [bandwidth_max], &
            [lower], [upper], [boundary], [is_valid], [weights], [weight_type], [skipnan], &
            [n_null], [n_nan], [n_outside], [ok], [threads])
-call k%pdf(x, f)
-call k%cdf(x, p)
-call k%quantile(p, x)
-call k%curve(x, f, [xmin], [xmax], [cut])
+call k%pdf(x, f, [threads])
+call k%cdf(x, p, [threads])
+call k%quantile(p, x, [threads])
+call k%curve(x, f, [xmin], [xmax], [cut], [threads])
+call k%sample(v, seed, [stream], [threads])
 call k%bandwidths(h, [x])
 call k%bandwidth_at(x, h)
 call k%pilot(g)
@@ -45,8 +47,9 @@ call k%print([unit])
 
 `x` in `%fit` is a `real64` or `real32` array; a `real32` sample is widened before anything else
 happens to it. `%pdf`, `%cdf`, `%quantile` and `%bandwidth_at` each take a scalar or a rank-1
-array, and every result is `real64`. Every token (`rule`, `kernel`, `boundary`) is matched without
-regard to case.
+array, and every result is `real64`; `threads=` belongs to the array forms, `%curve` and
+`%sample` (see [Thread safety](#thread-safety)). Every token (`rule`, `kernel`, `boundary`) is
+matched without regard to case.
 
 ## The estimate
 
@@ -259,10 +262,14 @@ one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`).
   `%cdf` inside a bracket, with bisection whenever a step would leave it. `p = 0` and `p = 1` give
   the two ends of the estimate's support: the extreme points minus and plus one kernel's reach,
   clipped to the bounds. A `p` outside `[0, 1]` aborts.
-- **`%curve(x, f, [xmin], [xmax], [cut])`**: fills `x` with `size(x)` equally spaced points, both
-  ends exact, and `f` with the density at each. The default range is the sample's minimum minus
-  `cut` bandwidths to its maximum plus `cut` bandwidths, `cut` defaulting to 3, clipped to the
-  support; `xmin=` and `xmax=` replace either end.
+- **`%curve(x, f, [xmin], [xmax], [cut], [threads])`**: fills `x` with `size(x)` equally spaced
+  points, both ends exact, and `f` with the density at each. The default range is the sample's
+  minimum minus `cut` bandwidths to its maximum plus `cut` bandwidths, `cut` defaulting to 3,
+  clipped to the support; `xmin=` and `xmax=` replace either end.
+- **`threads=`** on the array forms of `%pdf`, `%cdf` and `%quantile`, and on `%curve`, shares the
+  points among a team. Each point is answered by one thread alone, so the answer is the same bits at
+  every thread count, and a team opens only where the points within the kernels' reach make the
+  work worth sharing.
 
 The counts come back as `int64` functions: `%n()` (the elements passed to `%fit`), `%n_valid()`
 (the population), `%n_null()`, `%n_nan()` and `%n_outside()`. `%sum_weights()` is `sum(w)` over the
@@ -283,6 +290,7 @@ call g%density(f, [x], [normalise])
 call g%pdf(x, f)
 call g%cdf(x, p)
 call g%quantile(p, x)
+call g%sample(v, seed, [stream], [threads])
 call g%grid(x)
 ```
 
@@ -393,7 +401,9 @@ call dens%density(f, x=zc)
   the usual choice is the grid's own bandwidth. `alpha=` and `bandwidth_max=` are as for `%fit`.
 - **`g` and every bandwidth are read exactly as `%fit` reads them**, so a grid given
   `pf_kde%pilot`'s copy reproduces that fit's adaptive estimate to the grid's resolution.
-- **A pilot holding a kept NaN** (`skipnan=.false.`) makes the grid built on it answer NaN.
+- **A pilot with no density to read** -- one holding a kept NaN (`skipnan=.false.`), or nothing
+  in its cells because every row of the first pass was excluded or lay beyond its range -- makes
+  the grid built on it answer NaN, as any other data condition does.
 
 **One grid per thread, merged at the end, is the parallel form.** `%merge(other)` adds another
 grid's cells and counts to this one, and refuses a grid that differs in its cells, range,
@@ -440,6 +450,39 @@ program grid_per_thread
     call dens%density(f, x=zc)
 end program grid_per_thread
 ```
+
+## Drawing from the estimate: `%sample`
+
+```fortran
+call k%sample(v, seed, [stream], [threads])
+call g%sample(v, seed, [stream], [threads])
+```
+
+`%sample` fills `v` with `size(v)` independent draws from the estimate.
+
+- **`pf_kde` draws the smoothed bootstrap**: a retained point, chosen in proportion to its weight,
+  then its kernel, at the point's own bandwidth, drawn about it. The draws follow `%pdf` exactly,
+  the adaptive kernel's included. A draw beyond the Gaussian's cut is drawn again from the same
+  kernel; under `"renormalise"` so is a draw beyond a bound, and under `"reflect"` it is mirrored
+  back inside, so the draws follow the corrected estimate and never leave the support.
+- **`pf_kde_grid` draws from the density its `%pdf` describes** over `[xmin, xmax]`, each draw
+  inverting the integral of that piecewise-linear density. Weight the grid counted beyond its range
+  has no place in it, so no draw lands there: the draws follow the density inside the range,
+  normalised to the weight it holds.
+- **Each draw is addressed by `(seed, stream, k)`**: element `k` of `v` is a function of the three
+  and of the estimate alone. A longer sample starts with a shorter one, another `stream` is an
+  independent sample, and `threads=` changes nothing but the time. `seed` is `int64`; `stream` is
+  `int32` or `int64`, and 0 when absent. The Gaussian kernel's draws repeat to the bit for a given
+  system mathematics library, as the library's normal draws do (see
+  [The promise table](random.html#the-promise-table)).
+- **The draws are independent of a program's own** at the same `seed`: the estimator derives a seed
+  of its own from it, one for each form, so neither shares a number with `pf_random_at(seed, ...)`
+  or with the other form's draws.
+- **An undefined estimate draws NaN**, as does a grid with nothing accumulated inside its range or
+  one a kept NaN has poisoned.
+
+A draw costs about what a dozen kernel evaluations do, and a weighted one about twice that;
+`bench/benchmark_kde.sh` measures it (`MODE=sample`).
 
 ## The estimate as a function
 
@@ -493,12 +536,17 @@ A data condition never aborts:
 - **A grid with nothing accumulated** answers zeros from `%density`, as an empty histogram does,
   and NaN from `%pdf`, `%cdf` and `%quantile`, which have nothing to normalise by.
 - **`skipnan=.false.` with a NaN in any `%add`** makes every later answer of that grid NaN, until
-  `%clear()`. A grid whose pilot holds such a NaN answers NaN from the start, `%clear()` or not.
+  `%clear()`.
+- **A grid whose pilot has no density to read** -- a pilot holding such a NaN, one never given a
+  point, or one whose points all lay beyond its range -- answers NaN from the start, `%clear()` or
+  not, and still counts what `%add` accepts.
 - **A bandwidth too large to use** -- an explicit one whose kernel would reach beyond the largest
   number, one that `adjust` would carry there, or an adaptive one that overflows -- leaves the fit
   undefined, `ok = .false.`, and an adaptive grid it reaches answers NaN.
 - **An adaptive fit of a population it could not fit** has no pilot: `%pilot` answers a grid that
   was never initialised.
+- **`%sample` from an undefined estimate** fills `v` with NaN, and so does a grid's `%sample` when
+  nothing lies inside its range to draw from, or a kept NaN has poisoned it.
 
 ## What aborts
 
@@ -518,7 +566,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `is_valid` or `weights` of the wrong size | `pf_kde%fit: weights has 3 elements but values has 4` (the family's text) |
 | a negative, NaN or infinite weight | `pf_kde%fit: weight 2 is negative; weights must be finite and non-negative` (the family's text) |
 | an unknown `weight_type` | `pf_kde%fit: weight_type "..." is not recognised; ...` (the family's text) |
-| `threads <= 0` | `pf_kde%fit: threads must be positive` |
+| `threads <= 0` | `pf_kde%fit: threads must be positive` (or `%pdf`, `%cdf`, `%quantile`, `%curve`, `%sample`) |
 | a query or accessor before `%fit`, or after `%clear` | `pf_kde%pdf: the estimate has not been fitted` |
 | an output of the wrong size | `pf_kde%pdf: f must have one element per point of x`, `pf_kde%cdf: p must have ...`, `pf_kde%quantile: x must have one element per element of p` |
 | `p` outside `[0, 1]`, or NaN | `pf_kde%quantile: p must lie in [0, 1]` |
@@ -539,9 +587,9 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `[xmin, xmax]` reaching outside `[lower, upper]` | `pf_kde_grid%init: the grid's range must lie inside the support` |
 | `bandwidth`, `kernel`, `alpha`, `bandwidth_max`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
 | `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |
-| `pilot=` a grid never initialised, or with nothing in its cells | `pf_kde_grid%init: pilot must be an initialised grid with points in it` |
+| `pilot=` a grid never initialised | `pf_kde_grid%init: pilot must be an initialised grid` |
 | `pilot=` a grid whose range does not cover `[xmin, xmax]` | `pf_kde_grid%init: the pilot must cover this grid's range` |
-| `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0` | `%fit`'s texts, naming `pf_kde_grid%add` |
+| `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0` | `%fit`'s texts, naming `pf_kde_grid%add` (`pf_kde_grid%sample` for its `threads`) |
 | a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |
 | `%merge` with a grid never initialised | `pf_kde_grid%merge: the other grid has not been initialised` |
 | `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`, `pilot`) |
@@ -561,12 +609,17 @@ per thread merged at the end is how several threads accumulate one estimate.
 - **`threads=` on `%add`** gives each thread of a team a contiguous share of the points and its own
   partial grid, added to the grid in thread order. At one thread count the answer is the same every
   time; two thread counts group the additions differently and agree to rounding.
-- Inside your own parallel region both stand down to one thread unless given explicitly. An abort
-  inside a parallel region is taken by one thread.
+- **`threads=` on the bulk queries and `%sample`** shares the points, probabilities or draws among a
+  team, each answered by one thread alone, so the answer is the same bits at every thread count. A
+  team opens only where the work is worth sharing: a few queries over a small sample, or a few
+  thousand draws, stay on the calling thread whatever `threads=` asks.
+- Inside your own parallel region every one of them stands down to one thread unless given
+  explicitly. An abort inside a parallel region is taken by one thread.
 
 ## What it costs to import
 
 `use parquet_kde` compiles the statistics tier it is built on (`parquet_stats`, and beneath it the
-sorting tier) plus the module's own four files; no reader, writer or C++ boundary. It re-exports
+sorting tier), the random-number generator `%sample` draws from (`parquet_random`), and the
+module's own four files; no reader, writer or C++ boundary. It re-exports
 the verbosity and message-stream pair, which `%print` reads, so a program importing it alone can
 silence its output with `parquet_set_verbosity("silent")`.

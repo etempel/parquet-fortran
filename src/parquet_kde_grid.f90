@@ -26,7 +26,9 @@
 !! midpoint sum `step * sum(acc)` -- the trapezoid rule over that interpolant and the midpoint rule
 !! over the cells are the same number -- and `%cdf` integrates it piece by piece, a quadratic
 !! between two centres, which `%quantile` solves. Each query forms the running sum it needs per
-!! call and writes nothing.
+!! call and writes nothing. `%sample` inverts the same integral over the cells alone, from one
+!! uniform per draw at `(pf_random_key(seed, KDE_GRID_FAMILY_LABEL), pf_random_key(stream, k))`, so
+!! its draws follow `%pdf` inside the range and none lands on weight the grid counted beyond it.
 !!
 !! **`%add(threads=)` partitions by index.** Each thread of the team takes a contiguous share of
 !! the survivors and deposits it into a private partial grid, and the partial grids are added to
@@ -71,14 +73,14 @@ contains
         a%x1 = pilot%x1
         a%dx = pilot%dx
         a%wt = pilot%w_total
-        a%poisoned = pilot%poisoned
+        a%unreadable = pilot%poisoned
         allocate(a%acc(pilot%nc))
         do i = 1, pilot%nc
             a%acc(i) = pilot%acc(i)
         end do
         a%logg = 0.0_real64
         a%pmin = 0.0_real64
-        if (a%poisoned) return
+        if (a%unreadable) return
 
         ! `log g` is the mean of `log p` over the pilot's own density: the population form of the
         ! geometric mean of the pilot at the sample points, which needs no second pass over them.
@@ -95,6 +97,14 @@ contains
             s2 = s2 + p*log(p)
             if (p < a%pmin) a%pmin = p
         end do
+        ! A pilot with no positive density in any cell -- nothing added, only weight beyond its
+        ! range, or cells too small against the total to register -- has nothing to read: a data
+        ! condition, answered with NaN by every grid built on it rather than by an abort.
+        if (.not. (s1 > 0.0_real64)) then
+            a%unreadable = .true.
+            a%pmin = 0.0_real64
+            return
+        end if
         a%logg = s2/s1
 
     end procedure kde_adapt_set
@@ -199,12 +209,10 @@ contains
         end if
         call check_adaptive_settings(EP, alpha, bandwidth_max, a_alpha, a_bmax)
         if (present(pilot)) then
-            ! A pilot must have a density to read -- a poisoned one answers NaN, and poisons this
-            ! grid in turn, quietly -- and must cover the range, so that no point inside it reads
-            ! a pilot that was never built there.
-            if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid with points in it")
-            if (.not. pilot%poisoned .and. .not. holds_weight(pilot)) &
-                call kde_abort(EP, "pilot must be an initialised grid with points in it")
+            ! A pilot must be a grid, and must cover the range, so that no point inside it reads a
+            ! pilot that was never built there. What it holds is data: one with no density to read,
+            ! a kept NaN or nothing in its cells, makes this grid answer NaN, quietly.
+            if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid")
             if (pilot%x0 > xmin .or. pilot%x1 < xmax) call kde_abort(EP, "the pilot must cover this grid's range")
             ! The table is read out of the pilot before this grid is touched.
             call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax)
@@ -475,6 +483,22 @@ contains
 
     end procedure grid_quantile_r1
 
+    module procedure grid_sample_s32
+
+        integer(int64) :: s
+
+        s = 0_int64
+        if (present(stream)) s = int(stream, int64)
+        call sample_fill(self, v, seed, s, threads)
+
+    end procedure grid_sample_s32
+
+    module procedure grid_sample_s64
+
+        call sample_fill(self, v, seed, stream, threads)
+
+    end procedure grid_sample_s64
+
     ! ==========================================================================================
     ! Accessors
     ! ==========================================================================================
@@ -606,7 +630,8 @@ contains
                 self%adapt%x0, " to", self%adapt%x1
         end if
         if (self%poisoned) then
-            ! A kept NaN, a poisoned pilot or a bandwidth the adaptive rule could not represent.
+            ! A kept NaN, a pilot with no density to read or a bandwidth the adaptive rule could not
+            ! represent.
             write(u, '(2x,a)') "poisoned    every query answers NaN"
         else if (.not. (self%w_total > 0.0_real64)) then
             write(u, '(2x,a)') "empty       nothing accumulated; %density answers zeros"
@@ -644,12 +669,12 @@ contains
     end subroutine check_probability
 
     !> Zeroes the accumulation and every count, keeping the geometry and the settings. A grid whose
-    !! pilot is poisoned starts poisoned: its adaptive rule has nothing to read.
+    !! pilot has no density to read starts poisoned: its adaptive rule has nothing to read.
     subroutine empty_grid(self)
         class(pf_kde_grid), intent(inout) :: self !! the grid, initialised
 
         self%acc = 0.0_real64
-        self%poisoned = self%adapt%on .and. self%adapt%poisoned
+        self%poisoned = self%adapt%on .and. self%adapt%unreadable
         self%w_total = 0.0_real64
         self%w_below = 0.0_real64
         self%w_above = 0.0_real64
@@ -693,31 +718,13 @@ contains
             if (a%bmax /= b%bmax) return
         end if
         if (a%nc /= b%nc .or. a%x0 /= b%x0 .or. a%x1 /= b%x1 .or. a%wt /= b%wt) return
-        if (a%poisoned .neqv. b%poisoned) return
+        if (a%unreadable .neqv. b%unreadable) return
         do i = 1, a%nc
             if (a%acc(i) /= b%acc(i)) return
         end do
         res = .true.
 
     end function same_rule
-
-    !> `.true.` when some cell of a grid holds weight: a density a pilot can be read from.
-    pure function holds_weight(g) result(res)
-        type(pf_kde_grid), intent(in) :: g   !! the grid, initialised
-        logical                       :: res !! a cell holds weight
-
-        integer :: i
-
-        res = .false.
-        if (.not. (g%w_total > 0.0_real64)) return
-        do i = 1, g%nc
-            if (g%acc(i) > 0.0_real64) then
-                res = .true.
-                return
-            end if
-        end do
-
-    end function holds_weight
 
     !> The adaptive rule's settings `%init` checks, in the canonical order, with their defaults
     !! filled in: `alpha` in `[0, 1]`, 0.5 when absent, and `bandwidth_max` a finite positive
@@ -792,7 +799,7 @@ contains
         to%x1 = from%x1
         to%dx = from%dx
         to%wt = from%wt
-        to%poisoned = from%poisoned
+        to%unreadable = from%unreadable
         to%logg = from%logg
         to%pmin = from%pmin
         if (allocated(from%acc)) call move_alloc(from%acc, to%acc)
@@ -1344,7 +1351,8 @@ contains
     !! tested before it is raised, so that a bandwidth too large to represent is `+Infinity`
     !! without an overflow (which would stop a program under nagfor). Exactly `h` at `alpha = 0`,
     !! then capped at `bandwidth_max`. Where the pilot reads zero, the cap is the answer; without
-    !! one, the pilot's smallest positive cell density stands in for `p`.
+    !! one, the pilot's smallest positive cell density stands in for `p`. NaN from a table with
+    !! nothing to read, whatever `alpha`.
     function rule_bandwidth(a, h, t) result(hj)
         type(kde_adapt), intent(in) :: a  !! the rule
         real(real64), intent(in)    :: h  !! the global bandwidth
@@ -1354,6 +1362,7 @@ contains
         real(real64) :: p, e
 
         hj = ieee_value(1.0_real64, ieee_quiet_nan)
+        if (a%unreadable) return
         if (t /= t) return
         if (a%alpha == 0.0_real64) then
             hj = h
@@ -1449,8 +1458,7 @@ contains
         real(real64), intent(in)       :: p    !! the probability, in `[0, 1]`
         real(real64)                   :: x    !! the quantile
 
-        real(real64) :: target, total, d, a, b, s
-        integer :: j, lo_j, hi_j, mid
+        real(real64) :: target, total
 
         x = ieee_value(1.0_real64, ieee_quiet_nan)
         if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
@@ -1466,6 +1474,23 @@ contains
             if (.not. (self%w_above > 0.0_real64)) x = right_end(self)
             return
         end if
+        x = mass_at(self, q, target)
+
+    end function quantile_value
+
+    !> The point of `[xmin, xmax]` at which `%pdf`'s integral from `xmin`, over the cells alone,
+    !! reaches `target`, strictly between zero and the cells' whole mass: the linear piece of an
+    !! outer half-cell, or the quadratic piece between two centres, solved for it. What `%quantile`
+    !! and `%sample` both invert.
+    pure function mass_at(self, q, target) result(x)
+        class(pf_kde_grid), intent(in) :: self   !! the grid
+        real(real64), intent(in)       :: q(:)   !! the running integral at each centre
+        real(real64), intent(in)       :: target !! the mass to reach
+        real(real64)                   :: x      !! where it is reached
+
+        real(real64) :: d, a, b, s
+        integer :: j, lo_j, hi_j, mid
+
         if (target <= q(1)) then
             ! The first half-cell, where the density is the constant `acc(1)`, positive here.
             x = min(self%x0 + target/self%acc(1), centre(self, 1))
@@ -1497,7 +1522,74 @@ contains
         s = max(0.0_real64, min(1.0_real64, s))
         x = centre(self, j) + s*self%dx
 
-    end function quantile_value
+    end function mass_at
+
+    !> Fills `v` with draws from the grid's density inside its range, element `k` from one uniform
+    !! of stream `pf_random_key(stream, k)` under the grid family's key, serially or shared among a
+    !! team; NaN when the cells hold nothing to draw from or a kept NaN has poisoned the grid.
+    subroutine sample_fill(self, v, seed, stream, threads)
+        class(pf_kde_grid), intent(in) :: self    !! the grid
+        real(real64), intent(out)      :: v(:)    !! the draws
+        integer(int64), intent(in)     :: seed    !! the caller's seed
+        integer(int64), intent(in)     :: stream  !! the caller's stream
+        integer, intent(in), optional  :: threads !! the caller's request
+
+        character(len=*), parameter :: EP = "pf_kde_grid%sample"
+        real(real64), allocatable :: q(:)
+        real(real64) :: total
+        integer(int64) :: k, n, key
+        integer :: team
+
+        call require_initialised(self, EP)
+        n = size(v, kind=int64)
+        call kde_query_team(EP, threads, n, KDE_DRAW_WORK, team)
+        v = ieee_value(1.0_real64, ieee_quiet_nan)
+        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
+        call running_mass(self, q)
+        total = q(self%nc) + 0.5_real64*self%acc(self%nc)*self%dx
+        ! Weight counted only beyond the range has no place in it to be drawn at.
+        if (.not. (total > 0.0_real64)) return
+        key = pf_random_key(seed, KDE_GRID_FAMILY_LABEL)
+        if (team <= 1) then
+            kde_team_used = 1
+            do k = 1_int64, n
+                v(k) = cells_draw(self, q, total, pf_random_at(key, pf_random_key(stream, k), 1_int64))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(k)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do k = 1_int64, n
+            v(k) = cells_draw(self, q, total, pf_random_at(key, pf_random_key(stream, k), 1_int64))
+        end do
+        !$omp end do
+        !$omp end parallel
+
+    end subroutine sample_fill
+
+    !> The draw at the uniform `u`: where `%pdf`'s integral over the cells reaches the share `u` of
+    !! their mass `total`; `u = 0`, and rounding at the top end, fall on where the accumulated
+    !! density starts and ends.
+    pure function cells_draw(self, q, total, u) result(x)
+        class(pf_kde_grid), intent(in) :: self  !! the grid, with mass in its cells
+        real(real64), intent(in)       :: q(:)  !! the running integral at each centre
+        real(real64), intent(in)       :: total !! the cells' whole mass
+        real(real64), intent(in)       :: u     !! the uniform, in `[0, 1)`
+        real(real64)                   :: x     !! the draw
+
+        real(real64) :: target
+
+        target = u*total
+        if (.not. (target > 0.0_real64)) then
+            x = left_end(self)
+        else if (.not. (target < total)) then
+            x = right_end(self)
+        else
+            x = mass_at(self, q, target)
+        end if
+
+    end function cells_draw
 
     !> Where the accumulated density starts inside the range: `xmin` when the first cell holds
     !! weight, else the centre before the first cell that does, from which the interpolant rises;

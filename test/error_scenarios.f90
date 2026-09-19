@@ -4197,8 +4197,6 @@ program error_scenarios
         call scenario_kde_grid_bandwidth_max_nan()
     case ("kde_grid_pilot_uninitialised")
         call scenario_kde_grid_pilot_uninitialised()
-    case ("kde_grid_pilot_empty")
-        call scenario_kde_grid_pilot_empty()
     case ("kde_grid_pilot_not_covering")
         call scenario_kde_grid_pilot_not_covering()
     case ("kde_grid_merge_pilot")
@@ -4207,6 +4205,22 @@ program error_scenarios
         call scenario_kde_grid_merge_fixed()
     case ("kde_grid_merge_alpha")
         call scenario_kde_grid_merge_alpha()
+    case ("kde_pdf_threads_zero")
+        call scenario_kde_pdf_threads_zero()
+    case ("kde_cdf_threads_zero")
+        call scenario_kde_cdf_threads_zero()
+    case ("kde_quantile_threads_zero")
+        call scenario_kde_quantile_threads_zero()
+    case ("kde_curve_threads_zero")
+        call scenario_kde_curve_threads_zero()
+    case ("kde_sample_threads_zero")
+        call scenario_kde_sample_threads_zero()
+    case ("kde_sample_unfitted")
+        call scenario_kde_sample_unfitted()
+    case ("kde_grid_sample_threads_zero")
+        call scenario_kde_grid_sample_threads_zero()
+    case ("kde_grid_sample_uninitialised")
+        call scenario_kde_grid_sample_uninitialised()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -35304,19 +35318,6 @@ contains
         print '(a)', "accepted a pilot that was never initialised"
     end subroutine scenario_kde_grid_pilot_uninitialised
     !
-    !> Proves that pf_kde_grid%init refuses a pilot with nothing in it.
-    subroutine scenario_kde_grid_pilot_empty()
-        type(pf_kde_grid) :: g, p, empty
-
-        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
-        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
-        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
-        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
-        call empty%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
-        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=empty)
-        print '(a)', "accepted a pilot with nothing in it"
-    end subroutine scenario_kde_grid_pilot_empty
-    !
     !> Proves that pf_kde_grid%init refuses a pilot that does not cover its range.
     subroutine scenario_kde_grid_pilot_not_covering()
         type(pf_kde_grid) :: g, p
@@ -35379,5 +35380,109 @@ contains
         call g%merge(other)
         print '(a)', "merged grids with different alpha"
     end subroutine scenario_kde_grid_merge_alpha
+    !
+    !> Proves that pf_kde%pdf refuses threads=0.
+    subroutine scenario_kde_pdf_threads_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4), f(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=0.5_real64)
+        call k%pdf(x, f, threads=1)
+        print '(a, es22.15)', "kde control density: ", f(2)
+        call k%pdf(x, f, threads=0)
+        print '(a, es22.15)', "accepted threads=0: ", f(2)
+    end subroutine scenario_kde_pdf_threads_zero
+    !
+    !> Proves that pf_kde%cdf refuses threads=0.
+    subroutine scenario_kde_cdf_threads_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4), p(4)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=0.5_real64)
+        call k%cdf(x, p, threads=1)
+        print '(a, es22.15)', "kde control probability: ", p(2)
+        call k%cdf(x, p, threads=0)
+        print '(a, es22.15)', "accepted threads=0: ", p(2)
+    end subroutine scenario_kde_cdf_threads_zero
+    !
+    !> Proves that pf_kde%quantile refuses threads=0.
+    subroutine scenario_kde_quantile_threads_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4), q(2)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=0.5_real64)
+        call k%quantile([0.25_real64, 0.75_real64], q, threads=1)
+        print '(a, es22.15)', "kde control quantile: ", q(1)
+        call k%quantile([0.25_real64, 0.75_real64], q, threads=0)
+        print '(a, es22.15)', "accepted threads=0: ", q(1)
+    end subroutine scenario_kde_quantile_threads_zero
+    !
+    !> Proves that pf_kde%curve refuses threads=0.
+    subroutine scenario_kde_curve_threads_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4), xg(8), fg(8)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=0.5_real64)
+        call k%curve(xg, fg, threads=1)
+        print '(a, es22.15)', "kde control curve: ", fg(4)
+        call k%curve(xg, fg, threads=0)
+        print '(a, es22.15)', "accepted threads=0: ", fg(4)
+    end subroutine scenario_kde_curve_threads_zero
+    !
+    !> Proves that pf_kde%sample refuses threads=0.
+    subroutine scenario_kde_sample_threads_zero()
+        type(pf_kde) :: k
+        real(real64) :: x(4), v(8)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=0.5_real64)
+        call k%sample(v, 1_int64, threads=1)
+        print '(a, es22.15)', "kde control draw: ", v(1)
+        call k%sample(v, 1_int64, threads=0)
+        print '(a, es22.15)', "accepted threads=0: ", v(1)
+    end subroutine scenario_kde_sample_threads_zero
+    !
+    !> Proves that pf_kde%sample refuses an object that was never fitted.
+    subroutine scenario_kde_sample_unfitted()
+        type(pf_kde) :: k, fresh
+        real(real64) :: x(4), v(8)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call k%fit(x, bandwidth=0.5_real64)
+        call k%sample(v, 1_int64)
+        print '(a, es22.15)', "kde control draw: ", v(1)
+        call fresh%sample(v, 1_int64)
+        print '(a, es22.15)', "sampled an unfitted estimate: ", v(1)
+    end subroutine scenario_kde_sample_unfitted
+    !
+    !> Proves that pf_kde_grid%sample refuses threads=0.
+    subroutine scenario_kde_grid_sample_threads_zero()
+        type(pf_kde_grid) :: g
+        real(real64) :: v(8)
+
+        call g%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.2_real64, 0.4_real64, 0.6_real64])
+        call g%sample(v, 1_int64, threads=1)
+        print '(a, es22.15)', "kde control draw: ", v(1)
+        call g%sample(v, 1_int64, threads=0)
+        print '(a, es22.15)', "accepted threads=0: ", v(1)
+    end subroutine scenario_kde_grid_sample_threads_zero
+    !
+    !> Proves that pf_kde_grid%sample refuses a grid that was never initialised.
+    subroutine scenario_kde_grid_sample_uninitialised()
+        type(pf_kde_grid) :: g, fresh
+        real(real64) :: v(8)
+
+        call g%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.2_real64, 0.4_real64, 0.6_real64])
+        call g%sample(v, 1_int64)
+        print '(a, es22.15)', "kde control draw: ", v(1)
+        call fresh%sample(v, 1_int64)
+        print '(a, es22.15)', "sampled an uninitialised grid: ", v(1)
+    end subroutine scenario_kde_grid_sample_uninitialised
     !
 end program error_scenarios

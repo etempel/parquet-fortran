@@ -2,7 +2,7 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> `pf_kde`: the fit, the exact queries, the curve, the accessors and the printer.
+!> `pf_kde`: the fit, the exact queries, the curve, the sampler, the accessors and the printer.
 !!
 !! **Every query sums a window, never the whole sample.** The retained points are ascending and
 !! every kernel has compact support, so the points that can reach a query point `x` are exactly
@@ -37,9 +37,31 @@
 !! for bit. Two loops written to mirror each other would not (a compiler may hoist the reciprocal
 !! of a divisor it can see is constant in one of them and not in the other), and there is no branch
 !! on the kind of fit for a compiler to split the loop at. A query divides by nothing per kernel.
+!!
+!! **A bulk query shares its elements among a team, and each element is computed alone.** `%pdf`,
+!! `%cdf`, `%quantile`, `%curve` and `%sample` over an array give each thread a contiguous share of
+!! the elements, and an element's answer is the serial one: nothing is summed across threads, so the
+!! answer is the same bits at every thread count. The team opens only where the work, estimated from
+!! the points one kernel reaches, pays for it (`kde_query_team`).
+!!
+!! **`%sample` is the smoothed bootstrap, addressed by `(seed, stream, k)`.** Element `k` reads the
+!! stream `pf_random_key(stream, k)` under `pf_random_key(seed, KDE_FAMILY_LABEL)` and takes its
+!! draws in order: the first chooses the point -- `pf_random_int_at` unweighted, a uniform located in
+!! the running weight otherwise -- and the next ones its kernel's variate (a normal, one uniform for
+!! the box, four summed for the cubic B-spline, which is the box convolved four times, and three
+!! under Devroye's rule for the Epanechnikov kernel). A variate beyond the Gaussian's cut, or a draw
+!! beyond a bound under `"renormalise"`, or one that a mirror under `"reflect"` leaves outside the
+!! support (the doubly reflected mass the images omit), is drawn again from the same point's
+!! kernel with the stream's next draws -- which samples the truncated, corrected kernel exactly --
+!! and after `KDE_SAMPLE_TRIES` such draws the point's corrected distribution function is inverted
+!! by bisection instead, from the next uniform. A redraw never reads another element's stream.
 submodule (parquet_kde) parquet_kde_fit
 
     implicit none
+
+    !> What `%quantile` costs at one probability, in queries: its bracketed Newton iteration takes
+    !! about this many evaluations of `%cdf` and `%pdf`.
+    real(real64), parameter :: KDE_QUANTILE_STEPS = 40.0_real64
 
 contains
 
@@ -268,14 +290,29 @@ contains
 
     module procedure kde_pdf_r1
 
-        integer(int64) :: i
+        character(len=*), parameter :: EP = "pf_kde%pdf"
+        integer(int64) :: i, n
+        integer :: team
 
-        call require_fitted(self, "pf_kde%pdf")
-        if (size(f, kind=int64) /= size(x, kind=int64)) &
-            call kde_abort("pf_kde%pdf", "f must have one element per point of x")
-        do i = 1_int64, size(x, kind=int64)
+        call require_fitted(self, EP)
+        n = size(x, kind=int64)
+        if (size(f, kind=int64) /= n) call kde_abort(EP, "f must have one element per point of x")
+        call kde_query_team(EP, threads, n, query_work(self), team)
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                f(i) = density_at(self, x(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do i = 1_int64, n
             f(i) = density_at(self, x(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure kde_pdf_r1
 
@@ -288,14 +325,29 @@ contains
 
     module procedure kde_cdf_r1
 
-        integer(int64) :: i
+        character(len=*), parameter :: EP = "pf_kde%cdf"
+        integer(int64) :: i, n
+        integer :: team
 
-        call require_fitted(self, "pf_kde%cdf")
-        if (size(p, kind=int64) /= size(x, kind=int64)) &
-            call kde_abort("pf_kde%cdf", "p must have one element per point of x")
-        do i = 1_int64, size(x, kind=int64)
+        call require_fitted(self, EP)
+        n = size(x, kind=int64)
+        if (size(p, kind=int64) /= n) call kde_abort(EP, "p must have one element per point of x")
+        call kde_query_team(EP, threads, n, query_work(self), team)
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                p(i) = cdf_at(self, x(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do i = 1_int64, n
             p(i) = cdf_at(self, x(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure kde_cdf_r1
 
@@ -309,17 +361,34 @@ contains
 
     module procedure kde_quantile_r1
 
-        integer(int64) :: i
+        character(len=*), parameter :: EP = "pf_kde%quantile"
+        integer(int64) :: i, n
+        integer :: team
 
-        call require_fitted(self, "pf_kde%quantile")
-        if (size(x, kind=int64) /= size(p, kind=int64)) &
-            call kde_abort("pf_kde%quantile", "x must have one element per element of p")
-        do i = 1_int64, size(p, kind=int64)
+        call require_fitted(self, EP)
+        n = size(p, kind=int64)
+        if (size(x, kind=int64) /= n) call kde_abort(EP, "x must have one element per element of p")
+        call kde_query_team(EP, threads, n, KDE_QUANTILE_STEPS*query_work(self), team)
+        ! Every probability is checked before any is answered, and serially, so that an abort is
+        ! taken outside the team.
+        do i = 1_int64, n
             call check_probability(p(i))
         end do
-        do i = 1_int64, size(p, kind=int64)
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                x(i) = quantile_at(self, p(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do i = 1_int64, n
             x(i) = quantile_at(self, p(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure kde_quantile_r1
 
@@ -328,10 +397,12 @@ contains
         character(len=*), parameter :: EP = "pf_kde%curve"
         real(real64) :: a, b, c, nan
         integer(int64) :: n, i
+        integer :: team
 
         call require_fitted(self, EP)
         n = size(x, kind=int64)
         if (size(f, kind=int64) /= n) call kde_abort(EP, "x and f must have the same size")
+        call kde_query_team(EP, threads, n, query_work(self), team)
         c = 3.0_real64
         if (present(cut)) then
             if (ieee_is_nan(cut)) call kde_abort(EP, "cut must not be negative")
@@ -364,11 +435,39 @@ contains
         if (present(xmax)) b = xmax
         if (.not. (a < b)) call kde_abort(EP, "xmin must be below xmax")
         call spaced(a, b, x)
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                f(i) = density_at(self, x(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
         do i = 1_int64, n
             f(i) = density_at(self, x(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure kde_curve
+
+    module procedure kde_sample_s32
+
+        integer(int64) :: s
+
+        s = 0_int64
+        if (present(stream)) s = int(stream, int64)
+        call sample_fill(self, v, seed, s, threads)
+
+    end procedure kde_sample_s32
+
+    module procedure kde_sample_s64
+
+        call sample_fill(self, v, seed, stream, threads)
+
+    end procedure kde_sample_s64
 
     module procedure kde_bandwidths
 
@@ -947,6 +1046,236 @@ contains
         end if
 
     end subroutine bandwidths_at
+
+    !> About how many kernel evaluations a query at one point costs: the points within the widest
+    !! kernel's reach of it, were the sample spread evenly over its range, and the two searches that
+    !! find them. What the query team is sized by; 1 on an undefined estimate, which answers at once.
+    pure function query_work(self) result(w)
+        class(pf_kde), intent(in) :: self !! the fitted estimate
+        real(real64)              :: w    !! the cost of one query point
+
+        integer(int64) :: m
+        real(real64) :: half, reach
+
+        w = 1.0_real64
+        if (.not. self%defined) return
+        m = size(self%x, kind=int64)
+        ! Halved before the difference, which cannot then overflow; the reach is finite, the fit
+        ! having refused any bandwidth whose kernel would reach beyond the largest number.
+        half = 0.5_real64*self%x(m) - 0.5_real64*self%x(1)
+        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        if (reach < half) then
+            w = real(m, real64)*(reach/half)
+        else
+            w = real(m, real64)
+        end if
+        w = w + 64.0_real64
+
+    end function query_work
+
+    !> Fills `v` with draws from the estimate, element `k` from stream `pf_random_key(stream, k)`
+    !! under the family key, serially or shared among a team; NaN on an undefined estimate.
+    subroutine sample_fill(self, v, seed, stream, threads)
+        class(pf_kde), intent(in)     :: self    !! the fitted estimate
+        real(real64), intent(out)     :: v(:)    !! the draws
+        integer(int64), intent(in)    :: seed    !! the caller's seed
+        integer(int64), intent(in)    :: stream  !! the caller's stream
+        integer, intent(in), optional :: threads !! the caller's request
+
+        character(len=*), parameter :: EP = "pf_kde%sample"
+        integer(int64) :: k, n, key
+        integer :: team
+
+        call require_fitted(self, EP)
+        n = size(v, kind=int64)
+        call kde_query_team(EP, threads, n, KDE_DRAW_WORK, team)
+        if (.not. self%defined) then
+            v = ieee_value(1.0_real64, ieee_quiet_nan)
+            return
+        end if
+        key = pf_random_key(seed, KDE_FAMILY_LABEL)
+        if (team <= 1) then
+            kde_team_used = 1
+            do k = 1_int64, n
+                v(k) = draw_at(self, key, pf_random_key(stream, k))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(k)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do k = 1_int64, n
+            v(k) = draw_at(self, key, pf_random_key(stream, k))
+        end do
+        !$omp end do
+        !$omp end parallel
+
+    end subroutine sample_fill
+
+    !> One draw from the estimate, from the stream `sk` under the family key `key`: its first draw
+    !! chooses a point in proportion to its weight and the next ones its kernel's variate, redrawn
+    !! where the kernel's cut or the support rejects it and, after `KDE_SAMPLE_TRIES` redraws,
+    !! found by inverting the point's corrected distribution function instead.
+    pure function draw_at(self, key, sk) result(y)
+        class(pf_kde), intent(in)  :: self !! the fitted estimate, defined
+        integer(int64), intent(in) :: key  !! the family key
+        integer(int64), intent(in) :: sk   !! this element's stream
+        real(real64)               :: y    !! the draw
+
+        integer(int64) :: j, m, d
+        integer :: attempt
+        real(real64) :: xj, hj, e
+        logical :: kept
+
+        m = size(self%x, kind=int64)
+        d = 1_int64
+        if (self%weighted) then
+            ! The first point whose running weight passes a uniform share of the total; rounding
+            ! at the top end is held to the last point.
+            j = last_at_or_below(self%cw, pf_random_at(key, sk, d)*self%w_total) + 1_int64
+            if (j > m) j = m
+        else
+            j = pf_random_int_at(key, sk, 1_int64, m, d)
+        end if
+        d = d + 1_int64
+        xj = self%x(j)
+        hj = self%hb(1_int64 + (j - 1_int64)*self%hstride)
+        do attempt = 1, KDE_SAMPLE_TRIES
+            call kernel_variate(self%kernel_code, key, sk, d, e)
+            ! The Gaussian is cut at five standard deviations, inclusive, and a variate beyond is
+            ! drawn again: the fitted kernel is the cut one.
+            if (self%kernel_code == KDE_GAUSSIAN) then
+                if (abs(e) > KDE_GAUSS_CUT) cycle
+            end if
+            y = xj + hj*e
+            call place(self, y, kept)
+            if (kept) return
+        end do
+        y = invert_point(self, j, xj, hj, pf_random_at(key, sk, d))
+
+    end function draw_at
+
+    !> Whether `y` is a draw the corrected estimate keeps, moving it where `"reflect"` puts it:
+    !! kept inside the support under `"renormalise"`; under `"reflect"`, mirrored about the bound it
+    !! crossed and kept if then inside the support, the doubly reflected draw being one the images
+    !! omit.
+    pure subroutine place(self, y, ok)
+        class(pf_kde), intent(in)   :: self !! the fitted estimate
+        real(real64), intent(inout) :: y    !! the draw; mirrored under `"reflect"`
+        logical, intent(out)        :: ok   !! it is kept
+
+        ok = .true.
+        select case (self%boundary_code)
+        case (KDE_BOUNDARY_RENORMALISE)
+            if (self%has_lower) then
+                if (y < self%lo) ok = .false.
+            end if
+            if (self%has_upper) then
+                if (y > self%hi) ok = .false.
+            end if
+        case (KDE_BOUNDARY_REFLECT)
+            if (self%has_lower) then
+                if (y < self%lo) then
+                    y = 2.0_real64*self%lo - y
+                    if (self%has_upper) then
+                        if (y > self%hi) ok = .false.
+                    end if
+                    return
+                end if
+            end if
+            if (self%has_upper) then
+                if (y > self%hi) then
+                    y = 2.0_real64*self%hi - y
+                    if (self%has_lower) then
+                        if (y < self%lo) ok = .false.
+                    end if
+                end if
+            end if
+        end select
+
+    end subroutine place
+
+    !> One variate of the kernel `code` in standard-deviation units, from the stream `sk` under
+    !! `key` starting at draw `d`, which is advanced past the draws it read: a normal; one uniform
+    !! on `[-1, 1)` for the box; four uniforms on `[-1/2, 1/2)` summed for the cubic B-spline, which
+    !! is the box convolved four times; and for the Epanechnikov kernel Devroye's rule over three
+    !! uniforms on `[-1, 1)`, the second unless the third is the largest in size.
+    pure subroutine kernel_variate(code, key, sk, d, e)
+        integer, intent(in)           :: code !! the kernel
+        integer(int64), intent(in)    :: key  !! the family key
+        integer(int64), intent(in)    :: sk   !! this element's stream
+        integer(int64), intent(inout) :: d    !! the next draw to read; advanced past those read
+        real(real64), intent(out)     :: e    !! the variate
+
+        real(real64) :: u1, u2, u3, u4
+
+        select case (code)
+        case (KDE_GAUSSIAN)
+            e = pf_random_normal_at(key, sk, d)
+            d = d + 1_int64
+        case (KDE_EPANECHNIKOV)
+            u1 = 2.0_real64*pf_random_at(key, sk, d) - 1.0_real64
+            u2 = 2.0_real64*pf_random_at(key, sk, d + 1_int64) - 1.0_real64
+            u3 = 2.0_real64*pf_random_at(key, sk, d + 2_int64) - 1.0_real64
+            d = d + 3_int64
+            e = u3
+            if (abs(u3) >= abs(u2)) then
+                if (abs(u3) >= abs(u1)) e = u2
+            end if
+            e = KDE_SCALE(code)*e
+        case (KDE_BSPLINE)
+            u1 = pf_random_at(key, sk, d)
+            u2 = pf_random_at(key, sk, d + 1_int64)
+            u3 = pf_random_at(key, sk, d + 2_int64)
+            u4 = pf_random_at(key, sk, d + 3_int64)
+            d = d + 4_int64
+            e = KDE_SCALE(code)*(((u1 + u2) + (u3 + u4)) - 2.0_real64)
+        case default
+            e = KDE_SCALE(code)*(2.0_real64*pf_random_at(key, sk, d) - 1.0_real64)
+            d = d + 1_int64
+        end select
+
+    end subroutine kernel_variate
+
+    !> The draw from point `j` (at `xj`, bandwidth `hj`) at which its corrected distribution
+    !! function -- its images' under `"reflect"`, over the support and within its kernel's reach --
+    !! reaches the share `u` of its mass, by bisection to the last bit: what `draw_at` falls back to
+    !! where redrawing keeps being rejected.
+    pure function invert_point(self, j, xj, hj, u) result(y)
+        class(pf_kde), intent(in)  :: self !! the fitted estimate
+        integer(int64), intent(in) :: j    !! the point
+        real(real64), intent(in)   :: xj   !! where it is
+        real(real64), intent(in)   :: hj   !! its bandwidth
+        real(real64), intent(in)   :: u    !! the share of its mass, in `[0, 1)`
+        real(real64)               :: y    !! the draw
+
+        integer :: it
+        real(real64) :: a, b, mid, r, reach, s_a, target
+
+        r = point_reciprocal(self, j)
+        reach = KDE_RADIUS(self%kernel_code)*hj
+        a = xj - reach
+        b = xj + reach
+        if (self%has_lower) then
+            if (a < self%lo) a = self%lo
+        end if
+        if (self%has_upper) then
+            if (b > self%hi) b = self%hi
+        end if
+        s_a = images_cdf(self, j, a, r)
+        target = s_a + u*(images_cdf(self, j, b, r) - s_a)
+        do it = 1, 256
+            mid = a + 0.5_real64*(b - a)
+            if (.not. (mid > a .and. mid < b)) exit
+            if (images_cdf(self, j, mid, r) >= target) then
+                b = mid
+            else
+                a = mid
+            end if
+        end do
+        y = b
+
+    end function invert_point
 
     !> Records phase `k` of the fit, from clock reading `c0` to `c1`, in nanoseconds; nothing when
     !! the processor has no clock.

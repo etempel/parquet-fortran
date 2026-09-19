@@ -1,6 +1,6 @@
 !> Tests for `parquet_kde`: `pf_kde`'s kernels, bandwidth rules, population rules, boundary
 !> corrections, exact queries and curve, `pf_kde_grid`'s deposit, merge and interpolated queries,
-!> and the adaptive kernel in both forms.
+!> the adaptive kernel in both forms, and `%sample` in both forms.
 !!
 !! **The grid is tested against the exact estimate**, which the golden vectors pin: its density
 !! converges to `pf_kde%pdf` as the square of the cell width, its deposit conserves every point's
@@ -13,6 +13,13 @@
 !! bandwidth, and -- in `kde_serial`, where `parquet_debug_set_kde_pilot_cells` makes the pilot
 !! fine -- to `1e-9`, falling as the square of the pilot's cell width. `alpha = 0` is the fixed
 !! estimate bit for bit, in both forms, which is what keeps the adaptive loop honest.
+!!
+!! **`%sample` is tested by its recipe and its moments**, never by a goodness-of-fit statistic. The
+!! recipe -- which stream and which draw each element reads -- is reproduced here from the generator
+!! itself, beside a control arm without the family's label that must match nowhere; the moments of a
+!! sample from each kernel, corrected at a bound or not, are asserted against the kernel's own at a
+!! tolerance of five standard errors for the sample's size. The seeds are fixed, so each assertion is
+!! deterministic.
 !!
 !! **Every expectation is derived, never read off a run.** The golden vectors come from
 !! `tools/generate_kde_vectors.py`, a 50-digit oracle that sums every kernel of every point;
@@ -35,6 +42,7 @@ module test_kde
     use parquet_kde
     use parquet_stats, only : pf_stddev, pf_iqr, pf_count_valid
     use parquet_integrate, only : pf_integrand, pf_integrate
+    use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
     use test_kde_golden
     use iso_fortran_env, only : int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
@@ -66,6 +74,22 @@ module test_kde
     contains
         procedure :: eval => kde_density_eval !! `x**power` times the density at `x`
     end type kde_density
+
+    !> A grid's interpolated density as a function, `x**power * f(x)`, for `pf_integrate`.
+    type, extends(pf_integrand) :: grid_density
+        type(pf_kde_grid) :: g         !! the grid
+        integer           :: power = 0 !! 0 for the density, 1 and 2 for its moments
+    contains
+        procedure :: eval => grid_density_eval !! `x**power` times the grid's `%pdf` at `x`
+    end type grid_density
+
+    !> The label `pf_kde%sample` derives its key with, copied from `src/parquet_kde.f90`'s
+    !> `KDE_FAMILY_LABEL`: the recipe test reproduces every draw from it, so a changed label -- which
+    !> changes every sample a program has ever drawn -- fails that test rather than passing unseen.
+    integer(int64), parameter :: KDE_LABEL = 7089359947230782746_int64
+
+    !> `pf_kde_grid%sample`'s label, copied from `KDE_GRID_FAMILY_LABEL` for the same reason.
+    integer(int64), parameter :: KDE_GRID_LABEL = 8280789554566260118_int64
 
 contains
 
@@ -128,10 +152,16 @@ contains
             new_unittest("%bandwidth_at is the rule %fit applied", test_bandwidth_at), &
             new_unittest("the adaptive grid copies its pilot, merges and is poisoned by a poisoned one", &
                 test_adaptive_grid), &
+            new_unittest("a grid on a pilot with nothing in its cells answers NaN", &
+                test_empty_pilot_is_quiet), &
             new_unittest("the adaptive fit's accessors, printer, real32 form and refit", &
                 test_adaptive_accessors), &
             new_unittest("a bandwidth too large to use leaves the estimate undefined", &
-                test_unusable_bandwidth) &
+                test_unusable_bandwidth), &
+            new_unittest("%sample is addressed by (seed, stream, k)", test_sample_addressing), &
+            new_unittest("%sample respects the support and the kernel", test_sample_support_and_kernel), &
+            new_unittest("%sample draws each point's own weight and bandwidth", test_sample_weights_and_bandwidths), &
+            new_unittest("the grid's %sample follows its %pdf inside its range", test_grid_sample) &
             ]
 
     end subroutine collect_tests_kde
@@ -215,6 +245,55 @@ contains
         if (this%power /= 0) f = f*x**this%power
 
     end function kde_density_eval
+
+    !> `x**power` times the grid's interpolated density at `x`.
+    function grid_density_eval(this, x) result(f)
+        class(grid_density), intent(inout) :: this !! the grid as a function
+        real(real64), intent(in)            :: x    !! where to evaluate
+        real(real64)                        :: f    !! the value
+
+        call this%g%pdf(x, f)
+        if (this%power /= 0) f = f*x**this%power
+
+    end function grid_density_eval
+
+    !> The mean, variance and kurtosis of `v`, over its own mean.
+    pure subroutine moments(v, mean, var, kurt)
+        real(real64), intent(in)  :: v(:) !! the values
+        real(real64), intent(out) :: mean !! their mean
+        real(real64), intent(out) :: var  !! their variance, over `size(v)`
+        real(real64), intent(out) :: kurt !! their fourth central moment over the variance squared
+        integer(int64) :: i, n
+        real(real64) :: d, m2, m4
+
+        n = size(v, kind=int64)
+        mean = sum(v)/real(n, real64)
+        m2 = 0.0_real64
+        m4 = 0.0_real64
+        do i = 1_int64, n
+            d = v(i) - mean
+            m2 = m2 + d*d
+            m4 = m4 + (d*d)*(d*d)
+        end do
+        var = m2/real(n, real64)
+        kurt = (m4/real(n, real64))/(var*var)
+
+    end subroutine moments
+
+    !> How many pairs of elements of `v` are equal.
+    pure function equal_pairs(v) result(c)
+        real(real64), intent(in) :: v(:) !! the values
+        integer(int64)           :: c    !! the pairs
+        integer(int64) :: i, j
+
+        c = 0_int64
+        do i = 1_int64, size(v, kind=int64)
+            do j = i + 1_int64, size(v, kind=int64)
+                if (v(i) == v(j)) c = c + 1_int64
+            end do
+        end do
+
+    end function equal_pairs
 
     !> `.true.` when `a` and `b` agree to `rel` of `scale`, or are both NaN.
     pure function close_to(a, b, rel, scale) result(res)
@@ -745,15 +824,16 @@ contains
     subroutine test_quiet_returns(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k
-        real(real64) :: f, c, empty(0), xg(5), fg(5)
+        real(real64) :: f, c, empty(0), xg(5), fg(5), vs(3)
         logical :: ok
 
         call k%fit(empty, ok=ok)
         call k%pdf(0.0_real64, f)
         call k%curve(xg, fg)
+        call k%sample(vs, 1_int64)
         call check(error, (.not. ok) .and. k%is_fitted() .and. ieee_is_nan(f) .and. &
-            all(ieee_is_nan(fg)) .and. all(ieee_is_nan(xg)) .and. k%n_valid() == 0_int64, &
-            "an empty sample must leave a fitted, undefined estimate")
+            all(ieee_is_nan(fg)) .and. all(ieee_is_nan(xg)) .and. all(ieee_is_nan(vs)) .and. &
+            k%n_valid() == 0_int64, "an empty sample must leave a fitted, undefined estimate")
         if (allocated(error)) return
         call k%fit([1.0_real64, 2.0_real64], is_valid=[.false., .false.], ok=ok)
         call check(error, .not. ok .and. k%n_null() == 2_int64, "an all-null sample is undefined")
@@ -2359,6 +2439,64 @@ contains
 
     end subroutine test_adaptive_grid
 
+    !> A pilot with no density to read is data, not a mistake, so `%init` accepts it and every answer
+    !> of the grid built on it is NaN -- before and after `%add`, `%clear()` or not -- with every
+    !> count still kept. Two such pilots: one never given a point, and one whose only point lies
+    !> beyond its range, so that it holds weight but none in its cells. The control, a pilot with
+    !> points in its cells, gives the same grid finite answers.
+    subroutine test_empty_pilot_is_quiet(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: empty, beyond, full, g
+        real(real64) :: f(4), fp(8), pdf, cdf, q
+        integer :: which
+
+        call empty%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call beyond%init(8, 0.0_real64, 1.0_real64, 0.01_real64)
+        call beyond%add([5.0_real64])
+        call beyond%density(fp)
+        call check(error, beyond%sum_weights() == 1.0_real64 .and. all(fp == 0.0_real64), &
+            "the fixture: a pilot whose one point lies beyond its range holds its weight and none in its cells")
+        if (allocated(error)) return
+        call full%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call full%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=full)
+        call g%add([0.25_real64, 0.5_real64])
+        call g%density(f)
+        call check(error, g%is_adaptive() .and. .not. any(ieee_is_nan(f)), &
+            "the control: a grid on a pilot with points in its cells must answer finite densities")
+        if (allocated(error)) return
+
+        do which = 1, 2
+            if (which == 1) then
+                call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=empty, bandwidth_max=0.5_real64)
+            else
+                call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=beyond)
+            end if
+            call g%density(f)
+            call check(error, g%is_adaptive() .and. all(ieee_is_nan(f)), &
+                "a grid on a pilot with nothing to read must be adaptive and answer NaN before any %add")
+            if (allocated(error)) return
+            call g%add([0.25_real64, 0.5_real64])
+            call g%density(f)
+            call g%pdf(0.5_real64, pdf)
+            call g%cdf(0.5_real64, cdf)
+            call g%quantile(0.5_real64, q)
+            call check(error, all(ieee_is_nan(f)) .and. ieee_is_nan(pdf) .and. ieee_is_nan(cdf) .and. &
+                ieee_is_nan(q) .and. g%n_valid() == 2_int64 .and. g%sum_weights() == 2.0_real64, &
+                "a grid on a pilot with nothing to read must answer NaN and still count what %add accepted")
+            if (allocated(error)) return
+            call g%clear()
+            call g%add([0.5_real64])
+            call g%density(f)
+            call g%sample(fp, 3_int64)
+            call check(error, all(ieee_is_nan(f)) .and. all(ieee_is_nan(fp)), &
+                "clearing the grid must not give it a pilot to read, nor its %sample a density to draw")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_empty_pilot_is_quiet
+
     !> The adaptive fit's state through its accessors: `%is_adaptive`, the printer's extra rows,
     !> `%clear`, a fixed refit (every bandwidth the global one again), and the `real32` form, which
     !> forwards `adaptive`, `alpha` and `bandwidth_max` and equals the `real64` form over the
@@ -2437,6 +2575,305 @@ contains
         call check(error, ok, "the control: a box whose reach stays finite must be defined")
 
     end subroutine test_unusable_bandwidth
+
+    !> `%sample` is addressed by `(seed, stream, k)`, and every element follows one recipe: the stream
+    !> `pf_random_key(stream, k)` under `pf_random_key(seed, label)`, whose first draw chooses the
+    !> point and whose next draws the kernel's variate. Reproduced here from the generator on a
+    !> two-point box fit, unweighted (`pf_random_int_at` chooses) and weighted (a uniform share of the
+    !> total weight, located in the running weight), beside a coupled control arm that drops the
+    !> label and must match no element. Then, on a fit whose draws a bound keeps rejecting: a longer
+    !> sample starts with a shorter one, the two stream kinds agree, an absent stream is stream 0,
+    !> and another stream or seed changes every element. A redraw reads only its own element's
+    !> stream: on a one-point fit whose every other draw a bound rejects, no two elements are alike,
+    !> where a redraw reading its neighbour's draws would repeat that neighbour's value; and a
+    !> Gaussian variate beyond the cut is replaced by the same stream's next normal, found here by
+    !> searching the streams for one whose first variate lies beyond five standard deviations.
+    subroutine test_sample_addressing(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer(int64), parameter :: SEED = 20260919_int64
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        real(real64) :: v(400), a(1000), b(500), c(1000), d(1000), r(2000), u, want, raw, e
+        integer(int64) :: i, key, sk, j, jr, st
+        integer :: n_recipe, n_raw, pass
+
+        key = pf_random_key(SEED, KDE_LABEL)
+        do pass = 1, 2
+            if (pass == 1) then
+                call k%fit([0.0_real64, 10.0_real64], bandwidth=1.0_real64, kernel="box")
+            else
+                call k%fit([0.0_real64, 10.0_real64], bandwidth=1.0_real64, kernel="box", &
+                    weights=[1.0_real64, 3.0_real64])
+            end if
+            call k%sample(v, SEED, 3)
+            n_recipe = 0
+            n_raw = 0
+            do i = 1_int64, 400_int64
+                sk = pf_random_key(3_int64, i)
+                if (pass == 1) then
+                    j = pf_random_int_at(key, sk, 1_int64, 2_int64, 1_int64)
+                    jr = pf_random_int_at(SEED, sk, 1_int64, 2_int64, 1_int64)
+                else
+                    ! The running weight is [1, 4]: the second point once the share reaches 1.
+                    j = merge(1_int64, 2_int64, 4.0_real64*pf_random_at(key, sk, 1_int64) < 1.0_real64)
+                    jr = merge(1_int64, 2_int64, 4.0_real64*pf_random_at(SEED, sk, 1_int64) < 1.0_real64)
+                end if
+                u = pf_random_at(key, sk, 2_int64)
+                want = 10.0_real64*real(j - 1_int64, real64) + sqrt(3.0_real64)*(2.0_real64*u - 1.0_real64)
+                u = pf_random_at(SEED, sk, 2_int64)
+                raw = 10.0_real64*real(jr - 1_int64, real64) + sqrt(3.0_real64)*(2.0_real64*u - 1.0_real64)
+                if (abs(v(i) - want) <= 1.0e-13_real64) n_recipe = n_recipe + 1
+                if (abs(v(i) - raw) <= 1.0e-13_real64) n_raw = n_raw + 1
+            end do
+            call check(error, n_recipe == 400, merge("unweighted", "weighted  ", pass == 1) // &
+                ": every element must be the recipe's draw, from its own stream under the family's key")
+            if (allocated(error)) return
+            call check(error, n_raw == 0, merge("unweighted", "weighted  ", pass == 1) // &
+                ": no element may be the draw at the caller's own coordinates: the label must separate them")
+            if (allocated(error)) return
+        end do
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="silverman", lower=-330.0_real64)
+        call k%sample(a, SEED, 7)
+        call k%sample(b, SEED, 7)
+        call k%sample(c, SEED, 7_int64)
+        call check(error, all(b == a(1:500)) .and. all(c == a), &
+            "a shorter sample must be a prefix of a longer one, and the two stream kinds must agree")
+        if (allocated(error)) return
+        call check(error, minval(a) >= -330.0_real64, "every draw must respect the lower bound")
+        if (allocated(error)) return
+        call k%sample(c, SEED)
+        call k%sample(d, SEED, 0_int64)
+        call check(error, all(c == d), "an absent stream must be stream 0")
+        if (allocated(error)) return
+        call k%sample(c, SEED, 8)
+        call k%sample(d, SEED + 1_int64, 7)
+        call check(error, all(c /= a) .and. all(d /= a), "another stream, or another seed, must change every element")
+        if (allocated(error)) return
+
+        call k%fit([0.0_real64], bandwidth=1.0_real64, lower=0.0_real64)
+        call k%sample(r, SEED, 1)
+        call check(error, minval(r) >= 0.0_real64 .and. equal_pairs(r) == 0_int64, &
+            "a redraw at the bound must read only its own element's stream: no two draws may be alike")
+        if (allocated(error)) return
+
+        e = 0.0_real64
+        do st = 1_int64, 100000000_int64
+            e = pf_random_normal_at(key, pf_random_key(st, 1_int64), 2_int64)
+            if (abs(e) > 5.0_real64) exit
+        end do
+        want = pf_random_normal_at(key, pf_random_key(st, 1_int64), 3_int64)
+        call check(error, abs(e) > 5.0_real64 .and. abs(want) <= 5.0_real64, &
+            "the fixture: a stream whose first normal lies beyond the cut and whose second does not")
+        if (allocated(error)) return
+        call k%fit([0.0_real64], bandwidth=1.0_real64)
+        call k%sample(r(1:1), SEED, st)
+        call check(error, r(1) == want, &
+            "a variate beyond the Gaussian's cut must be redrawn from the same stream's next normal")
+
+    end subroutine test_sample_addressing
+
+    !> Each kernel's sampler draws that kernel, and each correction keeps the draws where the
+    !> corrected estimate is. A one-point fit at unit bandwidth draws the kernel itself: 200000 draws
+    !> have its mean (0), variance (1, the cut Gaussian's `1 - 1.5e-5`) and kurtosis (the cut
+    !> Gaussian's 3, the Epanechnikov kernel's 15/7, the cubic B-spline's 2.7, the box's 1.8) to
+    !> five standard errors, and none lies beyond its support. At a bound the draws follow the
+    !> corrected kernel: the half kernel under `"renormalise"`, whose mean is the fit's own first
+    !> moment (`pf_integrate`); under both corrections a box ten times wider than `[0, 1]`, which is
+    !> flat there -- mean 1/2, variance 1/12 -- and which rejects so many draws that most fall back
+    !> to inverting the point's distribution function; and under both, Gaussians wider than
+    !> `[0, 1]`, whose draws have the mean and variance of the fit's own corrected density
+    !> (`pf_integrate`), the case where a mirror image reaches the far bound and the doubly
+    !> reflected mass the images omit is drawn again rather than kept.
+    subroutine test_sample_support_and_kernel(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer, parameter :: N = 200000
+        real(real64), parameter :: KERNEL_KURT(4) = [3.0_real64, 15.0_real64/7.0_real64, 2.7_real64, &
+            1.8_real64]
+        character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        type(pf_kde) :: k
+        type(kde_density) :: fn
+        real(real64), allocatable :: v(:)
+        real(real64) :: mean, var, kurt, var_k, want, se
+        integer :: kk, mm
+        character(len=200) :: msg
+
+        allocate(v(N))
+        do kk = 1, 4
+            call k%fit([0.0_real64], bandwidth=1.0_real64, kernel=trim(KERNELS(kk)))
+            call k%sample(v, 11_int64, kk)
+            call moments(v, mean, var, kurt)
+            var_k = 1.0_real64
+            if (kk == 1) var_k = 1.0_real64 - 1.5e-5_real64
+            write(msg, '(a,a,3es12.4)') trim(KERNELS(kk)), ": mean, variance and kurtosis ", mean, var, kurt
+            call check(error, abs(mean) <= 5.0_real64*sqrt(var_k/real(N, real64)) .and. &
+                abs(var - var_k) <= 5.0_real64*var_k*sqrt((KERNEL_KURT(kk) - 1.0_real64)/real(N, real64)) .and. &
+                abs(kurt - KERNEL_KURT(kk)) <= 0.1_real64, trim(msg) // " must be the kernel's")
+            if (allocated(error)) return
+            call check(error, maxval(abs(v)) <= RADIUS(kk), trim(KERNELS(kk)) // ": no draw may lie beyond the support")
+            if (allocated(error)) return
+        end do
+
+        ! The half Gaussian at a lower bound: its mean is the corrected estimate's first moment.
+        call fn%k%fit([0.0_real64], bandwidth=1.0_real64, lower=0.0_real64)
+        fn%power = 1
+        want = pf_integrate(fn, 0.0_real64, 5.0_real64, 1.0e-12_real64)
+        call fn%k%sample(v, 12_int64)
+        call moments(v, mean, var, kurt)
+        se = sqrt(var/real(N, real64))
+        write(msg, '(a,2es14.6)') "renormalise at a bound: the mean and the fit's first moment ", mean, want
+        call check(error, minval(v) >= 0.0_real64 .and. abs(mean - want) <= 5.0_real64*se, trim(msg))
+        if (allocated(error)) return
+
+        ! Gaussians wider than [0, 1]: the draws follow the fit's own corrected density.
+        do mm = 1, 2
+            call fn%k%fit([0.1_real64, 0.35_real64, 0.8_real64], bandwidth=1.0_real64, lower=0.0_real64, &
+                upper=1.0_real64, boundary=METHODS(mm))
+            fn%power = 1
+            want = pf_integrate(fn, 0.0_real64, 1.0_real64, 1.0e-12_real64)
+            fn%power = 2
+            var_k = pf_integrate(fn, 0.0_real64, 1.0_real64, 1.0e-12_real64) - want*want
+            call fn%k%sample(v, 14_int64, mm)
+            call moments(v, mean, var, kurt)
+            write(msg, '(a,a,4es13.5)') trim(METHODS(mm)), ": wide Gaussians; the sample's mean and variance, and the fit's ", &
+                mean, var, want, var_k
+            call check(error, minval(v) >= 0.0_real64 .and. maxval(v) <= 1.0_real64 .and. &
+                abs(mean - want) <= 5.0_real64*sqrt(var_k/real(N, real64)) .and. &
+                abs(var - var_k) <= 5.0_real64*var_k*sqrt(1.0_real64/real(N, real64)), trim(msg))
+            if (allocated(error)) return
+        end do
+
+        ! A box ten bandwidths wide on [0, 1] is flat there under either correction.
+        do mm = 1, 2
+            call k%fit([0.5_real64], bandwidth=10.0_real64, kernel="box", lower=0.0_real64, upper=1.0_real64, &
+                boundary=METHODS(mm))
+            call k%sample(v, 13_int64, mm)
+            call moments(v, mean, var, kurt)
+            write(msg, '(a,a,2es14.6)') trim(METHODS(mm)), ": a box far wider than [0, 1] draws it flat; mean, variance ", &
+                mean, var
+            call check(error, minval(v) >= 0.0_real64 .and. maxval(v) <= 1.0_real64 .and. &
+                abs(mean - 0.5_real64) <= 5.0_real64*sqrt(1.0_real64/(12.0_real64*real(N, real64))) .and. &
+                abs(var - 1.0_real64/12.0_real64) <= 5.0_real64*sqrt(0.8_real64/real(N, real64))/12.0_real64, trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_sample_support_and_kernel
+
+    !> The point a draw starts from is chosen in proportion to its weight, and its kernel has the
+    !> point's own bandwidth: three quarters of the draws from a fit weighted 1 to 3 lie about the
+    !> heavier point, and the draws from an adaptive fit have the variance of the points plus the
+    !> mean of `h_j**2` (each Gaussian kernel adding its own, cut, variance), which a sampler using
+    !> the global bandwidth would miss by the spread of the bandwidths.
+    subroutine test_sample_weights_and_bandwidths(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer, parameter :: N = 200000
+        type(pf_kde) :: k
+        real(real64), allocatable :: v(:), x(:), hb(:), xs(:)
+        real(real64) :: share, mean, var, kurt, mu, want, want_global
+        character(len=200) :: msg
+
+        allocate(v(N))
+        call k%fit([-10.0_real64, 10.0_real64], bandwidth=1.0_real64, kernel="box", weights=[1.0_real64, 3.0_real64])
+        call k%sample(v, 21_int64)
+        share = real(count(v > 0.0_real64), real64)/real(N, real64)
+        write(msg, '(a,f9.6)') "weights 1 and 3: the share of draws about the heavier point is ", share
+        call check(error, abs(share - 0.75_real64) <= 5.0_real64*sqrt(0.75_real64*0.25_real64/real(N, real64)), &
+            trim(msg) // ", not 0.75")
+        if (allocated(error)) return
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="silverman", adaptive=.true., alpha=1.0_real64)
+        allocate(hb(k%n_valid()), xs(k%n_valid()))
+        call k%bandwidths(hb, xs)
+        mu = sum(xs)/real(size(xs), real64)
+        want = sum((xs - mu)**2)/real(size(xs), real64) + (1.0_real64 - 1.5e-5_real64)*sum(hb**2)/real(size(hb), real64)
+        want_global = sum((xs - mu)**2)/real(size(xs), real64) + (1.0_real64 - 1.5e-5_real64)*k%bandwidth()**2
+        call k%sample(v, 22_int64)
+        call moments(v, mean, var, kurt)
+        write(msg, '(a,3es14.6)') "adaptive: the variance, and that of the points plus mean(h_j**2) and plus h**2 ", &
+            var, want, want_global
+        call check(error, abs(mean - mu) <= 5.0_real64*sqrt(want/real(N, real64)) .and. &
+            abs(var - want) <= 5.0_real64*want*sqrt(2.0_real64/real(N, real64)) .and. &
+            abs(want - want_global) > 10.0_real64*want*sqrt(2.0_real64/real(N, real64)), trim(msg))
+
+    end subroutine test_sample_weights_and_bandwidths
+
+    !> The grid's `%sample` inverts the integral of its `%pdf` over its cells: each draw is the
+    !> point where that integral reaches its uniform's share -- the recipe, reproduced here through
+    !> the grid's own `%cdf` on a grid holding every point's weight, which at a draw is the draw's
+    !> uniform, beside the control arm without the label -- and a sample's mean and variance are those
+    !> of `%pdf` over the range (`pf_integrate`), on a grid narrower than its data, whose weight
+    !> beyond the range no draw may land on. A longer sample starts with a shorter one; a grid with
+    !> nothing in its cells, or a poisoned one, draws NaN.
+    subroutine test_grid_sample(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer, parameter :: N = 200000
+        integer(int64), parameter :: SEED = 77_int64
+        type(pf_kde_grid) :: g
+        type(grid_density) :: fn
+        real(real64), allocatable :: x(:), v(:)
+        real(real64) :: w(300), p(300), b(100), mass, m1, m2, mean, var, kurt
+        integer(int64) :: i, key, sk
+        integer :: n_recipe, n_raw
+        character(len=200) :: msg
+
+        call kde_fixture(1000_int64, x)
+        call g%init(400, -700.0_real64, 700.0_real64, 30.0_real64)
+        call g%add(x)
+        call g%sample(w, SEED, 5)
+        call g%cdf(w, p)
+        key = pf_random_key(SEED, KDE_GRID_LABEL)
+        n_recipe = 0
+        n_raw = 0
+        do i = 1_int64, 300_int64
+            sk = pf_random_key(5_int64, i)
+            if (abs(p(i) - pf_random_at(key, sk, 1_int64)) <= 1.0e-12_real64) n_recipe = n_recipe + 1
+            if (abs(p(i) - pf_random_at(SEED, sk, 1_int64)) <= 1.0e-12_real64) n_raw = n_raw + 1
+        end do
+        call check(error, n_recipe == 300, &
+            "every draw must be where the grid's integral reaches its uniform's share, from its own stream")
+        if (allocated(error)) return
+        call check(error, n_raw == 0, "no draw may come from the caller's own coordinates: the label must separate them")
+        if (allocated(error)) return
+        call g%sample(b, SEED, 5_int64)
+        call check(error, all(b == w(1:100)), "a shorter sample must be a prefix, and the two stream kinds must agree")
+        if (allocated(error)) return
+
+        call g%init(300, -300.0_real64, 300.0_real64, 40.0_real64)
+        call g%add(x)
+        allocate(v(N))
+        call g%sample(v, SEED)
+        call moments(v, mean, var, kurt)
+        fn%g = g
+        ! The interpolant is linear between centres, so the centres are where the integrand bends.
+        call g%grid(w)
+        fn%power = 0
+        mass = pf_integrate(fn, -300.0_real64, 300.0_real64, 1.0e-12_real64, breakpoints=w)
+        fn%power = 1
+        m1 = pf_integrate(fn, -300.0_real64, 300.0_real64, 1.0e-12_real64, breakpoints=w)/mass
+        fn%power = 2
+        m2 = pf_integrate(fn, -300.0_real64, 300.0_real64, 1.0e-12_real64, breakpoints=w)/mass - m1*m1
+        write(msg, '(a,4es13.5)') "the sample's mean and variance, and %pdf's over the range ", mean, var, m1, m2
+        call check(error, minval(v) >= -300.0_real64 .and. maxval(v) <= 300.0_real64 .and. &
+            mass < 0.95_real64 .and. abs(mean - m1) <= 5.0_real64*sqrt(m2/real(N, real64)) .and. &
+            abs(var - m2) <= 5.0_real64*m2*sqrt(2.0_real64/real(N, real64)), trim(msg))
+        if (allocated(error)) return
+
+        call g%init(10, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%sample(b, SEED)
+        call check(error, all(ieee_is_nan(b)), "an empty grid must draw NaN")
+        if (allocated(error)) return
+        call g%add([5.0_real64])
+        call g%sample(b, SEED)
+        call check(error, all(ieee_is_nan(b)), "a grid whose only weight lies beyond its range must draw NaN")
+        if (allocated(error)) return
+        call g%clear()
+        call g%add([0.5_real64, ieee_value(1.0_real64, ieee_quiet_nan)], skipnan=.false.)
+        call g%sample(b, SEED)
+        call check(error, all(ieee_is_nan(b)), "a poisoned grid must draw NaN")
+
+    end subroutine test_grid_sample
 
     !> The adaptive golden cases once the pilot is fine: at 262144 cells the library agrees with the
     !> exact pilot's estimate to `1e-9` of its peak, and its gap falls as the square of the pilot's

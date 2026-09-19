@@ -59,7 +59,7 @@ in every one of them.
 | `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
-| `parquet_kde` | 33 | no | `pf_kde`: a kernel density estimate of a one-dimensional sample, its density, distribution function and quantiles answered anywhere; `pf_kde_grid`: the same estimate streamed into fixed cells |
+| `parquet_kde` | 36 | no | `pf_kde`: a kernel density estimate of a one-dimensional sample, its density, distribution function and quantiles answered anywhere; `pf_kde_grid`: the same estimate streamed into fixed cells |
 | `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
 | `parquet_interpolate` | 4 | no | `pf_interp_1d`, `pf_interp_2d` and `pf_interp`: linear, cubic-spline and shape-preserving interpolation of tabulated data, in one dimension and on a rectilinear grid |
 | `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |

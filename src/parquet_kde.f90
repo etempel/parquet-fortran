@@ -8,10 +8,11 @@
 !!
 !! **This module is Arrow-free and must stay that way.** Nothing in its closure reaches
 !! `parquet_bindings`; `check_parquet_kde_stays_arrow_free` (tools/check_source_conventions.py)
-!! walks the closure, submodules included. Its one library tier edge is `parquet_stats`, whose
+!! walks the closure, submodules included. Its library tier edges are `parquet_stats`, whose
 !! `pf_stddev` and `pf_iqr` are the bandwidth rules' scale and whose exclusion pass and argument
 !! checkers are this module's population rules, so that "in the population" means here exactly
-!! what it means for every `pf_*` statistic. `tools/module_footprints.txt` records the cost.
+!! what it means for every `pf_*` statistic, and `parquet_random`, the generator `%sample` draws
+!! from. `tools/module_footprints.txt` records the cost.
 !!
 !! **`bandwidth` is the standard deviation of the kernel, whichever kernel is chosen.** Each
 !! kernel is stored with the scale factor that gives it unit variance, so one bandwidth rule
@@ -39,9 +40,17 @@
 !! (`pf_kde%fit: ...`) and is taken under one named `critical`, so a caller fitting one object
 !! per thread inside a parallel region aborts once.
 !!
+!! **`%sample` draws from the estimate, addressed by `(seed, stream, k)`.** Element `k` of a sample
+!! reads its own stream of the generator, `pf_random_key(stream, k)` under a key this module derives
+!! from `seed` with a label of its own, so a caller's own draws at `(seed, stream)` are untouched, a
+!! rejected draw is redrawn from the same element's stream, and a sample is the same bits however it
+!! is split among threads.
+!!
 !! **A fitted object is read-only under every query**, so any number of threads may share one.
 !! `%fit` and `%clear` are the only writes to a `pf_kde`; `%init`, `%add`, `%merge` and `%clear` the
-!! only writes to a `pf_kde_grid`, whose queries are read-only too.
+!! only writes to a `pf_kde_grid`, whose queries are read-only too. The bulk queries take
+!! `threads=`, and every element of them is computed by one thread alone, so their answers are the
+!! same bits at every thread count.
 !!
 !! **Nothing is printed unasked.** `%print` is solicited output, silenced by
 !! `verbosity = "silent"` and written where `message_stream` says; that is why this module
@@ -61,12 +70,15 @@ module parquet_kde
     use parquet_argsort, only : pf_argsort, resolve_thread_count
     ! The Gaussian kernel is the library's `phi` and `Phi`, never a second spelling of them.
     use parquet_utils, only : pf_norm_pdf, pf_norm_cdf
+    ! `%sample`'s draws: the coordinate-addressed generator, so that a draw is a pure function of
+    ! its coordinates and a sample splits among threads anywhere.
+    use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
     ! `%print` is solicited output; the verbosity and message-stream pair is re-exported because
     ! this module reads it.
     use parquet_settings_base, only : parquet_output_is_suppressed, parquet_message_unit, &
         parquet_set_verbosity, parquet_get_verbosity, parquet_set_message_stream, &
         parquet_get_message_stream
-    use iso_fortran_env, only : int64, real32, real64
+    use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
         ieee_negative_inf, ieee_is_nan, ieee_is_finite
 
@@ -138,6 +150,32 @@ module parquet_kde
     !! `threads=`; the team takes the pieces in turn.
     integer(int64), parameter :: KDE_PILOT_PARTS = 64_int64
 
+    ! ---- sampling and the query teams ---------------------------------------------------------
+
+    !> The label `pf_kde%sample` derives its key from `seed` with, so that its draws share no bit
+    !! with a caller's own `pf_random_at(seed, ...)` at the same coordinates (`feature_risks.md`
+    !! Risk-123: a new construction over the generator takes its own label). Distinct from every
+    !! other label in the library; it needs only to differ from them and from 0.
+    integer(int64), parameter :: KDE_FAMILY_LABEL = 7089359947230782746_int64
+
+    !> The label `pf_kde_grid%sample` derives its key with: its own, so that the two forms' samples
+    !! at one `(seed, stream)` are two draws and not two functions of one uniform.
+    integer(int64), parameter :: KDE_GRID_FAMILY_LABEL = 8280789554566260118_int64
+
+    !> How many times a draw the kernel's cut or the support rejects is redrawn from the kernel
+    !! before the point's own distribution function is inverted instead. Either way the draw is from
+    !! the corrected kernel; the inversion bounds the cost where a kernel far wider than the support
+    !! would otherwise reject almost every draw.
+    integer, parameter :: KDE_SAMPLE_TRIES = 32
+
+    !> The least work, in kernel evaluations, worth giving one thread of a bulk query's team: about
+    !! a few hundred microseconds, well above what opening the team costs.
+    real(real64), parameter :: KDE_QUERY_MIN_WORK = 32768.0_real64
+
+    !> What one draw of `%sample` costs, in kernel evaluations, about: a point chosen, a variate
+    !! drawn and, rarely, a rejection.
+    real(real64), parameter :: KDE_DRAW_WORK = 32.0_real64
+
     ! ---- the test observable ------------------------------------------------------------------
 
     !> The team the most recent threaded pass ran on; 1 when it ran serially.
@@ -179,7 +217,7 @@ module parquet_kde
         real(real64) :: x1 = 0.0_real64           !! the pilot's last cell's right edge
         real(real64) :: dx = 0.0_real64           !! the pilot's cell width
         real(real64) :: wt = 0.0_real64           !! the pilot's total weight
-        logical :: poisoned = .false.             !! the pilot answers NaN
+        logical :: unreadable = .false.           !! the pilot has no density to read: poisoned, or empty cells
         real(real64) :: logg = 0.0_real64         !! `log g`: the mean of `log p` over the pilot's own density
         real(real64) :: pmin = 0.0_real64         !! the pilot's smallest positive cell density
         real(real64), allocatable :: acc(:)
@@ -242,6 +280,9 @@ module parquet_kde
         generic :: quantile => grid_quantile_r0, grid_quantile_r1 !! the inverse of `%cdf`
         procedure, private :: grid_quantile_r0 !! at one probability
         procedure, private :: grid_quantile_r1 !! at each probability of an array
+        generic :: sample => grid_sample_s32, grid_sample_s64 !! draws from the density `%pdf` describes
+        procedure, private :: grid_sample_s32 !! `stream` absent or `int32`
+        procedure, private :: grid_sample_s64 !! `stream` `int64`
         procedure :: grid => grid_centres !! the cell centres
         procedure :: ncells => grid_ncells !! the number of cells
         procedure :: step => grid_step !! the cell width
@@ -324,6 +365,9 @@ module parquet_kde
         procedure, private :: kde_quantile_r0 !! at one probability
         procedure, private :: kde_quantile_r1 !! at each probability of an array
         procedure :: curve => kde_curve !! the density on equally spaced points
+        generic :: sample => kde_sample_s32, kde_sample_s64 !! draws from the estimate
+        procedure, private :: kde_sample_s32 !! `stream` absent or `int32`
+        procedure, private :: kde_sample_s64 !! `stream` `int64`
         procedure :: bandwidths => kde_bandwidths !! every retained point's bandwidth, and the points
         generic :: bandwidth_at => kde_bandwidth_at_r0, kde_bandwidth_at_r1 !! the bandwidth the rule gives a point
         procedure, private :: kde_bandwidth_at_r0 !! at one point
@@ -441,13 +485,16 @@ module parquet_kde
             real(real64), intent(out) :: f    !! the density there
         end subroutine kde_pdf_r0
 
-        !> The density at each point of `x`: `call k%pdf(x, f)`, `f(i)` at `x(i)`.
-        !! `size(f) /= size(x)` aborts.
-        module subroutine kde_pdf_r1(self, x, f)
+        !> The density at each point of `x`: `call k%pdf(x, f, [threads])`, `f(i)` at `x(i)`.
+        !! `size(f) /= size(x)` aborts. `threads` is the team the points are shared among; each
+        !! point is computed by one thread alone, so the answer does not depend on it, and a team
+        !! opens only where the work would pay for it.
+        module subroutine kde_pdf_r1(self, x, f, threads)
             implicit none
-            class(pf_kde), intent(in) :: self !! the fitted estimate
-            real(real64), intent(in)  :: x(:) !! where to evaluate
-            real(real64), intent(out) :: f(:) !! the density at each point
+            class(pf_kde), intent(in)     :: self    !! the fitted estimate
+            real(real64), intent(in)      :: x(:)    !! where to evaluate
+            real(real64), intent(out)     :: f(:)    !! the density at each point
+            integer, intent(in), optional :: threads !! the team for the points
         end subroutine kde_pdf_r1
 
         !> `P(X <= x)` at one point: `call k%cdf(x, p)`. Exact: the sum of the kernels' own CDFs,
@@ -460,12 +507,14 @@ module parquet_kde
             real(real64), intent(out) :: p    !! the probability at or below `x`
         end subroutine kde_cdf_r0
 
-        !> `P(X <= x)` at each point of `x`: `call k%cdf(x, p)`. `size(p) /= size(x)` aborts.
-        module subroutine kde_cdf_r1(self, x, p)
+        !> `P(X <= x)` at each point of `x`: `call k%cdf(x, p, [threads])`. `size(p) /= size(x)`
+        !! aborts; `threads` as `%pdf` takes it.
+        module subroutine kde_cdf_r1(self, x, p, threads)
             implicit none
-            class(pf_kde), intent(in) :: self !! the fitted estimate
-            real(real64), intent(in)  :: x(:) !! where to evaluate
-            real(real64), intent(out) :: p(:) !! the probability at or below each point
+            class(pf_kde), intent(in)     :: self    !! the fitted estimate
+            real(real64), intent(in)      :: x(:)    !! where to evaluate
+            real(real64), intent(out)     :: p(:)    !! the probability at or below each point
+            integer, intent(in), optional :: threads !! the team for the points
         end subroutine kde_cdf_r1
 
         !> The quantile at probability `p`: `call k%quantile(p, x)`, the smallest `x` at which
@@ -478,32 +527,63 @@ module parquet_kde
             real(real64), intent(out) :: x    !! the quantile
         end subroutine kde_quantile_r0
 
-        !> The quantile at each probability of `p`: `call k%quantile(p, x)`.
-        !! `size(x) /= size(p)` aborts.
-        module subroutine kde_quantile_r1(self, p, x)
+        !> The quantile at each probability of `p`: `call k%quantile(p, x, [threads])`.
+        !! `size(x) /= size(p)` aborts; `threads` as `%pdf` takes it.
+        module subroutine kde_quantile_r1(self, p, x, threads)
             implicit none
-            class(pf_kde), intent(in) :: self !! the fitted estimate
-            real(real64), intent(in)  :: p(:) !! the probabilities
-            real(real64), intent(out) :: x(:) !! the quantile at each
+            class(pf_kde), intent(in)     :: self    !! the fitted estimate
+            real(real64), intent(in)      :: p(:)    !! the probabilities
+            real(real64), intent(out)     :: x(:)    !! the quantile at each
+            integer, intent(in), optional :: threads !! the team for the probabilities
         end subroutine kde_quantile_r1
 
         !> The density on `size(x)` equally spaced points: `call k%curve(x, f, [xmin], [xmax],
-        !! [cut])`.
+        !! [cut], [threads])`.
         !!
         !! `x` receives the points, from `xmin` to `xmax` inclusive, and `f` the density at each.
         !! The default range is the sample's minimum minus `cut` bandwidths to its maximum plus
         !! `cut` bandwidths (`cut` defaults to 3), clipped to the support. `size(f) /= size(x)`,
         !! `xmin >= xmax` and a negative `cut` abort. On an undefined estimate `f` is NaN, and so
-        !! is `x` unless both ends were given.
-        module subroutine kde_curve(self, x, f, xmin, xmax, cut)
+        !! is `x` unless both ends were given. `threads` as `%pdf` takes it.
+        module subroutine kde_curve(self, x, f, xmin, xmax, cut, threads)
             implicit none
-            class(pf_kde), intent(in)          :: self !! the fitted estimate
-            real(real64), intent(out)          :: x(:) !! the points
-            real(real64), intent(out)          :: f(:) !! the density at each point
-            real(real64), intent(in), optional :: xmin !! the first point
-            real(real64), intent(in), optional :: xmax !! the last point
-            real(real64), intent(in), optional :: cut  !! bandwidths beyond the data, by default
+            class(pf_kde), intent(in)          :: self    !! the fitted estimate
+            real(real64), intent(out)          :: x(:)    !! the points
+            real(real64), intent(out)          :: f(:)    !! the density at each point
+            real(real64), intent(in), optional :: xmin    !! the first point
+            real(real64), intent(in), optional :: xmax    !! the last point
+            real(real64), intent(in), optional :: cut     !! bandwidths beyond the data, by default
+            integer, intent(in), optional      :: threads !! the team for the points
         end subroutine kde_curve
+
+        !> Draws from the estimate: `call k%sample(v, seed, [stream], [threads])` fills `v` with
+        !! `size(v)` independent draws, `stream` absent (stream 0) or `int32`.
+        !!
+        !! The smoothed bootstrap: a retained point chosen in proportion to its weight, then its
+        !! kernel, at its own bandwidth, drawn about it. Under `"renormalise"` a draw beyond a bound
+        !! is drawn again from the same point's kernel, and under `"reflect"` it is mirrored back,
+        !! so the draws follow the corrected estimate `%pdf` describes. Element `k` of `v` is a
+        !! function of `seed`, `stream` and `k` alone: a longer sample starts with a shorter one,
+        !! and `threads` changes nothing but the time. `v` is NaN on an undefined estimate.
+        module subroutine kde_sample_s32(self, v, seed, stream, threads)
+            implicit none
+            class(pf_kde), intent(in)            :: self    !! the fitted estimate
+            real(real64), intent(out)            :: v(:)    !! the draws
+            integer(int64), intent(in)           :: seed    !! the seed
+            integer(int32), intent(in), optional :: stream  !! the stream; 0 when absent
+            integer, intent(in), optional        :: threads !! the team for the draws
+        end subroutine kde_sample_s32
+
+        !> Draws from the estimate with an `int64` `stream`: `call k%sample(v, seed, stream,
+        !! [threads])`; otherwise as the `int32` form, and the two agree at every stream they share.
+        module subroutine kde_sample_s64(self, v, seed, stream, threads)
+            implicit none
+            class(pf_kde), intent(in)     :: self    !! the fitted estimate
+            real(real64), intent(out)     :: v(:)    !! the draws
+            integer(int64), intent(in)    :: seed    !! the seed
+            integer(int64), intent(in)    :: stream  !! the stream
+            integer, intent(in), optional :: threads !! the team for the draws
+        end subroutine kde_sample_s64
 
         !> Every retained point's bandwidth: `call k%bandwidths(h, [x])`, in the object's own
         !! ascending order, with the points themselves in `x` when it is given.
@@ -663,9 +743,11 @@ module parquet_kde
         !! `ncells` cells of width `step = (xmax - xmin)/ncells` span `[xmin, xmax]`, cell `i`
         !! centred on `xmin + (i - 1/2)*step`. `bandwidth` is the kernel's standard deviation and is
         !! always a number: a grid has no data to apply a rule to before the points arrive. `pilot`
-        !! selects the adaptive kernel: a grid with points in it, whose range covers this one's,
-        !! from which each point `%add` accepts takes the bandwidth `bandwidth * (p(x)/g)**(-alpha)`;
-        !! it is copied, so the caller may discard it. `alpha` (default 0.5) and `bandwidth_max` are
+        !! selects the adaptive kernel: an initialised grid whose range covers this one's, from which
+        !! each point `%add` accepts takes the bandwidth `bandwidth * (p(x)/g)**(-alpha)`; it is
+        !! copied, so the caller may discard it. A pilot with no density to read -- nothing in its
+        !! cells, or a kept NaN -- makes every answer of this grid NaN, as a data condition does
+        !! everywhere else. `alpha` (default 0.5) and `bandwidth_max` are
         !! as `pf_kde%fit` takes them and need `pilot`. `kernel`, `lower`, `upper` and `boundary`
         !! are as `pf_kde%fit` takes them, and the range must lie inside the support. Every
         !! accumulated point and count is discarded; a grid may be initialised again.
@@ -852,6 +934,36 @@ module parquet_kde
             real(real64), intent(out)      :: x(:) !! the quantile at each
         end subroutine grid_quantile_r1
 
+        !> Draws from the grid's density: `call g%sample(v, seed, [stream], [threads])` fills `v`
+        !! with `size(v)` independent draws, `stream` absent (stream 0) or `int32`.
+        !!
+        !! Each draw inverts the distribution of the piecewise-linear density `%pdf` describes over
+        !! `[xmin, xmax]`, a quadratic between two centres, so the draws follow `%pdf` exactly. Weight
+        !! the grid counted beyond its range is not located, so no draw lands there: the draws
+        !! follow the density inside the range, normalised to the weight it holds. Element `k` of
+        !! `v` is a function of `seed`, `stream` and `k` alone, and `threads` changes nothing but the
+        !! time. `v` is NaN when nothing has been accumulated inside the range or a kept NaN has
+        !! poisoned the grid.
+        module subroutine grid_sample_s32(self, v, seed, stream, threads)
+            implicit none
+            class(pf_kde_grid), intent(in)       :: self    !! the grid
+            real(real64), intent(out)            :: v(:)    !! the draws
+            integer(int64), intent(in)           :: seed    !! the seed
+            integer(int32), intent(in), optional :: stream  !! the stream; 0 when absent
+            integer, intent(in), optional        :: threads !! the team for the draws
+        end subroutine grid_sample_s32
+
+        !> Draws from the grid's density with an `int64` `stream`: `call g%sample(v, seed, stream,
+        !! [threads])`; otherwise as the `int32` form, and the two agree at every stream they share.
+        module subroutine grid_sample_s64(self, v, seed, stream, threads)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self    !! the grid
+            real(real64), intent(out)      :: v(:)    !! the draws
+            integer(int64), intent(in)     :: seed    !! the seed
+            integer(int64), intent(in)     :: stream  !! the stream
+            integer, intent(in), optional  :: threads !! the team for the draws
+        end subroutine grid_sample_s64
+
         !> The cell centres: `call g%grid(x)`, `x(i) = xmin + (i - 1/2)*step`. `size(x)` other
         !! than `ncells` aborts.
         module subroutine grid_centres(self, x)
@@ -1007,8 +1119,9 @@ module parquet_kde
 
         !> Sets the adaptive rule from a pilot grid: copies its cells into the look-up table and
         !! forms `log g`, the mean of `log p` over the pilot's own density, and the smallest
-        !! positive cell density, the stand-in for a point the pilot reads as zero. The pilot must
-        !! hold weight in some cell unless it is poisoned, which the callers check.
+        !! positive cell density, the stand-in for a point the pilot reads as zero. A pilot with no
+        !! density to read -- poisoned, or no cell holding a positive density -- gives a table
+        !! marked unreadable, from which every bandwidth is NaN.
         module subroutine kde_adapt_set(a, pilot, alpha, has_bmax, bmax)
             implicit none
             type(kde_adapt), intent(out)  :: a        !! the rule
@@ -1022,7 +1135,8 @@ module parquet_kde
         !! `h`: `h * (p(x)/g)**(-alpha)`, with `p` the pilot interpolated between its centres, and
         !! capped at `bandwidth_max`. Exactly `h` when `alpha = 0`. Where the pilot reads zero the
         !! answer is the cap, or without one the pilot's smallest positive cell density stands in.
-        !! NaN at a NaN point; `+Infinity` where the bandwidth is too large to represent.
+        !! NaN at a NaN point and everywhere on an unreadable table; `+Infinity` where the bandwidth
+        !! is too large to represent.
         module subroutine kde_adapt_bandwidths(a, h, x, hb)
             implicit none
             type(kde_adapt), intent(in) :: a     !! the rule
@@ -1045,6 +1159,27 @@ module parquet_kde
             character(len=*), intent(in) :: entry !! the binding, e.g. `pf_kde%fit`
             character(len=*), intent(in) :: text  !! what went wrong
         end subroutine kde_abort
+
+        !> The team a bulk query of `n` elements opens, into `team`: `resolve_thread_count`'s
+        !! answer -- the caller's `threads` or the automatic count, never a nested team where one
+        !! would deadlock, clamped to the processors available -- cut so that each thread gets at
+        !! least `KDE_QUERY_MIN_WORK` of work, `work` being one element's cost in kernel
+        !! evaluations. 1 means serial, and is the only answer without OpenMP. Aborts with the
+        !! caller's `entry` when `threads` is below one, whatever `n` is.
+        module subroutine kde_query_team(entry, threads, n, work, team)
+            implicit none
+            character(len=*), intent(in)  :: entry   !! the binding, for the message
+            integer, intent(in), optional :: threads !! the caller's request; absent means automatic
+            integer(int64), intent(in)    :: n       !! the elements
+            real(real64), intent(in)      :: work    !! one element's cost, in kernel evaluations
+            integer, intent(out)          :: team    !! threads to open
+        end subroutine kde_query_team
+
+        !> Records, from inside a parallel region, the team it runs on in the test observable
+        !! `parquet_debug_kde_threads_used` reads. Every thread of the team must call it, once.
+        module subroutine kde_record_team()
+            implicit none
+        end subroutine kde_record_team
 
         !> A caller's token, trimmed and lower-cased into a fixed buffer; blank when it is longer
         !! than the buffer, which no valid token is.

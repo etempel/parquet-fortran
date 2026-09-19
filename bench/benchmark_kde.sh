@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # What `parquet_kde` costs: `pf_kde`'s exact queries against the bandwidth, `pf_kde_grid`'s deposit
 # against the cells one kernel reaches and its merge against the grid's size, how fast the grid
-# converges to the exact estimate, and what the adaptive kernel adds.
+# converges to the exact estimate, what the adaptive kernel adds, what a draw costs, and how the
+# threaded forms scale.
 #
-# Four modes, all driving `bench/benchmark_kde.f90`:
+# Six modes, all driving `bench/benchmark_kde.f90`:
 #
-#   evaluate  `pf_kde%pdf` and `%cdf` in microseconds per query point, one call over an array of
-#             QUERIES points spread across the sample, per kernel, at bandwidths of 1/50, 1/200 and
-#             1/1000 of the sample's range. `window` is the share of the sample within one kernel's
-#             reach of a query, on average: a query sums exactly those points, so its cost should
-#             follow that column rather than the sample's size. The sample is dense at its two ends
-#             and thin in the middle, so the column is an average over very different windows.
+#   evaluate  `pf_kde%pdf` and `%cdf` in microseconds per query point on ONE thread, one call
+#             over an array of QUERIES points spread across the sample, per kernel, at bandwidths of
+#             1/50, 1/200 and 1/1000 of the sample's range. `window` is the share of the sample
+#             within one kernel's reach of a query, on average: a query sums exactly those points,
+#             so its cost should follow that column rather than the sample's size. The sample is
+#             dense at its two ends and thin in the middle, so the column is an average over very
+#             different windows.
 #
 #   grid      `pf_kde_grid%add` in nanoseconds per point, on ONE thread, per kernel, at 2, 4, 8
 #             and 16 cells per bandwidth; `cells` is the number of cells one kernel reaches, which
@@ -39,25 +41,45 @@
 #             under each fit: an adaptive query sums the points within reach of the WIDEST kernel,
 #             so its cost follows `max`.
 #
-# The guide page quotes no figure from here, only statements `evaluate`, `accuracy` and `adaptive`
-# must keep true: a query costs in proportion to the points within reach of it (of the widest
-# kernel, under the adaptive kernel), the grid converges as the square of its cell width for the
-# two smooth kernels, and the adaptive fit costs one grid pass and one look-up per point beyond the
-# fixed one. Re-read them against a new run.
+#   sample    `%sample` in nanoseconds per draw on ONE thread, per kernel, at a bandwidth of
+#             1/200 of the sample's range, QUERIES draws per call: from the exact form unweighted
+#             (`exact`), weighted (`weighted`, a uniform located in the running weight), and with
+#             `lower=` at the sample's minimum (`bounded`, where a draw beyond the bound is drawn
+#             again from the same kernel), and from a grid of four cells to a bandwidth (`grid`,
+#             one uniform and one quadratic per draw).
+#
+#   threads   `%add`, `%pdf` and `%sample` across a ladder of thread counts, 1, 2, 4, ... up to the
+#             threads OpenMP offers (at most 64): milliseconds per call, the speed-up over one
+#             thread, and the team each call actually opened (`parquet_debug_kde_threads_used`),
+#             which is smaller than asked for where the work would not pay for a larger one.
+#             `%pdf` at QUERIES points and `%sample` of 100*QUERIES draws must give the serial
+#             bits at every count, and `%add`'s grid must agree with the serial one to 1e-12 of
+#             its largest cell (the team partitions the points, so its sums group differently):
+#             the mode EXITS NONZERO when a rung misses its gate. Run it with
+#             `OMP_PLACES=sockets` and say so when quoting it; a thread bound to one core per
+#             place clamps every team to the processors the mask allows.
+#
+# The guide page quotes no figure from here, only statements `evaluate`, `accuracy`, `adaptive` and
+# `threads` must keep true: a query costs in proportion to the points within reach of it (of the
+# widest kernel, under the adaptive kernel), the grid converges as the square of its cell width for
+# the two smooth kernels, the adaptive fit costs one grid pass and one look-up per point beyond the
+# fixed one, and a threaded query or sample answers the serial bits. Re-read them against a new run.
 #
 # Usage:
 #   bench/benchmark_kde.sh                     # every mode
 #   MODE=grid bench/benchmark_kde.sh           # one of them
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=all          evaluate, grid, accuracy, adaptive, or all.
+#   MODE=all          evaluate, grid, accuracy, adaptive, sample, threads, or all.
 #   ROUNDS=5          Timed laps per figure; the FASTEST is kept, never the mean, because the slow
 #                     laps are the machine's other work rather than this code's.
-#   POINTS=100000     The sample's size in `evaluate`, `accuracy` and `adaptive`.
+#   POINTS=100000     The sample's size in `evaluate`, `accuracy`, `adaptive`, `sample` and
+#                     `threads`.
 #   GRID_POINTS=1000000
 #                     The sample's size in `grid`.
-#   QUERIES=10000     Query points per call in `evaluate` and `adaptive`, and the error's points in
-#                     `accuracy`.
+#   QUERIES=10000     Query points per call in `evaluate`, `adaptive` and `threads`, draws per
+#                     call in `sample` (and a hundred times as many in `threads`), and the error's
+#                     points in `accuracy`.
 #
 # Name the machine and the toolchain when reporting a figure from this script
 # (`tools/machine_report.sh` prints both), and quote the load average: this repository's reference
@@ -75,8 +97,9 @@ GRID_POINTS="${GRID_POINTS:-1000000}"
 QUERIES="${QUERIES:-10000}"
 
 case "$MODE" in
-    evaluate|grid|accuracy|adaptive|all) ;;
-    *) echo "benchmark_kde.sh: MODE must be evaluate, grid, accuracy, adaptive or all (got '$MODE')" >&2
+    evaluate|grid|accuracy|adaptive|sample|threads|all) ;;
+    *) echo "benchmark_kde.sh: MODE must be evaluate, grid, accuracy, adaptive, sample, threads" \
+            "or all (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -122,5 +145,18 @@ fi
 if [[ "$MODE" == "adaptive" || "$MODE" == "all" ]]; then
     fpm run benchmark_kde --profile release -- \
         --mode=adaptive --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
+    echo
+fi
+
+if [[ "$MODE" == "sample" || "$MODE" == "all" ]]; then
+    fpm run benchmark_kde --profile release -- \
+        --mode=sample --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
+    echo
+fi
+
+if [[ "$MODE" == "threads" || "$MODE" == "all" ]]; then
+    echo "OMP_PLACES=${OMP_PLACES:-unset} OMP_PROC_BIND=${OMP_PROC_BIND:-unset}"
+    fpm run benchmark_kde --profile release -- \
+        --mode=threads --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
     echo
 fi

@@ -1,19 +1,24 @@
 !> What `parquet_kde` costs: `pf_kde`'s exact queries against the bandwidth, `pf_kde_grid`'s deposit
 !> against the cells one kernel reaches, a merge against the grid's size, how fast the grid
-!> converges to the exact estimate as its cells shrink, and what the adaptive kernel adds to a fit
-!> and to a query.
+!> converges to the exact estimate as its cells shrink, what the adaptive kernel adds to a fit
+!> and to a query, what a draw from either form costs, and how the threaded forms scale.
 !!
 !! Driven by `bench/benchmark_kde.sh`, whose header carries the usage and what each column means.
 !! Every timed job is repeated until one lap lasts at least `MIN_LAP` seconds and the fastest of
 !! `--rounds` laps is kept; every buffer is written before the first lap, and each job's answer is
 !! folded into a checksum outside the timed region and printed, so that no compiler can drop the
 !! work. The grid mode refuses to report a deposit that did not conserve its weight: a faster
-!! deposit that loses weight is not the same computation made cheaper.
+!! deposit that loses weight is not the same computation made cheaper. The threads mode refuses to
+!! report a speed-up whose answer moved: `%pdf` and `%sample` must give the serial bits at every
+!! thread count, and `%add` must agree with the serial deposit to rounding.
 program benchmark_kde
 
     use iso_fortran_env, only : real64, int64, error_unit
-    use parquet_kde, only : pf_kde, pf_kde_grid, parquet_debug_kde_fit_nanos
+    use parquet_kde, only : pf_kde, pf_kde_grid, parquet_debug_kde_fit_nanos, parquet_debug_kde_threads_used
     use parquet_argsort, only : pf_argsort
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_max_threads
+#endif
 
     implicit none
 
@@ -46,13 +51,17 @@ program benchmark_kde
         call run_accuracy(npoints, nqueries)
     case ("adaptive")
         call run_adaptive(rounds, npoints, nqueries)
+    case ("sample")
+        call run_sample(rounds, npoints, nqueries)
+    case ("threads")
+        call run_threads(rounds, npoints, nqueries, failures)
     case default
         write(error_unit, '(a)') "benchmark_kde: unknown mode '" // trim(mode) // "'"
         error stop 1
     end select
     if (failures /= 0) then
-        write(error_unit, '(a,i0,a)') "benchmark_kde: ", failures, " grids did not conserve their " // &
-            "weight; no timing above measures what it says"
+        write(error_unit, '(a,i0,a)') "benchmark_kde: ", failures, " answers failed their gate (a grid " // &
+            "that lost weight, or a threaded answer that moved); no timing above measures what it says"
         error stop 1
     end if
 
@@ -63,7 +72,7 @@ contains
         character(len=*), intent(out) :: mode     !! which measurement to run
         integer, intent(out)          :: rounds   !! timed laps per figure; the fastest is kept
         integer(int64), intent(out)   :: npoints  !! the sample's size
-        integer(int64), intent(out)   :: nqueries !! query points per lap in `evaluate` and `accuracy`
+        integer(int64), intent(out)   :: nqueries !! query points or draws per call
 
         character(len=64) :: arg, val
         integer :: k, eq
@@ -91,8 +100,8 @@ contains
                 read(val, *) nqueries
             case default
                 write(error_unit, '(a)') "benchmark_kde: unknown option '" // trim(arg(1:eq - 1)) // "'"
-                write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|accuracy|adaptive] " // &
-                    "[--rounds=N] [--points=N] [--queries=N]"
+                write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|accuracy|adaptive|" // &
+                    "sample|threads] [--rounds=N] [--points=N] [--queries=N]"
                 error stop 1
             end select
         end do
@@ -229,7 +238,7 @@ contains
                 do
                     t0 = clock()
                     do r = 1_int64, reps
-                        call k%pdf(xq, f)
+                        call k%pdf(xq, f, threads=1)
                     end do
                     t = clock() - t0
                     if (t >= MIN_LAP) exit
@@ -239,7 +248,7 @@ contains
                 do lap = 2, rounds
                     t0 = clock()
                     do r = 1_int64, reps
-                        call k%pdf(xq, f)
+                        call k%pdf(xq, f, threads=1)
                     end do
                     best_pdf = min(best_pdf, (clock() - t0)/real(reps, real64))
                 end do
@@ -249,7 +258,7 @@ contains
                 do
                     t0 = clock()
                     do r = 1_int64, reps
-                        call k%cdf(xq, p)
+                        call k%cdf(xq, p, threads=1)
                     end do
                     t = clock() - t0
                     if (t >= MIN_LAP) exit
@@ -259,7 +268,7 @@ contains
                 do lap = 2, rounds
                     t0 = clock()
                     do r = 1_int64, reps
-                        call k%cdf(xq, p)
+                        call k%cdf(xq, p, threads=1)
                     end do
                     best_cdf = min(best_cdf, (clock() - t0)/real(reps, real64))
                 end do
@@ -423,7 +432,7 @@ contains
         print '(a)', "  kernel          cells   h/step     pdf rms    order     centres"
         do kk = 1, 4
             call k%fit(x, bandwidth=h, kernel=trim(KERNELS(kk)))
-            call k%pdf(xq, fx)
+            call k%pdf(xq, fx, threads=1)
             xmin = lo - RADIUS(kk)*h
             xmax = hi + RADIUS(kk)*h
             prev = -1.0_real64
@@ -436,7 +445,7 @@ contains
                 if (allocated(c)) deallocate(c, fc, fe)
                 allocate(c(nc), fc(nc), fe(nc))
                 call g%density(fc, x=c)
-                call k%pdf(c, fe)
+                call k%pdf(c, fe, threads=1)
                 centre_err = maxval(abs(fc - fe))/maxval(fe)
                 order = ""
                 if (prev > 0.0_real64 .and. err > 0.0_real64) write(order, '(f8.2)') log(prev/err)/log(2.0_real64)
@@ -501,6 +510,213 @@ contains
 
     end subroutine run_adaptive
 
+    ! ---- sample --------------------------------------------------------------------------------
+
+    !> What a draw costs, per kernel, on one thread: from the exact form unweighted, weighted and
+    !> with a lower bound at the sample's minimum (where the kernels crossing it reject their draws
+    !> beyond it), and from a grid of four cells to a bandwidth. The bandwidth is 1/200 of the range.
+    subroutine run_sample(rounds, n, m)
+        integer, intent(in)        :: rounds !! timed laps per figure
+        integer(int64), intent(in) :: n      !! the sample's size
+        integer(int64), intent(in) :: m      !! draws per call
+
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), w(:), v(:)
+        real(real64) :: lo, hi, h, best(4), checksum
+        integer(int64) :: i
+        integer :: kk, form, nc
+
+        call sample(n, x)
+        allocate(w(n), v(m))
+        do i = 1_int64, n
+            w(i) = real(1_int64 + modulo(i, 3_int64), real64)
+        end do
+        lo = minval(x)
+        hi = maxval(x)
+        h = (hi - lo)/200.0_real64
+        v = 0.0_real64
+        checksum = 0.0_real64
+
+        print '(a)', "=== %sample: nanoseconds per draw, one thread ==="
+        print '(a,i0,a,i0,a,i0,a)', "sample of ", n, " points, ", m, " draws per call, bandwidth = range/200, " // &
+            "fastest of ", rounds, " laps"
+        print '(a)', "bounded: lower = the sample's minimum, so the kernels crossing it redraw beyond it; " // &
+            "grid: 4 cells to a bandwidth"
+        print '(a)', ""
+        print '(a)', "  kernel          exact   weighted    bounded       grid"
+        do kk = 1, 4
+            do form = 1, 4
+                select case (form)
+                case (1)
+                    call k%fit(x, bandwidth=h, kernel=trim(KERNELS(kk)))
+                case (2)
+                    call k%fit(x, bandwidth=h, kernel=trim(KERNELS(kk)), weights=w)
+                case (3)
+                    call k%fit(x, bandwidth=h, kernel=trim(KERNELS(kk)), lower=lo)
+                case (4)
+                    nc = int(ceiling((hi - lo + 2.0_real64*RADIUS(kk)*h)/(h/4.0_real64)))
+                    call g%init(nc, lo - RADIUS(kk)*h, lo - RADIUS(kk)*h + real(nc, real64)*h/4.0_real64, h, &
+                        kernel=trim(KERNELS(kk)))
+                    call g%add(x, threads=1)
+                end select
+                best(form) = time_draws(k, g, form == 4, v, rounds, checksum)
+            end do
+            print '(2x,a12,4f11.1)', KERNELS(kk), 1.0e9_real64*best/real(m, real64)
+        end do
+        print '(a)', ""
+        print '(a,es22.14)', "checksum ", checksum
+
+    end subroutine run_sample
+
+    !> The fastest of `rounds` calls of `%sample` into `v` on one thread, from the grid when
+    !> `from_grid` and from `k` otherwise, repeated until a lap is long enough to time, in seconds
+    !> per call; every call draws on its own stream, and the draws are folded into `checksum`.
+    function time_draws(k, g, from_grid, v, rounds, checksum) result(best)
+        type(pf_kde), intent(in)      :: k         !! the fitted estimate
+        type(pf_kde_grid), intent(in) :: g         !! the grid
+        logical, intent(in)           :: from_grid !! draw from the grid
+        real(real64), intent(inout)   :: v(:)      !! the draws, written before any lap
+        integer, intent(in)           :: rounds    !! laps
+        real(real64), intent(inout)   :: checksum  !! the keep-it-live sum
+        real(real64)                  :: best      !! seconds per call, the fastest lap
+
+        real(real64) :: t0, t
+        integer(int64) :: reps, r, stream
+        integer :: lap
+
+        stream = 0_int64
+        reps = 1_int64
+        do
+            t0 = clock()
+            do r = 1_int64, reps
+                stream = stream + 1_int64
+                if (from_grid) then
+                    call g%sample(v, 20260919_int64, stream, threads=1)
+                else
+                    call k%sample(v, 20260919_int64, stream, threads=1)
+                end if
+            end do
+            t = clock() - t0
+            if (t >= MIN_LAP) exit
+            reps = 2_int64*reps
+        end do
+        best = t/real(reps, real64)
+        do lap = 2, rounds
+            t0 = clock()
+            do r = 1_int64, reps
+                stream = stream + 1_int64
+                if (from_grid) then
+                    call g%sample(v, 20260919_int64, stream, threads=1)
+                else
+                    call k%sample(v, 20260919_int64, stream, threads=1)
+                end if
+            end do
+            best = min(best, (clock() - t0)/real(reps, real64))
+        end do
+        checksum = checksum + sum(v)
+
+    end function time_draws
+
+    ! ---- threads -------------------------------------------------------------------------------
+
+    !> `%add`, `%pdf` and `%sample` across a ladder of thread counts, 1, 2, 4, ... up to the
+    !> threads OpenMP offers (at most 64): the wall time of one call, the speed-up over one thread,
+    !> and the team the call actually opened. `%pdf` over `m` points and `%sample` of `100*m` draws
+    !> must give the serial bits at every count, and `%add`'s grid must agree with the serial one
+    !> to `1e-12` of its largest cell (the weaker promise of a partition that follows the team);
+    !> a rung that misses its gate counts a failure, and the run exits nonzero.
+    subroutine run_threads(rounds, n, m, failures)
+        integer, intent(in)        :: rounds   !! timed laps per figure
+        integer(int64), intent(in) :: n        !! the sample's size
+        integer(int64), intent(in) :: m        !! query points per call
+        integer, intent(inout)     :: failures !! rungs whose answer moved
+
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), xq(:), f(:), f1(:), v(:), v1(:), acc(:), acc1(:)
+        real(real64) :: lo, hi, h, t0, t, best_add, best_pdf, best_draw, base(3), gap, checksum
+        integer :: nt, top, lap, nc, team(3)
+        character(len=8) :: gate
+
+        call sample(n, x)
+        lo = minval(x)
+        hi = maxval(x)
+        h = (hi - lo)/200.0_real64
+        nc = int(ceiling((hi - lo + 10.0_real64*h)/(h/4.0_real64)))
+        call k%fit(x, bandwidth=h)
+        allocate(xq(m), f(m), f1(m), v(100_int64*m), v1(100_int64*m), acc(nc), acc1(nc))
+        call spread(lo, hi, xq)
+        f = 0.0_real64
+        v = 0.0_real64
+        checksum = 0.0_real64
+        top = min(64, max_threads())
+
+        print '(a)', "=== the threaded forms: milliseconds per call, and the speed-up over one thread ==="
+        print '(a,i0,a,i0,a,i0,a,i0,a)', "sample of ", n, " points, bandwidth = range/200, Gaussian; %pdf at ", m, &
+            " points; %sample of ", 100_int64*m, " draws; %add of the sample into ", nc, " cells"
+        print '(a)', "team: the threads each call actually opened (%add/%pdf/%sample); gate: the answers against " // &
+            "the serial ones"
+        print '(a)', ""
+        print '(a)', "  threads   team         add ms   speed-up     pdf ms   speed-up  sample ms   speed-up   gate"
+        nt = 1
+        do while (nt <= top)
+            best_add = huge(1.0_real64)
+            best_pdf = huge(1.0_real64)
+            best_draw = huge(1.0_real64)
+            do lap = 1, rounds
+                t0 = clock()
+                call g%init(nc, lo - 5.0_real64*h, lo - 5.0_real64*h + real(nc, real64)*h/4.0_real64, h)
+                call g%add(x, threads=nt)
+                t = clock() - t0
+                best_add = min(best_add, t)
+                team(1) = parquet_debug_kde_threads_used()
+                t0 = clock()
+                call k%pdf(xq, f, threads=nt)
+                t = clock() - t0
+                best_pdf = min(best_pdf, t)
+                team(2) = parquet_debug_kde_threads_used()
+                t0 = clock()
+                call k%sample(v, 20260919_int64, threads=nt)
+                t = clock() - t0
+                best_draw = min(best_draw, t)
+                team(3) = parquet_debug_kde_threads_used()
+            end do
+            call g%density(acc, normalise=.false.)
+            if (nt == 1) then
+                base = [best_add, best_pdf, best_draw]
+                f1 = f
+                v1 = v
+                acc1 = acc
+            end if
+            gap = maxval(abs(acc - acc1))/maxval(abs(acc1))
+            gate = "ok"
+            if (any(f /= f1) .or. any(v /= v1) .or. .not. (gap <= 1.0e-12_real64)) then
+                gate = "MOVED"
+                failures = failures + 1
+            end if
+            checksum = checksum + sum(f) + sum(v) + sum(acc)
+            print '(i9,2x,i3,"/",i3,"/",i3,3(f11.2,f11.2),3x,a)', nt, team, 1.0e3_real64*best_add, base(1)/best_add, &
+                1.0e3_real64*best_pdf, base(2)/best_pdf, 1.0e3_real64*best_draw, base(3)/best_draw, trim(gate)
+            nt = 2*nt
+        end do
+        print '(a)', ""
+        print '(a,es22.14)', "checksum ", checksum
+
+    end subroutine run_threads
+
+    !> The threads OpenMP offers here; 1 without OpenMP.
+    function max_threads() result(n)
+        integer :: n !! the thread count
+
+#ifdef _OPENMP
+        n = omp_get_max_threads()
+#else
+        n = 1
+#endif
+
+    end function max_threads
+
     !> The fastest of `rounds` fits of `x` on one thread, fixed or adaptive, into `k`; for the
     !> adaptive fit, the library's phase times of the fastest lap go to `best_ns`.
     function time_fit(k, x, h, kernel, adaptive, rounds, best_ns) result(best)
@@ -553,7 +769,7 @@ contains
         do
             t0 = clock()
             do r = 1_int64, reps
-                call k%pdf(xq, f)
+                call k%pdf(xq, f, threads=1)
             end do
             t = clock() - t0
             if (t >= MIN_LAP) exit
@@ -563,7 +779,7 @@ contains
         do lap = 2, rounds
             t0 = clock()
             do r = 1_int64, reps
-                call k%pdf(xq, f)
+                call k%pdf(xq, f, threads=1)
             end do
             best = min(best, (clock() - t0)/real(reps, real64))
         end do

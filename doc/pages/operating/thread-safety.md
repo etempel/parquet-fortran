@@ -28,8 +28,8 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
   group](../tables/table-group.html).
 - A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
   See [Logging from several threads](#logging-from-several-threads) below.
-- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, index maps, TOML — have
-  their own short rules, and one of them matters: a **bulk** `pf_spatial_index` query may rebuild
+- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, index maps, density
+  estimation, TOML — have their own short rules, and one of them matters: a **bulk** `pf_spatial_index` query may rebuild
   the index, so it must not run on a shared index from two threads. See
   [The Arrow-free tiers](#the-arrow-free-tiers) below.
 
@@ -335,8 +335,9 @@ interaction with other threads, and it is handled internally.
 
 Everything above is about the reader, the writer and `parquet_table`. The tiers that never touch a
 Parquet file and have a rule of their own — sorting, statistics, strings, spatial indexing,
-HEALPix, minimisation, index maps and TOML configuration — are below, and they are short. **One of them has
-teeth**; the rest are here so that "what may I do concurrently" has one answer rather than seven.
+HEALPix, minimisation, index maps, density estimation and TOML configuration — are below, and they
+are short. **One of them has teeth**; the rest are here so that "what may I do concurrently" has
+one answer rather than one per module.
 
 **A tier not listed here needs no rule**, which is why the list is shorter than the set of
 Arrow-free modules. `parquet_temporal`, `parquet_columns`, `parquet_list`, `parquet_map`,
@@ -399,6 +400,14 @@ said about it.
   and **whatever the objective accumulates is not visible to you afterwards** — `info%neval` is
   the count. The answer does not depend on the thread count in either module. See
   [The objective under threads](../utilities/optimization.html#threads-and-what-each-thread-sees).
+- **`pf_kde` and `pf_kde_grid`: every query is read-only, and the rest are writes.** A fitted
+  `pf_kde`, and a grid nobody is adding to, may be queried and sampled from any number of threads
+  at once; `%fit`, `%init`, `%add`, `%merge` and `%clear` are writes — one object per thread, or
+  one shared and written inside your own critical section, and `%merge` is how per-thread grids
+  become one. The bulk queries, `%sample`, `%fit` and `%add` thread internally and stand down
+  inside your region. A query's or a sample's answer is the same bits at every thread count;
+  `%add`'s is the same at one count and changes by rounding between counts. See
+  [Thread safety](../utilities/kernel-density.html#thread-safety).
 - **`pf_toml`: every public procedure is safe inside a parallel region**, because each takes one
   module-wide lock on entry. What that does not cover is a document's lifetime: closing one while
   another thread still holds a handle taken from it is yours to prevent. See

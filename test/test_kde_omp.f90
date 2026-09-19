@@ -1,9 +1,12 @@
 !> Threading tests for `parquet_kde`: that `pf_kde_grid%add(threads=)` opens the team it resolves,
 !> answers the same bits every time at one team size and within rounding of the serial deposit at
 !> another, and that its two limits -- a floor of survivors per thread, and a cap from the partial
-!> grids' own cost -- keep a team shut where one would not pay; and that the pilot an adaptive
+!> grids' own cost -- keep a team shut where one would not pay; that the pilot an adaptive
 !> `pf_kde%fit` builds answers the same bits at every thread count, its deposit cut by the sample
-!> and not by the team.
+!> and not by the team; that the bulk queries and `%sample` of both forms answer the same bits at
+!> every thread count and open a team only where the work pays for it; and that objects fitted and
+!> queried inside a caller's own region, one per iteration or one shared by every thread, answer
+!> what they answer serially.
 !!
 !! **Every threaded assertion reads `parquet_debug_kde_threads_used()` beside the answer**: two
 !! team sizes differ only by rounding, and not at all against a deposit that never opened its
@@ -29,7 +32,7 @@ module test_kde_omp
     use parquet_kde
     use iso_fortran_env, only : int64, real64
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_num_procs
+    use omp_lib, only : omp_get_num_procs, omp_get_thread_num
 #endif
 
     implicit none
@@ -49,7 +52,15 @@ contains
             new_unittest("%add's floor per thread and its grid cap keep a team shut", &
                 test_add_limits_decide_the_team), &
             new_unittest("an adaptive %fit answers the same bits at every thread count", &
-                test_adaptive_fit_ignores_the_team) &
+                test_adaptive_fit_ignores_the_team), &
+            new_unittest("the bulk queries and %sample answer the same bits at every thread count", &
+                test_queries_ignore_the_team), &
+            new_unittest("a bulk query opens a team only where the work pays for it", &
+                test_query_team_floor), &
+            new_unittest("one object per iteration inside a caller's region answers the serial bits", &
+                test_one_object_per_iteration), &
+            new_unittest("one fitted object shared by every thread answers the serial bits", &
+                test_one_object_shared) &
             ]
 
     end subroutine collect_tests_kde_omp
@@ -264,5 +275,327 @@ contains
             "an adaptive grid's four-thread deposit must open its team and agree with one thread's to rounding")
 
     end subroutine test_adaptive_fit_ignores_the_team
+
+    !> The cut Gaussian's density at `z` standard deviations, written here from the intrinsic `exp`
+    !> rather than read from the library: `phi(z)/(1 - 2*Phi(-5))` inside the cut, 0 beyond.
+    pure function cut_pdf(z) result(k)
+        real(real64), intent(in) :: z !! the offset, in standard deviations
+        real(real64)             :: k !! the density
+
+        k = 0.0_real64
+        if (abs(z) <= 5.0_real64) k = exp(-0.5_real64*z*z)/(sqrt(2.0_real64*acos(-1.0_real64))*(1.0_real64 - &
+            erfc(5.0_real64/sqrt(2.0_real64))))
+
+    end function cut_pdf
+
+    !> The cut Gaussian's distribution function at `z`, from the intrinsic `erfc`: 0 below the cut, 1
+    !> above it, `(Phi(z) - Phi(-5))/(1 - 2*Phi(-5))` between.
+    pure function cut_cdf(z) result(c)
+        real(real64), intent(in) :: z !! the offset, in standard deviations
+        real(real64)             :: c !! the mass at or below it
+
+        real(real64) :: tail
+
+        tail = 0.5_real64*erfc(5.0_real64/sqrt(2.0_real64))
+        c = 0.0_real64
+        if (z >= 5.0_real64) then
+            c = 1.0_real64
+        else if (z > -5.0_real64) then
+            c = (0.5_real64*erfc(-z/sqrt(2.0_real64)) - tail)/(1.0_real64 - 2.0_real64*tail)
+        end if
+
+    end function cut_cdf
+
+    !> Every bulk query of a weighted, bounded fit, and both forms' `%sample`, at `threads=1` and at
+    !> `threads=4`: the counter reads 1 and then 4 -- the negative control first -- and the answers
+    !> agree bit for bit, each element being computed by one thread alone. Beside the A/B, the
+    !> serial answers against an independent oracle: `%pdf` and `%cdf` against the kernel sums
+    !> written out here from `exp` and `erfc`, each point's kernel renormalised at the bound;
+    !> `%quantile` inverting `%cdf`; `%curve` being `%pdf` at its points; and the sample's mean the
+    !> population's to five standard errors. An adaptive fit's `%pdf` and `%sample` agree across
+    !> the two counts as well.
+    subroutine test_queries_ignore_the_team(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        real(real64), parameter :: H = 5.0_real64, LO = -450.0_real64
+        integer, parameter :: NQ = 2000, NP = 400, NS = 100000
+        type(pf_kde) :: k, ka
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), w(:), t(:), f1(:), f4(:), c1(:), c4(:), s1(:), s4(:)
+        real(real64) :: p(NP), q1(NP), q4(NP), qc(NP), xc1(NQ), xc4(NQ), fc1(NQ), fc4(NQ), fe, ce, mass, wsum
+        real(real64) :: gap_f, gap_c, mean, xbar
+        integer :: team1(7), team4(7), i
+        integer(int64) :: j
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no query can open a team, so the one-thread and " // &
+            "four-thread answers below would be the same serial code and agree for the wrong reason")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
+                "processors available, so a process bound to one opens no team")
+            return
+        end if
+#endif
+        call team_fixture(50000_int64, x, w)
+        call k%fit(x, bandwidth=H, weights=w, lower=LO)
+        allocate(t(NQ), f1(NQ), f4(NQ), c1(NQ), c4(NQ), s1(NS), s4(NS))
+        do i = 1, NQ
+            t(i) = LO + 950.0_real64*modulo(real(i, real64)*0.6180339887498949_real64, 1.0_real64)
+        end do
+        do i = 1, NP
+            p(i) = (real(i, real64) - 0.5_real64)/real(NP, real64)
+        end do
+
+        call k%pdf(t, f1, threads=1)
+        team1(1) = parquet_debug_kde_threads_used()
+        call k%pdf(t, f4, threads=4)
+        team4(1) = parquet_debug_kde_threads_used()
+        call k%cdf(t, c1, threads=1)
+        team1(2) = parquet_debug_kde_threads_used()
+        call k%cdf(t, c4, threads=4)
+        team4(2) = parquet_debug_kde_threads_used()
+        call k%quantile(p, q1, threads=1)
+        team1(3) = parquet_debug_kde_threads_used()
+        call k%quantile(p, q4, threads=4)
+        team4(3) = parquet_debug_kde_threads_used()
+        call k%curve(xc1, fc1, threads=1)
+        team1(4) = parquet_debug_kde_threads_used()
+        call k%curve(xc4, fc4, threads=4)
+        team4(4) = parquet_debug_kde_threads_used()
+        call k%sample(s1, 99_int64, 3, threads=1)
+        team1(5) = parquet_debug_kde_threads_used()
+        call k%sample(s4, 99_int64, 3, threads=4)
+        team4(5) = parquet_debug_kde_threads_used()
+        call check(error, all(team1(1:5) == 1), "threads=1 must run every bulk query serially; the team observable says not")
+        if (allocated(error)) return
+        call check(error, all(team4(1:5) == 4), &
+            "threads=4 must open a team of four for every bulk query, or the comparisons below compare the " // &
+            "serial answers with themselves")
+        if (allocated(error)) return
+        call check(error, all(f4 == f1) .and. all(c4 == c1) .and. all(q4 == q1) .and. all(xc4 == xc1) .and. &
+            all(fc4 == fc1) .and. all(s4 == s1), "every bulk query and %sample must give the same bits at every thread count")
+        if (allocated(error)) return
+
+        ! The oracle: every point's cut kernel, renormalised to the mass it keeps above the bound.
+        wsum = sum(w, mask=x >= LO)
+        gap_f = 0.0_real64
+        gap_c = 0.0_real64
+        do i = 1, NQ, 20
+            fe = 0.0_real64
+            ce = 0.0_real64
+            do j = 1_int64, size(x, kind=int64)
+                if (x(j) < LO) cycle
+                mass = 1.0_real64 - cut_cdf((LO - x(j))/H)
+                fe = fe + w(j)*cut_pdf((t(i) - x(j))/H)/mass
+                ce = ce + w(j)*(cut_cdf((t(i) - x(j))/H) - cut_cdf((LO - x(j))/H))/mass
+            end do
+            gap_f = max(gap_f, abs(f1(i) - fe/(H*wsum)))
+            gap_c = max(gap_c, abs(c1(i) - ce/wsum))
+        end do
+        call check(error, gap_f <= 1.0e-12_real64*maxval(f1) .and. gap_c <= 1.0e-12_real64, &
+            "the serial %pdf and %cdf must be the kernel sums written out independently")
+        if (allocated(error)) return
+        call k%cdf(q1, qc)
+        call k%pdf(xc1, f4)
+        call check(error, maxval(abs(qc - p)) <= 1.0e-12_real64 .and. all(f4(1:NQ) == fc1), &
+            "the serial %quantile must invert %cdf and %curve must be %pdf at its points")
+        if (allocated(error)) return
+        xbar = sum(w*x, mask=x >= LO)/wsum
+        mean = sum(s1)/real(NS, real64)
+        call check(error, abs(mean - xbar) <= 5.0_real64*300.0_real64/sqrt(real(NS, real64)), &
+            "the serial sample's mean must be the population's, to five standard errors")
+        if (allocated(error)) return
+
+        call ka%fit(x, bandwidth=H, weights=w, adaptive=.true., lower=LO)
+        call ka%pdf(t, f1, threads=1)
+        call ka%pdf(t, f4, threads=4)
+        team4(6) = parquet_debug_kde_threads_used()
+        call ka%sample(s1, 5_int64, threads=1)
+        call ka%sample(s4, 5_int64, threads=4)
+        call check(error, team4(6) == 4 .and. all(f4 == f1) .and. all(s4 == s1), &
+            "an adaptive fit's %pdf and %sample must give the same bits at every thread count")
+        if (allocated(error)) return
+
+        call g%init(500, -500.0_real64, 500.0_real64, H)
+        call g%add(x, weights=w)
+        call g%sample(s1, 7_int64, 2_int64, threads=1)
+        team1(7) = parquet_debug_kde_threads_used()
+        call g%sample(s4, 7_int64, 2_int64, threads=4)
+        team4(7) = parquet_debug_kde_threads_used()
+        mean = sum(s1)/real(NS, real64)
+        call check(error, team1(7) == 1 .and. team4(7) == 4 .and. all(s4 == s1) .and. &
+            abs(mean - sum(w*x)/sum(w)) <= 5.0_real64*300.0_real64/sqrt(real(NS, real64)), &
+            "the grid's %sample must open its team, give the same bits at every thread count, and have the mean")
+
+    end subroutine test_queries_ignore_the_team
+
+    !> A bulk query's team is sized by its work: twenty density queries over two hundred points stay
+    !> serial at `threads=4`, as do a thousand draws, while the controls -- two thousand queries over
+    !> fifty thousand points, and a hundred thousand draws -- open the four. Each limit asserted
+    !> against a control that does open a team, so that a floor that did nothing would be seen.
+    subroutine test_query_team_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: small, big
+        real(real64), allocatable :: x(:), w(:), v(:)
+        real(real64) :: t(2000), f(2000)
+        integer :: team_small, team_big, team_few, team_many, i
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it every team is one thread, so a floor that keeps " // &
+            "the team shut cannot be told from one that does nothing")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
+                "processors available, so a process bound to one opens no team")
+            return
+        end if
+#endif
+        call team_fixture(50000_int64, x, w)
+        do i = 1, 2000
+            t(i) = -500.0_real64 + real(i, real64)*0.5_real64
+        end do
+        call small%fit(x(1:200), bandwidth=5.0_real64)
+        call big%fit(x, bandwidth=5.0_real64)
+        call big%pdf(t, f, threads=4)
+        team_big = parquet_debug_kde_threads_used()
+        call small%pdf(t(1:20), f(1:20), threads=4)
+        team_small = parquet_debug_kde_threads_used()
+        allocate(v(100000))
+        call big%sample(v, 1_int64, threads=4)
+        team_many = parquet_debug_kde_threads_used()
+        call big%sample(v(1:1000), 1_int64, threads=4)
+        team_few = parquet_debug_kde_threads_used()
+        call check(error, team_big == 4 .and. team_many == 4, &
+            "the controls: two thousand queries over fifty thousand points, and a hundred thousand draws, must open four")
+        if (allocated(error)) return
+        call check(error, team_small == 1, "twenty queries over two hundred points must stay serial")
+        if (allocated(error)) return
+        call check(error, team_few == 1, "a thousand draws must stay serial")
+
+    end subroutine test_query_team_floor
+
+    !> Two thousand estimates fitted and queried inside the caller's own `!$omp parallel do`, one
+    !> object per iteration held in an array made before the region, each over its own sample: every
+    !> density and every draw equals what a fresh object answers serially afterwards, bit for bit,
+    !> and every query inside the region stood down to one thread (the counter, read after each
+    !> iteration's calls, never exceeds 1).
+    subroutine test_one_object_per_iteration(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer, parameter :: NOBJ = 2000, M = 40
+        type(pf_kde), allocatable :: ks(:)
+        type(pf_kde) :: k
+        real(real64) :: xs(M, NOBJ), t(5), f(5, NOBJ), v(5, NOBJ), fs(5), vs(5)
+        integer :: seen(NOBJ), i, j, bad
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the point is the caller's own region, which cannot open without it")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs two processors: a region of one thread shares nothing")
+            return
+        end if
+#endif
+        do i = 1, NOBJ
+            do j = 1, M
+                xs(j, i) = 10.0_real64*sin(real(i*M + j, real64)*0.37_real64) + 0.01_real64*real(i, real64)
+            end do
+        end do
+        do j = 1, 5
+            t(j) = -12.0_real64 + 5.0_real64*real(j, real64)
+        end do
+        allocate(ks(NOBJ))
+        !$omp parallel do num_threads(4) schedule(dynamic, 16) default(shared) private(i)
+        do i = 1, NOBJ
+            call ks(i)%fit(xs(:, i), rule="silverman", adaptive=(mod(i, 2) == 0))
+            call ks(i)%pdf(t, f(:, i))
+            call ks(i)%sample(v(:, i), int(i, int64))
+            seen(i) = parquet_debug_kde_threads_used()
+        end do
+        !$omp end parallel do
+
+        call check(error, maxval(seen) == 1, "every query inside the caller's region must stand down to one thread")
+        if (allocated(error)) return
+        bad = 0
+        do i = 1, NOBJ
+            call k%fit(xs(:, i), rule="silverman", adaptive=(mod(i, 2) == 0))
+            call k%pdf(t, fs)
+            call k%sample(vs, int(i, int64))
+            if (any(fs /= f(:, i)) .or. any(vs /= v(:, i))) bad = bad + 1
+        end do
+        call check(error, bad == 0, "every object fitted inside the region must answer the serial bits")
+
+    end subroutine test_one_object_per_iteration
+
+    !> One fitted object and one grid, shared by every thread of the caller's region: each thread's
+    !> densities, probabilities, quantiles and draws -- at its own points and on its own stream --
+    !> equal the serial answers bit for bit, since every query takes the object `intent(in)` and
+    !> writes nothing.
+    subroutine test_one_object_shared(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer, parameter :: NT = 4, NQ = 300
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g, p
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: t(NQ, NT), f(NQ, NT), c(NQ, NT), q(NQ, NT), v(NQ, NT), gf(NQ, NT), gv(NQ, NT)
+        real(real64) :: fs(NQ), cs(NQ), qs(NQ), vs(NQ), gfs(NQ), gvs(NQ), pr(NQ)
+        integer :: i, j, tid, bad
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the point is several threads sharing one object")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs two processors: a region of one thread shares nothing")
+            return
+        end if
+#endif
+        call team_fixture(20000_int64, x, w)
+        call k%fit(x, bandwidth=5.0_real64, weights=w, adaptive=.true., lower=-450.0_real64)
+        call k%pilot(p)
+        call g%init(400, -450.0_real64, 500.0_real64, 5.0_real64, pilot=p, lower=-450.0_real64)
+        call g%add(x, weights=w)
+        do j = 1, NT
+            do i = 1, NQ
+                t(i, j) = -440.0_real64 + 930.0_real64*modulo(real(i + NQ*j, real64)*0.6180339887498949_real64, &
+                    1.0_real64)
+            end do
+        end do
+        do i = 1, NQ
+            pr(i) = (real(i, real64) - 0.5_real64)/real(NQ, real64)
+        end do
+        !$omp parallel num_threads(NT) default(shared) private(tid)
+        tid = 1
+#ifdef _OPENMP
+        tid = omp_get_thread_num() + 1
+#endif
+        call k%pdf(t(:, tid), f(:, tid))
+        call k%cdf(t(:, tid), c(:, tid))
+        call k%quantile(pr, q(:, tid))
+        call k%sample(v(:, tid), 3_int64, tid)
+        call g%pdf(t(:, tid), gf(:, tid))
+        call g%sample(gv(:, tid), 3_int64, tid)
+        !$omp end parallel
+
+        bad = 0
+        do j = 1, NT
+            call k%pdf(t(:, j), fs)
+            call k%cdf(t(:, j), cs)
+            call k%quantile(pr, qs)
+            call k%sample(vs, 3_int64, j)
+            call g%pdf(t(:, j), gfs)
+            call g%sample(gvs, 3_int64, j)
+            if (any(fs /= f(:, j)) .or. any(cs /= c(:, j)) .or. any(qs /= q(:, j)) .or. any(vs /= v(:, j)) .or. &
+                any(gfs /= gf(:, j)) .or. any(gvs /= gv(:, j))) bad = bad + 1
+        end do
+        call check(error, bad == 0, "every thread sharing one fitted object and one grid must get the serial bits")
+
+    end subroutine test_one_object_shared
 
 end module test_kde_omp

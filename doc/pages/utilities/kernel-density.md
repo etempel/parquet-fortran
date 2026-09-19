@@ -5,7 +5,9 @@ title: Kernel density estimation with parquet_kde
 `parquet_kde` estimates the density a one-dimensional sample was drawn from, by placing a kernel
 on every point and adding them up. `pf_kde` fits an array it keeps a sorted copy of, and then
 answers the density, the distribution function and its quantiles exactly at any point, and the
-density on a grid of points for plotting. It reaches no reader and no writer: a program can
+density on a grid of points for plotting. `pf_kde_grid` accumulates the same estimate on a fixed
+grid of cells from points streamed through it in any number of pieces, which it does not keep. The
+module reaches no reader and no writer: a program can
 `use parquet_kde` on its own, compiling the statistics tier it is built on and nothing of the
 Arrow stack. `use parquet` brings it in too. See
 [Choosing a module](../operating/choosing-a-module.html) for what each entry module costs.
@@ -52,9 +54,19 @@ f(x) = sum_j w_j K((x - x_j)/h) / (h * sum_j w_j)
 
 It is a probability density: it is never negative and it integrates to one. `%cdf` is the same sum
 over each kernel's own distribution function, so `%cdf` is exactly the integral of `%pdf`, and
-`%quantile` inverts `%cdf`. Nothing is approximated on a grid: every query sums the kernels of the
+`%quantile` inverts `%cdf`. `pf_kde` approximates nothing: every query sums the kernels of the
 points within reach of it, which the sorted copy finds by two binary searches, so a query costs time
 in proportion to the number of points within one kernel's reach rather than to the sample.
+
+## Two forms, and when to use each
+
+- **`pf_kde` keeps the population**, as a sorted copy, and answers the estimate exactly anywhere.
+  Use it when the sample fits in memory, which is the usual case.
+- **`pf_kde_grid` keeps only its cells**, however many points it has seen: a sample read one row
+  group at a time, a stream, or pieces accumulated on separate threads and merged at the end. Its
+  density is the estimate at each cell centre, interpolated between them, and converges to the
+  exact estimate as the square of the cell width. The bandwidth is chosen before the first point
+  arrives. See [Streaming into a grid](#streaming-into-a-grid-pf_kde_grid).
 
 ## Kernels, and what `bandwidth` means
 
@@ -165,6 +177,7 @@ normalised to one unit inside the support under both corrections, so the estimat
 to one.
 
 `%bounds(lo, hi)` answers the support, with `-Infinity`/`+Infinity` where no bound was given.
+`pf_kde_grid%init` takes the same three arguments, and its range must lie inside the support.
 
 ## Reading the estimate
 
@@ -183,6 +196,141 @@ The counts come back as `int64` functions: `%n()` (the elements passed to `%fit`
 (the population), `%n_null()`, `%n_nan()` and `%n_outside()`. `%sum_weights()` is `sum(w)` over the
 population, `%kernel(name)` the kernel's token, and `%is_fitted()` says whether `%fit` has run since
 the last `%clear()`. `%print([unit])` writes all of it as one block.
+
+## Streaming into a grid: `pf_kde_grid`
+
+A grid lays `ncells` cells across `[xmin, xmax]`. Each point `%add` accepts deposits its kernel on
+the cells and is forgotten, so the grid's memory is its cells whatever the sample's size:
+
+```fortran
+call g%init(ncells, xmin, xmax, bandwidth, [kernel], [lower], [upper], [boundary])
+call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], [threads])
+call g%merge(other)
+call g%density(f, [x], [normalise])
+call g%pdf(x, f)
+call g%cdf(x, p)
+call g%quantile(p, x)
+call g%grid(x)
+```
+
+- **`%init`** makes cells of width `step = (xmax - xmin)/ncells`, cell `i` centred on
+  `xmin + (i - 1/2)*step`. The bandwidth is always a number, since a grid has seen no data when it
+  is set up: to use a rule, fit a `pf_kde` to a subsample and pass its `%bandwidth()`. `kernel`,
+  `lower`, `upper` and `boundary` are as for `%fit`, and `[xmin, xmax]` must lie inside the support.
+  A second `%init` discards everything.
+- **`%add`** takes one point or an array, `real64` or `real32`, under the population rules of
+  `%fit`. `n_null`, `n_nan` and `n_outside` report what that call excluded, and the accessors
+  (`%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%n_outside()`, `%sum_weights()`) the totals over
+  every call.
+- **Each point adds exactly its weight**, to rounding, at every cell width. Its kernel is evaluated
+  at every cell centre it reaches and scaled so that the values sum to the point's weight, and a
+  kernel crossing a bound is corrected onto the cells inside it as `boundary=` says.
+- **Weight beyond the range is counted, not located.** The part of a kernel reaching past `xmin` or
+  `xmax` goes into a count at that end. The cells still hold the estimate over every point, and
+  `%cdf` below `xmin` is the counted share: the grid knows how much weight lies beyond each end, not
+  where.
+- **A bandwidth narrower than a cell is used as given.** Such a kernel reaches one or two centres,
+  or none when it falls between two, and its weight lands whole in the cells it reaches or in the
+  cell holding the point: the grid, not the kernel, then sets the smoothing. Nothing is widened, and
+  `%bandwidth()` answers what was asked for.
+
+Reading it:
+
+- **`%density(f, [x], [normalise])`**: the estimate at every cell centre, with `x` receiving the
+  centres. `normalise=.false.` skips the division by the total weight and answers the weighted count
+  per unit length.
+- **`%pdf(x, f)`**: linear between neighbouring centres, constant over the outer half of the first
+  and the last cell, zero outside `[xmin, xmax]`; at a centre it is `%density` exactly.
+- **`%cdf(x, p)`**: the integral of `%pdf` from `xmin`, plus the share counted below `xmin`. Below
+  `xmin` it is that share and above `xmax` one less the share counted above; it is exactly 0 at and
+  below a lower bound and exactly 1 at and above an upper one.
+- **`%quantile(p, x)`**: the smallest point of `[xmin, xmax]` at which `%cdf` reaches `p`, solved
+  exactly on the quadratic `%cdf` is between two centres. A quantile the share below `xmin` covers
+  answers `xmin`, one only the share above `xmax` reaches answers `xmax`, and `p = 0` and `p = 1`
+  answer where the accumulated density starts and ends inside the range.
+- `%grid(x)` fills the centres, `%ncells()` and `%step()` answer the geometry, and `%bandwidth()`,
+  `%kernel(name)` and `%bounds(lo, hi)` the settings. `%clear()` empties the grid and keeps its
+  geometry and settings; `%print([unit])` writes all of it as one block.
+
+**How close the grid comes to the exact estimate.** At a cell centre the grid's density differs
+from `pf_kde%pdf` only by how finely the cells sample each kernel, and between centres `%pdf` adds
+the error of a straight line. For the Gaussian and B-spline kernels the difference falls by four
+each time the cells halve, once a bandwidth spans a cell or more. The Epanechnikov estimate has
+kinks and the box estimate steps, and both converge more slowly. A few cells per bandwidth is a
+sensible start.
+
+**What it costs.** A deposit costs time in proportion to the cells one kernel reaches, and a merge
+in proportion to the cells. `%pdf` at a point is a constant; `%cdf` and `%quantile` form a running
+sum over the cells once per call, so an array of points costs one pass over the cells plus a
+constant per point. `bench/benchmark_kde.sh` measures the deposit (`MODE=grid`) and the order of
+convergence (`MODE=accuracy`).
+
+The catalogue too large to hold, read one row group at a time through the slice regime (see
+[Reading part of a file: the slice regime](../tables/table-open.html#reading-part-of-a-file-the-slice-regime)):
+
+```fortran
+type(pf_kde_grid) :: dens
+type(parquet_table) :: t
+integer(int64), allocatable :: bounds(:,:)
+real(real64), allocatable :: z(:)
+real(real64) :: f(400), zc(400)
+integer :: rg
+
+call parquet_table_row_group_bounds("big.parquet", bounds)
+call dens%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64)
+do rg = 1, size(bounds, 2)                          ! one row group at a time
+    call parquet_open_table(t, "big.parquet", bounds(1, rg), bounds(2, rg))
+    call t%get("z", z)
+    call dens%add(z)
+end do
+call dens%density(f, x=zc)
+```
+
+**One grid per thread, merged at the end, is the parallel form.** `%merge(other)` adds another
+grid's cells and counts to this one, and refuses a grid that differs in its cells, range,
+bandwidth, kernel, support or boundary correction. Hold the per-thread grids in an array made
+before the region, not in a `block` or a `private` copy inside it: a grid owns an allocatable
+array, and a derived type that does is not reliably copied or created per thread on every
+compiler.
+
+```fortran
+program grid_per_thread
+    use parquet
+    use omp_lib, only: omp_get_max_threads, omp_get_thread_num
+    use iso_fortran_env, only: int64, real64
+    implicit none
+
+    integer(int64), allocatable :: bounds(:,:)
+    type(pf_kde_grid), allocatable :: part(:)
+    type(pf_kde_grid) :: dens
+    real(real64) :: f(400), zc(400)
+    integer :: rg, i
+
+    call parquet_table_row_group_bounds("big.parquet", bounds)
+    allocate(part(omp_get_max_threads()))
+    do i = 1, size(part)
+        call part(i)%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64)
+    end do
+
+    !$omp parallel do
+    do rg = 1, size(bounds, 2)
+        block
+            type(parquet_table) :: t
+            real(real64), allocatable :: z(:)
+            call parquet_open_table(t, "big.parquet", bounds(1, rg), bounds(2, rg))
+            call t%get("z", z)
+            call part(omp_get_thread_num() + 1)%add(z)
+        end block
+    end do
+    !$omp end parallel do
+
+    call dens%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64)
+    do i = 1, size(part)
+        call dens%merge(part(i))
+    end do
+    call dens%density(f, x=zc)
+end program grid_per_thread
+```
 
 ## The estimate as a function
 
@@ -217,7 +365,8 @@ two, and the messages are the family's own, naming `pf_kde%fit`. The one rule th
 the support: after the family's exclusions, a point outside `[lower, upper]` leaves the population
 and is counted in `n_outside`. **An infinite point is outside every support**, bounded or not: a
 kernel centred at infinity has nowhere to put its mass. The bandwidth rules read exactly the
-population that remains.
+population that remains. `pf_kde_grid%add` applies the same rules to every call, and its messages
+name `pf_kde_grid%add`.
 
 ## What returns quietly
 
@@ -232,6 +381,10 @@ A data condition never aborts:
   `ok = .false.`
 - **A query at a NaN point** answers NaN; at an infinite point, the density is zero and `%cdf` is 0
   or 1.
+- **A grid with nothing accumulated** answers zeros from `%density`, as an empty histogram does,
+  and NaN from `%pdf`, `%cdf` and `%quantile`, which have nothing to normalise by.
+- **`skipnan=.false.` with a NaN in any `%add`** makes every later answer of that grid NaN, until
+  `%clear()`.
 
 ## What aborts
 
@@ -259,18 +412,37 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `xmin` or `xmax` infinite or NaN | `pf_kde%curve: xmin and xmax must be finite` |
 | `xmin >= xmax` | `pf_kde%curve: xmin must be below xmax` |
 | `cut` negative or NaN | `pf_kde%curve: cut must not be negative` |
+| `ncells < 1` | `pf_kde_grid%init: ncells must be positive` |
+| `xmin` or `xmax` NaN or infinite | `pf_kde_grid%init: xmin and xmax must be finite` |
+| `xmin >= xmax` | `pf_kde_grid%init: xmin must be below xmax` |
+| a range wider than the largest number, or cells too narrow to represent | `pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number` |
+| `[xmin, xmax]` reaching outside `[lower, upper]` | `pf_kde_grid%init: the grid's range must lie inside the support` |
+| `bandwidth`, `kernel`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
+| `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0` | `%fit`'s texts, naming `pf_kde_grid%add` |
+| a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |
+| `%merge` with a grid never initialised | `pf_kde_grid%merge: the other grid has not been initialised` |
+| `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`) |
+| `%density` or `%grid` with an output of the wrong size | `pf_kde_grid%density: f must have one element per cell` (`x must have ...` for the centres) |
+| `%pdf`, `%cdf` or `%quantile` with an output of the wrong size, or `p` outside `[0, 1]` | `pf_kde`'s texts, naming `pf_kde_grid` |
 
 ## Thread safety
 
-**A fitted `pf_kde` is read-only under every query**, so any number of threads may query one object
-at once. `%fit` and `%clear` are writes: give each thread its own object, or fit once before the
-region and share the result. `threads=` on `%fit` sets the team for the sort and the rules'
-statistics; the answer does not depend on it, and inside your own parallel region it stands down
-to one thread unless given explicitly. An abort inside a parallel region is taken by one thread.
+**A fitted `pf_kde`, and a `pf_kde_grid`, are read-only under every query**, so any number of
+threads may query one object at once. `%fit`, `%init`, `%add`, `%merge` and `%clear` are writes:
+give each thread its own object, or write once before the region and share the result; one grid
+per thread merged at the end is how several threads accumulate one estimate.
+
+- **`threads=` on `%fit`** sets the team for the sort and the rules' statistics; the answer does not
+  depend on it.
+- **`threads=` on `%add`** gives each thread of a team a contiguous share of the points and its own
+  partial grid, added to the grid in thread order. At one thread count the answer is the same every
+  time; two thread counts group the additions differently and agree to rounding.
+- Inside your own parallel region both stand down to one thread unless given explicitly. An abort
+  inside a parallel region is taken by one thread.
 
 ## What it costs to import
 
 `use parquet_kde` compiles the statistics tier it is built on (`parquet_stats`, and beneath it the
-sorting tier) plus the module's own three files; no reader, writer or C++ boundary. It re-exports
+sorting tier) plus the module's own four files; no reader, writer or C++ boundary. It re-exports
 the verbosity and message-stream pair, which `%print` reads, so a program importing it alone can
 silence its output with `parquet_set_verbosity("silent")`.

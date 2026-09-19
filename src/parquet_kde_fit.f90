@@ -53,7 +53,7 @@ contains
         if (present(bandwidth) .and. present(rule)) &
             call kde_abort(EP, "bandwidth= and rule= cannot both be given; use adjust= to scale a rule")
         if (present(bandwidth)) then
-            if (.not. positive_finite(bandwidth)) &
+            if (.not. kde_positive_finite(bandwidth)) &
                 call kde_abort(EP, "bandwidth must be a finite, positive number")
             self%rule_code = KDE_RULE_EXPLICIT
         else if (present(rule)) then
@@ -63,31 +63,11 @@ contains
         end if
         adj = 1.0_real64
         if (present(adjust)) then
-            if (.not. positive_finite(adjust)) call kde_abort(EP, "adjust must be a finite, positive number")
+            if (.not. kde_positive_finite(adjust)) call kde_abort(EP, "adjust must be a finite, positive number")
             adj = adjust
         end if
-        self%kernel_code = KDE_GAUSSIAN
-        if (present(kernel)) call kde_resolve_kernel(EP, kernel, self%kernel_code)
-        if (present(lower)) then
-            if (.not. ieee_is_finite(lower)) call kde_abort(EP, "lower and upper must be finite")
-            self%has_lower = .true.
-            self%lo = lower
-        end if
-        if (present(upper)) then
-            if (.not. ieee_is_finite(upper)) call kde_abort(EP, "lower and upper must be finite")
-            self%has_upper = .true.
-            self%hi = upper
-        end if
-        if (self%has_lower .and. self%has_upper) then
-            if (.not. (self%lo < self%hi)) call kde_abort(EP, "lower must be below upper")
-        end if
-        if (present(boundary)) then
-            if (.not. (self%has_lower .or. self%has_upper)) &
-                call kde_abort(EP, "boundary= needs lower= or upper=")
-            call kde_resolve_boundary(EP, boundary, self%boundary_code)
-        else if (self%has_lower .or. self%has_upper) then
-            self%boundary_code = KDE_BOUNDARY_RENORMALISE
-        end if
+        call kde_resolve_setup(EP, kernel, lower, upper, boundary, self%kernel_code, self%has_lower, &
+            self%lo, self%has_upper, self%hi, self%boundary_code)
         call stats_weight_kind(EP, weight_type, freq)
 
         ! ---- the population: the family's exclusions, then the support ----
@@ -103,7 +83,7 @@ contains
             ! A NaN kept by `skipnan = .false.` stays, to poison the estimate below; it is neither
             ! inside nor outside the support, and it must not reach an ordered comparison.
             if (v == v) then
-                if (is_outside(self, v)) then
+                if (kde_outside(self%has_lower, self%lo, self%has_upper, self%hi, v)) then
                     nout = nout + 1_int64
                     cycle
                 end if
@@ -157,7 +137,7 @@ contains
         ! fail by overflowing; either way there is no estimate to answer with.
         if (ieee_is_nan(hh)) return
         hh = hh*adj
-        if (.not. positive_finite(hh)) return
+        if (.not. kde_positive_finite(hh)) return
         self%h = hh
 
         ! ---- each point's mass inside the support, where it can differ from one ----
@@ -445,19 +425,6 @@ contains
     ! Private helpers
     ! ==========================================================================================
 
-    !> `.true.` for a finite number above zero. The NaN is screened first, as its own test: an
-    !! ordered comparison raises `IEEE_INVALID` on one.
-    pure function positive_finite(v) result(res)
-        real(real64), intent(in) :: v   !! the value
-        logical                  :: res !! it is finite and positive
-
-        res = .false.
-        if (ieee_is_nan(v)) return
-        if (.not. ieee_is_finite(v)) return
-        res = v > 0.0_real64
-
-    end function positive_finite
-
     !> Aborts unless the object has been fitted. Impure deliberately, like every guard here.
     subroutine require_fitted(self, entry)
         class(pf_kde), intent(in)    :: self  !! the estimate
@@ -475,20 +442,6 @@ contains
         if (p < 0.0_real64 .or. p > 1.0_real64) call kde_abort("pf_kde%quantile", "p must lie in [0, 1]")
 
     end subroutine check_probability
-
-    !> `.true.` when a (non-NaN) value lies outside the support: beyond a bound, or infinite.
-    pure function is_outside(self, v) result(res)
-        class(pf_kde), intent(in) :: self !! the estimate, with its bounds set
-        real(real64), intent(in)  :: v    !! the value, not NaN
-        logical                   :: res  !! it is outside
-
-        res = .not. (abs(v) <= huge(v))
-        if (res) return
-        if (self%has_lower) res = v < self%lo
-        if (res) return
-        if (self%has_upper) res = v > self%hi
-
-    end function is_outside
 
     !> Fills `x` with `size(x)` equally spaced points from `a` to `b`, both ends exact.
     pure subroutine spaced(a, b, x)

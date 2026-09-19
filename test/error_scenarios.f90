@@ -4111,6 +4111,64 @@ program error_scenarios
         call scenario_kde_curve_negative_cut()
     case ("kde_curve_nonfinite_end")
         call scenario_kde_curve_nonfinite_end()
+    case ("kde_grid_ncells")
+        call scenario_kde_grid_ncells()
+    case ("kde_grid_range_nan")
+        call scenario_kde_grid_range_nan()
+    case ("kde_grid_range_reversed")
+        call scenario_kde_grid_range_reversed()
+    case ("kde_grid_cell_width")
+        call scenario_kde_grid_cell_width()
+    case ("kde_grid_bandwidth")
+        call scenario_kde_grid_bandwidth()
+    case ("kde_grid_unknown_kernel")
+        call scenario_kde_grid_unknown_kernel()
+    case ("kde_grid_boundary_without_bound")
+        call scenario_kde_grid_boundary_without_bound()
+    case ("kde_grid_outside_support")
+        call scenario_kde_grid_outside_support()
+    case ("kde_grid_add_uninitialised")
+        call scenario_kde_grid_add_uninitialised()
+    case ("kde_grid_threads_zero")
+        call scenario_kde_grid_threads_zero()
+    case ("kde_grid_weights_size")
+        call scenario_kde_grid_weights_size()
+    case ("kde_grid_real32_weights_size")
+        call scenario_kde_grid_real32_weights_size()
+    case ("kde_grid_negative_weight")
+        call scenario_kde_grid_negative_weight()
+    case ("kde_grid_density_size")
+        call scenario_kde_grid_density_size()
+    case ("kde_grid_density_x_size")
+        call scenario_kde_grid_density_x_size()
+    case ("kde_grid_centres_size")
+        call scenario_kde_grid_centres_size()
+    case ("kde_grid_pdf_size")
+        call scenario_kde_grid_pdf_size()
+    case ("kde_grid_cdf_size")
+        call scenario_kde_grid_cdf_size()
+    case ("kde_grid_quantile_size")
+        call scenario_kde_grid_quantile_size()
+    case ("kde_grid_quantile_p")
+        call scenario_kde_grid_quantile_p()
+    case ("kde_grid_query_uninitialised")
+        call scenario_kde_grid_query_uninitialised()
+    case ("kde_grid_accessor_uninitialised")
+        call scenario_kde_grid_accessor_uninitialised()
+    case ("kde_grid_merge_uninitialised")
+        call scenario_kde_grid_merge_uninitialised()
+    case ("kde_grid_merge_cells")
+        call scenario_kde_grid_merge_cells()
+    case ("kde_grid_merge_range")
+        call scenario_kde_grid_merge_range()
+    case ("kde_grid_merge_bandwidth")
+        call scenario_kde_grid_merge_bandwidth()
+    case ("kde_grid_merge_kernel")
+        call scenario_kde_grid_merge_kernel()
+    case ("kde_grid_merge_support")
+        call scenario_kde_grid_merge_support()
+    case ("kde_grid_merge_boundary")
+        call scenario_kde_grid_merge_boundary()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -34688,5 +34746,353 @@ contains
         call k%curve(xg, fg, xmin=ieee_value(1.0_real64, ieee_negative_inf))
         print '(a)', "accepted an infinite end"
     end subroutine scenario_kde_curve_nonfinite_end
+    !
+    ! ---- pf_kde_grid: every caller contract it refuses ----------------------------------
+    !
+    !> Each scenario first makes the nearest LEGAL call and prints a "kde control" line, as the
+    !> `pf_kde` scenarios above do, then the smallest call that provokes exactly one abort.
+    !
+    !> Proves that pf_kde_grid%init refuses ncells=0.
+    subroutine scenario_kde_grid_ncells()
+        type(pf_kde_grid) :: g
+
+        call g%init(1, 0.0_real64, 1.0_real64, 0.1_real64)
+        print '(a, i0)', "kde control initialised: ", g%ncells()
+        call g%init(0, 0.0_real64, 1.0_real64, 0.1_real64)
+        print '(a)', "accepted ncells=0"
+    end subroutine scenario_kde_grid_ncells
+    !
+    !> Proves that pf_kde_grid%init refuses a NaN xmin.
+    subroutine scenario_kde_grid_range_nan()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        type(pf_kde_grid) :: g
+
+        call g%init(4, -1.0_real64, 1.0_real64, 0.1_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(4, ieee_value(1.0_real64, ieee_quiet_nan), 1.0_real64, 0.1_real64)
+        print '(a)', "accepted a NaN xmin"
+    end subroutine scenario_kde_grid_range_nan
+    !
+    !> Proves that pf_kde_grid%init refuses xmin == xmax.
+    subroutine scenario_kde_grid_range_reversed()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(4, 1.0_real64, 1.0_real64, 0.1_real64)
+        print '(a)', "accepted an empty range"
+    end subroutine scenario_kde_grid_range_reversed
+    !
+    !> Proves that pf_kde_grid%init refuses a range wider than the largest number.
+    subroutine scenario_kde_grid_cell_width()
+        type(pf_kde_grid) :: g
+
+        call g%init(1, -0.25_real64*huge(1.0_real64), 0.25_real64*huge(1.0_real64), 1.0_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(1, -huge(1.0_real64), huge(1.0_real64), 1.0_real64)
+        print '(a)', "accepted a range wider than the largest number"
+    end subroutine scenario_kde_grid_cell_width
+    !
+    !> Proves that pf_kde_grid%init refuses a zero bandwidth.
+    subroutine scenario_kde_grid_bandwidth()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 1.0e-300_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.0_real64)
+        print '(a)', "accepted a zero bandwidth"
+    end subroutine scenario_kde_grid_bandwidth
+    !
+    !> Proves that pf_kde_grid%init refuses an unknown kernel.
+    subroutine scenario_kde_grid_unknown_kernel()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, kernel="Box")
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, kernel="triangle")
+        print '(a)', "accepted an unknown kernel"
+    end subroutine scenario_kde_grid_unknown_kernel
+    !
+    !> Proves that pf_kde_grid%init refuses boundary= without a bound.
+    subroutine scenario_kde_grid_boundary_without_bound()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, boundary="reflect")
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, boundary="reflect")
+        print '(a)', "accepted boundary= without a bound"
+    end subroutine scenario_kde_grid_boundary_without_bound
+    !
+    !> Proves that pf_kde_grid%init refuses a range reaching outside the support.
+    subroutine scenario_kde_grid_outside_support()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(4, -0.5_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
+        print '(a)', "accepted a range reaching below the support"
+    end subroutine scenario_kde_grid_outside_support
+    !
+    !> Proves that pf_kde_grid%add refuses a grid that was never initialised.
+    subroutine scenario_kde_grid_add_uninitialised()
+        type(pf_kde_grid) :: g, fresh
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        print '(a, i0)', "kde control added: ", g%n()
+        call fresh%add([0.5_real64])
+        print '(a)', "added to a grid that was never initialised"
+    end subroutine scenario_kde_grid_add_uninitialised
+    !
+    !> Proves that pf_kde_grid%add refuses threads=0.
+    subroutine scenario_kde_grid_threads_zero()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64], threads=1)
+        print '(a, i0)', "kde control added: ", g%n()
+        call g%add([0.5_real64], threads=0)
+        print '(a)', "accepted threads=0"
+    end subroutine scenario_kde_grid_threads_zero
+    !
+    !> Proves that pf_kde_grid%add refuses weights of the wrong length, in the family's words.
+    subroutine scenario_kde_grid_weights_size()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], weights=[1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a, i0)', "kde control added: ", g%n()
+        call g%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], weights=[1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a)', "accepted three weights for four values"
+    end subroutine scenario_kde_grid_weights_size
+    !
+    !> Proves that pf_kde_grid%add's real32 form refuses weights of the wrong length.
+    subroutine scenario_kde_grid_real32_weights_size()
+        type(pf_kde_grid) :: g
+        real(real32) :: x(4)
+
+        x = [0.1, 0.2, 0.3, 0.4]
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add(x, weights=[1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64])
+        print '(a, i0)', "kde control added: ", g%n()
+        call g%add(x, weights=[1.0_real64, 1.0_real64])
+        print '(a)', "accepted two weights for four values"
+    end subroutine scenario_kde_grid_real32_weights_size
+    !
+    !> Proves that pf_kde_grid%add refuses a negative weight, in the family's words.
+    subroutine scenario_kde_grid_negative_weight()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.1_real64, 0.2_real64, 0.3_real64], weights=[1.0_real64, 0.0_real64, 1.0_real64])
+        print '(a, i0)', "kde control added: ", g%n()
+        call g%add([0.1_real64, 0.2_real64, 0.3_real64], weights=[1.0_real64, -1.0_real64, 1.0_real64])
+        print '(a)', "accepted a negative weight"
+    end subroutine scenario_kde_grid_negative_weight
+    !
+    !> Proves that pf_kde_grid%density refuses an output of the wrong size.
+    subroutine scenario_kde_grid_density_size()
+        type(pf_kde_grid) :: g
+        real(real64) :: f4(4), f3(3)
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%density(f4)
+        print '(a, es22.15)', "kde control density: ", f4(2)
+        call g%density(f3)
+        print '(a, es22.15)', "accepted three densities for four cells: ", f3(1)
+    end subroutine scenario_kde_grid_density_size
+    !
+    !> Proves that pf_kde_grid%density refuses centres of the wrong size.
+    subroutine scenario_kde_grid_density_x_size()
+        type(pf_kde_grid) :: g
+        real(real64) :: f4(4), x4(4), x5(5)
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%density(f4, x=x4)
+        print '(a, es22.15)', "kde control density: ", x4(2)
+        call g%density(f4, x=x5)
+        print '(a, es22.15)', "accepted five centres for four cells: ", x5(1)
+    end subroutine scenario_kde_grid_density_x_size
+    !
+    !> Proves that pf_kde_grid%grid refuses an output of the wrong size.
+    subroutine scenario_kde_grid_centres_size()
+        type(pf_kde_grid) :: g
+        real(real64) :: x4(4), x3(3)
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%grid(x4)
+        print '(a, es22.15)', "kde control centres: ", x4(2)
+        call g%grid(x3)
+        print '(a, es22.15)', "accepted three centres for four cells: ", x3(1)
+    end subroutine scenario_kde_grid_centres_size
+    !
+    !> Proves that pf_kde_grid%pdf refuses an output of the wrong size.
+    subroutine scenario_kde_grid_pdf_size()
+        type(pf_kde_grid) :: g
+        real(real64) :: t(3), f3(3), f2(2)
+
+        t = [0.2_real64, 0.5_real64, 0.8_real64]
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%pdf(t, f3)
+        print '(a, es22.15)', "kde control density: ", f3(2)
+        call g%pdf(t, f2)
+        print '(a, es22.15)', "accepted two densities for three points: ", f2(1)
+    end subroutine scenario_kde_grid_pdf_size
+    !
+    !> Proves that pf_kde_grid%cdf refuses an output of the wrong size.
+    subroutine scenario_kde_grid_cdf_size()
+        type(pf_kde_grid) :: g
+        real(real64) :: t(3), p3(3), p2(2)
+
+        t = [0.2_real64, 0.5_real64, 0.8_real64]
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%cdf(t, p3)
+        print '(a, es22.15)', "kde control probability: ", p3(2)
+        call g%cdf(t, p2)
+        print '(a, es22.15)', "accepted two probabilities for three points: ", p2(1)
+    end subroutine scenario_kde_grid_cdf_size
+    !
+    !> Proves that pf_kde_grid%quantile refuses an output of the wrong size.
+    subroutine scenario_kde_grid_quantile_size()
+        type(pf_kde_grid) :: g
+        real(real64) :: p(3), q3(3), q2(2)
+
+        p = [0.2_real64, 0.5_real64, 0.8_real64]
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%quantile(p, q3)
+        print '(a, es22.15)', "kde control quantile: ", q3(2)
+        call g%quantile(p, q2)
+        print '(a, es22.15)', "accepted two quantiles for three probabilities: ", q2(1)
+    end subroutine scenario_kde_grid_quantile_size
+    !
+    !> Proves that pf_kde_grid%quantile refuses p above one.
+    subroutine scenario_kde_grid_quantile_p()
+        type(pf_kde_grid) :: g
+        real(real64) :: q
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%quantile(1.0_real64, q)
+        print '(a, es22.15)', "kde control quantile: ", q
+        call g%quantile(1.5_real64, q)
+        print '(a, es22.15)', "accepted p above one: ", q
+    end subroutine scenario_kde_grid_quantile_p
+    !
+    !> Proves that pf_kde_grid%pdf refuses a grid that was never initialised.
+    subroutine scenario_kde_grid_query_uninitialised()
+        type(pf_kde_grid) :: g, fresh
+        real(real64) :: f
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%pdf(0.5_real64, f)
+        print '(a, es22.15)', "kde control density: ", f
+        call fresh%pdf(0.5_real64, f)
+        print '(a, es22.15)', "answered from a grid that was never initialised: ", f
+    end subroutine scenario_kde_grid_query_uninitialised
+    !
+    !> Proves that pf_kde_grid%ncells refuses a grid that was never initialised.
+    subroutine scenario_kde_grid_accessor_uninitialised()
+        type(pf_kde_grid) :: g, fresh
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        print '(a, i0)', "kde control cells: ", g%ncells()
+        print '(a, i0)', "answered from a grid that was never initialised: ", fresh%ncells()
+    end subroutine scenario_kde_grid_accessor_uninitialised
+    !
+    !> Proves that pf_kde_grid%merge refuses another grid that was never initialised.
+    subroutine scenario_kde_grid_merge_uninitialised()
+        type(pf_kde_grid) :: g, other, fresh
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(other)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call g%merge(fresh)
+        print '(a)', "merged a grid that was never initialised"
+    end subroutine scenario_kde_grid_merge_uninitialised
+    !
+    !> Proves that pf_kde_grid%merge refuses a different number of cells.
+    subroutine scenario_kde_grid_merge_cells()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(5, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(other)
+        print '(a)', "merged grids with a different number of cells"
+    end subroutine scenario_kde_grid_merge_cells
+    !
+    !> Proves that pf_kde_grid%merge refuses a different range.
+    subroutine scenario_kde_grid_merge_range()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 2.0_real64, 0.1_real64)
+        call g%merge(other)
+        print '(a)', "merged grids with a different range"
+    end subroutine scenario_kde_grid_merge_range
+    !
+    !> Proves that pf_kde_grid%merge refuses a different bandwidth.
+    subroutine scenario_kde_grid_merge_bandwidth()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.2_real64)
+        call g%merge(other)
+        print '(a)', "merged grids with a different bandwidth"
+    end subroutine scenario_kde_grid_merge_bandwidth
+    !
+    !> Proves that pf_kde_grid%merge refuses a different kernel.
+    subroutine scenario_kde_grid_merge_kernel()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, kernel="box")
+        call g%merge(other)
+        print '(a)', "merged grids with a different kernel"
+    end subroutine scenario_kde_grid_merge_kernel
+    !
+    !> Proves that pf_kde_grid%merge refuses a different support.
+    subroutine scenario_kde_grid_merge_support()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
+        call g%merge(other)
+        print '(a)', "merged grids with a different support"
+    end subroutine scenario_kde_grid_merge_support
+    !
+    !> Proves that pf_kde_grid%merge refuses a different boundary correction.
+    subroutine scenario_kde_grid_merge_boundary()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, boundary="reflect")
+        call g%merge(other)
+        print '(a)', "merged grids with a different boundary correction"
+    end subroutine scenario_kde_grid_merge_boundary
     !
 end program error_scenarios

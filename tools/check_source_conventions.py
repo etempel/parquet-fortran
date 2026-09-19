@@ -1249,7 +1249,7 @@ DIRECT_PRINT_ALLOWED = {
     # stream is named anywhere in it.
     "parquet_print_settings", "print_one", "print_text", "print_big",
     "table_print_stat", "display_rows", "schema_print_schema_info", "col_print", "psv_print",
-    "obj_print", "kde_print",
+    "obj_print", "kde_print", "grid_print",
     # ---- parquet_logging: the separate system described above ----
     # `machinery_warning` reports a failure of the logging machinery ITSELF, which is why it
     # bypasses sinks, layout and the output critical section alike and writes straight to

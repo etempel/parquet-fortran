@@ -89,6 +89,54 @@ contains
 
     end procedure kde_resolve_boundary
 
+    module procedure kde_resolve_setup
+
+        kernel_code = KDE_GAUSSIAN
+        if (present(kernel)) call kde_resolve_kernel(entry, kernel, kernel_code)
+        has_lower = present(lower)
+        has_upper = present(upper)
+        lo = 0.0_real64
+        hi = 0.0_real64
+        if (has_lower) then
+            if (.not. ieee_is_finite(lower)) call kde_abort(entry, "lower and upper must be finite")
+            lo = lower
+        end if
+        if (has_upper) then
+            if (.not. ieee_is_finite(upper)) call kde_abort(entry, "lower and upper must be finite")
+            hi = upper
+        end if
+        if (has_lower .and. has_upper) then
+            if (.not. (lo < hi)) call kde_abort(entry, "lower must be below upper")
+        end if
+        boundary_code = KDE_BOUNDARY_NONE
+        if (present(boundary)) then
+            if (.not. (has_lower .or. has_upper)) call kde_abort(entry, "boundary= needs lower= or upper=")
+            call kde_resolve_boundary(entry, boundary, boundary_code)
+        else if (has_lower .or. has_upper) then
+            boundary_code = KDE_BOUNDARY_RENORMALISE
+        end if
+
+    end procedure kde_resolve_setup
+
+    module procedure kde_positive_finite
+
+        res = .false.
+        if (ieee_is_nan(v)) return
+        if (.not. ieee_is_finite(v)) return
+        res = v > 0.0_real64
+
+    end procedure kde_positive_finite
+
+    module procedure kde_outside
+
+        res = .not. (abs(v) <= huge(v))
+        if (res) return
+        if (has_lower) res = v < lo
+        if (res) return
+        if (has_upper) res = v > hi
+
+    end procedure kde_outside
+
     module procedure kde_kernel_pdf
 
         real(real64) :: u, a
@@ -121,6 +169,57 @@ contains
         end select
 
     end procedure kde_kernel_pdf
+
+    module procedure kde_kernel_pdf_many
+
+        real(real64) :: u, a, c, r
+        integer(int64) :: i
+
+        ! `kde_kernel_pdf`'s formulas and support tests, written out once per kernel so that the
+        ! choice is made once per row rather than once per cell; KEEP THE TWO IN STEP. The
+        ! Gaussian still calls the library's `phi`, which is the one spelling of it. The grid
+        ! converging to the exact estimate as the cell width shrinks is the test that sees the two
+        ! disagree. Every caller screens a NaN before forming `z`, as for the scalar form.
+        c = KDE_SCALE(code)
+        r = KDE_RADIUS(code)
+        select case (code)
+        case (KDE_GAUSSIAN)
+            ! The one kernel with mass AT its radius: the cut is inclusive.
+            do i = 1_int64, size(z, kind=int64)
+                a = abs(z(i))
+                k(i) = 0.0_real64
+                if (a <= KDE_GAUSS_CUT) k(i) = pf_norm_pdf(a)/KDE_GAUSS_MASS
+            end do
+        case (KDE_EPANECHNIKOV)
+            do i = 1_int64, size(z, kind=int64)
+                a = abs(z(i))
+                k(i) = 0.0_real64
+                if (a < r) then
+                    u = a/c
+                    k(i) = 0.75_real64*(1.0_real64 - u)*(1.0_real64 + u)/c
+                end if
+            end do
+        case (KDE_BSPLINE)
+            do i = 1_int64, size(z, kind=int64)
+                a = abs(z(i))
+                k(i) = 0.0_real64
+                if (a < r) then
+                    u = a/c
+                    if (u < 1.0_real64) then
+                        k(i) = (2.0_real64/3.0_real64 - u*u + 0.5_real64*u*u*u)/c
+                    else
+                        k(i) = (2.0_real64 - u)**3/(6.0_real64*c)
+                    end if
+                end if
+            end do
+        case default
+            do i = 1_int64, size(z, kind=int64)
+                k(i) = 0.0_real64
+                if (abs(z(i)) < r) k(i) = 0.5_real64/c
+            end do
+        end select
+
+    end procedure kde_kernel_pdf_many
 
     module procedure kde_kernel_cdf
 
@@ -197,5 +296,9 @@ contains
         end select
 
     end procedure kde_rule_bandwidth
+
+    module procedure parquet_debug_kde_threads_used
+        n = kde_team_used
+    end procedure parquet_debug_kde_threads_used
 
 end submodule parquet_kde_core ! GCOVR_EXCL_LINE

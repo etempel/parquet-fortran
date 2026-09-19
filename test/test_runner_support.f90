@@ -279,9 +279,17 @@ contains
     !> with the sort engine forced, has neither problem and stays parallel. Pure in-memory work
     !> over five-row fixtures; serial it costs well under a second.
     !>
-    !> "kde_serial" is excluded because its one test silences `%print` through the process-global
-    !> `verbosity` setting, so a concurrent printer elsewhere would write nothing, or this test's
-    !> negative control would. The concurrent "kde" suite writes no global state and stays parallel.
+    !> "kde_serial" is excluded because its tests silence `%print` through the process-global
+    !> `verbosity` setting, so a concurrent printer elsewhere would write nothing, or a test's
+    !> negative control would. The concurrent "kde" suite stays parallel: the one global it writes
+    !> is `pf_kde_grid%add`'s team counter, which every `%add` inside test-drive's region sets to
+    !> 1 (no nested team opens there) and which no test of that suite reads.
+    !>
+    !> "kde_omp" is excluded for the nested-team reason "integrate_omp" states, and because it
+    !> reads that process-global team counter straight after each `%add` it asserts: run inside
+    !> test-drive's region, every team would collapse to one and a concurrent `%add` elsewhere
+    !> could overwrite the counter between a call and its assertion. Serially it costs well under
+    !> a second.
     !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
@@ -327,7 +335,7 @@ contains
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "integrate_omp" .or. name == "interpolate_omp" .or. name == "optimize_omp" &
-            .or. name == "prima_omp" .or. name == "sphere_omp" .or. name == "kde_serial" &
+            .or. name == "prima_omp" .or. name == "sphere_omp" .or. name == "kde_serial" .or. name == "kde_omp" &
             .or. name == "stats" .or. name == "table_join_hash")
     end function suite_is_safe_to_parallelize
 

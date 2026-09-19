@@ -2003,7 +2003,7 @@ contains
 
 end module test_module_surface_transform
 
-!> `parquet_kde` alone: a fit, a query, and the output pair `%print` reads.
+!> `parquet_kde` alone: a fit, a query, a grid, and the output pair `%print` reads.
 !!
 !! **One library import, and it must stay that way.** This module's row in the entry-module table
 !! makes two claims nothing else checks: that `use parquet_kde` compiles what the footprint file
@@ -2018,12 +2018,13 @@ module test_module_surface_kde
 
 contains
 
-    !> Exercises the estimator and the re-exported output pair through `use parquet_kde` alone.
+    !> Exercises both estimators and the re-exported output pair through `use parquet_kde` alone.
     subroutine check_kde_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
 
         type(pf_kde) :: k
-        real(real64) :: f
+        type(pf_kde_grid) :: g
+        real(real64) :: f, cells(4)
         logical :: ok
         character(len=:), allocatable :: saved, now
 
@@ -2034,6 +2035,16 @@ contains
         ! mass the five-sd cut keeps.
         if (.not. ok .or. abs(f - (2.0_real64*0.24197072451914337_real64 + 0.3989422804014327_real64) &
             /3.0_real64/(1.0_real64 - 5.7330314375838782e-7_real64)) > 1.0e-15_real64) what = "pf_kde%pdf"
+
+        ! The streaming form: the same three points into four cells, each kernel inside the range,
+        ! so the cells hold the whole weight.
+        if (what == "") then
+            call g%init(4, -2.0_real64, 2.0_real64, 0.1_real64)
+            call g%add([-1.0_real64, 0.0_real64, 1.0_real64])
+            call g%density(cells)
+            if (abs(sum(cells)*g%step() - 1.0_real64) > 1.0e-15_real64 .or. g%n_valid() /= 3) &
+                what = "pf_kde_grid%density"
+        end if
 
         ! The output pair, round-tripped: the module re-exports both halves.
         if (what == "") then

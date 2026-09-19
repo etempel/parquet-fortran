@@ -86,7 +86,7 @@ contains
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
                                             p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
-                                            p35(:), p36(:), p37(:), p38(:)
+                                            p35(:), p36(:), p37(:), p38(:), p39(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3601,8 +3601,70 @@ contains
             new_unittest("pf_kde%curve refuses an infinite end", &
                 test_kde_curve_nonfinite_end_aborts) &
             ]
+        ! ---- parquet_kde: pf_kde_grid ----
+        p39 = [ &
+            new_unittest("pf_kde_grid%init refuses ncells=0", &
+                test_kde_grid_ncells_aborts), &
+            new_unittest("pf_kde_grid%init refuses a NaN xmin", &
+                test_kde_grid_range_nan_aborts), &
+            new_unittest("pf_kde_grid%init refuses xmin == xmax", &
+                test_kde_grid_range_reversed_aborts), &
+            new_unittest("pf_kde_grid%init refuses a range wider than the largest number", &
+                test_kde_grid_cell_width_aborts), &
+            new_unittest("pf_kde_grid%init refuses a zero bandwidth", &
+                test_kde_grid_bandwidth_aborts), &
+            new_unittest("pf_kde_grid%init refuses an unknown kernel", &
+                test_kde_grid_unknown_kernel_aborts), &
+            new_unittest("pf_kde_grid%init refuses boundary= without a bound", &
+                test_kde_grid_boundary_without_bound_aborts), &
+            new_unittest("pf_kde_grid%init refuses a range reaching outside the support", &
+                test_kde_grid_outside_support_aborts), &
+            new_unittest("pf_kde_grid%add refuses a grid that was never initialised", &
+                test_kde_grid_add_uninitialised_aborts), &
+            new_unittest("pf_kde_grid%add refuses threads=0", &
+                test_kde_grid_threads_zero_aborts), &
+            new_unittest("pf_kde_grid%add refuses weights of the wrong length, in the family's words", &
+                test_kde_grid_weights_size_aborts), &
+            new_unittest("pf_kde_grid%add's real32 form refuses weights of the wrong length", &
+                test_kde_grid_real32_weights_size_aborts), &
+            new_unittest("pf_kde_grid%add refuses a negative weight, in the family's words", &
+                test_kde_grid_negative_weight_aborts), &
+            new_unittest("pf_kde_grid%density refuses an output of the wrong size", &
+                test_kde_grid_density_size_aborts), &
+            new_unittest("pf_kde_grid%density refuses centres of the wrong size", &
+                test_kde_grid_density_x_size_aborts), &
+            new_unittest("pf_kde_grid%grid refuses an output of the wrong size", &
+                test_kde_grid_centres_size_aborts), &
+            new_unittest("pf_kde_grid%pdf refuses an output of the wrong size", &
+                test_kde_grid_pdf_size_aborts), &
+            new_unittest("pf_kde_grid%cdf refuses an output of the wrong size", &
+                test_kde_grid_cdf_size_aborts), &
+            new_unittest("pf_kde_grid%quantile refuses an output of the wrong size", &
+                test_kde_grid_quantile_size_aborts), &
+            new_unittest("pf_kde_grid%quantile refuses p above one", &
+                test_kde_grid_quantile_p_aborts), &
+            new_unittest("pf_kde_grid%pdf refuses a grid that was never initialised", &
+                test_kde_grid_query_uninitialised_aborts), &
+            new_unittest("pf_kde_grid%ncells refuses a grid that was never initialised", &
+                test_kde_grid_accessor_uninitialised_aborts), &
+            new_unittest("pf_kde_grid%merge refuses another grid that was never initialised", &
+                test_kde_grid_merge_uninitialised_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a different number of cells", &
+                test_kde_grid_merge_cells_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a different range", &
+                test_kde_grid_merge_range_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a different bandwidth", &
+                test_kde_grid_merge_bandwidth_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a different kernel", &
+                test_kde_grid_merge_kernel_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a different support", &
+                test_kde_grid_merge_support_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a different boundary correction", &
+                test_kde_grid_merge_boundary_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
-            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38]
+            p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, &
+            p39]
     end subroutine collect_tests_parquet_errors
 
 
@@ -21201,5 +21263,183 @@ contains
         call check_kde_scenario(error, "kde_curve_nonfinite_end", &
             "pf_kde%curve: xmin and xmax must be finite")
     end subroutine test_kde_curve_nonfinite_end_aborts
+    !
+    !
+    !> Every one of `pf_kde_grid`'s refusals, asserted by the exact text the guide page's table
+    !> publishes; see `test/error_scenarios.f90` for each control and the call refused. The two in
+    !> the family's words prove `%add` hands `parquet_stats`' checkers `what = "pf_kde_grid%add"`.
+    subroutine test_kde_grid_ncells_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_ncells", &
+            "pf_kde_grid%init: ncells must be positive")
+    end subroutine test_kde_grid_ncells_aborts
+    !
+    subroutine test_kde_grid_range_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_range_nan", &
+            "pf_kde_grid%init: xmin and xmax must be finite")
+    end subroutine test_kde_grid_range_nan_aborts
+    !
+    subroutine test_kde_grid_range_reversed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_range_reversed", &
+            "pf_kde_grid%init: xmin must be below xmax")
+    end subroutine test_kde_grid_range_reversed_aborts
+    !
+    subroutine test_kde_grid_cell_width_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_cell_width", &
+            "pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number")
+    end subroutine test_kde_grid_cell_width_aborts
+    !
+    subroutine test_kde_grid_bandwidth_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_bandwidth", &
+            "pf_kde_grid%init: bandwidth must be a finite, positive number")
+    end subroutine test_kde_grid_bandwidth_aborts
+    !
+    subroutine test_kde_grid_unknown_kernel_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_unknown_kernel", &
+            "pf_kde_grid%init: kernel must be ""gaussian"", ""epanechnikov"", ""bspline"" or ""box""")
+    end subroutine test_kde_grid_unknown_kernel_aborts
+    !
+    subroutine test_kde_grid_boundary_without_bound_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_boundary_without_bound", &
+            "pf_kde_grid%init: boundary= needs lower= or upper=")
+    end subroutine test_kde_grid_boundary_without_bound_aborts
+    !
+    subroutine test_kde_grid_outside_support_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_outside_support", &
+            "pf_kde_grid%init: the grid's range must lie inside the support")
+    end subroutine test_kde_grid_outside_support_aborts
+    !
+    subroutine test_kde_grid_add_uninitialised_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_add_uninitialised", &
+            "pf_kde_grid%add: the grid has not been initialised")
+    end subroutine test_kde_grid_add_uninitialised_aborts
+    !
+    subroutine test_kde_grid_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_threads_zero", &
+            "pf_kde_grid%add: threads must be positive")
+    end subroutine test_kde_grid_threads_zero_aborts
+    !
+    subroutine test_kde_grid_weights_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_weights_size", &
+            "pf_kde_grid%add: weights has 3 elements but values has 4")
+    end subroutine test_kde_grid_weights_size_aborts
+    !
+    subroutine test_kde_grid_real32_weights_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_real32_weights_size", &
+            "pf_kde_grid%add: weights has 2 elements but values has 4")
+    end subroutine test_kde_grid_real32_weights_size_aborts
+    !
+    subroutine test_kde_grid_negative_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_negative_weight", &
+            "pf_kde_grid%add: weight 2 is negative; weights must be finite and non-negative")
+    end subroutine test_kde_grid_negative_weight_aborts
+    !
+    subroutine test_kde_grid_density_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_density_size", &
+            "pf_kde_grid%density: f must have one element per cell")
+    end subroutine test_kde_grid_density_size_aborts
+    !
+    subroutine test_kde_grid_density_x_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_density_x_size", &
+            "pf_kde_grid%density: x must have one element per cell")
+    end subroutine test_kde_grid_density_x_size_aborts
+    !
+    subroutine test_kde_grid_centres_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_centres_size", &
+            "pf_kde_grid%grid: x must have one element per cell")
+    end subroutine test_kde_grid_centres_size_aborts
+    !
+    subroutine test_kde_grid_pdf_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_pdf_size", &
+            "pf_kde_grid%pdf: f must have one element per point of x")
+    end subroutine test_kde_grid_pdf_size_aborts
+    !
+    subroutine test_kde_grid_cdf_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_cdf_size", &
+            "pf_kde_grid%cdf: p must have one element per point of x")
+    end subroutine test_kde_grid_cdf_size_aborts
+    !
+    subroutine test_kde_grid_quantile_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_quantile_size", &
+            "pf_kde_grid%quantile: x must have one element per element of p")
+    end subroutine test_kde_grid_quantile_size_aborts
+    !
+    subroutine test_kde_grid_quantile_p_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_quantile_p", &
+            "pf_kde_grid%quantile: p must lie in [0, 1]")
+    end subroutine test_kde_grid_quantile_p_aborts
+    !
+    subroutine test_kde_grid_query_uninitialised_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_query_uninitialised", &
+            "pf_kde_grid%pdf: the grid has not been initialised")
+    end subroutine test_kde_grid_query_uninitialised_aborts
+    !
+    subroutine test_kde_grid_accessor_uninitialised_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_accessor_uninitialised", &
+            "pf_kde_grid%ncells: the grid has not been initialised")
+    end subroutine test_kde_grid_accessor_uninitialised_aborts
+    !
+    subroutine test_kde_grid_merge_uninitialised_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_uninitialised", &
+            "pf_kde_grid%merge: the other grid has not been initialised")
+    end subroutine test_kde_grid_merge_uninitialised_aborts
+    !
+    subroutine test_kde_grid_merge_cells_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_cells", &
+            "pf_kde_grid%merge: the two grids differ in cells")
+    end subroutine test_kde_grid_merge_cells_aborts
+    !
+    subroutine test_kde_grid_merge_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_range", &
+            "pf_kde_grid%merge: the two grids differ in range")
+    end subroutine test_kde_grid_merge_range_aborts
+    !
+    subroutine test_kde_grid_merge_bandwidth_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_bandwidth", &
+            "pf_kde_grid%merge: the two grids differ in bandwidth")
+    end subroutine test_kde_grid_merge_bandwidth_aborts
+    !
+    subroutine test_kde_grid_merge_kernel_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_kernel", &
+            "pf_kde_grid%merge: the two grids differ in kernel")
+    end subroutine test_kde_grid_merge_kernel_aborts
+    !
+    subroutine test_kde_grid_merge_support_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_support", &
+            "pf_kde_grid%merge: the two grids differ in support")
+    end subroutine test_kde_grid_merge_support_aborts
+    !
+    subroutine test_kde_grid_merge_boundary_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_boundary", &
+            "pf_kde_grid%merge: the two grids differ in boundary")
+    end subroutine test_kde_grid_merge_boundary_aborts
     !
 end module test_errors

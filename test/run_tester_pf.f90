@@ -51,6 +51,7 @@ program run_tester_pf
     use test_toml, only : collect_tests_toml, collect_tests_toml_serial
     use test_transform, only : collect_tests_transform
     use test_kde, only : collect_tests_kde, collect_tests_kde_serial
+    use test_kde_omp, only : collect_tests_kde_omp
     use test_utils, only : collect_tests_utils
     implicit none
     type(testsuite_type), allocatable :: testsuites(:)
@@ -73,6 +74,7 @@ program run_tester_pf
         new_testsuite("transform", collect_tests_transform), &
         new_testsuite("kde", collect_tests_kde), &
         new_testsuite("kde_serial", collect_tests_kde_serial), &
+        new_testsuite("kde_omp", collect_tests_kde_omp), &
         new_testsuite("index_omp", collect_tests_index_omp), &
         new_testsuite("index_multimap", collect_tests_index_multimap), &
         new_testsuite("index_strings", collect_tests_index_strings), &

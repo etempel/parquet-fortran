@@ -3,7 +3,8 @@
 !===========================================
 !
 !> Kernel density estimation in one dimension: `pf_kde`, which fits a density to an array it
-!> retains and answers it exactly anywhere.
+!> retains and answers it exactly anywhere, and `pf_kde_grid`, which accumulates one on a fixed
+!> grid of cells from points streamed through it and forgets them.
 !!
 !! **This module is Arrow-free and must stay that way.** Nothing in its closure reaches
 !! `parquet_bindings`; `check_parquet_kde_stays_arrow_free` (tools/check_source_conventions.py)
@@ -31,7 +32,8 @@
 !! per thread inside a parallel region aborts once.
 !!
 !! **A fitted object is read-only under every query**, so any number of threads may share one.
-!! `%fit` and `%clear` are the only writes.
+!! `%fit` and `%clear` are the only writes to a `pf_kde`; `%init`, `%add`, `%merge` and `%clear` the
+!! only writes to a `pf_kde_grid`, whose queries are read-only too.
 !!
 !! **Nothing is printed unasked.** `%print` is solicited output, silenced by
 !! `verbosity = "silent"` and written where `message_stream` says; that is why this module
@@ -46,8 +48,9 @@ module parquet_kde
     ! `parquet_stats` publishes for this module and the `parquet` facade hides.
     use parquet_stats, only : pf_stddev, pf_iqr, stats_compact, stats_check_sizes, &
         stats_check_weight, stats_weight_kind
-    ! The sort of the retained sample; `parquet_argsort` is already beneath `parquet_stats`.
-    use parquet_argsort, only : pf_argsort
+    ! The sort of the retained sample, and the thread-count resolver `%add` shares with every
+    ! threaded pass of the library; `parquet_argsort` is already beneath `parquet_stats`.
+    use parquet_argsort, only : pf_argsort, resolve_thread_count
     ! The Gaussian kernel is the library's `phi` and `Phi`, never a second spelling of them.
     use parquet_utils, only : pf_norm_pdf, pf_norm_cdf
     ! `%print` is solicited output; the verbosity and message-stream pair is re-exported because
@@ -62,7 +65,8 @@ module parquet_kde
     implicit none
     private
 
-    public :: pf_kde
+    public :: pf_kde, pf_kde_grid
+    public :: parquet_debug_kde_threads_used
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
 
@@ -103,6 +107,18 @@ module parquet_kde
 
     !> The rules' constants: Silverman's rule of thumb and Scott's normal-reference rule.
     real(real64), parameter :: KDE_SILVERMAN_C = 0.9_real64, KDE_SCOTT_C = 1.06_real64
+
+    ! ---- the test observable ------------------------------------------------------------------
+
+    !> The team the most recent threaded pass ran on; 1 when it ran serially.
+    !!
+    !! Read by `parquet_debug_kde_threads_used` and by nothing else. An answer comparison cannot
+    !! see threading -- `%add` at one thread and at eight differ only by rounding, and not at all
+    !! against a pass that never opened its team -- so the threaded tests assert this beside the
+    !! answer. It is written from INSIDE the region, by `omp_get_num_threads`, so that it reports
+    !! the team that ran rather than the one that was decided on. Process-global and
+    !! unsynchronised, like every counter of its kind.
+    integer, save :: kde_team_used = 1
 
     ! ---- the type ---------------------------------------------------------------------------
 
@@ -170,6 +186,77 @@ module parquet_kde
         procedure :: print => kde_print !! a one-block summary
         procedure :: clear => kde_clear !! releases everything; the object is unfitted again
     end type pf_kde
+
+    !> A kernel density estimate accumulated on a fixed grid of cells from points streamed through
+    !! it, which are forgotten.
+    !!
+    !! `%init` fixes the geometry -- `ncells` cells of width `step = (xmax - xmin)/ncells`, centred
+    !! on `xmin + (i - 1/2)*step` -- with the bandwidth, the kernel and the support. Each point
+    !! `%add` accepts deposits its kernel on the cell centres it reaches, normalised so that the
+    !! point adds exactly its weight: what the kernel puts beyond `xmin` or `xmax` is counted there
+    !! but not located. `%merge` adds one grid to another. The queries read the cells: `%density`
+    !! at the centres, `%pdf` interpolated between them, `%cdf` its integral and `%quantile` the
+    !! inverse. The queries are read-only, so any number of threads may share a finished grid.
+    type :: pf_kde_grid
+        private
+        logical :: initialised = .false.             !! `%init` has run
+        logical :: poisoned = .false.                !! a NaN kept by `skipnan = .false.` arrived
+        integer :: nc = 0                            !! the number of cells
+        real(real64) :: x0 = 0.0_real64              !! `xmin`, the first cell's left edge
+        real(real64) :: x1 = 0.0_real64              !! `xmax`, the last cell's right edge
+        real(real64) :: dx = 0.0_real64              !! the cell width
+        real(real64) :: h = 0.0_real64               !! the bandwidth
+        integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
+        integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
+        logical :: has_lower = .false.               !! a lower bound was given
+        logical :: has_upper = .false.               !! an upper bound was given
+        real(real64) :: lo = 0.0_real64              !! the lower bound, when given
+        real(real64) :: hi = 0.0_real64              !! the upper bound, when given
+        real(real64) :: w_total = 0.0_real64         !! `sum(w)` over every point accepted
+        real(real64) :: w_below = 0.0_real64         !! the weight the kernels put below `xmin`
+        real(real64) :: w_above = 0.0_real64         !! the weight the kernels put above `xmax`
+        integer(int64) :: cnt_all = 0_int64          !! `size(x)` over every `%add`
+        integer(int64) :: cnt_valid = 0_int64        !! the population's size
+        integer(int64) :: cnt_null = 0_int64         !! excluded as null
+        integer(int64) :: cnt_nan = 0_int64          !! excluded as NaN
+        integer(int64) :: cnt_out = 0_int64          !! excluded as outside the support
+        real(real64), allocatable :: acc(:)
+        !! each cell's accumulated weight per unit length; `acc(i)*step` is the weight in cell `i`
+    contains
+        procedure :: init => grid_init !! fixes the geometry, the bandwidth, the kernel and the support
+        generic :: add => grid_add_f64_r0, grid_add_f64_r1, grid_add_f32_r0, grid_add_f32_r1 !! adds points
+        procedure, private :: grid_add_f64_r0 !! one `real64` point
+        procedure, private :: grid_add_f64_r1 !! an array of `real64` points
+        procedure, private :: grid_add_f32_r0 !! one `real32` point, widened
+        procedure, private :: grid_add_f32_r1 !! an array of `real32` points, widened
+        procedure :: merge => grid_merge !! adds another grid of the same geometry and settings
+        procedure :: density => grid_density !! the density at every cell centre
+        generic :: pdf => grid_pdf_r0, grid_pdf_r1 !! the density interpolated between the centres
+        procedure, private :: grid_pdf_r0 !! at one point
+        procedure, private :: grid_pdf_r1 !! at each point of an array
+        generic :: cdf => grid_cdf_r0, grid_cdf_r1 !! `P(X <= x)`, the integral of `%pdf`
+        procedure, private :: grid_cdf_r0 !! at one point
+        procedure, private :: grid_cdf_r1 !! at each point of an array
+        generic :: quantile => grid_quantile_r0, grid_quantile_r1 !! the inverse of `%cdf`
+        procedure, private :: grid_quantile_r0 !! at one probability
+        procedure, private :: grid_quantile_r1 !! at each probability of an array
+        procedure :: grid => grid_centres !! the cell centres
+        procedure :: ncells => grid_ncells !! the number of cells
+        procedure :: step => grid_step !! the cell width
+        procedure :: bandwidth => grid_bandwidth !! the bandwidth
+        procedure :: kernel => grid_kernel_name !! the kernel's token
+        procedure :: bounds => grid_bounds !! the support; infinite where unbounded
+        procedure :: n => grid_n !! `size(x)` over every `%add`
+        procedure :: n_valid => grid_n_valid !! the population's size
+        procedure :: n_null => grid_n_null !! how many were excluded as null
+        procedure :: n_nan => grid_n_nan !! how many were excluded as NaN
+        procedure :: n_outside => grid_n_outside !! how many were outside the support
+        procedure :: sum_weights => grid_sum_weights !! `sum(w)` over the population
+        procedure :: is_initialised => grid_is_initialised !! `%init` has run
+        procedure :: is_adaptive => grid_is_adaptive !! each point takes its own bandwidth
+        procedure :: print => grid_print !! a one-block summary
+        procedure :: clear => grid_clear !! zeroes the accumulation and keeps the geometry
+    end type pf_kde_grid
 
     ! ---- fitting, implemented in parquet_kde_fit.f90 ----------------------------------------
 
@@ -425,6 +512,316 @@ module parquet_kde
 
     end interface
 
+    ! ---- the grid: set-up and accumulation, implemented in parquet_kde_grid.f90 ---------------
+
+    interface
+
+        !> Fixes the grid: `call g%init(ncells, xmin, xmax, bandwidth, [kernel], [lower], [upper],
+        !! [boundary])`.
+        !!
+        !! `ncells` cells of width `step = (xmax - xmin)/ncells` span `[xmin, xmax]`, cell `i`
+        !! centred on `xmin + (i - 1/2)*step`. `bandwidth` is the kernel's standard deviation and is
+        !! always a number: a grid has no data to apply a rule to before the points arrive. `kernel`,
+        !! `lower`, `upper` and `boundary` are as `pf_kde%fit` takes them, and the range must lie
+        !! inside the support. Every accumulated point and count is discarded; a grid may be
+        !! initialised again.
+        module subroutine grid_init(self, ncells, xmin, xmax, bandwidth, kernel, lower, upper, boundary)
+            implicit none
+            class(pf_kde_grid), intent(inout)      :: self      !! the grid; reset
+            integer, intent(in)                    :: ncells    !! cells, at least 1; held in memory
+            real(real64), intent(in)               :: xmin      !! the first cell's left edge
+            real(real64), intent(in)               :: xmax      !! the last cell's right edge
+            real(real64), intent(in)               :: bandwidth !! the kernel's standard deviation
+            character(len=*), intent(in), optional :: kernel    !! the kernel's token
+            real(real64), intent(in), optional     :: lower     !! the support's lower bound
+            real(real64), intent(in), optional     :: upper     !! the support's upper bound
+            character(len=*), intent(in), optional :: boundary  !! the boundary correction
+        end subroutine grid_init
+
+        !> Accumulates one `real64` point: `call g%add(x, [is_valid], [weights], [skipnan],
+        !! [n_null], [n_nan], [n_outside])`, with `is_valid` and `weights` scalars; otherwise as the
+        !! array form.
+        module subroutine grid_add_f64_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside)
+            implicit none
+            class(pf_kde_grid), intent(inout)     :: self      !! the grid
+            real(real64), intent(in)              :: x         !! the point
+            logical, intent(in), optional         :: is_valid  !! `.false.` marks it null
+            real(real64), intent(in), optional    :: weights   !! its weight
+            logical, intent(in), optional         :: skipnan   !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional :: n_null    !! excluded as null
+            integer(int64), intent(out), optional :: n_nan     !! excluded as NaN
+            integer(int64), intent(out), optional :: n_outside !! excluded as outside the support
+        end subroutine grid_add_f64_r0
+
+        !> Accumulates an array of `real64` points: `call g%add(x, [is_valid], [weights],
+        !! [skipnan], [n_null], [n_nan], [n_outside], [threads])`.
+        !!
+        !! `is_valid`, `weights` and `skipnan` are the `pf_*` family's population arguments, and a
+        !! point outside the support is excluded and counted; `n_null`, `n_nan` and `n_outside`
+        !! report what THIS call excluded, while the grid's accessors report every call's total. A
+        !! NaN kept by `skipnan = .false.` makes every later answer of the grid NaN. `threads`
+        !! gives each thread of a team a static share of the points and a private partial grid,
+        !! summed in thread order: at a given count the bits do not change, and between counts
+        !! they differ by rounding.
+        module subroutine grid_add_f64_r1(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
+                threads)
+            implicit none
+            class(pf_kde_grid), intent(inout)     :: self        !! the grid
+            real(real64), intent(in)              :: x(:)        !! the points
+            logical, intent(in), optional         :: is_valid(:) !! `.false.` marks a null
+            real(real64), intent(in), optional    :: weights(:)  !! per-element weights
+            logical, intent(in), optional         :: skipnan     !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional :: n_null      !! excluded as null
+            integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
+            integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
+            integer, intent(in), optional         :: threads     !! the team for the deposit
+        end subroutine grid_add_f64_r1
+
+        !> Accumulates one `real32` point, widened to `real64` first; otherwise as the `real64` form.
+        module subroutine grid_add_f32_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside)
+            implicit none
+            class(pf_kde_grid), intent(inout)     :: self      !! the grid
+            real(real32), intent(in)              :: x         !! the point
+            logical, intent(in), optional         :: is_valid  !! `.false.` marks it null
+            real(real64), intent(in), optional    :: weights   !! its weight
+            logical, intent(in), optional         :: skipnan   !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional :: n_null    !! excluded as null
+            integer(int64), intent(out), optional :: n_nan     !! excluded as NaN
+            integer(int64), intent(out), optional :: n_outside !! excluded as outside the support
+        end subroutine grid_add_f32_r0
+
+        !> Accumulates an array of `real32` points, widened to `real64` first; otherwise as the
+        !! `real64` form.
+        module subroutine grid_add_f32_r1(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
+                threads)
+            implicit none
+            class(pf_kde_grid), intent(inout)     :: self        !! the grid
+            real(real32), intent(in)              :: x(:)        !! the points
+            logical, intent(in), optional         :: is_valid(:) !! `.false.` marks a null
+            real(real64), intent(in), optional    :: weights(:)  !! per-element weights
+            logical, intent(in), optional         :: skipnan     !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional :: n_null      !! excluded as null
+            integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
+            integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
+            integer, intent(in), optional         :: threads     !! the team for the deposit
+        end subroutine grid_add_f32_r1
+
+        !> Adds another grid's accumulation and counts to this one: `call g%merge(other)`. The two
+        !! must share the number of cells, the range, the bandwidth, the kernel, the support and
+        !! the boundary correction, or the call aborts naming the first that differs. One grid per
+        !! thread, merged at the end, is how a caller's own threads accumulate one estimate.
+        module subroutine grid_merge(self, other)
+            implicit none
+            class(pf_kde_grid), intent(inout) :: self  !! the grid that receives
+            class(pf_kde_grid), intent(in)    :: other !! the grid that is added; unchanged
+        end subroutine grid_merge
+
+    end interface
+
+    ! ---- the grid: queries and accessors, implemented in parquet_kde_grid.f90 -----------------
+
+    interface
+
+        !> The density at every cell centre: `call g%density(f, [x], [normalise])`.
+        !!
+        !! `f(i)` is the accumulation in cell `i` over the total weight, which is the estimate at
+        !! the cell's centre; `x`, when given, receives the centres. `normalise = .false.` skips the
+        !! division and answers the weighted count per unit length. A grid with nothing
+        !! accumulated answers zeros; a grid a kept NaN has poisoned answers NaN. `size(f)` and
+        !! `size(x)` other than `ncells` abort.
+        module subroutine grid_density(self, f, x, normalise)
+            implicit none
+            class(pf_kde_grid), intent(in)      :: self      !! the grid
+            real(real64), intent(out)           :: f(:)      !! the density at each centre
+            real(real64), intent(out), optional :: x(:)      !! the centres
+            logical, intent(in), optional       :: normalise !! `.false.` answers the raw accumulation
+        end subroutine grid_density
+
+        !> The density at one point, interpolated between the cell centres: `call g%pdf(x, f)`.
+        !!
+        !! Linear between neighbouring centres, constant over the outer half of the first and the
+        !! last cell, and zero outside `[xmin, xmax]`; exact at every centre. A quiet NaN when
+        !! nothing has been accumulated or a kept NaN has poisoned the grid.
+        module subroutine grid_pdf_r0(self, x, f)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(in)       :: x    !! where to evaluate
+            real(real64), intent(out)      :: f    !! the density there
+        end subroutine grid_pdf_r0
+
+        !> The interpolated density at each point of `x`: `call g%pdf(x, f)`. `size(f) /= size(x)`
+        !! aborts.
+        module subroutine grid_pdf_r1(self, x, f)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(in)       :: x(:) !! where to evaluate
+            real(real64), intent(out)      :: f(:) !! the density at each point
+        end subroutine grid_pdf_r1
+
+        !> `P(X <= x)` at one point: `call g%cdf(x, p)`, the integral of `%pdf` from `xmin` plus the
+        !! weight the kernels put below `xmin`, over the total weight.
+        !!
+        !! Below `xmin` it is that weight's share and above `xmax` one less the share put above:
+        !! weight outside the range is counted, not located. Exactly 0 at and below a lower bound
+        !! and exactly 1 at and above an upper one. A quiet NaN when nothing has been accumulated or
+        !! a kept NaN has poisoned the grid.
+        module subroutine grid_cdf_r0(self, x, p)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(in)       :: x    !! where to evaluate
+            real(real64), intent(out)      :: p    !! the probability at or below `x`
+        end subroutine grid_cdf_r0
+
+        !> `P(X <= x)` at each point of `x`: `call g%cdf(x, p)`. `size(p) /= size(x)` aborts.
+        module subroutine grid_cdf_r1(self, x, p)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(in)       :: x(:) !! where to evaluate
+            real(real64), intent(out)      :: p(:) !! the probability at or below each point
+        end subroutine grid_cdf_r1
+
+        !> The quantile at probability `p`: `call g%quantile(p, x)`, the smallest `x` in
+        !! `[xmin, xmax]` at which `%cdf` reaches `p`, found by solving the quadratic `%cdf` is
+        !! between two centres.
+        !!
+        !! A quantile the weight below `xmin` already covers answers `xmin`, and one only the
+        !! weight above `xmax` reaches answers `xmax`. `p = 0` and `p = 1` answer the two ends of
+        !! the accumulated density. `p` outside `[0, 1]`, or NaN, aborts.
+        module subroutine grid_quantile_r0(self, p, x)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(in)       :: p    !! the probability
+            real(real64), intent(out)      :: x    !! the quantile
+        end subroutine grid_quantile_r0
+
+        !> The quantile at each probability of `p`: `call g%quantile(p, x)`.
+        !! `size(x) /= size(p)` aborts.
+        module subroutine grid_quantile_r1(self, p, x)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(in)       :: p(:) !! the probabilities
+            real(real64), intent(out)      :: x(:) !! the quantile at each
+        end subroutine grid_quantile_r1
+
+        !> The cell centres: `call g%grid(x)`, `x(i) = xmin + (i - 1/2)*step`. `size(x)` other
+        !! than `ncells` aborts.
+        module subroutine grid_centres(self, x)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(out)      :: x(:) !! the centres
+        end subroutine grid_centres
+
+        !> The number of cells.
+        module function grid_ncells(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer                        :: n    !! the count
+        end function grid_ncells
+
+        !> The cell width, `(xmax - xmin)/ncells`.
+        module function grid_step(self) result(s)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64)                   :: s    !! the width
+        end function grid_step
+
+        !> The bandwidth, the kernel's standard deviation, as `%init` was given it.
+        module function grid_bandwidth(self) result(h)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64)                   :: h    !! the bandwidth
+        end function grid_bandwidth
+
+        !> The kernel in use, as its token: `call g%kernel(name)`.
+        module subroutine grid_kernel_name(self, name)
+            implicit none
+            class(pf_kde_grid), intent(in)             :: self !! the grid
+            character(len=:), allocatable, intent(out) :: name !! the kernel's token
+        end subroutine grid_kernel_name
+
+        !> The support: `call g%bounds(lo, hi)`, with `-Infinity`/`+Infinity` where unbounded.
+        module subroutine grid_bounds(self, lo, hi)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64), intent(out)      :: lo   !! the lower end of the support
+            real(real64), intent(out)      :: hi   !! the upper end of the support
+        end subroutine grid_bounds
+
+        !> `size(x)` summed over every `%add` since `%init` or `%clear`.
+        module function grid_n(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer(int64)                 :: n    !! the count
+        end function grid_n
+
+        !> The population's size: every point that survived the exclusions.
+        module function grid_n_valid(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer(int64)                 :: n    !! the count
+        end function grid_n_valid
+
+        !> How many points were excluded as null.
+        module function grid_n_null(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer(int64)                 :: n    !! the count
+        end function grid_n_null
+
+        !> How many points were excluded as NaN and were not already null.
+        module function grid_n_nan(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer(int64)                 :: n    !! the count
+        end function grid_n_nan
+
+        !> How many points were excluded as outside the support, or infinite.
+        module function grid_n_outside(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer(int64)                 :: n    !! the count
+        end function grid_n_outside
+
+        !> `sum(w)` over the population; its size when unweighted.
+        module function grid_sum_weights(self) result(s)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            real(real64)                   :: s    !! the total weight
+        end function grid_sum_weights
+
+        !> `.true.` once `%init` has run. Never aborts.
+        module function grid_is_initialised(self) result(res)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            logical                        :: res  !! it is initialised
+        end function grid_is_initialised
+
+        !> `.true.` when each point takes its own bandwidth.
+        module function grid_is_adaptive(self) result(res)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            logical                        :: res  !! the grid is adaptive
+        end function grid_is_adaptive
+
+        !> Writes a one-block summary: `call g%print([unit])`. The geometry, the kernel, the
+        !! bandwidth, the counts, the support and the correction. Silenced by
+        !! `verbosity = "silent"`; written to `unit` or, by default, where `message_stream` says.
+        !! An uninitialised grid prints one line saying so rather than aborting.
+        module subroutine grid_print(self, unit)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer, intent(in), optional  :: unit !! where to write
+        end subroutine grid_print
+
+        !> Zeroes the accumulation and every count, keeping the geometry and the settings: the grid
+        !! is initialised and empty. Does nothing to a grid that was never initialised.
+        module subroutine grid_clear(self)
+            implicit none
+            class(pf_kde_grid), intent(inout) :: self !! the grid
+        end subroutine grid_clear
+
+    end interface
+
     ! ---- kernels, tokens, rules and the abort, implemented in parquet_kde_core.f90 ----------
 
     interface
@@ -470,6 +867,46 @@ module parquet_kde
             integer, intent(out)         :: code  !! the correction's code
         end subroutine kde_resolve_boundary
 
+        !> Validates and resolves the settings `pf_kde%fit` and `pf_kde_grid%init` share -- the
+        !! kernel, the two bounds and the boundary correction -- in that order, aborting with the
+        !! caller's `entry` on the first mistake. Absent bounds leave the support unbounded on that
+        !! side; any bound without `boundary` selects `"renormalise"`.
+        module subroutine kde_resolve_setup(entry, kernel, lower, upper, boundary, kernel_code, &
+                has_lower, lo, has_upper, hi, boundary_code)
+            implicit none
+            character(len=*), intent(in)           :: entry         !! the binding, for the message
+            character(len=*), intent(in), optional :: kernel        !! the caller's kernel token
+            real(real64), intent(in), optional     :: lower         !! the caller's lower bound
+            real(real64), intent(in), optional     :: upper         !! the caller's upper bound
+            character(len=*), intent(in), optional :: boundary      !! the caller's correction token
+            integer, intent(out)                   :: kernel_code   !! the kernel
+            logical, intent(out)                   :: has_lower     !! a lower bound was given
+            real(real64), intent(out)              :: lo            !! the lower bound, or 0
+            logical, intent(out)                   :: has_upper     !! an upper bound was given
+            real(real64), intent(out)              :: hi            !! the upper bound, or 0
+            integer, intent(out)                   :: boundary_code !! the correction
+        end subroutine kde_resolve_setup
+
+        !> `.true.` for a finite number above zero. The NaN is screened first, as its own test: an
+        !! ordered comparison raises `IEEE_INVALID` on one.
+        pure module function kde_positive_finite(v) result(res)
+            implicit none
+            real(real64), intent(in) :: v   !! the value
+            logical                  :: res !! it is finite and positive
+        end function kde_positive_finite
+
+        !> `.true.` when a value that is not NaN lies outside a support: beyond a bound that was
+        !! given, or infinite, which is outside every support.
+        pure module function kde_outside(has_lower, lo, has_upper, hi, v) result(res)
+            implicit none
+            logical, intent(in)      :: has_lower !! a lower bound was given
+            real(real64), intent(in) :: lo        !! the lower bound
+            logical, intent(in)      :: has_upper !! an upper bound was given
+            real(real64), intent(in) :: hi        !! the upper bound
+            real(real64), intent(in) :: v         !! the value, not NaN
+            logical                  :: res       !! it is outside
+        end function kde_outside
+
         !> The kernel's density at `z` standard deviations from its centre: `K(z/C)/C` for the
         !! unit-scale kernel `K` and its scale `C`, so that it integrates to one over `z`. Zero
         !! beyond the support radius.
@@ -479,6 +916,16 @@ module parquet_kde
             real(real64), intent(in) :: z    !! the offset, in standard deviations
             real(real64)             :: k    !! the density there
         end function kde_kernel_pdf
+
+        !> The kernel's density at every offset of `z`, into `k`: `kde_kernel_pdf` for a whole row
+        !! of cells in one call, which is what the grid deposit evaluates per point. `k` has at
+        !! least `size(z)` elements.
+        pure module subroutine kde_kernel_pdf_many(code, z, k)
+            implicit none
+            integer, intent(in)       :: code !! the kernel
+            real(real64), intent(in)  :: z(:) !! the offsets, in standard deviations
+            real(real64), intent(out) :: k(:) !! the density at each
+        end subroutine kde_kernel_pdf_many
 
         !> The kernel's cumulative distribution at `z` standard deviations: exactly 0 at and below
         !! minus the support radius and exactly 1 at and above it.
@@ -503,6 +950,24 @@ module parquet_kde
             integer, intent(in), optional          :: threads     !! the statistics' team
             real(real64), intent(out)              :: h           !! the bandwidth
         end subroutine kde_rule_bandwidth
+
+    end interface
+
+    ! ---- the test hook, implemented in parquet_kde_core.f90 --------------------------------
+
+    interface
+
+        !> The team the most recent threaded pass of this module actually ran on; 1 when it ran
+        !! serially.
+        !!
+        !! Test-only, and public for that reason alone: an answer comparison between thread counts
+        !! cannot tell a team that ran from one that never opened, so every threading assertion
+        !! pairs its answer with this. Process-global and unsynchronised; read it from a serial
+        !! context straight after the call it describes.
+        module function parquet_debug_kde_threads_used() result(n)
+            implicit none
+            integer :: n !! the team size
+        end function parquet_debug_kde_threads_used
 
     end interface
 

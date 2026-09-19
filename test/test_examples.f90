@@ -276,7 +276,7 @@ contains
     !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
     !> parquet_root (pf_find_root/pf_bracket_expansion/pf_root_info/PF_ROOT_OK),
     !> parquet_transform (pf_dct/pf_is_pow2),
-    !> parquet_kde (pf_kde),
+    !> parquet_kde (pf_kde/pf_kde_grid),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
@@ -533,6 +533,18 @@ contains
             call dens%cdf(2.0_real64, p)
             call check(error, abs(p - 0.5_real64) <= 1.0e-15_real64, &
                 "pf_kde must be reachable from use parquet alone, with the CDF of a symmetric sample 0.5 at its centre")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_kde: the streaming form, one point deposited whole.
+        block
+            type(pf_kde_grid) :: cells
+            real(real64) :: f(4)
+            call cells%init(4, 0.0_real64, 4.0_real64, 0.1_real64)
+            call cells%add(1.5_real64)
+            call cells%density(f)
+            call check(error, abs(f(2) - 1.0_real64) <= 1.0e-15_real64, &
+                "pf_kde_grid must be reachable from use parquet alone, with a narrow kernel whole in its cell")
             if (allocated(error)) return
         end block
 

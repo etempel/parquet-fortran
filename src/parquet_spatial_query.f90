@@ -726,6 +726,7 @@ contains
         real(real64) :: dv(3), ds(3), c0(3), c1(3)
         real(real64) :: dd, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
         real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
+        real(real64) :: px, py, pz
         real(real64) :: q1, q2, q3, e1, e2, e3, dself, lself, bpself, blself, bpj, blj, sx, sy, sz, s2
         real(real64) :: dpv, dlv, dm
         real(real64), allocatable :: dwork(:)
@@ -744,7 +745,20 @@ contains
         ! references, so no reciprocal can be hoisted out of the candidate loop. The cost is an
         ! L1 load per candidate. Pinned by `test_axis_zero_radius_finds_the_axis`, which reports
         ! 19 of 21 on-axis points without this line and 21 with it.
-        volatile :: dd
+        !
+        ! `px`, `py` and `pz` hold `tp * v` for the same test's sake, and they are `volatile` for
+        ! the SECOND, independent way the same guarantee is lost: on a target whose ISA has a fused
+        ! multiply-add -- arm64's baseline does, so no flag is needed to reach this -- the compiler
+        ! contracts `qx - tp * vx` and does not round the product first. The zero residue is DUE to
+        ! that rounding: `tp` is the rounded parameter, so its exact product with `v` differs from
+        ! `q` by the ulp the second rounding absorbs, and an FMA faithfully keeps what it absorbed.
+        ! Measured: 16 of the 21 residues become nonzero, leaving the 5 whose parameter is a
+        ! multiple of a quarter and so exactly representable, which is the `5 of 21` this test
+        ! reports on a contracting build. No source form closes it -- parentheses are not honoured against
+        ! contraction and no cross-product spelling is exact either -- so the store forces the
+        ! rounding the cancellation needs (`fortran-gotchas.md`, "One target contracts to an FMA
+        ! and another cannot").
+        volatile :: dd, px, py, pz
 
         m = 0_int64
         ! Defensive, exactly as `spatial_scan`'s: the three axis bindings screen through
@@ -966,9 +980,14 @@ contains
                             else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
                                 cycle
                             end if
-                            wx = qx - tp * vx
-                            wy = qy - tp * vy
-                            wz = qz - tp * vz
+                            ! Through `px`/`py`/`pz`, which are `volatile` so that the product is
+                            ! ROUNDED before the subtraction reads it; see the declaration.
+                            px = tp * vx
+                            py = tp * vy
+                            pz = tp * vz
+                            wx = qx - px
+                            wy = qy - py
+                            wz = qz - pz
                             d2 = wx * wx + wy * wy + wz * wz
                             rad = r1 + tp * dr
                             if (d2 <= rad * rad) then
@@ -1035,9 +1054,13 @@ contains
                             else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
                                 cycle
                             end if
-                            wx = qx - tp * vx
-                            wy = qy - tp * vy
-                            wz = qz - tp * vz
+                            ! Rounded through the `volatile` products, as the direct loop is.
+                            px = tp * vx
+                            py = tp * vy
+                            pz = tp * vz
+                            wx = qx - px
+                            wy = qy - py
+                            wz = qz - pz
                             d2 = wx * wx + wy * wy + wz * wz
                             rad = r1 + tp * dr
                             if (d2 <= rad * rad) then

@@ -1306,7 +1306,7 @@ contains
         real(real64), allocatable :: x(:)
         real(real64), parameter :: PS(7) = [0.001_real64, 0.05_real64, 0.25_real64, 0.5_real64, &
             0.75_real64, 0.95_real64, 0.999_real64]
-        real(real64) :: q(7), c(7), q0, q1
+        real(real64) :: q(7), c(7), q0, q1, lo_end, hi_end
         integer :: kk, bounded
 
         call kde_fixture(50_int64, x)
@@ -1326,8 +1326,18 @@ contains
                 call k%quantile(0.0_real64, q0)
                 call k%quantile(1.0_real64, q1)
                 if (bounded == 0) then
-                    call check(error, q0 == minval(x) - 40.0_real64*RADIUS(kk) .and. &
-                        q1 == maxval(x) + 40.0_real64*RADIUS(kk), &
+                    ! A few ulp rather than `==`, because these two ends are RE-DERIVED here and
+                    ! the library computes its own from `KDE_RADIUS*hmax`: two independent
+                    ! computations of one real quantity agree bit for bit only where nothing can
+                    ! contract one of them differently, and `40*RADIUS` fuses into the subtraction
+                    ! on a target whose baseline has an FMA while the library's two-step form does
+                    ! not (`fortran-gotchas.md`, "One target contracts to an FMA and another cannot").
+                    ! The BOUNDED arm below stays exact: those ends are the caller's own literals,
+                    ! which the estimate stores and hands back unarithmetised.
+                    lo_end = minval(x) - 40.0_real64*RADIUS(kk)
+                    hi_end = maxval(x) + 40.0_real64*RADIUS(kk)
+                    call check(error, abs(q0 - lo_end) <= 4.0_real64*spacing(abs(lo_end)) .and. &
+                        abs(q1 - hi_end) <= 4.0_real64*spacing(abs(hi_end)), &
                         trim(KERNELS(kk)) // ": p = 0 and 1 must be the ends of the estimate's support")
                 else
                     call check(error, q0 == -480.0_real64 .and. q1 == 490.0_real64, &

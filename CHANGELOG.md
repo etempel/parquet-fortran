@@ -188,7 +188,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rather than answering as a ball about its first endpoint. The zero-radius answer holds under a
   value-unsafe floating-point model too: ifx's default `-fp-model=fast`, which a FLAGLESS
   `fpm build` selects, rewrote the projection's division into a multiply by the reciprocal and
-  dropped the on-axis points whose parameter is not representable (19 of 21 on a lattice row).
+  dropped the on-axis points whose parameter is not representable (19 of 21 on a lattice row), and
+  on a target whose baseline has a fused multiply-add, such as arm64, contracting the perpendicular
+  offset dropped the same points (5 of 21).
 - Writing from or reading into a large non-contiguous array, such as a component section
   `data(:)%x`, no longer crashes under ifx: `parquet_write_column`, `parquet_write_column_chunk`,
   `parquet_read_column`, `parquet_read_column_chunk`, `parquet_read_array_row_mode`,

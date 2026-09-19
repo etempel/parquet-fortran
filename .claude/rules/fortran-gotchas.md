@@ -194,6 +194,20 @@ done | sort | uniq -c | sort -rn
   centring is EXACT proves nothing about such an identity, which is how a suite stays green over
   one (`stats_pair_moments`' `diagonal` fork, `src/parquet_stats_core.f90`;
   `test_cov_identity_survives_inexact_centring`).
+- **One target contracts to an FMA and another cannot, so ONE compiler at ONE version walks a
+  different search path on each machine.** Contraction needs the instruction in the ISA: arm64 has
+  it, and x86-64 has none without an `-march` that adds FMA3, which no profile here passes. nagfor
+  lowers through the host C compiler, whose own default fuses `a*b + c`, so an arm64 build carries
+  fused arithmetic a same-version x86-64 build cannot form (69 `fmadd` in
+  `src_parquet_prima_bobyqb.f90.o`; audit with `otool -tv <obj> | grep -cE "fmadd|fmsub"`, or
+  `objdump -d` on ELF). An ITERATIVE run then ends somewhere else on each machine, one ulp at a
+  time: a COBYLA answer moved 2e-6, a BOBYQA run over values near `1e300` moved its
+  rounding-blocked stopping point by 1.5e-2, and the `1e-300` curvature a geometry-step reproducer
+  was aimed at stopped being reachable at all — for that fixture and for 32 `npt`/`rhobeg`
+  variations of it. So a test over such a run asserts the DIRECTION of the answer and the SIZE of
+  the improvement, never their digits; where it must reach one interior site, it SKIPS on the
+  machine that misses it and says why, because re-aiming the fixture only moves the skip to the
+  other machine (`test_bobyqa_geometry_step_overflow`, `test_bobyqa_huge_objective_values`).
 - **An OpenMP `reduction(+:...)` over reals is not bit-reproducible** across calls or thread counts;
   measure the tolerance floor by calling twice, or use an ordered/compensated sum.
 - **Nested OpenMP needs both `omp_set_nested(.true.)` and `omp_set_max_active_levels(2)`**
@@ -413,9 +427,11 @@ done | sort | uniq -c | sort -rn
   multiply-add, which does NOT round the product first, so the residue is nonzero for every
   non-representable parameter and the same test reports 5 of 21. Parenthesising the product
   helps only with `-assume protect_parens`; ifx does not honour parentheses against contraction
-  by default. No profile this project builds passes `-xHost`, so this is a limit on what a
-  consumer may add, not a defect here -- and the general lesson is that an exact-cancellation
-  guarantee is a property of the FP MODEL, not of the arithmetic as written.
+  by default -- so the general lesson is that an exact-cancellation guarantee is a property of the
+  FP MODEL, not of the arithmetic as written. **No flag is needed to reach this where the ISA's
+  BASELINE has an FMA**, which is why the products go through the `volatile` `px`/`py`/`pz` in
+  `spatial_scan_axis` rather than being left to a flag nobody passes (the general group, "One
+  target contracts to an FMA and another cannot").
 - **`-fp-model=fast` also folds an algebraic identity out of an expression, which can turn a test's
   own PRECONDITION into a lie.** `total = a + b + c` followed by `total - a == 0.0` — the check
   that two tiny weights vanished into a huge one — is rewritten to `b + c`, so the fixture reports

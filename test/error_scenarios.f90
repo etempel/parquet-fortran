@@ -4221,6 +4221,18 @@ program error_scenarios
         call scenario_kde_grid_sample_threads_zero()
     case ("kde_grid_sample_uninitialised")
         call scenario_kde_grid_sample_uninitialised()
+    case ("kde_fit_logical_column")
+        call scenario_kde_fit_logical_column()
+    case ("kde_fit_column_is_valid")
+        call scenario_kde_fit_column_is_valid()
+    case ("kde_grid_add_vector_column")
+        call scenario_kde_grid_add_vector_column()
+    case ("kde_grid_add_column_is_valid")
+        call scenario_kde_grid_add_column_is_valid()
+    case ("kde_isj_cells_not_pow2")
+        call scenario_kde_isj_cells_not_pow2()
+    case ("kde_isj_cells_out_of_range")
+        call scenario_kde_isj_cells_out_of_range()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -35484,5 +35496,80 @@ contains
         call fresh%sample(v, 1_int64)
         print '(a, es22.15)', "sampled an uninitialised grid: ", v(1)
     end subroutine scenario_kde_grid_sample_uninitialised
+    !
+    !> Proves that pf_kde%fit refuses a logical column, naming its kind.
+    subroutine scenario_kde_fit_logical_column()
+        type(pf_kde) :: k
+        type(parquet_column) :: c
+
+        call c%init(PK_FLOAT64, 4_int64)
+        call c%set_all([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call k%fit(c, bandwidth=0.5_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call c%init(PK_LOGICAL, 4_int64)
+        call c%set_all([.true., .false., .true., .true.])
+        call k%fit(c, bandwidth=0.5_real64)
+        print '(a, es22.15)', "fitted a logical column: ", k%bandwidth()
+    end subroutine scenario_kde_fit_logical_column
+    !
+    !> Proves that pf_kde%fit refuses is_valid= beside a column, which carries its own validity.
+    subroutine scenario_kde_fit_column_is_valid()
+        type(pf_kde) :: k
+        type(parquet_column) :: c
+
+        call c%init(PK_FLOAT64, 4_int64)
+        call c%set_all([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call k%fit(c, bandwidth=0.5_real64)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(c, bandwidth=0.5_real64, is_valid=[.true., .true., .true., .true.])
+        print '(a, es22.15)', "accepted is_valid= beside a column: ", k%bandwidth()
+    end subroutine scenario_kde_fit_column_is_valid
+    !
+    !> Proves that pf_kde_grid%add refuses a vector column, naming its kind.
+    subroutine scenario_kde_grid_add_vector_column()
+        type(pf_kde_grid) :: g
+        type(parquet_column) :: c
+
+        call g%init(8, 0.0_real64, 5.0_real64, 0.5_real64)
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call g%add(c)
+        print '(a, i0)', "kde control added: ", g%n_valid()
+        call c%init(PK_FLOAT64_VEC, 3_int64, width=2_int32)
+        call g%add(c)
+        print '(a, i0)', "added a vector column: ", g%n_valid()
+    end subroutine scenario_kde_grid_add_vector_column
+    !
+    !> Proves that pf_kde_grid%add refuses is_valid= beside a column, which carries its own validity.
+    subroutine scenario_kde_grid_add_column_is_valid()
+        type(pf_kde_grid) :: g
+        type(parquet_column) :: c
+
+        call g%init(8, 0.0_real64, 5.0_real64, 0.5_real64)
+        call c%init(PK_INT64, 3_int64)
+        call c%set_all([1_int64, 2_int64, 3_int64])
+        call g%add(c)
+        print '(a, i0)', "kde control added: ", g%n_valid()
+        call g%add(c, is_valid=[.true., .true., .true.])
+        print '(a, i0)', "accepted is_valid= beside a column: ", g%n_valid()
+    end subroutine scenario_kde_grid_add_column_is_valid
+    !
+    !> Proves that parquet_debug_set_kde_isj_cells refuses a count that is not a power of two.
+    subroutine scenario_kde_isj_cells_not_pow2()
+        call parquet_debug_set_kde_isj_cells(1024)
+        call parquet_debug_set_kde_isj_cells(0)
+        print '(a)', "kde control: 1024 cells accepted"
+        call parquet_debug_set_kde_isj_cells(1000)
+        print '(a)', "accepted 1000 cells"
+    end subroutine scenario_kde_isj_cells_not_pow2
+    !
+    !> Proves that parquet_debug_set_kde_isj_cells refuses a power of two beyond 2**20.
+    subroutine scenario_kde_isj_cells_out_of_range()
+        call parquet_debug_set_kde_isj_cells(1048576)
+        call parquet_debug_set_kde_isj_cells(0)
+        print '(a)', "kde control: 2**20 cells accepted"
+        call parquet_debug_set_kde_isj_cells(2097152)
+        print '(a)', "accepted 2**21 cells"
+    end subroutine scenario_kde_isj_cells_out_of_range
     !
 end program error_scenarios

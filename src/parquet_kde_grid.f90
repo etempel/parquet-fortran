@@ -338,6 +338,17 @@ contains
 
     end procedure grid_add_f32_r1
 
+    module procedure grid_add_col
+
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+
+        ! The column's validity becomes `is_valid`: unallocated when it has no null, and so absent.
+        call kde_widen_column("pf_kde_grid%add", x, is_valid, wide, mask)
+        call grid_add_f64_r1(self, wide, mask, weights, skipnan, n_null, n_nan, n_outside, threads)
+
+    end procedure grid_add_col
+
     module procedure grid_add_f32_r0
 
         call grid_add_f64_r0(self, real(x, real64), is_valid, weights, skipnan, n_null, n_nan, n_outside)

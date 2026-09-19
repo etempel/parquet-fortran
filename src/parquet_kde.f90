@@ -9,16 +9,26 @@
 !! **This module is Arrow-free and must stay that way.** Nothing in its closure reaches
 !! `parquet_bindings`; `check_parquet_kde_stays_arrow_free` (tools/check_source_conventions.py)
 !! walks the closure, submodules included. Its library tier edges are `parquet_stats`, whose
-!! `pf_stddev` and `pf_iqr` are the bandwidth rules' scale and whose exclusion pass and argument
-!! checkers are this module's population rules, so that "in the population" means here exactly
-!! what it means for every `pf_*` statistic, and `parquet_random`, the generator `%sample` draws
-!! from. `tools/module_footprints.txt` records the cost.
+!! `pf_stddev` and `pf_iqr` are the bandwidth rules' scale, whose `pf_bin_linear` bins the sample
+!! for the ISJ rule and whose exclusion pass and argument checkers are this module's population
+!! rules, so that "in the population" means here exactly what it means for every `pf_*` statistic;
+!! `parquet_root` and `parquet_transform`, whose root finder and discrete cosine transform the ISJ
+!! rule is built on; and `parquet_random`, the generator `%sample` draws from.
+!! `tools/module_footprints.txt` records the cost.
 !!
 !! **`bandwidth` is the standard deviation of the kernel, whichever kernel is chosen.** Each
 !! kernel is stored with the scale factor that gives it unit variance, so one bandwidth rule
 !! serves every kernel and a number means the same smoothing under all four. The Gaussian is cut
 !! at five standard deviations and renormalised, which gives every kernel compact support: the
 !! sorted sample is searched for the points within reach of a query, and nothing else is summed.
+!!
+!! **Without a number, the bandwidth comes from the Improved Sheather-Jones rule.** It solves a
+!! fixed-point equation for the bandwidth that minimises the estimate's asymptotic mean integrated
+!! squared error, reading the density's derivatives from the discrete cosine transform of the
+!! sample binned onto a grid of `2**14` cells, so it follows a multimodal sample that Silverman's
+!! and Scott's rules of thumb oversmooth. A sample the rule finds no bandwidth for at the grid's
+!! resolution -- a few points, or values rounded to a step the grid resolves -- takes Silverman's
+!! rule instead when the rule was not named, and is undefined when `rule = "isj"` asked for it.
 !!
 !! **The adaptive kernel gives each point its own bandwidth**, `h_j = h * (p(x_j)/g)**(-alpha)`,
 !! read from a pilot density `p` -- a `pf_kde_grid` at the global bandwidth -- whose geometric mean
@@ -59,12 +69,21 @@
 !! User guide: doc/pages/utilities/kernel-density.md. Design: feature_kde.md.
 module parquet_kde
 
-    ! The tier edge. `pf_stddev` and `pf_iqr` are the rules' scale; `stats_compact` applies the
-    ! family's exclusion order and hands back the survivors; the three checkers compose the
-    ! family's own abort texts from the `what` passed to them. The last four are plumbing that
+    ! The tier edge. `pf_stddev` and `pf_iqr` are the rules' scale; `pf_bin_linear` bins the sample
+    ! for the ISJ rule; `stats_compact` applies the family's exclusion order and hands back the
+    ! survivors; the three checkers compose the family's own abort texts from the `what` passed to
+    ! them; `col_to_real64` widens a column as the family does. The last five are plumbing that
     ! `parquet_stats` publishes for this module and the `parquet` facade hides.
-    use parquet_stats, only : pf_stddev, pf_iqr, stats_compact, stats_check_sizes, &
-        stats_check_weight, stats_weight_kind
+    use parquet_stats, only : pf_stddev, pf_iqr, pf_bin_linear, stats_compact, stats_check_sizes, &
+        stats_check_weight, stats_weight_kind, col_to_real64
+    ! The column forms of `%fit` and `%add`; `parquet_columns` is already beneath `parquet_stats`.
+    use parquet_columns, only : parquet_column, parquet_kind_name, PK_INT32, PK_INT64, PK_FLOAT32, &
+        PK_FLOAT64
+    ! The ISJ rule: its fixed point is solved by the library's root finder, over the discrete cosine
+    ! transform of the binned sample. Two leaf modules, two files each.
+    use parquet_root, only : pf_rootfun, pf_find_root, pf_bracket_expansion, pf_root_info, &
+        PF_EXPAND_UP, PF_ROOT_OK
+    use parquet_transform, only : pf_dct, pf_is_pow2
     ! The sort of the retained sample, and the thread-count resolver `%add` shares with every
     ! threaded pass of the library; `parquet_argsort` is already beneath `parquet_stats`.
     use parquet_argsort, only : pf_argsort, resolve_thread_count
@@ -87,6 +106,7 @@ module parquet_kde
 
     public :: pf_kde, pf_kde_grid
     public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
+    public :: parquet_debug_set_kde_isj_cells
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
 
@@ -116,7 +136,8 @@ module parquet_kde
     real(real64), parameter :: KDE_GAUSS_MASS = 1.0_real64 - 2.0_real64*KDE_GAUSS_TAIL
 
     !> Bandwidth rule codes. `KDE_RULE_EXPLICIT` records that `bandwidth=` was given as a number.
-    integer, parameter :: KDE_RULE_EXPLICIT = 0, KDE_RULE_SILVERMAN = 1, KDE_RULE_SCOTT = 2
+    integer, parameter :: KDE_RULE_EXPLICIT = 0, KDE_RULE_SILVERMAN = 1, KDE_RULE_SCOTT = 2, &
+        KDE_RULE_ISJ = 3
 
     !> Boundary correction codes. `KDE_BOUNDARY_NONE` is the unbounded estimate.
     integer, parameter :: KDE_BOUNDARY_NONE = 0, KDE_BOUNDARY_RENORMALISE = 1, &
@@ -127,6 +148,56 @@ module parquet_kde
 
     !> The rules' constants: Silverman's rule of thumb and Scott's normal-reference rule.
     real(real64), parameter :: KDE_SILVERMAN_C = 0.9_real64, KDE_SCOTT_C = 1.06_real64
+
+    ! ---- the Improved Sheather-Jones rule -------------------------------------------------------
+
+    !> The cells the ISJ rule bins the sample into: a power of two, as the transform needs. The
+    !! binning's own smoothing is then far below any bandwidth the rule is asked to find.
+    integer, parameter :: KDE_ISJ_CELLS = 16384
+
+    !> The binning grid reaches this share of the sample's range beyond each extreme point, before it
+    !! is clipped to the support.
+    real(real64), parameter :: KDE_ISJ_WIDEN = 0.1_real64
+
+    !> The fixed point's number of stages, `l`: the derivative whose norm is estimated first.
+    integer, parameter :: KDE_ISJ_STAGES = 7
+
+    !> The largest `t` the bracket search reaches, in units of the grid's span squared: a bandwidth
+    !! as wide as the whole grid, far beyond any the rule can mean.
+    real(real64), parameter :: KDE_ISJ_T_MAX = 1.0_real64
+
+    !> The largest exponent `k**2 * pi**2 * t` a term of the fixed point's sums is formed at: beyond
+    !! it `exp` falls below the normal range, and the terms are smaller than rounding can see.
+    real(real64), parameter :: KDE_ISJ_EXP_LIMIT = 708.0_real64
+
+    !> How many consecutive terms of a fixed-point sum take their exponential by recurrence, two
+    !! multiplications each, before it is formed afresh by `exp`: the recurrence's rounding grows as
+    !! the square of its length, to about `2e-13` here, and the sums cost a sixth of what one `exp` a
+    !! term does.
+    integer, parameter :: KDE_ISJ_RUN = 64
+
+    !> The largest magnitude a sample's extreme point may have for the binning grid to be formed
+    !! without overflowing in any order: a quarter of the largest number.
+    real(real64), parameter :: KDE_ISJ_LIMIT = 0.25_real64*huge(1.0_real64)
+
+    !> `pi**2`, and `2 * pi**(2s)` for `s = 2 .. 7`: the norm of the density's `s`-th derivative is
+    !! `2 * pi**(2s) * sum_k k**(2s) * (y_k/2)**2 * exp(-k**2 * pi**2 * t)`, `y` the transform.
+    !! Computed at 50 digits.
+    real(real64), parameter :: KDE_ISJ_PI2 = 9.8696044010893586188_real64
+    real(real64), parameter :: KDE_ISJ_NORM_C(2:7) = [194.81818206800487447_real64, &
+        1922.7783871506088741_real64, 18977.062032141148014_real64, 187296.09495216604195_real64, &
+        1848538.3630467483724_real64, 18244342.36350870634_real64]
+
+    !> `log(2 * c_s * K0_s)` for `s = 2 .. 6`, with `c_s = (1 + 2**(-(s + 1/2)))/3` and
+    !! `K0_s = (2s - 1)!!/sqrt(2*pi)`: the stage time `(2 c_s K0_s / (N |f^(s+1)|**2))**(2/(3 + 2s))`
+    !! is formed through its logarithm, which cannot overflow. Computed at 50 digits.
+    real(real64), parameter :: KDE_ISJ_LOG_C(2:6) = [-0.063012265988619525565_real64, &
+        1.4683445817129673905_real64, 3.3728021712641165025_real64, 5.5486377704290425764_real64, &
+        7.935664513152786701_real64]
+
+    !> `log(2 * sqrt(pi))`: the last stage's `t = (2 N sqrt(pi) |f''|**2)**(-2/5)`, through its
+    !! logarithm. Computed at 50 digits.
+    real(real64), parameter :: KDE_ISJ_LOG_2SQRTPI = 1.2655121234846453965_real64
 
     ! ---- the adaptive rule --------------------------------------------------------------------
 
@@ -193,6 +264,11 @@ module parquet_kde
     !! sets it runs serially.
     integer, save :: kde_pilot_cells_forced = 0
 
+    !> The cell count `parquet_debug_set_kde_isj_cells` forces on the ISJ rule's binning grid; 0, the
+    !! default, means `KDE_ISJ_CELLS`. Test-only, process-global and unsynchronised: the suite that
+    !! sets it runs serially.
+    integer, save :: kde_isj_cells_forced = 0
+
     !> Nanoseconds the most recent `pf_kde%fit` spent sorting, building the pilot and assigning the
     !! bandwidths (`parquet_debug_kde_fit_nanos`); 0 for a phase it did not reach. Process-global
     !! and unsynchronised, like the team counter.
@@ -223,6 +299,26 @@ module parquet_kde
         real(real64), allocatable :: acc(:)
         !! the pilot's accumulation, cell for cell
     end type kde_adapt
+
+    !> The ISJ rule's fixed-point function over one sample, for `pf_find_root`:
+    !! `F(t) = t - xi*gamma^[l](t)`, which is negative below the rule's `t` and changes sign there.
+    !!
+    !! `t` is the squared bandwidth in units of the binning grid's span. `gamma^[l]` estimates the
+    !! norm of the density's `l`-th derivative at the time `t`, then each lower derivative's at the
+    !! time the one above it makes optimal, down to the second, and returns the time that minimises
+    !! the asymptotic mean integrated squared error for that norm. The components hold everything
+    !! that does not depend on `t`.
+    type, extends(pf_rootfun) :: kde_isj_point
+        real(real64) :: n_eff = 0.0_real64 !! the effective sample size, `N` of the fixed point
+        integer :: kmax = 0                !! the highest frequency, one below the grid's cell count
+        real(real64), allocatable :: kk(:)
+        !! `k**2` for `k = 1 .. kmax`
+        real(real64), allocatable :: p(:,:)
+        !! `k**(2s) * (y_k/2)**2` for `k = 1 .. kmax` and `s = 2 .. KDE_ISJ_STAGES`, `y` the transform
+        !! of the binned sample
+    contains
+        procedure :: eval => kde_isj_eval !! `F(t)`
+    end type kde_isj_point
 
     !> A kernel density estimate accumulated on a fixed grid of cells from points streamed through
     !! it, which are forgotten.
@@ -264,11 +360,13 @@ module parquet_kde
         !! the adaptive rule, from the pilot `%init` was given; off for a fixed bandwidth
     contains
         procedure :: init => grid_init !! fixes the geometry, the bandwidth, the kernel and the support
-        generic :: add => grid_add_f64_r0, grid_add_f64_r1, grid_add_f32_r0, grid_add_f32_r1 !! adds points
+        generic :: add => grid_add_f64_r0, grid_add_f64_r1, grid_add_f32_r0, grid_add_f32_r1, &
+            grid_add_col !! adds points
         procedure, private :: grid_add_f64_r0 !! one `real64` point
         procedure, private :: grid_add_f64_r1 !! an array of `real64` points
         procedure, private :: grid_add_f32_r0 !! one `real32` point, widened
         procedure, private :: grid_add_f32_r1 !! an array of `real32` points, widened
+        procedure, private :: grid_add_col !! a numeric `parquet_column`, widened
         procedure :: merge => grid_merge !! adds another grid of the same geometry and settings
         procedure :: density => grid_density !! the density at every cell centre
         generic :: pdf => grid_pdf_r0, grid_pdf_r1 !! the density interpolated between the centres
@@ -313,7 +411,7 @@ module parquet_kde
         logical :: fitted = .false.                  !! `%fit` has run since the last `%clear`
         logical :: defined = .false.                 !! the estimate is defined (`ok` of `%fit`)
         integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
-        integer :: rule_code = KDE_RULE_SILVERMAN    !! how the bandwidth was chosen
+        integer :: rule_code = KDE_RULE_ISJ          !! how the bandwidth was chosen
         integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
         logical :: has_lower = .false.               !! a lower bound was given
         logical :: has_upper = .false.               !! an upper bound was given
@@ -352,9 +450,10 @@ module parquet_kde
         type(pf_kde_grid) :: pilot_grid
         !! the pilot the adaptive rule reads, which `%pilot` hands back; uninitialised otherwise
     contains
-        generic :: fit => kde_fit_f64, kde_fit_f32 !! fits the estimate to a `real64` or `real32` sample
+        generic :: fit => kde_fit_f64, kde_fit_f32, kde_fit_col !! fits the estimate to a sample
         procedure, private :: kde_fit_f64 !! the `real64` sample
         procedure, private :: kde_fit_f32 !! the `real32` sample, widened
+        procedure, private :: kde_fit_col !! a numeric `parquet_column`, widened
         generic :: pdf => kde_pdf_r0, kde_pdf_r1 !! the density at a point or at each of an array
         procedure, private :: kde_pdf_r0 !! at one point
         procedure, private :: kde_pdf_r1 !! at each point of an array
@@ -399,7 +498,10 @@ module parquet_kde
         !!
         !! `x` is the sample, retained as a sorted copy of its population. `bandwidth` is the
         !! kernel's standard deviation, a finite positive number; without it the bandwidth comes
-        !! from `rule`, `"silverman"` (the default) or `"scott"`, and the two cannot both be given.
+        !! from `rule`, `"isj"` (the default: the Improved Sheather-Jones rule), `"silverman"` or
+        !! `"scott"`, and the two cannot both be given. When the rule is not named and the ISJ rule
+        !! finds no bandwidth at its grid's resolution, Silverman's rule gives it instead, and
+        !! `%rule` says so; when `rule = "isj"` is named, the estimate is then undefined.
         !! `adjust` multiplies the bandwidth however it was chosen (default 1). `kernel` is
         !! `"gaussian"` (the default), `"epanechnikov"`, `"bspline"` or `"box"`. `adaptive =
         !! .true.` gives each point its own bandwidth, `h * (p(x_j)/g)**(-alpha)`, from a pilot
@@ -420,7 +522,7 @@ module parquet_kde
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real64), intent(in)               :: x(:)          !! the sample
             real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule          !! `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
@@ -449,7 +551,7 @@ module parquet_kde
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real32), intent(in)               :: x(:)          !! the sample
             real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule          !! `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
@@ -468,6 +570,36 @@ module parquet_kde
             logical, intent(out), optional         :: ok            !! the estimate is defined
             integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
         end subroutine kde_fit_f32
+
+        !> A numeric `parquet_column`, widened to `real64` first: `int32`, `int64`, `float32` or
+        !! `float64`, and any other kind aborts, naming it. The column's own validity is the null
+        !! mask, so `is_valid` cannot be given beside it; every other argument as the `real64` form.
+        module subroutine kde_fit_col(self, x, bandwidth, rule, adjust, kernel, adaptive, alpha, &
+                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, &
+                n_nan, n_outside, ok, threads)
+            implicit none
+            class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
+            type(parquet_column), intent(in)       :: x             !! the sample, one numeric column
+            real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
+            character(len=*), intent(in), optional :: kernel        !! the kernel's token
+            logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: lower         !! the support's lower bound
+            real(real64), intent(in), optional     :: upper         !! the support's upper bound
+            character(len=*), intent(in), optional :: boundary      !! the boundary correction
+            logical, intent(in), optional          :: is_valid(:)   !! must be absent: the column's own
+            real(real64), intent(in), optional     :: weights(:)    !! per-element weights
+            character(len=*), intent(in), optional :: weight_type   !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan       !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null        !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan         !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
+            logical, intent(out), optional         :: ok            !! the estimate is defined
+            integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
+        end subroutine kde_fit_col
 
     end interface
 
@@ -642,8 +774,10 @@ module parquet_kde
             character(len=:), allocatable, intent(out) :: name !! the kernel's token
         end subroutine kde_kernel_name
 
-        !> How the bandwidth was chosen, as a token: `call k%rule(name)` answers `"silverman"` or
-        !! `"scott"`, or `"explicit"` when `bandwidth=` was given as a number.
+        !> How the bandwidth was chosen, as a token: `call k%rule(name)` answers the rule that gave
+        !! it, `"isj"`, `"silverman"` or `"scott"`, or `"explicit"` when `bandwidth=` was given as a
+        !! number. Under the default it answers `"silverman"` when the ISJ rule found no bandwidth
+        !! and Silverman's rule gave it instead.
         module subroutine kde_rule_name(self, name)
             implicit none
             class(pf_kde), intent(in)                  :: self !! the fitted estimate
@@ -835,6 +969,24 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
             integer, intent(in), optional         :: threads     !! the team for the deposit
         end subroutine grid_add_f32_r1
+
+        !> Accumulates a numeric `parquet_column`, widened to `real64` first: `int32`, `int64`,
+        !! `float32` or `float64`, and any other kind aborts, naming it. The column's own validity is
+        !! the null mask, so `is_valid` cannot be given beside it; otherwise as the `real64` array
+        !! form.
+        module subroutine grid_add_col(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
+                threads)
+            implicit none
+            class(pf_kde_grid), intent(inout)     :: self        !! the grid
+            type(parquet_column), intent(in)      :: x           !! the points, one numeric column
+            logical, intent(in), optional         :: is_valid(:) !! must be absent: the column's own
+            real(real64), intent(in), optional    :: weights(:)  !! per-element weights
+            logical, intent(in), optional         :: skipnan     !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional :: n_null      !! excluded as null
+            integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
+            integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
+            integer, intent(in), optional         :: threads     !! the team for the deposit
+        end subroutine grid_add_col
 
         !> Adds another grid's accumulation and counts to this one: `call g%merge(other)`. The two
         !! must share the number of cells, the range, the bandwidth, the kernel, the support, the
@@ -1307,6 +1459,67 @@ module parquet_kde
             real(real64), intent(out)              :: h           !! the bandwidth
         end subroutine kde_rule_bandwidth
 
+        !> The effective sample size the rules use: the population's size unweighted, `sum(w)` under
+        !! frequency weights and Kish's `sum(w)**2/sum(w**2)` under reliability weights.
+        pure module function kde_n_eff(m, freq, weights) result(n_eff)
+            implicit none
+            integer(int64), intent(in)         :: m          !! the population's size
+            logical, intent(in)                :: freq       !! frequency weights
+            real(real64), intent(in), optional :: weights(:) !! its weights, when weighted
+            real(real64)                       :: n_eff      !! the effective sample size
+        end function kde_n_eff
+
+        !> The bandwidth the Improved Sheather-Jones rule gives the population `x`, ascending, with
+        !! its `weights`: `h = sqrt(t) * R`, `t` the smallest root of its fixed point at or above
+        !! one cell of the binning grid and `R` the grid's span. Not multiplied by `adjust`.
+        !!
+        !! The survivors are binned by `pf_bin_linear` onto the centres of `KDE_ISJ_CELLS` cells (or
+        !! the count `parquet_debug_set_kde_isj_cells` forces) spanning the sample's range widened
+        !! by `KDE_ISJ_WIDEN` of it on each side and clipped to the support; a point in the half cell
+        !! beyond the first or last centre lands whole on it, which is where the reflecting
+        !! boundary of the cosine basis puts it. The binned mass, normalised to one, is transformed
+        !! by `pf_dct`, and `pf_find_root` grows a bracket from `t` of one cell until the fixed
+        !! point changes sign. `found` is `.false.` -- and `h` NaN -- for a sample with no spread or
+        !! too extreme a range to bin, one whose fixed point is not negative at one cell (its root,
+        !! if any, lies below what the grid resolves), and one with no sign change up to
+        !! `KDE_ISJ_T_MAX`.
+        module subroutine kde_isj_bandwidth(x, freq, weights, has_lower, lo, has_upper, hi, h, found)
+            implicit none
+            real(real64), intent(in)           :: x(:)       !! the population, ascending, inside the support
+            logical, intent(in)                :: freq       !! frequency weights
+            real(real64), intent(in), optional :: weights(:) !! its weights, when weighted
+            logical, intent(in)                :: has_lower  !! a lower bound was given
+            real(real64), intent(in)           :: lo         !! the lower bound
+            logical, intent(in)                :: has_upper  !! an upper bound was given
+            real(real64), intent(in)           :: hi         !! the upper bound
+            real(real64), intent(out)          :: h          !! the bandwidth; NaN when none was found
+            logical, intent(out)               :: found      !! the rule found a bandwidth
+        end subroutine kde_isj_bandwidth
+
+        !> The ISJ rule's fixed-point function at `x`, the squared bandwidth in units of the grid's
+        !! span: `x - xi*gamma^[l](x)`. A stage whose norm is zero or too small to divide by makes
+        !! the answer `-huge`, the limit the function falls to there. Never NaN and never overflows.
+        module function kde_isj_eval(this, x) result(y)
+            implicit none
+            class(kde_isj_point), intent(inout) :: this !! the sample's binned transform
+            real(real64), intent(in)            :: x    !! `t`
+            real(real64)                        :: y    !! `F(t)`
+        end function kde_isj_eval
+
+        !> Widens a numeric `parquet_column` for a column form: `int32`, `int64`, `float32` and
+        !! `float64` are accepted, and any other kind aborts with `entry`, naming it. `wide` is the
+        !! column as `real64` and `mask` its validity, unallocated when it has no null, so that it
+        !! passes as an absent `is_valid`; `is_valid` itself must be absent, or the family's widener
+        !! aborts.
+        module subroutine kde_widen_column(entry, x, is_valid, wide, mask)
+            implicit none
+            character(len=*), intent(in)           :: entry    !! the binding, for the message
+            type(parquet_column), intent(in)       :: x        !! the column
+            logical, intent(in), optional          :: is_valid(:) !! the caller's `is_valid`, refused
+            real(real64), allocatable, intent(out) :: wide(:)  !! the values, widened
+            logical, allocatable, intent(out)      :: mask(:)  !! their validity, or unallocated
+        end subroutine kde_widen_column
+
     end interface
 
     ! ---- the test hooks, implemented in parquet_kde_core.f90 -------------------------------
@@ -1336,6 +1549,18 @@ module parquet_kde
             implicit none
             integer, intent(in) :: n !! the cell count; `<= 0` for the rule
         end subroutine parquet_debug_set_kde_pilot_cells
+
+        !> Forces the number of cells the ISJ rule bins the sample into; `n <= 0` restores
+        !! `2**14`. Otherwise `n` must be a power of two from `2**4` to `2**20`, or the call aborts.
+        !!
+        !! Test-only, and public for that reason alone: an independent oracle can reproduce the
+        !! rule's transform at `2**10` cells to fifty digits, and not at `2**14` in the time a test
+        !! may take, so this is how a test reaches the rule's own arithmetic. Process-global and
+        !! unsynchronised; the suite that calls it runs serially.
+        module subroutine parquet_debug_set_kde_isj_cells(n)
+            implicit none
+            integer, intent(in) :: n !! the cell count, a power of two; `<= 0` for the default
+        end subroutine parquet_debug_set_kde_isj_cells
 
         !> Nanoseconds the most recent `pf_kde%fit` spent in each of its three costly phases: the
         !! sort, the pilot (built and summarised) and the bandwidths (each point's, and its mass

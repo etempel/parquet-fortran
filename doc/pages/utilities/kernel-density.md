@@ -22,7 +22,7 @@ use iso_fortran_env, only : real64
 type(pf_kde) :: k
 real(real64) :: xg(200), fg(200)
 
-call k%fit(mag)                    ! Silverman's rule, Gaussian kernel: the defaults
+call k%fit(mag)                    ! the ISJ rule, Gaussian kernel: the defaults
 call k%curve(xg, fg)               ! the density on 200 points across the data
 print '(a, f8.4)', 'bandwidth = ', k%bandwidth()
 ```
@@ -45,8 +45,10 @@ call k%pilot(g)
 call k%print([unit])
 ```
 
-`x` in `%fit` is a `real64` or `real32` array; a `real32` sample is widened before anything else
-happens to it. `%pdf`, `%cdf`, `%quantile` and `%bandwidth_at` each take a scalar or a rank-1
+`x` in `%fit` is a `real64` or `real32` array, or a `parquet_column` of kind `int32`, `int64`,
+`float32` or `float64`; anything but a `real64` array is widened before anything else happens to
+it. A column's own validity is its null mask, so `is_valid=` cannot be given beside one, and a
+column of any other kind aborts, naming it. `%pdf`, `%cdf`, `%quantile` and `%bandwidth_at` each take a scalar or a rank-1
 array, and every result is `real64`; `threads=` belongs to the array forms, `%curve` and
 `%sample` (see [Thread safety](#thread-safety)). Every token (`rule`, `kernel`, `boundary`) is
 matched without regard to case.
@@ -112,38 +114,80 @@ no conversion under either.
 
 ## Choosing a bandwidth
 
-Without `bandwidth=`, the bandwidth comes from a rule over the fitted population, with the robust
-scale `A = min(s, IQR/1.349)`: `s` is `pf_stddev` and `IQR` is `pf_iqr`, each over the same
-population, with the same weights and `weight_type`.
+Without `bandwidth=`, the bandwidth comes from a rule over the fitted population. The default is the
+Improved Sheather-Jones rule, `rule="isj"`; Silverman's and Scott's rules of thumb are there by name.
+
+### The Improved Sheather-Jones rule
+
+The rule chooses the bandwidth that minimises the estimate's asymptotic mean integrated squared
+error, estimating the density's own derivatives from the sample rather than assuming it is normal.
+It bins the population onto 16384 cells spanning its range widened by a tenth on each side, clipped
+to the support when one is given, takes the discrete cosine transform of the binned sample, and
+solves a fixed-point equation for the bandwidth: each derivative's norm is estimated at the
+smoothing the norm of the one above makes optimal, from the seventh derivative down to the second.
+The answer is the smallest solution no narrower than one cell.
+
+- **It follows a multimodal sample.** Two narrow clusters far apart have a large standard
+  deviation, which a rule of thumb reads as the sample's scale, smoothing both clusters into broad
+  bumps; the ISJ rule reads the clusters' own width, and its bandwidth can be a tenth of Silverman's.
+- **On a normal sample it agrees with the rules of thumb** to a few per cent: it seeks the same
+  optimum without assuming the shape.
+- **Where it finds no bandwidth, Silverman's rule gives one**, and `%rule(name)` answers
+  `"silverman"`. That happens for a handful of points, and for values rounded to a step several
+  cells wide, whose repeats the equation reads as structure finer than a cell. Named as
+  `rule="isj"`, the rule is not replaced: the fit is undefined (`ok = .false.`, every answer NaN).
+- **Repeated values are concentrations to it.** A sample of few distinct values repeated many times,
+  and in the same way one given integer frequency weights, can be given a bandwidth of about a cell,
+  which resolves the repeats. Name a rule of thumb, or give the bandwidth, for such data.
+- **Its cost is one pass binning the sample and a fixed amount besides**: a transform of the 16384
+  cells and a few tens of evaluations of the equation. On a large sample that is less than the rules
+  of thumb spend on their own passes over it; on a small one it is many times more, so a loop
+  fitting many small samples should name a rule of thumb. `bench/benchmark_kde.sh`'s `rules` mode
+  measures each rule.
+- **The bandwidth is the Gaussian kernel's optimum**, and under the standard-deviation convention it
+  serves the other three kernels as the rules of thumb do.
+
+Other implementations of the rule bin onto other grids and count the sample differently, and their
+bandwidths differ accordingly. When a particular value is needed, pass it as `bandwidth=`.
+
+### Silverman's and Scott's rules, and what every rule shares
+
+The two rules of thumb scale a normal density's optimum by the robust scale `A = min(s,
+IQR/1.349)`: `s` is `pf_stddev` and `IQR` is `pf_iqr`, each over the same population, with the
+same weights and `weight_type`.
 
 | `rule=` | `h` |
 |---|---|
-| `"silverman"` (default) | `0.9 * A * n_eff**(-1/5)` -- Silverman's rule of thumb |
+| `"silverman"` | `0.9 * A * n_eff**(-1/5)` -- Silverman's rule of thumb |
 | `"scott"` | `1.06 * A * n_eff**(-1/5)` -- Scott's normal-reference rule |
 
 - **`adjust=`** multiplies the bandwidth however it was chosen, a rule's or an explicit number:
   `adjust=0.5` halves the smoothing.
 - **`bandwidth=` and `rule=` cannot both be given**; to scale a rule, use `adjust=`.
-- **`n_eff` is what the weights make it.** Unweighted, it is the population's size. Under
-  `weight_type="reliability"` (the default) it is `sum(w)**2 / sum(w**2)`; under
-  `weight_type="frequency"` it is `sum(w)`, so a frequency weight of three counts as three
-  observations. Under frequency weights `pf_iqr` takes its quartiles by the inverted CDF, the
-  family's own rule for them, so the bandwidth equals the replicated sample's exactly wherever
-  `s` is the smaller scale, and may differ slightly where the quartiles decide it.
-- **A sample more than half of whose values tie** has an interquartile range of zero, and the rule
-  then uses `s` alone rather than a bandwidth of zero.
-- **One point, or a constant sample, has no scale**, so a rule cannot give it a bandwidth: the fit
+- **`n_eff` is what the weights make it**, under all three rules. Unweighted, it is the
+  population's size. Under `weight_type="reliability"` (the default) it is `sum(w)**2 / sum(w**2)`;
+  under `weight_type="frequency"` it is `sum(w)`, so a frequency weight of three counts as three
+  observations, and the ISJ rule gives the replicated sample's bandwidth. Under frequency weights
+  `pf_iqr` takes its quartiles by the inverted CDF, the family's own rule for them, so a rule of
+  thumb's bandwidth equals the replicated sample's exactly wherever `s` is the smaller scale, and
+  may differ slightly where the quartiles decide it.
+- **A sample more than half of whose values tie** has an interquartile range of zero, and a rule
+  of thumb then uses `s` alone rather than a bandwidth of zero.
+- **One point, or a constant sample, has no scale**, so no rule can give it a bandwidth: the fit
   is undefined (`ok = .false.`, every answer NaN). The same sample with an explicit `bandwidth=` is a
   valid estimate, one bump per point.
-- **The rules are derived for a Gaussian kernel and a unimodal density.** Under the
+- **The rules of thumb are derived for a Gaussian kernel and a unimodal density.** Under the
   standard-deviation convention they serve the other three kernels within about one per cent of
   each kernel's own optimal scaling. A multimodal sample is oversmoothed by both.
+- **The rules choose `h` and the boundary correction does not.** With `lower=` or `upper=`, a rule
+  reads the population inside the support as if it were unbounded, and the correction is applied
+  to the kernels afterwards.
 
-Other software computes different numbers under the same two rule names. When a particular value
-is needed, pass it as `bandwidth=`.
+Other software computes different numbers under the two rules of thumb's names. When a particular
+value is needed, pass it as `bandwidth=`.
 
-`%bandwidth()` answers the bandwidth in use, after `adjust`, and `%rule(name)` how it was chosen:
-`"silverman"`, `"scott"`, or `"explicit"` when it was given as a number.
+`%bandwidth()` answers the bandwidth in use, after `adjust`, and `%rule(name)` the rule that chose
+it: `"isj"`, `"silverman"` or `"scott"`, or `"explicit"` when it was given as a number.
 
 ## Bounded support: `lower=`, `upper=` and `boundary=`
 
@@ -299,8 +343,8 @@ call g%grid(x)
   is set up: to use a rule, fit a `pf_kde` to a subsample and pass its `%bandwidth()`. `kernel`,
   `lower`, `upper` and `boundary` are as for `%fit`, and `[xmin, xmax]` must lie inside the support.
   A second `%init` discards everything.
-- **`%add`** takes one point or an array, `real64` or `real32`, under the population rules of
-  `%fit`. `n_null`, `n_nan` and `n_outside` report what that call excluded, and the accessors
+- **`%add`** takes one point or an array, `real64` or `real32`, or a numeric `parquet_column` as
+  `%fit` does, under the population rules of `%fit`. `n_null`, `n_nan` and `n_outside` report what that call excluded, and the accessors
   (`%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%n_outside()`, `%sum_weights()`) the totals over
   every call.
 - **Each point adds exactly its weight**, to rounding, at every cell width. Its kernel is evaluated
@@ -529,6 +573,8 @@ A data condition never aborts:
   unless both ends were given, and `%quantile` answers NaN.
 - **A population a rule cannot scale** (one point, or a constant sample) is the same: `ok =
   .false.` and NaN everywhere, `%bandwidth()` included.
+- **`rule="isj"` named, on a sample the rule finds no bandwidth for**, is the same too. Without
+  `rule=`, Silverman's rule gives the bandwidth instead, and `%rule(name)` answers `"silverman"`.
 - **`skipnan=.false.` with a NaN present** keeps the NaN, which makes the whole estimate NaN, with
   `ok = .false.`
 - **A query at a NaN point** answers NaN; at an infinite point, the density is zero and `%cdf` is 0
@@ -556,7 +602,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 |---|---|
 | `bandwidth` NaN, infinite or `<= 0` | `pf_kde%fit: bandwidth must be a finite, positive number` |
 | `bandwidth=` and `rule=` both given | `pf_kde%fit: bandwidth= and rule= cannot both be given; use adjust= to scale a rule` |
-| an unknown `rule` | `pf_kde%fit: rule must be "silverman" or "scott"` |
+| an unknown `rule` | `pf_kde%fit: rule must be "isj", "silverman" or "scott"` |
 | `adjust` NaN, infinite or `<= 0` | `pf_kde%fit: adjust must be a finite, positive number` |
 | an unknown `kernel` | `pf_kde%fit: kernel must be "gaussian", "epanechnikov", "bspline" or "box"` |
 | `lower` or `upper` NaN or infinite | `pf_kde%fit: lower and upper must be finite` |
@@ -566,6 +612,8 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `is_valid` or `weights` of the wrong size | `pf_kde%fit: weights has 3 elements but values has 4` (the family's text) |
 | a negative, NaN or infinite weight | `pf_kde%fit: weight 2 is negative; weights must be finite and non-negative` (the family's text) |
 | an unknown `weight_type` | `pf_kde%fit: weight_type "..." is not recognised; ...` (the family's text) |
+| a column of a kind other than `int32`, `int64`, `float32` or `float64` | `pf_kde%fit: a column of kind PK_LOGICAL holds no numbers to place kernels at; the column must be int32, int64, float32 or float64` (naming the kind) |
+| `is_valid=` beside a column | `pf_kde%fit: is_valid= cannot be given alongside a parquet_column; ...` (the family's text) |
 | `threads <= 0` | `pf_kde%fit: threads must be positive` (or `%pdf`, `%cdf`, `%quantile`, `%curve`, `%sample`) |
 | a query or accessor before `%fit`, or after `%clear` | `pf_kde%pdf: the estimate has not been fitted` |
 | an output of the wrong size | `pf_kde%pdf: f must have one element per point of x`, `pf_kde%cdf: p must have ...`, `pf_kde%quantile: x must have one element per element of p` |
@@ -589,7 +637,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |
 | `pilot=` a grid never initialised | `pf_kde_grid%init: pilot must be an initialised grid` |
 | `pilot=` a grid whose range does not cover `[xmin, xmax]` | `pf_kde_grid%init: the pilot must cover this grid's range` |
-| `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0` | `%fit`'s texts, naming `pf_kde_grid%add` (`pf_kde_grid%sample` for its `threads`) |
+| `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0`, a column of another kind, `is_valid=` beside a column | `%fit`'s texts, naming `pf_kde_grid%add` (`pf_kde_grid%sample` for its `threads`) |
 | a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |
 | `%merge` with a grid never initialised | `pf_kde_grid%merge: the other grid has not been initialised` |
 | `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`, `pilot`) |
@@ -619,7 +667,8 @@ per thread merged at the end is how several threads accumulate one estimate.
 ## What it costs to import
 
 `use parquet_kde` compiles the statistics tier it is built on (`parquet_stats`, and beneath it the
-sorting tier), the random-number generator `%sample` draws from (`parquet_random`), and the
-module's own four files; no reader, writer or C++ boundary. It re-exports
+sorting tier), the random-number generator `%sample` draws from (`parquet_random`), the root finder
+and the discrete cosine transform the ISJ rule is built on (`parquet_root`, `parquet_transform`),
+and the module's own four files; no reader, writer or C++ boundary. It re-exports
 the verbosity and message-stream pair, which `%print` reads, so a program importing it alone can
 silence its output with `parquet_set_verbosity("silent")`.

@@ -1,7 +1,8 @@
 !> What `parquet_kde` costs: `pf_kde`'s exact queries against the bandwidth, `pf_kde_grid`'s deposit
 !> against the cells one kernel reaches, a merge against the grid's size, how fast the grid
 !> converges to the exact estimate as its cells shrink, what the adaptive kernel adds to a fit
-!> and to a query, what a draw from either form costs, and how the threaded forms scale.
+!> and to a query, what each bandwidth rule adds to a fit, what a draw from either form costs, and
+!> how the threaded forms scale.
 !!
 !! Driven by `bench/benchmark_kde.sh`, whose header carries the usage and what each column means.
 !! Every timed job is repeated until one lap lasts at least `MIN_LAP` seconds and the fastest of
@@ -51,6 +52,8 @@ program benchmark_kde
         call run_accuracy(npoints, nqueries)
     case ("adaptive")
         call run_adaptive(rounds, npoints, nqueries)
+    case ("rules")
+        call run_rules(rounds, npoints)
     case ("sample")
         call run_sample(rounds, npoints, nqueries)
     case ("threads")
@@ -101,7 +104,7 @@ contains
             case default
                 write(error_unit, '(a)') "benchmark_kde: unknown option '" // trim(arg(1:eq - 1)) // "'"
                 write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|accuracy|adaptive|" // &
-                    "sample|threads] [--rounds=N] [--points=N] [--queries=N]"
+                    "rules|sample|threads] [--rounds=N] [--points=N] [--queries=N]"
                 error stop 1
             end select
         end do
@@ -509,6 +512,91 @@ contains
         print '(a,es22.14)', "checksum ", checksum
 
     end subroutine run_adaptive
+
+    ! ---- rules ---------------------------------------------------------------------------------
+
+    !> What choosing the bandwidth costs, per rule, on one thread: `%fit` under `rule="isj"`,
+    !> `"silverman"` and `"scott"`, and with the bandwidth given as a number, on samples of a
+    !> thousand points and every tenfold larger size up to `n`, in milliseconds. The fit given a
+    !> number is the sort and the bookkeeping every fit shares, so each rule's column less it is what
+    !> the rule adds: the ISJ rule's is one pass binning the sample and a fixed amount for its
+    !> transform and its fixed point, the rules of thumb's their passes over the population.
+    subroutine run_rules(rounds, n)
+        integer, intent(in)        :: rounds !! timed laps per figure
+        integer(int64), intent(in) :: n      !! the largest sample's size
+
+        character(len=9), parameter :: RULES(3) = [character(len=9) :: "isj", "silverman", "scott"]
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        real(real64) :: h, best(4), h_isj, h_silverman, checksum
+        integer(int64) :: nsize
+        integer :: r
+
+        call sample(n, x)
+        h = (maxval(x) - minval(x))/200.0_real64
+        checksum = 0.0_real64
+
+        print '(a)', "=== pf_kde%fit under each rule: milliseconds, one thread ==="
+        print '(a,i0,a)', "bandwidth: the rule's, or range/200 given as a number; fastest of ", rounds, " laps"
+        print '(a)', "isj/silverman: the two rules' bandwidths over each other on this sample"
+        print '(a)', ""
+        print '(a)', "     points        isj  silverman      scott     number  isj/silverman"
+        nsize = 1000_int64
+        do while (nsize <= n)
+            do r = 1, 3
+                best(r) = time_rule_fit(k, x(1:nsize), trim(RULES(r)), h, rounds, checksum)
+                if (r == 1) h_isj = k%bandwidth()
+                if (r == 2) h_silverman = k%bandwidth()
+            end do
+            best(4) = time_rule_fit(k, x(1:nsize), "", h, rounds, checksum)
+            print '(i11,4f11.3,f15.3)', nsize, 1.0e3_real64*best, h_isj/h_silverman
+            nsize = 10_int64*nsize
+        end do
+        print '(a)', ""
+        print '(a,es22.14)', "checksum ", checksum
+
+    end subroutine run_rules
+
+    !> The fastest of `rounds` fits of `x` under `rule` -- or with the bandwidth `h` given as a
+    !> number when `rule` is blank -- on one thread, each lap repeated until it is long enough to
+    !> time, in seconds per fit; each fit's bandwidth is folded into `checksum`.
+    function time_rule_fit(k, x, rule, h, rounds, checksum) result(best)
+        type(pf_kde), intent(inout) :: k        !! the estimate; refitted every repetition
+        real(real64), intent(in)    :: x(:)     !! the sample
+        character(len=*), intent(in) :: rule    !! the rule's token, or blank for `h`
+        real(real64), intent(in)    :: h        !! the bandwidth given as a number
+        integer, intent(in)         :: rounds   !! laps
+        real(real64), intent(inout) :: checksum !! the keep-it-live sum
+        real(real64)                :: best     !! seconds per fit, the fastest lap
+
+        real(real64) :: t0, t
+        integer(int64) :: reps, r
+        integer :: lap
+
+        ! The first lap doubles its repetitions until it lasts `MIN_LAP`; the rest repeat as many.
+        reps = 1_int64
+        best = huge(1.0_real64)
+        lap = 0
+        do while (lap < rounds)
+            t0 = clock()
+            do r = 1_int64, reps
+                if (len(rule) == 0) then
+                    call k%fit(x, bandwidth=h, threads=1)
+                else
+                    call k%fit(x, rule=rule, threads=1)
+                end if
+                checksum = checksum + k%bandwidth()
+            end do
+            t = clock() - t0
+            if (lap == 0 .and. t < MIN_LAP) then
+                reps = 2_int64*reps
+                cycle
+            end if
+            lap = lap + 1
+            best = min(best, t/real(reps, real64))
+        end do
+
+    end function time_rule_fit
 
     ! ---- sample --------------------------------------------------------------------------------
 

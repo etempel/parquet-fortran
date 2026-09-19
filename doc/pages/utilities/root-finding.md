@@ -145,15 +145,15 @@ aborted on, with `x` the end of the last bracket with the smaller `|f|` and `inf
 `info%bracket_hi` the last bracket tried. A caller can retry with a wider policy, or report that
 the data cannot support the answer.
 
-The bracket search of the Improved Sheather-Jones bandwidth rule is one object — start at a tiny
-bracket above zero, double it, stop at 1:
+The bracket search of the Improved Sheather-Jones bandwidth rule (`parquet_kde`'s default) is one
+object — start at the smallest `t` the rule accepts, `t_min`, double the bracket, stop at 1:
 
 ```fortran
 type(pf_bracket_expansion) :: grow
 grow%mode        = PF_EXPAND_UP
 grow%factor      = 2.0_real64
 grow%upper_limit = 1.0_real64
-call pf_find_root(fixed_point, 0.0_real64, 1.0e-11_real64, t, expand=grow, info=info)
+call pf_find_root(fixed_point, t_min, 2.0_real64*t_min, t, expand=grow, info=info)
 if (info%status == PF_ROOT_NO_BRACKET) then
     ! no sign change below 1: the sample is too small for this rule
 end if

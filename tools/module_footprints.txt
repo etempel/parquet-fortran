@@ -257,6 +257,8 @@ parquet_kde_core.f90
 parquet_kde_fit.f90
 parquet_kde_grid.f90
 parquet_random.f90
+parquet_root.f90
+parquet_root_solve.f90
 parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
@@ -275,6 +277,8 @@ parquet_stats_order.f90
 parquet_stats_relate.f90
 parquet_strings.f90
 parquet_temporal.f90
+parquet_transform.f90
+parquet_transform_dct.f90
 parquet_utils.f90
 parquet_wrapper.cpp
 parquet_ziggurat.f90

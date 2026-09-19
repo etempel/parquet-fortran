@@ -3718,7 +3718,19 @@ contains
             new_unittest("pf_kde_grid%sample refuses threads=0", &
                 test_kde_grid_sample_threads_zero_aborts), &
             new_unittest("pf_kde_grid%sample refuses an uninitialised grid", &
-                test_kde_grid_sample_uninitialised_aborts) &
+                test_kde_grid_sample_uninitialised_aborts), &
+            new_unittest("pf_kde%fit refuses a logical column, naming its kind", &
+                test_kde_fit_logical_column_aborts), &
+            new_unittest("pf_kde%fit refuses is_valid= beside a column", &
+                test_kde_fit_column_is_valid_aborts), &
+            new_unittest("pf_kde_grid%add refuses a vector column, naming its kind", &
+                test_kde_grid_add_vector_column_aborts), &
+            new_unittest("pf_kde_grid%add refuses is_valid= beside a column", &
+                test_kde_grid_add_column_is_valid_aborts), &
+            new_unittest("parquet_debug_set_kde_isj_cells refuses a count that is not a power of two", &
+                test_kde_isj_cells_not_pow2_aborts), &
+            new_unittest("parquet_debug_set_kde_isj_cells refuses a power of two beyond 2**20", &
+                test_kde_isj_cells_out_of_range_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, &
@@ -21175,7 +21187,7 @@ contains
     subroutine test_kde_unknown_rule_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_unknown_rule", &
-            "pf_kde%fit: rule must be ""silverman"" or ""scott""")
+            "pf_kde%fit: rule must be ""isj"", ""silverman"" or ""scott""")
     end subroutine test_kde_unknown_rule_aborts
     !
     subroutine test_kde_adjust_negative_aborts(error)
@@ -21659,5 +21671,43 @@ contains
         call check_kde_scenario(error, "kde_grid_sample_uninitialised", &
             "pf_kde_grid%sample: the grid has not been initialised")
     end subroutine test_kde_grid_sample_uninitialised_aborts
+    !
+    subroutine test_kde_fit_logical_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_logical_column", &
+            "pf_kde%fit: a column of kind PK_LOGICAL holds no numbers to place kernels at; " // &
+            "the column must be int32, int64, float32 or float64")
+    end subroutine test_kde_fit_logical_column_aborts
+    !
+    subroutine test_kde_fit_column_is_valid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_column_is_valid", &
+            "pf_kde%fit: is_valid= cannot be given alongside a parquet_column")
+    end subroutine test_kde_fit_column_is_valid_aborts
+    !
+    subroutine test_kde_grid_add_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_add_vector_column", &
+            "pf_kde_grid%add: a column of kind PK_FLOAT64_VEC holds no numbers to place kernels at; " // &
+            "the column must be int32, int64, float32 or float64")
+    end subroutine test_kde_grid_add_vector_column_aborts
+    !
+    subroutine test_kde_grid_add_column_is_valid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_add_column_is_valid", &
+            "pf_kde_grid%add: is_valid= cannot be given alongside a parquet_column")
+    end subroutine test_kde_grid_add_column_is_valid_aborts
+    !
+    subroutine test_kde_isj_cells_not_pow2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_isj_cells_not_pow2", &
+            "parquet_debug_set_kde_isj_cells: n must be a power of two from 16 to 1048576")
+    end subroutine test_kde_isj_cells_not_pow2_aborts
+    !
+    subroutine test_kde_isj_cells_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_isj_cells_out_of_range", &
+            "parquet_debug_set_kde_isj_cells: n must be a power of two from 16 to 1048576")
+    end subroutine test_kde_isj_cells_out_of_range_aborts
     !
 end module test_errors

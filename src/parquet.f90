@@ -202,10 +202,12 @@ module parquet
     ! Not part of that per-cell tier, hidden here for the same reason: it is the non-mutating
     ! `any_null` the table's read accessors must use, and a user already has `%any_null()`.
     private :: parquet_column_any_null
-    ! parquet_stats' exclusion pass and three argument checkers, published so that parquet_kde
-    ! applies the family's population rules and aborts with the family's own texts. They are
-    ! plumbing for that sibling, not API: every public `pf_*` procedure already runs them.
+    ! parquet_stats' exclusion pass, three argument checkers and column widener, published so that
+    ! parquet_kde applies the family's population rules, widens a column as the family does and
+    ! aborts with the family's own texts. They are plumbing for that sibling, not API: every public
+    ! `pf_*` procedure already runs them.
     private :: stats_compact, stats_check_sizes, stats_check_weight, stats_weight_kind
+    private :: col_to_real64
     ! Its ranged sibling, which %print_stat's statistics scan reads a column's nulls through a
     ! block at a time; a user already has `%row_validity_range`.
     private :: parquet_column_row_validity_range

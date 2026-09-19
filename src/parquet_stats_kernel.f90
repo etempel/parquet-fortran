@@ -20,27 +20,6 @@ submodule (parquet_stats) parquet_stats_kernel
 
 contains
 
-    !> Widens a scalar numeric `parquet_column` into a `real64` population and its validity mask.
-    !!
-    !! Three refusals, and each is a wrong answer rather than an inconvenience if it is dropped:
-    !!
-    !! * a **string, temporal or container** column has no numeric statistics, and the message names
-    !!   the kind it actually found;
-    !! * a column **wider than one element** aborts, because flattening a width-16 column into one
-    !!   population is a DIFFERENT statistic -- a caller who wants one element position across all
-    !!   rows has `%get_elem`, and one who genuinely wants the flattened population can pass the
-    !!   flattened array and thereby say so;
-    !! * `is_valid=` **alongside** a column aborts, because the column carries its own validity and
-    !!   two sources of truth that can disagree is a shape this repository has been bitten by.
-    !!
-    !! `mask` comes back UNALLOCATED for a null-free column, which is not a detail: an unallocated
-    !! allocatable passed to an `optional` dummy is ABSENT, so the core takes its own no-mask fast
-    !! path with no branch at the call site.
-    !!
-    !! The bulk read goes through `parquet_column_data_ptr` -- the typed accessor tier, never a
-    !! type-bound procedure -- so ifx does not build a class descriptor per call. The scalar
-    !! metadata queries below have no typed twin and are called once per column, which is the same
-    !! trade `parquet_sorting` already makes for its key extraction.
     !> Combines two columns' validity masks into the one a PAIRWISE statistic needs.
     !!
     !! Either input may be unallocated, which `col_to_real64` uses to mean "this column has no
@@ -60,14 +39,7 @@ contains
         if (allocated(b)) both = both .and. b
     end subroutine pair_mask
 
-    subroutine col_to_real64(col, what, is_valid, v, mask)
-        type(parquet_column), intent(in), target :: col
-        !! the column. `target` because `parquet_column_data_ptr` requires it; the pointer never
-        !! leaves this procedure, so the caller's actual argument needs no `target` of its own.
-        character(len=*), intent(in) :: what                  !! the public procedure's name.
-        logical, intent(in), optional :: is_valid(:)          !! must be absent; see above.
-        real(real64), allocatable, intent(out) :: v(:)        !! the widened population.
-        logical, allocatable, intent(out) :: mask(:)          !! its validity, or unallocated.
+    module procedure col_to_real64
         integer(int32), pointer :: p32(:)
         integer(int64), pointer :: p64(:)
         real(real32), pointer :: r32(:)
@@ -125,7 +97,7 @@ contains
             v = merge(1.0_real64, 0.0_real64, pb(1:n))
         end select
         call col%row_validity(mask)
-    end subroutine col_to_real64
+    end procedure col_to_real64
 
     module procedure count_valid_i32
         integer(int64) :: i, nv, nnull, wbits

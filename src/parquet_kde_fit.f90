@@ -76,7 +76,7 @@ contains
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
         real(real64) :: v, hh, adj, a_alpha, a_bmax, one(1)
-        logical :: saw_nan, freq, want_adaptive, built
+        logical :: saw_nan, freq, want_adaptive, built, found
 
         call kde_clear(self)
         kde_fit_ns = 0_int64
@@ -94,7 +94,7 @@ contains
         else if (present(rule)) then
             call kde_resolve_rule(EP, rule, self%rule_code)
         else
-            self%rule_code = KDE_RULE_SILVERMAN
+            self%rule_code = KDE_RULE_ISJ
         end if
         adj = 1.0_real64
         if (present(adjust)) then
@@ -192,6 +192,16 @@ contains
         ! ---- the bandwidth ----
         if (present(bandwidth)) then
             hh = bandwidth
+        else if (self%rule_code == KDE_RULE_ISJ) then
+            call kde_isj_bandwidth(self%x, freq, self%w, self%has_lower, self%lo, self%has_upper, self%hi, &
+                hh, found)
+            ! The default never fails where a rule of thumb would not: when the ISJ rule finds no
+            ! bandwidth and was not asked for by name, Silverman's rule gives one, and `%rule` says
+            ! which rule did. Named, it is left undefined, as a rule that finds no scale is.
+            if (.not. found .and. .not. present(rule)) then
+                self%rule_code = KDE_RULE_SILVERMAN
+                call kde_rule_bandwidth(self%rule_code, self%x, freq, self%w, weight_type, threads, hh)
+            end if
         else
             call kde_rule_bandwidth(self%rule_code, self%x, freq, self%w, weight_type, threads, hh)
         end if
@@ -276,6 +286,18 @@ contains
             upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
 
     end procedure kde_fit_f32
+
+    module procedure kde_fit_col
+
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+
+        ! The column's validity becomes `is_valid`: unallocated when it has no null, and so absent.
+        call kde_widen_column("pf_kde%fit", x, is_valid, wide, mask)
+        call kde_fit_f64(self, wide, bandwidth, rule, adjust, kernel, adaptive, alpha, bandwidth_max, lower, &
+            upper, boundary, mask, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
+
+    end procedure kde_fit_col
 
     ! ==========================================================================================
     ! Queries
@@ -557,6 +579,8 @@ contains
             name = "explicit"
         case (KDE_RULE_SCOTT)
             name = "scott"
+        case (KDE_RULE_ISJ)
+            name = "isj"
         case default
             name = "silverman"
         end select
@@ -673,7 +697,7 @@ contains
         self%fitted = .false.
         self%defined = .false.
         self%kernel_code = KDE_GAUSSIAN
-        self%rule_code = KDE_RULE_SILVERMAN
+        self%rule_code = KDE_RULE_ISJ
         self%boundary_code = KDE_BOUNDARY_NONE
         self%has_lower = .false.
         self%has_upper = .false.

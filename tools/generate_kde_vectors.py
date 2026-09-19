@@ -20,6 +20,16 @@ corrections at each bound and at both, the case where the kernel is wider than t
 (which only the mass normalisation keeps at unit mass), the single-point degenerate cases, and the
 adaptive kernel over a two-component recipe of its own.
 
+**The ISJ cases solve the rule's fixed point at 50 digits on the library's own grid.** The Improved
+Sheather-Jones rule bins the sample onto cell centres, takes the discrete cosine transform and finds
+the smallest root of Botev, Grotowski & Kroese's fixed point at or above one cell. The oracle does
+each step in exact arithmetic -- the linear split by rationals, the transform as a 50-digit cosine
+sum, the root by `findroot` inside the bracket the library's doubling search would find -- over
+`ISJ_CELLS = 1024` cells, which `parquet_debug_set_kde_isj_cells(1024)` makes the library use: at the
+library's default of `2**14` the transform would take minutes here. Every sign the search decides
+on is asserted to hold with a margin, and a float scan confirms the bracket holds one root, so a
+case cannot sit on a knife edge the two arithmetics could decide differently.
+
 **The adaptive cases take the pilot exactly.** The library reads each point's bandwidth from a
 pilot GRID, `h * (p(x_j)/g)**(-alpha)`, with `p` the grid interpolated and `log g` the mean of
 `log p` over the grid's density; the oracle takes the continuous limit of the same definitions --
@@ -37,17 +47,21 @@ Plain generation and `--check` need only `mpmath`; `--check` runs in CI's lint s
 `generate_stats_vectors.py --check`. `--self-test` needs scipy and fails without it; it also
 cross-checks against KDEpy and statsmodels when they import, and reports each one that does not
 as SKIPPED by name. It is a maintainer's run in the `astro` environment, which carries scipy and
-KDEpy, so a KDEpy skip reported there is an environment fault.
+KDEpy, so a KDEpy skip reported there is an environment fault. Its ISJ cross-check is built from
+KDEpy's fixed-point function and linear binning and scipy's transform, and runs the model at the
+library's default grid; KDEpy's own `improved_sheather_jones` is not a reference (see
+`self_test`).
 
 Maintainer-only: it is never run at build time and is stripped from the fpm-published package.
 """
 
+import math
 import sys
 import textwrap
 from pathlib import Path
 
 try:
-    from mpmath import mp, mpf, sqrt as mpsqrt, erf, erfc, exp, pi, quad
+    from mpmath import mp, mpf, sqrt as mpsqrt, erf, erfc, exp, pi, quad, cos as mpcos, findroot
 except ImportError:                                            # pragma: no cover - maintainer tool
     print("generate_kde_vectors.py: needs mpmath (pip install mpmath)", file=sys.stderr)
     raise SystemExit(2)
@@ -93,6 +107,216 @@ def two_component(n):
         else:
             out.append(-300.0 + v / 16.0)
     return out
+
+
+def two_component_rounded(n, step):
+    """The two-component recipe rounded to multiples of `step`: `step*floor(v/step + 1/2)`.
+
+    Exact in both languages for a power-of-two `step`: every value of the recipe is an integer over
+    16. The ISJ cases use it to put a comb of repeated values on the rule's grid.
+    """
+    return [step * math.floor(v / step + 0.5) for v in two_component(n)]
+
+
+# ======================================================================================
+# The Improved Sheather-Jones rule
+# ======================================================================================
+
+#: The cells the golden ISJ cases bin into, as `parquet_debug_set_kde_isj_cells(1024)` makes the
+#: library do. The library's own default is `2**14` (`KDE_ISJ_CELLS`).
+ISJ_CELLS = 1024
+
+#: The share of the range the grid reaches beyond each extreme point (`KDE_ISJ_WIDEN`).
+ISJ_WIDEN = mpf(1) / 10
+
+#: The fixed point's number of stages, `l` (`KDE_ISJ_STAGES`).
+ISJ_STAGES = 7
+
+#: The last `t` the library's bracket search probes (`KDE_ISJ_T_MAX`).
+ISJ_T_MAX = mpf(1)
+
+#: A term whose exponent `k**2 pi**2 t` passes this is below `1e-170` of the one before the sum's
+#: largest, far beyond 50 digits of any norm here; the library stops at 708 for its own reason.
+ISJ_EXP_CUT = 400
+
+#: How clearly a sign the search decides on must hold, relative to `t`: the library's arithmetic
+#: agrees with this model to about `1e-14`, so any margin far above that settles the case.
+ISJ_MARGIN = mpf("1e-3")
+
+
+def isj_mass(xs, ws, lo, hi, cells):
+    """The sample binned onto `cells` centres and normalised to one, with the grid's span.
+
+    The grid is the range widened by `ISJ_WIDEN` of it on each side, clipped to `[lo, hi]`, cut into
+    `cells` cells; each point splits its weight between the two centres about it in proportion to
+    its distance from each, and a point in the half cell beyond the first or last centre gives its
+    whole weight to that centre. `None` for a sample with no spread.
+    """
+    pairs = sorted(zip(xs, ws), key=lambda t: t[0])
+    if len(pairs) < 2 or pairs[-1][0] - pairs[0][0] <= 0:
+        return None
+    span = pairs[-1][0] - pairs[0][0]
+    a = pairs[0][0] - ISJ_WIDEN * span
+    b = pairs[-1][0] + ISJ_WIDEN * span
+    if lo is not None and lo > a:
+        a = lo
+    if hi is not None and hi < b:
+        b = hi
+    dx = (b - a) / cells
+    first = a + dx / 2
+    last = a + (cells - mpf(1) / 2) * dx
+    mass = {}
+
+    def deposit(j, v):
+        mass[j] = mass.get(j, mpf(0)) + v
+
+    for x, w in pairs:
+        if x <= first:
+            deposit(0, w)
+        elif x >= last:
+            deposit(cells - 1, w)
+        else:
+            u = (x - first) / dx
+            k = int(mp.floor(u))
+            deposit(k, w * (1 - (u - k)))
+            deposit(k + 1, w * (u - k))
+    total = sum(mass.values())
+    return {j: v / total for j, v in mass.items()}, b - a
+
+
+def isj_spectrum(mass, cells):
+    """`(y_k/2)**2` for `k = 1 .. cells - 1`, `y` the type-II transform with its factor of two.
+
+    `y_k = 2 sum_j p_j cos(pi k (2j + 1)/(2 cells))`, summed over the centres that hold mass, with
+    the cosine read from a table of the `4 cells` angles the index can reach.
+    """
+    n4 = 4 * cells
+    table = [mpcos(pi * q / (2 * cells)) for q in range(n4)]
+    items = sorted(mass.items())
+    out = []
+    for k in range(1, cells):
+        acc = mpf(0)
+        for j, v in items:
+            acc += v * table[(k * (2 * j + 1)) % n4]
+        out.append(acc * acc)          # (y_k/2)**2, y_k = 2*acc
+    return out
+
+
+class IsjFixedPoint:
+    """`F(t) = t - xi*gamma^[l](t)` over one sample's spectrum, at the working precision."""
+
+    def __init__(self, b2, n_eff):
+        self.n_eff = n_eff
+        self.kk = [mpf(k) ** 2 for k in range(1, len(b2) + 1)]
+        self.p = {s: [kk ** s * b for kk, b in zip(self.kk, b2)] for s in range(2, ISJ_STAGES + 1)}
+        self.pi2 = pi ** 2
+
+    def norm(self, s, t):
+        """`2 pi**(2s) sum_k k**(2s) (y_k/2)**2 exp(-k**2 pi**2 t)`."""
+        ct = self.pi2 * t
+        acc = mpf(0)
+        for kk, p in zip(self.kk, self.p[s]):
+            if kk * ct > ISJ_EXP_CUT:
+                break
+            acc += p * exp(-kk * ct)
+        return 2 * pi ** (2 * s) * acc
+
+    def __call__(self, t):
+        f = self.norm(ISJ_STAGES, t)
+        for s in range(ISJ_STAGES - 1, 1, -1):
+            if f <= 0:
+                return mpf("-inf")
+            odd = 1
+            for q in range(1, 2 * s, 2):
+                odd *= q
+            k0 = mpf(odd) / mpsqrt(2 * pi)
+            c = (1 + mpf(2) ** (-(s + mpf(1) / 2))) / 3
+            f = self.norm(s, (2 * c * k0 / (self.n_eff * f)) ** (mpf(2) / (3 + 2 * s)))
+        if f <= 0:
+            return mpf("-inf")
+        return t - (2 * self.n_eff * mpsqrt(pi) * f) ** (mpf(-2) / 5)
+
+
+def isj_float_sign_changes(b2, n_eff, lo_t, hi_t, points=96):
+    """The sign changes of the fixed point in doubles over `[lo_t, hi_t]`, log-spaced: a guard that
+    the bracket the search found holds exactly one root, which the model and the library then both
+    converge on whatever the order of their steps."""
+    kk = [float(k) ** 2 for k in range(1, len(b2) + 1)]
+    bf = [float(v) for v in b2]
+    pi2 = math.pi ** 2
+
+    def norm(s, t):
+        acc = 0.0
+        for k2, b in zip(kk, bf):
+            e = k2 * pi2 * t
+            if e > 700:
+                break
+            acc += k2 ** s * b * math.exp(-e)
+        return 2 * math.pi ** (2 * s) * acc
+
+    def fixed_point(t):
+        f = norm(ISJ_STAGES, t)
+        for s in range(ISJ_STAGES - 1, 1, -1):
+            if not f > 1e-300:
+                return -math.inf
+            odd = 1
+            for q in range(1, 2 * s, 2):
+                odd *= q
+            c = (1 + 2.0 ** (-(s + 0.5))) / 3
+            f = norm(s, (2 * c * odd / math.sqrt(2 * math.pi) / (float(n_eff) * f)) ** (2 / (3 + 2 * s)))
+        if not f > 1e-300:
+            return -math.inf
+        return t - (2 * float(n_eff) * math.sqrt(math.pi) * f) ** (-0.4)
+
+    ratio = (float(hi_t) / float(lo_t)) ** (1.0 / (points - 1))
+    signs = [fixed_point(float(lo_t) * ratio ** i) > 0 for i in range(points)]
+    return sum(1 for i in range(1, points) if signs[i] != signs[i - 1])
+
+
+def isj_bandwidth(xs, ws, n_eff, lo, hi, cells=ISJ_CELLS):
+    """`(h, reason)`: the rule's bandwidth, or `None` and why the rule found none.
+
+    The search is the library's: `F` must be negative at one cell, `t = 1/cells**2`; the bracket's
+    upper end starts at twice that and moves to `tlo + 2 (b - tlo)` until `F` is positive there or
+    it reaches `ISJ_T_MAX`, where the search stops; the root is the one in the last step's bracket.
+    """
+    got = isj_mass(xs, ws, lo, hi, cells)
+    if got is None:
+        return None, "the sample has no spread"
+    mass, span = got
+    b2 = isj_spectrum(mass, cells)
+    F = IsjFixedPoint(b2, n_eff)
+    tlo = mpf(1) / mpf(cells) ** 2
+    f_lo = F(tlo)
+    if not f_lo < -ISJ_MARGIN * tlo:
+        if f_lo > ISJ_MARGIN * tlo:
+            return None, "the fixed point is not negative at one cell"
+        raise SystemExit("ISJ: F at one cell is %s, too close to zero to decide" % mp.nstr(f_lo, 5))
+    prev, b = tlo, 2 * tlo
+    while True:
+        fb = F(b)
+        if fb > ISJ_MARGIN * b:
+            break
+        if not fb < -ISJ_MARGIN * b:
+            raise SystemExit("ISJ: F at a probe %s is %s, too close to zero" % (mp.nstr(b, 5), mp.nstr(fb, 5)))
+        if b >= ISJ_T_MAX:
+            return None, "the fixed point has no sign change up to t = 1"
+        prev, b = b, min(tlo + 2 * (b - tlo), ISJ_T_MAX)
+    changes = isj_float_sign_changes(b2, n_eff, tlo, b)
+    if changes != 1:
+        raise SystemExit("ISJ: the bracket [%s, %s] holds %d sign changes, not one"
+                         % (mp.nstr(tlo, 5), mp.nstr(b, 5), changes))
+    t = findroot(F, (prev, b), solver="anderson", tol=mpf(10) ** -40)
+    return mpsqrt(t) * span, "found"
+
+
+def isj_n_eff(ws, weighted, weight_type):
+    """`n_eff` as the rules use it: the population's size, `sum(w)` or Kish's."""
+    if not weighted:
+        return mpf(len(ws))
+    if weight_type == "frequency":
+        return sum(ws)
+    return sum(ws) ** 2 / sum(w * w for w in ws)
 
 
 # ======================================================================================
@@ -324,7 +548,12 @@ def pilot_log_g(pilot, a, b, dps):
 def estimate(case):
     """`(defined, h, [pdf at PROBES], [cdf at PROBES])` for one case, summing every kernel."""
     n = case.get("n", 32)
-    values = two_component(n) if case.get("fixture") == "two" else gsv.fixture(n)
+    if case.get("fixture") == "two":
+        values = two_component(n)
+    elif case.get("fixture") == "two_rounded8":
+        values = two_component_rounded(n, 8.0)
+    else:
+        values = gsv.fixture(n)
     weights = gsv.weights_mod5(n) if case.get("weights") == "mod5" else None
     weight_type = case.get("weight_type", "reliability")
     kernel = case.get("kernel", "gaussian")
@@ -339,9 +568,12 @@ def estimate(case):
         return False, None, None, None
     if "bandwidth" in case:
         h = mpf(case["bandwidth"])
+    elif case["rule"] == "isj":
+        h, _ = isj_bandwidth(xs, ws, isj_n_eff(ws, weights is not None, weight_type), lo, hi)
+        if h is None:
+            return False, None, None, None
     else:
-        h = rule_bandwidth(case.get("rule", "silverman"), xs, ws, weights is not None,
-                           weight_type)
+        h = rule_bandwidth(case["rule"], xs, ws, weights is not None, weight_type)
         if h is None:
             return False, None, None, None
     h *= mpf(case.get("adjust", 1.0))
@@ -370,14 +602,16 @@ def estimate(case):
 
 
 #: One population and one configuration per case. The keys are `pf_kde%fit`'s own argument names,
-#: plus `n` (the recipe's length, default 32) and `weights = "mod5"` (`w(i) = mod(i, 5)`, so every
-#: fifth weight is zero and removes its element). `test/test_kde.f90`'s `fit_golden_case` makes
-#: the same call for each name.
+#: plus `n` (the recipe's length, default 32), `fixture` (`"two"` for the two-component recipe,
+#: `"two_rounded8"` for it rounded to multiples of 8) and `weights = "mod5"` (`w(i) = mod(i, 5)`, so
+#: every fifth weight is zero and removes its element). Every case names its rule or its bandwidth,
+#: so that no expectation depends on the default. `test/test_kde.f90`'s `fit_golden_case` makes the
+#: same call for each name; the `ISJ` cases run at `ISJ_CELLS`, in the serial suite.
 CASES = [
-    ("DEFAULT", "the defaults: Silverman's rule, the Gaussian kernel, unbounded", {}),
+    ("SILVERMAN", "Silverman's rule, the Gaussian kernel, unbounded", {"rule": "silverman"}),
     ("SCOTT", "Scott's rule", {"rule": "scott"}),
-    ("ADJUST", "Silverman's rule times adjust = 1.5", {"adjust": 1.5}),
-    ("N1000", "the recipe at n = 1000, Silverman's rule", {"n": 1000}),
+    ("ADJUST", "Silverman's rule times adjust = 1.5", {"rule": "silverman", "adjust": 1.5}),
+    ("N1000", "the recipe at n = 1000, Silverman's rule", {"n": 1000, "rule": "silverman"}),
     ("GAUSS", "the Gaussian kernel at an explicit bandwidth of 60", {"bandwidth": 60.0}),
     ("EPAN", "the Epanechnikov kernel at an explicit bandwidth of 60",
      {"bandwidth": 60.0, "kernel": "epanechnikov"}),
@@ -385,9 +619,9 @@ CASES = [
      {"bandwidth": 60.0, "kernel": "bspline"}),
     ("BOX", "the box kernel at an explicit bandwidth of 60", {"bandwidth": 60.0, "kernel": "box"}),
     ("WREL", "weights mod 5, reliability: Kish's n_eff in the rule",
-     {"weights": "mod5"}),
+     {"rule": "silverman", "weights": "mod5"}),
     ("WFREQ", "weights mod 5, frequency: sum(w) in the rule, the inverted-CDF quartiles",
-     {"weights": "mod5", "weight_type": "frequency"}),
+     {"rule": "silverman", "weights": "mod5", "weight_type": "frequency"}),
     ("REN_LO", "renormalised at a lower bound, Gaussian, h = 60",
      {"bandwidth": 60.0, "lower": -470.0}),
     ("REN_BOTH", "renormalised at both bounds, Epanechnikov, h = 60",
@@ -403,11 +637,12 @@ CASES = [
      {"bandwidth": 600.0, "kernel": "box", "lower": -470.0, "upper": 460.0}),
     ("RULE_BOUNDED", "Silverman's rule over the population inside the support: two points are "
      "outside [-400, 400] and leave the rule's sample too",
-     {"lower": -400.0, "upper": 400.0}),
+     {"rule": "silverman", "lower": -400.0, "upper": 400.0}),
     ("ONE_H", "one point with an explicit bandwidth: a single bump", {"n": 1, "bandwidth": 10.0}),
-    ("ONE_RULE", "one point under a rule: no scale, so the estimate is undefined", {"n": 1}),
+    ("ONE_RULE", "one point under a rule: no scale, so the estimate is undefined",
+     {"n": 1, "rule": "silverman"}),
     ("ADAPT", "the adaptive kernel over the two-component recipe: Silverman's rule, the Gaussian, "
-     "alpha = 0.5", {"fixture": "two", "n": 60, "adaptive": True}),
+     "alpha = 0.5", {"fixture": "two", "n": 60, "adaptive": True, "rule": "silverman"}),
     ("ADAPT_CAP", "the adaptive kernel at alpha = 1 with every bandwidth capped at 120, the "
      "B-spline at an explicit bandwidth of 80, renormalised at a lower bound",
      {"fixture": "two", "n": 60, "adaptive": True, "alpha": 1.0, "bandwidth_max": 120.0,
@@ -416,7 +651,22 @@ CASES = [
      {"fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "kernel": "epanechnikov",
       "lower": -340.0, "upper": 470.0, "boundary": "reflect"}),
     ("ADAPT_W", "the adaptive kernel under weights mod 5, reliability: the pilot is weighted too",
-     {"fixture": "two", "n": 60, "adaptive": True, "weights": "mod5"}),
+     {"fixture": "two", "n": 60, "adaptive": True, "weights": "mod5", "rule": "silverman"}),
+    ("ISJ", "the ISJ rule over the two-component recipe, 1024 cells: the Gaussian, unbounded",
+     {"fixture": "two", "n": 60, "rule": "isj"}),
+    ("ISJ_WREL", "the ISJ rule under weights mod 5, reliability: Kish's n_eff, the binned mass weighted",
+     {"fixture": "two", "n": 60, "rule": "isj", "weights": "mod5"}),
+    ("ISJ_WFREQ", "the ISJ rule under weights mod 5, frequency: the replicated sample of 120 points "
+     "at 48 values, whose repeated values the rule resolves -- its root lies at about 1.2 cells",
+     {"fixture": "two", "n": 60, "rule": "isj", "weights": "mod5", "weight_type": "frequency"}),
+    ("ISJ_BOUNDED", "the ISJ rule on a grid clipped to [-331.625, 470]: the lowest point sits on the "
+     "lower bound, in the half cell below the first centre, and lands whole on it",
+     {"fixture": "two", "n": 60, "rule": "isj", "lower": -331.625, "upper": 470.0}),
+    ("ISJ_ROUNDED", "the ISJ rule over the recipe rounded to multiples of 8: the fixed point is not "
+     "negative at one cell, so the rule finds no bandwidth and the estimate is undefined",
+     {"fixture": "two_rounded8", "n": 60, "rule": "isj"}),
+    ("ISJ_NO_ROOT", "the ISJ rule over the recipe at n = 32: the fixed point is negative up to t = 1, "
+     "so the rule finds no bandwidth and the estimate is undefined", {"rule": "isj"}),
 ]
 
 
@@ -587,6 +837,8 @@ def self_test():
             failures.append("KDEpy's per-point bandwidths differ from the adaptive sum by %.3g" % err)
         print("self-test: KDEpy with per-point bandwidths agrees with the adaptive sum to %.2g" % err)
 
+    failures += isj_self_test()
+
     try:
         from statsmodels.nonparametric.kde import KDEUnivariate
     except ImportError:
@@ -604,6 +856,131 @@ def self_test():
     for f in failures:
         print("self-test FAILED: %s" % f, file=sys.stderr)
     return 1 if failures else 0
+
+
+def isj_float_pipeline(xs, ws, n_eff, lo, hi, cells):
+    """The ISJ rule in doubles, assembled from other software's pieces on the library's grid.
+
+    KDEpy's linear binning and its fixed-point function (`_fixed_point`, which carries the
+    reference implementation's own worked values as doctests) and scipy's transform; the grid, the
+    half-cell rule and the search are the library's, since those are the definitions under test.
+    `_fixed_point` takes the squared coefficients `y_k**2` where the model squares `y_k/2`, and
+    halves the norm's constant to match, so the two functions are the same function.
+    """
+    import numpy as np
+    from scipy.fft import dct
+    from scipy.optimize import brentq
+    from KDEpy.binning import linear_binning
+    from KDEpy.bw_selection import _fixed_point
+
+    order = np.argsort(np.array([float(v) for v in xs]))
+    x = np.array([float(xs[i]) for i in order])
+    w = np.array([float(ws[i]) for i in order])
+    span = x[-1] - x[0]
+    a, b = x[0] - span / 10, x[-1] + span / 10
+    if lo is not None:
+        a = max(a, float(lo))
+    if hi is not None:
+        b = min(b, float(hi))
+    dx = (b - a) / cells
+    centres = a + (np.arange(cells) + 0.5) * dx
+    mass = linear_binning(np.clip(x, centres[0], centres[-1]).reshape(-1, 1), centres, w)
+    mass = mass / mass.sum()
+    y = dct(mass)
+    i_sq = np.arange(1, cells, dtype=float) ** 2
+    a2 = y[1:] ** 2
+
+    def fixed_point(t):
+        # A norm that underflows to zero divides by it inside `_fixed_point`; its answer is then
+        # `-inf`, the right sign, and the warning is noise.
+        with np.errstate(divide="ignore", over="ignore"):
+            return float(_fixed_point(t, float(n_eff), i_sq, a2))
+
+    tlo = 1.0 / cells ** 2
+    if not fixed_point(tlo) < 0:
+        return None
+    prev, hi_t = tlo, 2 * tlo
+    while not fixed_point(hi_t) > 0:
+        if hi_t >= 1:
+            return None
+        prev, hi_t = hi_t, min(tlo + 2 * (hi_t - tlo), 1.0)
+    t = brentq(fixed_point, prev, hi_t, xtol=1e-300, rtol=4 * np.finfo(float).eps)
+    return math.sqrt(t) * (b - a)
+
+
+def isj_self_test():
+    """The ISJ model against a pipeline built from KDEpy's and scipy's pieces; the failures found.
+
+    KDEpy's own `improved_sheather_jones` is reported and not asserted: it widens its grid by at
+    least six units of the data beyond each end and scales the answer by the data's range rather
+    than the grid's, so its bandwidth depends on the data's units (the same sample in other units
+    gives another bandwidth, after converting back) and falls well short of the asymptotically
+    optimal one for a normal sample. Its fixed-point function and binning are sound, and they are
+    what the pipeline uses.
+    """
+    failures = []
+    try:
+        import numpy as np
+        from KDEpy.bw_selection import improved_sheather_jones
+    except ImportError:
+        print("self-test: SKIPPED the ISJ cross-check -- KDEpy does not import here")
+        return failures
+
+    xs = [mpf(v) for v in two_component(60)]
+    ws = [mpf(1)] * 60
+    # 1. The transcription: the model and the pipeline on the golden grid, every golden ISJ case.
+    worst = 0.0
+    for name, _, case in CASES:
+        if case.get("rule") != "isj":
+            continue
+        n = case.get("n", 32)
+        if case.get("fixture") == "two":
+            values = two_component(n)
+        elif case.get("fixture") == "two_rounded8":
+            values = two_component_rounded(n, 8.0)
+        else:
+            values = gsv.fixture(n)
+        weights = gsv.weights_mod5(n) if case.get("weights") == "mod5" else None
+        lo = mpf(case["lower"]) if "lower" in case else None
+        hi = mpf(case["upper"]) if "upper" in case else None
+        cx, cw, _ = population(values, weights, lo, hi)
+        n_eff = isj_n_eff(cw, weights is not None, case.get("weight_type", "reliability"))
+        model, _ = isj_bandwidth(cx, cw, n_eff, lo, hi)
+        pipe = isj_float_pipeline(cx, cw, n_eff, lo, hi, ISJ_CELLS)
+        if (model is None) != (pipe is None):
+            failures.append("ISJ %s: the model says %s and the pipeline %s"
+                            % (name, model is not None, pipe is not None))
+            continue
+        if model is not None:
+            worst = max(worst, abs(pipe - float(model)) / float(model))
+    if worst > 1e-9:
+        failures.append("ISJ: the pipeline differs from the model by %.3g relative" % worst)
+    print("self-test: the ISJ model and the KDEpy/scipy pipeline agree on every golden case, to %.2g"
+          % worst)
+
+    # 2. The library's default grid: the rule at 2**14 cells within a per cent of the golden grid's.
+    h14 = isj_float_pipeline(xs, ws, mpf(60), None, None, 2 ** 14)
+    h10, _ = isj_bandwidth(xs, ws, mpf(60), None, None)
+    gap = abs(h14 - float(h10)) / float(h10)
+    if gap > 0.01:
+        failures.append("ISJ: 2**14 cells differ from 2**10 by %.3g" % gap)
+    print("self-test: the ISJ rule at 2**14 cells is within %.2g of 2**10 on the two-component recipe"
+          % gap)
+
+    # 3. What the rule is for: a large normal sample's bandwidth is the asymptotically optimal
+    #    `(4/(3n))**(1/5)` standard deviations, to the few per cent a sample's own spread allows.
+    rng = np.random.default_rng(20260919)
+    normal = rng.standard_normal(100000)
+    got = isj_float_pipeline(list(normal), [1.0] * len(normal), 100000, None, None, 2 ** 14)
+    want = (4.0 / (3.0 * len(normal))) ** 0.2 * float(np.std(normal, ddof=1))
+    if abs(got / want - 1) > 0.05:
+        failures.append("ISJ: a normal sample's bandwidth is %.4g, not about %.4g" % (got, want))
+    print("self-test: the ISJ rule on 1e5 normal points gives %.4g against the optimal %.4g" % (got, want))
+    theirs = improved_sheather_jones(normal.reshape(-1, 1))
+    scaled = improved_sheather_jones((1000 * normal).reshape(-1, 1)) / 1000
+    print("self-test: INFO KDEpy's improved_sheather_jones gives %.4g, and %.4g for the same sample "
+          "in units a thousand times smaller -- not a reference (see isj_self_test)" % (theirs, scaled))
+    return failures
 
 
 def main(argv):

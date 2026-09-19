@@ -28,14 +28,23 @@
 !! the estimator; and the rules are re-formed here from `pf_stddev` and `pf_iqr`'s own answers.
 !!
 !! **Every test whose answer depends on the bandwidth rule names the rule**, or passes the
-!! bandwidth as a number, except `test_default_rule_is_silverman`, which is the one assertion of
-!! the default and which the change making ISJ the default replaces (feature_kde.md, 12.1).
+!! bandwidth as a number, except the two that assert the default: `test_default_rule_is_isj`,
+!! where the Improved Sheather-Jones rule finds a bandwidth, and `test_isj_fallback`, where it finds
+!! none and Silverman's rule stands in.
+!!
+!! **The ISJ rule is pinned at the oracle's grid.** At its default of `2**14` cells the rule's
+!! transform is beyond a 50-digit oracle, so `kde_serial` forces 1024 cells through
+!! `parquet_debug_set_kde_isj_cells` and asserts the golden cases there, where the library agrees
+!! with the oracle to a few units of rounding; at the default grid the tests assert relations that
+!! need no oracle -- the default is the rule, the rule is not a rule of thumb, the grid moves the
+!! answer by less than a per cent, weights follow their convention and the column forms change
+!! nothing.
 !!
 !! Two suites. `kde` is pure in-memory work and runs concurrently. `kde_serial` holds the tests
 !! that write process-global state -- they silence `%print` through the `verbosity` setting, or
-!! force the pilot's cells through `parquet_debug_set_kde_pilot_cells` -- and is on
-!! `suite_is_safe_to_parallelize`'s exclusion list. Both are registered in `run_tester_pf.f90`,
-!! the runner that executes no `bind(C)` call.
+!! force the pilot's or the ISJ rule's cells through `parquet_debug_set_kde_pilot_cells` and
+!! `parquet_debug_set_kde_isj_cells` -- and is on `suite_is_safe_to_parallelize`'s exclusion list.
+!! Both are registered in `run_tester_pf.f90`, the runner that executes no `bind(C)` call.
 module test_kde
 
     use testdrive, only : new_unittest, unittest_type, error_type, check
@@ -43,8 +52,9 @@ module test_kde
     use parquet_stats, only : pf_stddev, pf_iqr, pf_count_valid
     use parquet_integrate, only : pf_integrand, pf_integrate
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
+    use parquet_columns, only : parquet_column, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64
     use test_kde_golden
-    use iso_fortran_env, only : int64, real32, real64
+    use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
         ieee_is_nan, ieee_is_finite
 
@@ -102,7 +112,15 @@ contains
             new_unittest("every kernel has unit mass, unit variance and a matching CDF", &
                 test_kernel_identities), &
             new_unittest("the fixed estimate reproduces the golden vectors", test_golden_vectors), &
-            new_unittest("the default rule is silverman", test_default_rule_is_silverman), &
+            new_unittest("the default rule is isj", test_default_rule_is_isj), &
+            new_unittest("isj finds a narrower bandwidth than silverman on a bimodal sample", &
+                test_isj_narrower_on_bimodal), &
+            new_unittest("without a root the default falls back to silverman and rule=isj is undefined", &
+                test_isj_fallback), &
+            new_unittest("isj weights: frequency weights replicate, equal reliability weights are none", &
+                test_isj_weights), &
+            new_unittest("the column forms of %fit and %add equal the array forms, bit for bit", &
+                test_column_forms), &
             new_unittest("silverman and scott reproduce their formulas", test_rules_match_formulas), &
             new_unittest("adjust= multiplies whichever bandwidth was chosen", test_adjust_multiplies), &
             new_unittest("n_eff follows the weight type", test_n_eff_follows_weight_type), &
@@ -175,7 +193,10 @@ contains
             new_unittest("verbosity silences the grid's %print", test_grid_print_silenced), &
             new_unittest("the adaptive golden case with a fine pilot", test_adaptive_golden_fine), &
             new_unittest("parquet_debug_set_kde_pilot_cells forces the pilot's cells", &
-                test_pilot_cells_forced) &
+                test_pilot_cells_forced), &
+            new_unittest("isj reproduces the golden vectors at 1024 cells", test_isj_golden), &
+            new_unittest("parquet_debug_set_kde_isj_cells sets the rule's grid, which moves it by under 1%", &
+                test_isj_cells_forced) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -234,6 +255,20 @@ contains
         end do
 
     end subroutine kde_weights_mod5
+
+    !> `x` rounded to multiples of `step`, `step*floor(x/step + 1/2)`: `two_component_rounded` in the
+    !> generator, exact in both languages for a power-of-two `step`, since every value of the recipe
+    !> is an integer over 16.
+    subroutine kde_rounded(step, x)
+        real(real64), intent(in)    :: step !! the rounding step
+        real(real64), intent(inout) :: x(:) !! the values, rounded in place
+        integer(int64) :: i
+
+        do i = 1_int64, size(x, kind=int64)
+            x(i) = step*real(floor(x(i)/step + 0.5_real64, kind=int64), real64)
+        end do
+
+    end subroutine kde_rounded
 
     !> `x**power` times the density at `x`.
     function kde_density_eval(this, x) result(f)
@@ -323,6 +358,7 @@ contains
         if (name == "N1000") n = 1000_int64
         if (name == "ONE_H" .or. name == "ONE_RULE") n = 1_int64
         if (name(1:min(5, len(name))) == "ADAPT") n = 60_int64
+        if (name(1:min(3, len(name))) == "ISJ" .and. name /= "ISJ_NO_ROOT") n = 60_int64
         if (n == 60_int64) then
             call kde_two_component(n, x)
         else
@@ -330,7 +366,7 @@ contains
         end if
         call kde_weights_mod5(n, w)
         select case (name)
-        case ("DEFAULT")
+        case ("SILVERMAN")
             call k%fit(x, rule="silverman", ok=ok)
         case ("SCOTT")
             call k%fit(x, rule="scott", ok=ok)
@@ -383,6 +419,19 @@ contains
                 upper=470.0_real64, boundary="reflect", ok=ok)
         case ("ADAPT_W")
             call k%fit(x, rule="silverman", adaptive=.true., weights=w, ok=ok)
+        case ("ISJ")
+            call k%fit(x, rule="isj", ok=ok)
+        case ("ISJ_WREL")
+            call k%fit(x, rule="isj", weights=w, ok=ok)
+        case ("ISJ_WFREQ")
+            call k%fit(x, rule="isj", weights=w, weight_type="frequency", ok=ok)
+        case ("ISJ_BOUNDED")
+            call k%fit(x, rule="isj", lower=-331.625_real64, upper=470.0_real64, ok=ok)
+        case ("ISJ_ROUNDED")
+            call kde_rounded(8.0_real64, x)
+            call k%fit(x, rule="isj", ok=ok)
+        case ("ISJ_NO_ROOT")
+            call k%fit(x, rule="isj", ok=ok)
         case default
             error stop "fit_golden_case: unknown case " // name
         end select
@@ -557,7 +606,8 @@ contains
     subroutine test_golden_vectors(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
 
-        call check_golden_case(error, "DEFAULT", KG_DEFAULT_DEF, KG_DEFAULT_H, KG_DEFAULT_PDF, KG_DEFAULT_CDF)
+        call check_golden_case(error, "SILVERMAN", KG_SILVERMAN_DEF, KG_SILVERMAN_H, KG_SILVERMAN_PDF, &
+            KG_SILVERMAN_CDF)
         if (allocated(error)) return
         call check_golden_case(error, "SCOTT", KG_SCOTT_DEF, KG_SCOTT_H, KG_SCOTT_PDF, KG_SCOTT_CDF)
         if (allocated(error)) return
@@ -602,22 +652,227 @@ contains
 
     end subroutine test_golden_vectors
 
-    !> With no `rule=` and no `bandwidth=`, the rule is Silverman's. The one test that relies on
-    !> the default; P5 replaces it with the assertion that the default is ISJ.
-    subroutine test_default_rule_is_silverman(error)
+    !> With no `rule=` and no `bandwidth=`, the rule is the Improved Sheather-Jones rule: the fit is a
+    !> fit naming `"isj"`, bit for bit, and `%rule` says `"isj"`. On the two-component recipe it is
+    !> also not Silverman's bandwidth, which reads the spread between the clusters and is several
+    !> times wider -- the guard against a default that quietly stayed a rule of thumb.
+    subroutine test_default_rule_is_isj(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
-        type(pf_kde) :: a, b
+        type(pf_kde) :: a, b, c
         real(real64), allocatable :: x(:)
         character(len=:), allocatable :: name
 
-        call kde_fixture(32_int64, x)
+        call kde_two_component(60_int64, x)
         call a%fit(x)
-        call b%fit(x, rule="silverman")
+        call b%fit(x, rule="isj")
+        call c%fit(x, rule="silverman")
         call a%rule(name)
-        call check(error, name == "silverman" .and. a%bandwidth() == b%bandwidth(), &
-            "the default rule must be silverman")
+        call check(error, name == "isj" .and. a%bandwidth() == b%bandwidth(), &
+            "the default rule must be isj")
+        if (allocated(error)) return
+        call check(error, a%bandwidth() < 0.5_real64*c%bandwidth(), &
+            "the default's bandwidth must not be silverman's on two clusters")
 
-    end subroutine test_default_rule_is_silverman
+    end subroutine test_default_rule_is_isj
+
+    !> The rule's purpose: on two narrow clusters far apart, a rule of thumb reads the spread
+    !> between them and oversmooths both, while the ISJ rule reads the clusters' own width. On the
+    !> two-component recipe at n = 240 the ISJ bandwidth is about a tenth of Silverman's (the
+    !> generator's model gives 9.07 against 86.9); below a quarter is asserted, which a rule that
+    !> fell back or computed a rule of thumb cannot meet. `adjust` multiplies it exactly.
+    subroutine test_isj_narrower_on_bimodal(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: isj, silv, half
+        real(real64), allocatable :: x(:)
+        character(len=:), allocatable :: name
+        logical :: ok
+
+        call kde_two_component(240_int64, x)
+        call isj%fit(x, rule="isj", ok=ok)
+        call silv%fit(x, rule="silverman")
+        call isj%rule(name)
+        call check(error, ok .and. name == "isj", "the rule must find a bandwidth on two clusters")
+        if (allocated(error)) return
+        call check(error, isj%bandwidth() < 0.25_real64*silv%bandwidth(), &
+            "the ISJ bandwidth must be well below silverman's on two clusters")
+        if (allocated(error)) return
+        call half%fit(x, rule="isj", adjust=0.5_real64)
+        call check(error, half%bandwidth() == 0.5_real64*isj%bandwidth(), &
+            "adjust must multiply the ISJ rule's bandwidth")
+
+    end subroutine test_isj_narrower_on_bimodal
+
+    !> A sample the rule finds no bandwidth for, one per way it can find none: the recipe at n = 32,
+    !> whose fixed point is negative all the way to `t = 1`, and the two-component recipe rounded to
+    !> multiples of 8, whose fixed point is not negative at one cell (the generator asserts both at
+    !> 1024 cells, ISJ_NO_ROOT and ISJ_ROUNDED; this asserts them at the default grid). Under the
+    !> default Silverman's rule gives the bandwidth, bit for bit, and `%rule` says `"silverman"`;
+    !> with `rule = "isj"` named the estimate is undefined -- `ok = .false.`, every answer NaN,
+    !> `%rule` still `"isj"`. A constant sample has no bandwidth under either rule.
+    subroutine test_isj_fallback(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: d, s, i
+        real(real64), allocatable :: x(:)
+        real(real64) :: f(NKX)
+        character(len=:), allocatable :: name
+        logical :: okd, oki
+        integer :: c
+
+        do c = 1, 2
+            if (c == 1) then
+                call kde_fixture(32_int64, x)
+            else
+                call kde_two_component(60_int64, x)
+                call kde_rounded(8.0_real64, x)
+            end if
+            call d%fit(x, ok=okd)
+            call s%fit(x, rule="silverman")
+            call i%fit(x, rule="isj", ok=oki)
+            call d%rule(name)
+            call check(error, okd .and. name == "silverman" .and. d%bandwidth() == s%bandwidth(), &
+                trim(merge("the recipe at n = 32:", "the rounded recipe:  ", c == 1)) // &
+                " the default must give silverman's bandwidth when the rule finds none")
+            if (allocated(error)) return
+            call i%pdf(KG_X, f)
+            call i%rule(name)
+            call check(error, .not. oki .and. ieee_is_nan(i%bandwidth()) .and. all(ieee_is_nan(f)) .and. &
+                name == "isj", trim(merge("the recipe at n = 32:", "the rounded recipe:  ", c == 1)) // &
+                " a named isj rule that finds no bandwidth must leave the estimate undefined")
+            if (allocated(error)) return
+        end do
+        call d%fit([2.5_real64, 2.5_real64, 2.5_real64], ok=okd)
+        call d%rule(name)
+        call check(error, .not. okd .and. name == "silverman", &
+            "a constant sample has no bandwidth under the default, and silverman's rule was tried last")
+
+    end subroutine test_isj_fallback
+
+    !> Weights under the ISJ rule. Frequency weights are replication: the two-component recipe under
+    !> integer weights `mod(i, 5)` has the bandwidth of the sample with each value repeated that many
+    !> times, to the rounding that summing the binned mass in another order leaves. Equal reliability
+    !> weights are no weights: Kish's size is the population's, and the binned mass is the same
+    !> once normalised. On unequal weights the two conventions differ, through `n_eff` alone (the
+    !> golden ISJ_WREL and ISJ_WFREQ pin each).
+    subroutine test_isj_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: wk, rk, uk, ek
+        real(real64), allocatable :: x(:), w(:), rep(:), e(:)
+        integer(int64) :: i, j, m
+
+        call kde_two_component(60_int64, x)
+        call kde_weights_mod5(60_int64, w)
+        allocate(rep(int(sum(w), int64)))
+        m = 0_int64
+        do i = 1_int64, 60_int64
+            do j = 1_int64, int(w(i), int64)
+                m = m + 1_int64
+                rep(m) = x(i)
+            end do
+        end do
+        call wk%fit(x, rule="isj", weights=w, weight_type="frequency")
+        call rk%fit(rep, rule="isj")
+        call check(error, abs(wk%bandwidth() - rk%bandwidth()) <= 1.0e-12_real64*rk%bandwidth(), &
+            "frequency weights must give the replicated sample's ISJ bandwidth")
+        if (allocated(error)) return
+        call uk%fit(x, rule="isj")
+        allocate(e(60))
+        e = 3.0_real64
+        call ek%fit(x, rule="isj", weights=e)
+        call check(error, abs(ek%bandwidth() - uk%bandwidth()) <= 1.0e-12_real64*uk%bandwidth(), &
+            "equal reliability weights must give the unweighted ISJ bandwidth")
+        if (allocated(error)) return
+        call ek%fit(x, rule="isj", weights=w)
+        call check(error, abs(ek%bandwidth() - wk%bandwidth()) > 0.1_real64*wk%bandwidth(), &
+            "the two weight types must give different ISJ bandwidths on unequal weights")
+
+    end subroutine test_isj_weights
+
+    !> `%fit` and `%add` over a `parquet_column` answer exactly what they answer over the array of the
+    !> same numbers, for each of the four numeric kinds, the column's own nulls reaching them as the
+    !> equivalent `is_valid=` does. The `int32` column has no null, so its mask never exists and the
+    !> array side passes none; the other three carry a null in every seventh row, and the `float64`
+    !> one weights too. Bit for bit: the column is widened to the array the array form receives.
+    subroutine test_column_forms(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(parquet_column) :: c
+        type(pf_kde) :: kc, ka
+        type(pf_kde_grid) :: gc, ga
+        real(real64), allocatable :: x(:), wide(:), w(:), dc(:), da(:)
+        logical, allocatable :: mask(:)
+        integer(int32), allocatable :: iv(:)
+        real(real64) :: fc(NKX), fa(NKX)
+        integer(int64) :: i, n, nnc, nna
+        integer :: kind
+        character(len=12) :: tag
+
+        n = 300_int64
+        call kde_fixture(n, x)
+        allocate(iv(n), mask(n), w(n), dc(64), da(64))
+        iv = int(x, int32)
+        call kde_weights_mod5(n, w)
+        w = w + 0.5_real64
+        do kind = 1, 4
+            mask = .true.
+            select case (kind)
+            case (1)
+                tag = "int32"
+                call c%init(PK_INT32, n)
+                call c%set_all(iv)
+                wide = real(iv, real64)
+            case (2)
+                tag = "int64"
+                call c%init(PK_INT64, n)
+                call c%set_all(int(iv, int64))
+                wide = real(iv, real64)
+            case (3)
+                tag = "float32"
+                call c%init(PK_FLOAT32, n)
+                call c%set_all(real(x, real32))
+                wide = real(real(x, real32), real64)
+            case default
+                tag = "float64"
+                call c%init(PK_FLOAT64, n)
+                call c%set_all(x)
+                wide = x
+            end select
+            if (kind > 1) then
+                do i = 1_int64, n, 7_int64
+                    call c%set_null(i)
+                    mask(i) = .false.
+                end do
+            end if
+            if (kind == 4) then
+                call kc%fit(c, rule="isj", weights=w, n_null=nnc)
+                call ka%fit(wide, rule="isj", is_valid=mask, weights=w, n_null=nna)
+            else if (kind == 1) then
+                call kc%fit(c, rule="isj", n_null=nnc)
+                call ka%fit(wide, rule="isj", n_null=nna)
+            else
+                call kc%fit(c, rule="isj", n_null=nnc)
+                call ka%fit(wide, rule="isj", is_valid=mask, n_null=nna)
+            end if
+            call kc%pdf(KG_X, fc)
+            call ka%pdf(KG_X, fa)
+            call check(error, kc%bandwidth() == ka%bandwidth() .and. all(fc == fa) .and. nnc == nna .and. &
+                nnc == count(.not. mask, kind=int64), trim(tag) // ": %fit over a column must answer what the array does")
+            if (allocated(error)) return
+            call gc%init(64, -600.0_real64, 600.0_real64, 40.0_real64)
+            call ga%init(64, -600.0_real64, 600.0_real64, 40.0_real64)
+            if (kind == 1) then
+                call gc%add(c, n_null=nnc)
+                call ga%add(wide, n_null=nna)
+            else
+                call gc%add(c, n_null=nnc)
+                call ga%add(wide, is_valid=mask, n_null=nna)
+            end if
+            call gc%density(dc)
+            call ga%density(da)
+            call check(error, all(dc == da) .and. nnc == nna .and. gc%n_valid() == ga%n_valid(), &
+                trim(tag) // ": %add over a column must accumulate what the array does")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_column_forms
 
     !> Both rules, re-formed here from `pf_stddev` and `pf_iqr`'s own answers over the same
     !> population, on a weighted fixture whose reliability `n_eff` is well below `n` -- so a rule
@@ -2954,5 +3209,60 @@ contains
         call check(error, g%ncells() == rule_cells, "n <= 0 must restore the rule")
 
     end subroutine test_pilot_cells_forced
+
+    !> The ISJ golden cases at the oracle's grid of 1024 cells: the bandwidth, and the estimate's
+    !> density and distribution function at every probe, against the 50-digit oracle, which solves
+    !> the rule's fixed point on the same grid; and the two samples the rule finds no bandwidth for,
+    !> undefined under `rule = "isj"`. The library agrees with the oracle to a few units of rounding,
+    !> so the golden tolerances of the rules of thumb hold here too. Writes the process-global cell
+    !> count, so it runs serially, and restores the default.
+    subroutine test_isj_golden(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+
+        call parquet_debug_set_kde_isj_cells(1024)
+        call check_golden_case(error, "ISJ", KG_ISJ_DEF, KG_ISJ_H, KG_ISJ_PDF, KG_ISJ_CDF)
+        if (.not. allocated(error)) call check_golden_case(error, "ISJ_WREL", KG_ISJ_WREL_DEF, KG_ISJ_WREL_H, &
+            KG_ISJ_WREL_PDF, KG_ISJ_WREL_CDF)
+        if (.not. allocated(error)) call check_golden_case(error, "ISJ_WFREQ", KG_ISJ_WFREQ_DEF, KG_ISJ_WFREQ_H, &
+            KG_ISJ_WFREQ_PDF, KG_ISJ_WFREQ_CDF)
+        if (.not. allocated(error)) call check_golden_case(error, "ISJ_BOUNDED", KG_ISJ_BOUNDED_DEF, &
+            KG_ISJ_BOUNDED_H, KG_ISJ_BOUNDED_PDF, KG_ISJ_BOUNDED_CDF)
+        if (.not. allocated(error)) call check_golden_case(error, "ISJ_ROUNDED", KG_ISJ_ROUNDED_DEF, &
+            KG_ISJ_ROUNDED_H, KG_ISJ_ROUNDED_PDF, KG_ISJ_ROUNDED_CDF)
+        if (.not. allocated(error)) call check_golden_case(error, "ISJ_NO_ROOT", KG_ISJ_NO_ROOT_DEF, &
+            KG_ISJ_NO_ROOT_H, KG_ISJ_NO_ROOT_PDF, KG_ISJ_NO_ROOT_CDF)
+        call parquet_debug_set_kde_isj_cells(0)
+
+    end subroutine test_isj_golden
+
+    !> `parquet_debug_set_kde_isj_cells(n)` gives the rule `n` cells and `n <= 0` restores the
+    !> default: at 1024 cells the two-component recipe's bandwidth is the oracle's; at the default
+    !> `2**14` it differs from that by more than rounding -- the override reached the grid -- and by
+    !> less than a per cent, the grid being a discretisation and not a definition; after the reset
+    !> it is the default's again, bit for bit.
+    subroutine test_isj_cells_forced(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        real(real64) :: h_default, h_1024, gap
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="isj")
+        h_default = k%bandwidth()
+        call parquet_debug_set_kde_isj_cells(1024)
+        call k%fit(x, rule="isj")
+        h_1024 = k%bandwidth()
+        call parquet_debug_set_kde_isj_cells(0)
+        call check(error, close_to(h_1024, KG_ISJ_H, 1.0e-13_real64, KG_ISJ_H), &
+            "at 1024 cells the rule must give the oracle's bandwidth")
+        if (allocated(error)) return
+        gap = abs(h_default - h_1024)/h_1024
+        call check(error, gap > 1.0e-9_real64 .and. gap < 1.0e-2_real64, &
+            "the default grid must move the bandwidth by more than rounding and less than a per cent")
+        if (allocated(error)) return
+        call k%fit(x, rule="isj")
+        call check(error, k%bandwidth() == h_default, "n <= 0 must restore the default grid")
+
+    end subroutine test_isj_cells_forced
 
 end module test_kde

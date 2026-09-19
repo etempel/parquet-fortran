@@ -38,14 +38,14 @@ module test_kde_golden
     real(real64), parameter :: KG_X(NKX) = [-512.0_real64, -466.0_real64, -300.0_real64, -61.25_real64, 0.0_real64,  &
         17.5_real64, 250.0_real64, 458.5_real64, 470.0_real64]
 
-    !> the defaults: Silverman's rule, the Gaussian kernel, unbounded
-    logical, parameter :: KG_DEFAULT_DEF = .true.
-    real(real64), parameter :: KG_DEFAULT_H = 130.69287952567552_real64
-    real(real64), parameter :: KG_DEFAULT_PDF(NKX) = [0.00061636225409091949_real64, 0.0008209989241088247_real64,  &
+    !> Silverman's rule, the Gaussian kernel, unbounded
+    logical, parameter :: KG_SILVERMAN_DEF = .true.
+    real(real64), parameter :: KG_SILVERMAN_H = 130.69287952567552_real64
+    real(real64), parameter :: KG_SILVERMAN_PDF(NKX) = [0.00061636225409091949_real64, 0.0008209989241088247_real64,  &
         0.0012131108416934214_real64, 0.00091337406200095374_real64, 0.00091021964936181658_real64,  &
         0.00091374825691546528_real64, 0.00083320405736011052_real64, 0.00046863706385190531_real64,  &
         0.00043970899665899885_real64]
-    real(real64), parameter :: KG_DEFAULT_CDF(NKX) = [0.058046600332253603_real64, 0.091119298507939997_real64,  &
+    real(real64), parameter :: KG_SILVERMAN_CDF(NKX) = [0.058046600332253603_real64, 0.091119298507939997_real64,  &
         0.27106995522728722_real64, 0.52393126372978205_real64, 0.57960519896458229_real64, 0.59556383359443787_real64,  &
         0.80458100749700245_real64, 0.94664659190200373_real64, 0.95186974609115982_real64]
 
@@ -274,5 +274,60 @@ module test_kde_golden
     real(real64), parameter :: KG_ADAPT_W_CDF(NKX) = [0.0045529534268499462_real64, 0.01719823508602978_real64,  &
         0.31502585750787915_real64, 0.66777131118416722_real64, 0.67559587311928304_real64, 0.67811153596360652_real64,  &
         0.78160500392377685_real64, 0.94341723635839048_real64, 0.949547896433655_real64]
+
+    !> the ISJ rule over the two-component recipe, 1024 cells: the Gaussian, unbounded
+    logical, parameter :: KG_ISJ_DEF = .true.
+    real(real64), parameter :: KG_ISJ_H = 13.212291562086607_real64
+    real(real64), parameter :: KG_ISJ_PDF(NKX) = [0.0_real64, 0.0_real64, 0.011333196574679258_real64, 0.0_real64, 0.0_real64,  &
+        0.0_real64, 0.00054100329135813106_real64, 2.2599567175840048e-05_real64, 1.4384792320993094e-06_real64]
+    real(real64), parameter :: KG_ISJ_CDF(NKX) = [0.0_real64, 0.0_real64, 0.25931099153528708_real64,  &
+        0.66666666666666663_real64, 0.66666666666666663_real64, 0.66666666666666663_real64, 0.76304995208035642_real64,  &
+        0.99990160676547879_real64, 0.99999505762269791_real64]
+
+    !> the ISJ rule under weights mod 5, reliability: Kish's n_eff, the binned mass weighted
+    logical, parameter :: KG_ISJ_WREL_DEF = .true.
+    real(real64), parameter :: KG_ISJ_WREL_H = 15.530249651505166_real64
+    real(real64), parameter :: KG_ISJ_WREL_PDF(NKX) = [0.0_real64, 0.0_real64, 0.010757843790414308_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.00043599971488258679_real64, 3.760744391893859e-05_real64, 4.9545333735976465e-06_real64]
+    real(real64), parameter :: KG_ISJ_WREL_CDF(NKX) = [0.0_real64, 0.0_real64, 0.26047507318525287_real64,  &
+        0.66666666666666663_real64, 0.66666666666666663_real64, 0.66666666666666663_real64, 0.74853171328654011_real64,  &
+        0.99978389613877028_real64, 0.99997721452793054_real64]
+
+    !> the ISJ rule under weights mod 5, frequency: the replicated sample of 120 points at 48 values, whose repeated values the
+    !! rule resolves -- its root lies at about 1.2 cells
+    logical, parameter :: KG_ISJ_WFREQ_DEF = .true.
+    real(real64), parameter :: KG_ISJ_WFREQ_H = 1.1229871836821215_real64
+    real(real64), parameter :: KG_ISJ_WFREQ_PDF(NKX) = [0.0_real64, 0.0_real64, 0.012655842640159636_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64]
+    real(real64), parameter :: KG_ISJ_WFREQ_CDF(NKX) = [0.0_real64, 0.0_real64, 0.26121527229251723_real64,  &
+        0.66666666666666663_real64, 0.66666666666666663_real64, 0.66666666666666663_real64, 0.75_real64, 1.0_real64, 1.0_real64]
+
+    !> the ISJ rule on a grid clipped to [-331.625, 470]: the lowest point sits on the lower bound, in the half cell below the
+    !! first centre, and lands whole on it
+    logical, parameter :: KG_ISJ_BOUNDED_DEF = .true.
+    real(real64), parameter :: KG_ISJ_BOUNDED_H = 13.197266419755225_real64
+    real(real64), parameter :: KG_ISJ_BOUNDED_PDF(NKX) = [0.0_real64, 0.0_real64, 0.011663664339004167_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.00054065996256343464_real64, 2.2436785770791909e-05_real64, 1.4193020218056085e-06_real64]
+    real(real64), parameter :: KG_ISJ_BOUNDED_CDF(NKX) = [0.0_real64, 0.0_real64, 0.25630559978092898_real64,  &
+        0.66666666666666663_real64, 0.66666666666666663_real64, 0.66666666666666663_real64, 0.76305071941273173_real64,  &
+        0.99990738206624796_real64, 1.0_real64]
+
+    !> the ISJ rule over the recipe rounded to multiples of 8: the fixed point is not negative at one cell, so the rule finds no
+    !! bandwidth and the estimate is undefined
+    logical, parameter :: KG_ISJ_ROUNDED_DEF = .false.
+    real(real64), parameter :: KG_ISJ_ROUNDED_H = 0.0_real64
+    real(real64), parameter :: KG_ISJ_ROUNDED_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64]
+    real(real64), parameter :: KG_ISJ_ROUNDED_CDF(NKX) = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64]
+
+    !> the ISJ rule over the recipe at n = 32: the fixed point is negative up to t = 1, so the rule finds no bandwidth and the
+    !! estimate is undefined
+    logical, parameter :: KG_ISJ_NO_ROOT_DEF = .false.
+    real(real64), parameter :: KG_ISJ_NO_ROOT_H = 0.0_real64
+    real(real64), parameter :: KG_ISJ_NO_ROOT_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64]
+    real(real64), parameter :: KG_ISJ_NO_ROOT_CDF(NKX) = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64]
 
 end module test_kde_golden ! GCOVR_EXCL_LINE

@@ -1428,29 +1428,11 @@ COUNT_COL_BODY = """    module procedure count_valid_col
 
 
 #: The one place a `parquet_column` becomes a population. Every `*_col` entry point goes through
-#: it, so the three refusals and the nullness rule are stated once rather than eight times.
-COL_WIDEN = '''    !> Widens a scalar numeric `parquet_column` into a `real64` population and its validity mask.
-    !!
-    !! Three refusals, and each is a wrong answer rather than an inconvenience if it is dropped:
-    !!
-    !! * a **string, temporal or container** column has no numeric statistics, and the message names
-    !!   the kind it actually found;
-    !! * a column **wider than one element** aborts, because flattening a width-16 column into one
-    !!   population is a DIFFERENT statistic -- a caller who wants one element position across all
-    !!   rows has `%get_elem`, and one who genuinely wants the flattened population can pass the
-    !!   flattened array and thereby say so;
-    !! * `is_valid=` **alongside** a column aborts, because the column carries its own validity and
-    !!   two sources of truth that can disagree is a shape this repository has been bitten by.
-    !!
-    !! `mask` comes back UNALLOCATED for a null-free column, which is not a detail: an unallocated
-    !! allocatable passed to an `optional` dummy is ABSENT, so the core takes its own no-mask fast
-    !! path with no branch at the call site.
-    !!
-    !! The bulk read goes through `parquet_column_data_ptr` -- the typed accessor tier, never a
-    !! type-bound procedure -- so ifx does not build a class descriptor per call. The scalar
-    !! metadata queries below have no typed twin and are called once per column, which is the same
-    !! trade `parquet_sorting` already makes for its key extraction.
-    !> Combines two columns' validity masks into the one a PAIRWISE statistic needs.
+#: it, so the three refusals and the nullness rule are stated once rather than eight times. It is a
+#: separate module procedure, its interface in the spec (`COL_WIDEN_SPEC`), because `parquet_kde`'s
+#: column forms call it too; its body stays FIRST in this submodule, above every call to it, which
+#: nagfor requires of a separate module procedure.
+COL_WIDEN = '''    !> Combines two columns' validity masks into the one a PAIRWISE statistic needs.
     !!
     !! Either input may be unallocated, which `col_to_real64` uses to mean "this column has no
     !! nulls". When BOTH are, `both` is left unallocated too -- and an unallocated allocatable
@@ -1469,14 +1451,7 @@ COL_WIDEN = '''    !> Widens a scalar numeric `parquet_column` into a `real64` p
         if (allocated(b)) both = both .and. b
     end subroutine pair_mask
 
-    subroutine col_to_real64(col, what, is_valid, v, mask)
-        type(parquet_column), intent(in), target :: col
-        !! the column. `target` because `parquet_column_data_ptr` requires it; the pointer never
-        !! leaves this procedure, so the caller's actual argument needs no `target` of its own.
-        character(len=*), intent(in) :: what                  !! the public procedure's name.
-        logical, intent(in), optional :: is_valid(:)          !! must be absent; see above.
-        real(real64), allocatable, intent(out) :: v(:)        !! the widened population.
-        logical, allocatable, intent(out) :: mask(:)          !! its validity, or unallocated.
+    module procedure col_to_real64
         integer(int32), pointer :: p32(:)
         integer(int64), pointer :: p64(:)
         real(real32), pointer :: r32(:)
@@ -1534,7 +1509,48 @@ COL_WIDEN = '''    !> Widens a scalar numeric `parquet_column` into a `real64` p
             v = merge(1.0_real64, 0.0_real64, pb(1:n))
         end select
         call col%row_validity(mask)
-    end subroutine col_to_real64'''
+    end procedure col_to_real64'''
+
+
+#: The column widener's interface, published for `parquet_kde`'s column forms and implemented FIRST
+#: in `parquet_stats_kernel` (see `COL_WIDEN`).
+COL_WIDEN_SPEC = """    !
+    ! ---- The column widener (implemented in parquet_stats_kernel) ----
+    interface
+        !> Widens a scalar numeric `parquet_column` into a `real64` population and its validity mask.
+        !!
+        !! Three refusals, and each is a wrong answer rather than an inconvenience if it is dropped:
+        !!
+        !! * a **string, temporal or container** column has no numeric statistics, and the message names
+        !!   the kind it actually found;
+        !! * a column **wider than one element** aborts, because flattening a width-16 column into one
+        !!   population is a DIFFERENT statistic -- a caller who wants one element position across all
+        !!   rows has `%get_elem`, and one who genuinely wants the flattened population can pass the
+        !!   flattened array and thereby say so;
+        !! * `is_valid=` **alongside** a column aborts, because the column carries its own validity and
+        !!   two sources of truth that can disagree is a shape this repository has been bitten by.
+        !!
+        !! `mask` comes back UNALLOCATED for a null-free column, which is not a detail: an unallocated
+        !! allocatable passed to an `optional` dummy is ABSENT, so the core takes its own no-mask fast
+        !! path with no branch at the call site.
+        !!
+        !! The bulk read goes through `parquet_column_data_ptr` -- the typed accessor tier, never a
+        !! type-bound procedure -- so ifx does not build a class descriptor per call. The scalar
+        !! metadata queries it makes have no typed twin and are called once per column, which is the
+        !! same trade `parquet_sorting` already makes for its key extraction.
+        !!
+        !! Published as plumbing, beside the exclusion pass and the checkers, so that `parquet_kde`'s
+        !! column forms widen a column exactly as this family does; the `parquet` facade hides it.
+        module subroutine col_to_real64(col, what, is_valid, v, mask)
+            type(parquet_column), intent(in), target :: col
+            !! the column. `target` because `parquet_column_data_ptr` requires it; the pointer never
+            !! leaves this procedure, so the caller's actual argument needs no `target` of its own.
+            character(len=*), intent(in) :: what              !! the public procedure's name.
+            logical, intent(in), optional :: is_valid(:)      !! must be absent; see above.
+            real(real64), allocatable, intent(out) :: v(:)    !! the widened population.
+            logical, allocatable, intent(out) :: mask(:)      !! its validity, or unallocated.
+        end subroutine col_to_real64
+    end interface"""
 
 
 #: The output block `pf_moments` declares before its input block, shared by every kind's entry
@@ -3617,10 +3633,11 @@ def gen_spec():
     out.append("    public :: pf_sigma_clipped_stats")
     out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
     out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges, pf_bin_linear")
-    out.append("    ! Plumbing for parquet_kde, not API: the family's exclusion pass and argument checkers, so")
-    out.append("    ! that a sibling module applies the family's population rules and aborts with its texts.")
-    out.append("    ! The `parquet` facade hides them.")
+    out.append("    ! Plumbing for parquet_kde, not API: the family's exclusion pass, argument checkers and column")
+    out.append("    ! widener, so that a sibling module applies the family's population rules, widens a column as")
+    out.append("    ! the family does and aborts with its texts. The `parquet` facade hides them.")
     out.append("    public :: stats_compact, stats_check_sizes, stats_check_weight, stats_weight_kind")
+    out.append("    public :: col_to_real64")
     # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
     # and CLAUDE.md's standing rule is that a module re-exports, getter and setter both, every
     # knob its own code reads, so that a narrow `use parquet_stats` program can silence it
@@ -3750,6 +3767,7 @@ def gen_spec():
         out.append("        module procedure mode_%s" % tag)
     out.append("    end interface pf_mode")
     out.append(GUARD_SPEC.rstrip("\n"))
+    out.append(COL_WIDEN_SPEC.rstrip("\n"))
     out.append("    !")
     out.append("    ! ---- The real64 moment core (implemented in parquet_stats_core) ----")
     out.append("    interface")

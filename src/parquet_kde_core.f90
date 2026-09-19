@@ -3,7 +3,8 @@
 !===========================================
 !
 !> The workers both forms are built on: the abort, the token resolution, the four kernels'
-!> densities and distribution functions, the two bandwidth rules and the test hooks.
+!> densities and distribution functions, the three bandwidth rules, the column forms' widening
+!> and the test hooks.
 !!
 !! Every kernel is written in STANDARD-DEVIATION units: `z` is the offset from the kernel's centre
 !! divided by the bandwidth, and the kernel's own scale `KDE_SCALE` is applied here, once, so that
@@ -112,9 +113,11 @@ contains
             code = KDE_RULE_SILVERMAN
         case ("scott")
             code = KDE_RULE_SCOTT
+        case ("isj")
+            code = KDE_RULE_ISJ
         case default
             code = 0
-            call kde_abort(entry, 'rule must be "silverman" or "scott"')
+            call kde_abort(entry, 'rule must be "isj", "silverman" or "scott"')
         end select
 
     end procedure kde_resolve_rule
@@ -316,6 +319,20 @@ contains
 
     end procedure kde_kernel_cdf
 
+    module procedure kde_n_eff
+
+        if (present(weights)) then
+            if (freq) then
+                n_eff = sum(weights)
+            else
+                n_eff = sum(weights)**2/sum(weights*weights)
+            end if
+        else
+            n_eff = real(m, real64)
+        end if
+
+    end procedure kde_n_eff
+
     module procedure kde_rule_bandwidth
 
         real(real64) :: s, r, a, n_eff
@@ -334,15 +351,7 @@ contains
         if (ok_r) then
             if (r > 0.0_real64) a = min(s, r/KDE_IQR_NORMAL)
         end if
-        if (present(weights)) then
-            if (freq) then
-                n_eff = sum(weights)
-            else
-                n_eff = sum(weights)**2/sum(weights*weights)
-            end if
-        else
-            n_eff = real(size(x, kind=int64), real64)
-        end if
+        n_eff = kde_n_eff(size(x, kind=int64), freq, weights)
         select case (rule_code)
         case (KDE_RULE_SCOTT)
             h = KDE_SCOTT_C*a*n_eff**(-0.2_real64)
@@ -352,6 +361,177 @@ contains
 
     end procedure kde_rule_bandwidth
 
+    module procedure kde_isj_eval
+
+        real(real64) :: f, log_n
+        integer :: s
+
+        ! The first stage reads the norm of the highest derivative at `t` itself; each later one at
+        ! the time the norm above it makes optimal, formed through logarithms so that no quotient
+        ! or power can overflow whatever the sample size and the norm.
+        f = isj_norm(this, KDE_ISJ_STAGES, x)
+        log_n = log(this%n_eff)
+        do s = KDE_ISJ_STAGES - 1, 2, -1
+            ! A norm this small puts the next time beyond every term, and every later norm at zero:
+            ! the function's limit there is minus infinity, and `-huge` has its sign.
+            if (.not. (f >= tiny(f))) then
+                y = -huge(1.0_real64)
+                return
+            end if
+            f = isj_norm(this, s, exp((2.0_real64/real(3 + 2*s, real64))*(KDE_ISJ_LOG_C(s) - log_n - log(f))))
+        end do
+        if (.not. (f >= tiny(f))) then
+            y = -huge(1.0_real64)
+            return
+        end if
+        y = x - exp(-0.4_real64*(KDE_ISJ_LOG_2SQRTPI + log_n + log(f)))
+
+    end procedure kde_isj_eval
+
+    module procedure kde_isj_bandwidth
+
+        type(kde_isj_point) :: fp
+        type(pf_bracket_expansion) :: grow
+        type(pf_root_info) :: info
+        real(real64), allocatable :: c(:), mass(:), y(:)
+        real(real64) :: span, a, b, r, dx, below, above, total, n_eff, tlo, t, kk, pw, bk
+        integer(int64) :: m, i1, i2
+        integer :: nc, j, k, s
+
+        h = ieee_value(1.0_real64, ieee_quiet_nan)
+        found = .false.
+        m = size(x, kind=int64)
+        if (m < 2_int64) return
+        ! The grid below is formed from these two points; a quarter of the largest number keeps every
+        ! end, width and centre of it finite. Screened as two statements: the survivors are finite,
+        ! so neither comparison meets a NaN.
+        if (.not. (abs(x(1)) <= KDE_ISJ_LIMIT)) return
+        if (.not. (abs(x(m)) <= KDE_ISJ_LIMIT)) return
+        span = x(m) - x(1)
+        if (.not. (span > 0.0_real64)) return
+
+        ! ---- the grid: the range widened on each side, clipped to the support ----
+        a = x(1) - KDE_ISJ_WIDEN*span
+        b = x(m) + KDE_ISJ_WIDEN*span
+        if (has_lower) then
+            if (lo > a) a = lo
+        end if
+        if (has_upper) then
+            if (hi < b) b = hi
+        end if
+        r = b - a
+        nc = KDE_ISJ_CELLS
+        if (kde_isj_cells_forced > 0) nc = kde_isj_cells_forced
+        dx = r/real(nc, real64)
+        allocate(c(nc))
+        do j = 1, nc
+            c(j) = a + (real(j, real64) - 0.5_real64)*dx
+        end do
+        ! A spread too narrow for the grid's centres to be told apart has no grid to be binned on.
+        do j = 2, nc
+            if (.not. (c(j) > c(j - 1))) return
+        end do
+
+        ! ---- the binned sample, normalised to one ----
+        ! A point in the half cell beyond the first or the last centre lies between that centre and
+        ! the grid's edge, where the cosine basis reflects: its whole weight is the centre's. Such
+        ! points exist only where a bound clipped the grid, and they are the sorted sample's ends.
+        below = 0.0_real64
+        i1 = 1_int64
+        do while (i1 <= m)
+            if (.not. (x(i1) < c(1))) exit
+            if (present(weights)) then
+                below = below + weights(i1)
+            else
+                below = below + 1.0_real64
+            end if
+            i1 = i1 + 1_int64
+        end do
+        above = 0.0_real64
+        i2 = m
+        do while (i2 >= i1)
+            if (.not. (x(i2) > c(nc))) exit
+            if (present(weights)) then
+                above = above + weights(i2)
+            else
+                above = above + 1.0_real64
+            end if
+            i2 = i2 - 1_int64
+        end do
+        allocate(mass(nc))
+        if (present(weights)) then
+            call pf_bin_linear(x(i1:i2), c, mass, weights=weights(i1:i2))
+        else
+            call pf_bin_linear(x(i1:i2), c, mass)
+        end if
+        mass(1) = mass(1) + below
+        mass(nc) = mass(nc) + above
+        total = sum(mass)
+        if (.not. (total > 0.0_real64)) return
+        if (.not. (total <= huge(total))) return
+        do j = 1, nc
+            mass(j) = mass(j)/total
+        end do
+
+        ! ---- the transform, and what the fixed point reads of it ----
+        allocate(y(nc))
+        call pf_dct(mass, y, context="pf_kde%fit, the ISJ rule")
+        n_eff = kde_n_eff(m, freq, weights)
+        if (.not. (n_eff > 0.0_real64)) return
+        if (.not. (n_eff <= huge(n_eff))) return
+        fp%n_eff = n_eff
+        fp%kmax = nc - 1
+        allocate(fp%kk(fp%kmax), fp%p(fp%kmax, 2:KDE_ISJ_STAGES))
+        do k = 1, fp%kmax
+            kk = real(k, real64)**2
+            fp%kk(k) = kk
+            bk = (0.5_real64*y(k + 1))**2
+            pw = kk
+            do s = 2, KDE_ISJ_STAGES
+                pw = pw*kk
+                fp%p(k, s) = pw*bk
+            end do
+        end do
+
+        ! ---- the smallest root at or above one cell ----
+        ! Below one cell the binned points themselves are what the fixed point sees: a sample of
+        ! values rounded to a step the grid resolves has a root there, at a small fraction of a cell,
+        ! far below the bandwidth its density calls for. So the search starts at one cell, and a
+        ! function already non-negative there has no root the grid can stand behind.
+        tlo = 1.0_real64/real(nc, real64)**2
+        if (.not. (fp%eval(tlo) < 0.0_real64)) return
+        ! Doubled from there, as the rule's reference search does, the expansion stops at the first
+        ! sign change: the smallest root a probe steps over.
+        grow%mode = PF_EXPAND_UP
+        grow%factor = 2.0_real64
+        grow%upper_limit = KDE_ISJ_T_MAX
+        call pf_find_root(fp, tlo, 2.0_real64*tlo, t, expand=grow, info=info, context="pf_kde%fit, the ISJ rule")
+        if (info%status /= PF_ROOT_OK) return
+        h = sqrt(t)*r
+        found = .true.
+
+    end procedure kde_isj_bandwidth
+
+    module procedure kde_widen_column
+
+        character(len=:), allocatable :: kname
+        integer :: k
+
+        ! The family's widener takes a logical column as zeros and ones, a count it can average; a
+        ! density has no use for it, so this refuses every kind but the four numeric ones, by name.
+        k = x%kindof()
+        select case (k)
+        case (PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64)
+            continue
+        case default
+            call parquet_kind_name(k, kname)
+            call kde_abort(entry, "a column of kind " // kname // " holds no numbers to place kernels at; " // &
+                "the column must be int32, int64, float32 or float64")
+        end select
+        call col_to_real64(x, entry, is_valid, wide, mask)
+
+    end procedure kde_widen_column
+
     module procedure parquet_debug_kde_threads_used
         n = kde_team_used
     end procedure parquet_debug_kde_threads_used
@@ -360,10 +540,68 @@ contains
         kde_pilot_cells_forced = max(0, n)
     end procedure parquet_debug_set_kde_pilot_cells
 
+    module procedure parquet_debug_set_kde_isj_cells
+        if (n <= 0) then
+            kde_isj_cells_forced = 0
+            return
+        end if
+        if (.not. pf_is_pow2(n)) call kde_abort("parquet_debug_set_kde_isj_cells", &
+            "n must be a power of two from 16 to 1048576")
+        if (n < 16 .or. n > 1048576) call kde_abort("parquet_debug_set_kde_isj_cells", &
+            "n must be a power of two from 16 to 1048576")
+        kde_isj_cells_forced = n
+    end procedure parquet_debug_set_kde_isj_cells
+
     module procedure parquet_debug_kde_fit_nanos
         sort = kde_fit_ns(1)
         pilot = kde_fit_ns(2)
         lookup = kde_fit_ns(3)
     end procedure parquet_debug_kde_fit_nanos
+
+    ! ==========================================================================================
+    ! Private helpers
+    ! ==========================================================================================
+
+    !> The norm of the density's `s`-th derivative at the time `t`, as the ISJ rule estimates it from
+    !! the binned transform: `2 pi**(2s) sum_k k**(2s) (y_k/2)**2 exp(-k**2 pi**2 t)`.
+    !!
+    !! The sum stops at the last `k` whose exponent is within `KDE_ISJ_EXP_LIMIT`: the terms after
+    !! it are below the normal range, and below rounding against the terms before them, so what
+    !! it leaves out is nothing the answer can hold. Each term's `exp(-k**2 c)` is the previous one's
+    !! times `exp(-(2k - 1) c)`, and that factor the previous one's times `exp(-2c)`, over runs of
+    !! `KDE_ISJ_RUN` terms, each run starting from `exp` itself.
+    pure function isj_norm(this, s, t) result(f)
+        class(kde_isj_point), intent(in) :: this !! the sample's binned transform
+        integer, intent(in)              :: s    !! the derivative
+        real(real64), intent(in)         :: t    !! the time, at least zero
+        real(real64)                     :: f    !! the norm
+        real(real64) :: ct, e, g, q
+        integer :: k, j, kmax, kend
+
+        ct = KDE_ISJ_PI2*t
+        kmax = this%kmax
+        ! The quotient is formed only where the last term is past the limit, so `ct` is not small.
+        if (ct*this%kk(kmax) > KDE_ISJ_EXP_LIMIT) kmax = int(sqrt(KDE_ISJ_EXP_LIMIT/ct))
+        q = exp(-2.0_real64*ct)
+        f = 0.0_real64
+        k = 1
+        do while (k <= kmax)
+            ! `e` is term `k`'s exponential and `g` the factor to the next: `(k + 1)**2 - k**2` is
+            ! `2k + 1`. Every factor and every term stays in the normal range, since the last
+            ! term's exponent is within the limit.
+            e = exp(-this%kk(k)*ct)
+            g = exp(-real(2*k + 1, real64)*ct)
+            f = f + this%p(k, s)*e
+            kend = min(kmax, k + KDE_ISJ_RUN - 1)
+            do j = k + 1, kend
+                e = e*g
+                g = g*q
+                f = f + this%p(j, s)*e
+            end do
+            k = kend + 1
+        end do
+        f = KDE_ISJ_NORM_C(s)*f
+
+    end function isj_norm
 
 end submodule parquet_kde_core ! GCOVR_EXCL_LINE

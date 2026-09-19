@@ -132,10 +132,11 @@ module parquet_stats
     public :: pf_sigma_clipped_stats
     public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
     public :: pf_bucketize, pf_histogram, pf_bin_edges, pf_bin_linear
-    ! Plumbing for parquet_kde, not API: the family's exclusion pass and argument checkers, so
-    ! that a sibling module applies the family's population rules and aborts with its texts.
-    ! The `parquet` facade hides them.
+    ! Plumbing for parquet_kde, not API: the family's exclusion pass, argument checkers and column
+    ! widener, so that a sibling module applies the family's population rules, widens a column as
+    ! the family does and aborts with its texts. The `parquet` facade hides them.
     public :: stats_compact, stats_check_sizes, stats_check_weight, stats_weight_kind
+    public :: col_to_real64
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: pf_stats
@@ -1818,6 +1819,43 @@ module parquet_stats
             integer(int64), intent(in) :: i !! its index, for the message.
             character(len=*), intent(in) :: what !! the public procedure's name, for the message.
         end subroutine stats_check_weight
+    end interface
+    !
+    ! ---- The column widener (implemented in parquet_stats_kernel) ----
+    interface
+        !> Widens a scalar numeric `parquet_column` into a `real64` population and its validity mask.
+        !!
+        !! Three refusals, and each is a wrong answer rather than an inconvenience if it is dropped:
+        !!
+        !! * a **string, temporal or container** column has no numeric statistics, and the message names
+        !!   the kind it actually found;
+        !! * a column **wider than one element** aborts, because flattening a width-16 column into one
+        !!   population is a DIFFERENT statistic -- a caller who wants one element position across all
+        !!   rows has `%get_elem`, and one who genuinely wants the flattened population can pass the
+        !!   flattened array and thereby say so;
+        !! * `is_valid=` **alongside** a column aborts, because the column carries its own validity and
+        !!   two sources of truth that can disagree is a shape this repository has been bitten by.
+        !!
+        !! `mask` comes back UNALLOCATED for a null-free column, which is not a detail: an unallocated
+        !! allocatable passed to an `optional` dummy is ABSENT, so the core takes its own no-mask fast
+        !! path with no branch at the call site.
+        !!
+        !! The bulk read goes through `parquet_column_data_ptr` -- the typed accessor tier, never a
+        !! type-bound procedure -- so ifx does not build a class descriptor per call. The scalar
+        !! metadata queries it makes have no typed twin and are called once per column, which is the
+        !! same trade `parquet_sorting` already makes for its key extraction.
+        !!
+        !! Published as plumbing, beside the exclusion pass and the checkers, so that `parquet_kde`'s
+        !! column forms widen a column exactly as this family does; the `parquet` facade hides it.
+        module subroutine col_to_real64(col, what, is_valid, v, mask)
+            type(parquet_column), intent(in), target :: col
+            !! the column. `target` because `parquet_column_data_ptr` requires it; the pointer never
+            !! leaves this procedure, so the caller's actual argument needs no `target` of its own.
+            character(len=*), intent(in) :: what              !! the public procedure's name.
+            logical, intent(in), optional :: is_valid(:)      !! must be absent; see above.
+            real(real64), allocatable, intent(out) :: v(:)    !! the widened population.
+            logical, allocatable, intent(out) :: mask(:)      !! its validity, or unallocated.
+        end subroutine col_to_real64
     end interface
     !
     ! ---- The real64 moment core (implemented in parquet_stats_core) ----

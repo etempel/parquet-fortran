@@ -30,7 +30,7 @@ module test_integrate
     use test_integrate_support
     use iso_fortran_env, only : real64
     use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, &
-        ieee_invalid
+        ieee_invalid, ieee_underflow
 
     implicit none
     private
@@ -87,6 +87,8 @@ contains
                          test_rtol_floor_needs_atol), &
             new_unittest("the extrapolation earns its keep on an endpoint singularity", &
                          test_extrapolation_earns_its_keep), &
+            new_unittest("the epsilon table raises no underflow on an ordinary integral", &
+                         test_extrapolation_raises_no_underflow), &
             new_unittest("every infinite tail reproduces its closed form, negated ones included", &
                          test_infinite_tails), &
             new_unittest("a feature far along an infinite range is found, not stepped over", &
@@ -1102,6 +1104,48 @@ contains
                    "omitting extrapolate= must cost and report what extrapolate=.true. does")
 
     end subroutine test_extrapolation_earns_its_keep
+
+    !> Asserts that the Wynn-epsilon table raises no underflow on an integral whose own values
+    !! raise none.
+    !!
+    !! Each step of the table forms `1/delta` for three differences, and upstream's table holds
+    !! `huge` as a placeholder for the element not yet computed, so the first difference of every
+    !! step is about `huge` and its reciprocal is subnormal: every extrapolated call raised
+    !! IEEE_UNDERFLOW for a term that cannot change the answer. The engine forms each reciprocal
+    !! from a difference capped at `1/tiny` (deviation 14 in `parquet_integrate_engine.f90`).
+    !! `log_sqrt` over `[0, 1]` raises nothing in its own arithmetic, and the call must report that
+    !! the table ran, or the flag proves nothing. The flag is cleared around the call alone and
+    !! restored as `saved .or. raised`, as `test_status_divergent` does for INVALID.
+    subroutine test_extrapolation_raises_no_underflow(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integration_info) :: info
+        real(real64)              :: r
+        logical                   :: can_test, saved, raised
+
+        can_test = ieee_support_flag(ieee_underflow, 0.0_real64)
+        saved = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+        r = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info)
+        raised = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_underflow, raised)
+            call ieee_set_flag(ieee_underflow, saved .or. raised)
+        end if
+        call check(error, info%extrapolated, &
+                   "the call must have used the epsilon table, or the flag proves nothing")
+        if (allocated(error)) return
+        call check(error, abs(r - log_sqrt_exact()) <= 1.0e-9_real64, &
+                   "the extrapolated result must reach the closed form")
+        if (allocated(error)) return
+        call check(error, .not. raised, &
+                   "the epsilon table raised IEEE_UNDERFLOW: a reciprocal of the table's huge " // &
+                   "placeholder was formed")
+
+    end subroutine test_extrapolation_raises_no_underflow
 
     !> Asserts that the extrapolation costs the same at every tolerance, where the bisection does
     !! not.

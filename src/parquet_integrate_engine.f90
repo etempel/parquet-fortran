@@ -74,6 +74,13 @@
 !!     `|f|` over the whole range it was given -- which upstream keeps as a local. The outward
 !!     walk measures its round-off floor against the sum of these, exactly as qfeet measured its
 !!     own against the unrefined rule's `resabs`, and nothing else reads it.
+!! 14. `qelg` forms each of the table's three reciprocals `1/delta` from the difference capped at
+!!     `1/tiny` in magnitude (`RECIP_CAP`), stored before it is divided into. Upstream holds
+!!     `oflow` in the table as a placeholder for the element not yet computed, so the first
+!!     difference of every step is about `huge` and its reciprocal subnormal: every extrapolated
+!!     call raised IEEE_UNDERFLOW for a term that cannot change the answer
+!!     (`test_extrapolation_raises_no_underflow`). A difference within the cap is divided into
+!!     unchanged, so the table's values are upstream's wherever no reciprocal was subnormal.
 !!
 !! **What is deliberately NOT vendored: `dqagie` and `dqk15i`.** QUADPACK answers an infinite
 !! range by the change of variable `x = a + (1 - t)/t`, bisecting in `t` over `(0, 1]` with a
@@ -111,6 +118,9 @@ submodule (parquet_integrate) parquet_integrate_engine
     real(real64), parameter :: UFLOW = tiny(1.0_real64)
     !> The largest finite magnitude, QUADPACK's `oflow`, and the non-finite screen's threshold.
     real(real64), parameter :: OFLOW = huge(1.0_real64)
+    !> The largest magnitude whose reciprocal is normal, `1/tiny` (exactly `2**1022`): `qelg` caps
+    !> each difference at it before dividing (deviation 14).
+    real(real64), parameter :: RECIP_CAP = 1.0_real64/UFLOW
 
     ! The abscissae and weights are given for the interval (-1, 1). Because of symmetry only the
     ! positive abscissae and their corresponding weights are given.
@@ -391,6 +401,9 @@ contains
         real(real64) :: err1, err2, err3, e0, e1, e1abs, e2, e3
         real(real64) :: resq, ss, tol1, tol2, tol3, error
         integer      :: i, ib, ib2, ie, indx, k1, k2, k3, num, newelm
+        ! Each difference capped at RECIP_CAP, stored before it is divided into (deviation 14), so
+        ! an optimiser cannot split the cap into a quotient of the uncapped difference.
+        real(real64), volatile :: cap1, cap2, cap3
 
         nres = nres + 1
         abserr = OFLOW
@@ -424,7 +437,14 @@ contains
                     ! If two elements are very close to each other, omit a part of the table by
                     ! adjusting the value of n.
                     if (err1 > tol1 .and. err2 > tol2 .and. err3 > tol3) then
-                        ss = 1.0_real64/delta1 + 1.0_real64/delta2 - 1.0_real64/delta3
+                        ! Deviation 14: `delta1` is about `huge` on every step's first element, the
+                        ! table holding `OFLOW` there, and its reciprocal would be subnormal. The
+                        ! three errors exceed their tolerances, so none is a NaN or a zero, and
+                        ! `sign` puts back each difference's own sign.
+                        cap1 = sign(min(err1, RECIP_CAP), delta1)
+                        cap2 = sign(min(err2, RECIP_CAP), delta2)
+                        cap3 = sign(min(err3, RECIP_CAP), delta3)
+                        ss = 1.0_real64/cap1 + 1.0_real64/cap2 - 1.0_real64/cap3
                         epsinf = abs(ss*e1)
                         ! Test to detect irregular behaviour in the table, and eventually omit a
                         ! part of it by adjusting the value of n.

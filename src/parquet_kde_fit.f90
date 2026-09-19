@@ -690,7 +690,7 @@ contains
         if (allocated(self%hb)) deallocate(self%hb)
         if (allocated(self%hr)) deallocate(self%hr)
         self%adapt = kde_adapt()
-        self%pilot_grid = pf_kde_grid()
+        self%pilot_grid = pf_kde_grid(adapt=kde_adapt())
         self%hmax = 0.0_real64
         self%hinv = 0.0_real64
         self%hstride = 0_int64

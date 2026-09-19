@@ -570,6 +570,17 @@ contains
     !! it leaves out is nothing the answer can hold. Each term's `exp(-k**2 c)` is the previous one's
     !! times `exp(-(2k - 1) c)`, and that factor the previous one's times `exp(-2c)`, over runs of
     !! `KDE_ISJ_RUN` terms, each run starting from `exp` itself.
+    !!
+    !! **No factor is formed that no term reads.** Every exponential and every factor a term reads
+    !! is within the limit, so in the normal range. The ones no term reads are not, once `c` is
+    !! large -- the step `exp(-2c)` where no run has three terms, a run's first factor where the
+    !! run has one, and the factor past a run's last term -- and the search for a fixed point
+    !! reaches such a `c` on a sample the rule finds no root for. Forming one raises
+    !! IEEE_UNDERFLOW for a value nothing reads (`test_isj_sum_forms_no_unused_factor`), so none is
+    !! formed; the terms and their order are unchanged, so the sum is too. A term's PRODUCT with
+    !! its coefficient can still fall below the normal range, since a coefficient can be
+    !! arbitrarily small; that underflow is accepted, the term being far below rounding against
+    !! the sum.
     pure function isj_norm(this, s, t) result(f)
         class(kde_isj_point), intent(in) :: this !! the sample's binned transform
         integer, intent(in)              :: s    !! the derivative
@@ -582,22 +593,28 @@ contains
         kmax = this%kmax
         ! The quotient is formed only where the last term is past the limit, so `ct` is not small.
         if (ct*this%kk(kmax) > KDE_ISJ_EXP_LIMIT) kmax = int(sqrt(KDE_ISJ_EXP_LIMIT/ct))
-        q = exp(-2.0_real64*ct)
+        ! The step is read only by a run of three terms or more, where `9c` is within the limit.
+        q = 0.0_real64
+        if (kmax >= 3) q = exp(-2.0_real64*ct)
         f = 0.0_real64
         k = 1
         do while (k <= kmax)
             ! `e` is term `k`'s exponential and `g` the factor to the next: `(k + 1)**2 - k**2` is
-            ! `2k + 1`. Every factor and every term stays in the normal range, since the last
-            ! term's exponent is within the limit.
+            ! `2k + 1`. A factor is formed only for a term that follows, so it is within the
+            ! limit as that term is; the run's last term is taken outside the loop for that reason.
             e = exp(-this%kk(k)*ct)
-            g = exp(-real(2*k + 1, real64)*ct)
             f = f + this%p(k, s)*e
             kend = min(kmax, k + KDE_ISJ_RUN - 1)
-            do j = k + 1, kend
+            if (kend > k) then
+                g = exp(-real(2*k + 1, real64)*ct)
+                do j = k + 1, kend - 1
+                    e = e*g
+                    g = g*q
+                    f = f + this%p(j, s)*e
+                end do
                 e = e*g
-                g = g*q
-                f = f + this%p(j, s)*e
-            end do
+                f = f + this%p(kend, s)*e
+            end if
             k = kend + 1
         end do
         f = KDE_ISJ_NORM_C(s)*f

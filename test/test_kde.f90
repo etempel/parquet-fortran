@@ -56,7 +56,7 @@ module test_kde
     use test_kde_golden
     use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
-        ieee_is_nan, ieee_is_finite
+        ieee_is_nan, ieee_is_finite, ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow
 
     implicit none
     private
@@ -117,6 +117,8 @@ contains
                 test_isj_narrower_on_bimodal), &
             new_unittest("without a root the default falls back to silverman and rule=isj is undefined", &
                 test_isj_fallback), &
+            new_unittest("the isj rule's sum forms no factor it does not use", &
+                test_isj_sum_forms_no_unused_factor), &
             new_unittest("isj weights: frequency weights replicate, equal reliability weights are none", &
                 test_isj_weights), &
             new_unittest("the column forms of %fit and %add equal the array forms, bit for bit", &
@@ -746,6 +748,45 @@ contains
             "a constant sample has no bandwidth under the default, and silverman's rule was tried last")
 
     end subroutine test_isj_fallback
+
+    !> The ISJ rule's norm forms no factor its sum does not use. `isj_norm` walks the terms
+    !! `exp(-k**2 c)` by two running factors, and a factor formed past the last term kept is below
+    !! the normal range once `c` is large, which the search for a fixed point reaches on a sample
+    !! the rule finds no root for: the recipe at n = 60 formed both the `exp(-2c)` step and a
+    !! run's first factor there, raising IEEE_UNDERFLOW for values nothing read. The fit runs on
+    !! this thread (`threads = 1`), so the flag read here is the fit's; it is cleared around the
+    !! call alone and restored as `saved .or. raised`. That the sample is still one without a root
+    !! is asserted first, since a sample the rule solves never reaches the large `c`. A term the
+    !! sum keeps can still underflow in its product with a small coefficient, which is accepted
+    !! (`isj_norm`); this sample has none.
+    subroutine test_isj_sum_forms_no_unused_factor(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        character(len=:), allocatable :: name
+        logical :: ok, can_test, saved, raised
+
+        call kde_fixture(60_int64, x)
+        can_test = ieee_support_flag(ieee_underflow, 1.0_real64)
+        saved = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+        call k%fit(x, ok=ok, threads=1)
+        raised = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_underflow, raised)
+            call ieee_set_flag(ieee_underflow, saved .or. raised)
+        end if
+        call k%rule(name)
+        call check(error, ok .and. name == "silverman", &
+            "the fixture must be a sample the isj rule finds no root for, or it never reaches a large c")
+        if (allocated(error)) return
+        call check(error, .not. raised, &
+            "the isj rule's search raised IEEE_UNDERFLOW: isj_norm formed a factor its sum does not use")
+
+    end subroutine test_isj_sum_forms_no_unused_factor
 
     !> Weights under the ISJ rule. Frequency weights are replication: the two-component recipe under
     !> integer weights `mod(i, 5)` has the bandwidth of the sample with each value repeated that many

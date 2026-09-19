@@ -134,9 +134,10 @@ helpers, and the two generators meant to be copied into your own project.
 - [Celestial coordinate systems with `parquet_skycoord`](skycoord.html) — sky positions converted
   between ICRS, Galactic, ecliptic and supergalactic coordinates, by a named procedure or by two
   selectors read at run time, each rotation built from the three angles that define it and agreeing
-  with astropy to rounding; and the RA/Dec geometry that needs no coordinate system: the separation
-  of two positions, the position a separation away at a position angle, and that angle back. Every
-  procedure is `pure elemental`, so a whole column converts in one call.
+  with astropy to rounding; the RA/Dec geometry that needs no coordinate system: the separation of
+  two positions, the position a separation away at a position angle, and that angle back; positions
+  written as sexagesimal text and read back strictly; and a heliocentric redshift in the CMB rest
+  frame. All but the three text writers are `pure elemental`, so a whole column converts in one call.
 - [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key, a tuple of them when no one column
   is unique, or a string. Three storage backends behind one API — an array indexed by the key, an

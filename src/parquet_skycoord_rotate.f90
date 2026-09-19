@@ -1,5 +1,6 @@
 !> `parquet_skycoord`'s rotations: the kernel every conversion shares, the eight named procedures,
-!! `pf_sky_convert`, the selector tokens, and the RA/Dec helpers the geometry submodule shares.
+!! `pf_sky_convert`, the selector tokens, `pf_zhel2zcmb`, and the RA/Dec helpers the geometry
+!! submodule shares.
 !!
 !! **One kernel, one matrix per call.** `skc_rotate` is handed a compile-time matrix from the
 !! module's table and does the whole conversion -- the input's unit vector, one matrix product, and
@@ -15,7 +16,29 @@
 !! rather than `ieee_is_nan`, since these are per-element procedures.
 submodule (parquet_skycoord) parquet_skycoord_rotate
     use parquet_utils, only: pf_to_lower, pf_to_str
+    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     implicit none
+
+    ! ---- pf_zhel2zcmb's constants ----
+    !
+    ! The module's only physical constants, kept beside the one procedure that uses them. The dipole
+    ! is Planck 2018 results I (Aghanim et al. 2020, A&A 641, A1), its apex Galactic as every dipole
+    ! is published; tools/generate_skycoord_reference.py --self-test reads the four literals back, so
+    ! never edit one without the generator.
+
+    !> The speed of light, km/s: the SI definition, in the unit a dipole's speed is published in.
+    real(real64), parameter :: skc_c_kms = 299792.458_real64
+    !> The CMB dipole apex's Galactic longitude, degrees (Planck 2018).
+    real(real64), parameter :: skc_cmb_apex_lon = 264.021_real64
+    !> The CMB dipole apex's Galactic latitude, degrees (Planck 2018).
+    real(real64), parameter :: skc_cmb_apex_lat = 48.253_real64
+    !> The Sun's speed toward the apex, km/s (Planck 2018).
+    real(real64), parameter :: skc_cmb_apex_v = 369.82_real64
+    !> The default apex as a Galactic unit vector, built at compile time.
+    real(real64), parameter :: skc_cmb_apex_gal(3) = [ &
+        cos(skc_cmb_apex_lat * skc_deg2rad) * cos(skc_cmb_apex_lon * skc_deg2rad), &
+        cos(skc_cmb_apex_lat * skc_deg2rad) * sin(skc_cmb_apex_lon * skc_deg2rad), &
+        sin(skc_cmb_apex_lat * skc_deg2rad)]
 
 contains
 
@@ -212,6 +235,102 @@ contains
             end select
         end select
     end procedure pf_sky_convert
+
+    ! ---- The CMB rest frame ----
+
+    module procedure pf_zhel2zcmb
+        real(real64) :: v(3), w(3), a(3), alon, alat, av, beta, g, cth
+        integer :: sys
+        character(len=:), allocatable :: t
+
+        sys = PF_COORD_ICRS
+        if (present(system)) sys = system
+        if (.not. skc_is_system(sys)) then
+            call pf_to_str(sys, t)
+            error stop "pf_zhel2zcmb: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), PF_COORD_ECLIPTIC (3) " // &
+                "or PF_COORD_SUPERGALACTIC (4) (got " // t // ")"
+        end if
+        alon = skc_cmb_apex_lon
+        if (present(apex_lon)) alon = apex_lon
+        alat = skc_cmb_apex_lat
+        if (present(apex_lat)) alat = apex_lat
+        av = skc_cmb_apex_v
+        if (present(apex_v)) av = apex_v
+        ! A NaN is handed back itself, before any comparison or transcendental can raise a flag on it.
+        if (lon /= lon) then
+            z_cmb = lon
+            return
+        end if
+        if (lat /= lat) then
+            z_cmb = lat
+            return
+        end if
+        if (z_hel /= z_hel) then
+            z_cmb = z_hel
+            return
+        end if
+        if (alon /= alon) then
+            z_cmb = alon
+            return
+        end if
+        if (alat /= alat) then
+            z_cmb = alat
+            return
+        end if
+        if (av /= av) then
+            z_cmb = av
+            return
+        end if
+        ! The boost is a finite positive factor, so an infinite redshift is itself; and a speed at or
+        ! beyond light's has no Lorentz factor. The speeds are compared, not their quotient with 1:
+        ! ifx's default model divides by a constant as a multiplication by its rounded reciprocal,
+        ! which put `c / c` one ulp below 1.
+        if (abs(z_hel) > huge(z_hel)) then
+            z_cmb = z_hel
+            return
+        end if
+        if (abs(av) >= skc_c_kms) then
+            z_cmb = ieee_value(0.0_real64, ieee_quiet_nan)
+            return
+        end if
+        beta = av / skc_c_kms
+        ! The cosine of the angle to the apex: the position's unit vector taken into Galactic and
+        ! dotted with the apex's.
+        call skc_radec_unit(lon, lat, v)
+        select case (sys)
+        case (PF_COORD_ICRS)
+            call skc_apply(skc_m_icrs2gal, v, w)
+        case (PF_COORD_ECLIPTIC)
+            call skc_apply(skc_m_ecl2gal, v, w)
+        case (PF_COORD_SUPERGALACTIC)
+            call skc_apply(skc_m_sgal2gal, v, w)
+        case default
+            w = v
+        end select
+        if (present(apex_lon) .or. present(apex_lat)) then
+            call skc_radec_unit(alon, alat, a)
+        else
+            a = skc_cmb_apex_gal
+        end if
+        cth = w(1) * a(1) + w(2) * a(2) + w(3) * a(3)
+        ! `(1 + z) g (1 + beta cth) - 1` with nothing near 1 subtracted from 1, so a small redshift
+        ! keeps its digits: `g - 1 = g**2 beta**2 / (g + 1)`. And `g` from the speeds, whose
+        ! `(c - |v|)(c + |v|)` is positive for every speed below light's, where `1 - beta**2` of a
+        ! quotient rounded up could reach 0.
+        g = skc_c_kms / sqrt((skc_c_kms - abs(av)) * (skc_c_kms + abs(av)))
+        z_cmb = z_hel + (1.0_real64 + z_hel) * (g * g * beta * beta / (g + 1.0_real64) + g * beta * cth)
+    end procedure pf_zhel2zcmb
+
+    !> `w = m v`, one of the module's compile-time matrices applied to a unit vector.
+    pure subroutine skc_apply(m, v, w)
+        real(real64), intent(in) :: m(3, 3) !! the rotation.
+        real(real64), intent(in) :: v(3) !! the vector.
+        real(real64), intent(out) :: w(3) !! the rotated vector.
+
+        w(1) = m(1, 1) * v(1) + m(1, 2) * v(2) + m(1, 3) * v(3)
+        w(2) = m(2, 1) * v(1) + m(2, 2) * v(2) + m(2, 3) * v(3)
+        w(3) = m(3, 1) * v(1) + m(3, 2) * v(2) + m(3, 3) * v(3)
+    end subroutine skc_apply
 
     ! ---- The selector tokens ----
 

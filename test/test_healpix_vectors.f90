@@ -1,9 +1,15 @@
 !> Reference vectors for `parquet_healpix`, generated from an independent model.
 !!
-!! **GENERATED FILE -- DO NOT EDIT BY HAND.** Emitted by `tools/generate_healpix_reference.py`;
-!! `tools/generate_healpix_reference.py --check` fails if this file has drifted from what the
-!! generator produces, and CI runs it. **Never hand-edit a value here**: these vectors are what
-!! pin the pixelisation's contract, so an edited one is a lie that nothing else would catch.
+!! **GENERATED FILE -- DO NOT EDIT BY HAND.** Emitted by `tools/generate_healpix_reference.py`.
+!! **Never hand-edit a value here**: these vectors are what pin the pixelisation's contract, so
+!! an edited one is a lie that nothing else would catch.
+!!
+!! **`--check` is HOST-DEPENDENT and is deliberately NOT run by CI.** The directions below come
+!! from `math.acos`/`cos`/`atan2`, so their last digit follows the platform's libm and a fresh
+!! run on a different machine legitimately disagrees with this file in the 17th significant
+!! figure. Use it to see what a regeneration WOULD change, never as a pass/fail gate. What CI
+!! runs instead is `--self-test`, which reproduces the anchors without touching this file, plus
+!! the generated-file banner check in `tools/check_source_conventions.py`.
 !!
 !! Every value is derived by the generator's own pure-Python model of the published HEALPix
 !! algorithm (Gorski et al. 2005, ApJ 622, 759) and cross-checked against `healpy`. The oracle
@@ -1147,4 +1153,5 @@ module test_healpix_vectors
         9514_int64, 3019_int64, 11193_int64, 310748374288564224_int64, &
         198158383604301824_int64, 243194379878006784_int64, 180143985094819840_int64, 612489549322387456_int64]
 
-end module test_healpix_vectors
+    ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.
+end module test_healpix_vectors ! GCOVR_EXCL_LINE

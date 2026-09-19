@@ -3459,6 +3459,12 @@ contains
                 test_skycoord_convert_unknown_system_aborts), &
             new_unittest("pf_coord_system_name refuses an integer that is not a selector", &
                 test_skycoord_system_name_not_a_selector_aborts), &
+            new_unittest("pf_radec2str refuses a precision past nine decimals", &
+                test_skycoord_radec2str_width_overflow_aborts), &
+            new_unittest("pf_dec2str refuses a separator that is not a colon, a blank or the letters", &
+                test_skycoord_text_bad_separator_aborts), &
+            new_unittest("pf_zhel2zcmb refuses the unknown system", &
+                test_skycoord_zcmb_unknown_system_aborts), &
             new_unittest("a Fibonacci grid refuses n below 1", &
                 test_sphere_fibonacci_n_not_positive_aborts), &
             new_unittest("a Fibonacci grid refuses an array not shaped (3, n)", &
@@ -21088,6 +21094,31 @@ contains
             failure_message="naming system 7 was expected to abort", &
             required_stderr="pf_coord_system_name: system must be a PF_COORD_* selector (got 7)")
     end subroutine test_skycoord_system_name_not_a_selector_aborts
+    !
+    !> See scenario_skycoord_radec2str_width_overflow.
+    subroutine test_skycoord_radec2str_width_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_radec2str_width_overflow", expect_abort=.true., &
+            failure_message="writing at precision 10 was expected to abort", &
+            required_stderr="pf_radec2str: precision must be in [0, 9] (got 10)")
+    end subroutine test_skycoord_radec2str_width_overflow_aborts
+    !
+    !> See scenario_skycoord_text_bad_separator.
+    subroutine test_skycoord_text_bad_separator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_text_bad_separator", expect_abort=.true., &
+            failure_message="writing with a slash between the fields was expected to abort", &
+            required_stderr='pf_dec2str: sep must be ":", " " or "hms" (got "/")')
+    end subroutine test_skycoord_text_bad_separator_aborts
+    !
+    !> See scenario_skycoord_zcmb_unknown_system.
+    subroutine test_skycoord_zcmb_unknown_system_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_zcmb_unknown_system", expect_abort=.true., &
+            failure_message="a redshift in PF_COORD_UNKNOWN was expected to abort", &
+            required_stderr="pf_zhel2zcmb: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
+            "PF_COORD_ECLIPTIC (3) or PF_COORD_SUPERGALACTIC (4) (got 0)")
+    end subroutine test_skycoord_zcmb_unknown_system_aborts
     !
     !> See scenario_sphere_fibonacci_n_not_positive.
     subroutine test_sphere_fibonacci_n_not_positive_aborts(error)

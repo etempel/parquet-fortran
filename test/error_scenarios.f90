@@ -1553,6 +1553,12 @@ program error_scenarios
         call scenario_skycoord_convert_unknown_system()
     case ("skycoord_system_name_not_a_selector")
         call scenario_skycoord_system_name_not_a_selector()
+    case ("skycoord_radec2str_width_overflow")
+        call scenario_skycoord_radec2str_width_overflow()
+    case ("skycoord_text_bad_separator")
+        call scenario_skycoord_text_bad_separator()
+    case ("skycoord_zcmb_unknown_system")
+        call scenario_skycoord_zcmb_unknown_system()
     case ("sphere_fibonacci_n_not_positive")
         call scenario_sphere_fibonacci_n_not_positive()
     case ("sphere_fibonacci_bad_shape")
@@ -24338,6 +24344,35 @@ contains
         call pf_coord_system_name(7, name)   ! -> aborts
         print '(a,a)', "unexpectedly named system 7: ", name
     end subroutine scenario_skycoord_system_name_not_a_selector
+
+    !> A writer's precision is at most nine decimals of an arcsecond, which with the right ascension's
+    !! one more fills the widest text it writes. The control writes at nine.
+    subroutine scenario_skycoord_radec2str_width_overflow()
+        character(len=:), allocatable :: text
+        call pf_radec2str(187.5_real64, -12.5_real64, text, precision=9)
+        print '(a,a)', "wrote at precision 9: ", text
+        call pf_radec2str(187.5_real64, -12.5_real64, text, precision=10)   ! -> aborts
+        print '(a,a)', "unexpectedly wrote at precision 10: ", text
+    end subroutine scenario_skycoord_radec2str_width_overflow
+
+    !> A writer's separator is a colon, a blank or the letters. The control writes the letters.
+    subroutine scenario_skycoord_text_bad_separator()
+        character(len=:), allocatable :: text
+        call pf_dec2str(-12.5_real64, text, sep="hms")
+        print '(a,a)', "wrote with the letters: ", text
+        call pf_dec2str(-12.5_real64, text, sep="/")   ! -> aborts
+        print '(a,a)', "unexpectedly wrote with a slash: ", text
+    end subroutine scenario_skycoord_text_bad_separator
+
+    !> The position's system is one of the four, as for a conversion. The control names Galactic.
+    !! The result is printed each time: the procedure is `pure`, and an unused call may be deleted.
+    subroutine scenario_skycoord_zcmb_unknown_system()
+        real(real64) :: z
+        z = pf_zhel2zcmb(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_GALACTIC)
+        print '(a,es24.16)', "the redshift of a Galactic position: ", z
+        z = pf_zhel2zcmb(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_UNKNOWN)   ! -> aborts
+        print '(a,es24.16)', "unexpectedly gave a redshift in the unknown system: ", z
+    end subroutine scenario_skycoord_zcmb_unknown_system
 
     !> A grid of no points has no answer. The control is a grid of one.
     subroutine scenario_sphere_fibonacci_n_not_positive()

@@ -102,6 +102,9 @@ CHECKS=(
     "python3 tools/generate_sphere_reference.py --check"
     "python3 tools/generate_skycoord_reference.py --self-test"
     "python3 tools/generate_skycoord_reference.py --check"
+    "python3 tools/generate_path_reference.py --self-test"
+    "python3 tools/generate_path_reference.py --check"
+    "python3 tools/generate_healpix_reference.py --self-test"
 )
 
 if ! command -v python3 >/dev/null 2>&1; then

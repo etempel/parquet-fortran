@@ -448,8 +448,9 @@ contains
 
 end module test_module_surface_sphere
 
-!> `parquet_skycoord` alone: every rotation, the data-driven form, the selector tokens and the
-!> frame-free RA/Dec geometry, and no settings knob at all.
+!> `parquet_skycoord` alone: every rotation, the data-driven form, the selector tokens, the
+!> frame-free RA/Dec geometry, the sexagesimal fields and text and the CMB rest frame, and no
+!> settings knob at all.
 !!
 !! **One library import, and it must stay that way.** This module's row in the entry-module table
 !! claims that `use parquet_skycoord` compiles a handful of Fortran files and re-exports no setting
@@ -464,12 +465,15 @@ module test_module_surface_skycoord
 
 contains
 
-    !> Uses every rotation, the data-driven form, both token procedures and the three geometry
-    !! procedures through `use parquet_skycoord` alone, each against a value the geometry fixes.
+    !> Uses every rotation, the data-driven form, both token procedures, the three geometry
+    !! procedures, the ten sexagesimal ones and `pf_zhel2zcmb` through `use parquet_skycoord` alone,
+    !! each against a value the geometry or the arithmetic fixes.
     subroutine check_skycoord_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
-        character(len=:), allocatable :: name
-        real(real64) :: a, b, c, d, ra, dec
+        character(len=:), allocatable :: name, text
+        real(real64) :: a, b, c, d, ra, dec, s
+        integer :: h, m, sgn, deg
+        logical :: ok
 
         what = ""
         ! The eight named rotations chained round a closed loop through all four systems: a procedure
@@ -508,6 +512,31 @@ contains
             what = "pf_offset_radec"
         if (what == "" .and. abs(pf_position_angle_deg(0.0_real64, 0.0_real64, 10.0_real64, 0.0_real64) &
                                  - 90.0_real64) > 1.0e-12_real64) what = "pf_position_angle_deg"
+
+        ! The sexagesimal fields: 187.5 degrees is 12h30m exactly, and -12.5 is -12d30m.
+        call pf_deg2hms(187.5_real64, h, m, s)
+        if (what == "" .and. (h /= 12 .or. m /= 30 .or. s /= 0.0_real64)) what = "pf_deg2hms"
+        call pf_deg2dms(-12.5_real64, sgn, deg, m, s)
+        if (what == "" .and. (sgn /= -1 .or. deg /= 12 .or. m /= 30 .or. s /= 0.0_real64)) what = "pf_deg2dms"
+        if (what == "" .and. pf_hms2deg(12, 30, 0.0_real64) /= 187.5_real64) what = "pf_hms2deg"
+        if (what == "" .and. pf_dms2deg(-1, 12, 30, 0.0_real64) /= -12.5_real64) what = "pf_dms2deg"
+        ! The text, written and read back.
+        call pf_ra2str(187.5_real64, text)
+        if (what == "" .and. text /= "12:30:00.000") what = "pf_ra2str"
+        call pf_dec2str(-12.5_real64, text)
+        if (what == "" .and. text /= "-12:30:00.00") what = "pf_dec2str"
+        call pf_radec2str(187.5_real64, -12.5_real64, text, sep="hms")
+        if (what == "" .and. text /= "12h30m00.000s -12d30m00.00s") what = "pf_radec2str"
+        call pf_str2ra("12:30:00", ra, ok)
+        if (what == "" .and. .not. (ok .and. ra == 187.5_real64)) what = "pf_str2ra"
+        call pf_str2dec("-12:30:00", dec, ok)
+        if (what == "" .and. .not. (ok .and. dec == -12.5_real64)) what = "pf_str2dec"
+        call pf_str2radec("12 30 00 -12 30 00", ra, dec, ok)
+        if (what == "" .and. .not. (ok .and. ra == 187.5_real64 .and. dec == -12.5_real64)) what = "pf_str2radec"
+
+        ! The CMB rest frame: with no motion the redshift is unchanged, exactly.
+        if (what == "" .and. pf_zhel2zcmb(10.0_real64, 20.0_real64, 0.5_real64, apex_v=0.0_real64) /= 0.5_real64) &
+            what = "pf_zhel2zcmb"
     end subroutine check_skycoord_surface
 
 end module test_module_surface_skycoord

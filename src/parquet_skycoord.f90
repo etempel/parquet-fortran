@@ -1,7 +1,7 @@
-!> Celestial coordinate systems -- ICRS, Galactic, ecliptic and supergalactic -- and the library's
-!! frame-free RA/Dec geometry.
+!> Celestial coordinate systems -- ICRS, Galactic, ecliptic and supergalactic -- the library's
+!! frame-free RA/Dec geometry, sky angles as sexagesimal text, and the CMB rest frame of a redshift.
 !!
-!! Two families, both on the sky, both in degrees and both `pure elemental` over `real64`:
+!! Four families, all on the sky, all in degrees and all over `real64`:
 !!
 !! * **Rotations between coordinate systems.** Eight named procedures -- `pf_icrs2gal`,
 !!   `pf_gal2icrs`, `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal`,
@@ -11,6 +11,14 @@
 !! * **Frame-free RA/Dec geometry**: `pf_angdist_deg`, the separation of two positions;
 !!   `pf_offset_radec`, the position a separation away at a position angle; and
 !!   `pf_position_angle_deg`, its inverse.
+!! * **Sexagesimal angles and text**: `pf_deg2hms`, `pf_deg2dms`, `pf_hms2deg` and `pf_dms2deg`
+!!   split an angle into its fields and join them; `pf_ra2str`, `pf_dec2str` and `pf_radec2str`
+!!   write positions as text, and `pf_str2ra`, `pf_str2dec` and `pf_str2radec` read it back.
+!! * **The CMB rest frame**: `pf_zhel2zcmb`, a heliocentric redshift boosted into the rest frame of
+!!   the cosmic microwave background, with Planck 2018's dipole by default.
+!!
+!! Every procedure is `pure`, and every one but the three text writers, whose text is an
+!! allocatable argument, is `elemental`, so one call converts whole columns.
 !!
 !! **Every rotation is built from the three angles that define it**, `Rz(180 - lon0)
 !! Ry(90 - pole_lat) Rz(pole_lon)`: the target system's north pole in the system it is built from,
@@ -29,7 +37,9 @@
 !! sine of an infinite angle must, and a latitude outside `[-90, 90]` is read as the direction it
 !! names. A latitude of exactly +/-90 is the pole whatever the longitude says, and a pole's
 !! longitude is reported as 0. What aborts is a caller mistake with no sensible reading: a
-!! selector that is not one, and `pf_offset_radec`'s centre beyond a pole or negative separation.
+!! selector that is not one, a text writer's `sep` or `precision` outside its set, and
+!! `pf_offset_radec`'s centre beyond a pole or negative separation. Text is user data, not a
+!! caller's mistake: a reader that cannot read it says so through its `ok` flag.
 !!
 !! **This is not the HEALPix declination frame.** `PF_HP_DEC_NORTH` and `PF_HP_DEC_SOUTH` in
 !! `parquet_healpix` name a sign convention for the third component of a unit vector; a coordinate
@@ -43,7 +53,8 @@
 !! **Arrow-free, settings-free and silent.** It reaches `parquet_utils` only
 !! (`check_parquet_skycoord_stays_arrow_free`), reads no knob and prints nothing, so it re-exports
 !! no setting. It has no module variable: every procedure is `pure`, and everything here may be
-!! called from any number of threads at once.
+!! called from any number of threads at once. The only physical constants -- the speed of light
+!! and the default dipole -- are private to `pf_zhel2zcmb`, in `src/parquet_skycoord_rotate.f90`.
 module parquet_skycoord
     use, intrinsic :: iso_fortran_env, only: real64
     implicit none
@@ -60,6 +71,12 @@ module parquet_skycoord
     public :: pf_sky_convert
     ! ---- Frame-free RA/Dec geometry ----
     public :: pf_angdist_deg, pf_offset_radec, pf_position_angle_deg
+    ! ---- Sexagesimal angles and text ----
+    public :: pf_deg2hms, pf_deg2dms, pf_hms2deg, pf_dms2deg
+    public :: pf_ra2str, pf_dec2str, pf_radec2str
+    public :: pf_str2ra, pf_str2dec, pf_str2radec
+    ! ---- The CMB rest frame ----
+    public :: pf_zhel2zcmb
 
     ! ---- Selectors ----
 
@@ -422,6 +439,194 @@ module parquet_skycoord
             real(real64), intent(in) :: dec2 !! declination of the other position, degrees.
             real(real64) :: pa !! the position angle, degrees, in `[0, 360)`.
         end function pf_position_angle_deg
+    end interface
+
+    ! ---- Interfaces: the CMB rest frame ----
+    !
+    ! Implemented in submodule parquet_skycoord_rotate, beside the rotation kernel whose unit vectors
+    ! it shares.
+
+    interface
+        !> A heliocentric redshift in the rest frame of the cosmic microwave background:
+        !! `1 + z_cmb = (1 + z_hel) * gamma * (1 + (v/c) * cos(theta))`.
+        !!
+        !! `theta` is the angle between the position and the dipole apex, `v` the Sun's speed toward
+        !! the apex and `gamma` the Lorentz factor of the whole of `v`, so looking toward the apex the
+        !! CMB-frame redshift is the larger. **The apex is always Galactic**, as every dipole is
+        !! published, whatever `system` names for the position. The three dipole arguments default
+        !! independently to Planck 2018 results I (Aghanim et al. 2020, A&A 641, A1): the apex at
+        !! Galactic `(264.021, 48.253)` and `v = 369.82` km/s, the speed of light being 299792.458
+        !! km/s.
+        !!
+        !! `pure elemental` and total: a NaN argument gives a NaN without raising a flag, a `z_hel` at
+        !! or below -1 is computed as the formula says, an infinite `z_hel` comes back itself, and an
+        !! `apex_v` of the speed of light or more, which has no reading, gives a NaN without raising
+        !! a flag. **A `system` that is not one of the four stops the program**, as in
+        !! `pf_sky_convert`.
+        pure elemental module function pf_zhel2zcmb(lon, lat, z_hel, system, apex_lon, apex_lat, apex_v) &
+                result(z_cmb)
+            real(real64), intent(in) :: lon !! the position's longitude in `system`, degrees; any value.
+            real(real64), intent(in) :: lat !! the position's latitude in `system`, degrees.
+            real(real64), intent(in) :: z_hel !! the heliocentric redshift.
+            integer, intent(in), optional :: system !! the system of `(lon, lat)`, a `PF_COORD_*` selector; default ICRS.
+            real(real64), intent(in), optional :: apex_lon !! the apex's Galactic longitude, degrees; default 264.021.
+            real(real64), intent(in), optional :: apex_lat !! the apex's Galactic latitude, degrees; default 48.253.
+            real(real64), intent(in), optional :: apex_v !! the Sun's speed toward the apex, km/s; default 369.82.
+            real(real64) :: z_cmb !! the redshift in the CMB rest frame.
+        end function pf_zhel2zcmb
+    end interface
+
+    ! ---- Interfaces: sexagesimal angles and text ----
+    !
+    ! Implemented in submodule parquet_skycoord_text. The writers take a separator and a precision
+    ! with the same meaning in all three -- `precision` is a declination's arcsecond decimals, and a
+    ! right ascension's seconds of time carry one more, a second of time being 15 arcseconds -- so
+    ! two columns written separately read like the pair written together.
+
+    interface
+        !> A right ascension in degrees as hours, minutes and seconds of time.
+        !!
+        !! The angle is wrapped into `[0, 360)` first, so `h` is in `[0, 23]`, `m` in `[0, 59]` and `s`
+        !! in `[0, 60)`. Nothing is rounded: `s` carries the angle's whole precision. `pure elemental`
+        !! and total: **a NaN argument gives `h = m = 0` and `s` NaN** without raising a flag, and an
+        !! infinite one gives the same and raises `IEEE_INVALID`, as its wrap must.
+        pure elemental module subroutine pf_deg2hms(deg, h, m, s)
+            real(real64), intent(in) :: deg !! right ascension, degrees; any value.
+            integer, intent(out) :: h !! hours, in `[0, 23]`.
+            integer, intent(out) :: m !! minutes, in `[0, 59]`.
+            real(real64), intent(out) :: s !! seconds of time, in `[0, 60)`.
+        end subroutine pf_deg2hms
+
+        !> A declination in degrees as a sign, degrees, arcminutes and arcseconds.
+        !!
+        !! **The sign is its own argument**, because a declination between -1 and 0 has `d = 0`, and a
+        !! sign folded into `d` would be lost: `-0.5` is `sgn = -1, d = 0, m = 30, s = 0`. `sgn` is -1
+        !! for a negative `deg` and +1 otherwise, for `0` and `-0.0` alike. The magnitude splits as
+        !! given, so a declination beyond 90 has `d` above 90. Nothing is rounded. `pure elemental`
+        !! and total: a NaN argument gives `sgn = 1`, `d = m = 0` and `s` NaN without raising a flag;
+        !! an infinite one gives zero `d` and `m` and a NaN `s` and raises `IEEE_INVALID`; and a
+        !! magnitude of `huge(d)` degrees or more, whose degrees no default `integer` holds, gives
+        !! zero `d` and `m` and a NaN `s` without raising a flag.
+        pure elemental module subroutine pf_deg2dms(deg, sgn, d, m, s)
+            real(real64), intent(in) :: deg !! declination, degrees.
+            integer, intent(out) :: sgn !! -1 for a negative `deg`, +1 otherwise.
+            integer, intent(out) :: d !! whole degrees of the magnitude.
+            integer, intent(out) :: m !! arcminutes, in `[0, 59]`.
+            real(real64), intent(out) :: s !! arcseconds, in `[0, 60)`.
+        end subroutine pf_deg2dms
+
+        !> Hours, minutes and seconds of time as degrees, `15*h + m/4 + s/240`: the inverse of
+        !! `pf_deg2hms`.
+        !!
+        !! `pure elemental`. Nothing is validated or wrapped: `h = 24` gives 360, and a negative
+        !! field subtracts.
+        pure elemental module function pf_hms2deg(h, m, s) result(deg)
+            integer, intent(in) :: h !! hours.
+            integer, intent(in) :: m !! minutes.
+            real(real64), intent(in) :: s !! seconds of time.
+            real(real64) :: deg !! the angle, degrees.
+        end function pf_hms2deg
+
+        !> A sign, degrees, arcminutes and arcseconds as degrees, `d + m/60 + s/3600` negated when
+        !! `sgn` is negative: the inverse of `pf_deg2dms`.
+        !!
+        !! `pure elemental`. Nothing is validated: the three fields are used as given, and a `sgn` of
+        !! 0 or more means positive.
+        pure elemental module function pf_dms2deg(sgn, d, m, s) result(deg)
+            integer, intent(in) :: sgn !! negative for a negative angle.
+            integer, intent(in) :: d !! degrees.
+            integer, intent(in) :: m !! arcminutes.
+            real(real64), intent(in) :: s !! arcseconds.
+            real(real64) :: deg !! the angle, degrees.
+        end function pf_dms2deg
+
+        !> A right ascension in degrees as sexagesimal text: `"10:21:30.550"`.
+        !!
+        !! Wrapped into `[0, 360)` and written `hh:mm:ss.sss`, every field below ten zero-padded, the
+        !! seconds rounded to `precision + 1` decimals -- **one more than `precision`**, the
+        !! declination's decimals at the same resolution, since a second of time is 15 arcseconds.
+        !! Seconds that round to 60 carry into the minutes and on into the hours, and 24 hours wrap
+        !! to `00`. `sep` goes between the fields: `":"` or `" "`, or `"hms"` for the lettered form
+        !! `10h21m30.550s`. **A NaN `ra` is the text `nan`** and raises no flag; an infinite one is
+        !! `nan` too and raises `IEEE_INVALID`, as its wrap must. **A `sep` or `precision` outside
+        !! those sets stops the program.** `pure`.
+        pure module subroutine pf_ra2str(ra, text, sep, precision)
+            real(real64), intent(in) :: ra !! right ascension, degrees; any value.
+            character(len=:), allocatable, intent(out) :: text !! the text.
+            character(len=*), intent(in), optional :: sep !! `":"` (the default), `" "` or `"hms"`.
+            integer, intent(in), optional :: precision !! in `[0, 9]`, default 2; the seconds take one more decimal.
+        end subroutine pf_ra2str
+
+        !> A declination in degrees as sexagesimal text: `"+41:16:09.00"`.
+        !!
+        !! Written `+dd:mm:ss.ss` with its sign always, every field below ten zero-padded, the
+        !! arcseconds rounded to `precision` decimals; seconds that round to 60 carry into the
+        !! minutes and on into the degrees. The sign is `pf_deg2dms`'s, so `-0.0` is `+`, and a
+        !! declination beyond 90 is written as given. `sep` goes between the fields: `":"` or `" "`,
+        !! or `"hms"` for the lettered form `+41d16m09.00s`. **A NaN `dec` is the text `nan`** and
+        !! raises no flag; an infinite one is `nan` too and raises `IEEE_INVALID`, and a magnitude
+        !! of `huge(1)` degrees or more is `nan` without raising one. **A `sep` or `precision`
+        !! outside those sets stops the program.** `pure`.
+        pure module subroutine pf_dec2str(dec, text, sep, precision)
+            real(real64), intent(in) :: dec !! declination, degrees.
+            character(len=:), allocatable, intent(out) :: text !! the text.
+            character(len=*), intent(in), optional :: sep !! `":"` (the default), `" "` or `"hms"`.
+            integer, intent(in), optional :: precision !! the arcseconds' decimals, in `[0, 9]`, default 2.
+        end subroutine pf_dec2str
+
+        !> A position as one text, `pf_ra2str`'s and `pf_dec2str`'s joined by a blank:
+        !! `"10:21:30.550 +41:16:09.00"`.
+        !!
+        !! `sep` and `precision` mean what they mean for the two, and a NaN coordinate is `nan` in
+        !! its own half. **A `sep` or `precision` outside their sets stops the program.** `pure`.
+        pure module subroutine pf_radec2str(ra, dec, text, sep, precision)
+            real(real64), intent(in) :: ra !! right ascension, degrees; any value.
+            real(real64), intent(in) :: dec !! declination, degrees.
+            character(len=:), allocatable, intent(out) :: text !! the text.
+            character(len=*), intent(in), optional :: sep !! `":"` (the default), `" "` or `"hms"`.
+            integer, intent(in), optional :: precision !! the declination's arcsecond decimals, in `[0, 9]`, default 2.
+        end subroutine pf_radec2str
+
+        !> A right ascension read from sexagesimal text, in degrees.
+        !!
+        !! **Exactly three fields**, separated by colons (`10:21:30.55`), by blanks (`10 21 30.55`)
+        !! or by the letters `h`, `m` and a closing `s` (`10h21m30.55s`, a blank allowed after each
+        !! letter, either case): hours of one or two digits, minutes of one or two digits below 60,
+        !! seconds of one or two digits below 60 with any number of decimals. No sign; blanks around
+        !! the whole are ignored. Anything else -- a bare decimal number or two fields included --
+        !! sets `ok` to `.false.` and never stops the program: the text is user data. **`ra` is not
+        !! assigned when `ok` is `.false.`**, and must not be read then. Nothing is wrapped, so
+        !! `24:00:00` is 360. `pure elemental`, so a whole column of text reads in one call.
+        pure elemental module subroutine pf_str2ra(text, ra, ok)
+            character(len=*), intent(in) :: text !! the text.
+            real(real64), intent(out) :: ra !! the right ascension, degrees; assigned only when `ok`.
+            logical, intent(out) :: ok !! whether the text was a right ascension.
+        end subroutine pf_str2ra
+
+        !> A declination read from sexagesimal text, in degrees.
+        !!
+        !! `pf_str2ra`'s three fields and three separators, with `d` in place of `h`, one to three
+        !! digits of degrees, and **an optional leading `+` or `-`** applying to the whole angle, so
+        !! `-00:30:00` is -0.5. Anything else sets `ok` to `.false.`, and **`dec` is not assigned
+        !! then**. `pure elemental`.
+        pure elemental module subroutine pf_str2dec(text, dec, ok)
+            character(len=*), intent(in) :: text !! the text.
+            real(real64), intent(out) :: dec !! the declination, degrees; assigned only when `ok`.
+            logical, intent(out) :: ok !! whether the text was a declination.
+        end subroutine pf_str2dec
+
+        !> A position read from one text: a right ascension as `pf_str2ra` reads it, then blanks, one
+        !! comma or both, then a declination as `pf_str2dec` reads it.
+        !!
+        !! `"10:21:30.55 +41:16:09.0"`, `"10 21 30.55 +41 16 09.0"` and `"10h21m30.55s, +41d16m09s"`
+        !! all read. Anything else -- one angle alone, two commas, trailing text -- sets `ok` to
+        !! `.false.`, and **neither output is assigned then**. `pure elemental`.
+        pure elemental module subroutine pf_str2radec(text, ra, dec, ok)
+            character(len=*), intent(in) :: text !! the text.
+            real(real64), intent(out) :: ra !! the right ascension, degrees; assigned only when `ok`.
+            real(real64), intent(out) :: dec !! the declination, degrees; assigned only when `ok`.
+            logical, intent(out) :: ok !! whether the text was a position.
+        end subroutine pf_str2radec
     end interface
 
     ! ---- Interfaces: helpers shared by the two submodules ----

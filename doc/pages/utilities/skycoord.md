@@ -5,8 +5,10 @@ title: Celestial coordinate systems with parquet_skycoord
 `parquet_skycoord` converts sky positions between the celestial coordinate systems a catalogue is
 kept in — ICRS, Galactic, ecliptic and supergalactic — and carries the RA/Dec geometry that needs no
 coordinate system at all: the angular separation of two positions, the position a separation away
-at a position angle, and that position angle back. Every procedure is `pure elemental` over `real64`
-degrees, so a whole column converts in one call.
+at a position angle, and that position angle back. It also writes positions as sexagesimal text and
+reads them back, and takes a heliocentric redshift into the rest frame of the cosmic microwave
+background. Everything works in `real64` degrees, and every procedure but the three text writers is
+`pure elemental`, so a whole column converts in one call.
 
 ```fortran
 use parquet_skycoord
@@ -20,8 +22,8 @@ call pf_icrs2gal(ra, dec, l, b)                                   ! the whole co
 sep = pf_angdist_deg(ra, dec, 10.68458_real64, 41.26875_real64)   ! each one's distance from M31
 ```
 
-`use parquet_skycoord` compiles 4 of this library's Fortran files and never reaches this library's
-reader, its writer or its C++ bindings. Three of them are its own; the fourth is `parquet_utils`,
+`use parquet_skycoord` compiles 5 of this library's Fortran files and never reaches this library's
+reader, its writer or its C++ bindings. Four of them are its own; the fifth is `parquet_utils`,
 the small helpers every tier builds on. See [Choosing a module](../operating/choosing-a-module.html)
 for the whole table. Everything here is also available through `use parquet`.
 
@@ -154,6 +156,110 @@ For positions as unit vectors, [`parquet_sphere`](sphere.html#positions-vectors-
 `pf_radec2vec` and `pf_vec2radec` convert between the two, naming the declination frame at that
 interface.
 
+## Sexagesimal text
+
+Signatures in this section and the next show optional arguments in square brackets, with the comma
+outside the bracket: `pf_ra2str(ra, text, [sep], [precision])` means `sep` and `precision` may be
+omitted. The brackets are not Fortran, and a block containing them is a description rather than a
+runnable example.
+
+```fortran
+call pf_ra2str(ra, text, [sep], [precision])           ! "10:21:30.550"
+call pf_dec2str(dec, text, [sep], [precision])         ! "+41:16:09.00"
+call pf_radec2str(ra, dec, text, [sep], [precision])   ! "10:21:30.550 +41:16:09.00"
+call pf_str2ra(text, ra, ok)
+call pf_str2dec(text, dec, ok)
+call pf_str2radec(text, ra, dec, ok)
+```
+
+A catalogue often keeps its positions as text, and more often as two text columns than as one, so
+each angle has its own writer and reader and the pair is the two together.
+
+**Writing.** A right ascension is wrapped into `[0, 360)` and written `hh:mm:ss.sss`, a declination
+`+dd:mm:ss.ss` with its sign always, every field below ten zero-padded. **`precision` is the number
+of decimals of a declination's arcseconds, 0 to 9, default 2, and a right ascension's seconds carry
+one more** — a second of time is 15 arcseconds, so one `precision` gives both angles the same
+resolution on the sky, and two columns written separately read like the pair written together. The
+seconds are rounded once, to the nearest, ties to even; seconds that round to 60 carry into the
+minutes and on into the hours or degrees, and 24 hours wrap to `00`. `sep` goes between the fields:
+`":"` (the default) or `" "`, or `"hms"` for the lettered form, `10h21m30.550s` and
+`+41d16m09.00s`. The sign is `-` only below zero, so `-0.0` is `+00:00:00.00`, while `-1e-10` is
+`-00:00:00.00`; a declination beyond 90 is written as given. A NaN coordinate is the text `nan`, in
+its own half of a pair.
+
+The text is what astropy's `Angle.to_string` writes for the same separator and number of decimals,
+with `pad` on and, for a declination, `alwayssign`, but in three places: astropy carries seconds
+into the next minute from `60 - 10**-p` upward, `p` the decimals written, rather than from where
+they round to 60; it writes a right ascension that rounds up to 24 hours as `24:00:00.000` rather
+than `00:00:00.000`; and it writes `-0.0` with a `-`.
+
+**Reading.** A reader takes **exactly three fields**, separated by colons (`10:21:30.55`), by blanks
+(`10 21 30.55`) or by the unit letters (`10h21m30.55s`, `+41d16m09.0s`: `h` or `d`, then `m`, then a
+closing `s`, in either case, with a blank allowed after each letter). Hours have one or two digits
+and degrees one to three; minutes and whole seconds have one or two, each below 60; the seconds
+take any number of decimals. Only a declination takes a sign, `+` or `-`, which applies to the whole
+angle, so `-00:30:00` is -0.5. Blanks around the text are ignored, and a pair is the two angles
+separated by blanks, one comma, or both. Nothing is wrapped: `24:00:00` reads as 360.
+
+**Text a reader cannot read sets `ok` to `.false.`** — a bare decimal number, two fields, a signed
+right ascension, a field of 60, separators of two styles, a trailing letter too many — and never
+stops the program: the text is user data, and a lenient reading would turn a malformed field into a
+plausible wrong position. **The outputs are not assigned then, so do not read them.** A column of
+decimal degrees held as text is `pf_from_str`'s, in `parquet_utils`. The readers are
+`pure elemental`, so a whole column of text reads in one call:
+
+```fortran
+character(len=16) :: ra_text(1000)
+real(real64) :: ra(1000)
+logical :: ok(1000)
+
+call pf_str2ra(ra_text, ra, ok)     ! ok(i) says whether ra(i) was read
+```
+
+**Fields.** Between an angle and its text sit its fields:
+
+```fortran
+call pf_deg2hms(deg, h, m, s)          ! right ascension -> hours, minutes, seconds of time
+call pf_deg2dms(deg, sgn, d, m, s)     ! declination -> sign, degrees, arcminutes, arcseconds
+ra = pf_hms2deg(h, m, s)               ! 15*h + m/4 + s/240
+dec = pf_dms2deg(sgn, d, m, s)         ! d + m/60 + s/3600, negated for a negative sgn
+```
+
+**The sign is its own argument**, because a declination between -1 and 0 has no degrees to carry
+it: `-0.5` is `sgn = -1, d = 0, m = 30, s = 0`. `sgn` is -1 below zero and +1 otherwise, for both
+zeros alike. **Nothing is rounded**: `s` carries the angle's whole precision, and rounding for
+display is the writers' work. `pf_deg2hms` wraps its angle into `[0, 360)` first; `pf_deg2dms` splits
+a declination beyond 90 as given, up to `huge(d)` degrees, past which no default `integer` holds its
+degrees. The two joiners validate and wrap nothing, so `pf_hms2deg(24, 0, 0.0_real64)` is 360.
+
+## The CMB rest frame
+
+```fortran
+z_cmb = pf_zhel2zcmb(lon, lat, z_hel, [system], [apex_lon], [apex_lat], [apex_v])
+```
+
+`pf_zhel2zcmb` takes a heliocentric redshift into the rest frame of the cosmic microwave background:
+
+```
+1 + z_cmb = (1 + z_hel) * gamma * (1 + (v/c) * cos(theta))
+```
+
+where `theta` is the angle between the position and the dipole apex, `v` the Sun's speed toward the
+apex and `gamma` the Lorentz factor of the whole of `v`. Looking toward the apex the CMB-frame
+redshift is the larger, since the Sun's approach blueshifts what it observes. `system` names the
+system of `(lon, lat)`, a `PF_COORD_*` selector defaulting to `PF_COORD_ICRS`, so a catalogue in
+Galactic coordinates passes them as they are. **The apex is always Galactic**, whatever `system`
+says, because that is how every dipole is published.
+
+**The dipole defaults to Planck 2018 results I** (Aghanim et al. 2020, A&A 641, A1): the apex at
+Galactic `(264.021, 48.253)` and `v = 369.82` km/s, with the speed of light 299 792.458 km/s. A
+measured dipole changes between papers, so each of the three may be given, alone or together, in
+degrees and km/s. `pf_zhel2zcmb` is `pure elemental` in the position and the redshift alike.
+
+It is total in its coordinates and its redshift: a NaN argument gives a NaN; a redshift at or below
+-1 is computed as the formula says rather than refused; an infinite one comes back itself; and an
+`apex_v` of the speed of light or more, which has no Lorentz factor, gives a NaN.
+
 ## What is validated and what is not
 
 Every procedure here is **total in its coordinates**, because a column read from a file can carry
@@ -161,9 +267,9 @@ nulls and a conversion that stopped the program on one would be of no use on the
 
 - a NaN coordinate gives NaN results and raises no floating-point flag, so a program running with
   the exceptions unmasked can carry it through; screen the results with the validity mask you
-  already hold;
+  already hold. A split gives zero integer fields and a NaN `s`, and a writer the text `nan`;
 - an infinite coordinate gives NaN results and raises `IEEE_INVALID`, as the sine of an infinite
-  angle must;
+  angle must, and the fields and text of a NaN;
 - a latitude outside `[-90, 90]` is read as the direction it names: `(lon, 100)` is
   `(lon + 180, 80)`;
 - a latitude of exactly ±90 is the pole, whatever the longitude, and a result at a pole has
@@ -172,14 +278,15 @@ nulls and a conversion that stopped the program on one would be of no use on the
 What stops the program is a caller mistake that has no sensible reading:
 
 - `pf_sky_convert` with a selector that is not one of the four systems, `PF_COORD_UNKNOWN`
-  included, even when `from` and `to` are equal;
+  included, even when `from` and `to` are equal, and `pf_zhel2zcmb` with such a `system`;
 - `pf_coord_system_name` with an integer that is neither a system nor `PF_COORD_UNKNOWN`;
+- a text writer with a `sep` other than `":"`, `" "` or `"hms"`, or a `precision` outside `[0, 9]`;
 - `pf_offset_radec` with a `dec0` outside `[-90, 90]` — a centre beyond a pole turns the local north
   and east around and gives a plausible wrong point — or a negative `sep_deg`. A NaN argument
   gives NaN results.
 
-`pf_coord_system_from_name` never stops the program: text is user data, and an unknown token answers
-`PF_COORD_UNKNOWN`.
+`pf_coord_system_from_name` and the text readers never stop the program: text is user data, so an
+unknown token answers `PF_COORD_UNKNOWN`, and text a reader cannot read sets `ok` to `.false.`.
 
 ## Thread safety
 
@@ -193,6 +300,10 @@ setting.
   aberration or light deflection enters it.
 - The ecliptic is the mean ecliptic and equinox of J2000 only, without nutation, and there is no
   argument naming another equinox.
+- The text readers take three-field sexagesimal angles in ASCII only: no two-field or decimal-hour
+  forms, and no degree, minute or second symbols.
+- The CMB rest frame is a boost by the dipole and nothing more, and Planck 2018's is the one dipole
+  built in.
 - `real64` only. A `real32` column converts through `real(x, real64)` at the call.
 
 ## See also

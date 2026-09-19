@@ -11,22 +11,28 @@ Fortran run, which could only ever confirm that the implementation agrees with i
 Emitted (COMMITTED to the repository, like every other generator's output):
 
   test/test_skycoord_vectors.f90  module `test_skycoord_vectors`: the coordinate-system selectors;
-                                  rotations between every ordered pair of distinct systems; and
-                                  offsets and position angles.
+                                  rotations between every ordered pair of distinct systems;
+                                  offsets and position angles; sexagesimal fields, text written
+                                  and text read; and CMB-frame redshifts.
 
 Usage:  tools/generate_skycoord_reference.py [--check] [--self-test] [--verify-oracle]
 
   --check          regenerate into memory and compare with the committed file; exit 1 on any
                    difference.
   --self-test      re-derive the published anchors -- the angle table and the selectors against
-                   src/parquet_skycoord.f90, the ecliptic row's closed form, every row rebuilding
-                   its definition, orthonormality, round trips, the pole rules, and the offset's
-                   pole convention -- and exit 1 if any of them fails.
+                   src/parquet_skycoord.f90, the dipole and the speed of light against
+                   src/parquet_skycoord_rotate.f90, the ecliptic row's closed form, every row
+                   rebuilding its definition, orthonormality, round trips, the pole rules, the
+                   offset's pole convention, the text's carries, ties and grammar, and the
+                   redshift's identities -- and exit 1 if any of them fails.
   --verify-oracle  cross-check the emitted rows against astropy: every rotation through
                    `SkyCoord.transform_to`, every offset through `directional_offset_by` and
-                   `separation`, every position angle through `position_angle`. Needs the
-                   workspace `astro` environment; the two modes above need a bare `python3`, so
-                   CI's lint image can run them.
+                   `separation`, every position angle through `position_angle`, every field split
+                   through `Longitude.hms` and `Angle.signed_dms`, every text written through
+                   `to_string` and every text read through astropy's own parser, and every
+                   redshift's angle to the apex through `separation`. Needs the workspace `astro`
+                   environment; the two modes above need a bare `python3`, so CI's lint image can
+                   run them.
 
 NEVER HAND-EDIT A VECTOR. A contract change is an edit to the model below plus a regeneration.
 
@@ -61,6 +67,17 @@ Every value is computed in `decimal` at 60 significant digits plus guard digits 
 rounded to double, so `--check` gives the same answer on every host. The library builds its
 matrices from the rounded angles in double precision and computes with libm, so the suite asserts
 every row to a tolerance on the sky rather than bit for bit.
+
+THE TEXT IS EXACT, AND ITS FIXTURES ARE CHOSEN SO THAT IT CAN BE
+
+The sexagesimal model works on the input double's exact value as a `Fraction`: the fraction of a
+degree times the output units in a degree, rounded to nearest with ties to even, then integer
+fields. The library forms that product once in double precision before it rounds, so a fixture
+whose exact product lies within that one rounding of a half-unit -- or, for the unrounded field
+splits, of a whole second -- could legitimately print otherwise; `stable_*` refuses such a
+fixture rather than freezing a coin toss. The emitted text is then asserted character for
+character. Text read back is modelled by a separate grammar written as regular expressions, so
+the reader is checked against a second transcription of its own rules, not against itself.
 """
 
 import argparse
@@ -69,6 +86,7 @@ import math
 import pathlib
 import re
 import sys
+from fractions import Fraction
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
@@ -79,6 +97,7 @@ import generate_sphere_reference as sph  # noqa: E402
 REPO_ROOT = TOOLS.parent
 OUT_PATH = REPO_ROOT / "test" / "test_skycoord_vectors.f90"
 SRC_PATH = REPO_ROOT / "src" / "parquet_skycoord.f90"
+ROTATE_PATH = REPO_ROOT / "src" / "parquet_skycoord_rotate.f90"
 
 D = decimal.Decimal
 DPI = rgv.DPI
@@ -117,6 +136,14 @@ with dctx():
     ECL_PSIB = D("-0.041775") / ARCSEC
 SGAL_POLE = (D("47.37"), D("6.32"))
 SGAL_LON0 = D(90)
+
+# pf_zhel2zcmb's defaults: Planck 2018 results I (Aghanim et al. 2020, A&A 641, A1), the apex in
+# Galactic coordinates, and the SI speed of light, both speeds in km/s. `self_test` reads all four
+# back from src/parquet_skycoord_rotate.f90.
+CMB_APEX_LON = D("264.021")
+CMB_APEX_LAT = D("48.253")
+CMB_APEX_V = D("369.82")
+C_KMS = D("299792.458")
 
 # ---------------------------------------------------------------------------------------------
 # Rotations at 60 digits
@@ -319,6 +346,302 @@ def pa_rows(offsets):
 
 
 # ---------------------------------------------------------------------------------------------
+# Sexagesimal fields and text, exact
+# ---------------------------------------------------------------------------------------------
+
+STYLE_COLON, STYLE_BLANK, STYLE_LETTERS = 1, 2, 3
+STYLES = (STYLE_COLON, STYLE_BLANK, STYLE_LETTERS)
+#: `huge(1)` degrees: from here no default integer holds a declination's whole degrees.
+DMS_LIMIT = (1 << 31) - 1
+HALF = Fraction(1, 2)
+
+
+def ffloor(q):
+    return q.numerator // q.denominator
+
+
+def fwrap(x):
+    """`pf_wrap_deg(x)` as an exact Fraction, for an input every compiler's `modulo` wraps exactly --
+    whether it forms `fmod` or `a - floor(a/p)*p` -- which the golden inputs are chosen to be."""
+    q = Fraction(x) % 360
+    by_fmod = math.fmod(x, 360.0)
+    if by_fmod < 0:
+        by_fmod += 360.0
+    by_floor = x - math.floor(x / 360.0) * 360.0
+    for w in (by_fmod, by_floor):
+        if (0.0 if w >= 360.0 else w) != float(q) or Fraction(float(q)) != q:
+            raise SystemExit("the wrap of %r is not exact on every compiler: choose another input" % x)
+    return q
+
+
+def round_units(frac, per_deg):
+    """`frac * per_deg` rounded to the nearest integer, ties to even: the writers' one rounding."""
+    x = frac * per_deg
+    n = ffloor(x)
+    r = x - n
+    if r > HALF or (r == HALF and n % 2 == 1):
+        n += 1
+    return n
+
+
+def stable_round(frac, per_deg):
+    """Whether the library, forming `frac * per_deg` in one double product before rounding it, lands
+    on the unit the exact product rounds to. `frac` is an exact double wherever it is used."""
+    xd = float(frac) * float(per_deg)
+    t = math.trunc(xd)
+    r = xd - t
+    n = t + 1 if (r > 0.5 or (r == 0.5 and t % 2 == 1)) else t
+    return n == round_units(frac, per_deg)
+
+
+def stable_split(frac, per_deg):
+    """Whether the library's double `frac * per_deg` has the exact product's whole part."""
+    return math.trunc(float(frac) * float(per_deg)) == ffloor(frac * per_deg)
+
+
+def separators(style, letters):
+    if style == STYLE_COLON:
+        return ":", ":", ""
+    if style == STYLE_BLANK:
+        return " ", " ", ""
+    return letters
+
+
+def hms_fields(x):
+    """`pf_deg2hms(x)`: `(h, m, s)`, `s` an exact Fraction."""
+    w = fwrap(x)
+    whole = ffloor(w)
+    if not stable_split(w - whole, 240):
+        raise SystemExit("pf_deg2hms(%r): a whole second on a knife edge; choose another input" % x)
+    secs = w * 240
+    total = ffloor(secs)
+    return total // 3600, total % 3600 // 60, secs - (total - total % 60)
+
+
+def dms_fields(x):
+    """`pf_deg2dms(x)`: `(sgn, d, m, s)`, `s` an exact Fraction; `sgn` is -1 only below zero."""
+    mag = abs(Fraction(x))
+    d = ffloor(mag)
+    if d >= DMS_LIMIT:
+        raise SystemExit("pf_deg2dms(%r): past the integer degrees; not a golden input" % x)
+    if not stable_split(mag - d, 3600):
+        raise SystemExit("pf_deg2dms(%r): a whole arcsecond on a knife edge; choose another input" % x)
+    arcsec = (mag - d) * 3600
+    total = ffloor(arcsec)
+    return (-1 if x < 0 else 1), d, total // 60, arcsec - (total - total % 60)
+
+
+def ra_text(x, style, precision):
+    """`pf_ra2str(x, text, sep, precision)`: the seconds of time to `precision + 1` decimals."""
+    if math.isnan(x):
+        return "nan"
+    q = precision + 1
+    w = fwrap(x)
+    whole = ffloor(w)
+    per_deg = 240 * 10 ** q
+    if not stable_round(w - whole, per_deg):
+        raise SystemExit("pf_ra2str(%r, precision=%d) rounds on a knife edge; choose another input" % (x, precision))
+    units = round_units(w - whole, per_deg)
+    if units >= per_deg:
+        whole += 1
+        units -= per_deg
+    total = (whole * 240 + units // 10 ** q) % 86400
+    a, b, c = separators(style, ("h", "m", "s"))
+    return "%02d%s%02d%s%02d.%0*d%s" % (total // 3600, a, total % 3600 // 60, b, total % 60, q, units % 10 ** q, c)
+
+
+def dec_text(x, style, precision):
+    """`pf_dec2str(x, text, sep, precision)`: the arcseconds to `precision` decimals, the sign always."""
+    if math.isnan(x) or math.isinf(x):
+        return "nan"
+    mag = abs(Fraction(x))
+    whole = ffloor(mag)
+    if whole >= DMS_LIMIT:
+        return "nan"
+    per_deg = 3600 * 10 ** precision
+    if not stable_round(mag - whole, per_deg):
+        raise SystemExit("pf_dec2str(%r, precision=%d) rounds on a knife edge; choose another input" % (x, precision))
+    units = round_units(mag - whole, per_deg)
+    if units >= per_deg:
+        whole += 1
+        units -= per_deg
+    secs = units // 10 ** precision
+    a, b, c = separators(style, ("d", "m", "s"))
+    text = "%s%02d%s%02d%s%02d" % ("-" if x < 0 else "+", whole, a, secs // 60, b, secs % 60)
+    if precision > 0:
+        text += ".%0*d" % (precision, units % 10 ** precision)
+    return text + c
+
+
+# The readers' grammar, written a second time as regular expressions: three fields in one style,
+# minutes and whole seconds below 60, any number of decimals, blanks around the whole ignored.
+_SECONDS = r"(\d{1,2})(\.\d*)?"
+_RA_FORMS = [r"(\d{1,2}):(\d{1,2}):" + _SECONDS,
+             r"(\d{1,2}) +(\d{1,2}) +" + _SECONDS,
+             r"(\d{1,2})[hH] *(\d{1,2})[mM] *" + _SECONDS + r"[sS]"]
+_DEC_FORMS = [r"([+-]?)(\d{1,3}):(\d{1,2}):" + _SECONDS,
+              r"([+-]?)(\d{1,3}) +(\d{1,2}) +" + _SECONDS,
+              r"([+-]?)(\d{1,3})[dD] *(\d{1,2})[mM] *" + _SECONDS + r"[sS]"]
+
+
+def read_ra(text):
+    """`pf_str2ra(text)`: the exact right ascension in degrees, or None where `ok` is false."""
+    t = text.strip(" ")
+    for form in _RA_FORMS:
+        mt = re.fullmatch(form, t)
+        if mt:
+            h, m, s, frac = mt.groups()
+            if int(m) >= 60 or int(s) >= 60:
+                return None
+            return 15 * int(h) + Fraction(int(m), 4) + Fraction(s + (frac or "").rstrip(".") or "0") / 240
+    return None
+
+
+def read_dec(text):
+    """`pf_str2dec(text)`: the exact declination in degrees, or None where `ok` is false."""
+    t = text.strip(" ")
+    for form in _DEC_FORMS:
+        mt = re.fullmatch(form, t)
+        if mt:
+            sign, d, m, s, frac = mt.groups()
+            if int(m) >= 60 or int(s) >= 60:
+                return None
+            value = int(d) + Fraction(int(m), 60) + Fraction(s + (frac or "").rstrip(".") or "0") / 3600
+            return -value if sign == "-" else value
+    return None
+
+
+def read_pair(text):
+    """`pf_str2radec(text)`: `(ra, dec)` exactly, or None -- every way of cutting the text into a
+    right ascension, blanks and at most one comma, and a declination is tried, and every cut that
+    reads must read the same."""
+    t = text.strip(" ")
+    found = set()
+    for i in range(1, len(t)):
+        for j in range(i + 1, len(t)):
+            if re.fullmatch(r" +| *, *", t[i:j]):
+                ra, dec = read_ra(t[:i]), read_dec(t[j:])
+                if ra is not None and dec is not None:
+                    found.add((ra, dec))
+    if len(found) > 1:
+        raise SystemExit("the pair %r reads two ways: %r" % (text, found))
+    return found.pop() if found else None
+
+
+# ---------------------------------------------------------------------------------------------
+# pf_zhel2zcmb at 60 digits
+# ---------------------------------------------------------------------------------------------
+
+
+def zcmb(lon, lat, z, system, apex=None):
+    """`(1 + z) gamma (1 + beta cos(theta)) - 1`, the position taken into Galactic by the definitions'
+    own 60-digit matrices; `apex` is `(lon, lat, v)`, Galactic, or the Planck 2018 defaults."""
+    alon, alat, av = apex if apex is not None else (CMB_APEX_LON, CMB_APEX_LAT, CMB_APEX_V)
+    with dctx():
+        w = mv(pair_matrix(system, GAL), radec_unit(lon, lat))
+        a = radec_unit(alon, alat)
+        cth = w[0] * a[0] + w[1] * a[1] + w[2] * a[2]
+        beta = D(av) / C_KMS
+        g = 1 / (1 - beta * beta).sqrt()
+        return (1 + D(z)) * g * (1 + beta * cth) - 1
+
+
+def default_boost():
+    """`gamma (1 + v/c) - 1`: the redshift a source at the apex with `z_hel = 0` has in the CMB frame."""
+    with dctx():
+        beta = CMB_APEX_V / C_KMS
+        return (1 + beta) / (1 - beta * beta).sqrt() - 1
+
+
+# ---------------------------------------------------------------------------------------------
+# Text and redshift rows
+# ---------------------------------------------------------------------------------------------
+
+#: Right ascensions: the seam and both sides of it, a longitude below 0 and one past two turns,
+#: a tie at three decimals (0.9375 s), and seconds of 59.9996 that carry into the hour, and into
+#: 24 hours, which wrap to 0.
+TEXT_RA_INPUTS = [
+    0.0, 155.37729166666667, 359.99999999999994, 359.9999, -15.0, 725.5, 1.0e-9, 180.0,
+    90.123456789, 266.40499, 0.00390625, (3600 + 59 * 60 + 59.9996) / 240.0,
+    (23 * 3600 + 59 * 60 + 59.9996) / 240.0, (7 * 3600 + 5 * 60 + 3.25) / 240.0, 299.868,
+]
+#: Declinations: a sign between -1 and 0, both poles and one beyond, both zeros, a tie at two
+#: decimals (28.125"), 59.9996" carrying into the minute and on into the degree, 59.9994", which
+#: carries at two decimals and not at three (where astropy carries it anyway), a value that rounds
+#: up to the pole, and one with four digits of degrees.
+TEXT_DEC_INPUTS = [
+    41.26916666666667, -0.5, -28.93617, 90.0, -90.0, 100.0, -1.0e-10, 0.0, -0.0, 0.0078125,
+    (59 * 60 + 59.9996) / 3600.0, -(59.9996 / 3600.0), (59 * 60 + 59.9994) / 3600.0, 12.3456789,
+    -45.000000001, 89.99999999999, 1234.5,
+]
+#: (precision, style): the default, the coarsest and finest precisions, and every style.
+TEXT_CASES = [(2, STYLE_COLON), (0, STYLE_BLANK), (3, STYLE_LETTERS), (9, STYLE_COLON)]
+
+HMS_INPUTS = [0.0, 155.37729166666667, 359.99999999999994, -15.0, 725.5, 1.0e-9, 90.123456789,
+              266.40499, 299.868, 0.00390625]
+DMS_INPUTS = [41.26916666666667, -0.5, -28.93617, 90.0, -90.0, 100.0, -1.0e-10, 0.0, -0.0, 12.3456789,
+              -45.000000001, 1.0e6, 2147483646.5]
+
+#: Texts for `pf_str2ra`: every form it reads, and the shapes it must refuse.
+READ_RA_TEXTS = [
+    "10:21:30.55", "10 21 30.55", "10h21m30.55s", "10H21M30.55S", "10h 21m 30.55s", "  10:21:30.55  ",
+    "5:1:2", "00:00:00", "23:59:59.9999999999", "24:00:00", "10:21:30.", "10:21:30.123456789012345678",
+    "07:05:03.25", "10  21  30",
+    "10:21", "155.3772", "+10:21:30", "-10:21:30", "5 6", "10:60:00", "10:21:60", "10:21 30", "10h21m30",
+    "10d21m30s", "10:21:30x", "", "nan", "10:21:30:40", "10:021:30", "100:00:00", "10:21:.5", "1e1:00:00",
+    "10::30", "10 : 21 : 30", "10h21m30.5s s",
+]
+#: Texts for `pf_str2dec`.
+READ_DEC_TEXTS = [
+    "+41:16:09.00", "-00:30:00", "41 16 09", "+41d16m09s", "-41D16M09.5S", "+100:00:00", "-89:59:59.999",
+    "+05:04:03", "0:0:0", "-0:0:0", "+41d 16m 09.25s",
+    "+-41:16:09", "++41:16:09", "+1000:00:00", "41:16", "+41:16:60", "- 41:16:09", "41h16m09s",
+    "41:16:09.5.5", "+41:16:09 ", "-", "41:16:09s",
+]
+#: Texts for `pf_str2radec`.
+READ_PAIR_TEXTS = [
+    "10:21:30.55 +41:16:09.0", "10:21:30.55,+41:16:09.0", "10:21:30.55 , +41:16:09.0",
+    "10 21 30.55 +41 16 09.0", "10h21m30.55s +41d16m09.0s", "10h 21m 30.55s, -41d 16m 09.0s",
+    "10:21:30.55 41:16:09", "  23:59:59.9 -00:00:01  ",
+    "10:21:30.55", "10:21:30.55,,+41:16:09", "10:21:30.55+41:16:09", "10:21:30.55 +41:16:09 x",
+    "+10:21:30.55 +41:16:09", ", 10:21:30 +41:16:09", "10:21:30.55 , , +41:16:09",
+]
+
+#: (system, lon, lat): the apex and the antapex in Galactic, and a position in every system.
+ZCMB_POSITIONS = [
+    (GAL, 264.021, 48.253), (GAL, 84.021, -48.253), (ICRS, 155.0, 41.0), (ICRS, 0.0, 90.0),
+    (ICRS, 266.40499, -28.93617), (ECL, 100.0, 20.0), (SGAL, 200.0, -10.0), (GAL, 30.0, 0.0),
+]
+#: Heliocentric redshifts, one at -1 and one below it computed as the formula says.
+ZCMB_Z = [0.0, 0.01, 0.5, 3.0, -1.0, -2.0]
+#: Explicit dipoles `(apex_lon, apex_lat, apex_v)`: another apex, the defaults written out, no
+#: motion at all, and a negative speed, which is motion toward the antapex.
+ZCMB_APEXES = [(270.0, 30.0, 600.0), (264.021, 48.253, 369.82), (10.0, -60.0, 0.0), (180.0, 0.0, -300.0)]
+
+
+def text_rows():
+    ras = [(x, p, st, ra_text(x, st, p)) for x in TEXT_RA_INPUTS for p, st in TEXT_CASES]
+    decs = [(x, p, st, dec_text(x, st, p)) for x in TEXT_DEC_INPUTS for p, st in TEXT_CASES]
+    return ras, decs
+
+
+def read_rows():
+    ras = [(t, read_ra(t)) for t in READ_RA_TEXTS]
+    decs = [(t, read_dec(t)) for t in READ_DEC_TEXTS]
+    pairs = [(t, read_pair(t)) for t in READ_PAIR_TEXTS]
+    return ras, decs, pairs
+
+
+def zcmb_rows():
+    """(system, lon, lat, z, apex or None, z_cmb)."""
+    rows = [(s, lon, lat, z, None, zcmb(lon, lat, z, s)) for s, lon, lat in ZCMB_POSITIONS for z in ZCMB_Z]
+    for apex in ZCMB_APEXES:
+        for s, lon, lat in ((ICRS, 155.0, 41.0), (GAL, apex[0], apex[1])):
+            rows.append((s, lon, lat, 0.05, apex, zcmb(lon, lat, 0.05, s, apex)))
+    return rows
+
+
+# ---------------------------------------------------------------------------------------------
 # Rotation rows
 # ---------------------------------------------------------------------------------------------
 
@@ -367,10 +690,31 @@ array = rgv.array
 bits64 = rgv.bits64
 
 
+def char_array(name, size_expr, items, width):
+    """`character(len=width), parameter :: name(size_expr) = [character(len=width) :: ...]`, each
+    text a double-quoted literal on its own line."""
+    for t in items:
+        if '"' in t or len(t) > width:
+            raise SystemExit("text %r cannot be emitted into %s" % (t, name))
+    out = ["    character(len=%d), parameter :: %s(%s) = [character(len=%d) :: &" % (width, name, size_expr, width)]
+    for n, t in enumerate(items):
+        out.append('        "%s"%s' % (t, ", &" if n < len(items) - 1 else "]"))
+    return out
+
+
+def logical_array(name, size_expr, flags):
+    return array("logical", name, size_expr, [".true." if f else ".false." for f in flags])
+
+
 def gen_module():
     rots = rotation_rows()
     offs = offset_rows()
     pas = pa_rows(offs)
+    hms = [(x,) + hms_fields(x) for x in HMS_INPUTS]
+    dms = [(x,) + dms_fields(x) for x in DMS_INPUTS]
+    txt_ra, txt_dec = text_rows()
+    rd_ra, rd_dec, rd_pair = read_rows()
+    zrows = zcmb_rows()
 
     L = [BANNER]
     L.append("!> Golden rows for `parquet_skycoord`, derived from a 60-digit model of each system's definition.")
@@ -409,6 +753,65 @@ def gen_module():
     L += array("integer(int64)", "spa_in_bits", "4 * n_spa", [bits64(x) for r in pas for x in r[:4]])
     L += array("integer(int64)", "spa_out_bits", "n_spa", [bits64(r[4]) for r in pas])
     L += array("integer(int64)", "spa_tol_bits", "n_spa", [bits64(r[5]) for r in pas])
+    L.append("")
+
+    L.append("    ! ---- pf_deg2hms: deg -> (h, m, s), exactly split ----")
+    L.append("    integer, parameter :: n_shms = %d" % len(hms))
+    L += array("integer(int64)", "shms_in_bits", "n_shms", [bits64(r[0]) for r in hms])
+    L += array("integer", "shms_h", "n_shms", [str(r[1]) for r in hms])
+    L += array("integer", "shms_m", "n_shms", [str(r[2]) for r in hms])
+    L += array("integer(int64)", "shms_s_bits", "n_shms", [bits64(r[3]) for r in hms])
+    L.append("")
+    L.append("    ! ---- pf_deg2dms: deg -> (sgn, d, m, s), exactly split ----")
+    L.append("    integer, parameter :: n_sdms = %d" % len(dms))
+    L += array("integer(int64)", "sdms_in_bits", "n_sdms", [bits64(r[0]) for r in dms])
+    L += array("integer", "sdms_sgn", "n_sdms", [str(r[1]) for r in dms])
+    L += array("integer", "sdms_d", "n_sdms", [str(r[2]) for r in dms])
+    L += array("integer", "sdms_m", "n_sdms", [str(r[3]) for r in dms])
+    L += array("integer(int64)", "sdms_s_bits", "n_sdms", [bits64(r[4]) for r in dms])
+    L.append("")
+
+    L.append("    ! ---- The writers: (angle, precision, style) -> text; style 1 is sep=\":\", 2 sep=\" \", 3 sep=\"hms\" ----")
+    L.append("    integer, parameter :: n_stxt_ra = %d" % len(txt_ra))
+    L += array("integer(int64)", "stxt_ra_in_bits", "n_stxt_ra", [bits64(r[0]) for r in txt_ra])
+    L += array("integer", "stxt_ra_prec", "n_stxt_ra", [str(r[1]) for r in txt_ra])
+    L += array("integer", "stxt_ra_style", "n_stxt_ra", [str(r[2]) for r in txt_ra])
+    L += char_array("stxt_ra_text", "n_stxt_ra", [r[3] for r in txt_ra], 24)
+    L.append("    integer, parameter :: n_stxt_dec = %d" % len(txt_dec))
+    L += array("integer(int64)", "stxt_dec_in_bits", "n_stxt_dec", [bits64(r[0]) for r in txt_dec])
+    L += array("integer", "stxt_dec_prec", "n_stxt_dec", [str(r[1]) for r in txt_dec])
+    L += array("integer", "stxt_dec_style", "n_stxt_dec", [str(r[2]) for r in txt_dec])
+    L += char_array("stxt_dec_text", "n_stxt_dec", [r[3] for r in txt_dec], 24)
+    L.append("")
+
+    L.append("    ! ---- The readers: text -> (ok, value); a value is 0 where ok is false ----")
+    L.append("    integer, parameter :: n_sread_ra = %d" % len(rd_ra))
+    L += char_array("sread_ra_text", "n_sread_ra", [r[0] for r in rd_ra], 32)
+    L += logical_array("sread_ra_ok", "n_sread_ra", [r[1] is not None for r in rd_ra])
+    L += array("integer(int64)", "sread_ra_bits", "n_sread_ra", [bits64(r[1] if r[1] is not None else 0) for r in rd_ra])
+    L.append("    integer, parameter :: n_sread_dec = %d" % len(rd_dec))
+    L += char_array("sread_dec_text", "n_sread_dec", [r[0] for r in rd_dec], 32)
+    L += logical_array("sread_dec_ok", "n_sread_dec", [r[1] is not None for r in rd_dec])
+    L += array("integer(int64)", "sread_dec_bits", "n_sread_dec", [bits64(r[1] if r[1] is not None else 0) for r in rd_dec])
+    L.append("    integer, parameter :: n_sread_pair = %d" % len(rd_pair))
+    L += char_array("sread_pair_text", "n_sread_pair", [r[0] for r in rd_pair], 40)
+    L += logical_array("sread_pair_ok", "n_sread_pair", [r[1] is not None for r in rd_pair])
+    L += array("integer(int64)", "sread_pair_bits", "2 * n_sread_pair",
+               [bits64(v) for r in rd_pair for v in (r[1] if r[1] is not None else (0, 0))])
+    L.append("")
+
+    L.append("    ! ---- pf_zhel2zcmb: (lon, lat, z_hel) in a system, the dipole default or given -> z_cmb ----")
+    L.append("    !> The default dipole as documented -- apex longitude and latitude, degrees Galactic, and speed,")
+    L.append("    !! km/s -- and the redshift it gives a source at the apex with `z_hel = 0`, `gamma*(1 + v/c) - 1`.")
+    L += array("integer(int64)", "szcmb_default_bits", "3", [bits64(CMB_APEX_LON), bits64(CMB_APEX_LAT), bits64(CMB_APEX_V)])
+    L.append("    integer(int64), parameter :: szcmb_boost_bits = %s" % bits64(default_boost()))
+    L.append("    integer, parameter :: n_szcmb = %d" % len(zrows))
+    L += array("integer", "szcmb_system", "n_szcmb", [str(r[0]) for r in zrows])
+    L += array("integer(int64)", "szcmb_in_bits", "3 * n_szcmb", [bits64(v) for r in zrows for v in r[1:4]])
+    L += logical_array("szcmb_apex_given", "n_szcmb", [r[4] is not None for r in zrows])
+    L += array("integer(int64)", "szcmb_apex_bits", "3 * n_szcmb",
+               [bits64(v) for r in zrows for v in (r[4] if r[4] is not None else (0.0, 0.0, 0.0))])
+    L += array("integer(int64)", "szcmb_out_bits", "n_szcmb", [bits64(r[5]) for r in zrows])
     L.append("")
     L.append("    ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.")
     L.append("end module test_skycoord_vectors ! GCOVR_EXCL_LINE")
@@ -514,6 +917,63 @@ def self_test():
     close(position_angle(0.0, 0.0, 0.0, 10.0), 0.0, 1e-15, "due north is 0")
     close(position_angle(0.0, 0.0, 10.0, 0.0), 90.0, 1e-12, "due east is 90")
     check(position_angle(10.0, 90.0, 250.0, 90.0) == 0, "two labels of one pole coincide")
+
+    # pf_zhel2zcmb's dipole and the speed of light, read back from where they are declared.
+    rotate_src = ROTATE_PATH.read_text()
+    for name, value in (("skc_c_kms", C_KMS), ("skc_cmb_apex_lon", CMB_APEX_LON),
+                        ("skc_cmb_apex_lat", CMB_APEX_LAT), ("skc_cmb_apex_v", CMB_APEX_V)):
+        got = source_real(rotate_src, name)
+        check(got is not None and got == float(value),
+              "%s in src/parquet_skycoord_rotate.f90 is %r, not the documented %s" % (name, got, value))
+
+    # The text: the documented examples, the carries into the minute, the degree and 24 hours, the
+    # half-unit on either side, the tie, and the sign of a zero.
+    ex_ra, ex_dec = 155.37729166666667, 41.26916666666667
+    check(ra_text(ex_ra, STYLE_COLON, 2) == "10:21:30.550", "the right ascension example")
+    check(dec_text(ex_dec, STYLE_COLON, 2) == "+41:16:09.00", "the declination example")
+    check(ra_text(ex_ra, STYLE_LETTERS, 2) == "10h21m30.550s", "the lettered right ascension")
+    check(dec_text(-0.5, STYLE_LETTERS, 2) == "-00d30m00.00s", "the lettered declination, and its sign")
+    check(ra_text((23 * 3600 + 59 * 60 + 59.9996) / 240.0, STYLE_COLON, 2) == "00:00:00.000", "24 hours wrap to 0")
+    check(dec_text((59 * 60 + 59.9996) / 3600.0, STYLE_COLON, 3) == "+01:00:00.000", "the carry into the degree")
+    check(dec_text((59 * 60 + 59.9994) / 3600.0, STYLE_COLON, 3) == "+00:59:59.999", "no carry below the half")
+    check(dec_text(0.0078125, STYLE_COLON, 2) == "+00:00:28.12", "a tie rounds to even")
+    check(dec_text(-0.0, STYLE_COLON, 2) == "+00:00:00.00", "-0.0 is written with +")
+    check(dec_text(-1.0e-10, STYLE_COLON, 2) == "-00:00:00.00", "a negative value that rounds to 0 keeps its -")
+
+    # The grammar: the documented forms read alike, and the documented refusals refuse.
+    one = read_ra("10:21:30.55")
+    check(one is not None and all(read_ra(t) == one for t in ("10 21 30.55", "10h21m30.55s", "10h 21m 30.55s")),
+          "the three separator styles do not read alike")
+    check(all(read_ra(t) is None for t in ("5 6", "155.3772", "+10:21:30", "10:21", "10:60:00", "10:21:60")),
+          "a documented refusal was read")
+    check(read_dec("-00:30:00") == Fraction(-1, 2), "-00:30:00 is not -0.5")
+    check(read_pair("10:21:30.55, +41:16:09") == (one, read_dec("+41:16:09")), "a pair split at a comma")
+
+    # Every golden input, written and read back by the model, lands within half a unit of the last
+    # decimal it was written to.
+    for x in TEXT_RA_INPUTS:
+        for p, st in TEXT_CASES:
+            back = read_ra(ra_text(x, st, p))
+            gap = abs((back - fwrap(x) + 180) % 360 - 180) * 240
+            check(back is not None and gap <= HALF / 10 ** (p + 1), "ra %r at precision %d does not round-trip" % (x, p))
+    for x in TEXT_DEC_INPUTS:
+        if abs(x) >= 1000:
+            continue                                   # four digits of degrees: written, never read
+        for p, st in TEXT_CASES:
+            back = read_dec(dec_text(x, st, p))
+            check(back is not None and abs(back - Fraction(x)) * 3600 <= HALF / 10 ** p,
+                  "dec %r at precision %d does not round-trip" % (x, p))
+
+    # The redshift: no motion changes nothing; the apex gives the documented boost; and the apex's
+    # and the antapex's factors multiply to gamma**2 (1 - beta**2), which is exactly one.
+    with dctx():
+        z = zcmb(155.0, 41.0, 0.05, ICRS, (270.0, 30.0, 0.0))
+        check(tiny(z - D(0.05)), "no motion changed the redshift")
+        up = zcmb(CMB_APEX_LON, CMB_APEX_LAT, 0.0, GAL)
+        down = zcmb(CMB_APEX_LON + 180, -CMB_APEX_LAT, 0.0, GAL)
+        check(tiny(up - default_boost()), "the apex does not give gamma*(1 + v/c) - 1")
+        check(tiny((1 + up) * (1 + down) - 1), "the apex's and the antapex's factors do not multiply to one")
+        check(up > 0 > down, "the CMB-frame redshift is not the larger toward the apex")
     return bad
 
 
@@ -587,6 +1047,8 @@ def verify_oracle():
         check(abs(diff) < max(1e-9, 1e3 * tol), "position angle (%g, %g, %g, %g): astropy %r, model %r"
               % (ra1, dec1, ra2, dec2, got, float(pa)))
 
+    verify_text_and_redshift(check, counts, frames)
+
     if bad:
         sys.stderr.write("generate_skycoord_reference --verify-oracle FAILED (%d):\n" % len(bad))
         for line in bad[:40]:
@@ -595,6 +1057,114 @@ def verify_oracle():
     print("generate_skycoord_reference --verify-oracle: astropy %s agrees (%s)"
           % (astropy.__version__, ", ".join("%d %s" % (v, k) for k, v in counts.items())))
     return 0
+
+
+def verify_text_and_redshift(check, counts, frames):
+    """The sexagesimal rows against astropy's `Angle`, and the redshift rows against a cosine taken
+    from astropy's `separation`.
+
+    Three differences are the library's by design and are counted rather than compared:
+
+    * astropy carries seconds into the next minute from `60 - 10**-q` upward, where they round to 60
+      only from `60 - 10**-q / 2`; the library carries what rounds to 60, so a row in between is not
+      compared;
+    * astropy writes a right ascension that rounds up to 24 hours as `24:...`, and the library wraps
+      it to `00:...`;
+    * astropy signs a zero by `np.sign` (0) or, in text, `-0.0` negative, where the library's sign is
+      `pf_deg2dms`'s: -1 below zero, +1 otherwise.
+
+    A field split is compared as the time it adds up to, modulo a day: astropy converts degrees to
+    hours by multiplying by a rounded 1/15, which can carry a value a hair below a field boundary
+    across it (359.99999999999994 degrees is 24 hours there), where the library splits exactly.
+    """
+    import astropy.units as u
+    from astropy.coordinates import Angle, Longitude, SkyCoord
+
+    for key in ("field splits", "texts written", "texts read", "redshifts", "by design: early carries",
+                "by design: 24 h wrapped", "by design: the sign of a zero", "texts astropy refuses"):
+        counts[key] = 0
+    ra_sep = {STYLE_COLON: ":", STYLE_BLANK: " ", STYLE_LETTERS: "hms"}
+    dec_sep = {STYLE_COLON: ":", STYLE_BLANK: " ", STYLE_LETTERS: "dms"}
+
+    def carries_early(seconds, q):
+        return 60 - Fraction(1, 10 ** q) <= seconds < 60 - Fraction(1, 2 * 10 ** q)
+
+    for x in HMS_INPUTS:
+        h, m, s = hms_fields(x)
+        a = Longitude(x * u.deg).hms
+        gap = ((a.h * 3600 + a.m * 60 + a.s) - (h * 3600 + m * 60 + float(s)) + 43200) % 86400 - 43200
+        counts["field splits"] += 1
+        check(abs(gap) < 1e-9, "pf_deg2hms(%r): astropy %r, model (%d, %d, %r)" % (x, tuple(a), h, m, float(s)))
+    for x in DMS_INPUTS:
+        sgn, d, m, s = dms_fields(x)
+        a = Angle(x * u.deg).signed_dms
+        if x == 0:
+            counts["by design: the sign of a zero"] += 1
+            continue
+        counts["field splits"] += 1
+        check(a.sign == sgn and a.d == d and a.m == m and abs(a.s - float(s)) < 1e-6,
+              "pf_deg2dms(%r): astropy %r, model (%d, %d, %d, %r)" % (x, tuple(a), sgn, d, m, float(s)))
+
+    txt_ra, txt_dec = text_rows()
+    for x, p, st, text in txt_ra:
+        secs = fwrap(x) * 240
+        if carries_early(secs - 60 * ffloor(secs / 60), p + 1):
+            counts["by design: early carries"] += 1
+            continue
+        got = Longitude(x * u.deg).to_string(unit=u.hourangle, sep=ra_sep[st], precision=p + 1, pad=True)
+        if got.startswith("24") and text.startswith("00"):
+            counts["by design: 24 h wrapped"] += 1
+            got = "00" + got[2:]
+        counts["texts written"] += 1
+        check(got == text, "pf_ra2str(%r, precision=%d, style %d): astropy %r, model %r" % (x, p, st, got, text))
+    for x, p, st, text in txt_dec:
+        arcsec = abs(Fraction(x)) * 3600
+        if carries_early(arcsec - 60 * ffloor(arcsec / 60), p):
+            counts["by design: early carries"] += 1
+            continue
+        if x == 0 and math.copysign(1.0, x) < 0:
+            counts["by design: the sign of a zero"] += 1
+            continue
+        got = Angle(x * u.deg).to_string(unit=u.deg, sep=dec_sep[st], precision=p, pad=True, alwayssign=True)
+        counts["texts written"] += 1
+        check(got == text, "pf_dec2str(%r, precision=%d, style %d): astropy %r, model %r" % (x, p, st, got, text))
+
+    rd_ra, rd_dec, rd_pair = read_rows()
+    for rows, unit in ((rd_ra, u.hourangle), (rd_dec, u.deg)):
+        for text, want in rows:
+            if want is None:
+                continue                               # the library's grammar is stricter than astropy's
+            try:
+                got = Angle(text, unit=unit).degree
+            except Exception:
+                counts["texts astropy refuses"] += 1
+                continue
+            counts["texts read"] += 1
+            check(abs(got - float(want)) < 1e-12, "reading %r: astropy %r, model %r" % (text, got, float(want)))
+    for text, want in rd_pair:
+        if want is None:
+            continue
+        try:
+            c = SkyCoord(text, unit=(u.hourangle, u.deg))
+        except Exception:
+            counts["texts astropy refuses"] += 1
+            continue
+        counts["texts read"] += 1
+        check(abs(c.ra.deg - float(want[0])) < 1e-12 and abs(c.dec.deg - float(want[1])) < 1e-12,
+              "reading the pair %r: astropy (%r, %r), model (%r, %r)"
+              % (text, c.ra.deg, c.dec.deg, float(want[0]), float(want[1])))
+
+    c_kms = float(C_KMS)
+    for system, lon, lat, z, apex, want in zcmb_rows():
+        alon, alat, av = apex if apex is not None else (float(CMB_APEX_LON), float(CMB_APEX_LAT), float(CMB_APEX_V))
+        sep = SkyCoord(lon * u.deg, lat * u.deg, frame=frames[system]).separation(
+            SkyCoord(l=alon * u.deg, b=alat * u.deg, frame="galactic"))
+        beta = av / c_kms
+        got = (1 + z) / math.sqrt(1 - beta * beta) * (1 + beta * math.cos(sep.radian)) - 1
+        counts["redshifts"] += 1
+        check(abs(got - float(want)) < 1e-13 * max(1.0, abs(float(want))),
+              "pf_zhel2zcmb(%r, %r, %r, system %d, apex %r): astropy's angle gives %r, model %r"
+              % (lon, lat, z, system, apex, got, float(want)))
 
 
 def main():

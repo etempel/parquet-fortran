@@ -13,6 +13,7 @@ ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
 ordered_subpage: sphere.md
+ordered_subpage: skycoord.md
 ordered_subpage: index-maps.md
 ordered_subpage: logging.md
 ordered_subpage: configuration-files.md
@@ -28,7 +29,8 @@ finding where a function of one variable crosses zero, the discrete cosine trans
 interpolation of tabulated data,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
-random points in sky polygons and HEALPix masks with the RA/Dec geometry they need,
+random points in sky polygons and HEALPix masks with the RA/Dec geometry they need, celestial
+coordinate systems with the separations and offsets that need none,
 fast key-to-index lookup and a recycling allocator for index values,
 leveled logging for your own program, TOML configuration files, small numeric, text and path
 helpers, and the two generators meant to be copied into your own project.
@@ -120,16 +122,21 @@ helpers, and the two generators meant to be copied into your own project.
   points move, and a cell size the library measures for itself rather than asking you to pick.
 - [Sphere pixelisation with `parquet_healpix`](healpix.html) — HEALPix: the direction a pixel
   covers and the pixel a direction falls in, in both numbering schemes, and the pixels of a disc;
-  `pf_healpix_grid` to carry a resolution and a scheme in one object, angular separations, grid
-  arithmetic, and a `_bulk` form of every conversion that threads internally. Equal-area pixels on
-  rings of constant latitude, both integer kinds, and no floating-point exception raised — so a
-  program running under `-ffpe-trap` needs no guard around a disc query.
+  `pf_healpix_grid` to carry a resolution and a scheme in one object, the separation of two
+  directions, grid arithmetic, and a `_bulk` form of every conversion that threads internally.
+  Equal-area pixels on rings of constant latitude, both integer kinds, and no floating-point
+  exception raised — so a program running under `-ffpe-trap` needs no guard around a disc query.
 - [Random points and geometry on the sphere with parquet_sphere](sphere.html) — points uniform per
   solid angle inside a sky polygon, with straight RA/Dec edges or great-circle edges, inside one
   HEALPix pixel or over a list of them; the polygon's containment, area and acceptance; RA/Dec
-  conversions that name their declination frame, offsets by a separation at a position angle, and
-  the Fibonacci grid. Every draw is addressed like `pf_random_at`, so a catalogue reproduces under
-  any schedule.
+  conversions that name their declination frame, and the Fibonacci grid. Every draw is addressed
+  like `pf_random_at`, so a catalogue reproduces under any schedule.
+- [Celestial coordinate systems with `parquet_skycoord`](skycoord.html) — sky positions converted
+  between ICRS, Galactic, ecliptic and supergalactic coordinates, by a named procedure or by two
+  selectors read at run time, each rotation built from the three angles that define it and agreeing
+  with astropy to rounding; and the RA/Dec geometry that needs no coordinate system: the separation
+  of two positions, the position a separation away at a position angle, and that angle back. Every
+  procedure is `pure elemental`, so a whole column converts in one call.
 - [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key, a tuple of them when no one column
   is unique, or a string. Three storage backends behind one API — an array indexed by the key, an

@@ -80,7 +80,6 @@ module parquet_healpix
     !
     ! ---- Added after the three tiers ----
     !
-    public :: pf_angdist_deg
     public :: pf_neighbours_nest, pf_neighbours_ring
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
@@ -1068,47 +1067,6 @@ module parquet_healpix
             real(real64), intent(in) :: vec2(3) !! second direction; any nonzero length.
             real(real64), intent(out) :: dist !! the angle between them, radians, in [0, pi].
         end subroutine pf_angdist
-
-        !> Angular separation of two sky positions given in degrees, in degrees.
-        !>
-        !> **The one RA/Dec entry point this module offers as a free procedure, and the reason it
-        !> can be one is that it does not need a frame.** Everywhere else the module refuses a bare
-        !> `dec`, because the two conventions in live downstream use -- `theta = pi/2 - dec` and the
-        !> mirrored `theta = pi/2 + dec` -- send the same number to opposite hemispheres, which is
-        !> why RA/Dec otherwise lives on `pf_healpix_grid` and its `frame=`. The two differ by a
-        !> reflection in `z`, and a reflection preserves the angle between two directions, so this
-        !> procedure returns the same answer under either. It needs no frame and takes none.
-        !>
-        !> `pure elemental`, so it broadcasts over whole arrays of coordinates -- which
-        !> `pf_angdist` cannot do, its `vec(3)` dummies being arrays already. It is also **31%
-        !> cheaper than converting to vectors and calling `pf_angdist`** (47.0 ns against 68.0 on
-        !> machine B), because working in the frame where only the RA difference survives removes
-        !> one of the four sine/cosine pairs.
-        !>
-        !> **A position is EXACTLY zero degrees from itself**, including when the two right
-        !> ascensions differ by whole turns and when both positions sit at a pole with unrelated
-        !> right ascensions. That is a guarantee rather than an arithmetic accident: the formula
-        !> alone gives a few times 1e-15 degrees there on a compiler that contracts a
-        !> multiply-subtract into an FMA, and a caller excluding self-matches with `dist > 0`
-        !> would then keep every one of them.
-        !>
-        !> **Total, like every other elemental here: it validates nothing and never aborts.** A
-        !> NaN argument gives a NaN result rather than an error, and `dec` outside [-90, 90] is
-        !> read as the direction that declination names rather than refused.
-        !>
-        !> **A NaN argument also raises no IEEE flag**, so a caller running with the exceptions
-        !> unmasked -- which is nagfor's default -- can carry a NaN through this procedure without
-        !> being terminated by it. An INFINITE argument is different and does raise `IEEE_INVALID`,
-        !> because taking the sine of an infinite angle is an invalid operation on any conforming
-        !> processor rather than anything this formula chooses; the distinction is between
-        !> propagating a NaN that already exists and creating one.
-        pure elemental module function pf_angdist_deg(ra1, dec1, ra2, dec2) result(dist)
-            real(real64), intent(in) :: ra1 !! right ascension of the first position, degrees; any value.
-            real(real64), intent(in) :: dec1 !! declination of the first position, degrees, in [-90, 90].
-            real(real64), intent(in) :: ra2 !! right ascension of the second position, degrees; any value.
-            real(real64), intent(in) :: dec2 !! declination of the second position, degrees, in [-90, 90].
-            real(real64) :: dist !! the angle between them, degrees, in [0, 180].
-        end function pf_angdist_deg
     end interface
 
     ! ---- Interfaces: disc queries ----

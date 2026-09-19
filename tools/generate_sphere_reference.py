@@ -2,7 +2,7 @@
 """Generate the reference vectors that pin `parquet_sphere`'s contract.
 
 `parquet_sphere` draws random points in sky polygons and HEALPix pixels by rejection, and computes
-RA/Dec geometry. A wrong containment rule, area, offset or candidate order is a plausible WRONG
+RA/Dec geometry. A wrong containment rule, area or candidate order is a plausible WRONG
 ANSWER rather than an abort, so the vectors below are derived here -- from a 60-digit model of the
 contract built on `tools/generate_random_golden_vectors.py`'s own sphere model -- rather than read
 back out of a Fortran run, which could only ever confirm that the implementation agrees with
@@ -13,9 +13,11 @@ Emitted (COMMITTED to the repository, like every other generator's output):
   test/test_sphere_vectors.f90    module `test_sphere_vectors`: the family labels and the contract
                                   identifier; polygons with their areas and acceptances;
                                   containment truth tables (chart and great-circle, the antipodes
-                                  of inside points included); offsets, position angles and
-                                  Fibonacci points; and polygon, pixel and mask draws with the
-                                  candidate count each took.
+                                  of inside points included); Fibonacci points; and polygon,
+                                  pixel and mask draws with the candidate count each took.
+                                  Offsets and position angles are
+                                  tools/generate_skycoord_reference.py's, as the two procedures
+                                  are `parquet_skycoord`'s.
 
 Usage:  tools/generate_sphere_reference.py [--check] [--self-test] [--verify-oracle]
 
@@ -23,14 +25,14 @@ Usage:  tools/generate_sphere_reference.py [--check] [--self-test] [--verify-ora
                    difference.
   --self-test      re-derive the published anchors -- the labels and identifier against
                    src/parquet_sphere.f90, the closed-form areas (a rectangle, a polar cap, the
-                   octant), the offset's pole convention, the two containment models' agreement,
-                   and the decimal pixel model against tools/generate_healpix_reference.py's --
-                   and exit 1 if any of them fails.
-  --verify-oracle  cross-check the emitted rows against astropy (offsets, position angles, the
-                   Fibonacci grid), matplotlib (chart containment) and healpy (great-circle
-                   containment by pixel centre, areas by pixel count, and every pixel draw's
-                   pixel). Needs the workspace `astro` environment; the two modes above need a bare
-                   `python3`, so CI's lint image can run them.
+                   octant), the two containment models' agreement, and the decimal pixel model
+                   against tools/generate_healpix_reference.py's -- and exit 1 if any of them
+                   fails.
+  --verify-oracle  cross-check the emitted rows against astropy (the Fibonacci grid), matplotlib
+                   (chart containment) and healpy (great-circle containment by pixel centre, areas
+                   by pixel count, and every pixel draw's pixel). Needs the workspace `astro`
+                   environment; the two modes above need a bare `python3`, so CI's lint image can
+                   run them.
 
 NEVER HAND-EDIT A VECTOR. A contract change is an edit to the model below plus a regeneration.
 
@@ -209,49 +211,7 @@ def dwrap360(x):
         return x
 
 
-def danint(x):
-    """Fortran's `anint`: nearest integer, halves away from zero."""
-    with dctx():
-        return dd(x).to_integral_value(rounding=decimal.ROUND_HALF_UP)
-
-
-# ---- Offsets, position angles and the Fibonacci grid ----
-
-def offset_radec(ra0, dec0, pa, sep):
-    """`pf_offset_radec`: `cos(sep)*c + sin(sep)*(cos(pa)*north + sin(pa)*east)`."""
-    with dctx():
-        sd0, cd0 = dec_sin_cos(dec0)
-        sa, ca = dsin_cos(deg2rad(ra0))
-        sp, cp = dsin_cos(deg2rad(pa))
-        ss, cs = dsin_cos(deg2rad(sep))
-        c = [cd0 * ca, cd0 * sa, sd0]
-        north = [-(sd0 * ca), -(sd0 * sa), cd0]
-        east = [-sa, ca, D(0)]
-        v = [cs * c[j] + ss * (cp * north[j] + sp * east[j]) for j in range(3)]
-        return unit_radec(v)
-
-
-def position_angle(ra1, dec1, ra2, dec2):
-    """`pf_position_angle_deg`, with its fold, its coincidence rule and the pole rule."""
-    with dctx():
-        dl = dd(ra2) - dd(ra1)
-        dl = dl - 360 * danint(dl / 360)
-        if dec1 == dec2 and (dl == 0 or abs(dec1) == 90.0):
-            return D(0)
-        sd1, cd1 = dec_sin_cos(dec1)
-        sd2, cd2 = dec_sin_cos(dec2)
-        sdl, cdl = dsin_cos(deg2rad(dl))
-        y = sdl * cd2
-        x = cd1 * sd2 - sd1 * cd2 * cdl
-        if y == 0 and x == 0:
-            return D(0)
-        pa = rad2deg(datan2(y, x))
-        if pa < 0:
-            pa += 360
-        if pa >= 360:
-            pa = D(0)
-        return pa
-
+# ---- The Fibonacci grid ----
 
 PHI = None
 
@@ -950,52 +910,6 @@ def containment_rows(polys):
     return rows
 
 
-OFFSET_CENTRES = [(10.0, 20.0), (350.0, -45.0), (0.0, 90.0), (123.4, -90.0), (200.0, 89.999),
-                  (75.0, -89.5), (720.5, 0.0)]
-OFFSET_PAS = [0.0, 90.0, 180.0, 270.0, 33.3, -45.0, 400.0]
-OFFSET_SEPS = [0.0, 1e-6, 0.5, 45.0, 90.0, 179.9, 180.0, 250.0]
-
-
-def offset_rows():
-    rows = []
-    n = 0
-    for ra0, dec0 in OFFSET_CENTRES:
-        for pa in OFFSET_PAS:
-            sep = OFFSET_SEPS[n % len(OFFSET_SEPS)]
-            n += 1
-            ra, dec = offset_radec(D(ra0), dec0, D(pa), D(sep))
-            rows.append((ra0, dec0, pa, sep, ra, dec))
-    return rows
-
-
-def pa_rows(offsets):
-    """Position angles of the offsets' results seen from their centres, and a few set pairs; a
-    pair whose separation is within 0.01 degree of 0 or 180 is kept only when it coincides."""
-    pairs = [(r[0], r[1], float(r[4]), float(r[5])) for r in offsets]
-    pairs += [
-        (10.0, 90.0, 250.0, 90.0),       # two labels of the north pole: coincident, 0 by rule
-        (33.0, -12.0, 393.0, -12.0),     # one position written two turns apart: 0 by rule
-        (0.0, 90.0, 45.0, 60.0),         # from the pole
-        (45.0, 60.0, 0.0, 90.0),         # to the pole: north, 0
-        (359.5, 10.0, 0.5, 10.0),        # across ra = 0
-        (120.0, -30.0, 100.0, -35.0),
-        (10.0, -89.0, 190.0, -89.0),     # across the south pole
-    ]
-    rows = []
-    for ra1, dec1, ra2, dec2 in pairs:
-        with dctx():
-            sep = dangle(radec_unit(ra1, dec1), radec_unit(ra2, dec2))
-            sep_deg = float(rad2deg(sep))
-        coincident = position_angle(ra1, dec1, ra2, dec2) == 0 and sep_deg < 1e-30
-        if not coincident and (sep_deg < 0.01 or sep_deg > 179.99):
-            continue
-        pa = position_angle(ra1, dec1, ra2, dec2)
-        # How far rounding can move the angle: an ulp or two of a direction, over the separation.
-        tol = 1e-11 if coincident else max(1e-11, 16 * 2.2e-16 / math.sin(math.radians(sep_deg)) * 180 / math.pi)
-        rows.append((ra1, dec1, ra2, dec2, pa, tol))
-    return rows
-
-
 FIB_CASES = [(1, [0]), (2, [0, 1]), (7, list(range(7))), (1000, [0, 1, 2, 499, 500, 998, 999])]
 
 
@@ -1136,8 +1050,6 @@ def logical(b):
 def gen_module():
     polys = polygons()
     cont = containment_rows(polys)
-    offs = offset_rows()
-    pas = pa_rows(offs)
     fibs = fibonacci_rows()
     pdraws = polygon_draw_rows(polys)
     pxdraws = pixel_draw_rows()
@@ -1193,19 +1105,6 @@ def gen_module():
     L += array("integer(int64)", "scont_ra_bits", "n_scont", [bits64(r[1]) for r in cont])
     L += array("integer(int64)", "scont_dec_bits", "n_scont", [bits64(r[2]) for r in cont])
     L += array("logical", "scont_inside", "n_scont", [logical(r[3]) for r in cont])
-    L.append("")
-
-    L.append("    ! ---- pf_offset_radec: (ra0, dec0, pa_deg, sep_deg) -> (ra, dec) ----")
-    L.append("    integer, parameter :: n_soff = %d" % len(offs))
-    L += array("integer(int64)", "soff_in_bits", "4 * n_soff", [bits64(x) for r in offs for x in r[:4]])
-    L += array("integer(int64)", "soff_out_bits", "2 * n_soff", [bits64(x) for r in offs for x in r[4:]])
-    L.append("")
-
-    L.append("    ! ---- pf_position_angle_deg: (ra1, dec1, ra2, dec2) -> pa, with each row's tolerance ----")
-    L.append("    integer, parameter :: n_spa = %d" % len(pas))
-    L += array("integer(int64)", "spa_in_bits", "4 * n_spa", [bits64(x) for r in pas for x in r[:4]])
-    L += array("integer(int64)", "spa_out_bits", "n_spa", [bits64(r[4]) for r in pas])
-    L += array("integer(int64)", "spa_tol_bits", "n_spa", [bits64(r[5]) for r in pas])
     L.append("")
 
     L.append("    ! ---- pf_fibonacci_grid_radec: point k of an n-point grid, with each row's RA tolerance ----")
@@ -1324,18 +1223,6 @@ def self_test():
             total += math.radians(width) * math.cos(math.radians(y)) * math.radians(50.0 / steps)
         close(poly.area, total, 1e-8, "slanted quadrilateral area by quadrature")
 
-    # The offset's pole convention and its inverse.
-    ra, dec = offset_radec(D(10), 90.0, D(30), D(5))
-    close(ra, 160.0, 1e-12, "offset from the north pole: ra")
-    close(dec, 85.0, 1e-12, "offset from the north pole: dec")
-    ra, dec = offset_radec(D(10), -90.0, D(30), D(5))
-    close(ra, 40.0, 1e-12, "offset from the south pole: ra")
-    ra, dec = offset_radec(D(10), 20.0, D(33), D(4))
-    close(position_angle(10.0, 20.0, float(ra), float(dec)), 33.0, 1e-10, "the position angle inverts the offset")
-    close(position_angle(0.0, 0.0, 0.0, 10.0), 0.0, 1e-15, "due north is 0")
-    close(position_angle(0.0, 0.0, 10.0, 0.0), 90.0, 1e-12, "due east is 90")
-    check(position_angle(10.0, 90.0, 250.0, 90.0) == 0, "two labels of one pole coincide")
-
     # The Fibonacci grid: the single point, and the half step in the longitude.
     ra, dec = fibonacci_point(1, 0)
     close(ra, 0.5 * 360 / ((1 + math.sqrt(5)) / 2), 1e-12, "the one-point grid's ra")
@@ -1413,7 +1300,7 @@ def verify_oracle():
                          "matplotlib: %s\n" % exc)
         return 2
     bad = []
-    counts = {"offsets": 0, "position angles": 0, "grid points": 0, "chart probes": 0,
+    counts = {"grid points": 0, "chart probes": 0,
               "great-circle polygons": 0, "pixel draws": 0}
 
     def check(ok, what):
@@ -1422,30 +1309,6 @@ def verify_oracle():
 
     polys = polygons()
 
-    # Offsets and position angles against astropy.
-    for ra0, dec0, pa, sep, ra, dec in offset_rows():
-        if abs(dec0) == 90.0 and sep > 180.0:
-            # astropy's pole branch sets the longitude as though the separation were at most 180, so
-            # past the far pole it reports the mirror meridian; the vector form continues correctly.
-            continue
-        o = SkyCoord(ra0 * u.deg, dec0 * u.deg).directional_offset_by(pa * u.deg, sep * u.deg)
-        dra = ((o.ra.deg - float(ra) + 180.0) % 360.0 - 180.0) * math.cos(math.radians(float(dec)))
-        # astropy takes the declination as `arcsin`, which loses digits near a pole: an ulp of the
-        # sine is `eps/sqrt(2*(1 - |sin(dec)|))` radians there. The model uses `atan2`.
-        one_minus = max(1e-300, 1.0 - abs(math.sin(math.radians(float(dec)))))
-        dec_tol = 1e-9 + 4.0 * 2.2e-16 / math.sqrt(2.0 * one_minus) * 180.0 / math.pi
-        counts["offsets"] += 1
-        check(abs(dra) < 1e-9 and abs(o.dec.deg - float(dec)) < dec_tol,
-              "offset (%g, %g, %g, %g): astropy (%r, %r), model (%r, %r)"
-              % (ra0, dec0, pa, sep, o.ra.deg, o.dec.deg, float(ra), float(dec)))
-    for ra1, dec1, ra2, dec2, pa, tol in pa_rows(offset_rows()):
-        if pa == 0 and dec1 == dec2 and abs(dec1) == 90.0:
-            continue                               # the pole's coincidence rule is the library's own
-        got = SkyCoord(ra1 * u.deg, dec1 * u.deg).position_angle(SkyCoord(ra2 * u.deg, dec2 * u.deg)).deg
-        diff = (got - float(pa) + 180.0) % 360.0 - 180.0
-        counts["position angles"] += 1
-        check(abs(diff) < max(1e-9, 1e3 * tol), "position angle (%g, %g, %g, %g): astropy %r, model %r"
-              % (ra1, dec1, ra2, dec2, got, float(pa)))
     for n, ks in FIB_CASES:
         g = golden_spiral_grid(n)
         for k in ks:

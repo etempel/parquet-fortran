@@ -128,6 +128,13 @@ parquet_utils.f90
 parquet_wrapper.cpp
 parquet_ziggurat.f90
 
+[parquet_skycoord]
+parquet_skycoord.f90
+parquet_skycoord_geom.f90
+parquet_skycoord_rotate.f90
+parquet_utils.f90
+parquet_wrapper.cpp
+
 [parquet_columns]
 parquet_columns.f90
 parquet_columns_access.f90
@@ -614,6 +621,9 @@ parquet_root_solve.f90
 parquet_sampling.f90
 parquet_settings.f90
 parquet_settings_base.f90
+parquet_skycoord.f90
+parquet_skycoord_geom.f90
+parquet_skycoord_rotate.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
 parquet_sorting_keys.f90

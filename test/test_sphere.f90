@@ -2,7 +2,8 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !> Tests for `parquet_sphere`: sky polygons, points in HEALPix pixels and masks, and the RA/Dec
-!> geometry -- conversions, offsets, position angles and the Fibonacci grid.
+!> geometry -- conversions and the Fibonacci grid. The offset and the position angle are
+!> `parquet_skycoord`'s, and so are their tests (`test/test_skycoord.f90`).
 !>
 !> Three layers, as for `parquet_random`'s own sphere family:
 !>
@@ -21,7 +22,7 @@ module test_sphere
     use parquet_sphere
     use parquet_random, only: pf_random_at, pf_random_key, pf_random_int_at, pf_random_direction_at, &
         pf_random_radec_at, pf_random_disc_at, pf_random_disc_radec_at, pf_random_pair_spare_at
-    use parquet_healpix, only: pf_vec2pix_nest, pf_ring2nest, pf_angdist, pf_angdist_deg
+    use parquet_healpix, only: pf_vec2pix_nest, pf_ring2nest, pf_angdist
     use test_sphere_vectors
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf, &
         ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_invalid
@@ -59,7 +60,7 @@ contains
     subroutine collect_tests_sphere(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)   !! the collected tests
         testsuite = [ &
-            new_unittest("golden rows: identifier, areas, containment, offsets, angles, grid points and draws", &
+            new_unittest("golden rows: identifier, areas, containment, grid points and draws", &
                          test_sphere_golden), &
             new_unittest("pf_radec2vec and pf_vec2radec round-trip, name their frame, and agree with the grid's", &
                          test_radec2vec_round_trip), &
@@ -91,8 +92,6 @@ contains
                          test_pixel_mask_tiers_agree), &
             new_unittest("every int32 and int64 specific pair agrees, and a draw below 1 is draw 1", &
                          test_region_kinds_agree), &
-            new_unittest("the position angle inverts the offset, at the poles and the cardinal points too", &
-                         test_offset_and_position_angle), &
             new_unittest("the Fibonacci grid is unit, spaced as astropy's, and its two forms are one grid", &
                          test_fibonacci_grid), &
             new_unittest("a mask too long for the spare bits falls back and still spans its list", &
@@ -107,11 +106,10 @@ contains
     !> Every golden row of `test/test_sphere_vectors.f90`.
     !!
     !! Exact: the identifier, every containment answer, every candidate count and every mask choice.
-    !! To a tolerance: areas and acceptances to 1e-12 relative; offsets to 1e-11 degrees on the sky;
-    !! position angles to each row's own tolerance, which grows as the separation nears 0 or 180; the
-    !! Fibonacci points to 1e-12 degrees in declination and to each row's tolerance in right ascension,
-    !! which grows with the unwrapped longitude; a polygon draw to `POLY_TOL` degrees on the sky; a
-    !! pixel or mask draw's vector to 32 ulp.
+    !! To a tolerance: areas and acceptances to 1e-12 relative; the Fibonacci points to 1e-12 degrees
+    !! in declination and to each row's tolerance in right ascension, which grows with the unwrapped
+    !! longitude; a polygon draw to `POLY_TOL` degrees on the sky; a pixel or mask draw's vector to
+    !! 32 ulp.
     subroutine test_sphere_golden(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         !> A polygon draw on the sky: `asin` near a pole and the box's own rounding move a chart
@@ -119,7 +117,7 @@ contains
         real(real64), parameter :: POLY_TOL = 1.0e-11_real64
         type(pf_sky_polygon), allocatable :: polys(:)
         type(pf_healpix_grid) :: grid
-        real(real64) :: ra, dec, want_ra, want_dec, v(3), got, want, worst, tol, u1, u2
+        real(real64) :: ra, dec, want_ra, want_dec, v(3), want, worst, tol, u1, u2
         logical :: differs, spare_ok
         real(real64), allocatable :: fra(:), fdec(:)
         integer(int64) :: ncand, ipix, choice, dd
@@ -167,31 +165,6 @@ contains
             write (msg, '(a,i0,a,i0,a,2f14.8,a,l1)') "containment row ", k, " (polygon ", scont_poly(k), ", ", ra, dec, &
                 ") should read ", scont_inside(k)
             call check(error, polys(scont_poly(k))%contains(ra, dec) .eqv. scont_inside(k), trim(msg))
-            if (allocated(error)) return
-        end do
-
-        worst = 0.0_real64
-        do k = 1, n_soff
-            call pf_offset_radec(transfer(soff_in_bits(4 * k - 3), 0.0_real64), transfer(soff_in_bits(4 * k - 2), 0.0_real64), &
-                                 transfer(soff_in_bits(4 * k - 1), 0.0_real64), transfer(soff_in_bits(4 * k), 0.0_real64), &
-                                 ra, dec)
-            worst = max(worst, sky_gap(ra, dec, transfer(soff_out_bits(2 * k - 1), 0.0_real64), &
-                                       transfer(soff_out_bits(2 * k), 0.0_real64)))
-            differs = differs .or. ra /= transfer(soff_out_bits(2 * k - 1), 0.0_real64) .or. &
-                dec /= transfer(soff_out_bits(2 * k), 0.0_real64)
-        end do
-        write (msg, '(a,es10.3,a)') "pf_offset_radec misses the model by ", worst, " degrees on the sky (at most 1e-11)"
-        call check(error, worst <= 1.0e-11_real64, trim(msg))
-        if (allocated(error)) return
-
-        do k = 1, n_spa
-            got = pf_position_angle_deg(transfer(spa_in_bits(4 * k - 3), 0.0_real64), &
-                                        transfer(spa_in_bits(4 * k - 2), 0.0_real64), &
-                                        transfer(spa_in_bits(4 * k - 1), 0.0_real64), transfer(spa_in_bits(4 * k), 0.0_real64))
-            want = transfer(spa_out_bits(k), 0.0_real64)
-            write (msg, '(a,i0,a,es24.16,a,es24.16)') "position-angle row ", k, ": ", got, " against ", want
-            call check(error, turn_gap(got, want) <= transfer(spa_tol_bits(k), 0.0_real64), trim(msg))
-            differs = differs .or. got /= want
             if (allocated(error)) return
         end do
 
@@ -1407,92 +1380,8 @@ contains
     end subroutine test_region_kinds_agree
 
     ! ================================================================================
-    ! Offsets, position angles and the Fibonacci grid
+    ! The Fibonacci grid
     ! ================================================================================
-
-    !> `pf_position_angle_deg(p0, pf_offset_radec(p0, pa, sep)) == pa` and the separation is `sep`, over
-    !! random positions; then the poles, separations 0 and 180, the four cardinal directions, the
-    !! coincidence rule, and a quiet NaN.
-    subroutine test_offset_and_position_angle(error)
-        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
-        integer(int64), parameter :: NPAIR = 10000_int64
-        real(real64) :: ra0, dec0, pa, sep, ra, dec, worst_pa, worst_sep, nan, got
-        integer(int64) :: k
-        logical :: had_invalid, raised
-        character(len=120) :: msg
-
-        worst_pa = 0.0_real64
-        worst_sep = 0.0_real64
-        do k = 1_int64, NPAIR
-            call pf_random_radec_at(SKY_SEED, k, ra0, dec0)
-            pa = 360.0_real64 * pf_random_at(SKY_SEED, k, 3_int64)
-            sep = 0.01_real64 + 179.98_real64 * pf_random_at(SKY_SEED, k, 4_int64)
-            call pf_offset_radec(ra0, dec0, pa, sep, ra, dec)
-            worst_pa = max(worst_pa, turn_gap(pf_position_angle_deg(ra0, dec0, ra, dec), pa) * sin(sep * DEG))
-            worst_sep = max(worst_sep, abs(pf_angdist_deg(ra0, dec0, ra, dec) - sep))
-        end do
-        write (msg, '(a,es10.3,a,es10.3)') "the offset and the position angle are not inverses: angle ", worst_pa, &
-            ", separation ", worst_sep
-        call check(error, worst_pa <= 1.0e-9_real64 .and. worst_sep <= 1.0e-9_real64, trim(msg))
-        if (allocated(error)) return
-
-        ! The poles: the local frame follows ra0.
-        call pf_offset_radec(10.0_real64, 90.0_real64, 30.0_real64, 5.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 160.0_real64, 85.0_real64) <= 1.0e-12_real64, &
-            "an offset from the north pole at position angle pa does not land at ra0 + 180 - pa")
-        if (allocated(error)) return
-        call pf_offset_radec(10.0_real64, -90.0_real64, 30.0_real64, 5.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 40.0_real64, -85.0_real64) <= 1.0e-12_real64, &
-            "an offset from the south pole at position angle pa does not land at ra0 + pa")
-        if (allocated(error)) return
-        ! Separations 0 and 180, and past 180 along the same great circle.
-        call pf_offset_radec(725.0_real64, -33.0_real64, 77.0_real64, 0.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 5.0_real64, -33.0_real64) <= 1.0e-12_real64, "a zero offset moves the position")
-        if (allocated(error)) return
-        call pf_offset_radec(10.0_real64, 20.0_real64, 77.0_real64, 180.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 190.0_real64, -20.0_real64) <= 1.0e-12_real64, &
-            "an offset of 180 degrees is not the antipode")
-        if (allocated(error)) return
-        call pf_offset_radec(10.0_real64, 90.0_real64, 90.0_real64, 250.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 280.0_real64, -20.0_real64) <= 1.0e-12_real64, &
-            "an offset of 250 degrees from the pole does not continue past the south pole")
-        if (allocated(error)) return
-        ! The cardinal directions on the equator.
-        call pf_offset_radec(10.0_real64, 0.0_real64, 0.0_real64, 5.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 10.0_real64, 5.0_real64) <= 1.0e-12_real64, "position angle 0 is not north")
-        if (allocated(error)) return
-        call pf_offset_radec(10.0_real64, 0.0_real64, 90.0_real64, 5.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 15.0_real64, 0.0_real64) <= 1.0e-12_real64, "position angle 90 is not east")
-        if (allocated(error)) return
-        call pf_offset_radec(10.0_real64, 0.0_real64, 180.0_real64, 5.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 10.0_real64, -5.0_real64) <= 1.0e-12_real64, "position angle 180 is not south")
-        if (allocated(error)) return
-        call pf_offset_radec(10.0_real64, 0.0_real64, 270.0_real64, 5.0_real64, ra, dec)
-        call check(error, sky_gap(ra, dec, 5.0_real64, 0.0_real64) <= 1.0e-12_real64, "position angle 270 is not west")
-        if (allocated(error)) return
-
-        call check(error, pf_position_angle_deg(33.0_real64, 12.0_real64, 393.0_real64, 12.0_real64) == 0.0_real64 .and. &
-            pf_position_angle_deg(10.0_real64, -90.0_real64, 250.0_real64, -90.0_real64) == 0.0_real64, &
-            "a coincident pair -- one position written two turns apart, or two labels of one pole -- has an angle")
-        if (allocated(error)) return
-        got = pf_position_angle_deg(0.0_real64, 0.0_real64, 0.0_real64, -1.0_real64)
-        call check(error, abs(got - 180.0_real64) <= 1.0e-12_real64, "due south is not position angle 180")
-        if (allocated(error)) return
-
-        nan = ieee_value(0.0_real64, ieee_quiet_nan)
-        if (ieee_support_flag(ieee_invalid)) then
-            call ieee_get_flag(ieee_invalid, had_invalid)
-            call ieee_set_flag(ieee_invalid, .false.)
-        end if
-        got = pf_position_angle_deg(nan, 0.0_real64, 1.0_real64, 1.0_real64)
-        if (ieee_support_flag(ieee_invalid)) then
-            call ieee_get_flag(ieee_invalid, raised)
-            call ieee_set_flag(ieee_invalid, had_invalid .or. raised)
-            call check(error, .not. raised, "a NaN argument raised IEEE_INVALID in pf_position_angle_deg")
-            if (allocated(error)) return
-        end if
-        call check(error, got /= got, "a NaN argument did not give a NaN position angle")
-    end subroutine test_offset_and_position_angle
 
     !> The Fibonacci grid: unit vectors, the two forms one grid in both frames, a mean near 0, and
     !! nearest-neighbour separations within the band astropy's grid shows.

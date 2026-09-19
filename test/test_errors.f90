@@ -3453,10 +3453,12 @@ contains
                 test_sphere_fill_mask_draw_overflow_aborts), &
             new_unittest("an offset refuses a centre past a pole", &
                 test_sphere_offset_dec_out_of_range_aborts), &
-            new_unittest("an offset refuses a NaN position angle", &
-                test_sphere_offset_nonfinite_aborts), &
             new_unittest("an offset refuses a negative separation", &
                 test_sphere_offset_negative_separation_aborts), &
+            new_unittest("pf_sky_convert refuses the unknown system, even to itself", &
+                test_skycoord_convert_unknown_system_aborts), &
+            new_unittest("pf_coord_system_name refuses an integer that is not a selector", &
+                test_skycoord_system_name_not_a_selector_aborts), &
             new_unittest("a Fibonacci grid refuses n below 1", &
                 test_sphere_fibonacci_n_not_positive_aborts), &
             new_unittest("a Fibonacci grid refuses an array not shaped (3, n)", &
@@ -21057,30 +21059,35 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "sphere_offset_dec_out_of_range", expect_abort=.true., &
             failure_message="an offset from declination 90.5 was expected to abort", &
-            required_stderr="pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite and " // &
-            "at least 0 (got ra0 = 1.0000000E+01, dec0 = 9.0500000E+01, pa_deg = 0.0000000E+00, " // &
-            "sep_deg = 1.0000000E+00)")
+            required_stderr="pf_offset_radec: dec0 must be in [-90, 90] and sep_deg at least 0 (got dec0 = " // &
+            "9.0500000E+01, sep_deg = 1.0000000E+00)")
     end subroutine test_sphere_offset_dec_out_of_range_aborts
-    !
-    !> See scenario_sphere_offset_nonfinite.
-    subroutine test_sphere_offset_nonfinite_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "sphere_offset_nonfinite", expect_abort=.true., &
-            failure_message="an offset at a NaN position angle was expected to abort", &
-            required_stderr="pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite and " // &
-            "at least 0 (got ra0 = 1.0000000E+01, dec0 = 2.0000000E+01, pa_deg = NaN, sep_deg = " // &
-            "1.0000000E+00)")
-    end subroutine test_sphere_offset_nonfinite_aborts
     !
     !> See scenario_sphere_offset_negative_separation.
     subroutine test_sphere_offset_negative_separation_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "sphere_offset_negative_separation", expect_abort=.true., &
             failure_message="an offset by -1 degree was expected to abort", &
-            required_stderr="pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite and " // &
-            "at least 0 (got ra0 = 1.0000000E+01, dec0 = 2.0000000E+01, pa_deg = 3.0000000E+01, " // &
-            "sep_deg = -1.0000000E+00)")
+            required_stderr="pf_offset_radec: dec0 must be in [-90, 90] and sep_deg at least 0 (got dec0 = " // &
+            "2.0000000E+01, sep_deg = -1.0000000E+00)")
     end subroutine test_sphere_offset_negative_separation_aborts
+    !
+    !> See scenario_skycoord_convert_unknown_system.
+    subroutine test_skycoord_convert_unknown_system_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_convert_unknown_system", expect_abort=.true., &
+            failure_message="a conversion out of PF_COORD_UNKNOWN was expected to abort", &
+            required_stderr="pf_sky_convert: from and to must each be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
+            "PF_COORD_ECLIPTIC (3) or PF_COORD_SUPERGALACTIC (4) (got from = 0, to = 0)")
+    end subroutine test_skycoord_convert_unknown_system_aborts
+    !
+    !> See scenario_skycoord_system_name_not_a_selector.
+    subroutine test_skycoord_system_name_not_a_selector_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_system_name_not_a_selector", expect_abort=.true., &
+            failure_message="naming system 7 was expected to abort", &
+            required_stderr="pf_coord_system_name: system must be a PF_COORD_* selector (got 7)")
+    end subroutine test_skycoord_system_name_not_a_selector_aborts
     !
     !> See scenario_sphere_fibonacci_n_not_positive.
     subroutine test_sphere_fibonacci_n_not_positive_aborts(error)

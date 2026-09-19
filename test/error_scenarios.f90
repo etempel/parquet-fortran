@@ -1547,10 +1547,12 @@ program error_scenarios
         call scenario_sphere_fill_mask_draw_overflow()
     case ("sphere_offset_dec_out_of_range")
         call scenario_sphere_offset_dec_out_of_range()
-    case ("sphere_offset_nonfinite")
-        call scenario_sphere_offset_nonfinite()
     case ("sphere_offset_negative_separation")
         call scenario_sphere_offset_negative_separation()
+    case ("skycoord_convert_unknown_system")
+        call scenario_skycoord_convert_unknown_system()
+    case ("skycoord_system_name_not_a_selector")
+        call scenario_skycoord_system_name_not_a_selector()
     case ("sphere_fibonacci_n_not_positive")
         call scenario_sphere_fibonacci_n_not_positive()
     case ("sphere_fibonacci_bad_shape")
@@ -24308,17 +24310,6 @@ contains
         print '(a,2f10.4)', "unexpectedly offset from declination 90.5: ", ra, dec
     end subroutine scenario_sphere_offset_dec_out_of_range
 
-    !> A non-finite argument names no position. The control uses a position angle of several turns,
-    !! which is legal.
-    subroutine scenario_sphere_offset_nonfinite()
-        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
-        real(real64) :: ra, dec
-        call pf_offset_radec(10.0_real64, 20.0_real64, 1000.0_real64, 1.0_real64, ra, dec)
-        print '(a,2f10.4)', "offset at position angle 1000: ", ra, dec
-        call pf_offset_radec(10.0_real64, 20.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), 1.0_real64, ra, dec)   ! -> aborts
-        print '(a,2f10.4)', "unexpectedly offset at a NaN position angle: ", ra, dec
-    end subroutine scenario_sphere_offset_nonfinite
-
     !> A separation is at least 0. The control offsets by 0.
     subroutine scenario_sphere_offset_negative_separation()
         real(real64) :: ra, dec
@@ -24327,6 +24318,26 @@ contains
         call pf_offset_radec(10.0_real64, 20.0_real64, 30.0_real64, -1.0_real64, ra, dec)   ! -> aborts
         print '(a,2f10.4)', "unexpectedly offset by -1 degree: ", ra, dec
     end subroutine scenario_sphere_offset_negative_separation
+
+    !> A conversion names two of the four systems, and the sentinel is not one of them -- not even
+    !! from itself to itself, where the identity must not be taken before the selectors are read.
+    !! The control converts ICRS to Galactic.
+    subroutine scenario_skycoord_convert_unknown_system()
+        real(real64) :: lon, lat
+        call pf_sky_convert(10.0_real64, 20.0_real64, PF_COORD_ICRS, PF_COORD_GALACTIC, lon, lat)
+        print '(a,2f10.4)', "converted ICRS to Galactic: ", lon, lat
+        call pf_sky_convert(10.0_real64, 20.0_real64, PF_COORD_UNKNOWN, PF_COORD_UNKNOWN, lon, lat)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly converted out of the unknown system: ", lon, lat
+    end subroutine scenario_skycoord_convert_unknown_system
+
+    !> Only a selector has a token. The control spells the sentinel, which has one.
+    subroutine scenario_skycoord_system_name_not_a_selector()
+        character(len=:), allocatable :: name
+        call pf_coord_system_name(PF_COORD_UNKNOWN, name)
+        print '(a,a)', "the sentinel's token: ", name
+        call pf_coord_system_name(7, name)   ! -> aborts
+        print '(a,a)', "unexpectedly named system 7: ", name
+    end subroutine scenario_skycoord_system_name_not_a_selector
 
     !> A grid of no points has no answer. The control is a grid of one.
     subroutine scenario_sphere_fibonacci_n_not_positive()

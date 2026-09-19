@@ -100,6 +100,8 @@ CHECKS=(
     "python3 tools/generate_random_perm_vectors.py --check"
     "python3 tools/generate_sphere_reference.py --self-test"
     "python3 tools/generate_sphere_reference.py --check"
+    "python3 tools/generate_skycoord_reference.py --self-test"
+    "python3 tools/generate_skycoord_reference.py --check"
 )
 
 if ! command -v python3 >/dev/null 2>&1; then

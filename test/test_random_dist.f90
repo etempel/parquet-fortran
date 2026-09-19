@@ -30,8 +30,9 @@ module test_random_dist
     use parquet_random
     use parquet_expkey, only: parquet_debug_exp_key
     ! The points-on-a-sphere gates measure what they draw with the pixelisation's equal-area cells and
-    ! its distances, which know nothing of how the draws were made.
-    use parquet_healpix, only: pf_vec2pix_ring, pf_angdist, pf_angdist_deg
+    ! the two separations, which know nothing of how the draws were made.
+    use parquet_healpix, only: pf_vec2pix_ring, pf_angdist
+    use parquet_skycoord, only: pf_angdist_deg
     use test_random_vectors
     use iso_fortran_env, only: int32, int64, real32, real64
     use testdrive, only: new_unittest, unittest_type, error_type, check

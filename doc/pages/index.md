@@ -17,16 +17,16 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the list/struct/map container columns, the date/time/timestamp types, sorting,
 array statistics, kernel density estimation, random numbers and sampling, spatial neighbour search, key-to-index lookup,
-sphere pixelisation, random points in sky regions, logging for your own program, TOML configuration
-files, numeric, text and path helpers, and the process-global settings. Every page below assumes
-that single import.
+sphere pixelisation, random points in sky regions, celestial coordinate systems, logging for your
+own program, TOML configuration files, numeric, text and path helpers, and the process-global
+settings. Every page below assumes that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
 `parquet_argsort`, `parquet_stats`, `parquet_kde`, `parquet_integrate`, `parquet_interpolate`, `parquet_optimize`,
 `parquet_prima`, `parquet_root`, `parquet_transform`,
 `parquet_sampling`, `parquet_spatial`,
-`parquet_healpix`, `parquet_sphere`,
+`parquet_healpix`, `parquet_sphere`, `parquet_skycoord`,
 `parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`,
 `parquet_settings`, `parquet_version`, `parquet_maml_base`) can be named directly when you want a
 narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one
@@ -65,9 +65,9 @@ point in the library.
   the discrete cosine transform,
   reproducible random numbers and the sampling built on them,
   spatial neighbour search,
-  sphere pixelisation, random points and geometry on the sphere, key-to-index lookup, logging for
-  your own program, TOML configuration files, numeric, text and path helpers, generated table types,
-  and embedding your own MAML schemas.
+  sphere pixelisation, random points and geometry on the sphere, celestial coordinate systems,
+  key-to-index lookup, logging for your own program, TOML configuration files, numeric, text and
+  path helpers, generated table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an abort means, why a build
   or read fails, what may run concurrently, what memory and speed to expect, and the process-global
@@ -75,7 +75,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 45 pages, in reading order. (This list, each group's own page list and the
+All 46 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -126,6 +126,7 @@ All 45 pages, in reading order. (This list, each group's own page list and the
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)
 - [Random points and geometry on the sphere with parquet_sphere](utilities/sphere.html)
+- [Celestial coordinate systems with `parquet_skycoord`](utilities/skycoord.html)
 - [Key-to-index lookup with `parquet_index`](utilities/index-maps.html)
 - [Logging with `parquet_logging`](utilities/logging.html)
 - [Configuration files with `parquet_toml`](utilities/configuration-files.html)

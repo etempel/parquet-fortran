@@ -160,10 +160,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   costs one block and rejects nothing, read through `%pix2vec_offset`, and a mask draw costs the
   same one block by taking its choice of a listed pixel from the bits the point leaves spare.
   `pf_radec2vec` and `pf_vec2radec` convert between degrees and unit vectors in a named declination
-  frame, `pf_offset_radec` and `pf_position_angle_deg` offset a position by a separation at a
-  position angle and recover the angle, and `pf_fibonacci_grid` places `n` quasi-uniform
-  directions. `pf_sky_region_algorithm` freezes the samplers' values. An Arrow-free entry module.
-  See [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
+  frame, and `pf_fibonacci_grid` places `n` quasi-uniform directions. `pf_sky_region_algorithm`
+  freezes the samplers' values. An Arrow-free entry module. See
+  [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
+- **Celestial coordinate systems: `parquet_skycoord`.** `pf_icrs2gal`, `pf_gal2icrs`,
+  `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal` and `pf_sgal2icrs`
+  convert sky positions between the ICRS, Galactic, ecliptic and supergalactic systems as astropy
+  defines them, in degrees, `pure elemental` so a whole column converts in one call;
+  `pf_sky_convert` does the same with the systems named by `PF_COORD_*` selectors rather than by
+  the procedure, and `pf_coord_system_name` and `pf_coord_system_from_name` turn a selector into a
+  token and back for a system read out of a configuration file. Each rotation is built from the
+  three angles that define it — the target system's north pole and the target longitude of the
+  source's north pole — so it is orthonormal by construction, and the inverse is the transpose
+  rather than a second matrix. The module also holds the RA/Dec geometry that needs no coordinate
+  system: `pf_angdist_deg`, and `pf_offset_radec` and `pf_position_angle_deg`, which offset a
+  position by a separation at a position angle and recover the angle. Total, like the rest of the
+  sky tier: a NaN argument comes back as a NaN raising no floating-point flag, and a declination
+  outside `[-90, 90]` is read as the direction it names, except as `pf_offset_radec`'s centre,
+  which stops the program. The declination frame of `parquet_healpix` is a different thing and does
+  not enter here. An Arrow-free entry module. See
+  [Celestial coordinate systems](doc/pages/utilities/skycoord.md).
 
 ### Changed
 
@@ -180,6 +196,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hash's two chains cross-fed**, so keys differing only in bytes 5-8, 13-16, ... no longer share
   hashes. `%probe_stats` reports the longest run of string keys sharing one hash
   (`max_hash_chain=`), and a map warns once when 32 of its keys share one.
+- **`pf_angdist_deg` moved from `parquet_healpix` to `parquet_skycoord`.** Its arguments, result
+  and totality are unchanged and `use parquet` sees no difference; a program that imported
+  `parquet_healpix` alone for it now imports `parquet_skycoord`. `pf_angdist`, the vector form,
+  stays in `parquet_healpix`.
 
 ### Fixed
 

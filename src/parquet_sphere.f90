@@ -9,8 +9,9 @@
 !!   angle inside it, by coordinate or along a `pf_random_stream`.
 !! * **Points in HEALPix pixels and masks**: `pf_random_pixel_at` draws uniformly inside one pixel
 !!   of a `pf_healpix_grid`, `pf_random_mask_at` uniformly over a list of pixels.
-!! * **Deterministic geometry**: `pf_radec2vec`/`pf_vec2radec` in a named declination frame,
-!!   `pf_offset_radec` and `pf_position_angle_deg`, and the Fibonacci grid.
+!! * **Deterministic geometry**: `pf_radec2vec`/`pf_vec2radec` in a named declination frame, and
+!!   the Fibonacci grid. The frame-free RA/Dec geometry -- separations, offsets and position
+!!   angles -- is `parquet_skycoord`'s.
 !!
 !! **A polygon rejects; a pixel does not.** A polygon's candidate is drawn uniformly over a region
 !! bounding it -- the RA/Dec box, or the cap about the vertices' mean direction -- and kept when it
@@ -23,11 +24,11 @@
 !!
 !! **Where the declination frame enters, and where it does not.** A polygon's vertices and its
 !! points are both `(ra, dec)`, and the mirrored convention (`theta = pi/2 + dec`) is a reflection
-!! that maps great circles, containment and solid angle onto themselves, so `pf_sky_polygon`,
-!! `pf_offset_radec`, `pf_position_angle_deg` and `pf_fibonacci_grid_radec` take no frame and
-!! compute in the standard one. A frame is named wherever a VECTOR or a PIXEL crosses the
-!! interface: `pf_radec2vec`, `pf_vec2radec` and `pf_fibonacci_grid` take `frame=`, and the pixel
-!! and mask samplers read the frame their `pf_healpix_grid` was built with.
+!! that maps great circles, containment and solid angle onto themselves, so `pf_sky_polygon` and
+!! `pf_fibonacci_grid_radec` take no frame and compute in the standard one. A frame is named
+!! wherever a VECTOR or a PIXEL crosses the interface: `pf_radec2vec`, `pf_vec2radec` and
+!! `pf_fibonacci_grid` take `frame=`, and the pixel and mask samplers read the frame their
+!! `pf_healpix_grid` was built with.
 !!
 !! **Arrow-free, settings-free and silent.** It reaches `parquet_random`, `parquet_healpix` and
 !! `parquet_utils` only (`check_parquet_sphere_stays_arrow_free`), reads no knob and prints nothing,
@@ -60,7 +61,6 @@ module parquet_sphere
     public :: pf_random_mask_next, pf_random_mask_radec_next
     ! ---- Deterministic geometry ----
     public :: pf_radec2vec, pf_vec2radec
-    public :: pf_offset_radec, pf_position_angle_deg
     public :: pf_fibonacci_grid, pf_fibonacci_grid_radec
     ! ---- Re-exported, so one import is enough to call everything above ----
     !
@@ -437,41 +437,6 @@ module parquet_sphere
             real(real64), intent(out) :: dec !! declination, degrees, in `[-90, 90]`.
             integer, intent(in), optional :: frame !! `PF_HP_DEC_NORTH` (default) or `PF_HP_DEC_SOUTH`.
         end subroutine pf_vec2radec
-
-        !> The position `sep_deg` away from `(ra0, dec0)` at position angle `pa_deg`, all in degrees.
-        !!
-        !! The position angle is measured from north through east, astropy's
-        !! `directional_offset_by`: with `c` the centre, `north` and `east` the local unit vectors,
-        !! the point is `cos(sep)*c + sin(sep)*(cos(pa)*north + sin(pa)*east)`. **At a pole the
-        !! local frame follows the given `ra0`**, so an offset from the north pole at position angle
-        !! `pa` lands at right ascension `ra0 + 180 - pa`. A `sep_deg` above 180 continues along the
-        !! great circle. `ra` in `[0, 360)` and `dec` in `[-90, 90]`; a result at a pole has `ra = 0`.
-        !! Frame-free. **Validates**, because a centre in the wrong range gives a plausible wrong
-        !! point: a non-finite argument, `dec0` outside `[-90, 90]` and a negative `sep_deg` abort.
-        !! `pure elemental`.
-        pure elemental module subroutine pf_offset_radec(ra0, dec0, pa_deg, sep_deg, ra, dec)
-            real(real64), intent(in) :: ra0 !! the centre's right ascension, degrees; any finite value.
-            real(real64), intent(in) :: dec0 !! the centre's declination, degrees, in `[-90, 90]`.
-            real(real64), intent(in) :: pa_deg !! position angle, degrees, north through east; any finite value.
-            real(real64), intent(in) :: sep_deg !! separation, degrees; finite and at least 0.
-            real(real64), intent(out) :: ra !! the offset position's right ascension, degrees, in `[0, 360)`.
-            real(real64), intent(out) :: dec !! the offset position's declination, degrees, in `[-90, 90]`.
-        end subroutine pf_offset_radec
-
-        !> The position angle of `(ra2, dec2)` seen from `(ra1, dec1)`, degrees, north through east.
-        !!
-        !! `atan2(sin(dra)*cos(dec2), cos(dec1)*sin(dec2) - sin(dec1)*cos(dec2)*cos(dra))`, astropy's
-        !! `position_angle`, in `[0, 360)`. The inverse of `pf_offset_radec` for a separation strictly
-        !! between 0 and 180. **0 by rule for a coincident pair**, including two positions at one pole
-        !! with different right ascensions. A declination of +/-90 is the pole exactly. **Total**: no
-        !! validation, and a NaN argument gives a NaN without raising a flag. Frame-free.
-        pure elemental module function pf_position_angle_deg(ra1, dec1, ra2, dec2) result(pa)
-            real(real64), intent(in) :: ra1 !! right ascension of the reference position, degrees.
-            real(real64), intent(in) :: dec1 !! declination of the reference position, degrees.
-            real(real64), intent(in) :: ra2 !! right ascension of the other position, degrees.
-            real(real64), intent(in) :: dec2 !! declination of the other position, degrees.
-            real(real64) :: pa !! the position angle, degrees, in `[0, 360)`.
-        end function pf_position_angle_deg
 
         !> `pf_fibonacci_grid` for an `integer(int32)` count.
         pure module subroutine sky_fibonacci_i32(n, vec, frame)

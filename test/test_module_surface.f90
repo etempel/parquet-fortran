@@ -390,19 +390,12 @@ contains
         call grid%init(4_int64, PF_HP_NEST, frame=PF_HP_DEC_NORTH)
         call grid%radec2pix(30.0_real64, 40.0_real64, other)
         if (what == "" .and. other /= ipix) what = "PF_HP_DEC_NORTH"
-
-        ! Added after the three tiers: the free RA/Dec separation. Checked against a value the
-        ! geometry fixes rather than against a range -- two points on the equator 90 degrees apart
-        ! in right ascension are 90 degrees apart on the sphere -- so a procedure that compiled but
-        ! answered nonsense would still be caught here.
-        if (what == "" .and. abs(pf_angdist_deg(10.0_real64, 0.0_real64, 100.0_real64, 0.0_real64) &
-                                 - 90.0_real64) > 1.0e-12_real64) what = "pf_angdist_deg"
     end subroutine check_healpix_surface
 
 end module test_module_surface_healpix
 
-!> `parquet_sphere` alone: a polygon and its draw, a pixel draw on a grid, a conversion and an offset,
-!> and the deliberate ABSENCE of any settings re-export.
+!> `parquet_sphere` alone: a polygon and its draw, a pixel draw on a grid, a conversion, and the
+!> deliberate ABSENCE of any settings re-export.
 !!
 !! **One library import, and it must stay that way.** The module reads no knob and prints nothing, so
 !! what it must carry is the vocabulary its procedures take: the HEALPix scheme and frame selectors and
@@ -446,9 +439,6 @@ contains
         ! The conversions against values the geometry fixes, so a procedure answering nonsense is caught.
         call pf_radec2vec(90.0_real64, 0.0_real64, v, frame=PF_HP_DEC_NORTH)
         if (what == "" .and. abs(v(2) - 1.0_real64) > 1.0e-12_real64) what = "pf_radec2vec"
-        call pf_offset_radec(10.0_real64, 0.0_real64, 90.0_real64, 5.0_real64, ra, dec)
-        if (what == "" .and. (abs(ra - 15.0_real64) > 1.0e-12_real64 .or. abs(dec) > 1.0e-12_real64)) &
-            what = "pf_offset_radec"
 
         ! The frozen contract identifier is a parameter, and naming it is what keeps it re-exported.
         algo = pf_sky_region_algorithm
@@ -457,6 +447,70 @@ contains
     end subroutine check_sphere_surface
 
 end module test_module_surface_sphere
+
+!> `parquet_skycoord` alone: every rotation, the data-driven form, the selector tokens and the
+!> frame-free RA/Dec geometry, and no settings knob at all.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! claims that `use parquet_skycoord` compiles a handful of Fortran files and re-exports no setting
+!! -- it reads none and prints nothing -- and every procedure and selector below is a separate
+!! `public ::` entry, so each is separately droppable.
+module test_module_surface_skycoord
+    use parquet_skycoord               ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_skycoord_surface
+
+contains
+
+    !> Uses every rotation, the data-driven form, both token procedures and the three geometry
+    !! procedures through `use parquet_skycoord` alone, each against a value the geometry fixes.
+    subroutine check_skycoord_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        character(len=:), allocatable :: name
+        real(real64) :: a, b, c, d, ra, dec
+
+        what = ""
+        ! The eight named rotations chained round a closed loop through all four systems: a procedure
+        ! that compiled but answered nonsense would leave the loop open.
+        call pf_icrs2gal(30.0_real64, 40.0_real64, a, b)
+        call pf_gal2sgal(a, b, c, d)
+        call pf_sgal2icrs(c, d, a, b)
+        call pf_icrs2ecl(a, b, c, d)
+        call pf_ecl2icrs(c, d, a, b)
+        call pf_icrs2sgal(a, b, c, d)
+        call pf_sgal2gal(c, d, a, b)
+        call pf_gal2icrs(a, b, ra, dec)
+        if (abs(ra - 30.0_real64) > 1.0e-9_real64 .or. abs(dec - 40.0_real64) > 1.0e-9_real64) &
+            what = "the eight named rotations"
+        ! The ICRS north pole in Galactic coordinates: latitude the north Galactic pole's declination.
+        call pf_sky_convert(0.0_real64, 90.0_real64, PF_COORD_ICRS, PF_COORD_GALACTIC, a, b)
+        if (what == "" .and. abs(b - 27.128252414968_real64) > 1.0e-9_real64) what = "pf_sky_convert"
+        call pf_sky_convert(a, b, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, c, d)
+        if (what == "" .and. abs(d - 66.560718661389_real64) > 1.0e-9_real64) what = "PF_COORD_ECLIPTIC"
+        call pf_sky_convert(c, d, PF_COORD_SUPERGALACTIC, PF_COORD_SUPERGALACTIC, a, b)
+        if (what == "" .and. (a /= c .or. b /= d)) what = "PF_COORD_SUPERGALACTIC"
+
+        ! The tokens, the sentinel included.
+        call pf_coord_system_name(PF_COORD_ECLIPTIC, name)
+        if (what == "" .and. name /= "ecliptic") what = "pf_coord_system_name"
+        if (what == "" .and. pf_coord_system_from_name("Supergalactic") /= PF_COORD_SUPERGALACTIC) &
+            what = "pf_coord_system_from_name"
+        if (what == "" .and. pf_coord_system_from_name("nowhere") /= PF_COORD_UNKNOWN) what = "PF_COORD_UNKNOWN"
+
+        ! The frame-free geometry: two points on the equator 90 degrees apart in right ascension are 90
+        ! degrees apart on the sphere, an offset east along the equator stays on it, and due east is 90.
+        if (what == "" .and. abs(pf_angdist_deg(10.0_real64, 0.0_real64, 100.0_real64, 0.0_real64) &
+                                 - 90.0_real64) > 1.0e-12_real64) what = "pf_angdist_deg"
+        call pf_offset_radec(10.0_real64, 0.0_real64, 90.0_real64, 5.0_real64, ra, dec)
+        if (what == "" .and. (abs(ra - 15.0_real64) > 1.0e-12_real64 .or. abs(dec) > 1.0e-12_real64)) &
+            what = "pf_offset_radec"
+        if (what == "" .and. abs(pf_position_angle_deg(0.0_real64, 0.0_real64, 10.0_real64, 0.0_real64) &
+                                 - 90.0_real64) > 1.0e-12_real64) what = "pf_position_angle_deg"
+    end subroutine check_skycoord_surface
+
+end module test_module_surface_skycoord
 
 module test_module_surface_spatial
     use parquet_spatial                ! THE ONLY library import.
@@ -2087,6 +2141,7 @@ module test_module_surface
     use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_healpix, only : check_healpix_surface
     use test_module_surface_sphere, only : check_sphere_surface
+    use test_module_surface_skycoord, only : check_skycoord_surface
     use test_module_surface_columns, only : check_columns_surface
     use test_module_surface_list, only : check_list_surface
     use test_module_surface_struct, only : check_struct_surface
@@ -2201,6 +2256,8 @@ contains
                          test_healpix_surface), &
             new_unittest("parquet_sphere alone draws in a polygon and a pixel, and exposes no setting", &
                          test_sphere_surface), &
+            new_unittest("parquet_skycoord alone converts between every system and measures the sky", &
+                         test_skycoord_surface), &
             new_unittest("parquet_utils alone folds text and takes a path apart", &
                          test_utils_surface), &
             new_unittest("parquet_integrate alone integrates and hands back its record", &
@@ -2321,6 +2378,16 @@ contains
         call check(error, what == "", &
             "points on the sphere were not usable through `use parquet_sphere` alone: " // what)
     end subroutine test_sphere_surface
+
+    !> The test-drive wrapper over check_skycoord_surface.
+    subroutine test_skycoord_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_skycoord_surface(what)
+        call check(error, what == "", &
+            "coordinate systems were not usable through `use parquet_skycoord` alone: " // what)
+    end subroutine test_skycoord_surface
 
     !> The test-drive wrapper over check_utils_surface.
     subroutine test_utils_surface(error)

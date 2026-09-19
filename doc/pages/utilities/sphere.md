@@ -5,10 +5,10 @@ title: Random points and geometry on the sphere with parquet_sphere
 `parquet_sphere` draws random points uniformly inside a region of the sky — a polygon given by its
 right ascensions and declinations, one HEALPix pixel, or a list of pixels — and carries the RA/Dec
 geometry such work needs: conversion between positions and unit vectors in a declination frame you
-name, offsetting a position by a separation at a position angle, and the Fibonacci grid of
-quasi-uniform directions. Every draw is addressed by `(seed, i, [draw])` exactly as
-[`pf_random_at`](random.html) is, so a mock catalogue comes out the same under any OpenMP schedule
-and any thread count.
+name, and the Fibonacci grid of quasi-uniform directions. Separations, offsets and position angles,
+which need no frame, are [`parquet_skycoord`](skycoord.html)'s. Every draw is addressed by
+`(seed, i, [draw])` exactly as [`pf_random_at`](random.html) is, so a mock catalogue comes out the
+same under any OpenMP schedule and any thread count.
 
 ```fortran
 use parquet_sphere
@@ -57,20 +57,20 @@ between a position and a vector has to know which one it is in**, so these two t
 `PF_HP_DEC_NORTH` — the standard convention — as the default and `PF_HP_DEC_SOUTH` for the mirrored
 one. Any other value stops the program.
 
-Both are **total**, like `pf_angdist_deg`. A NaN argument gives NaN results without raising a
-floating-point flag; a declination outside `[-90, 90]` is read as the direction it names; a vector
-need not have unit length, and one as small as `[1e-300, 0, 1e-300]` is still a direction; an
-infinite component is read as the direction of the infinite components alone; the zero vector gives
-`(0, 0)`. Two rules make the poles exact: **a declination of exactly ±90 is the pole `(0, 0, ±1)`**,
-whatever the right ascension, and **the right ascension of a pole is 0**. `pf_vec2radec` takes the
-declination as `atan2(z, hypot(x, y))`, never `asin(z)`, which loses half its digits near a pole.
+Both are **total**, like [`pf_angdist_deg`](skycoord.html#what-is-validated-and-what-is-not). A NaN
+argument gives NaN results without raising a floating-point flag; a declination outside `[-90, 90]`
+is read as the direction it names; a vector need not have unit length, and one as small as
+`[1e-300, 0, 1e-300]` is still a direction; an infinite component is read as the direction of the
+infinite components alone; the zero vector gives `(0, 0)`. Two rules make the poles exact: **a
+declination of exactly ±90 is the pole `(0, 0, ±1)`**, whatever the right ascension, and **the right
+ascension of a pole is 0**. `pf_vec2radec` takes the declination as `atan2(z, hypot(x, y))`, never
+`asin(z)`, which loses half its digits near a pole.
 
 **Nothing else on this page takes a frame, or needs one.** A procedure whose input and output are
-both `(ra, dec)` — a polygon, an offset, a position angle, the Fibonacci grid's RA/Dec form — gives
-the same answer under either convention: the two differ by a reflection, which maps great circles,
-containment and solid angle onto themselves. These compute in the standard frame. A frame enters
-again only where a pixel crosses the interface, and there it is the one your `pf_healpix_grid` was
-built with.
+both `(ra, dec)` — a polygon, the Fibonacci grid's RA/Dec form — gives the same answer under either
+convention: the two differ by a reflection, which maps great circles, containment and solid angle
+onto themselves. These compute in the standard frame. A frame enters again only where a pixel
+crosses the interface, and there it is the one your `pf_healpix_grid` was built with.
 
 ## Polygons: `pf_sky_polygon`
 
@@ -230,24 +230,12 @@ v = pf_random_pixel_at(grid, seed, i, pixels(j), draw)
 `pf_random_at` and `pf_random_key` come from `parquet_random`, and `my_label` is any integer of your
 own.
 
-## Offsets, position angles and the Fibonacci grid
+## The Fibonacci grid
 
 ```fortran
-call pf_offset_radec(ra0, dec0, pa_deg, sep_deg, ra, dec)     ! pure elemental
-pa = pf_position_angle_deg(ra1, dec1, ra2, dec2)              ! pure elemental
 call pf_fibonacci_grid(n, vec, [frame])                       ! vec(3, n)
 call pf_fibonacci_grid_radec(n, ra, dec)                      ! ra(n), dec(n)
 ```
-
-`pf_offset_radec` moves `sep_deg` along the great circle leaving `(ra0, dec0)` at position angle
-`pa_deg`, measured from north through east, and `pf_position_angle_deg` recovers that angle, in
-`[0, 360)`: both follow astropy's `directional_offset_by` and `position_angle`. **At a pole the local
-frame follows the `ra0` you gave**, so an offset from the north pole at position angle `pa` lands at
-right ascension `ra0 + 180 - pa`, and one from the south pole at `ra0 + pa`. A separation above 180
-continues along the same great circle. `pf_offset_radec` validates — a non-finite argument, a `dec0`
-outside `[-90, 90]` and a negative `sep_deg` stop the program — because a centre in the wrong range
-gives a plausible wrong point. The position angle is total: a NaN argument gives a NaN, and **a
-coincident pair has position angle 0**, including two labels of one pole.
 
 The Fibonacci grid places `n` directions nearly uniformly: point `k` (from 0) has latitude
 `asin(1 - 2*(k + 1/2)/n)` and longitude `2*pi*(k + 1/2)/phi`, with `phi` the golden ratio. That is
@@ -273,8 +261,8 @@ them. What this module adds is how a rejection sampler keeps them.
   candidate stream, so overlapping polygons give related points. For independent draws, give each
   region its own seed: `pf_random_key(seed, k)` for the `k`-th.
 - **`pf_sky_region_algorithm` names the value contract** of every sampler on this page, for a given
-  libm, as `pf_sphere_algorithm` does for the disc they draw candidates from. The conversions, the
-  offset and the grid are arithmetic, pinned to an accuracy rather than frozen.
+  libm, as `pf_sphere_algorithm` does for the disc they draw candidates from. The conversions and
+  the grid are arithmetic, pinned to an accuracy rather than frozen.
 
 ## Thread safety
 
@@ -301,5 +289,7 @@ prints, and nothing reads a setting.
   addressing every draw here follows.
 - [Sphere pixelisation with `parquet_healpix`](healpix.html) — the grid these samplers take, and the
   two declination conventions.
+- [Celestial coordinate systems with `parquet_skycoord`](skycoord.html) — separations, offsets and
+  position angles, and conversions between ICRS, Galactic, ecliptic and supergalactic coordinates.
 - [Spatial neighbour search](spatial.html#search-on-the-sky) — finding the points near a position once
   you have drawn them.

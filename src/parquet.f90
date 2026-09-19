@@ -33,8 +33,13 @@
 !>                          recycling allocator for unique index values.
 !>   * `parquet_healpix` -- the HEALPix sphere pixelisation.
 !>   * `parquet_sphere`  -- `pf_sky_polygon`, random points in sky polygons and
-!>                          HEALPix pixels and masks, and RA/Dec geometry:
-!>                          conversions, offsets and the Fibonacci grid.
+!>                          HEALPix pixels and masks, the RA/Dec <-> vector
+!>                          conversions in a named declination frame, and the
+!>                          Fibonacci grid.
+!>   * `parquet_skycoord` -- celestial coordinate systems: ICRS, Galactic,
+!>                          ecliptic and supergalactic rotations, and the
+!>                          frame-free RA/Dec geometry (`pf_angdist_deg`,
+!>                          `pf_offset_radec`, `pf_position_angle_deg`).
 !>   * `parquet_toml`   -- `pf_toml`: reading and writing TOML configuration
 !>                          files on top of `toml-f`, with checked types, a
 !>                          report for every key nobody read, and diagnostics
@@ -122,6 +127,7 @@ module parquet
     use parquet_index
     use parquet_healpix
     use parquet_sphere
+    use parquet_skycoord
     use parquet_logging
     use parquet_toml
     use parquet_utils

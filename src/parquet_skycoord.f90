@@ -1,0 +1,456 @@
+!> Celestial coordinate systems -- ICRS, Galactic, ecliptic and supergalactic -- and the library's
+!! frame-free RA/Dec geometry.
+!!
+!! Two families, both on the sky, both in degrees and both `pure elemental` over `real64`:
+!!
+!! * **Rotations between coordinate systems.** Eight named procedures -- `pf_icrs2gal`,
+!!   `pf_gal2icrs`, `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal`,
+!!   `pf_sgal2icrs` -- and `pf_sky_convert` for systems named at run time by `PF_COORD_*`
+!!   selectors, with `pf_coord_system_name` and `pf_coord_system_from_name` between a selector and
+!!   its token.
+!! * **Frame-free RA/Dec geometry**: `pf_angdist_deg`, the separation of two positions;
+!!   `pf_offset_radec`, the position a separation away at a position angle; and
+!!   `pf_position_angle_deg`, its inverse.
+!!
+!! **Every rotation is built from the three angles that define it**, `Rz(180 - lon0)
+!! Ry(90 - pole_lat) Rz(pole_lon)`: the target system's north pole in the system it is built from,
+!! and the target longitude of that system's north pole. So each matrix is orthonormal by
+!! construction and its inverse is its transpose, never a second matrix. Every matrix, every
+!! transpose and every product of two is a compile-time `parameter`; no procedure builds one per
+!! call. The Galactic and ecliptic rows are referred to ICRS and so carry the ICRS frame bias
+!! inside them, which is what makes the answers agree with astropy's `SkyCoord` rather than miss
+!! it by about 20 milliarcseconds; the supergalactic system is defined in Galactic coordinates and
+!! is built there. `tools/generate_skycoord_reference.py` derives the table at 60 digits, and its
+!! `--self-test` holds every literal below to the double nearest the derived value.
+!!
+!! **Total, not validating.** A NaN argument gives NaN results and raises no IEEE flag -- screened
+!! with `x /= x` before any comparison or transcendental, since these are per-element procedures,
+!! and handed back itself rather than composed -- an infinite one raises `IEEE_INVALID`, as the
+!! sine of an infinite angle must, and a latitude outside `[-90, 90]` is read as the direction it
+!! names. A latitude of exactly +/-90 is the pole whatever the longitude says, and a pole's
+!! longitude is reported as 0. What aborts is a caller mistake with no sensible reading: a
+!! selector that is not one, and `pf_offset_radec`'s centre beyond a pole or negative separation.
+!!
+!! **This is not the HEALPix declination frame.** `PF_HP_DEC_NORTH` and `PF_HP_DEC_SOUTH` in
+!! `parquet_healpix` name a sign convention for the third component of a unit vector; a coordinate
+!! system is a rotation of the sphere. Nothing here takes a frame: a position is `(lon, lat)` as
+!! astronomers write it, and a declination held in the mirrored convention is negated before it is
+!! converted, because a rotation does not commute with the mirror.
+!!
+!! **`real64` only**, like every sky procedure in the library; a `real32` caller converts at the
+!! call.
+!!
+!! **Arrow-free, settings-free and silent.** It reaches `parquet_utils` only
+!! (`check_parquet_skycoord_stays_arrow_free`), reads no knob and prints nothing, so it re-exports
+!! no setting. It has no module variable: every procedure is `pure`, and everything here may be
+!! called from any number of threads at once.
+module parquet_skycoord
+    use, intrinsic :: iso_fortran_env, only: real64
+    implicit none
+    private
+
+    ! ---- Coordinate systems ----
+    public :: PF_COORD_UNKNOWN, PF_COORD_ICRS, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, PF_COORD_SUPERGALACTIC
+    public :: pf_coord_system_name, pf_coord_system_from_name
+    ! ---- Rotations ----
+    public :: pf_icrs2gal, pf_gal2icrs
+    public :: pf_icrs2ecl, pf_ecl2icrs
+    public :: pf_gal2sgal, pf_sgal2gal
+    public :: pf_icrs2sgal, pf_sgal2icrs
+    public :: pf_sky_convert
+    ! ---- Frame-free RA/Dec geometry ----
+    public :: pf_angdist_deg, pf_offset_radec, pf_position_angle_deg
+
+    ! ---- Selectors ----
+
+    !> No coordinate system: what `pf_coord_system_from_name` answers for a token it does not know.
+    !!
+    !! A sentinel, not a system -- `pf_sky_convert` refuses it -- and it is 0, so an integer left at
+    !! zero reads as unknown. `pf_coord_system_name` spells it `"unknown"`.
+    integer, parameter :: PF_COORD_UNKNOWN = 0
+    !> The International Celestial Reference System, the hub every rotation here is referred to.
+    integer, parameter :: PF_COORD_ICRS = 1
+    !> Galactic `(l, b)`, astropy's `Galactic`: its FK5 J2000 definition carried through the ICRS
+    !! frame bias of USNO Circular 179.
+    integer, parameter :: PF_COORD_GALACTIC = 2
+    !> Ecliptic longitude and latitude, astropy's `BarycentricMeanEcliptic` at equinox J2000: the
+    !! IAU 2006 mean ecliptic and equinox, the frame bias included.
+    integer, parameter :: PF_COORD_ECLIPTIC = 3
+    !> Supergalactic `(SGL, SGB)`, astropy's `Supergalactic`: de Vaucouleurs' pole at Galactic
+    !! `(47.37, 6.32)`, with `SGL = 90` at the north Galactic pole.
+    integer, parameter :: PF_COORD_SUPERGALACTIC = 4
+
+    ! ---- Mathematical constants ----
+
+    !> pi.
+    real(real64), parameter :: skc_pi = 3.14159265358979323846264338327950288_real64
+    !> Radians per degree.
+    real(real64), parameter :: skc_deg2rad = skc_pi / 180.0_real64
+    !> Degrees per radian.
+    real(real64), parameter :: skc_rad2deg = 180.0_real64 / skc_pi
+    !> The component magnitude above which `x*x + y*y` cannot go subnormal, so `hypot` is not needed.
+    !!
+    !! The squares underflow below about `1.5e-154`; this sits four decades clear of it.
+    real(real64), parameter :: skc_hypot_safe = 1.0e-150_real64
+
+    ! ---- The angle table ----
+    !
+    ! One row per system: `pole_lon`, `pole_lat` -- its north pole in the system it is built from --
+    ! and `lon0`, its own longitude of that system's north pole, all in degrees. Derived at 60 digits
+    ! by tools/generate_skycoord_reference.py, whose --self-test holds each literal to the double
+    ! nearest the derived value: never edit one by hand.
+
+    !> Galactic from ICRS: the north Galactic pole's right ascension -- astropy's FK5 J2000
+    !! `192.8594812065348` carried through the frame bias, which moves it from the eighth digit on.
+    real(real64), parameter :: skc_gal_pole_lon = 192.859477894776054418_real64
+    !> Galactic from ICRS: the north Galactic pole's declination, astropy's `27.12825118085622`
+    !! through the bias.
+    real(real64), parameter :: skc_gal_pole_lat = 27.1282524149679992594_real64
+    !> Galactic from ICRS: the Galactic longitude of the ICRS north pole, astropy's
+    !! `122.9319185680026` through the bias.
+    real(real64), parameter :: skc_gal_lon0 = 122.931925255416626620_real64
+    !> Ecliptic from ICRS: `270 + gamb`, with `gamb = -0.052928"` the IAU 2006 frame-bias angle.
+    real(real64), parameter :: skc_ecl_pole_lon = 269.999985297777777778_real64
+    !> Ecliptic from ICRS: `90 - phib`, with `phib = 84381.412819"` the bias-precession angle at J2000.
+    real(real64), parameter :: skc_ecl_pole_lat = 66.5607186613888888889_real64
+    !> Ecliptic from ICRS: `90 + psib`, with `psib = -0.041775"` the third bias angle.
+    real(real64), parameter :: skc_ecl_lon0 = 89.9999883958333333333_real64
+    !> Supergalactic from GALACTIC: de Vaucouleurs' north supergalactic pole's Galactic longitude.
+    real(real64), parameter :: skc_sgal_pole_lon = 47.37_real64
+    !> Supergalactic from Galactic: that pole's Galactic latitude.
+    real(real64), parameter :: skc_sgal_pole_lat = 6.32_real64
+    !> Supergalactic from Galactic: the supergalactic longitude of the north Galactic pole.
+    real(real64), parameter :: skc_sgal_lon0 = 90.0_real64
+
+    ! ---- The matrices, built at compile time ----
+    !
+    ! `M = Rz(a) Ry(b) Rz(c)` with `a = 180 - lon0`, `b = 90 - pole_lat` and `c = pole_lon`, each `R`
+    ! a rotation of the AXES (astropy's `rotation_matrix`), written out element by element because
+    ! a constant expression cannot call a procedure. `M(i, j)` takes component `j` of a unit vector
+    ! in the source system to component `i` of the target's. The kernel is handed one of these and
+    ! never `transpose(M)` at a call: that is an array expression at an explicit-shape dummy.
+
+    !> The sines and cosines of the Galactic row's `a`, `b` and `c`.
+    real(real64), parameter :: gal_ca = cos((180.0_real64 - skc_gal_lon0) * skc_deg2rad), &
+                               gal_sa = sin((180.0_real64 - skc_gal_lon0) * skc_deg2rad), &
+                               gal_cb = cos((90.0_real64 - skc_gal_pole_lat) * skc_deg2rad), &
+                               gal_sb = sin((90.0_real64 - skc_gal_pole_lat) * skc_deg2rad), &
+                               gal_cc = cos(skc_gal_pole_lon * skc_deg2rad), &
+                               gal_sc = sin(skc_gal_pole_lon * skc_deg2rad)
+    !> The sines and cosines of the ecliptic row's `a`, `b` and `c`.
+    real(real64), parameter :: ecl_ca = cos((180.0_real64 - skc_ecl_lon0) * skc_deg2rad), &
+                               ecl_sa = sin((180.0_real64 - skc_ecl_lon0) * skc_deg2rad), &
+                               ecl_cb = cos((90.0_real64 - skc_ecl_pole_lat) * skc_deg2rad), &
+                               ecl_sb = sin((90.0_real64 - skc_ecl_pole_lat) * skc_deg2rad), &
+                               ecl_cc = cos(skc_ecl_pole_lon * skc_deg2rad), &
+                               ecl_sc = sin(skc_ecl_pole_lon * skc_deg2rad)
+    !> The sines and cosines of the supergalactic row's `a`, `b` and `c`.
+    real(real64), parameter :: sgal_ca = cos((180.0_real64 - skc_sgal_lon0) * skc_deg2rad), &
+                               sgal_sa = sin((180.0_real64 - skc_sgal_lon0) * skc_deg2rad), &
+                               sgal_cb = cos((90.0_real64 - skc_sgal_pole_lat) * skc_deg2rad), &
+                               sgal_sb = sin((90.0_real64 - skc_sgal_pole_lat) * skc_deg2rad), &
+                               sgal_cc = cos(skc_sgal_pole_lon * skc_deg2rad), &
+                               sgal_sc = sin(skc_sgal_pole_lon * skc_deg2rad)
+
+    !> ICRS to Galactic.
+    real(real64), parameter :: skc_m_icrs2gal(3, 3) = reshape([ &
+        gal_ca * gal_cb * gal_cc - gal_sa * gal_sc, -gal_sa * gal_cb * gal_cc - gal_ca * gal_sc, gal_sb * gal_cc, &
+        gal_ca * gal_cb * gal_sc + gal_sa * gal_cc, -gal_sa * gal_cb * gal_sc + gal_ca * gal_cc, gal_sb * gal_sc, &
+        -gal_ca * gal_sb, gal_sa * gal_sb, gal_cb], [3, 3])
+    !> ICRS to ecliptic.
+    real(real64), parameter :: skc_m_icrs2ecl(3, 3) = reshape([ &
+        ecl_ca * ecl_cb * ecl_cc - ecl_sa * ecl_sc, -ecl_sa * ecl_cb * ecl_cc - ecl_ca * ecl_sc, ecl_sb * ecl_cc, &
+        ecl_ca * ecl_cb * ecl_sc + ecl_sa * ecl_cc, -ecl_sa * ecl_cb * ecl_sc + ecl_ca * ecl_cc, ecl_sb * ecl_sc, &
+        -ecl_ca * ecl_sb, ecl_sa * ecl_sb, ecl_cb], [3, 3])
+    !> Galactic to supergalactic.
+    real(real64), parameter :: skc_m_gal2sgal(3, 3) = reshape([ &
+        sgal_ca * sgal_cb * sgal_cc - sgal_sa * sgal_sc, -sgal_sa * sgal_cb * sgal_cc - sgal_ca * sgal_sc, sgal_sb * sgal_cc, &
+        sgal_ca * sgal_cb * sgal_sc + sgal_sa * sgal_cc, -sgal_sa * sgal_cb * sgal_sc + sgal_ca * sgal_cc, sgal_sb * sgal_sc, &
+        -sgal_ca * sgal_sb, sgal_sa * sgal_sb, sgal_cb], [3, 3])
+    !> Galactic to ICRS, the transpose.
+    real(real64), parameter :: skc_m_gal2icrs(3, 3) = transpose(skc_m_icrs2gal)
+    !> Ecliptic to ICRS, the transpose.
+    real(real64), parameter :: skc_m_ecl2icrs(3, 3) = transpose(skc_m_icrs2ecl)
+    !> Supergalactic to Galactic, the transpose.
+    real(real64), parameter :: skc_m_sgal2gal(3, 3) = transpose(skc_m_gal2sgal)
+    !> ICRS to supergalactic: one matrix, so a conversion is one rotation rather than two.
+    real(real64), parameter :: skc_m_icrs2sgal(3, 3) = matmul(skc_m_gal2sgal, skc_m_icrs2gal)
+    !> Supergalactic to ICRS, the transpose.
+    real(real64), parameter :: skc_m_sgal2icrs(3, 3) = transpose(skc_m_icrs2sgal)
+    !> Galactic to ecliptic, for `pf_sky_convert`'s pair with no named procedure.
+    real(real64), parameter :: skc_m_gal2ecl(3, 3) = matmul(skc_m_icrs2ecl, skc_m_gal2icrs)
+    !> Ecliptic to Galactic, the transpose.
+    real(real64), parameter :: skc_m_ecl2gal(3, 3) = transpose(skc_m_gal2ecl)
+    !> Ecliptic to supergalactic, for `pf_sky_convert`'s pair with no named procedure.
+    real(real64), parameter :: skc_m_ecl2sgal(3, 3) = matmul(skc_m_icrs2sgal, skc_m_ecl2icrs)
+    !> Supergalactic to ecliptic, the transpose.
+    real(real64), parameter :: skc_m_sgal2ecl(3, 3) = transpose(skc_m_ecl2sgal)
+
+    ! ---- Interfaces: rotations and the selector tokens ----
+    !
+    ! Implemented in submodule parquet_skycoord_rotate. Every rotation shares one contract, stated
+    ! on each: total in its coordinates, a latitude of exactly +/-90 the pole whatever the longitude
+    ! says, the output longitude in `[0, 360)`, and a pole's longitude 0.
+
+    interface
+        !> ICRS `(ra, dec)` to Galactic `(l, b)`, in degrees, as astropy's `SkyCoord.galactic`.
+        !!
+        !! `pure elemental`, so one call converts whole columns. **Total**: a NaN argument gives NaN
+        !! results without raising a flag, and a `dec` outside `[-90, 90]` is read as the direction
+        !! it names. A `dec` of exactly +/-90 is the pole whatever `ra` says, and a result at a pole
+        !! has `l = 0`.
+        pure elemental module subroutine pf_icrs2gal(ra, dec, l, b)
+            real(real64), intent(in) :: ra !! right ascension, ICRS, degrees; any value.
+            real(real64), intent(in) :: dec !! declination, ICRS, degrees.
+            real(real64), intent(out) :: l !! Galactic longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: b !! Galactic latitude, degrees, in `[-90, 90]`.
+        end subroutine pf_icrs2gal
+
+        !> Galactic `(l, b)` to ICRS `(ra, dec)`, in degrees; the inverse of `pf_icrs2gal`.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, a `b` outside `[-90, 90]` names a direction, `b = +/-90` is the pole whatever `l`
+        !! says, and a result at a pole has `ra = 0`.
+        pure elemental module subroutine pf_gal2icrs(l, b, ra, dec)
+            real(real64), intent(in) :: l !! Galactic longitude, degrees; any value.
+            real(real64), intent(in) :: b !! Galactic latitude, degrees.
+            real(real64), intent(out) :: ra !! right ascension, ICRS, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec !! declination, ICRS, degrees, in `[-90, 90]`.
+        end subroutine pf_gal2icrs
+
+        !> ICRS `(ra, dec)` to ecliptic `(elon, elat)`, in degrees, as astropy's
+        !! `BarycentricMeanEcliptic` at equinox J2000 -- the IAU 2006 mean ecliptic, frame bias
+        !! included.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, a `dec` outside `[-90, 90]` names a direction, `dec = +/-90` is the pole whatever
+        !! `ra` says, and a result at a pole has `elon = 0`.
+        pure elemental module subroutine pf_icrs2ecl(ra, dec, elon, elat)
+            real(real64), intent(in) :: ra !! right ascension, ICRS, degrees; any value.
+            real(real64), intent(in) :: dec !! declination, ICRS, degrees.
+            real(real64), intent(out) :: elon !! ecliptic longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: elat !! ecliptic latitude, degrees, in `[-90, 90]`.
+        end subroutine pf_icrs2ecl
+
+        !> Ecliptic `(elon, elat)` to ICRS `(ra, dec)`, in degrees; the inverse of `pf_icrs2ecl`.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, an `elat` outside `[-90, 90]` names a direction, `elat = +/-90` is the pole
+        !! whatever `elon` says, and a result at a pole has `ra = 0`.
+        pure elemental module subroutine pf_ecl2icrs(elon, elat, ra, dec)
+            real(real64), intent(in) :: elon !! ecliptic longitude, degrees; any value.
+            real(real64), intent(in) :: elat !! ecliptic latitude, degrees.
+            real(real64), intent(out) :: ra !! right ascension, ICRS, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec !! declination, ICRS, degrees, in `[-90, 90]`.
+        end subroutine pf_ecl2icrs
+
+        !> Galactic `(l, b)` to supergalactic `(sgl, sgb)`, in degrees, as astropy's
+        !! `Supergalactic`. The system is defined in Galactic coordinates, so this is its own
+        !! rotation, not a trip through ICRS.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, a `b` outside `[-90, 90]` names a direction, `b = +/-90` is the pole whatever `l`
+        !! says, and a result at a pole has `sgl = 0`.
+        pure elemental module subroutine pf_gal2sgal(l, b, sgl, sgb)
+            real(real64), intent(in) :: l !! Galactic longitude, degrees; any value.
+            real(real64), intent(in) :: b !! Galactic latitude, degrees.
+            real(real64), intent(out) :: sgl !! supergalactic longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: sgb !! supergalactic latitude, degrees, in `[-90, 90]`.
+        end subroutine pf_gal2sgal
+
+        !> Supergalactic `(sgl, sgb)` to Galactic `(l, b)`, in degrees; the inverse of
+        !! `pf_gal2sgal`.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, an `sgb` outside `[-90, 90]` names a direction, `sgb = +/-90` is the pole whatever
+        !! `sgl` says, and a result at a pole has `l = 0`.
+        pure elemental module subroutine pf_sgal2gal(sgl, sgb, l, b)
+            real(real64), intent(in) :: sgl !! supergalactic longitude, degrees; any value.
+            real(real64), intent(in) :: sgb !! supergalactic latitude, degrees.
+            real(real64), intent(out) :: l !! Galactic longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: b !! Galactic latitude, degrees, in `[-90, 90]`.
+        end subroutine pf_sgal2gal
+
+        !> ICRS `(ra, dec)` to supergalactic `(sgl, sgb)`, in degrees: the Galactic rotation and the
+        !! supergalactic one composed into one matrix at compile time, so a conversion rounds once.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, a `dec` outside `[-90, 90]` names a direction, `dec = +/-90` is the pole whatever
+        !! `ra` says, and a result at a pole has `sgl = 0`.
+        pure elemental module subroutine pf_icrs2sgal(ra, dec, sgl, sgb)
+            real(real64), intent(in) :: ra !! right ascension, ICRS, degrees; any value.
+            real(real64), intent(in) :: dec !! declination, ICRS, degrees.
+            real(real64), intent(out) :: sgl !! supergalactic longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: sgb !! supergalactic latitude, degrees, in `[-90, 90]`.
+        end subroutine pf_icrs2sgal
+
+        !> Supergalactic `(sgl, sgb)` to ICRS `(ra, dec)`, in degrees; the inverse of
+        !! `pf_icrs2sgal`.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, an `sgb` outside `[-90, 90]` names a direction, `sgb = +/-90` is the pole whatever
+        !! `sgl` says, and a result at a pole has `ra = 0`.
+        pure elemental module subroutine pf_sgal2icrs(sgl, sgb, ra, dec)
+            real(real64), intent(in) :: sgl !! supergalactic longitude, degrees; any value.
+            real(real64), intent(in) :: sgb !! supergalactic latitude, degrees.
+            real(real64), intent(out) :: ra !! right ascension, ICRS, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec !! declination, ICRS, degrees, in `[-90, 90]`.
+        end subroutine pf_sgal2icrs
+
+        !> A position converted between two systems named at run time by `PF_COORD_*` selectors,
+        !! in degrees.
+        !!
+        !! For a pair with a named procedure it calls that procedure, so it answers exactly what the
+        !! procedure answers; for a pair without one -- Galactic and ecliptic, ecliptic and
+        !! supergalactic, either way round -- it applies that pair's own compile-time matrix, never
+        !! two rotations through angles. **`from == to` is the identity: the input comes back by
+        !! copy, before any arithmetic**, so a longitude of `-10` stays `-10` and a `-0.0` keeps its
+        !! sign; the `[0, 360)` promise on `lon_out` does not apply to it. Total in the coordinates,
+        !! with the named procedures' rules. **A selector that is not one of the four systems
+        !! aborts**, `PF_COORD_UNKNOWN` included and `from == to` included. `pure elemental`.
+        pure elemental module subroutine pf_sky_convert(lon_in, lat_in, from, to, lon_out, lat_out)
+            real(real64), intent(in) :: lon_in !! longitude in the system `from`, degrees; any value.
+            real(real64), intent(in) :: lat_in !! latitude in the system `from`, degrees.
+            integer, intent(in) :: from !! the input's system: `PF_COORD_ICRS`, `_GALACTIC`, `_ECLIPTIC` or `_SUPERGALACTIC`.
+            integer, intent(in) :: to !! the output's system, from the same four.
+            real(real64), intent(out) :: lon_out !! longitude in the system `to`, degrees, in `[0, 360)` unless `from == to`.
+            real(real64), intent(out) :: lat_out !! latitude in the system `to`, degrees.
+        end subroutine pf_sky_convert
+
+        !> The token naming a coordinate system, lowercase: `"icrs"`, `"galactic"`, `"ecliptic"` or
+        !! `"supergalactic"`, and `"unknown"` for `PF_COORD_UNKNOWN`, so the sentinel round-trips
+        !! through text.
+        !!
+        !! The inverse of `pf_coord_system_from_name`. Any integer that is neither a system nor the
+        !! sentinel aborts, as `pf_sky_convert` does: it is a caller mistake with no reading.
+        pure module subroutine pf_coord_system_name(system, name)
+            integer, intent(in) :: system !! a `PF_COORD_*` selector, or `PF_COORD_UNKNOWN`.
+            character(len=:), allocatable, intent(out) :: name !! the token.
+        end subroutine pf_coord_system_name
+
+        !> The selector a token names, case-insensitively and ignoring blanks around it:
+        !! `pf_coord_system_from_name("Galactic")` is `PF_COORD_GALACTIC`.
+        !!
+        !! **A token it does not know answers `PF_COORD_UNKNOWN` rather than aborting**: the text is
+        !! user data, read out of a configuration file or a column's metadata, and a caller
+        !! validating it reports the bad token in its own words. astropy's frame names are
+        !! understood too -- `icrs`, `galactic` and `supergalactic` are the same words, and
+        !! `barycentricmeanecliptic` names the ecliptic.
+        pure module function pf_coord_system_from_name(name) result(system)
+            character(len=*), intent(in) :: name !! the token.
+            integer :: system !! the selector it names, or `PF_COORD_UNKNOWN`.
+        end function pf_coord_system_from_name
+    end interface
+
+    ! ---- Interfaces: frame-free RA/Dec geometry ----
+    !
+    ! Implemented in submodule parquet_skycoord_geom.
+
+    interface
+        !> Angular separation of two sky positions given in degrees, in degrees.
+        !!
+        !! **It needs no frame and takes none.** The two declination conventions in live
+        !! downstream use -- `theta = pi/2 - dec` and the mirrored `theta = pi/2 + dec` -- send the
+        !! same number to opposite hemispheres, but they differ by a reflection in `z`, and a
+        !! reflection preserves the angle between two directions, so this procedure returns the
+        !! same answer under either.
+        !!
+        !! `pure elemental`, so it broadcasts over whole arrays of coordinates -- which
+        !! `parquet_healpix`'s `pf_angdist` cannot do, its `vec(3)` dummies being arrays already.
+        !! It is also **31% cheaper than converting to vectors and calling `pf_angdist`** (47.0 ns
+        !! against 68.0 on machine B), because working in the frame where only the RA difference
+        !! survives removes one of the four sine/cosine pairs.
+        !!
+        !! **A position is EXACTLY zero degrees from itself**, including when the two right
+        !! ascensions differ by whole turns and when both positions sit at a pole with unrelated
+        !! right ascensions. That is a guarantee rather than an arithmetic accident: the formula
+        !! alone gives a few times 1e-15 degrees there on a compiler that contracts a
+        !! multiply-subtract into an FMA, and a caller excluding self-matches with `dist > 0`
+        !! would then keep every one of them.
+        !!
+        !! **Total, like every other elemental here: it validates nothing and never aborts.** A
+        !! NaN argument gives a NaN result rather than an error, and `dec` outside [-90, 90] is
+        !! read as the direction that declination names rather than refused.
+        !!
+        !! **A NaN argument also raises no IEEE flag**, so a caller running with the exceptions
+        !! unmasked -- which is nagfor's default -- can carry a NaN through this procedure without
+        !! being terminated by it. An INFINITE argument is different and does raise `IEEE_INVALID`,
+        !! because taking the sine of an infinite angle is an invalid operation on any conforming
+        !! processor rather than anything this formula chooses; the distinction is between
+        !! propagating a NaN that already exists and creating one.
+        pure elemental module function pf_angdist_deg(ra1, dec1, ra2, dec2) result(dist)
+            real(real64), intent(in) :: ra1 !! right ascension of the first position, degrees; any value.
+            real(real64), intent(in) :: dec1 !! declination of the first position, degrees, in [-90, 90].
+            real(real64), intent(in) :: ra2 !! right ascension of the second position, degrees; any value.
+            real(real64), intent(in) :: dec2 !! declination of the second position, degrees, in [-90, 90].
+            real(real64) :: dist !! the angle between them, degrees, in [0, 180].
+        end function pf_angdist_deg
+
+        !> The position `sep_deg` away from `(ra0, dec0)` at position angle `pa_deg`, all in degrees.
+        !!
+        !! The position angle is measured from north through east, astropy's
+        !! `directional_offset_by`: with `c` the centre, `north` and `east` the local unit vectors,
+        !! the point is `cos(sep)*c + sin(sep)*(cos(pa)*north + sin(pa)*east)`. **At a pole the
+        !! local frame follows the given `ra0`**, so an offset from the north pole at position angle
+        !! `pa` lands at right ascension `ra0 + 180 - pa`. A `sep_deg` above 180 continues along the
+        !! great circle. `ra` in `[0, 360)` and `dec` in `[-90, 90]`; a result at a pole has `ra = 0`.
+        !! Frame-free. **A `dec0` outside `[-90, 90]` and a negative `sep_deg` stop the program**,
+        !! because a centre beyond a pole mirrors the local north and east and gives a plausible
+        !! wrong point, and a negative separation has no reading; **a NaN argument gives NaN
+        !! results**, raising no flag, and an infinite `ra0`, `pa_deg` or `sep_deg` gives NaN results
+        !! and raises `IEEE_INVALID`, as the sine of an infinite angle must. `pure elemental`.
+        pure elemental module subroutine pf_offset_radec(ra0, dec0, pa_deg, sep_deg, ra, dec)
+            real(real64), intent(in) :: ra0 !! the centre's right ascension, degrees; any value.
+            real(real64), intent(in) :: dec0 !! the centre's declination, degrees, in `[-90, 90]`.
+            real(real64), intent(in) :: pa_deg !! position angle, degrees, north through east; any value.
+            real(real64), intent(in) :: sep_deg !! separation, degrees; at least 0.
+            real(real64), intent(out) :: ra !! the offset position's right ascension, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec !! the offset position's declination, degrees, in `[-90, 90]`.
+        end subroutine pf_offset_radec
+
+        !> The position angle of `(ra2, dec2)` seen from `(ra1, dec1)`, degrees, north through east.
+        !!
+        !! `atan2(sin(dra)*cos(dec2), cos(dec1)*sin(dec2) - sin(dec1)*cos(dec2)*cos(dra))`, astropy's
+        !! `position_angle`, in `[0, 360)`. The inverse of `pf_offset_radec` for a separation strictly
+        !! between 0 and 180. **0 by rule for a coincident pair**, including two positions at one pole
+        !! with different right ascensions. A declination of +/-90 is the pole exactly. **Total**: no
+        !! validation, and a NaN argument gives a NaN without raising a flag. Frame-free.
+        pure elemental module function pf_position_angle_deg(ra1, dec1, ra2, dec2) result(pa)
+            real(real64), intent(in) :: ra1 !! right ascension of the reference position, degrees.
+            real(real64), intent(in) :: dec1 !! declination of the reference position, degrees.
+            real(real64), intent(in) :: ra2 !! right ascension of the other position, degrees.
+            real(real64), intent(in) :: dec2 !! declination of the other position, degrees.
+            real(real64) :: pa !! the position angle, degrees, in `[0, 360)`.
+        end function pf_position_angle_deg
+    end interface
+
+    ! ---- Interfaces: helpers shared by the two submodules ----
+    !
+    ! Implemented in submodule parquet_skycoord_rotate, beside the rotation kernel that is their hot
+    ! caller; private. They carry the same two rules as `parquet_sphere`'s own RA/Dec helpers, which
+    ! that module keeps for its samplers: keep the two in step.
+
+    interface
+        !> The sine and cosine of a latitude in degrees, exactly `(+/-1, 0)` at `+/-90`.
+        pure module subroutine skc_dec_sin_cos(lat, sl, cl)
+            real(real64), intent(in) :: lat !! a latitude, degrees; not NaN.
+            real(real64), intent(out) :: sl !! its sine.
+            real(real64), intent(out) :: cl !! its cosine.
+        end subroutine skc_dec_sin_cos
+
+        !> A position in degrees as a unit vector, the pole exact. No NaN screen.
+        pure module subroutine skc_radec_unit(lon, lat, v)
+            real(real64), intent(in) :: lon !! longitude, degrees.
+            real(real64), intent(in) :: lat !! latitude, degrees.
+            real(real64), intent(out) :: v(3) !! the unit vector.
+        end subroutine skc_radec_unit
+
+        !> A nonzero, finite vector as `(lon, lat)` in degrees, the pole's `lon` 0.
+        pure module subroutine skc_unit_radec(v, lon, lat)
+            real(real64), intent(in) :: v(3) !! a direction; nonzero, finite, of moderate length.
+            real(real64), intent(out) :: lon !! longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: lat !! latitude, degrees, in `[-90, 90]`.
+        end subroutine skc_unit_radec
+    end interface
+
+end module parquet_skycoord

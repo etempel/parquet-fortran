@@ -1,12 +1,12 @@
-!> `parquet_sphere`'s deterministic geometry -- the RA/Dec conversions, the offset, the position
-!! angle and the Fibonacci grid -- and the helpers the three submodules share.
+!> `parquet_sphere`'s deterministic geometry -- the RA/Dec conversions and the Fibonacci grid --
+!! and the helpers the three submodules share.
 !!
 !! **Two rules run through all of it.** A declination of exactly +/-90 is the pole, whatever the
 !! right ascension says (`sky_dec_sin_cos`): `cos(90 * pi/180)` is `6.1e-17`, a representation limit
 !! no formulation removes, and `parquet_random`'s own RA/Dec twin makes the same rule, so the two
 !! agree at a pole instead of differing by that residue. And a quiet NaN argument of a TOTAL
 !! procedure is handed back before any comparison or transcendental can raise a flag on it -- the
-!! rule `pf_angdist_deg` states at length in `src/parquet_healpix_core.f90` -- with `x /= x` rather
+!! rule `pf_angdist_deg` states at length in `src/parquet_skycoord_geom.f90` -- with `x /= x` rather
 !! than `ieee_is_nan`, since these are per-element procedures.
 submodule (parquet_sphere) parquet_sphere_geom
     implicit none
@@ -196,81 +196,6 @@ contains
         call sky_unit_radec(w, ra, dec)
         if (sgn < 0.0_real64) dec = -dec
     end procedure pf_vec2radec
-
-    ! ---- Offsets and position angles ----
-
-    module procedure pf_offset_radec
-        real(real64) :: sd0, cd0, a0, sa, ca, p, sp, cp, s, ss, cs, c(3), north(3), east(3), v(3)
-        logical :: bad
-
-        ! A NaN is screened with `/=` before the ordered comparisons, which would raise on it.
-        bad = ra0 /= ra0 .or. dec0 /= dec0 .or. pa_deg /= pa_deg .or. sep_deg /= sep_deg
-        if (.not. bad) then
-            bad = .not. (abs(ra0) <= huge(ra0) .and. abs(pa_deg) <= huge(pa_deg) .and. &
-                         dec0 >= -90.0_real64 .and. dec0 <= 90.0_real64 .and. &
-                         sep_deg >= 0.0_real64 .and. sep_deg <= huge(sep_deg))
-        end if
-        if (bad) then
-            error stop "pf_offset_radec: ra0 and pa_deg must be finite, dec0 in [-90, 90], and sep_deg finite " // &
-                "and at least 0 (got ra0 = " // trim(sky_real_text(ra0)) // ", dec0 = " // &
-                trim(sky_real_text(dec0)) // ", pa_deg = " // trim(sky_real_text(pa_deg)) // ", sep_deg = " // &
-                trim(sky_real_text(sep_deg)) // ")"
-        end if
-        call sky_dec_sin_cos(dec0, sd0, cd0)
-        a0 = ra0 * sky_deg2rad
-        sa = sin(a0)
-        ca = cos(a0)
-        p = pa_deg * sky_deg2rad
-        sp = sin(p)
-        cp = cos(p)
-        s = sep_deg * sky_deg2rad
-        ss = sin(s)
-        cs = cos(s)
-        ! The centre and its local north and east, built from `ra0` even at a pole, where `north`
-        ! still points along the meridian `ra0` names -- which is what makes astropy's pole
-        ! convention come out of the same expression rather than a special case.
-        c = [cd0 * ca, cd0 * sa, sd0]
-        north = [-(sd0 * ca), -(sd0 * sa), cd0]
-        east = [-sa, ca, 0.0_real64]
-        v = cs * c + ss * (cp * north + sp * east)
-        call sky_unit_radec(v, ra, dec)
-    end procedure pf_offset_radec
-
-    module procedure pf_position_angle_deg
-        real(real64) :: dl, sdl, cdl, sd1, cd1, sd2, cd2, y, x
-
-        dl = ra2 - ra1
-        if (dl /= dl .or. dec1 /= dec1 .or. dec2 /= dec2) then
-            pa = dl
-            if (dec1 /= dec1) pa = dec1
-            if (dec2 /= dec2) pa = dec2
-            return
-        end if
-        ! Folded in degrees before scaling, as `pf_angdist_deg` does, so a small difference that
-        ! straddles `ra = 0` stays small.
-        dl = dl - 360.0_real64 * anint(dl / 360.0_real64)
-        ! A coincident pair has no position angle, and the arithmetic alone would give 0 or 180 by
-        ! the sign of an FMA residue; two positions at one pole coincide whatever their right
-        ! ascensions.
-        if (dec1 == dec2 .and. (dl == 0.0_real64 .or. abs(dec1) == 90.0_real64)) then
-            pa = 0.0_real64
-            return
-        end if
-        call sky_dec_sin_cos(dec1, sd1, cd1)
-        call sky_dec_sin_cos(dec2, sd2, cd2)
-        dl = dl * sky_deg2rad
-        sdl = sin(dl)
-        cdl = cos(dl)
-        y = sdl * cd2
-        x = cd1 * sd2 - sd1 * cd2 * cdl
-        if (y == 0.0_real64 .and. x == 0.0_real64) then
-            pa = 0.0_real64
-        else
-            pa = atan2(y, x) * sky_rad2deg
-            if (pa < 0.0_real64) pa = pa + 360.0_real64
-            if (pa >= 360.0_real64) pa = 0.0_real64
-        end if
-    end procedure pf_position_angle_deg
 
     ! ---- The Fibonacci grid ----
 

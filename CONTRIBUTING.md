@@ -244,6 +244,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_probit_reference.py` | `pf_probit` and the normal family's golden expectations, from a 50-digit `mpmath` oracle. |
 | `generate_healpix_reference.py` | The reference vectors pinning `parquet_healpix` against an independent model. |
 | `generate_sphere_reference.py` | The golden rows pinning `parquet_sphere`'s regions, draws and geometry, from a 60-digit model. |
+| `generate_skycoord_reference.py` | The golden rows pinning `parquet_skycoord`'s rotations, offsets and position angles, from a 60-digit model of each system's definition. |
 | `generate_path_reference.py` | The CPython `posixpath` values pinning `parquet_utils`' path procedures. |
 | `check_healpix_fptrap.sh` | Runs `parquet_healpix` in a build where an FP exception is fatal. |
 | `generate_random_perm_vectors.py` | The same for the permutation contract. |

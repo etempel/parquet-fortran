@@ -13,7 +13,8 @@
 !! * `pixel` -- `pf_random_pixel_at` at nside 64, 1024 and 2**20, nanoseconds per draw and candidates
 !!   per draw, and `pf_random_mask_at` over a 1000-pixel list.
 !! * `geometry` -- nanoseconds per element of `pf_radec2vec`, `pf_vec2radec`, `pf_offset_radec`,
-!!   `pf_position_angle_deg` and `pf_fibonacci_grid_radec`.
+!!   `pf_position_angle_deg` and `pf_fibonacci_grid_radec`; the offset and the position angle
+!!   are `parquet_skycoord`'s.
 !!
 !! Every row prints a checksum over what it drew, so a row that stopped doing its work shows as a
 !! changed checksum rather than as a faster time. Usage and configuration are in
@@ -22,6 +23,7 @@ program benchmark_sphere
 
     use iso_fortran_env, only : int64, real64, output_unit
     use parquet_sphere
+    use parquet_skycoord, only : pf_offset_radec, pf_position_angle_deg
 #ifdef _OPENMP
     use omp_lib, only : omp_get_wtime
 #endif

@@ -45,6 +45,7 @@ program benchmark_healpix
 #endif
     use, intrinsic :: iso_fortran_env, only: real64, int32, int64, output_unit, error_unit
     use parquet_healpix
+    use parquet_skycoord, only: pf_angdist_deg
     implicit none
 
     !> pi.

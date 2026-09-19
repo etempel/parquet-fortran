@@ -124,13 +124,6 @@ program healpix_fptrap
             call pf_angdist(vec, other, dist)
             call pf_angdist(vec, vec, dist)
             call pf_angdist(vec, -vec, dist)
-            ! The RA/Dec separation, over the shapes that would raise if anything did: the seam,
-            ! the poles, coincident and antipodal positions, and a right ascension outside [0,360).
-            dist = pf_angdist_deg(359.999_real64, 0.0_real64, 0.001_real64, 0.0_real64)
-            dist = dist + pf_angdist_deg(0.0_real64, 90.0_real64, 123.5_real64, -90.0_real64)
-            dist = dist + pf_angdist_deg(45.0_real64, 45.0_real64, 45.0_real64, 45.0_real64)
-            dist = dist + pf_angdist_deg(0.0_real64, 0.0_real64, 180.0_real64, 0.0_real64)
-            dist = dist + pf_angdist_deg(-725.5_real64, 89.9_real64, 1085.25_real64, -89.9_real64)
             if (nside <= 8192_int64) then
                 call pf_ang2pix_ring(int(nside, int32), theta, phi, ipix32)
                 sink = sink + int(ipix32, int64)

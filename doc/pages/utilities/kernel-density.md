@@ -6,7 +6,8 @@ title: Kernel density estimation with parquet_kde
 on every point and adding them up. `pf_kde` fits an array it keeps a sorted copy of, and then
 answers the density, the distribution function and its quantiles exactly at any point, and the
 density on a grid of points for plotting. `pf_kde_grid` accumulates the same estimate on a fixed
-grid of cells from points streamed through it in any number of pieces, which it does not keep. The
+grid of cells from points streamed through it in any number of pieces, which it does not keep.
+Both have an adaptive kernel, narrow where the data are dense and wide where they are sparse. The
 module reaches no reader and no writer: a program can
 `use parquet_kde` on its own, compiling the statistics tier it is built on and nothing of the
 Arrow stack. `use parquet` brings it in too. See
@@ -29,19 +30,23 @@ Signatures on this page show optional arguments in square brackets, with the com
 bracket:
 
 ```fortran
-call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [lower], [upper], [boundary], &
-           [is_valid], [weights], [weight_type], [skipnan], [n_null], [n_nan], [n_outside], &
-           [ok], [threads])
+call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [alpha], [bandwidth_max], &
+           [lower], [upper], [boundary], [is_valid], [weights], [weight_type], [skipnan], &
+           [n_null], [n_nan], [n_outside], [ok], [threads])
 call k%pdf(x, f)
 call k%cdf(x, p)
 call k%quantile(p, x)
 call k%curve(x, f, [xmin], [xmax], [cut])
+call k%bandwidths(h, [x])
+call k%bandwidth_at(x, h)
+call k%pilot(g)
 call k%print([unit])
 ```
 
 `x` in `%fit` is a `real64` or `real32` array; a `real32` sample is widened before anything else
-happens to it. `%pdf`, `%cdf` and `%quantile` each take a scalar or a rank-1 array, and every
-result is `real64`. Every token (`rule`, `kernel`, `boundary`) is matched without regard to case.
+happens to it. `%pdf`, `%cdf`, `%quantile` and `%bandwidth_at` each take a scalar or a rank-1
+array, and every result is `real64`. Every token (`rule`, `kernel`, `boundary`) is matched without
+regard to case.
 
 ## The estimate
 
@@ -66,7 +71,8 @@ in proportion to the number of points within one kernel's reach rather than to t
   group at a time, a stream, or pieces accumulated on separate threads and merged at the end. Its
   density is the estimate at each cell centre, interpolated between them, and converges to the
   exact estimate as the square of the cell width. The bandwidth is chosen before the first point
-  arrives. See [Streaming into a grid](#streaming-into-a-grid-pf_kde_grid).
+  arrives, and the adaptive kernel takes a second pass. See
+  [Streaming into a grid](#streaming-into-a-grid-pf_kde_grid).
 
 ## Kernels, and what `bandwidth` means
 
@@ -179,6 +185,72 @@ to one.
 `%bounds(lo, hi)` answers the support, with `-Infinity`/`+Infinity` where no bound was given.
 `pf_kde_grid%init` takes the same three arguments, and its range must lie inside the support.
 
+## The adaptive kernel
+
+A fixed bandwidth is a compromise: wide enough to smooth the sparse tails, it blurs the dense
+peaks, and narrow enough to resolve the peaks, it leaves the tails ragged. The adaptive kernel
+gives each point its own bandwidth, narrow where the data are dense and wide where they are
+sparse:
+
+```fortran
+call k%fit(mag, adaptive=.true.)                    ! each point's own bandwidth, alpha = 0.5
+call k%fit(mag, adaptive=.true., alpha=0.3_real64, bandwidth_max=0.5_real64)
+```
+
+Each point `x_j` takes the bandwidth
+
+```
+h_j = h * (p(x_j)/g)**(-alpha)          at most bandwidth_max
+```
+
+where `h` is the global bandwidth -- a rule's or the number given, times `adjust`, and what
+`%bandwidth()` answers -- `p` is a pilot estimate of the density, the fixed estimate at `h`, and
+`g` is the pilot's geometric mean, so that a point at a typical density keeps about `h`. The
+estimate is then
+
+```
+f(x) = sum_j w_j K((x - x_j)/h_j) / (h_j * sum_j w_j)
+```
+
+Every point's kernel still has unit mass, so the estimate is still a density and integrates to
+one, and a boundary correction applies to each kernel at its own bandwidth.
+
+- **`alpha`**, in `[0, 1]` (default 0.5, Abramson's choice), sets how far the bandwidths follow
+  the pilot. `alpha = 0` is the fixed estimate exactly; `alpha = 1` makes each bandwidth inversely
+  proportional to the pilot, which is the nearest-neighbour extreme.
+- **`bandwidth_max`** caps every point's bandwidth. An outlier has a pilot density near zero and
+  so a very wide kernel, and since every query sums the points within reach of the widest
+  kernel, one far outlier slows every query. The cap is the remedy.
+- **The pilot** is a `pf_kde_grid` that `%fit` builds at the global bandwidth over the population,
+  with the same kernel and support, from four bandwidths below the lowest point to four above the
+  highest (clipped to the support), a quarter of a bandwidth to the cell, and never fewer than 64
+  cells nor more than 65536. The estimate is insensitive to the pilot's fine detail: at that
+  resolution it agrees with one computed from an exact pilot to a few parts in a thousand of its
+  peak. A sample spanning more than about 16000 bandwidths -- a far outlier -- reaches the ceiling
+  and gets coarser pilot cells; `lower=`/`upper=`, or clipping the sample, is the remedy.
+- **`g` is the mean over the pilot's own density**, `log g = sum_i p_i log p_i / sum_i p_i` over
+  its cells, rather than the mean over the sample points. The two differ by a constant factor
+  near one on every bandwidth, which rescales `h`; this form needs no second pass over the points,
+  which is what gives the streaming form the same estimate.
+- **A point the pilot reads as zero** -- which only a pilot built from other data can do -- takes
+  `bandwidth_max` when it is given, and otherwise the bandwidth of the pilot's smallest positive
+  density.
+
+Reading the adaptive fit:
+
+- **`%bandwidths(h, [x])`**: every retained point's bandwidth, in the order of the points,
+  ascending, with the points themselves in `x` on request. A fixed fit answers `%bandwidth()` for
+  every point.
+- **`%bandwidth_at(x, h)`**: the bandwidth the rule gives a point at `x`, read from the pilot as
+  `%fit` read it for each retained point.
+- **`%pilot(g)`**: a copy of the pilot. Given to `pf_kde_grid%init(pilot=g)` with the same
+  bandwidth and `alpha`, it gives every point the bandwidth `%fit` gave it, so the grid converges
+  to the same adaptive estimate.
+- **`%is_adaptive()`** says whether the fit was asked for the adaptive kernel.
+
+The adaptive `%fit` costs one grid pass for the pilot and one look-up per point beyond the fixed
+one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`).
+
 ## Reading the estimate
 
 - **`%pdf(x, f)`**: the density at a point, or at each point of an array.
@@ -203,7 +275,8 @@ A grid lays `ncells` cells across `[xmin, xmax]`. Each point `%add` accepts depo
 the cells and is forgotten, so the grid's memory is its cells whatever the sample's size:
 
 ```fortran
-call g%init(ncells, xmin, xmax, bandwidth, [kernel], [lower], [upper], [boundary])
+call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha], [bandwidth_max], &
+            [lower], [upper], [boundary])
 call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], [threads])
 call g%merge(other)
 call g%density(f, [x], [normalise])
@@ -286,12 +359,48 @@ end do
 call dens%density(f, x=zc)
 ```
 
+**The adaptive kernel takes two passes.** `pilot=` on `%init` gives a grid the adaptive rule of
+`%fit`: a first pass builds the pilot, a second deposits each point at the bandwidth the pilot
+gives it.
+
+```fortran
+type(pf_kde_grid) :: pilot, dens
+type(parquet_table) :: t
+integer(int64), allocatable :: bounds(:,:)
+real(real64), allocatable :: z(:)
+real(real64) :: f(400), zc(400)
+integer :: rg
+
+call parquet_table_row_group_bounds("big.parquet", bounds)
+call pilot%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64)
+do rg = 1, size(bounds, 2)                          ! pass one: the pilot
+    call parquet_open_table(t, "big.parquet", bounds(1, rg), bounds(2, rg))
+    call t%get("z", z)
+    call pilot%add(z)
+end do
+
+call dens%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64, pilot=pilot)
+do rg = 1, size(bounds, 2)                          ! pass two: the estimate
+    call parquet_open_table(t, "big.parquet", bounds(1, rg), bounds(2, rg))
+    call t%get("z", z)
+    call dens%add(z)
+end do
+call dens%density(f, x=zc)
+```
+
+- **The pilot is copied**, so it may be discarded or reused, and its range must cover the grid's.
+  Its cells and bandwidth need not match the grid's: the pilot shapes only the bandwidths, and
+  the usual choice is the grid's own bandwidth. `alpha=` and `bandwidth_max=` are as for `%fit`.
+- **`g` and every bandwidth are read exactly as `%fit` reads them**, so a grid given
+  `pf_kde%pilot`'s copy reproduces that fit's adaptive estimate to the grid's resolution.
+- **A pilot holding a kept NaN** (`skipnan=.false.`) makes the grid built on it answer NaN.
+
 **One grid per thread, merged at the end, is the parallel form.** `%merge(other)` adds another
 grid's cells and counts to this one, and refuses a grid that differs in its cells, range,
-bandwidth, kernel, support or boundary correction. Hold the per-thread grids in an array made
-before the region, not in a `block` or a `private` copy inside it: a grid owns an allocatable
-array, and a derived type that does is not reliably copied or created per thread on every
-compiler.
+bandwidth, kernel, support, boundary correction or pilot (the same pilot cell for cell, with the
+same `alpha` and `bandwidth_max`). Hold the per-thread grids in an array made before the region,
+not in a `block` or a `private` copy inside it: a grid owns an allocatable array, and a derived
+type that does is not reliably copied or created per thread on every compiler.
 
 ```fortran
 program grid_per_thread
@@ -384,7 +493,12 @@ A data condition never aborts:
 - **A grid with nothing accumulated** answers zeros from `%density`, as an empty histogram does,
   and NaN from `%pdf`, `%cdf` and `%quantile`, which have nothing to normalise by.
 - **`skipnan=.false.` with a NaN in any `%add`** makes every later answer of that grid NaN, until
-  `%clear()`.
+  `%clear()`. A grid whose pilot holds such a NaN answers NaN from the start, `%clear()` or not.
+- **A bandwidth too large to use** -- an explicit one whose kernel would reach beyond the largest
+  number, one that `adjust` would carry there, or an adaptive one that overflows -- leaves the fit
+  undefined, `ok = .false.`, and an adaptive grid it reaches answers NaN.
+- **An adaptive fit of a population it could not fit** has no pilot: `%pilot` answers a grid that
+  was never initialised.
 
 ## What aborts
 
@@ -412,16 +526,25 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `xmin` or `xmax` infinite or NaN | `pf_kde%curve: xmin and xmax must be finite` |
 | `xmin >= xmax` | `pf_kde%curve: xmin must be below xmax` |
 | `cut` negative or NaN | `pf_kde%curve: cut must not be negative` |
+| `alpha=` or `bandwidth_max=` without `adaptive=.true.` | `pf_kde%fit: alpha= and bandwidth_max= need adaptive=.true.` |
+| `alpha` outside `[0, 1]`, or NaN | `pf_kde%fit: alpha must lie in [0, 1]` |
+| `bandwidth_max` NaN, infinite or `<= 0` | `pf_kde%fit: bandwidth_max must be a finite, positive number` |
+| `%bandwidths` with an output of the wrong size | `pf_kde%bandwidths: h must have one element per retained point` (`x must have ...` for the points) |
+| `%bandwidth_at` with an output of the wrong size | `pf_kde%bandwidth_at: h must have one element per point of x` |
+| `%pilot` on a fit that is not adaptive | `pf_kde%pilot: the fit is not adaptive` |
 | `ncells < 1` | `pf_kde_grid%init: ncells must be positive` |
 | `xmin` or `xmax` NaN or infinite | `pf_kde_grid%init: xmin and xmax must be finite` |
 | `xmin >= xmax` | `pf_kde_grid%init: xmin must be below xmax` |
 | a range wider than the largest number, or cells too narrow to represent | `pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number` |
 | `[xmin, xmax]` reaching outside `[lower, upper]` | `pf_kde_grid%init: the grid's range must lie inside the support` |
-| `bandwidth`, `kernel`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
+| `bandwidth`, `kernel`, `alpha`, `bandwidth_max`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
+| `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |
+| `pilot=` a grid never initialised, or with nothing in its cells | `pf_kde_grid%init: pilot must be an initialised grid with points in it` |
+| `pilot=` a grid whose range does not cover `[xmin, xmax]` | `pf_kde_grid%init: the pilot must cover this grid's range` |
 | `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0` | `%fit`'s texts, naming `pf_kde_grid%add` |
 | a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |
 | `%merge` with a grid never initialised | `pf_kde_grid%merge: the other grid has not been initialised` |
-| `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`) |
+| `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`, `pilot`) |
 | `%density` or `%grid` with an output of the wrong size | `pf_kde_grid%density: f must have one element per cell` (`x must have ...` for the centres) |
 | `%pdf`, `%cdf` or `%quantile` with an output of the wrong size, or `p` outside `[0, 1]` | `pf_kde`'s texts, naming `pf_kde_grid` |
 
@@ -432,8 +555,9 @@ threads may query one object at once. `%fit`, `%init`, `%add`, `%merge` and `%cl
 give each thread its own object, or write once before the region and share the result; one grid
 per thread merged at the end is how several threads accumulate one estimate.
 
-- **`threads=` on `%fit`** sets the team for the sort and the rules' statistics; the answer does not
-  depend on it.
+- **`threads=` on `%fit`** sets the team for the sort, the rules' statistics and the adaptive
+  kernel's pilot; the answer does not depend on it. The pilot's deposit is cut into pieces the
+  sample decides, which the team takes in turn.
 - **`threads=` on `%add`** gives each thread of a team a contiguous share of the points and its own
   partial grid, added to the grid in thread order. At one thread count the answer is the same every
   time; two thread counts group the additions differently and agree to rounding.

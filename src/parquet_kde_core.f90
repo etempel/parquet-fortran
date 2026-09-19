@@ -2,8 +2,8 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> The workers `pf_kde` is built on: the abort, the token resolution, the four kernels' densities
-!> and distribution functions, and the two bandwidth rules.
+!> The workers both forms are built on: the abort, the token resolution, the four kernels'
+!> densities and distribution functions, the two bandwidth rules and the test hooks.
 !!
 !! Every kernel is written in STANDARD-DEVIATION units: `z` is the offset from the kernel's centre
 !! divided by the bandwidth, and the kernel's own scale `KDE_SCALE` is applied here, once, so that
@@ -126,6 +126,17 @@ contains
         res = v > 0.0_real64
 
     end procedure kde_positive_finite
+
+    module procedure kde_bandwidth_usable
+
+        ! The NaN is screened first, as its own test: an ordered comparison raises IEEE_INVALID on
+        ! one.
+        res = .false.
+        if (h /= h) return
+        if (.not. (h > 0.0_real64)) return
+        res = h <= huge(h)/KDE_RADIUS(code)
+
+    end procedure kde_bandwidth_usable
 
     module procedure kde_outside
 
@@ -300,5 +311,15 @@ contains
     module procedure parquet_debug_kde_threads_used
         n = kde_team_used
     end procedure parquet_debug_kde_threads_used
+
+    module procedure parquet_debug_set_kde_pilot_cells
+        kde_pilot_cells_forced = max(0, n)
+    end procedure parquet_debug_set_kde_pilot_cells
+
+    module procedure parquet_debug_kde_fit_nanos
+        sort = kde_fit_ns(1)
+        pilot = kde_fit_ns(2)
+        lookup = kde_fit_ns(3)
+    end procedure parquet_debug_kde_fit_nanos
 
 end submodule parquet_kde_core ! GCOVR_EXCL_LINE

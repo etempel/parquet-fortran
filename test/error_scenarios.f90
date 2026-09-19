@@ -4169,6 +4169,44 @@ program error_scenarios
         call scenario_kde_grid_merge_support()
     case ("kde_grid_merge_boundary")
         call scenario_kde_grid_merge_boundary()
+    case ("kde_alpha_without_adaptive")
+        call scenario_kde_alpha_without_adaptive()
+    case ("kde_bandwidth_max_without_adaptive")
+        call scenario_kde_bandwidth_max_without_adaptive()
+    case ("kde_alpha_above_one")
+        call scenario_kde_alpha_above_one()
+    case ("kde_alpha_nan")
+        call scenario_kde_alpha_nan()
+    case ("kde_bandwidth_max_zero")
+        call scenario_kde_bandwidth_max_zero()
+    case ("kde_bandwidths_size")
+        call scenario_kde_bandwidths_size()
+    case ("kde_bandwidths_x_size")
+        call scenario_kde_bandwidths_x_size()
+    case ("kde_bandwidth_at_size")
+        call scenario_kde_bandwidth_at_size()
+    case ("kde_pilot_not_adaptive")
+        call scenario_kde_pilot_not_adaptive()
+    case ("kde_grid_alpha_without_pilot")
+        call scenario_kde_grid_alpha_without_pilot()
+    case ("kde_grid_bandwidth_max_without_pilot")
+        call scenario_kde_grid_bandwidth_max_without_pilot()
+    case ("kde_grid_alpha_negative")
+        call scenario_kde_grid_alpha_negative()
+    case ("kde_grid_bandwidth_max_nan")
+        call scenario_kde_grid_bandwidth_max_nan()
+    case ("kde_grid_pilot_uninitialised")
+        call scenario_kde_grid_pilot_uninitialised()
+    case ("kde_grid_pilot_empty")
+        call scenario_kde_grid_pilot_empty()
+    case ("kde_grid_pilot_not_covering")
+        call scenario_kde_grid_pilot_not_covering()
+    case ("kde_grid_merge_pilot")
+        call scenario_kde_grid_merge_pilot()
+    case ("kde_grid_merge_fixed")
+        call scenario_kde_grid_merge_fixed()
+    case ("kde_grid_merge_alpha")
+        call scenario_kde_grid_merge_alpha()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -35094,5 +35132,252 @@ contains
         call g%merge(other)
         print '(a)', "merged grids with a different boundary correction"
     end subroutine scenario_kde_grid_merge_boundary
+    !
+    ! ---- parquet_kde: the adaptive kernel's caller contracts, in both forms ----------------
+    !
+    !> Each scenario first makes the nearest LEGAL call and prints a "kde control" line, as the
+    !> scenarios above do, then the smallest call that provokes exactly one abort.
+    !
+    !> Proves that pf_kde%fit refuses alpha= without adaptive=.true..
+    subroutine scenario_kde_alpha_without_adaptive()
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true., alpha=0.5_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, alpha=0.5_real64)
+        print '(a)', "accepted alpha= without adaptive=.true."
+    end subroutine scenario_kde_alpha_without_adaptive
+    !
+    !> Proves that pf_kde%fit refuses bandwidth_max= with adaptive=.false..
+    subroutine scenario_kde_bandwidth_max_without_adaptive()
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., bandwidth_max=0.2_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.false., bandwidth_max=0.2_real64)
+        print '(a)', "accepted bandwidth_max= with adaptive=.false."
+    end subroutine scenario_kde_bandwidth_max_without_adaptive
+    !
+    !> Proves that pf_kde%fit refuses alpha above one.
+    subroutine scenario_kde_alpha_above_one()
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true., alpha=1.0_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true., alpha=1.5_real64)
+        print '(a)', "accepted alpha = 1.5"
+    end subroutine scenario_kde_alpha_above_one
+    !
+    !> Proves that pf_kde%fit refuses a NaN alpha.
+    subroutine scenario_kde_alpha_nan()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true., alpha=0.0_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., alpha=ieee_value(1.0_real64, ieee_quiet_nan))
+        print '(a)', "accepted a NaN alpha"
+    end subroutine scenario_kde_alpha_nan
+    !
+    !> Proves that pf_kde%fit refuses a zero bandwidth_max.
+    subroutine scenario_kde_bandwidth_max_zero()
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., bandwidth_max=1.0e-300_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., bandwidth_max=0.0_real64)
+        print '(a)', "accepted a zero bandwidth_max"
+    end subroutine scenario_kde_bandwidth_max_zero
+    !
+    !> Proves that pf_kde%bandwidths refuses an output of the wrong size.
+    subroutine scenario_kde_bandwidths_size()
+        type(pf_kde) :: k
+        real(real64) :: h4(4), h3(3)
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true.)
+        call k%bandwidths(h4)
+        print '(a, es22.15)', "kde control bandwidths: ", h4(1)
+        call k%bandwidths(h3)
+        print '(a, es22.15)', "accepted three bandwidths for four points: ", h3(1)
+    end subroutine scenario_kde_bandwidths_size
+    !
+    !> Proves that pf_kde%bandwidths refuses points of the wrong size.
+    subroutine scenario_kde_bandwidths_x_size()
+        type(pf_kde) :: k
+        real(real64) :: h4(4), x4(4), x5(5)
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true.)
+        call k%bandwidths(h4, x=x4)
+        print '(a, es22.15)', "kde control bandwidths: ", x4(1)
+        call k%bandwidths(h4, x=x5)
+        print '(a, es22.15)', "accepted five points for four: ", x5(1)
+    end subroutine scenario_kde_bandwidths_x_size
+    !
+    !> Proves that pf_kde%bandwidth_at refuses an output of the wrong size.
+    subroutine scenario_kde_bandwidth_at_size()
+        type(pf_kde) :: k
+        real(real64) :: h2(2), h3(3)
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true.)
+        call k%bandwidth_at([0.1_real64, 0.2_real64], h2)
+        print '(a, es22.15)', "kde control bandwidth_at: ", h2(1)
+        call k%bandwidth_at([0.1_real64, 0.2_real64], h3)
+        print '(a, es22.15)', "accepted three bandwidths for two points: ", h3(1)
+    end subroutine scenario_kde_bandwidth_at_size
+    !
+    !> Proves that pf_kde%pilot refuses a fit that is not adaptive.
+    subroutine scenario_kde_pilot_not_adaptive()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, adaptive=.true.)
+        call k%pilot(g)
+        print '(a, i0)', "kde control pilot: ", g%ncells()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64)
+        call k%pilot(g)
+        print '(a, l1)', "handed back a pilot of a fixed fit: ", g%is_initialised()
+    end subroutine scenario_kde_pilot_not_adaptive
+    !
+    !> Proves that pf_kde_grid%init refuses alpha= without pilot=.
+    subroutine scenario_kde_grid_alpha_without_pilot()
+        type(pf_kde_grid) :: g, p
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, alpha=0.5_real64)
+        print '(a)', "accepted alpha= without pilot="
+    end subroutine scenario_kde_grid_alpha_without_pilot
+    !
+    !> Proves that pf_kde_grid%init refuses bandwidth_max= without pilot=.
+    subroutine scenario_kde_grid_bandwidth_max_without_pilot()
+        type(pf_kde_grid) :: g, p
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, bandwidth_max=0.2_real64)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, bandwidth_max=0.2_real64)
+        print '(a)', "accepted bandwidth_max= without pilot="
+    end subroutine scenario_kde_grid_bandwidth_max_without_pilot
+    !
+    !> Proves that pf_kde_grid%init refuses a negative alpha.
+    subroutine scenario_kde_grid_alpha_negative()
+        type(pf_kde_grid) :: g, p
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=0.0_real64)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=-0.1_real64)
+        print '(a)', "accepted alpha = -0.1"
+    end subroutine scenario_kde_grid_alpha_negative
+    !
+    !> Proves that pf_kde_grid%init refuses a NaN bandwidth_max.
+    subroutine scenario_kde_grid_bandwidth_max_nan()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        type(pf_kde_grid) :: g, p
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, bandwidth_max=0.2_real64)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, bandwidth_max=ieee_value(1.0_real64, ieee_quiet_nan))
+        print '(a)', "accepted a NaN bandwidth_max"
+    end subroutine scenario_kde_grid_bandwidth_max_nan
+    !
+    !> Proves that pf_kde_grid%init refuses a pilot that was never initialised.
+    subroutine scenario_kde_grid_pilot_uninitialised()
+        type(pf_kde_grid) :: g, p, fresh
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=fresh)
+        print '(a)', "accepted a pilot that was never initialised"
+    end subroutine scenario_kde_grid_pilot_uninitialised
+    !
+    !> Proves that pf_kde_grid%init refuses a pilot with nothing in it.
+    subroutine scenario_kde_grid_pilot_empty()
+        type(pf_kde_grid) :: g, p, empty
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call empty%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=empty)
+        print '(a)', "accepted a pilot with nothing in it"
+    end subroutine scenario_kde_grid_pilot_empty
+    !
+    !> Proves that pf_kde_grid%init refuses a pilot that does not cover its range.
+    subroutine scenario_kde_grid_pilot_not_covering()
+        type(pf_kde_grid) :: g, p
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
+        call g%init(4, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p)
+        print '(a)', "accepted a pilot covering half the range"
+    end subroutine scenario_kde_grid_pilot_not_covering
+    !
+    !> Proves that pf_kde_grid%merge refuses a grid read from another pilot.
+    subroutine scenario_kde_grid_merge_pilot()
+        type(pf_kde_grid) :: g, same, other, p, q
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call q%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call q%add([0.5_real64, 0.6_real64, 0.7_real64, 0.8_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=q)
+        call g%merge(other)
+        print '(a)', "merged grids read from different pilots"
+    end subroutine scenario_kde_grid_merge_pilot
+    !
+    !> Proves that pf_kde_grid%merge refuses a fixed grid into an adaptive one.
+    subroutine scenario_kde_grid_merge_fixed()
+        type(pf_kde_grid) :: g, same, other, p, q
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call q%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call q%add([0.5_real64, 0.6_real64, 0.7_real64, 0.8_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%merge(other)
+        print '(a)', "merged a fixed grid into an adaptive one"
+    end subroutine scenario_kde_grid_merge_fixed
+    !
+    !> Proves that pf_kde_grid%merge refuses a grid with another alpha.
+    subroutine scenario_kde_grid_merge_alpha()
+        type(pf_kde_grid) :: g, same, other, p, q
+
+        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call q%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call q%add([0.5_real64, 0.6_real64, 0.7_real64, 0.8_real64])
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=0.4_real64)
+        call g%merge(other)
+        print '(a)', "merged grids with different alpha"
+    end subroutine scenario_kde_grid_merge_alpha
     !
 end program error_scenarios

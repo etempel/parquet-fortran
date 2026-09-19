@@ -19,6 +19,14 @@
 !! at five standard deviations and renormalised, which gives every kernel compact support: the
 !! sorted sample is searched for the points within reach of a query, and nothing else is summed.
 !!
+!! **The adaptive kernel gives each point its own bandwidth**, `h_j = h * (p(x_j)/g)**(-alpha)`,
+!! read from a pilot density `p` -- a `pf_kde_grid` at the global bandwidth -- whose geometric mean
+!! over its own density is `g`. Each point's kernel keeps unit mass, so the estimate is still a
+!! density, and only the point's bandwidth has to be known when it is deposited, which is what lets
+!! the streaming form have it too: `pf_kde%fit(adaptive=.true.)` builds the pilot itself, and
+!! `pf_kde_grid%init(pilot=)` takes one the caller built in a first pass. Both read it through the
+!! same table and the same look-up, so one pilot gives both forms the same bandwidths.
+!!
 !! **The population rules are the family's**: a null is excluded, then a NaN (by default), then
 !! a zero weight; a negative, NaN or infinite weight aborts; `skipnan = .false.` keeps a NaN as a
 !! value that makes the whole estimate NaN. The one rule this module adds is the SUPPORT: a point
@@ -66,7 +74,7 @@ module parquet_kde
     private
 
     public :: pf_kde, pf_kde_grid
-    public :: parquet_debug_kde_threads_used
+    public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
 
@@ -108,6 +116,28 @@ module parquet_kde
     !> The rules' constants: Silverman's rule of thumb and Scott's normal-reference rule.
     real(real64), parameter :: KDE_SILVERMAN_C = 0.9_real64, KDE_SCOTT_C = 1.06_real64
 
+    ! ---- the adaptive rule --------------------------------------------------------------------
+
+    !> The adaptive rule's default sensitivity: the square root of the pilot's inverse.
+    real(real64), parameter :: KDE_ALPHA_DEFAULT = 0.5_real64
+
+    !> The pilot `pf_kde%fit(adaptive=.true.)` builds reaches this many global bandwidths beyond the
+    !! extreme points, clipped to the support.
+    real(real64), parameter :: KDE_PILOT_REACH = 4.0_real64
+
+    !> Its cells are a quarter of the global bandwidth wide: this many to a bandwidth.
+    real(real64), parameter :: KDE_PILOT_PER_H = 4.0_real64
+
+    !> The fewest and the most cells that pilot is given. The lower clamp keeps a sample narrower
+    !! than sixteen bandwidths from getting a coarse table; the upper one bounds its memory when
+    !! far outliers stretch its range, and its cells are then wider than a quarter bandwidth.
+    integer, parameter :: KDE_PILOT_MIN_CELLS = 64, KDE_PILOT_MAX_CELLS = 65536
+
+    !> The most pieces that pilot's deposit is cut into. The cut is decided by the sample and the
+    !! pilot alone, never by the team that runs it, so that the fit answers the same bits at every
+    !! `threads=`; the team takes the pieces in turn.
+    integer(int64), parameter :: KDE_PILOT_PARTS = 64_int64
+
     ! ---- the test observable ------------------------------------------------------------------
 
     !> The team the most recent threaded pass ran on; 1 when it ran serially.
@@ -120,83 +150,53 @@ module parquet_kde
     !! unsynchronised, like every counter of its kind.
     integer, save :: kde_team_used = 1
 
-    ! ---- the type ---------------------------------------------------------------------------
+    !> The cell count `parquet_debug_set_kde_pilot_cells` forces on the pilot `pf_kde%fit` builds;
+    !! 0, the default, means the rule. Test-only, process-global and unsynchronised: the suite that
+    !! sets it runs serially.
+    integer, save :: kde_pilot_cells_forced = 0
 
-    !> A kernel density estimate over a retained, sorted sample.
+    !> Nanoseconds the most recent `pf_kde%fit` spent sorting, building the pilot and assigning the
+    !! bandwidths (`parquet_debug_kde_fit_nanos`); 0 for a phase it did not reach. Process-global
+    !! and unsynchronised, like the team counter.
+    integer(int64), save :: kde_fit_ns(3) = 0_int64
+
+    ! ---- the types --------------------------------------------------------------------------
+
+    !> The adaptive rule's state, which both forms hold: the pilot's cells, copied as a look-up
+    !! table, and the rule's settings.
     !!
-    !! `%fit` chooses the bandwidth, applies the population rules and keeps the survivors in
-    !! ascending order with their weights. Every query afterwards is exact: `%pdf` and `%cdf` sum
-    !! the kernels of the points within reach of each query point, and `%quantile` inverts `%cdf`.
-    !! A fitted object is read-only under every query and may be shared by any number of threads.
-    type :: pf_kde
-        private
-        logical :: fitted = .false.                  !! `%fit` has run since the last `%clear`
-        logical :: defined = .false.                 !! the estimate is defined (`ok` of `%fit`)
-        integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
-        integer :: rule_code = KDE_RULE_SILVERMAN    !! how the bandwidth was chosen
-        integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
-        logical :: has_lower = .false.               !! a lower bound was given
-        logical :: has_upper = .false.               !! an upper bound was given
-        real(real64) :: lo = 0.0_real64              !! the lower bound, when given
-        real(real64) :: hi = 0.0_real64              !! the upper bound, when given
-        real(real64) :: h = 0.0_real64               !! the global bandwidth, after `adjust`
-        real(real64) :: w_total = 0.0_real64         !! `sum(w)` over the population
-        logical :: weighted = .false.                !! `weights=` was given
-        integer(int64) :: cnt_all = 0_int64          !! `size(x)` at `%fit`
-        integer(int64) :: cnt_valid = 0_int64        !! the population's size
-        integer(int64) :: cnt_null = 0_int64         !! excluded as null
-        integer(int64) :: cnt_nan = 0_int64          !! excluded as NaN
-        integer(int64) :: cnt_out = 0_int64          !! excluded as outside the support
-        real(real64), allocatable :: x(:)
-        !! the population, ascending
-        real(real64), allocatable :: w(:)
-        !! their weights, in the same order; allocated only when weighted
-        real(real64), allocatable :: cw(:)
-        !! the running sum of `w`, so that `cw(k)` is the weight of `x(1:k)`; allocated only
-        !! when weighted, and built here rather than on first use so that no query writes
-        real(real64), allocatable :: mass(:)
-        !! each point's kernel mass inside the support, by which its kernel is divided; allocated
-        !! only when a correction can make it differ from one
-    contains
-        generic :: fit => kde_fit_f64, kde_fit_f32 !! fits the estimate to a `real64` or `real32` sample
-        procedure, private :: kde_fit_f64 !! the `real64` sample
-        procedure, private :: kde_fit_f32 !! the `real32` sample, widened
-        generic :: pdf => kde_pdf_r0, kde_pdf_r1 !! the density at a point or at each of an array
-        procedure, private :: kde_pdf_r0 !! at one point
-        procedure, private :: kde_pdf_r1 !! at each point of an array
-        generic :: cdf => kde_cdf_r0, kde_cdf_r1 !! `P(X <= x)` at a point or at each of an array
-        procedure, private :: kde_cdf_r0 !! at one point
-        procedure, private :: kde_cdf_r1 !! at each point of an array
-        generic :: quantile => kde_quantile_r0, kde_quantile_r1 !! the inverse of `%cdf`
-        procedure, private :: kde_quantile_r0 !! at one probability
-        procedure, private :: kde_quantile_r1 !! at each probability of an array
-        procedure :: curve => kde_curve !! the density on equally spaced points
-        procedure :: bandwidth => kde_bandwidth !! the resolved global bandwidth
-        procedure :: kernel => kde_kernel_name !! the kernel's token
-        procedure :: rule => kde_rule_name !! the bandwidth rule's token, or `"explicit"`
-        procedure :: bounds => kde_bounds !! the support; infinite where unbounded
-        procedure :: n => kde_n !! `size(x)` at `%fit`
-        procedure :: n_valid => kde_n_valid !! the population's size
-        procedure :: n_null => kde_n_null !! how many were excluded as null
-        procedure :: n_nan => kde_n_nan !! how many were excluded as NaN
-        procedure :: n_outside => kde_n_outside !! how many were outside the support
-        procedure :: sum_weights => kde_sum_weights !! `sum(w)` over the population
-        procedure :: is_fitted => kde_is_fitted !! `%fit` has run since the last `%clear`
-        procedure :: is_adaptive => kde_is_adaptive !! the fit is adaptive
-        procedure :: print => kde_print !! a one-block summary
-        procedure :: clear => kde_clear !! releases everything; the object is unfitted again
-    end type pf_kde
+    !! A copy of the pilot's accumulation rather than of the pilot: a `pf_kde_grid` cannot hold one
+    !! of its own kind (a recursive allocatable component, which gfortran copies wrongly beyond one
+    !! level), and reading the pilot through the same table in both forms is what gives one pilot
+    !! the same bandwidths in either.
+    type :: kde_adapt
+        logical :: on = .false.                   !! the rule is in use
+        real(real64) :: alpha = KDE_ALPHA_DEFAULT !! the sensitivity, in `[0, 1]`
+        logical :: has_bmax = .false.             !! a cap was given
+        real(real64) :: bmax = 0.0_real64         !! the cap on every point's bandwidth
+        integer :: nc = 0                         !! the pilot's number of cells
+        real(real64) :: x0 = 0.0_real64           !! the pilot's first cell's left edge
+        real(real64) :: x1 = 0.0_real64           !! the pilot's last cell's right edge
+        real(real64) :: dx = 0.0_real64           !! the pilot's cell width
+        real(real64) :: wt = 0.0_real64           !! the pilot's total weight
+        logical :: poisoned = .false.             !! the pilot answers NaN
+        real(real64) :: logg = 0.0_real64         !! `log g`: the mean of `log p` over the pilot's own density
+        real(real64) :: pmin = 0.0_real64         !! the pilot's smallest positive cell density
+        real(real64), allocatable :: acc(:)
+        !! the pilot's accumulation, cell for cell
+    end type kde_adapt
 
     !> A kernel density estimate accumulated on a fixed grid of cells from points streamed through
     !! it, which are forgotten.
     !!
     !! `%init` fixes the geometry -- `ncells` cells of width `step = (xmax - xmin)/ncells`, centred
-    !! on `xmin + (i - 1/2)*step` -- with the bandwidth, the kernel and the support. Each point
-    !! `%add` accepts deposits its kernel on the cell centres it reaches, normalised so that the
-    !! point adds exactly its weight: what the kernel puts beyond `xmin` or `xmax` is counted there
-    !! but not located. `%merge` adds one grid to another. The queries read the cells: `%density`
-    !! at the centres, `%pdf` interpolated between them, `%cdf` its integral and `%quantile` the
-    !! inverse. The queries are read-only, so any number of threads may share a finished grid.
+    !! on `xmin + (i - 1/2)*step` -- with the bandwidth, the kernel and the support, and with
+    !! `pilot=` the adaptive rule. Each point `%add` accepts deposits its kernel on the cell centres
+    !! it reaches, normalised so that the point adds exactly its weight: what the kernel puts beyond
+    !! `xmin` or `xmax` is counted there but not located. `%merge` adds one grid to another. The
+    !! queries read the cells: `%density` at the centres, `%pdf` interpolated between them, `%cdf`
+    !! its integral and `%quantile` the inverse. The queries are read-only, so any number of
+    !! threads may share a finished grid.
     type :: pf_kde_grid
         private
         logical :: initialised = .false.             !! `%init` has run
@@ -205,7 +205,7 @@ module parquet_kde
         real(real64) :: x0 = 0.0_real64              !! `xmin`, the first cell's left edge
         real(real64) :: x1 = 0.0_real64              !! `xmax`, the last cell's right edge
         real(real64) :: dx = 0.0_real64              !! the cell width
-        real(real64) :: h = 0.0_real64               !! the bandwidth
+        real(real64) :: h = 0.0_real64               !! the bandwidth; the global one when adaptive
         integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
         integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
         logical :: has_lower = .false.               !! a lower bound was given
@@ -222,6 +222,8 @@ module parquet_kde
         integer(int64) :: cnt_out = 0_int64          !! excluded as outside the support
         real(real64), allocatable :: acc(:)
         !! each cell's accumulated weight per unit length; `acc(i)*step` is the weight in cell `i`
+        type(kde_adapt) :: adapt
+        !! the adaptive rule, from the pilot `%init` was given; off for a fixed bandwidth
     contains
         procedure :: init => grid_init !! fixes the geometry, the bandwidth, the kernel and the support
         generic :: add => grid_add_f64_r0, grid_add_f64_r1, grid_add_f32_r0, grid_add_f32_r1 !! adds points
@@ -258,73 +260,169 @@ module parquet_kde
         procedure :: clear => grid_clear !! zeroes the accumulation and keeps the geometry
     end type pf_kde_grid
 
+    !> A kernel density estimate over a retained, sorted sample.
+    !!
+    !! `%fit` chooses the bandwidth, applies the population rules and keeps the survivors in
+    !! ascending order with their weights -- and, when adaptive, each one's own bandwidth and the
+    !! pilot they were read from. Every query afterwards is exact: `%pdf` and `%cdf` sum the kernels
+    !! of the points within reach of each query point, and `%quantile` inverts `%cdf`. A fitted
+    !! object is read-only under every query and may be shared by any number of threads.
+    type :: pf_kde
+        private
+        logical :: fitted = .false.                  !! `%fit` has run since the last `%clear`
+        logical :: defined = .false.                 !! the estimate is defined (`ok` of `%fit`)
+        integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
+        integer :: rule_code = KDE_RULE_SILVERMAN    !! how the bandwidth was chosen
+        integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
+        logical :: has_lower = .false.               !! a lower bound was given
+        logical :: has_upper = .false.               !! an upper bound was given
+        real(real64) :: lo = 0.0_real64              !! the lower bound, when given
+        real(real64) :: hi = 0.0_real64              !! the upper bound, when given
+        real(real64) :: h = 0.0_real64               !! the global bandwidth, after `adjust`
+        real(real64) :: hinv = 0.0_real64            !! one over the global bandwidth
+        real(real64) :: hmax = 0.0_real64            !! the largest point bandwidth: how far a query reaches
+        real(real64) :: w_total = 0.0_real64         !! `sum(w)` over the population
+        logical :: weighted = .false.                !! `weights=` was given
+        integer(int64) :: cnt_all = 0_int64          !! `size(x)` at `%fit`
+        integer(int64) :: cnt_valid = 0_int64        !! the population's size
+        integer(int64) :: cnt_null = 0_int64         !! excluded as null
+        integer(int64) :: cnt_nan = 0_int64          !! excluded as NaN
+        integer(int64) :: cnt_out = 0_int64          !! excluded as outside the support
+        integer(int64) :: hstride = 0_int64          !! 1 when `hb` and `hr` hold one per point, 0 one for all
+        real(real64), allocatable :: x(:)
+        !! the population, ascending
+        real(real64), allocatable :: w(:)
+        !! their weights, in the same order; allocated only when weighted
+        real(real64), allocatable :: cw(:)
+        !! the running sum of `w`, so that `cw(k)` is the weight of `x(1:k)`; allocated only
+        !! when weighted, and built here rather than on first use so that no query writes
+        real(real64), allocatable :: mass(:)
+        !! each point's kernel mass inside the support, by which its kernel is divided; allocated
+        !! only when a correction can make it differ from one
+        real(real64), allocatable :: hb(:)
+        !! each point's bandwidth, in the same order, read at `1 + (j - 1)*hstride`: one per point
+        !! when adaptive, and the global bandwidth alone otherwise, so that both estimates run one
+        !! loop and `alpha = 0` is the fixed estimate bit for bit
+        real(real64), allocatable :: hr(:)
+        !! one over each of `hb`, formed once at `%fit` by one scalar division each, so that a query
+        !! multiplies by it instead of dividing
+        type(kde_adapt) :: adapt
+        !! the adaptive rule; off for a fixed bandwidth
+        type(pf_kde_grid) :: pilot_grid
+        !! the pilot the adaptive rule reads, which `%pilot` hands back; uninitialised otherwise
+    contains
+        generic :: fit => kde_fit_f64, kde_fit_f32 !! fits the estimate to a `real64` or `real32` sample
+        procedure, private :: kde_fit_f64 !! the `real64` sample
+        procedure, private :: kde_fit_f32 !! the `real32` sample, widened
+        generic :: pdf => kde_pdf_r0, kde_pdf_r1 !! the density at a point or at each of an array
+        procedure, private :: kde_pdf_r0 !! at one point
+        procedure, private :: kde_pdf_r1 !! at each point of an array
+        generic :: cdf => kde_cdf_r0, kde_cdf_r1 !! `P(X <= x)` at a point or at each of an array
+        procedure, private :: kde_cdf_r0 !! at one point
+        procedure, private :: kde_cdf_r1 !! at each point of an array
+        generic :: quantile => kde_quantile_r0, kde_quantile_r1 !! the inverse of `%cdf`
+        procedure, private :: kde_quantile_r0 !! at one probability
+        procedure, private :: kde_quantile_r1 !! at each probability of an array
+        procedure :: curve => kde_curve !! the density on equally spaced points
+        procedure :: bandwidths => kde_bandwidths !! every retained point's bandwidth, and the points
+        generic :: bandwidth_at => kde_bandwidth_at_r0, kde_bandwidth_at_r1 !! the bandwidth the rule gives a point
+        procedure, private :: kde_bandwidth_at_r0 !! at one point
+        procedure, private :: kde_bandwidth_at_r1 !! at each point of an array
+        procedure :: pilot => kde_pilot_copy !! a copy of the pilot an adaptive fit read
+        procedure :: bandwidth => kde_bandwidth !! the resolved global bandwidth
+        procedure :: kernel => kde_kernel_name !! the kernel's token
+        procedure :: rule => kde_rule_name !! the bandwidth rule's token, or `"explicit"`
+        procedure :: bounds => kde_bounds !! the support; infinite where unbounded
+        procedure :: n => kde_n !! `size(x)` at `%fit`
+        procedure :: n_valid => kde_n_valid !! the population's size
+        procedure :: n_null => kde_n_null !! how many were excluded as null
+        procedure :: n_nan => kde_n_nan !! how many were excluded as NaN
+        procedure :: n_outside => kde_n_outside !! how many were outside the support
+        procedure :: sum_weights => kde_sum_weights !! `sum(w)` over the population
+        procedure :: is_fitted => kde_is_fitted !! `%fit` has run since the last `%clear`
+        procedure :: is_adaptive => kde_is_adaptive !! the fit is adaptive
+        procedure :: print => kde_print !! a one-block summary
+        procedure :: clear => kde_clear !! releases everything; the object is unfitted again
+    end type pf_kde
+
     ! ---- fitting, implemented in parquet_kde_fit.f90 ----------------------------------------
 
     interface
 
         !> Fits the estimate to a `real64` sample: `call k%fit(x, [bandwidth], [rule], [adjust],
-        !! [kernel], [lower], [upper], [boundary], [is_valid], [weights], [weight_type], [skipnan],
-        !! [n_null], [n_nan], [n_outside], [ok], [threads])`.
+        !! [kernel], [adaptive], [alpha], [bandwidth_max], [lower], [upper], [boundary], [is_valid],
+        !! [weights], [weight_type], [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads])`.
         !!
         !! `x` is the sample, retained as a sorted copy of its population. `bandwidth` is the
         !! kernel's standard deviation, a finite positive number; without it the bandwidth comes
         !! from `rule`, `"silverman"` (the default) or `"scott"`, and the two cannot both be given.
         !! `adjust` multiplies the bandwidth however it was chosen (default 1). `kernel` is
-        !! `"gaussian"` (the default), `"epanechnikov"`, `"bspline"` or `"box"`. `lower` and
-        !! `upper` bound the support: a point outside is excluded and counted in `n_outside`, and
-        !! a kernel crossing a bound is corrected by `boundary`, `"renormalise"` (the default) or
-        !! `"reflect"`. `is_valid`, `weights`, `weight_type` and `skipnan` are the `pf_*`
-        !! family's population arguments; `weight_type` decides the effective sample size the
-        !! rules use. `n_null`, `n_nan` and `n_outside` report what each exclusion removed, and
-        !! `ok` is `.false.` when the estimate is undefined. `threads` is the team for the sort
-        !! and the rules' statistics; the answer does not depend on it. Tokens are matched
-        !! without regard to case.
-        module subroutine kde_fit_f64(self, x, bandwidth, rule, adjust, kernel, lower, upper, boundary, &
-                is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
+        !! `"gaussian"` (the default), `"epanechnikov"`, `"bspline"` or `"box"`. `adaptive =
+        !! .true.` gives each point its own bandwidth, `h * (p(x_j)/g)**(-alpha)`, from a pilot
+        !! estimate at the global bandwidth `h`: `alpha` in `[0, 1]` (default 0.5) sets how far
+        !! the bandwidths follow the pilot, `0` being the fixed estimate, and `bandwidth_max` caps
+        !! every one; both need `adaptive = .true.`. `lower` and `upper` bound the support: a
+        !! point outside is excluded and counted in `n_outside`, and a kernel crossing a bound is
+        !! corrected by `boundary`, `"renormalise"` (the default) or `"reflect"`. `is_valid`,
+        !! `weights`, `weight_type` and `skipnan` are the `pf_*` family's population arguments;
+        !! `weight_type` decides the effective sample size the rules use. `n_null`, `n_nan` and
+        !! `n_outside` report what each exclusion removed, and `ok` is `.false.` when the estimate
+        !! is undefined. `threads` is the team for the sort, the rules' statistics and the pilot;
+        !! the answer does not depend on it. Tokens are matched without regard to case.
+        module subroutine kde_fit_f64(self, x, bandwidth, rule, adjust, kernel, adaptive, alpha, &
+                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, &
+                n_nan, n_outside, ok, threads)
             implicit none
-            class(pf_kde), intent(inout)           :: self        !! the estimate; refitted
-            real(real64), intent(in)               :: x(:)        !! the sample
-            real(real64), intent(in), optional     :: bandwidth   !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule        !! `"silverman"` or `"scott"`
-            real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
-            character(len=*), intent(in), optional :: kernel      !! the kernel's token
-            real(real64), intent(in), optional     :: lower       !! the support's lower bound
-            real(real64), intent(in), optional     :: upper       !! the support's upper bound
-            character(len=*), intent(in), optional :: boundary    !! the boundary correction
-            logical, intent(in), optional          :: is_valid(:) !! `.false.` marks a null
-            real(real64), intent(in), optional     :: weights(:)  !! per-element weights
-            character(len=*), intent(in), optional :: weight_type !! `"reliability"` or `"frequency"`
-            logical, intent(in), optional          :: skipnan     !! `.false.` lets a NaN poison
-            integer(int64), intent(out), optional  :: n_null      !! excluded as null
-            integer(int64), intent(out), optional  :: n_nan       !! excluded as NaN
-            integer(int64), intent(out), optional  :: n_outside   !! excluded as outside the support
-            logical, intent(out), optional         :: ok          !! the estimate is defined
-            integer, intent(in), optional          :: threads     !! the team for the sort
+            class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
+            real(real64), intent(in)               :: x(:)          !! the sample
+            real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
+            character(len=*), intent(in), optional :: rule          !! `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
+            character(len=*), intent(in), optional :: kernel        !! the kernel's token
+            logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: lower         !! the support's lower bound
+            real(real64), intent(in), optional     :: upper         !! the support's upper bound
+            character(len=*), intent(in), optional :: boundary      !! the boundary correction
+            logical, intent(in), optional          :: is_valid(:)   !! `.false.` marks a null
+            real(real64), intent(in), optional     :: weights(:)    !! per-element weights
+            character(len=*), intent(in), optional :: weight_type   !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan       !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null        !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan         !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
+            logical, intent(out), optional         :: ok            !! the estimate is defined
+            integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
         end subroutine kde_fit_f64
 
         !> The `real32` sample, widened to `real64` first; every other argument as the `real64`
         !! form.
-        module subroutine kde_fit_f32(self, x, bandwidth, rule, adjust, kernel, lower, upper, boundary, &
-                is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
+        module subroutine kde_fit_f32(self, x, bandwidth, rule, adjust, kernel, adaptive, alpha, &
+                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, &
+                n_nan, n_outside, ok, threads)
             implicit none
-            class(pf_kde), intent(inout)           :: self        !! the estimate; refitted
-            real(real32), intent(in)               :: x(:)        !! the sample
-            real(real64), intent(in), optional     :: bandwidth   !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule        !! `"silverman"` or `"scott"`
-            real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
-            character(len=*), intent(in), optional :: kernel      !! the kernel's token
-            real(real64), intent(in), optional     :: lower       !! the support's lower bound
-            real(real64), intent(in), optional     :: upper       !! the support's upper bound
-            character(len=*), intent(in), optional :: boundary    !! the boundary correction
-            logical, intent(in), optional          :: is_valid(:) !! `.false.` marks a null
-            real(real64), intent(in), optional     :: weights(:)  !! per-element weights
-            character(len=*), intent(in), optional :: weight_type !! `"reliability"` or `"frequency"`
-            logical, intent(in), optional          :: skipnan     !! `.false.` lets a NaN poison
-            integer(int64), intent(out), optional  :: n_null      !! excluded as null
-            integer(int64), intent(out), optional  :: n_nan       !! excluded as NaN
-            integer(int64), intent(out), optional  :: n_outside   !! excluded as outside the support
-            logical, intent(out), optional         :: ok          !! the estimate is defined
-            integer, intent(in), optional          :: threads     !! the team for the sort
+            class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
+            real(real32), intent(in)               :: x(:)          !! the sample
+            real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
+            character(len=*), intent(in), optional :: rule          !! `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
+            character(len=*), intent(in), optional :: kernel        !! the kernel's token
+            logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: lower         !! the support's lower bound
+            real(real64), intent(in), optional     :: upper         !! the support's upper bound
+            character(len=*), intent(in), optional :: boundary      !! the boundary correction
+            logical, intent(in), optional          :: is_valid(:)   !! `.false.` marks a null
+            real(real64), intent(in), optional     :: weights(:)    !! per-element weights
+            character(len=*), intent(in), optional :: weight_type   !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan       !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null        !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan         !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
+            logical, intent(out), optional         :: ok            !! the estimate is defined
+            integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
         end subroutine kde_fit_f32
 
     end interface
@@ -407,6 +505,48 @@ module parquet_kde
             real(real64), intent(in), optional :: cut  !! bandwidths beyond the data, by default
         end subroutine kde_curve
 
+        !> Every retained point's bandwidth: `call k%bandwidths(h, [x])`, in the object's own
+        !! ascending order, with the points themselves in `x` when it is given.
+        !!
+        !! Every bandwidth is the global one unless the fit is adaptive. `size(h)` and `size(x)`
+        !! other than `%n_valid()` abort. On an undefined estimate `h` is NaN, and so is `x` where
+        !! no point was kept.
+        module subroutine kde_bandwidths(self, h, x)
+            implicit none
+            class(pf_kde), intent(in)           :: self !! the fitted estimate
+            real(real64), intent(out)           :: h(:) !! each retained point's bandwidth
+            real(real64), intent(out), optional :: x(:) !! the retained points, ascending
+        end subroutine kde_bandwidths
+
+        !> The bandwidth the adaptive rule gives a point at `x`: `call k%bandwidth_at(x, h)`, read
+        !! from the pilot exactly as `%fit` read it for each retained point; the global bandwidth
+        !! when the fit is not adaptive. A quiet NaN at a NaN `x` or on an undefined estimate.
+        module subroutine kde_bandwidth_at_r0(self, x, h)
+            implicit none
+            class(pf_kde), intent(in) :: self !! the fitted estimate
+            real(real64), intent(in)  :: x    !! the point
+            real(real64), intent(out) :: h    !! its bandwidth
+        end subroutine kde_bandwidth_at_r0
+
+        !> The bandwidth the rule gives each point of `x`: `call k%bandwidth_at(x, h)`.
+        !! `size(h) /= size(x)` aborts.
+        module subroutine kde_bandwidth_at_r1(self, x, h)
+            implicit none
+            class(pf_kde), intent(in) :: self !! the fitted estimate
+            real(real64), intent(in)  :: x(:) !! the points
+            real(real64), intent(out) :: h(:) !! the bandwidth at each
+        end subroutine kde_bandwidth_at_r1
+
+        !> A copy of the pilot an adaptive fit read its bandwidths from: `call k%pilot(g)`. Given to
+        !! `pf_kde_grid%init(pilot=g)` with the same global bandwidth and `alpha`, it gives every
+        !! point the bandwidth `%fit` gave it. Aborts on a fit that is not adaptive; an adaptive fit
+        !! with nothing to build a pilot from answers a grid that was never initialised.
+        module subroutine kde_pilot_copy(self, g)
+            implicit none
+            class(pf_kde), intent(in)       :: self !! the fitted estimate
+            type(pf_kde_grid), intent(out)  :: g    !! the pilot
+        end subroutine kde_pilot_copy
+
         !> The resolved global bandwidth, after `adjust`: the kernel's standard deviation. NaN
         !! when a rule could not produce one.
         module function kde_bandwidth(self) result(h)
@@ -487,7 +627,7 @@ module parquet_kde
             logical                   :: res  !! it is fitted
         end function kde_is_fitted
 
-        !> `.true.` when the fit gave each point its own bandwidth.
+        !> `.true.` when the fit was asked for the adaptive kernel.
         module function kde_is_adaptive(self) result(res)
             implicit none
             class(pf_kde), intent(in) :: self !! the fitted estimate
@@ -495,7 +635,8 @@ module parquet_kde
         end function kde_is_adaptive
 
         !> Writes a one-block summary: `call k%print([unit])`. The kernel, the rule, the
-        !! bandwidth, the counts, the support and the correction. Silenced by
+        !! bandwidth, the counts, the support and the correction, and the adaptive rule's settings
+        !! and the range of its bandwidths. Silenced by
         !! `verbosity = "silent"`; written to `unit` or, by default, where `message_stream` says.
         !! An unfitted object prints one line saying so rather than aborting.
         module subroutine kde_print(self, unit)
@@ -516,26 +657,33 @@ module parquet_kde
 
     interface
 
-        !> Fixes the grid: `call g%init(ncells, xmin, xmax, bandwidth, [kernel], [lower], [upper],
-        !! [boundary])`.
+        !> Fixes the grid: `call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha],
+        !! [bandwidth_max], [lower], [upper], [boundary])`.
         !!
         !! `ncells` cells of width `step = (xmax - xmin)/ncells` span `[xmin, xmax]`, cell `i`
         !! centred on `xmin + (i - 1/2)*step`. `bandwidth` is the kernel's standard deviation and is
-        !! always a number: a grid has no data to apply a rule to before the points arrive. `kernel`,
-        !! `lower`, `upper` and `boundary` are as `pf_kde%fit` takes them, and the range must lie
-        !! inside the support. Every accumulated point and count is discarded; a grid may be
-        !! initialised again.
-        module subroutine grid_init(self, ncells, xmin, xmax, bandwidth, kernel, lower, upper, boundary)
+        !! always a number: a grid has no data to apply a rule to before the points arrive. `pilot`
+        !! selects the adaptive kernel: a grid with points in it, whose range covers this one's,
+        !! from which each point `%add` accepts takes the bandwidth `bandwidth * (p(x)/g)**(-alpha)`;
+        !! it is copied, so the caller may discard it. `alpha` (default 0.5) and `bandwidth_max` are
+        !! as `pf_kde%fit` takes them and need `pilot`. `kernel`, `lower`, `upper` and `boundary`
+        !! are as `pf_kde%fit` takes them, and the range must lie inside the support. Every
+        !! accumulated point and count is discarded; a grid may be initialised again.
+        module subroutine grid_init(self, ncells, xmin, xmax, bandwidth, kernel, pilot, alpha, &
+                bandwidth_max, lower, upper, boundary)
             implicit none
-            class(pf_kde_grid), intent(inout)      :: self      !! the grid; reset
-            integer, intent(in)                    :: ncells    !! cells, at least 1; held in memory
-            real(real64), intent(in)               :: xmin      !! the first cell's left edge
-            real(real64), intent(in)               :: xmax      !! the last cell's right edge
-            real(real64), intent(in)               :: bandwidth !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: kernel    !! the kernel's token
-            real(real64), intent(in), optional     :: lower     !! the support's lower bound
-            real(real64), intent(in), optional     :: upper     !! the support's upper bound
-            character(len=*), intent(in), optional :: boundary  !! the boundary correction
+            class(pf_kde_grid), intent(inout)       :: self          !! the grid; reset
+            integer, intent(in)                     :: ncells        !! cells, at least 1; held in memory
+            real(real64), intent(in)                :: xmin          !! the first cell's left edge
+            real(real64), intent(in)                :: xmax          !! the last cell's right edge
+            real(real64), intent(in)                :: bandwidth     !! the kernel's standard deviation
+            character(len=*), intent(in), optional  :: kernel        !! the kernel's token
+            type(pf_kde_grid), intent(in), optional :: pilot         !! the pilot of the adaptive kernel
+            real(real64), intent(in), optional      :: alpha         !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional      :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional      :: lower         !! the support's lower bound
+            real(real64), intent(in), optional      :: upper         !! the support's upper bound
+            character(len=*), intent(in), optional  :: boundary      !! the boundary correction
         end subroutine grid_init
 
         !> Accumulates one `real64` point: `call g%add(x, [is_valid], [weights], [skipnan],
@@ -607,8 +755,9 @@ module parquet_kde
         end subroutine grid_add_f32_r1
 
         !> Adds another grid's accumulation and counts to this one: `call g%merge(other)`. The two
-        !! must share the number of cells, the range, the bandwidth, the kernel, the support and
-        !! the boundary correction, or the call aborts naming the first that differs. One grid per
+        !! must share the number of cells, the range, the bandwidth, the kernel, the support, the
+        !! boundary correction and the pilot -- the same copy, cell for cell, with the same `alpha`
+        !! and `bandwidth_max` -- or the call aborts naming the first that differs. One grid per
         !! thread, merged at the end, is how a caller's own threads accumulate one estimate.
         module subroutine grid_merge(self, other)
             implicit none
@@ -796,7 +945,7 @@ module parquet_kde
             logical                        :: res  !! it is initialised
         end function grid_is_initialised
 
-        !> `.true.` when each point takes its own bandwidth.
+        !> `.true.` when each point takes its own bandwidth, from the pilot `%init` was given.
         module function grid_is_adaptive(self) result(res)
             implicit none
             class(pf_kde_grid), intent(in) :: self !! the grid
@@ -804,7 +953,8 @@ module parquet_kde
         end function grid_is_adaptive
 
         !> Writes a one-block summary: `call g%print([unit])`. The geometry, the kernel, the
-        !! bandwidth, the counts, the support and the correction. Silenced by
+        !! bandwidth, the counts, the support and the correction, and the adaptive rule's settings
+        !! and its pilot's geometry. Silenced by
         !! `verbosity = "silent"`; written to `unit` or, by default, where `message_stream` says.
         !! An uninitialised grid prints one line saying so rather than aborting.
         module subroutine grid_print(self, unit)
@@ -819,6 +969,67 @@ module parquet_kde
             implicit none
             class(pf_kde_grid), intent(inout) :: self !! the grid
         end subroutine grid_clear
+
+    end interface
+
+    ! ---- the adaptive rule's workers, implemented in parquet_kde_grid.f90 --------------------
+
+    interface
+
+        !> Builds the pilot `pf_kde%fit(adaptive=.true.)` reads: a grid of the survivors `x`,
+        !! ascending, at the global bandwidth `h`, with the fit's kernel, support and correction.
+        !!
+        !! Its range reaches `KDE_PILOT_REACH` bandwidths beyond the extreme points, clipped to the
+        !! support, and its cells are `1/KDE_PILOT_PER_H` of a bandwidth wide, their number clamped
+        !! to `[KDE_PILOT_MIN_CELLS, KDE_PILOT_MAX_CELLS]` unless
+        !! `parquet_debug_set_kde_pilot_cells` forces one. The deposit is cut into pieces the sample
+        !! and the pilot decide, never the team, so the pilot's bits do not depend on `threads`.
+        !! `ok` is `.false.` only when no range can be represented, which takes points beyond half
+        !! the largest number.
+        module subroutine kde_build_pilot(g, x, w, weighted, h, kernel_code, has_lower, lo, has_upper, &
+                hi, boundary_code, w_total, threads, ok)
+            implicit none
+            type(pf_kde_grid), intent(inout) :: g             !! the pilot; set up afresh
+            real(real64), intent(in)         :: x(:)          !! the survivors, ascending, inside the support
+            real(real64), intent(in)         :: w(:)          !! their weights, when weighted
+            logical, intent(in)              :: weighted      !! `w` holds one weight per survivor
+            real(real64), intent(in)         :: h             !! the global bandwidth
+            integer, intent(in)              :: kernel_code   !! the kernel
+            logical, intent(in)              :: has_lower     !! a lower bound was given
+            real(real64), intent(in)         :: lo            !! the lower bound
+            logical, intent(in)              :: has_upper     !! an upper bound was given
+            real(real64), intent(in)         :: hi            !! the upper bound
+            integer, intent(in)              :: boundary_code !! the correction
+            real(real64), intent(in)         :: w_total       !! the survivors' total weight
+            integer, intent(in), optional    :: threads       !! the team for the deposit
+            logical, intent(out)             :: ok            !! a range could be represented
+        end subroutine kde_build_pilot
+
+        !> Sets the adaptive rule from a pilot grid: copies its cells into the look-up table and
+        !! forms `log g`, the mean of `log p` over the pilot's own density, and the smallest
+        !! positive cell density, the stand-in for a point the pilot reads as zero. The pilot must
+        !! hold weight in some cell unless it is poisoned, which the callers check.
+        module subroutine kde_adapt_set(a, pilot, alpha, has_bmax, bmax)
+            implicit none
+            type(kde_adapt), intent(out)  :: a        !! the rule
+            type(pf_kde_grid), intent(in) :: pilot    !! the pilot
+            real(real64), intent(in)      :: alpha    !! the sensitivity, in `[0, 1]`
+            logical, intent(in)           :: has_bmax !! a cap was given
+            real(real64), intent(in)      :: bmax     !! the cap
+        end subroutine kde_adapt_set
+
+        !> The bandwidth the adaptive rule `a` gives each point of `x` under the global bandwidth
+        !! `h`: `h * (p(x)/g)**(-alpha)`, with `p` the pilot interpolated between its centres, and
+        !! capped at `bandwidth_max`. Exactly `h` when `alpha = 0`. Where the pilot reads zero the
+        !! answer is the cap, or without one the pilot's smallest positive cell density stands in.
+        !! NaN at a NaN point; `+Infinity` where the bandwidth is too large to represent.
+        module subroutine kde_adapt_bandwidths(a, h, x, hb)
+            implicit none
+            type(kde_adapt), intent(in) :: a     !! the rule
+            real(real64), intent(in)    :: h     !! the global bandwidth
+            real(real64), intent(in)    :: x(:)  !! the points
+            real(real64), intent(out)   :: hb(:) !! the bandwidth at each; `size(x)` elements
+        end subroutine kde_adapt_bandwidths
 
     end interface
 
@@ -895,6 +1106,16 @@ module parquet_kde
             logical                  :: res !! it is finite and positive
         end function kde_positive_finite
 
+        !> `.true.` for a bandwidth the estimate can use: above zero, and finite once multiplied by
+        !! the kernel's support radius, which is how far a kernel of it reaches. An adaptive rule
+        !! can produce one that is neither, by overflow or underflow.
+        pure module function kde_bandwidth_usable(code, h) result(res)
+            implicit none
+            integer, intent(in)      :: code !! the kernel
+            real(real64), intent(in) :: h    !! the bandwidth
+            logical                  :: res  !! it can be used
+        end function kde_bandwidth_usable
+
         !> `.true.` when a value that is not NaN lies outside a support: beyond a bound that was
         !! given, or infinite, which is outside every support.
         pure module function kde_outside(has_lower, lo, has_upper, hi, v) result(res)
@@ -953,7 +1174,7 @@ module parquet_kde
 
     end interface
 
-    ! ---- the test hook, implemented in parquet_kde_core.f90 --------------------------------
+    ! ---- the test hooks, implemented in parquet_kde_core.f90 -------------------------------
 
     interface
 
@@ -968,6 +1189,34 @@ module parquet_kde
             implicit none
             integer :: n !! the team size
         end function parquet_debug_kde_threads_used
+
+        !> Forces the number of cells in the pilot `pf_kde%fit(adaptive=.true.)` builds; `n <= 0`
+        !! restores the rule (a quarter of a bandwidth per cell, clamped to `[64, 65536]`).
+        !!
+        !! Test-only, and public for that reason alone: the rule gives a small sample a pilot too
+        !! coarse to reproduce an exact pilot to more than three digits, and a finer one is how a
+        !! test reaches the rule's own arithmetic. Process-global and unsynchronised; the suite that
+        !! calls it runs serially.
+        module subroutine parquet_debug_set_kde_pilot_cells(n)
+            implicit none
+            integer, intent(in) :: n !! the cell count; `<= 0` for the rule
+        end subroutine parquet_debug_set_kde_pilot_cells
+
+        !> Nanoseconds the most recent `pf_kde%fit` spent in each of its three costly phases: the
+        !! sort, the pilot (built and summarised) and the bandwidths (each point's, and its mass
+        !! inside the support). A fixed fit reports zero for the pilot.
+        !!
+        !! Test-and-bench only, and public for that reason: `bench/benchmark_kde.sh`'s `adaptive`
+        !! mode reads it, so that its phase table is one run rather than a subtraction between
+        !! runs. The clock is `system_clock` at `int64` kinds, read at the phase boundaries, so a
+        !! phase shorter than one of its counts reads 0. Process-global and unsynchronised: read it
+        !! from a serial context straight after the fit it describes.
+        module subroutine parquet_debug_kde_fit_nanos(sort, pilot, lookup)
+            implicit none
+            integer(int64), intent(out) :: sort   !! ordering the survivors and their running weight
+            integer(int64), intent(out) :: pilot  !! building the pilot and its look-up table
+            integer(int64), intent(out) :: lookup !! each point's bandwidth and mass inside the support
+        end subroutine parquet_debug_kde_fit_nanos
 
     end interface
 

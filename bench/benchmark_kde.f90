@@ -1,6 +1,7 @@
 !> What `parquet_kde` costs: `pf_kde`'s exact queries against the bandwidth, `pf_kde_grid`'s deposit
-!> against the cells one kernel reaches, a merge against the grid's size, and how fast the grid
-!> converges to the exact estimate as its cells shrink.
+!> against the cells one kernel reaches, a merge against the grid's size, how fast the grid
+!> converges to the exact estimate as its cells shrink, and what the adaptive kernel adds to a fit
+!> and to a query.
 !!
 !! Driven by `bench/benchmark_kde.sh`, whose header carries the usage and what each column means.
 !! Every timed job is repeated until one lap lasts at least `MIN_LAP` seconds and the fastest of
@@ -11,7 +12,7 @@
 program benchmark_kde
 
     use iso_fortran_env, only : real64, int64, error_unit
-    use parquet_kde, only : pf_kde, pf_kde_grid
+    use parquet_kde, only : pf_kde, pf_kde_grid, parquet_debug_kde_fit_nanos
     use parquet_argsort, only : pf_argsort
 
     implicit none
@@ -43,6 +44,8 @@ program benchmark_kde
         call run_grid(rounds, npoints, failures)
     case ("accuracy")
         call run_accuracy(npoints, nqueries)
+    case ("adaptive")
+        call run_adaptive(rounds, npoints, nqueries)
     case default
         write(error_unit, '(a)') "benchmark_kde: unknown mode '" // trim(mode) // "'"
         error stop 1
@@ -88,7 +91,7 @@ contains
                 read(val, *) nqueries
             case default
                 write(error_unit, '(a)') "benchmark_kde: unknown option '" // trim(arg(1:eq - 1)) // "'"
-                write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|accuracy] " // &
+                write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|accuracy|adaptive] " // &
                     "[--rounds=N] [--points=N] [--queries=N]"
                 error stop 1
             end select
@@ -445,5 +448,127 @@ contains
         end do
 
     end subroutine run_accuracy
+
+    ! ---- adaptive ------------------------------------------------------------------------------
+
+    !> What the adaptive kernel adds, per kernel: `%fit` fixed and adaptive, on one thread, with the
+    !> adaptive fit's three phases as the library times them (the sort, the pilot, each point's
+    !> bandwidth and mass), the pilot's cells, the spread of the bandwidths, and `%pdf` per query
+    !> point under each fit. The bandwidth is 1/200 of the sample's range, so the pilot's cells are
+    !> 800 across it.
+    subroutine run_adaptive(rounds, n, m)
+        integer, intent(in)        :: rounds !! timed laps per figure
+        integer(int64), intent(in) :: n      !! the sample's size
+        integer(int64), intent(in) :: m      !! query points per call
+
+        type(pf_kde) :: kf, ka
+        type(pf_kde_grid) :: pilot
+        real(real64), allocatable :: x(:), xq(:), f(:), hb(:)
+        real(real64) :: lo, hi, h, best_fixed, best_adapt, best_pf, best_pa, checksum
+        integer(int64) :: best_ns(3)
+        integer :: kk
+
+        call sample(n, x)
+        lo = minval(x)
+        hi = maxval(x)
+        h = (hi - lo)/200.0_real64
+        allocate(xq(m), f(m), hb(n))
+        call spread(lo, hi, xq)
+        f = 0.0_real64
+        checksum = 0.0_real64
+
+        print '(a)', "=== pf_kde%fit adaptive against fixed: milliseconds, one thread ==="
+        print '(a,i0,a,i0,a)', "sample of ", n, " points, bandwidth = range/200, fastest of ", rounds, " laps"
+        print '(a)', "sort, pilot, lookup: the adaptive fit's phases (parquet_debug_kde_fit_nanos); pdf: " // &
+            "microseconds per query point"
+        print '(a)', ""
+        print '(a)', "  kernel        fixed  adaptive      sort     pilot    lookup   cells  h_j/h min  max" // &
+            "   pdf fixed  pdf adapt"
+        do kk = 1, 4
+            best_fixed = time_fit(kf, x, h, trim(KERNELS(kk)), .false., rounds, best_ns)
+            best_adapt = time_fit(ka, x, h, trim(KERNELS(kk)), .true., rounds, best_ns)
+            call ka%pilot(pilot)
+            call ka%bandwidths(hb)
+            best_pf = time_pdf(kf, xq, f, rounds, checksum)
+            best_pa = time_pdf(ka, xq, f, rounds, checksum)
+            print '(2x,a12,5f10.2,i8,2f7.3,2f11.3)', KERNELS(kk), 1.0e3_real64*best_fixed, 1.0e3_real64*best_adapt, &
+                1.0e-6_real64*real(best_ns(1), real64), 1.0e-6_real64*real(best_ns(2), real64), &
+                1.0e-6_real64*real(best_ns(3), real64), pilot%ncells(), minval(hb)/h, maxval(hb)/h, &
+                1.0e6_real64*best_pf/real(m, real64), 1.0e6_real64*best_pa/real(m, real64)
+        end do
+        print '(a)', ""
+        print '(a,es22.14)', "checksum ", checksum
+
+    end subroutine run_adaptive
+
+    !> The fastest of `rounds` fits of `x` on one thread, fixed or adaptive, into `k`; for the
+    !> adaptive fit, the library's phase times of the fastest lap go to `best_ns`.
+    function time_fit(k, x, h, kernel, adaptive, rounds, best_ns) result(best)
+        type(pf_kde), intent(inout)   :: k          !! the estimate; refitted every lap
+        real(real64), intent(in)      :: x(:)       !! the sample
+        real(real64), intent(in)      :: h          !! the bandwidth
+        character(len=*), intent(in)  :: kernel     !! the kernel's token
+        logical, intent(in)           :: adaptive   !! fit the adaptive kernel
+        integer, intent(in)           :: rounds     !! laps
+        integer(int64), intent(inout) :: best_ns(3) !! the fastest adaptive lap's phases
+        real(real64)                  :: best       !! seconds, the fastest lap
+
+        real(real64) :: t0, t
+        integer(int64) :: ns(3)
+        integer :: lap
+
+        best = huge(1.0_real64)
+        do lap = 1, rounds
+            t0 = clock()
+            if (adaptive) then
+                call k%fit(x, bandwidth=h, kernel=kernel, adaptive=.true., threads=1)
+            else
+                call k%fit(x, bandwidth=h, kernel=kernel, threads=1)
+            end if
+            t = clock() - t0
+            if (adaptive) call parquet_debug_kde_fit_nanos(ns(1), ns(2), ns(3))
+            if (t < best) then
+                best = t
+                if (adaptive) best_ns = ns
+            end if
+        end do
+
+    end function time_fit
+
+    !> The fastest of `rounds` calls of `k%pdf` over `xq`, repeated until a lap is long enough to
+    !> time, in seconds per call; the answer is folded into `checksum`.
+    function time_pdf(k, xq, f, rounds, checksum) result(best)
+        type(pf_kde), intent(in)    :: k        !! the fitted estimate
+        real(real64), intent(in)    :: xq(:)    !! the query points
+        real(real64), intent(inout) :: f(:)     !! the density at each, written before any lap
+        integer, intent(in)         :: rounds   !! laps
+        real(real64), intent(inout) :: checksum !! the keep-it-live sum
+        real(real64)                :: best     !! seconds per call, the fastest lap
+
+        real(real64) :: t0, t
+        integer(int64) :: reps, r
+        integer :: lap
+
+        reps = 1_int64
+        do
+            t0 = clock()
+            do r = 1_int64, reps
+                call k%pdf(xq, f)
+            end do
+            t = clock() - t0
+            if (t >= MIN_LAP) exit
+            reps = 2_int64*reps
+        end do
+        best = t/real(reps, real64)
+        do lap = 2, rounds
+            t0 = clock()
+            do r = 1_int64, reps
+                call k%pdf(xq, f)
+            end do
+            best = min(best, (clock() - t0)/real(reps, real64))
+        end do
+        checksum = checksum + sum(f)
+
+    end function time_pdf
 
 end program benchmark_kde

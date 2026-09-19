@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # What `parquet_kde` costs: `pf_kde`'s exact queries against the bandwidth, `pf_kde_grid`'s deposit
-# against the cells one kernel reaches and its merge against the grid's size, and how fast the grid
-# converges to the exact estimate.
+# against the cells one kernel reaches and its merge against the grid's size, how fast the grid
+# converges to the exact estimate, and what the adaptive kernel adds.
 #
-# Three modes, all driving `bench/benchmark_kde.f90`:
+# Four modes, all driving `bench/benchmark_kde.f90`:
 #
 #   evaluate  `pf_kde%pdf` and `%cdf` in microseconds per query point, one call over an array of
 #             QUERIES points spread across the sample, per kernel, at bandwidths of 1/50, 1/200 and
@@ -30,22 +30,34 @@
 #             kernels; the Epanechnikov estimate has kinks and the box estimate steps, and both
 #             converge more slowly. `centres` is the largest gap at a centre over the peak density.
 #
-# The guide page quotes no figure from here, only statements `evaluate` and `accuracy` must keep
-# true: a query costs in proportion to the points within reach of it, and the grid converges as the
-# square of its cell width for the two smooth kernels. Re-read them against a new run.
+#   adaptive  `pf_kde%fit` fixed and adaptive, in milliseconds on ONE thread, per kernel, at a
+#             bandwidth of 1/200 of the sample's range, with the adaptive fit's three phases as the
+#             library times them (`parquet_debug_kde_fit_nanos`): `sort` orders the survivors,
+#             `pilot` deposits the pilot grid and reads its table, `lookup` gives each point its
+#             bandwidth and its mass inside the support. `cells` is the pilot's, `h_j/h` the range
+#             of the bandwidths over the global one, and `pdf` the microseconds per query point
+#             under each fit: an adaptive query sums the points within reach of the WIDEST kernel,
+#             so its cost follows `max`.
+#
+# The guide page quotes no figure from here, only statements `evaluate`, `accuracy` and `adaptive`
+# must keep true: a query costs in proportion to the points within reach of it (of the widest
+# kernel, under the adaptive kernel), the grid converges as the square of its cell width for the
+# two smooth kernels, and the adaptive fit costs one grid pass and one look-up per point beyond the
+# fixed one. Re-read them against a new run.
 #
 # Usage:
 #   bench/benchmark_kde.sh                     # every mode
 #   MODE=grid bench/benchmark_kde.sh           # one of them
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=all          evaluate, grid, accuracy, or all.
+#   MODE=all          evaluate, grid, accuracy, adaptive, or all.
 #   ROUNDS=5          Timed laps per figure; the FASTEST is kept, never the mean, because the slow
 #                     laps are the machine's other work rather than this code's.
-#   POINTS=100000     The sample's size in `evaluate` and `accuracy`.
+#   POINTS=100000     The sample's size in `evaluate`, `accuracy` and `adaptive`.
 #   GRID_POINTS=1000000
 #                     The sample's size in `grid`.
-#   QUERIES=10000     Query points per call in `evaluate`, and the error's points in `accuracy`.
+#   QUERIES=10000     Query points per call in `evaluate` and `adaptive`, and the error's points in
+#                     `accuracy`.
 #
 # Name the machine and the toolchain when reporting a figure from this script
 # (`tools/machine_report.sh` prints both), and quote the load average: this repository's reference
@@ -63,8 +75,8 @@ GRID_POINTS="${GRID_POINTS:-1000000}"
 QUERIES="${QUERIES:-10000}"
 
 case "$MODE" in
-    evaluate|grid|accuracy|all) ;;
-    *) echo "benchmark_kde.sh: MODE must be evaluate, grid, accuracy or all (got '$MODE')" >&2
+    evaluate|grid|accuracy|adaptive|all) ;;
+    *) echo "benchmark_kde.sh: MODE must be evaluate, grid, accuracy, adaptive or all (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -104,5 +116,11 @@ fi
 if [[ "$MODE" == "accuracy" || "$MODE" == "all" ]]; then
     fpm run benchmark_kde --profile release -- \
         --mode=accuracy --points="$POINTS" --queries="$QUERIES"
+    echo
+fi
+
+if [[ "$MODE" == "adaptive" || "$MODE" == "all" ]]; then
+    fpm run benchmark_kde --profile release -- \
+        --mode=adaptive --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
     echo
 fi

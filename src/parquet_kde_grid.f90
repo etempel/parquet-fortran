@@ -3,7 +3,8 @@
 !===========================================
 !
 !> `pf_kde_grid`: the set-up, the deposit, the merge, the interpolated queries, the accessors and
-!> the printer.
+!> the printer; and the adaptive rule both forms read -- the pilot `pf_kde%fit` builds, the table
+!> a pilot is copied into, and the look-up that turns it into each point's bandwidth.
 !!
 !! **Every point deposits exactly its weight.** A point's kernel is evaluated at every cell centre
 !! it reaches -- with its mirror images under `"reflect"` -- and those values are scaled to sum to
@@ -31,7 +32,15 @@
 !! the survivors and deposits it into a private partial grid, and the partial grids are added to
 !! the grid in thread order afterwards. The partition depends on the survivor count and the team
 !! size alone, so one team size answers the same bits every time, and two team sizes group the
-!! additions differently and differ by rounding.
+!! additions differently and differ by rounding. The pilot `pf_kde%fit` builds is cut into pieces
+!! the sample and the pilot decide instead, which any team takes in turn, so that the fit answers
+!! the same bits at every `threads=`.
+!!
+!! **The adaptive rule reads its pilot through one table and one look-up.** A pilot's cells are
+!! copied into a `kde_adapt`, and a point's bandwidth is `h * (p(x)/g)**(-alpha)` with `p` the
+!! table interpolated exactly as `%pdf` interpolates a grid -- the same procedure, `interp_cells` --
+!! and `log g` the mean of `log p` over the pilot's own density. `pf_kde%fit` and `%init(pilot=)`
+!! both build the table here and both read it here, so one pilot gives both forms the same bits.
 submodule (parquet_kde) parquet_kde_grid
 
     implicit none
@@ -44,15 +53,122 @@ submodule (parquet_kde) parquet_kde_grid
 contains
 
     ! ==========================================================================================
+    ! The adaptive rule, for both forms; above every call to it, as nagfor requires
+    ! ==========================================================================================
+
+    module procedure kde_adapt_set
+
+        integer :: i
+        real(real64) :: p, s1, s2
+
+        a%on = .true.
+        a%alpha = alpha
+        a%has_bmax = has_bmax
+        a%bmax = 0.0_real64
+        if (has_bmax) a%bmax = bmax
+        a%nc = pilot%nc
+        a%x0 = pilot%x0
+        a%x1 = pilot%x1
+        a%dx = pilot%dx
+        a%wt = pilot%w_total
+        a%poisoned = pilot%poisoned
+        allocate(a%acc(pilot%nc))
+        do i = 1, pilot%nc
+            a%acc(i) = pilot%acc(i)
+        end do
+        a%logg = 0.0_real64
+        a%pmin = 0.0_real64
+        if (a%poisoned) return
+
+        ! `log g` is the mean of `log p` over the pilot's own density: the population form of the
+        ! geometric mean of the pilot at the sample points, which needs no second pass over them.
+        ! It is taken over the density the cells hold, so weight the pilot counted beyond its range
+        ! does not pull it towards zero.
+        s1 = 0.0_real64
+        s2 = 0.0_real64
+        a%pmin = huge(1.0_real64)
+        do i = 1, a%nc
+            if (.not. (a%acc(i) > 0.0_real64)) cycle
+            p = cell_value(a%acc(i), a%wt)
+            if (.not. (p > 0.0_real64)) cycle
+            s1 = s1 + p
+            s2 = s2 + p*log(p)
+            if (p < a%pmin) a%pmin = p
+        end do
+        a%logg = s2/s1
+
+    end procedure kde_adapt_set
+
+    module procedure kde_adapt_bandwidths
+
+        integer(int64) :: i
+
+        do i = 1_int64, size(x, kind=int64)
+            hb(i) = rule_bandwidth(a, h, x(i))
+        end do
+
+    end procedure kde_adapt_bandwidths
+
+    module procedure kde_build_pilot
+
+        real(real64) :: a, b, lim, reach, one(1), hb(1)
+        integer(int64) :: m
+        integer :: nc
+
+        m = size(x, kind=int64)
+        ok = .false.
+        ! The range: the reach beyond the extreme points, held inside half the largest number at
+        ! either end so that its width is finite, then clipped to the support. Every bound is
+        ! tested before it is formed: the overflow itself would stop a program under nagfor.
+        lim = 0.5_real64*huge(1.0_real64)
+        a = -lim
+        b = lim
+        if (h <= lim/KDE_PILOT_REACH) then
+            reach = KDE_PILOT_REACH*h
+            if (x(1) > reach - lim) a = x(1) - reach
+            if (x(m) < lim - reach) b = x(m) + reach
+        end if
+        if (has_lower) a = max(a, lo)
+        if (has_upper) b = min(b, hi)
+        if (.not. (a < b)) return
+        ! The cells: a quarter of a bandwidth wide, clamped, unless a test forces their number. A
+        ! range too many bandwidths wide for the count is recognised before the count is formed.
+        if (kde_pilot_cells_forced > 0) then
+            nc = kde_pilot_cells_forced
+        else if ((b - a)/(real(KDE_PILOT_MAX_CELLS, real64)/KDE_PILOT_PER_H) >= h) then
+            nc = KDE_PILOT_MAX_CELLS
+        else
+            nc = int(ceiling(KDE_PILOT_PER_H*((b - a)/h)))
+            nc = min(KDE_PILOT_MAX_CELLS, max(KDE_PILOT_MIN_CELLS, nc))
+        end if
+        call set_geometry(g, nc, a, b, h, kernel_code, boundary_code, has_lower, lo, has_upper, hi)
+        g%adapt = kde_adapt()
+        call empty_grid(g)
+        g%cnt_all = m
+        g%cnt_valid = m
+        g%w_total = w_total
+        hb(1) = h
+        if (weighted) then
+            call deposit(g, x, w, .true., hb, 0_int64, m, threads, pilot_parts(g, m))
+        else
+            one(1) = 1.0_real64
+            call deposit(g, x, one, .false., hb, 0_int64, m, threads, pilot_parts(g, m))
+        end if
+        ok = .true.
+
+    end procedure kde_build_pilot
+
+    ! ==========================================================================================
     ! Set-up and accumulation
     ! ==========================================================================================
 
     module procedure grid_init
 
         character(len=*), parameter :: EP = "pf_kde_grid%init"
-        real(real64) :: step, lo, hi
+        real(real64) :: step, lo, hi, a_alpha, a_bmax
         integer :: kcode, bcode
         logical :: has_lo, has_hi
+        type(kde_adapt) :: rule
 
         if (ncells < 1) call kde_abort(EP, "ncells must be positive")
         if (.not. ieee_is_finite(xmin)) call kde_abort(EP, "xmin and xmax must be finite")
@@ -77,20 +193,25 @@ contains
             if (xmax > hi) call kde_abort(EP, "the grid's range must lie inside the support")
         end if
 
-        self%initialised = .true.
-        self%nc = ncells
-        self%x0 = xmin
-        self%x1 = xmax
-        self%dx = step
-        self%h = bandwidth
-        self%kernel_code = kcode
-        self%boundary_code = bcode
-        self%has_lower = has_lo
-        self%has_upper = has_hi
-        self%lo = lo
-        self%hi = hi
-        if (allocated(self%acc)) deallocate(self%acc)
-        allocate(self%acc(ncells))
+        ! ---- the adaptive rule ----
+        if (present(alpha) .or. present(bandwidth_max)) then
+            if (.not. present(pilot)) call kde_abort(EP, "alpha= and bandwidth_max= need pilot=")
+        end if
+        call check_adaptive_settings(EP, alpha, bandwidth_max, a_alpha, a_bmax)
+        if (present(pilot)) then
+            ! A pilot must have a density to read -- a poisoned one answers NaN, and poisons this
+            ! grid in turn, quietly -- and must cover the range, so that no point inside it reads
+            ! a pilot that was never built there.
+            if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid with points in it")
+            if (.not. pilot%poisoned .and. .not. holds_weight(pilot)) &
+                call kde_abort(EP, "pilot must be an initialised grid with points in it")
+            if (pilot%x0 > xmin .or. pilot%x1 < xmax) call kde_abort(EP, "the pilot must cover this grid's range")
+            ! The table is read out of the pilot before this grid is touched.
+            call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax)
+        end if
+
+        call set_geometry(self, ncells, xmin, xmax, bandwidth, kcode, bcode, has_lo, lo, has_hi, hi)
+        call move_adapt(rule, self%adapt)
         call empty_grid(self)
 
     end procedure grid_init
@@ -98,9 +219,9 @@ contains
     module procedure grid_add_f64_r1
 
         character(len=*), parameter :: EP = "pf_kde_grid%add"
-        real(real64), allocatable :: keep_x(:), keep_w(:)
+        real(real64), allocatable :: keep_x(:), keep_w(:), hb(:)
         real(real64) :: one(1), v, wsum
-        integer(int64) :: nv, nnull, nnan, nout, m, i
+        integer(int64) :: nv, nnull, nnan, nout, m, i, stride
         logical :: saw_nan, weighted
 
         call require_initialised(self, EP)
@@ -149,12 +270,31 @@ contains
         ! A poisoned grid answers NaN whatever arrives later, so nothing more is deposited.
         if (self%poisoned .or. m == 0_int64) return
 
+        ! ---- each point's bandwidth: its own when adaptive, the one for all otherwise ----
+        if (self%adapt%on) then
+            allocate(hb(m))
+            call kde_adapt_bandwidths(self%adapt, self%h, keep_x(1:m), hb)
+            ! A bandwidth the rule could only overflow or underflow to leaves no estimate to
+            ! answer with: the grid is poisoned, as by a kept NaN.
+            do i = 1_int64, m
+                if (.not. kde_bandwidth_usable(self%kernel_code, hb(i))) then
+                    self%poisoned = .true.
+                    return
+                end if
+            end do
+            stride = 1_int64
+        else
+            allocate(hb(1))
+            hb(1) = self%h
+            stride = 0_int64
+        end if
+
         ! ---- the deposit ----
         if (weighted) then
-            call deposit(self, keep_x, keep_w, .true., m, threads)
+            call deposit(self, keep_x, keep_w, .true., hb, stride, m, threads)
         else
             one(1) = 1.0_real64
-            call deposit(self, keep_x, one, .false., m, threads)
+            call deposit(self, keep_x, one, .false., hb, stride, m, threads)
         end if
 
     end procedure grid_add_f64_r1
@@ -209,6 +349,7 @@ contains
         if (self%kernel_code /= other%kernel_code) call kde_abort(EP, "the two grids differ in kernel")
         if (.not. same_support(self, other)) call kde_abort(EP, "the two grids differ in support")
         if (self%boundary_code /= other%boundary_code) call kde_abort(EP, "the two grids differ in boundary")
+        if (.not. same_rule(self%adapt, other%adapt)) call kde_abort(EP, "the two grids differ in pilot")
 
         do i = 1, self%nc
             self%acc(i) = self%acc(i) + other%acc(i)
@@ -418,7 +559,7 @@ contains
 
     module procedure grid_is_adaptive
         call require_initialised(self, "pf_kde_grid%is_adaptive")
-        res = .false.
+        res = self%adapt%on
     end procedure grid_is_adaptive
 
     module procedure grid_print
@@ -458,8 +599,15 @@ contains
         case default
             write(u, '(2x,a,a)') "boundary    ", "none (unbounded)"
         end select
+        if (self%adapt%on) then
+            write(u, '(2x,a,es24.16e3)') "alpha       ", self%adapt%alpha
+            if (self%adapt%has_bmax) write(u, '(2x,a,es23.16e3)') "bandwidth_max", self%adapt%bmax
+            write(u, '(2x,a,i0,a,es24.16e3,a,es24.16e3)') "pilot       ", self%adapt%nc, " cells over", &
+                self%adapt%x0, " to", self%adapt%x1
+        end if
         if (self%poisoned) then
-            write(u, '(2x,a)') "poisoned    a NaN was kept; every query answers NaN"
+            ! A kept NaN, a poisoned pilot or a bandwidth the adaptive rule could not represent.
+            write(u, '(2x,a)') "poisoned    every query answers NaN"
         else if (.not. (self%w_total > 0.0_real64)) then
             write(u, '(2x,a)') "empty       nothing accumulated; %density answers zeros"
         end if
@@ -495,12 +643,13 @@ contains
 
     end subroutine check_probability
 
-    !> Zeroes the accumulation and every count, keeping the geometry.
+    !> Zeroes the accumulation and every count, keeping the geometry and the settings. A grid whose
+    !! pilot is poisoned starts poisoned: its adaptive rule has nothing to read.
     subroutine empty_grid(self)
         class(pf_kde_grid), intent(inout) :: self !! the grid, initialised
 
         self%acc = 0.0_real64
-        self%poisoned = .false.
+        self%poisoned = self%adapt%on .and. self%adapt%poisoned
         self%w_total = 0.0_real64
         self%w_below = 0.0_real64
         self%w_above = 0.0_real64
@@ -526,14 +675,150 @@ contains
 
     end function same_support
 
-    !> Cell `i`'s centre, `xmin + (i - 1/2)*step`: the one spelling of it, so that `%grid`, the
-    !! deposit and the interpolation agree to the bit.
+    !> `.true.` when two adaptive rules are the same: both off, or both on with the same `alpha`
+    !! and cap and a pilot the same cell for cell.
+    pure function same_rule(a, b) result(res)
+        type(kde_adapt), intent(in) :: a   !! one rule
+        type(kde_adapt), intent(in) :: b   !! the other
+        logical                     :: res !! they agree
+
+        integer :: i
+
+        res = a%on .eqv. b%on
+        if (.not. (res .and. a%on)) return
+        res = .false.
+        if (a%alpha /= b%alpha) return
+        if (a%has_bmax .neqv. b%has_bmax) return
+        if (a%has_bmax) then
+            if (a%bmax /= b%bmax) return
+        end if
+        if (a%nc /= b%nc .or. a%x0 /= b%x0 .or. a%x1 /= b%x1 .or. a%wt /= b%wt) return
+        if (a%poisoned .neqv. b%poisoned) return
+        do i = 1, a%nc
+            if (a%acc(i) /= b%acc(i)) return
+        end do
+        res = .true.
+
+    end function same_rule
+
+    !> `.true.` when some cell of a grid holds weight: a density a pilot can be read from.
+    pure function holds_weight(g) result(res)
+        type(pf_kde_grid), intent(in) :: g   !! the grid, initialised
+        logical                       :: res !! a cell holds weight
+
+        integer :: i
+
+        res = .false.
+        if (.not. (g%w_total > 0.0_real64)) return
+        do i = 1, g%nc
+            if (g%acc(i) > 0.0_real64) then
+                res = .true.
+                return
+            end if
+        end do
+
+    end function holds_weight
+
+    !> The adaptive rule's settings `%init` checks, in the canonical order, with their defaults
+    !! filled in: `alpha` in `[0, 1]`, 0.5 when absent, and `bandwidth_max` a finite positive
+    !! number, when given.
+    subroutine check_adaptive_settings(entry, alpha, bandwidth_max, a_alpha, a_bmax)
+        character(len=*), intent(in)       :: entry         !! the binding, for the message
+        real(real64), intent(in), optional :: alpha         !! the caller's sensitivity
+        real(real64), intent(in), optional :: bandwidth_max !! the caller's cap
+        real(real64), intent(out)          :: a_alpha       !! the sensitivity to use
+        real(real64), intent(out)          :: a_bmax        !! the cap, or 0 when absent
+
+        a_alpha = KDE_ALPHA_DEFAULT
+        if (present(alpha)) then
+            ! The NaN first, as its own test: an ordered comparison raises IEEE_INVALID on one.
+            if (alpha /= alpha) call kde_abort(entry, "alpha must lie in [0, 1]")
+            if (alpha < 0.0_real64 .or. alpha > 1.0_real64) call kde_abort(entry, "alpha must lie in [0, 1]")
+            a_alpha = alpha
+        end if
+        a_bmax = 0.0_real64
+        if (present(bandwidth_max)) then
+            if (.not. kde_positive_finite(bandwidth_max)) &
+                call kde_abort(entry, "bandwidth_max must be a finite, positive number")
+            a_bmax = bandwidth_max
+        end if
+
+    end subroutine check_adaptive_settings
+
+    !> Sets a grid's geometry and settings, discarding its cells: what `%init` does once it has
+    !! checked them, and what the pilot builder does with its own.
+    subroutine set_geometry(self, ncells, xmin, xmax, h, kcode, bcode, has_lo, lo, has_hi, hi)
+        class(pf_kde_grid), intent(inout) :: self   !! the grid
+        integer, intent(in)               :: ncells !! the number of cells
+        real(real64), intent(in)          :: xmin   !! the first cell's left edge
+        real(real64), intent(in)          :: xmax   !! the last cell's right edge
+        real(real64), intent(in)          :: h      !! the bandwidth
+        integer, intent(in)               :: kcode  !! the kernel
+        integer, intent(in)               :: bcode  !! the correction
+        logical, intent(in)               :: has_lo !! a lower bound was given
+        real(real64), intent(in)          :: lo     !! the lower bound
+        logical, intent(in)               :: has_hi !! an upper bound was given
+        real(real64), intent(in)          :: hi     !! the upper bound
+
+        self%initialised = .true.
+        self%nc = ncells
+        self%x0 = xmin
+        self%x1 = xmax
+        self%dx = (xmax - xmin)/real(ncells, real64)
+        self%h = h
+        self%kernel_code = kcode
+        self%boundary_code = bcode
+        self%has_lower = has_lo
+        self%has_upper = has_hi
+        self%lo = lo
+        self%hi = hi
+        if (allocated(self%acc)) deallocate(self%acc)
+        allocate(self%acc(ncells))
+
+    end subroutine set_geometry
+
+    !> Moves an adaptive rule into a grid, leaving the source empty; an absent rule is `off`.
+    subroutine move_adapt(from, to)
+        type(kde_adapt), intent(inout) :: from !! the rule; left empty
+        type(kde_adapt), intent(inout) :: to   !! the grid's rule; replaced
+
+        if (allocated(to%acc)) deallocate(to%acc)
+        to%on = from%on
+        to%alpha = from%alpha
+        to%has_bmax = from%has_bmax
+        to%bmax = from%bmax
+        to%nc = from%nc
+        to%x0 = from%x0
+        to%x1 = from%x1
+        to%dx = from%dx
+        to%wt = from%wt
+        to%poisoned = from%poisoned
+        to%logg = from%logg
+        to%pmin = from%pmin
+        if (allocated(from%acc)) call move_alloc(from%acc, to%acc)
+
+    end subroutine move_adapt
+
+    !> Cell `i`'s centre on a grid starting at `x0` with cells `dx` wide, `x0 + (i - 1/2)*dx`: the
+    !! one spelling of it, so that `%grid`, the deposit, the interpolation and the pilot's look-up
+    !! agree to the bit.
+    pure function centre_at(x0, dx, i) result(c)
+        real(real64), intent(in) :: x0 !! the first cell's left edge
+        real(real64), intent(in) :: dx !! the cell width
+        integer, intent(in)      :: i  !! the cell
+        real(real64)             :: c  !! its centre
+
+        c = x0 + (real(i, real64) - 0.5_real64)*dx
+
+    end function centre_at
+
+    !> Cell `i`'s centre on this grid.
     pure function centre(self, i) result(c)
         class(pf_kde_grid), intent(in) :: self !! the grid
         integer, intent(in)            :: i    !! the cell
         real(real64)                   :: c    !! its centre
 
-        c = self%x0 + (real(i, real64) - 0.5_real64)*self%dx
+        c = centre_at(self%x0, self%dx, i)
 
     end function centre
 
@@ -603,30 +888,37 @@ contains
     end function add_team
 
     !> Deposits the survivors `x(1:m)` -- with their weights `w(1:m)` when `weighted`, `w` unread
-    !! otherwise -- serially or on a team with one partial grid per thread.
-    subroutine deposit(self, x, w, weighted, m, threads)
+    !! otherwise, and the bandwidth of survivor `j` at `hb(1 + (j - 1)*hstride)` -- serially or on
+    !! a team with one partial grid per thread. With `parts`, the survivors are cut into that many
+    !! pieces whatever the team, which the team takes in turn: the pilot's deposit, whose bits
+    !! must not depend on the thread count.
+    subroutine deposit(self, x, w, weighted, hb, hstride, m, threads, parts)
 #ifdef _OPENMP
         use omp_lib, only : omp_get_thread_num, omp_get_num_threads
 #endif
-        class(pf_kde_grid), intent(inout) :: self     !! the grid
-        real(real64), intent(in)          :: x(:)     !! the survivors, inside the support
-        real(real64), intent(in)          :: w(:)     !! their weights, when weighted
-        logical, intent(in)               :: weighted !! `w` holds one weight per survivor
-        integer(int64), intent(in)        :: m        !! how many survivors
-        integer, intent(in), optional     :: threads  !! the caller's request
+        class(pf_kde_grid), intent(inout)    :: self     !! the grid
+        real(real64), intent(in)             :: x(:)     !! the survivors, inside the support
+        real(real64), intent(in)             :: w(:)     !! their weights, when weighted
+        logical, intent(in)                  :: weighted !! `w` holds one weight per survivor
+        real(real64), intent(in)             :: hb(:)    !! the bandwidths, one per survivor or one for all
+        integer(int64), intent(in)           :: hstride  !! 1 for one per survivor, 0 for one for all
+        integer(int64), intent(in)           :: m        !! how many survivors
+        integer, intent(in), optional        :: threads  !! the caller's request
+        integer(int64), intent(in), optional :: parts    !! the pieces, fixed in advance
 
         real(real64), allocatable :: part(:, :), pbelow(:), pabove(:)
         integer(int64) :: team, lo_t, hi_t
         integer :: t, nt, i
 
+        if (present(parts)) then
+            call deposit_parts(self, x, w, weighted, hb, hstride, m, threads, parts)
+            return
+        end if
         team = add_team(self, threads, m)
         if (team <= 1_int64) then
             kde_team_used = 1
-            if (weighted) then
-                call deposit_range(self, x(1:m), w(1:m), .true., self%acc, self%w_below, self%w_above)
-            else
-                call deposit_range(self, x(1:m), w, .false., self%acc, self%w_below, self%w_above)
-            end if
+            call deposit_range(self, x, w, weighted, hb, hstride, 1_int64, m, self%acc, self%w_below, &
+                self%w_above)
             return
         end if
 
@@ -652,13 +944,8 @@ contains
         part(:, t) = 0.0_real64
         pbelow(t) = 0.0_real64
         pabove(t) = 0.0_real64
-        if (hi_t >= lo_t) then
-            if (weighted) then
-                call deposit_range(self, x(lo_t:hi_t), w(lo_t:hi_t), .true., part(:, t), pbelow(t), pabove(t))
-            else
-                call deposit_range(self, x(lo_t:hi_t), w, .false., part(:, t), pbelow(t), pabove(t))
-            end if
-        end if
+        if (hi_t >= lo_t) call deposit_range(self, x, w, weighted, hb, hstride, lo_t, hi_t, part(:, t), &
+            pbelow(t), pabove(t))
         !$omp end parallel
 
         ! Summed in thread order: the grouping is fixed by the survivor count and the team size.
@@ -672,13 +959,19 @@ contains
 
     end subroutine deposit
 
-    !> Deposits every point of `x`, with the weights `w` when `weighted`, into `acc`, and the
-    !! weight their kernels put below `xmin` and above `xmax` into `below` and `above`.
-    subroutine deposit_range(self, x, w, weighted, acc, below, above)
+    !> Deposits the points `x(jlo:jhi)`, with the weights `w` when `weighted` and the bandwidth of
+    !! point `j` at `hb(1 + (j - 1)*hstride)`, into `acc`, and the weight their kernels put below
+    !! `xmin` and above `xmax` into `below` and `above`. One loop for one bandwidth and for many,
+    !! so that an adaptive rule giving every point the global bandwidth deposits the same bits.
+    subroutine deposit_range(self, x, w, weighted, hb, hstride, jlo, jhi, acc, below, above)
         class(pf_kde_grid), intent(in) :: self     !! the grid, read for its geometry
         real(real64), intent(in)       :: x(:)     !! the points, inside the support
         real(real64), intent(in)       :: w(:)     !! their weights, when weighted
         logical, intent(in)            :: weighted !! `w` holds one weight per point
+        real(real64), intent(in)       :: hb(:)    !! the bandwidths, one per point or one for all
+        integer(int64), intent(in)     :: hstride  !! 1 for one per point, 0 for one for all
+        integer(int64), intent(in)     :: jlo      !! the first point to deposit
+        integer(int64), intent(in)     :: jhi      !! the last point to deposit
         real(real64), intent(inout)    :: acc(:)   !! the cells to deposit into
         real(real64), intent(inout)    :: below    !! the weight below `xmin`
         real(real64), intent(inout)    :: above    !! the weight above `xmax`
@@ -689,12 +982,100 @@ contains
 
         allocate(z(self%nc), k(self%nc), k2(self%nc))
         wj = 1.0_real64
-        do j = 1_int64, size(x, kind=int64)
+        do j = jlo, jhi
             if (weighted) wj = w(j)
-            call deposit_one(self, x(j), wj, self%h, z, k, k2, acc, below, above)
+            call deposit_one(self, x(j), wj, hb(1_int64 + (j - 1_int64)*hstride), z, k, k2, acc, below, above)
         end do
 
     end subroutine deposit_range
+
+    !> The pilot's deposit: the survivors cut into `np` pieces, each deposited into a partial grid of
+    !! its own, the partials added in piece order. The cut is `np`'s alone, never the team's, so a
+    !! team of any size -- one included -- answers the same bits; the team takes the pieces in
+    !! turn. One piece is the serial deposit straight into the grid.
+    subroutine deposit_parts(self, x, w, weighted, hb, hstride, m, threads, np)
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_num_threads
+#endif
+        class(pf_kde_grid), intent(inout) :: self     !! the grid, empty
+        real(real64), intent(in)          :: x(:)     !! the survivors, inside the support
+        real(real64), intent(in)          :: w(:)     !! their weights, when weighted
+        logical, intent(in)               :: weighted !! `w` holds one weight per survivor
+        real(real64), intent(in)          :: hb(:)    !! the bandwidths, one per survivor or one for all
+        integer(int64), intent(in)        :: hstride  !! 1 for one per survivor, 0 for one for all
+        integer(int64), intent(in)        :: m        !! how many survivors
+        integer, intent(in), optional     :: threads  !! the caller's request
+        integer(int64), intent(in)        :: np       !! the pieces
+
+        real(real64), allocatable :: part(:, :), pbelow(:), pabove(:)
+        integer(int64) :: p, lo_p, hi_p, nt
+        integer :: team, i
+
+        if (np <= 1_int64) then
+            kde_team_used = 1
+            call deposit_range(self, x, w, weighted, hb, hstride, 1_int64, m, self%acc, self%w_below, &
+                self%w_above)
+            return
+        end if
+        team = 1
+#ifdef _OPENMP
+        call resolve_thread_count(threads, m, nt)
+        team = int(max(1_int64, min(nt, np)))
+#else
+        ! No OpenMP: the pieces are deposited one after another, into the same partial grids.
+        nt = 1_int64
+        if (present(threads)) team = int(max(1_int64, nt))
+#endif
+        allocate(part(self%nc, np), pbelow(np), pabove(np))
+        kde_team_used = 1
+        !$omp parallel num_threads(team) if(team > 1) default(shared) private(p, lo_p, hi_p)
+#ifdef _OPENMP
+        !$omp single
+        kde_team_used = omp_get_num_threads()
+        !$omp end single
+#endif
+        !$omp do schedule(static)
+        do p = 1_int64, np
+            lo_p = (m*(p - 1_int64))/np + 1_int64
+            hi_p = (m*p)/np
+            part(:, p) = 0.0_real64
+            pbelow(p) = 0.0_real64
+            pabove(p) = 0.0_real64
+            if (hi_p >= lo_p) call deposit_range(self, x, w, weighted, hb, hstride, lo_p, hi_p, part(:, p), &
+                pbelow(p), pabove(p))
+        end do
+        !$omp end do
+        !$omp end parallel
+
+        ! Added in piece order: the grouping is fixed by `np` and the survivor count.
+        do p = 1_int64, np
+            do i = 1, self%nc
+                self%acc(i) = self%acc(i) + part(i, p)
+            end do
+            self%w_below = self%w_below + pbelow(p)
+            self%w_above = self%w_above + pabove(p)
+        end do
+
+    end subroutine deposit_parts
+
+    !> How many pieces the pilot's deposit of `m` survivors is cut into: at least
+    !! `KDE_ADD_MIN_PER_THREAD` survivors a piece, no more than `KDE_PILOT_PARTS`, and no more than
+    !! the deposit's work over the grid's size, since each piece zeroes and then adds one whole
+    !! partial grid. A function of the sample and the pilot alone.
+    pure function pilot_parts(self, m) result(np)
+        class(pf_kde_grid), intent(in) :: self !! the pilot, geometry set
+        integer(int64), intent(in)     :: m    !! the survivors
+        integer(int64)                 :: np   !! the pieces
+
+        real(real64) :: cells, cap
+
+        np = min(KDE_PILOT_PARTS, m/KDE_ADD_MIN_PER_THREAD)
+        cells = min(real(self%nc, real64), 2.0_real64*KDE_RADIUS(self%kernel_code)*(self%h/self%dx) + 1.0_real64)
+        cap = real(m, real64)*(cells/real(self%nc, real64))
+        if (cap < real(np, real64)) np = int(cap, int64)
+        if (np < 1_int64) np = 1_int64
+
+    end function pilot_parts
 
     !> Deposits one point `xj` of weight `wj` and bandwidth `hj`. `z`, `k` and `k2` are work rows
     !! of one element per cell.
@@ -844,55 +1225,82 @@ contains
 
     end function upper_end
 
-    !> Cell `i`'s density, its accumulation over the total weight: the one division `%density`
-    !! and `%pdf` at a centre share, so that the two agree to the bit. The divisor is `volatile`:
-    !! ifx's default `-fp-model=fast` otherwise turns a division repeated over a loop into a
-    !! multiply by the reciprocal, which rounds differently from a single division.
+    !> A cell's density, its accumulation `a` over the total weight `wt`: the one division
+    !! `%density` and `%pdf` at a centre share, so that the two agree to the bit. The divisor is
+    !! `volatile`: ifx's default `-fp-model=fast` otherwise turns a division repeated over a loop
+    !! into a multiply by the reciprocal, which rounds differently from a single division.
+    function cell_value(a, wt) result(f)
+        real(real64), intent(in) :: a  !! the cell's accumulation
+        real(real64), intent(in) :: wt !! the total weight, positive
+        real(real64)             :: f  !! its density
+
+        real(real64), volatile :: d
+
+        d = wt
+        f = a/d
+
+    end function cell_value
+
+    !> Cell `i`'s density on this grid, which holds weight.
     function cell_density(self, i) result(f)
         class(pf_kde_grid), intent(in) :: self !! the grid, with weight in it
         integer, intent(in)            :: i    !! the cell
         real(real64)                   :: f    !! its density
 
-        real(real64), volatile :: wt
-
-        wt = self%w_total
-        f = self%acc(i)/wt
+        f = cell_value(self%acc(i), self%w_total)
 
     end function cell_density
 
-    !> The interpolated density at `t`: linear between neighbouring centres, constant over the
-    !! outer half-cells, zero outside the range; NaN on an empty or poisoned grid or at a NaN `t`.
-    !! At a centre it is `cell_density` itself, the value `%density` answers there.
+    !> The interpolated density at `t`: NaN on an empty or poisoned grid, else `interp_cells`.
     function pdf_value(self, t) result(f)
         class(pf_kde_grid), intent(in) :: self !! the grid
         real(real64), intent(in)       :: t    !! where to evaluate
         real(real64)                   :: f    !! the density
 
+        f = ieee_value(1.0_real64, ieee_quiet_nan)
+        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
+        f = interp_cells(self%nc, self%x0, self%x1, self%dx, self%acc, self%w_total, t)
+
+    end function pdf_value
+
+    !> The density cells `acc` of total weight `wt` describe at `t`: linear between neighbouring
+    !! centres, constant over the outer half-cells, zero outside `[x0, x1]`, NaN at a NaN `t`. At
+    !! a centre it is `cell_value` itself, the value `%density` answers there. The one
+    !! interpolation, for a grid's `%pdf` and for the adaptive rule's look-up of its pilot.
+    function interp_cells(nc, x0, x1, dx, acc, wt, t) result(f)
+        integer, intent(in)      :: nc      !! the number of cells
+        real(real64), intent(in) :: x0      !! the first cell's left edge
+        real(real64), intent(in) :: x1      !! the last cell's right edge
+        real(real64), intent(in) :: dx      !! the cell width
+        real(real64), intent(in) :: acc(:)  !! each cell's accumulation
+        real(real64), intent(in) :: wt      !! the total weight, positive
+        real(real64), intent(in) :: t       !! where to evaluate
+        real(real64)             :: f       !! the density
+
         integer :: j
         real(real64) :: s
 
         f = ieee_value(1.0_real64, ieee_quiet_nan)
-        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
         if (t /= t) return
         f = 0.0_real64
-        if (t < self%x0 .or. t > self%x1) return
-        if (t <= centre(self, 1)) then
-            f = cell_density(self, 1)
+        if (t < x0 .or. t > x1) return
+        if (t <= centre_at(x0, dx, 1)) then
+            f = cell_value(acc(1), wt)
             return
         end if
-        if (t >= centre(self, self%nc)) then
-            f = cell_density(self, self%nc)
+        if (t >= centre_at(x0, dx, nc)) then
+            f = cell_value(acc(nc), wt)
             return
         end if
-        j = segment(self, t)
-        s = (t - centre(self, j))/self%dx
+        j = segment_at(nc, x0, dx, t)
+        s = (t - centre_at(x0, dx, j))/dx
         if (s == 0.0_real64) then
-            f = cell_density(self, j)
+            f = cell_value(acc(j), wt)
             return
         end if
-        f = ((1.0_real64 - s)*self%acc(j) + s*self%acc(j + 1))/self%w_total
+        f = ((1.0_real64 - s)*acc(j) + s*acc(j + 1))/wt
 
-    end function pdf_value
+    end function interp_cells
 
     !> The `j` in `1 .. ncells - 1` with `centre(j) <= t < centre(j + 1)`, for a `t` strictly
     !! between the first and the last centre.
@@ -901,22 +1309,75 @@ contains
         real(real64), intent(in)       :: t    !! the point
         integer                        :: j    !! the segment
 
+        j = segment_at(self%nc, self%x0, self%dx, t)
+
+    end function segment
+
+    !> `segment` on a grid of `nc` cells `dx` wide from `x0`.
+    pure function segment_at(nc, x0, dx, t) result(j)
+        integer, intent(in)      :: nc !! the number of cells, two or more
+        real(real64), intent(in) :: x0 !! the first cell's left edge
+        real(real64), intent(in) :: dx !! the cell width
+        real(real64), intent(in) :: t  !! the point
+        integer                  :: j  !! the segment
+
         real(real64) :: u
 
         ! Centre `j` sits at `u = j - 1`, so the segment holding `t` is `floor(u) + 1`.
-        u = (t - self%x0)/self%dx - 0.5_real64
+        u = (t - x0)/dx - 0.5_real64
         j = 1
-        if (u > 0.0_real64) j = int(min(u, real(self%nc, real64))) + 1
-        j = max(1, min(self%nc - 1, j))
+        if (u > 0.0_real64) j = int(min(u, real(nc, real64))) + 1
+        j = max(1, min(nc - 1, j))
         ! The quotient can land one either side of the true segment; the centres decide.
         if (j > 1) then
-            if (t < centre(self, j)) j = j - 1
+            if (t < centre_at(x0, dx, j)) j = j - 1
         end if
-        if (j < self%nc - 1) then
-            if (t >= centre(self, j + 1)) j = j + 1
+        if (j < nc - 1) then
+            if (t >= centre_at(x0, dx, j + 1)) j = j + 1
         end if
 
-    end function segment
+    end function segment_at
+
+    !> The bandwidth the adaptive rule `a` gives a point at `t` under the global bandwidth `h`.
+    !!
+    !! `h * (p(t)/g)**(-alpha)`, formed as `h * exp(-alpha * (log p - log g))` with the exponent
+    !! tested before it is raised, so that a bandwidth too large to represent is `+Infinity`
+    !! without an overflow (which would stop a program under nagfor). Exactly `h` at `alpha = 0`,
+    !! then capped at `bandwidth_max`. Where the pilot reads zero, the cap is the answer; without
+    !! one, the pilot's smallest positive cell density stands in for `p`.
+    function rule_bandwidth(a, h, t) result(hj)
+        type(kde_adapt), intent(in) :: a  !! the rule
+        real(real64), intent(in)    :: h  !! the global bandwidth
+        real(real64), intent(in)    :: t  !! the point
+        real(real64)                :: hj !! its bandwidth
+
+        real(real64) :: p, e
+
+        hj = ieee_value(1.0_real64, ieee_quiet_nan)
+        if (t /= t) return
+        if (a%alpha == 0.0_real64) then
+            hj = h
+        else
+            p = interp_cells(a%nc, a%x0, a%x1, a%dx, a%acc, a%wt, t)
+            if (.not. (p > 0.0_real64)) then
+                if (a%has_bmax) then
+                    hj = a%bmax
+                    return
+                end if
+                p = a%pmin
+            end if
+            e = -a%alpha*(log(p) - a%logg)
+            if (e > log(huge(h)) - log(h) - 1.0_real64) then
+                hj = ieee_value(1.0_real64, ieee_positive_inf)
+            else
+                hj = h*exp(e)
+            end if
+        end if
+        if (a%has_bmax) then
+            if (hj > a%bmax) hj = a%bmax
+        end if
+
+    end function rule_bandwidth
 
     !> `q(i)`, the accumulated weight per unit length integrated from `xmin` to centre `i`, under
     !! `%pdf`'s interpolant: half a cell of `acc(1)` to the first centre, then a trapezoid per

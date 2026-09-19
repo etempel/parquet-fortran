@@ -17,7 +17,16 @@ test/test_kde.f90) and asserts `KG_PROBE`, which reports a recipe that has drift
 What each case pins is named in its own comment in the generated file: every kernel's density
 and distribution function, both rules, `adjust`, both weight conventions, both boundary
 corrections at each bound and at both, the case where the kernel is wider than the whole support
-(which only the mass normalisation keeps at unit mass), and the single-point degenerate cases.
+(which only the mass normalisation keeps at unit mass), the single-point degenerate cases, and the
+adaptive kernel over a two-component recipe of its own.
+
+**The adaptive cases take the pilot exactly.** The library reads each point's bandwidth from a
+pilot GRID, `h * (p(x_j)/g)**(-alpha)`, with `p` the grid interpolated and `log g` the mean of
+`log p` over the grid's density; the oracle takes the continuous limit of the same definitions --
+`p` the exact fixed estimate, summed over every point, and `log g` its integral over the pilot's
+range, `[max(lower, min - 4h), min(upper, max + 4h)]`, by quadrature between the kernels' knots.
+The library agrees to the pilot's discretisation, about `1e-3` at the rule's cells and to far
+closer once `parquet_debug_set_kde_pilot_cells` makes them fine; the tests assert both.
 
 Usage:
     python3 tools/generate_kde_vectors.py              # rewrite test/test_kde_golden.f90
@@ -34,6 +43,7 @@ Maintainer-only: it is never run at build time and is stripped from the fpm-publ
 """
 
 import sys
+import textwrap
 from pathlib import Path
 
 try:
@@ -57,27 +67,69 @@ PROBES = [-512.0, -466.0, -300.0, -61.25, 0.0, 17.5, 250.0, 458.5, 470.0]
 #: The Gaussian's cut, in standard deviations.
 CUT = mpf(5)
 
+#: The pilot's reach beyond the extreme points, in global bandwidths (`KDE_PILOT_REACH`).
+PILOT_REACH = mpf(4)
+
+#: The digits the pilot's entropy integral is taken to. `log g` is read to about `1e-12` by the
+#: tightest test (a bandwidth moves by `alpha` times its error), and a quadrature at 50 digits
+#: would cost minutes; `--self-test` confirms this one against 30.
+G_DPS = 18
+
+
+def two_component(n):
+    """The adaptive cases' recipe: two clusters, one five times as wide as the other.
+
+    Two points in three fall in a narrow cluster about -300 (`v/16`, within 32 of it) and the
+    third in a wide one about +300 (`5v/16`, within 160), `v` a spread integer in `[-512, 511]`
+    from the stats oracle's recipe. Every value is an integer over 16, exact in both languages;
+    `kde_two_component` in test/test_kde.f90 mirrors it and `KG_PROBE2` reports a drift.
+    """
+    out = []
+    for i in range(1, n + 1):
+        a = (i * i * gsv.RECIPE_A + gsv.RECIPE_B) % gsv.RECIPE_M
+        v = a % 1024 - 512
+        if i % 3 == 0:
+            out.append(300.0 + 5.0 * v / 16.0)
+        else:
+            out.append(-300.0 + v / 16.0)
+    return out
+
 
 # ======================================================================================
 # The kernels, in standard-deviation units
 # ======================================================================================
 
+#: The constants below at each working precision they have been asked for; the adaptive cases'
+#: quadrature evaluates the kernels millions of times, at a precision of its own.
+_CONST = {}
+
+
+def _const(name):
+    key = (name, mp.prec)
+    if key not in _CONST:
+        _CONST[key] = {"sqrt2": lambda: mpsqrt(2), "sqrt3": lambda: mpsqrt(3),
+                       "sqrt5": lambda: mpsqrt(5), "sqrt2pi": lambda: mpsqrt(2 * pi),
+                       "gmass": lambda: erf(CUT / mpsqrt(2))}[name]()
+    return _CONST[key]
+
+
 def scale(kernel):
     """The kernel's scale per unit standard deviation."""
-    return {"gaussian": mpf(1), "epanechnikov": mpsqrt(5), "bspline": mpsqrt(3),
-            "box": mpsqrt(3)}[kernel]
+    if kernel == "gaussian":
+        return mpf(1)
+    return _const("sqrt5") if kernel == "epanechnikov" else _const("sqrt3")
 
 
 def phi(z):
-    return exp(-z * z / 2) / mpsqrt(2 * pi)
+    return exp(-z * z / 2) / _const("sqrt2pi")
 
 
 def big_phi(z):
-    return erfc(-z / mpsqrt(2)) / 2
+    return erfc(-z / _const("sqrt2")) / 2
 
 
 def gauss_mass():
-    return erf(CUT / mpsqrt(2))
+    return _const("gmass")
 
 
 def kernel_pdf(kernel, z):
@@ -184,10 +236,95 @@ def images(x, boundary, lower, upper):
     return out
 
 
+#: Where each kernel's density has a kink, a jump or its cut, in standard deviations: the
+#: breakpoints the pilot's entropy integral is split at.
+KNOTS = {"gaussian": [-CUT, CUT], "epanechnikov": [-mpsqrt(5), mpsqrt(5)],
+         "bspline": [-2 * mpsqrt(3), -mpsqrt(3), mpf(0), mpsqrt(3), 2 * mpsqrt(3)],
+         "box": [-mpsqrt(3), mpsqrt(3)]}
+
+
+class Estimate:
+    """A kernel estimate over points `xs` with weights `ws`, point `j` of bandwidth `hs[j]`."""
+
+    def __init__(self, xs, ws, hs, kernel, boundary, lo, hi):
+        self.xs, self.ws, self.hs = xs, ws, hs
+        self.kernel, self.boundary, self.lo, self.hi = kernel, boundary, lo, hi
+        self.W = sum(ws)
+        self.masses = [self.mass(x, h) for x, h in zip(xs, hs)]
+        # Each point's images with their reach, in doubles and widened by a margin, so that `pdf`
+        # skips the kernels that are exactly zero at `t` without evaluating them. A skip test
+        # only: every kernel that is summed is summed at full precision.
+        radius = float(CUT) if kernel == "gaussian" else float(KNOTS[kernel][-1])
+        self.reach = [[(float(c), 1.000001 * radius * float(h) + 1e-300)
+                       for c in images(x, boundary, lo, hi)] for x, h in zip(xs, hs)]
+
+    def s_of(self, x, h, t):
+        return sum(kernel_cdf(self.kernel, (t - c) / h)
+                   for c in images(x, self.boundary, self.lo, self.hi))
+
+    def s_lower(self, x, h):
+        return self.s_of(x, h, self.lo) if self.lo is not None else mpf(0)
+
+    def mass(self, x, h):
+        top = (self.s_of(x, h, self.hi) if self.hi is not None
+               else mpf(len(images(x, self.boundary, self.lo, self.hi))))
+        return top - self.s_lower(x, h)
+
+    def pdf(self, t):
+        if (self.lo is not None and t < self.lo) or (self.hi is not None and t > self.hi):
+            return mpf(0)
+        acc = mpf(0)
+        tf = float(t)
+        for x, w, h, mj, reach in zip(self.xs, self.ws, self.hs, self.masses, self.reach):
+            if all(abs(tf - cf) > rf for cf, rf in reach):
+                continue
+            acc += w * sum(kernel_pdf(self.kernel, (t - c) / h)
+                           for c in images(x, self.boundary, self.lo, self.hi)) / (h * mj)
+        return acc / self.W
+
+    def cdf(self, t):
+        if self.lo is not None and t <= self.lo:
+            return mpf(0)
+        if self.hi is not None and t >= self.hi:
+            return mpf(1)
+        acc = mpf(0)
+        for x, w, h, mj in zip(self.xs, self.ws, self.hs, self.masses):
+            acc += w * (self.s_of(x, h, t) - self.s_lower(x, h)) / mj
+        return acc / self.W
+
+
+def pilot_log_g(pilot, a, b, dps):
+    """`log g`: the mean of `log p` over the pilot's own density on its range `[a, b]`.
+
+    The numerator is integrated between the kernels' knots, where the density is smooth, at
+    `dps` digits; the denominator, the mass on the range, is the distribution function's
+    difference, exactly.
+    """
+    cuts = {a, b}
+    for x, h in zip(pilot.xs, pilot.hs):
+        for c in images(x, pilot.boundary, pilot.lo, pilot.hi):
+            for k in KNOTS[pilot.kernel]:
+                t = c + k * h
+                if a < t < b:
+                    cuts.add(t)
+    cuts = sorted(cuts)
+    den = pilot.cdf(b) - pilot.cdf(a)
+    saved = mp.dps
+    mp.dps = dps
+    try:
+        def plogp(t):
+            v = pilot.pdf(t)
+            return v * mp.log(v) if v > 0 else mpf(0)
+        num = sum(quad(plogp, [cuts[i], cuts[i + 1]]) for i in range(len(cuts) - 1))
+    finally:
+        mp.dps = saved
+    return num / den
+
+
 def estimate(case):
     """`(defined, h, [pdf at PROBES], [cdf at PROBES])` for one case, summing every kernel."""
     n = case.get("n", 32)
-    values = gsv.fixture(n)
+    values = two_component(n) if case.get("fixture") == "two" else gsv.fixture(n)
     weights = gsv.weights_mod5(n) if case.get("weights") == "mod5" else None
     weight_type = case.get("weight_type", "reliability")
     kernel = case.get("kernel", "gaussian")
@@ -208,39 +345,27 @@ def estimate(case):
         if h is None:
             return False, None, None, None
     h *= mpf(case.get("adjust", 1.0))
-    W = sum(ws)
-
-    def s_of(x, t):
-        return sum(kernel_cdf(kernel, (t - c) / h) for c in images(x, boundary, lo, hi))
-
-    def s_lower(x):
-        return s_of(x, lo) if lo is not None else mpf(0)
-
-    def mass(x):
-        top = s_of(x, hi) if hi is not None else mpf(len(images(x, boundary, lo, hi)))
-        return top - s_lower(x)
-
-    masses = [mass(x) for x in xs]
-    pdf, cdf = [], []
-    for t in PROBES:
-        t = mpf(t)
-        if (lo is not None and t < lo) or (hi is not None and t > hi):
-            pdf.append(mpf(0))
-        else:
-            acc = mpf(0)
-            for x, w, mj in zip(xs, ws, masses):
-                acc += w * sum(kernel_pdf(kernel, (t - c) / h)
-                               for c in images(x, boundary, lo, hi)) / mj
-            pdf.append(acc / (W * h))
-        if lo is not None and t <= lo:
-            cdf.append(mpf(0))
-        elif hi is not None and t >= hi:
-            cdf.append(mpf(1))
-        else:
-            acc = mpf(0)
-            for x, w, mj in zip(xs, ws, masses):
-                acc += w * (s_of(x, t) - s_lower(x)) / mj
-            cdf.append(acc / W)
+    hs = [h] * len(xs)
+    if case.get("adaptive"):
+        # The pilot is the fixed estimate at the global bandwidth, read exactly at every point;
+        # `log g` is its entropy over the range the library's pilot grid spans.
+        pilot = Estimate(xs, ws, hs, kernel, boundary, lo, hi)
+        a = min(xs) - PILOT_REACH * h
+        b = max(xs) + PILOT_REACH * h
+        if lo is not None:
+            a = max(a, lo)
+        if hi is not None:
+            b = min(b, hi)
+        log_g = pilot_log_g(pilot, a, b, G_DPS)
+        alpha = mpf(case.get("alpha", 0.5))
+        cap = mpf(case["bandwidth_max"]) if "bandwidth_max" in case else None
+        hs = []
+        for x in xs:
+            hj = h * mp.exp(-alpha * (mp.log(pilot.pdf(x)) - log_g))
+            hs.append(min(hj, cap) if cap is not None else hj)
+    est = Estimate(xs, ws, hs, kernel, boundary, lo, hi)
+    pdf = [est.pdf(mpf(t)) for t in PROBES]
+    cdf = [est.cdf(mpf(t)) for t in PROBES]
     return True, h, pdf, cdf
 
 
@@ -281,6 +406,17 @@ CASES = [
      {"lower": -400.0, "upper": 400.0}),
     ("ONE_H", "one point with an explicit bandwidth: a single bump", {"n": 1, "bandwidth": 10.0}),
     ("ONE_RULE", "one point under a rule: no scale, so the estimate is undefined", {"n": 1}),
+    ("ADAPT", "the adaptive kernel over the two-component recipe: Silverman's rule, the Gaussian, "
+     "alpha = 0.5", {"fixture": "two", "n": 60, "adaptive": True}),
+    ("ADAPT_CAP", "the adaptive kernel at alpha = 1 with every bandwidth capped at 120, the "
+     "B-spline at an explicit bandwidth of 80, renormalised at a lower bound",
+     {"fixture": "two", "n": 60, "adaptive": True, "alpha": 1.0, "bandwidth_max": 120.0,
+      "bandwidth": 80.0, "kernel": "bspline", "lower": -340.0}),
+    ("ADAPT_REF", "the adaptive kernel reflected at both bounds, Epanechnikov, h = 60",
+     {"fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "kernel": "epanechnikov",
+      "lower": -340.0, "upper": 470.0, "boundary": "reflect"}),
+    ("ADAPT_W", "the adaptive kernel under weights mod 5, reliability: the pilot is weighted too",
+     {"fixture": "two", "n": 60, "adaptive": True, "weights": "mod5"}),
 ]
 
 
@@ -327,13 +463,20 @@ def emit():
     out += gsv.wrap_array("    real(real64), parameter :: KG_PROBE(%d) =" % probe_n,
                           [gsv.fortran_real(v) for v in gsv.fixture(probe_n)])
     out.append("")
+    out.append("    !> The first %d values `kde_two_component` must produce: the adaptive cases' recipe."
+               % probe_n)
+    out += gsv.wrap_array("    real(real64), parameter :: KG_PROBE2(%d) =" % probe_n,
+                          [gsv.fortran_real(v) for v in two_component(probe_n)])
+    out.append("")
     out.append("    !> Where every case is probed.")
     out += gsv.wrap_array("    real(real64), parameter :: KG_X(NKX) =",
                           [gsv.fortran_real(v) for v in PROBES])
     for name, doc, case in CASES:
         defined, h, pdf, cdf = estimate(case)
         out.append("")
-        out.append("    !> %s" % doc)
+        lines = textwrap.wrap(doc, width=124)
+        out.append("    !> %s" % lines[0])
+        out += ["    !! %s" % line for line in lines[1:]]
         out.append("    logical, parameter :: KG_%s_DEF = .%s." % (name, "true" if defined else "false"))
         out.append("    real(real64), parameter :: KG_%s_H = %s" % (name, gsv.fortran_real(h)))
         for tag, vals in (("PDF", pdf), ("CDF", cdf)):
@@ -381,6 +524,16 @@ def self_test():
     mp.dps = 50
     print("self-test: kernel mass, variance and CDF checked for %d kernels" % len(KERNELS))
 
+    # The pilot's entropy integral at the generator's working precision against 30 digits.
+    xs2 = [mpf(v) for v in two_component(60)]
+    h2 = mpf(90)
+    pilot = Estimate(xs2, [mpf(1)] * 60, [h2] * 60, "gaussian", "none", None, None)
+    a, b = min(xs2) - PILOT_REACH * h2, max(xs2) + PILOT_REACH * h2
+    gap = abs(pilot_log_g(pilot, a, b, G_DPS) - pilot_log_g(pilot, a, b, 30))
+    if gap > mpf("1e-15"):
+        failures.append("log g at %d digits differs from 30 by %s" % (G_DPS, mp.nstr(gap, 3)))
+    print("self-test: log g at %d digits agrees with 30 to %s" % (G_DPS, mp.nstr(gap, 3)))
+
     try:
         import numpy as np
         from scipy.stats import gaussian_kde
@@ -417,6 +570,22 @@ def self_test():
             if err > 1e-15:
                 failures.append("KDEpy %s differs by %.3g" % (name, err))
             print("self-test: KDEpy %s agrees to %.2g absolute" % (name, err))
+        # The adaptive estimate is the sample-point one: each point's own kernel, of its own
+        # standard deviation, which is what a per-point bandwidth array means there too. Given the
+        # oracle's bandwidths, the two sums must agree to rounding.
+        xs2 = [mpf(v) for v in two_component(60)]
+        h2 = mpf(60)
+        pilot = Estimate(xs2, [mpf(1)] * 60, [h2] * 60, "epanechnikov", "none", None, None)
+        log_g = pilot_log_g(pilot, min(xs2) - PILOT_REACH * h2, max(xs2) + PILOT_REACH * h2, G_DPS)
+        hs = [h2 * mp.exp(-mpf("0.5") * (mp.log(pilot.pdf(v)) - log_g)) for v in xs2]
+        est = Estimate(xs2, [mpf(1)] * 60, hs, "epanechnikov", "none", None, None)
+        want = np.array([float(est.pdf(mpf(t))) for t in PROBES])
+        got = NaiveKDE(kernel="epa", bw=np.array([float(v) for v in hs])).fit(
+            np.array(two_component(60))).evaluate(probes)
+        err = np.max(np.abs(got - want))
+        if err > 1e-15:
+            failures.append("KDEpy's per-point bandwidths differ from the adaptive sum by %.3g" % err)
+        print("self-test: KDEpy with per-point bandwidths agrees with the adaptive sum to %.2g" % err)
 
     try:
         from statsmodels.nonparametric.kde import KDEUnivariate

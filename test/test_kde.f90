@@ -1,11 +1,18 @@
 !> Tests for `parquet_kde`: `pf_kde`'s kernels, bandwidth rules, population rules, boundary
-!> corrections, exact queries and curve, and `pf_kde_grid`'s deposit, merge and interpolated
-!> queries.
+!> corrections, exact queries and curve, `pf_kde_grid`'s deposit, merge and interpolated queries,
+!> and the adaptive kernel in both forms.
 !!
 !! **The grid is tested against the exact estimate**, which the golden vectors pin: its density
 !! converges to `pf_kde%pdf` as the square of the cell width, its deposit conserves every point's
 !! weight to rounding, and the weight it counts beyond its range is the exact estimate's own
 !! distribution function there.
+!!
+!! **The adaptive kernel is tested against an exact pilot.** The oracle sums the fixed estimate
+!! at every point for the pilot and integrates its entropy for `g`, so the library, reading a
+!! pilot grid, agrees to that grid's discretisation: to about `2e-3` at the rule's quarter
+!! bandwidth, and -- in `kde_serial`, where `parquet_debug_set_kde_pilot_cells` makes the pilot
+!! fine -- to `1e-9`, falling as the square of the pilot's cell width. `alpha = 0` is the fixed
+!! estimate bit for bit, in both forms, which is what keeps the adaptive loop honest.
 !!
 !! **Every expectation is derived, never read off a run.** The golden vectors come from
 !! `tools/generate_kde_vectors.py`, a 50-digit oracle that sums every kernel of every point;
@@ -17,10 +24,11 @@
 !! bandwidth as a number, except `test_default_rule_is_silverman`, which is the one assertion of
 !! the default and which the change making ISJ the default replaces (feature_kde.md, 12.1).
 !!
-!! Two suites. `kde` is pure in-memory work and runs concurrently. `kde_serial` holds the one test
-!! that writes process-global state -- it silences `%print` through the `verbosity` setting -- and
-!! is on `suite_is_safe_to_parallelize`'s exclusion list. Both are registered in
-!! `run_tester_pf.f90`, the runner that executes no `bind(C)` call.
+!! Two suites. `kde` is pure in-memory work and runs concurrently. `kde_serial` holds the tests
+!! that write process-global state -- they silence `%print` through the `verbosity` setting, or
+!! force the pilot's cells through `parquet_debug_set_kde_pilot_cells` -- and is on
+!! `suite_is_safe_to_parallelize`'s exclusion list. Both are registered in `run_tester_pf.f90`,
+!! the runner that executes no `bind(C)` call.
 module test_kde
 
     use testdrive, only : new_unittest, unittest_type, error_type, check
@@ -107,7 +115,23 @@ contains
             new_unittest("the grid's accessors report its set-up and %clear keeps it", &
                 test_grid_accessors_and_clear), &
             new_unittest("the grid's %print writes the summary and says when there is none", &
-                test_grid_print_writes) &
+                test_grid_print_writes), &
+            new_unittest("alpha=0 is the fixed estimate, alpha=0.5 is not", test_alpha_zero_is_fixed), &
+            new_unittest("the adaptive bandwidths follow the pilot", test_adaptive_bandwidths_follow_pilot), &
+            new_unittest("the adaptive golden case", test_adaptive_golden), &
+            new_unittest("bandwidth_max caps every h_j", test_bandwidth_max_caps), &
+            new_unittest("%pilot returns the grid the fit used", test_pilot_is_the_fits), &
+            new_unittest("the pilot's cells follow the rule and its clamps", test_pilot_cells_rule), &
+            new_unittest("the two forms agree under one pilot", test_two_forms_agree_under_one_pilot), &
+            new_unittest("the adaptive kernel conserves mass under both corrections", &
+                test_adaptive_conserves_mass), &
+            new_unittest("%bandwidth_at is the rule %fit applied", test_bandwidth_at), &
+            new_unittest("the adaptive grid copies its pilot, merges and is poisoned by a poisoned one", &
+                test_adaptive_grid), &
+            new_unittest("the adaptive fit's accessors, printer, real32 form and refit", &
+                test_adaptive_accessors), &
+            new_unittest("a bandwidth too large to use leaves the estimate undefined", &
+                test_unusable_bandwidth) &
             ]
 
     end subroutine collect_tests_kde
@@ -118,7 +142,10 @@ contains
 
         testsuite = [ &
             new_unittest("verbosity silences %print", test_print_silenced), &
-            new_unittest("verbosity silences the grid's %print", test_grid_print_silenced) &
+            new_unittest("verbosity silences the grid's %print", test_grid_print_silenced), &
+            new_unittest("the adaptive golden case with a fine pilot", test_adaptive_golden_fine), &
+            new_unittest("parquet_debug_set_kde_pilot_cells forces the pilot's cells", &
+                test_pilot_cells_forced) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -142,6 +169,28 @@ contains
         end do
 
     end subroutine kde_fixture
+
+    !> The adaptive cases' recipe, `two_component` in `tools/generate_kde_vectors.py`: two points in
+    !> three in a narrow cluster about -300 (within 32 of it) and the third in a cluster five times
+    !> as wide about +300, `v` a spread integer from the same recipe. Every value is an integer over
+    !> 16, exact in both languages.
+    subroutine kde_two_component(n, x)
+        integer(int64), intent(in)             :: n    !! how many values
+        real(real64), allocatable, intent(out) :: x(:) !! the values
+        integer(int64) :: i, a, v
+
+        allocate(x(n))
+        do i = 1_int64, n
+            a = mod(i*i*7919_int64 + 12345_int64, 1000003_int64)
+            v = mod(a, 1024_int64) - 512_int64
+            if (mod(i, 3_int64) == 0_int64) then
+                x(i) = 300.0_real64 + 5.0_real64*real(v, real64)/16.0_real64
+            else
+                x(i) = -300.0_real64 + real(v, real64)/16.0_real64
+            end if
+        end do
+
+    end subroutine kde_two_component
 
     !> `w(i) = mod(i, 5)`: every fifth weight is zero and removes its element.
     subroutine kde_weights_mod5(n, w)
@@ -194,7 +243,12 @@ contains
         n = 32_int64
         if (name == "N1000") n = 1000_int64
         if (name == "ONE_H" .or. name == "ONE_RULE") n = 1_int64
-        call kde_fixture(n, x)
+        if (name(1:min(5, len(name))) == "ADAPT") n = 60_int64
+        if (n == 60_int64) then
+            call kde_two_component(n, x)
+        else
+            call kde_fixture(n, x)
+        end if
         call kde_weights_mod5(n, w)
         select case (name)
         case ("DEFAULT")
@@ -240,6 +294,16 @@ contains
             call k%fit(x, bandwidth=10.0_real64, ok=ok)
         case ("ONE_RULE")
             call k%fit(x, rule="silverman", ok=ok)
+        case ("ADAPT")
+            call k%fit(x, rule="silverman", adaptive=.true., ok=ok)
+        case ("ADAPT_CAP")
+            call k%fit(x, bandwidth=80.0_real64, kernel="bspline", adaptive=.true., alpha=1.0_real64, &
+                bandwidth_max=120.0_real64, lower=-340.0_real64, ok=ok)
+        case ("ADAPT_REF")
+            call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", adaptive=.true., lower=-340.0_real64, &
+                upper=470.0_real64, boundary="reflect", ok=ok)
+        case ("ADAPT_W")
+            call k%fit(x, rule="silverman", adaptive=.true., weights=w, ok=ok)
         case default
             error stop "fit_golden_case: unknown case " // name
         end select
@@ -322,6 +386,11 @@ contains
         call check(error, all(x == KG_PROBE), &
             "kde_fixture has drifted from generate_stats_vectors.py's fixture(): every golden " // &
             "case below would fail for that reason")
+        if (allocated(error)) return
+        call kde_two_component(int(size(KG_PROBE2), int64), x)
+        call check(error, all(x == KG_PROBE2), &
+            "kde_two_component has drifted from generate_kde_vectors.py's two_component(): every " // &
+            "adaptive golden case would fail for that reason")
 
     end subroutine test_fixture_matches_generator
 
@@ -1787,5 +1856,666 @@ contains
         call check(error, nlines == 0, 'verbosity="silent" must silence %print entirely')
 
     end subroutine test_print_silenced
+
+    ! ==========================================================================================
+    ! The adaptive kernel
+    ! ==========================================================================================
+
+    !> Compares one adaptive golden case: `ok`, the global bandwidth, and the density and CDF at
+    !> every probe, the density to `rel_pdf` of its peak and the CDF to `abs_cdf`.
+    subroutine check_adaptive_case(error, name, h, pdf, cdf, rel_pdf, abs_cdf)
+        type(error_type), allocatable, intent(out) :: error    !! set on the first failed check
+        character(len=*), intent(in)               :: name     !! the case
+        real(real64), intent(in)                   :: h        !! the global bandwidth
+        real(real64), intent(in)                   :: pdf(NKX) !! the density at `KG_X`
+        real(real64), intent(in)                   :: cdf(NKX) !! the CDF at `KG_X`
+        real(real64), intent(in)                   :: rel_pdf  !! the density's tolerance, over its peak
+        real(real64), intent(in)                   :: abs_cdf  !! the CDF's tolerance
+        type(pf_kde) :: k
+        logical :: ok
+        real(real64) :: got_pdf(NKX), got_cdf(NKX)
+        character(len=200) :: msg
+
+        call fit_golden_case(name, k, ok)
+        call check(error, ok .and. k%is_adaptive(), name // ": the adaptive fit must be defined")
+        if (allocated(error)) return
+        call check(error, close_to(k%bandwidth(), h, 1.0e-13_real64, h), &
+            name // ": the global bandwidth must match the oracle")
+        if (allocated(error)) return
+        call k%pdf(KG_X, got_pdf)
+        call k%cdf(KG_X, got_cdf)
+        write(msg, '(2a,es10.3,a,es10.3)') name, ": the density misses the oracle by ", &
+            maxval(abs(got_pdf - pdf))/maxval(pdf), " of its peak; allowed ", rel_pdf
+        call check(error, maxval(abs(got_pdf - pdf)) <= rel_pdf*maxval(pdf), trim(msg))
+        if (allocated(error)) return
+        write(msg, '(2a,es10.3,a,es10.3)') name, ": the CDF misses the oracle by ", &
+            maxval(abs(got_cdf - cdf)), "; allowed ", abs_cdf
+        call check(error, maxval(abs(got_cdf - cdf)) <= abs_cdf, trim(msg))
+
+    end subroutine check_adaptive_case
+
+    !> `log g` recomputed from a pilot grid's own cells: the mean of `log p` over its density, as
+    !> the adaptive rule defines it, formed here by this test and not by the library.
+    function pilot_log_g(g) result(lg)
+        type(pf_kde_grid), intent(in) :: g  !! the pilot
+        real(real64)                  :: lg !! `log g`
+        real(real64), allocatable :: f(:)
+        real(real64) :: s1, s2
+        integer :: i
+
+        allocate(f(g%ncells()))
+        call g%density(f)
+        s1 = 0.0_real64
+        s2 = 0.0_real64
+        do i = 1, size(f)
+            if (f(i) > 0.0_real64) then
+                s1 = s1 + f(i)
+                s2 = s2 + f(i)*log(f(i))
+            end if
+        end do
+        lg = s2/s1
+
+    end function pilot_log_g
+
+    !> `alpha = 0` makes every point's bandwidth the global one, and the adaptive estimate is then
+    !> the fixed one BIT FOR BIT -- density, distribution function and quantiles -- unbounded, under
+    !> "renormalise", and under "reflect" with a kernel wider than the support, where each point's
+    !> mass is divided out; the streaming form's accumulation likewise. `alpha = 0.5` moves the
+    !> estimate, so an adaptive path that silently fell back on the fixed one is caught.
+    subroutine test_alpha_zero_is_fixed(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kf, k0, k5
+        type(pf_kde_grid) :: pilot, gf, g0
+        real(real64), allocatable :: x(:), hb(:), rf(:), r0(:)
+        real(real64) :: t(301), ff(301), f0(301), f5(301), cf(301), c0(301), qf(9), q0(9), pp(9)
+        integer :: cfg, j
+        character(len=12) :: kern
+        character(len=100) :: tag
+
+        call kde_two_component(60_int64, x)
+        call spread_points(-700.0_real64, 800.0_real64, t)
+        do j = 1, 9
+            pp(j) = real(j, real64)/10.0_real64
+        end do
+        do cfg = 1, 4
+            select case (cfg)
+            case (1)
+                tag = "unbounded, Silverman's rule, Gaussian"
+                call kf%fit(x, rule="silverman")
+                call k0%fit(x, rule="silverman", adaptive=.true., alpha=0.0_real64)
+                call k5%fit(x, rule="silverman", adaptive=.true., alpha=0.5_real64)
+            case (2)
+                tag = "renormalised at a lower bound, B-spline"
+                call kf%fit(x, bandwidth=80.0_real64, kernel="bspline", lower=-340.0_real64)
+                call k0%fit(x, bandwidth=80.0_real64, kernel="bspline", adaptive=.true., alpha=0.0_real64, &
+                    lower=-340.0_real64)
+                call k5%fit(x, bandwidth=80.0_real64, kernel="bspline", adaptive=.true., lower=-340.0_real64)
+            case (3)
+                tag = "reflected at both bounds, Epanechnikov"
+                call kf%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", lower=-340.0_real64, &
+                    upper=470.0_real64, boundary="reflect")
+                call k0%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", adaptive=.true., alpha=0.0_real64, &
+                    lower=-340.0_real64, upper=470.0_real64, boundary="reflect")
+                call k5%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", adaptive=.true., &
+                    lower=-340.0_real64, upper=470.0_real64, boundary="reflect")
+            case (4)
+                tag = "reflected with the kernel wider than the support"
+                call kf%fit(x, bandwidth=400.0_real64, lower=-340.0_real64, upper=470.0_real64, boundary="reflect")
+                call k0%fit(x, bandwidth=400.0_real64, adaptive=.true., alpha=0.0_real64, lower=-340.0_real64, &
+                    upper=470.0_real64, boundary="reflect")
+                call k5%fit(x, bandwidth=400.0_real64, adaptive=.true., lower=-340.0_real64, &
+                    upper=470.0_real64, boundary="reflect")
+            end select
+            call kf%pdf(t, ff)
+            call k0%pdf(t, f0)
+            call k5%pdf(t, f5)
+            call kf%cdf(t, cf)
+            call k0%cdf(t, c0)
+            call kf%quantile(pp, qf)
+            call k0%quantile(pp, q0)
+            call check(error, all(f0 == ff) .and. all(c0 == cf) .and. all(q0 == qf), &
+                trim(tag) // ": alpha = 0 must answer the fixed estimate bit for bit")
+            if (allocated(error)) return
+            if (allocated(hb)) deallocate(hb)
+            allocate(hb(k0%n_valid()))
+            call k0%bandwidths(hb)
+            call check(error, all(hb == kf%bandwidth()), trim(tag) // ": at alpha = 0 every bandwidth is the global one")
+            if (allocated(error)) return
+            call check(error, maxval(abs(f5 - ff)) > 1.0e-2_real64*maxval(ff), &
+                trim(tag) // ": alpha = 0.5 must move the estimate; the adaptive path has fallen back on the fixed")
+            if (allocated(error)) return
+        end do
+
+        ! The streaming form: a pilot at alpha = 0 deposits every point as the fixed grid does.
+        do cfg = 1, 2
+            kern = "gaussian"
+            if (cfg == 2) kern = "bspline"
+            call pilot%init(64, -700.0_real64, 800.0_real64, 60.0_real64, kernel=kern)
+            call pilot%add(x)
+            call gf%init(150, -650.0_real64, 750.0_real64, 50.0_real64, kernel=kern)
+            call g0%init(150, -650.0_real64, 750.0_real64, 50.0_real64, kernel=kern, pilot=pilot, &
+                alpha=0.0_real64)
+            call gf%add(x)
+            call g0%add(x)
+            call raw_cells(gf, rf)
+            call raw_cells(g0, r0)
+            call gf%cdf(t, cf)
+            call g0%cdf(t, c0)
+            call check(error, g0%is_adaptive() .and. all(r0 == rf) .and. all(c0 == cf), &
+                trim(kern) // ": a grid whose pilot rule has alpha = 0 must accumulate the fixed grid's bits")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_alpha_zero_is_fixed
+
+    !> On the two-component recipe the rule narrows the kernels in the dense cluster and widens
+    !> them in the sparse one: every bandwidth in the narrow cluster is below the global one and
+    !> every one in the wide cluster above it, and the gap between the clusters, where the pilot is
+    !> thinnest, gets a wider bandwidth still. A sign error on `alpha`, or a `g` off by much, turns
+    !> one of the three around.
+    subroutine test_adaptive_bandwidths_follow_pilot(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:), hb(:), xs(:)
+        real(real64) :: h, h_gap
+        character(len=200) :: msg
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="silverman", adaptive=.true.)
+        h = k%bandwidth()
+        allocate(hb(k%n_valid()), xs(k%n_valid()))
+        call k%bandwidths(hb, xs)
+        call check(error, count(xs < 0.0_real64) == 40 .and. count(xs > 0.0_real64) == 20, &
+            "the fixture must hold forty points in the narrow cluster and twenty in the wide one")
+        if (allocated(error)) return
+        write(msg, '(a,f8.3,a,f8.3)') "the narrow cluster's widest bandwidth over the global one is ", &
+            maxval(hb, mask=xs < 0.0_real64)/h, "; the wide cluster's narrowest ", minval(hb, mask=xs > 0.0_real64)/h
+        call check(error, maxval(hb, mask=xs < 0.0_real64) < h .and. minval(hb, mask=xs > 0.0_real64) > h, trim(msg))
+        if (allocated(error)) return
+        call k%bandwidth_at(0.0_real64, h_gap)
+        call check(error, h_gap > maxval(hb), "the gap between the clusters must get the widest bandwidth of all")
+
+    end subroutine test_adaptive_bandwidths_follow_pilot
+
+    !> The four adaptive golden cases, at the rule's own pilot: the library reads a pilot grid a
+    !> quarter of a bandwidth to the cell, whose interpolation errs by about `(step/h)**2/8` of the
+    !> pilot, a bandwidth by `alpha` times that, so the estimate agrees with the exact pilot's to
+    !> about `2e-3` of its peak -- asserted at `5e-3`, and the CDF at `5e-4`. `kde_serial`'s fine
+    !> case shows the gap is that discretisation and nothing else.
+    subroutine test_adaptive_golden(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+
+        call check_adaptive_case(error, "ADAPT", KG_ADAPT_H, KG_ADAPT_PDF, KG_ADAPT_CDF, 5.0e-3_real64, &
+            5.0e-4_real64)
+        if (allocated(error)) return
+        call check_adaptive_case(error, "ADAPT_CAP", KG_ADAPT_CAP_H, KG_ADAPT_CAP_PDF, KG_ADAPT_CAP_CDF, &
+            5.0e-3_real64, 5.0e-4_real64)
+        if (allocated(error)) return
+        call check_adaptive_case(error, "ADAPT_REF", KG_ADAPT_REF_H, KG_ADAPT_REF_PDF, KG_ADAPT_REF_CDF, &
+            5.0e-3_real64, 5.0e-4_real64)
+        if (allocated(error)) return
+        call check_adaptive_case(error, "ADAPT_W", KG_ADAPT_W_H, KG_ADAPT_W_PDF, KG_ADAPT_W_CDF, 5.0e-3_real64, &
+            5.0e-4_real64)
+
+    end subroutine test_adaptive_golden
+
+    !> `bandwidth_max` caps every point's bandwidth and touches no other: where the uncapped rule
+    !> stays below the cap the two fits agree bit for bit, everywhere else the capped one is the cap
+    !> exactly, and the estimates then differ. A point the pilot reads as zero takes the cap itself.
+    subroutine test_bandwidth_max_caps(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k, kc
+        real(real64), allocatable :: x(:), h0(:), hc(:)
+        real(real64) :: cap, f0(50), fc(50), t(50), far
+        integer :: i
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="silverman", adaptive=.true.)
+        cap = 1.2_real64*k%bandwidth()
+        call kc%fit(x, rule="silverman", adaptive=.true., bandwidth_max=cap)
+        allocate(h0(k%n_valid()), hc(kc%n_valid()))
+        call k%bandwidths(h0)
+        call kc%bandwidths(hc)
+        call check(error, count(h0 > cap) >= 3 .and. count(h0 < cap) >= 3, &
+            "the cap must bind on some points and not on others, or this test is vacuous")
+        if (allocated(error)) return
+        do i = 1, size(h0)
+            if (h0(i) < cap) then
+                call check(error, hc(i) == h0(i), "a bandwidth below the cap must be left as it is")
+            else
+                call check(error, hc(i) == cap, "a bandwidth above the cap must be the cap exactly")
+            end if
+            if (allocated(error)) return
+        end do
+        call spread_points(-400.0_real64, 500.0_real64, t)
+        call k%pdf(t, f0)
+        call kc%pdf(t, fc)
+        call check(error, maxval(abs(fc - f0)) > 1.0e-3_real64*maxval(f0), "the cap must change the estimate")
+        if (allocated(error)) return
+        call kc%bandwidth_at(1.0e4_real64, far)
+        call check(error, far == cap, "a point the pilot reads as zero must take the cap")
+
+    end subroutine test_bandwidth_max_caps
+
+    !> `%pilot` hands back the grid the fit read: at the global bandwidth, over the survivors, from
+    !> four bandwidths below the lowest point to four above the highest, with a quarter of a
+    !> bandwidth to the cell. Every bandwidth `%bandwidths` reports is recomputed from it by this
+    !> test -- the pilot interpolated at the point, `log g` its mean `log` density -- and agrees;
+    !> so does the stand-in for a point the pilot reads as zero, its smallest positive density.
+    subroutine test_pilot_is_the_fits(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k, kempty
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), hb(:), xs(:), c(:), f(:)
+        real(real64) :: h, lg, p, want, far, pmin, a, b, empty(0)
+        integer :: j, nc
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, bandwidth=40.0_real64, adaptive=.true.)
+        h = k%bandwidth()
+        call k%pilot(g)
+        allocate(hb(k%n_valid()), xs(k%n_valid()))
+        call k%bandwidths(hb, xs)
+        ! Its own check first: every accessor below aborts on a grid never initialised.
+        call check(error, g%is_initialised(), "an adaptive fit's %pilot must hand back an initialised grid")
+        if (allocated(error)) return
+        call check(error, .not. g%is_adaptive() .and. g%bandwidth() == h .and. &
+            g%n_valid() == k%n_valid() .and. g%sum_weights() == k%sum_weights(), &
+            "the pilot must be a fixed grid at the global bandwidth over the survivors")
+        if (allocated(error)) return
+        a = xs(1) - 4.0_real64*h
+        b = xs(size(xs)) + 4.0_real64*h
+        nc = ceiling(4.0_real64*((b - a)/h))
+        allocate(c(g%ncells()), f(g%ncells()))
+        call g%grid(c)
+        call check(error, g%ncells() == nc .and. abs(c(1) - 0.5_real64*g%step() - a) <= 1.0e-12_real64*abs(a) &
+            .and. abs(g%step() - (b - a)/nc) <= 1.0e-12_real64*g%step(), &
+            "the pilot must span four bandwidths beyond the data, a quarter of a bandwidth to the cell")
+        if (allocated(error)) return
+
+        lg = pilot_log_g(g)
+        do j = 1, size(xs)
+            call g%pdf(xs(j), p)
+            want = h*exp(-0.5_real64*(log(p) - lg))
+            call check(error, abs(hb(j) - want) <= 1.0e-12_real64*want, &
+                "every bandwidth must be h*(p(x)/g)**(-1/2) read from the pilot %pilot returns")
+            if (allocated(error)) return
+        end do
+        call g%density(f)
+        pmin = minval(f, mask=f > 0.0_real64)
+        call k%bandwidth_at(1.0e4_real64, far)
+        want = h*exp(-0.5_real64*(log(pmin) - lg))
+        call check(error, abs(far - want) <= 1.0e-12_real64*want, &
+            "a point the pilot reads as zero must take its smallest positive density instead")
+        if (allocated(error)) return
+
+        call kempty%fit(empty, adaptive=.true.)
+        call kempty%pilot(g)
+        call check(error, kempty%is_adaptive() .and. .not. g%is_initialised(), &
+            "an adaptive fit with nothing to build a pilot from must hand back an uninitialised grid")
+
+    end subroutine test_pilot_is_the_fits
+
+    !> The pilot's cells: a quarter of a bandwidth over its range, never fewer than 64 -- a sample
+    !> narrower than sixteen bandwidths -- and never more than 65536 -- a far outlier -- with the
+    !> range clipped to the support.
+    subroutine test_pilot_cells_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64) :: c(64)
+
+        call k%fit([0.0_real64, 1.0_real64, 2.0_real64], bandwidth=10.0_real64, adaptive=.true.)
+        call k%pilot(g)
+        call check(error, g%ncells() == 64, "a range of about eight bandwidths must get the 64-cell floor")
+        if (allocated(error)) return
+        call k%fit([0.0_real64, 0.5_real64, 1.0_real64, 1000.0_real64], bandwidth=0.01_real64, adaptive=.true.)
+        call k%pilot(g)
+        call check(error, g%ncells() == 65536, "a far outlier must meet the 65536-cell ceiling")
+        if (allocated(error)) return
+        call k%fit([0.1_real64, 0.2_real64, 0.9_real64], bandwidth=0.1_real64, adaptive=.true., lower=0.0_real64, &
+            upper=1.0_real64)
+        call k%pilot(g)
+        call g%grid(c)
+        call check(error, g%ncells() == 64 .and. abs(c(1) - 0.5_real64/64.0_real64) <= 1.0e-15_real64 .and. &
+            abs(c(64) - 127.0_real64/128.0_real64) <= 1.0e-15_real64, &
+            "a pilot reaching past the support must be clipped to it")
+
+    end subroutine test_pilot_cells_rule
+
+    !> A `pf_kde_grid` given the fit's own pilot, with the fit's bandwidth and `alpha`, gives every
+    !> point the bandwidth `%fit` gave it, so the grid converges to the fit's adaptive estimate as
+    !> the square of its cell width -- the fixed form's convergence test, adaptive. `g` or `lambda`
+    !> formed differently in the two forms leaves an error that does not fall.
+    subroutine test_two_forms_agree_under_one_pilot(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p, g
+        real(real64), allocatable :: x(:)
+        real(real64) :: t(997), fx(997), fg(997), e(2), h, lo, hi
+        integer :: kk, r
+        character(len=200) :: msg
+
+        call kde_two_component(60_int64, x)
+        h = 30.0_real64
+        lo = minval(x) - 3.5_real64*h
+        hi = maxval(x) + 3.5_real64*h
+        call spread_points(minval(x), maxval(x), t)
+        do kk = 1, 3, 2
+            call k%fit(x, bandwidth=h, kernel=KERNELS(kk), adaptive=.true.)
+            call k%pilot(p)
+            call k%pdf(t, fx)
+            do r = 1, 2
+                call g%init(400*r, lo, hi, h, kernel=KERNELS(kk), pilot=p)
+                call g%add(x)
+                call g%pdf(t, fg)
+                e(r) = rms(fg - fx)
+            end do
+            write(msg, '(3a,f8.4)') "adaptive ", trim(KERNELS(kk)), &
+                ": halving the cells must divide the RMS error by four; the ratio is ", e(1)/e(2)
+            call check(error, e(1)/e(2) > 3.6_real64 .and. e(1)/e(2) < 4.4_real64, trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_two_forms_agree_under_one_pilot
+
+    !> Every point's kernel keeps unit mass inside the support at its own bandwidth: the adaptive
+    !> estimate integrates to one under both corrections (`pf_integrate`, which shares nothing with
+    !> it), its `%cdf` reaches one just inside the upper bound, and an adaptive grid deposits
+    !> exactly its weight. A mass formed at the global bandwidth instead of the point's own loses
+    !> or invents mass wherever the two differ.
+    subroutine test_adaptive_conserves_mass(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_density) :: fn
+        type(pf_kde_grid) :: p, g
+        real(real64), allocatable :: z(:), r(:)
+        real(real64) :: mass, c_top
+        character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        integer :: mm
+        character(len=160) :: msg
+
+        call bounded_fixture(300_int64, z)
+        do mm = 1, 2
+            ! The B-spline, twice continuously differentiable, so that the quadrature needs no
+            ! breakpoint at each of six hundred kernel edges.
+            call fn%k%fit(z, bandwidth=0.06_real64, kernel="bspline", adaptive=.true., lower=0.0_real64, &
+                upper=1.0_real64, boundary=METHODS(mm))
+            fn%power = 0
+            mass = pf_integrate(fn, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+            write(msg, '(2a,es10.3)') trim(METHODS(mm)), ": the adaptive estimate must integrate to one; it misses by ", &
+                mass - 1.0_real64
+            call check(error, abs(mass - 1.0_real64) <= 1.0e-9_real64, trim(msg))
+            if (allocated(error)) return
+            call fn%k%cdf(nearest(1.0_real64, -1.0_real64), c_top)
+            call check(error, abs(c_top - 1.0_real64) <= 1.0e-12_real64, &
+                trim(METHODS(mm)) // ": %cdf must reach one just inside the upper bound")
+            if (allocated(error)) return
+            call fn%k%pilot(p)
+            call g%init(200, 0.0_real64, 1.0_real64, 0.06_real64, kernel="bspline", pilot=p, lower=0.0_real64, &
+                upper=1.0_real64, boundary=METHODS(mm))
+            call g%add(z)
+            call raw_cells(g, r)
+            call check(error, abs(sum(r)*g%step()/g%sum_weights() - 1.0_real64) <= 1.0e-13_real64, &
+                trim(METHODS(mm)) // ": an adaptive grid must deposit exactly its weight")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_adaptive_conserves_mass
+
+    !> `%bandwidth_at` is the look-up `%fit` used: at the retained points it answers `%bandwidths`
+    !> bit for bit, the scalar form answers the array form's element, and it is NaN at a NaN point
+    !> and on an undefined estimate. A fixed fit answers its one bandwidth everywhere.
+    subroutine test_bandwidth_at(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k, kf, ku
+        real(real64), allocatable :: x(:), hb(:), xs(:), ha(:)
+        real(real64) :: one, nan_h, fixed(3), w(60)
+        logical :: ok
+        integer :: i
+
+        call kde_two_component(60_int64, x)
+        do i = 1, 60
+            w(i) = real(1 + mod(i, 3), real64)
+        end do
+        call k%fit(x, rule="silverman", adaptive=.true., weights=w)
+        allocate(hb(k%n_valid()), xs(k%n_valid()), ha(k%n_valid()))
+        call k%bandwidths(hb, xs)
+        call k%bandwidth_at(xs, ha)
+        call check(error, all(ha == hb), "%bandwidth_at at the retained points must be %bandwidths, bit for bit")
+        if (allocated(error)) return
+        call k%bandwidth_at(xs(7), one)
+        call check(error, one == hb(7), "the scalar form must answer the array form's element")
+        if (allocated(error)) return
+        call k%bandwidth_at(ieee_value(1.0_real64, ieee_quiet_nan), nan_h)
+        call check(error, ieee_is_nan(nan_h), "%bandwidth_at must be NaN at a NaN point")
+        if (allocated(error)) return
+        call kf%fit(x, bandwidth=25.0_real64)
+        call kf%bandwidth_at([-300.0_real64, 0.0_real64, 300.0_real64], fixed)
+        call check(error, all(fixed == 25.0_real64), "a fixed fit must answer its one bandwidth everywhere")
+        if (allocated(error)) return
+        call ku%fit([3.0_real64, 3.0_real64], rule="silverman", adaptive=.true., ok=ok)
+        call ku%bandwidth_at(3.0_real64, one)
+        call check(error, (.not. ok) .and. ieee_is_nan(one), "an undefined adaptive estimate must answer NaN")
+
+    end subroutine test_bandwidth_at
+
+    !> The streaming form's adaptive rule: `pilot=` copies the pilot, so clearing the caller's
+    !> afterwards changes nothing; a grid over all but the last point merged with one over that
+    !> point is the grid over them all, to the bit, when both read one pilot; and a poisoned pilot
+    !> poisons the grid built on it, quietly and for good.
+    subroutine test_adaptive_grid(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, pp, g, g_all, g1, g2, gp, gf
+        real(real64), allocatable :: x(:), r(:), r_all(:), before(:)
+        real(real64) :: f(100)
+
+        call kde_two_component(60_int64, x)
+        call p%init(64, -700.0_real64, 800.0_real64, 50.0_real64)
+        call p%add(x)
+        call g%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
+        call gf%init(100, -600.0_real64, 700.0_real64, 50.0_real64)
+        call check(error, g%is_adaptive() .and. .not. gf%is_adaptive(), "pilot= must make the grid adaptive")
+        if (allocated(error)) return
+        call g%add(x)
+        call raw_cells(g, before)
+        call p%clear()
+        call g%clear()
+        call g%add(x)
+        call raw_cells(g, r)
+        call check(error, all(r == before), "the pilot must be copied: clearing the caller's must change nothing")
+        if (allocated(error)) return
+
+        call p%add(x)
+        call g_all%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
+        call g_all%add(x)
+        call g1%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
+        call g1%add(x(1:59))
+        call g2%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
+        call g2%add(x(60:60))
+        call g1%merge(g2)
+        call raw_cells(g_all, r_all)
+        call raw_cells(g1, r)
+        call check(error, all(r == r_all) .and. g1%n() == 60_int64, &
+            "two adaptive grids reading one pilot must merge into the grid over all their points, to the bit")
+        if (allocated(error)) return
+
+        ! Poisoned after it had accumulated the sample, so that its cells hold weight and every
+        ! bandwidth read from them would be finite and wrong: only the poison stops the deposit.
+        call pp%init(64, -700.0_real64, 800.0_real64, 50.0_real64)
+        call pp%add(x)
+        call pp%add([ieee_value(1.0_real64, ieee_quiet_nan)], skipnan=.false.)
+        call gp%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=pp)
+        call gp%density(f)
+        call check(error, all(ieee_is_nan(f)), "a grid on a poisoned pilot must answer NaN before any %add")
+        if (allocated(error)) return
+        call gp%add(x)
+        call gp%density(f)
+        call check(error, all(ieee_is_nan(f)), "a poisoned pilot must poison the grid built on it")
+        if (allocated(error)) return
+        call gp%clear()
+        call gp%add(x)
+        call gp%density(f)
+        call check(error, all(ieee_is_nan(f)), "clearing the grid must not clear its pilot's poison")
+
+    end subroutine test_adaptive_grid
+
+    !> The adaptive fit's state through its accessors: `%is_adaptive`, the printer's extra rows,
+    !> `%clear`, a fixed refit (every bandwidth the global one again), and the `real32` form, which
+    !> forwards `adaptive`, `alpha` and `bandwidth_max` and equals the `real64` form over the
+    !> widened values bit for bit.
+    subroutine test_adaptive_accessors(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k, k64
+        real(real64), allocatable :: x(:), hb(:), hb64(:), xw(:)
+        real(real32), allocatable :: x32(:)
+        real(real64) :: t(40), f(40), f64(40)
+        integer :: u, nlines
+        logical :: seen
+        character(len=*), parameter :: PATH = "test_run/kde_adaptive_print.txt"
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="silverman", adaptive=.true., alpha=0.3_real64, bandwidth_max=150.0_real64)
+        call check(error, k%is_adaptive(), "an adaptive fit must say so")
+        if (allocated(error)) return
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "bandwidth_max", seen)
+        ! The heading and the fixed summary's nine rows, then alpha, the cap, the pilot and the two
+        ! ends of the bandwidths.
+        call check(error, nlines == 15 .and. seen, "%print must add the adaptive rule's five rows")
+        if (allocated(error)) return
+
+        call k%clear()
+        call check(error, .not. k%is_fitted(), "%clear must unfit an adaptive estimate")
+        if (allocated(error)) return
+        call k%fit(x, bandwidth=30.0_real64)
+        allocate(hb(k%n_valid()))
+        call k%bandwidths(hb)
+        call check(error, (.not. k%is_adaptive()) .and. all(hb == 30.0_real64), &
+            "a fixed refit must leave nothing of the adaptive rule behind")
+        if (allocated(error)) return
+
+        x32 = real(x, real32)
+        xw = real(x32, real64)
+        ! At alpha = 0.3 the widest bandwidth is about 1.17 of the global one, 133: a cap of 125 binds.
+        call k%fit(x32, rule="silverman", adaptive=.true., alpha=0.3_real64, bandwidth_max=125.0_real64)
+        call k64%fit(xw, rule="silverman", adaptive=.true., alpha=0.3_real64, bandwidth_max=125.0_real64)
+        deallocate(hb)
+        allocate(hb(k%n_valid()), hb64(k64%n_valid()))
+        call k%bandwidths(hb)
+        call k64%bandwidths(hb64)
+        call spread_points(-400.0_real64, 500.0_real64, t)
+        call k%pdf(t, f)
+        call k64%pdf(t, f64)
+        call check(error, maxval(hb) == 125.0_real64, "the real32 form must forward the cap, which binds here")
+        if (allocated(error)) return
+        call check(error, all(hb == hb64) .and. all(f == f64), &
+            "the real32 form must forward the adaptive settings and equal the real64 form, bit for bit")
+
+    end subroutine test_adaptive_accessors
+
+    !> A bandwidth the estimate cannot use is an undefined estimate, never an overflow: one whose
+    !> kernel would reach beyond the largest number, and an explicit bandwidth whose product with
+    !> `adjust` would overflow, are both `ok = .false.` with every answer NaN.
+    subroutine test_unusable_bandwidth(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: f
+        logical :: ok
+
+        call k%fit([1.0_real64, 2.0_real64], bandwidth=0.5_real64*huge(1.0_real64), ok=ok)
+        call k%pdf(1.0_real64, f)
+        call check(error, (.not. ok) .and. ieee_is_nan(f) .and. ieee_is_nan(k%bandwidth()), &
+            "a Gaussian whose reach would pass the largest number must leave the estimate undefined")
+        if (allocated(error)) return
+        call k%fit([1.0_real64, 2.0_real64], bandwidth=1.0e300_real64, adjust=1.0e10_real64, ok=ok)
+        call check(error, (.not. ok) .and. ieee_is_nan(k%bandwidth()), &
+            "a bandwidth times adjust past the largest number must leave the estimate undefined")
+        if (allocated(error)) return
+        call k%fit([1.0_real64, 2.0_real64], bandwidth=0.1_real64*huge(1.0_real64), kernel="box", ok=ok)
+        call check(error, ok, "the control: a box whose reach stays finite must be defined")
+
+    end subroutine test_unusable_bandwidth
+
+    !> The adaptive golden cases once the pilot is fine: at 262144 cells the library agrees with the
+    !> exact pilot's estimate to `1e-9` of its peak, and its gap falls as the square of the pilot's
+    !> cell width -- by about sixteen from 65536 cells -- which is what shows the coarse case's gap
+    !> to be the pilot's discretisation and not a difference of definition. Writes the process-global
+    !> cell count, so it runs serially, and restores the rule.
+    subroutine test_adaptive_golden_fine(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+
+        call check_fine("ADAPT", KG_ADAPT_PDF)
+        if (allocated(error)) return
+        call check_fine("ADAPT_CAP", KG_ADAPT_CAP_PDF)
+        if (allocated(error)) return
+        call check_fine("ADAPT_REF", KG_ADAPT_REF_PDF)
+        if (allocated(error)) return
+        call check_fine("ADAPT_W", KG_ADAPT_W_PDF)
+        if (allocated(error)) return
+        call parquet_debug_set_kde_pilot_cells(262144)
+        call check_adaptive_case(error, "ADAPT", KG_ADAPT_H, KG_ADAPT_PDF, KG_ADAPT_CDF, 1.0e-9_real64, &
+            1.0e-10_real64)
+        if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_CAP", KG_ADAPT_CAP_H, KG_ADAPT_CAP_PDF, &
+            KG_ADAPT_CAP_CDF, 1.0e-9_real64, 1.0e-10_real64)
+        if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_REF", KG_ADAPT_REF_H, KG_ADAPT_REF_PDF, &
+            KG_ADAPT_REF_CDF, 1.0e-9_real64, 1.0e-10_real64)
+        if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_W", KG_ADAPT_W_H, KG_ADAPT_W_PDF, &
+            KG_ADAPT_W_CDF, 1.0e-9_real64, 1.0e-10_real64)
+        call parquet_debug_set_kde_pilot_cells(0)
+
+    contains
+
+        !> The gap to the oracle at 65536 cells over the gap at 262144: second order, so about 16.
+        subroutine check_fine(name, pdf)
+            character(len=*), intent(in) :: name     !! the case
+            real(real64), intent(in)     :: pdf(NKX) !! the oracle's density at `KG_X`
+            type(pf_kde) :: k
+            logical :: ok
+            real(real64) :: got(NKX), e(2)
+            integer :: r
+            character(len=160) :: msg
+
+            do r = 1, 2
+                call parquet_debug_set_kde_pilot_cells(65536*4**(r - 1))
+                call fit_golden_case(name, k, ok)
+                call k%pdf(KG_X, got)
+                e(r) = maxval(abs(got - pdf))
+            end do
+            call parquet_debug_set_kde_pilot_cells(0)
+            write(msg, '(2a,f8.3)') name, ": quartering the pilot's cells must divide the gap by about 16; it is ", &
+                e(1)/e(2)
+            call check(error, e(1)/e(2) > 10.0_real64 .and. e(1)/e(2) < 25.0_real64, trim(msg))
+
+        end subroutine check_fine
+
+    end subroutine test_adaptive_golden_fine
+
+    !> `parquet_debug_set_kde_pilot_cells(n)` gives the fit's pilot `n` cells whatever the rule
+    !> says, and `n <= 0` restores the rule: the control first, then the override, then the
+    !> restoration.
+    subroutine test_pilot_cells_forced(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:)
+        integer :: rule_cells
+
+        call kde_two_component(60_int64, x)
+        call k%fit(x, bandwidth=40.0_real64, adaptive=.true.)
+        call k%pilot(g)
+        rule_cells = g%ncells()
+        call parquet_debug_set_kde_pilot_cells(100)
+        call k%fit(x, bandwidth=40.0_real64, adaptive=.true.)
+        call k%pilot(g)
+        call parquet_debug_set_kde_pilot_cells(0)
+        call check(error, rule_cells /= 100 .and. g%ncells() == 100, "the override must set the pilot's cells")
+        if (allocated(error)) return
+        call k%fit(x, bandwidth=40.0_real64, adaptive=.true.)
+        call k%pilot(g)
+        call check(error, g%ncells() == rule_cells, "n <= 0 must restore the rule")
+
+    end subroutine test_pilot_cells_forced
 
 end module test_kde

@@ -30,6 +30,10 @@ module test_kde_golden
     real(real64), parameter :: KG_PROBE(8) = [-468.4931640625_real64, -445.29296875_real64, -406.6259765625_real64,  &
         -352.4921875_real64, -282.8916015625_real64, -197.82421875_real64, -97.2900390625_real64, 18.7109375_real64]
 
+    !> The first 8 values `kde_two_component` must produce: the adaptive cases' recipe.
+    real(real64), parameter :: KG_PROBE2(8) = [-281.5_real64, -268.6875_real64, 350.0_real64, -281.4375_real64, -307.0_real64,  &
+        286.5625_real64, -268.5_real64, -268.4375_real64]
+
     !> Where every case is probed.
     real(real64), parameter :: KG_X(NKX) = [-512.0_real64, -466.0_real64, -300.0_real64, -61.25_real64, 0.0_real64,  &
         17.5_real64, 250.0_real64, 458.5_real64, 470.0_real64]
@@ -227,5 +231,48 @@ module test_kde_golden
         0.0_real64, 0.0_real64, 0.0_real64]
     real(real64), parameter :: KG_ONE_RULE_CDF(NKX) = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64,  &
         0.0_real64, 0.0_real64, 0.0_real64]
+
+    !> the adaptive kernel over the two-component recipe: Silverman's rule, the Gaussian, alpha = 0.5
+    logical, parameter :: KG_ADAPT_DEF = .true.
+    real(real64), parameter :: KG_ADAPT_H = 113.57143640464979_real64
+    real(real64), parameter :: KG_ADAPT_PDF(NKX) = [7.8458263944782792e-05_real64, 0.00032313856337138426_real64,  &
+        0.0033440863699562944_real64, 9.9938180010162867e-05_real64, 0.00012844613003146899_real64,  &
+        0.00015552066484258835_real64, 0.00083557373390661098_real64, 0.00050417914570348335_real64,  &
+        0.00046270782753398505_real64]
+    real(real64), parameter :: KG_ADAPT_CDF(NKX) = [0.0020574571960979638_real64, 0.010224863139779713_real64,  &
+        0.31408941651816336_real64, 0.6689615078192207_real64, 0.67528341112729429_real64, 0.67775923896695178_real64,  &
+        0.78934646051685131_real64, 0.95162442559616978_real64, 0.95718328374644368_real64]
+
+    !> the adaptive kernel at alpha = 1 with every bandwidth capped at 120, the B-spline at an explicit bandwidth of 80,
+    !! renormalised at a lower bound
+    logical, parameter :: KG_ADAPT_CAP_DEF = .true.
+    real(real64), parameter :: KG_ADAPT_CAP_H = 80.0_real64
+    real(real64), parameter :: KG_ADAPT_CAP_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0076328655127352032_real64,  &
+        3.6620969238690797e-05_real64, 0.00010982629842453274_real64, 0.00014241207456504383_real64,  &
+        0.00085189938351307724_real64, 0.00051928698465249755_real64, 0.00047641647529906287_real64]
+    real(real64), parameter :: KG_ADAPT_CAP_CDF(NKX) = [0.0_real64, 0.0_real64, 0.25107861593961978_real64,  &
+        0.6680924893905219_real64, 0.67227788169285618_real64, 0.67447687499390996_real64, 0.78918531936613479_real64,  &
+        0.95416711523802578_real64, 0.95989213357644021_real64]
+
+    !> the adaptive kernel reflected at both bounds, Epanechnikov, h = 60
+    logical, parameter :: KG_ADAPT_REF_DEF = .true.
+    real(real64), parameter :: KG_ADAPT_REF_H = 60.0_real64
+    real(real64), parameter :: KG_ADAPT_REF_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0062267398433207988_real64,  &
+        1.2813840857919066e-05_real64, 8.6020545386965088e-05_real64, 0.00011522715238080912_real64,  &
+        0.00097594368141979456_real64, 0.00084024012545246799_real64, 0.00083581979190045636_real64]
+    real(real64), parameter :: KG_ADAPT_REF_CDF(NKX) = [0.0_real64, 0.0_real64, 0.29793625900539494_real64,  &
+        0.66687540440497917_real64, 0.66958647244248659_real64, 0.67135137111005905_real64, 0.78020221977335202_real64,  &
+        0.99037200427674033_real64, 1.0_real64]
+
+    !> the adaptive kernel under weights mod 5, reliability: the pilot is weighted too
+    logical, parameter :: KG_ADAPT_W_DEF = .true.
+    real(real64), parameter :: KG_ADAPT_W_H = 125.45560414391876_real64
+    real(real64), parameter :: KG_ADAPT_W_PDF(NKX) = [0.00014354420883252235_real64, 0.00045198858468351304_real64,  &
+        0.0030044930836210623_real64, 0.00015125285868088049_real64, 0.00013410449433740173_real64,  &
+        0.00015466123701314717_real64, 0.00078121218645840469_real64, 0.00055307029059431653_real64,  &
+        0.0005131106717538136_real64]
+    real(real64), parameter :: KG_ADAPT_W_CDF(NKX) = [0.0045529534268499462_real64, 0.01719823508602978_real64,  &
+        0.31502585750787915_real64, 0.66777131118416722_real64, 0.67559587311928304_real64, 0.67811153596360652_real64,  &
+        0.78160500392377685_real64, 0.94341723635839048_real64, 0.949547896433655_real64]
 
 end module test_kde_golden ! GCOVR_EXCL_LINE

@@ -86,7 +86,7 @@ contains
                                             p15(:), p16(:), p17(:), p18(:), p19(:), p20(:), p21(:), &
                                             p22(:), p23(:), p24(:), p25(:), p26(:), p27(:), &
                                             p28(:), p29(:), p30(:), p31(:), p32(:), p33(:), p34(:), &
-                                            p35(:), p36(:), p37(:), p38(:), p39(:)
+                                            p35(:), p36(:), p37(:), p38(:), p39(:), p40(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -3662,9 +3662,50 @@ contains
             new_unittest("pf_kde_grid%merge refuses a different boundary correction", &
                 test_kde_grid_merge_boundary_aborts) &
             ]
+        ! ---- parquet_kde: the adaptive kernel ----
+        p40 = [ &
+            new_unittest("pf_kde%fit refuses alpha= without adaptive=.true.", &
+                test_kde_alpha_without_adaptive_aborts), &
+            new_unittest("pf_kde%fit refuses bandwidth_max= with adaptive=.false.", &
+                test_kde_bandwidth_max_without_adaptive_aborts), &
+            new_unittest("pf_kde%fit refuses alpha above one", &
+                test_kde_alpha_above_one_aborts), &
+            new_unittest("pf_kde%fit refuses a NaN alpha", &
+                test_kde_alpha_nan_aborts), &
+            new_unittest("pf_kde%fit refuses a zero bandwidth_max", &
+                test_kde_bandwidth_max_zero_aborts), &
+            new_unittest("pf_kde%bandwidths refuses an output of the wrong size", &
+                test_kde_bandwidths_size_aborts), &
+            new_unittest("pf_kde%bandwidths refuses points of the wrong size", &
+                test_kde_bandwidths_x_size_aborts), &
+            new_unittest("pf_kde%bandwidth_at refuses an output of the wrong size", &
+                test_kde_bandwidth_at_size_aborts), &
+            new_unittest("pf_kde%pilot refuses a fit that is not adaptive", &
+                test_kde_pilot_not_adaptive_aborts), &
+            new_unittest("pf_kde_grid%init refuses alpha= without pilot=", &
+                test_kde_grid_alpha_without_pilot_aborts), &
+            new_unittest("pf_kde_grid%init refuses bandwidth_max= without pilot=", &
+                test_kde_grid_bandwidth_max_without_pilot_aborts), &
+            new_unittest("pf_kde_grid%init refuses a negative alpha", &
+                test_kde_grid_alpha_negative_aborts), &
+            new_unittest("pf_kde_grid%init refuses a NaN bandwidth_max", &
+                test_kde_grid_bandwidth_max_nan_aborts), &
+            new_unittest("pf_kde_grid%init refuses a pilot that was never initialised", &
+                test_kde_grid_pilot_uninitialised_aborts), &
+            new_unittest("pf_kde_grid%init refuses a pilot with nothing in it", &
+                test_kde_grid_pilot_empty_aborts), &
+            new_unittest("pf_kde_grid%init refuses a pilot that does not cover its range", &
+                test_kde_grid_pilot_not_covering_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a grid read from another pilot", &
+                test_kde_grid_merge_pilot_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a fixed grid into an adaptive one", &
+                test_kde_grid_merge_fixed_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a grid with another alpha", &
+                test_kde_grid_merge_alpha_aborts) &
+            ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, &
-            p39]
+            p39, p40]
     end subroutine collect_tests_parquet_errors
 
 
@@ -21441,5 +21482,123 @@ contains
         call check_kde_scenario(error, "kde_grid_merge_boundary", &
             "pf_kde_grid%merge: the two grids differ in boundary")
     end subroutine test_kde_grid_merge_boundary_aborts
+    !
+    !
+    !> Every one of the adaptive kernel's refusals, in both forms, asserted by the exact text the
+    !> guide page's table publishes; see `test/error_scenarios.f90` for each control and the call
+    !> refused.
+    subroutine test_kde_alpha_without_adaptive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_alpha_without_adaptive", &
+            "pf_kde%fit: alpha= and bandwidth_max= need adaptive=.true.")
+    end subroutine test_kde_alpha_without_adaptive_aborts
+    !
+    subroutine test_kde_bandwidth_max_without_adaptive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidth_max_without_adaptive", &
+            "pf_kde%fit: alpha= and bandwidth_max= need adaptive=.true.")
+    end subroutine test_kde_bandwidth_max_without_adaptive_aborts
+    !
+    subroutine test_kde_alpha_above_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_alpha_above_one", &
+            "pf_kde%fit: alpha must lie in [0, 1]")
+    end subroutine test_kde_alpha_above_one_aborts
+    !
+    subroutine test_kde_alpha_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_alpha_nan", &
+            "pf_kde%fit: alpha must lie in [0, 1]")
+    end subroutine test_kde_alpha_nan_aborts
+    !
+    subroutine test_kde_bandwidth_max_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidth_max_zero", &
+            "pf_kde%fit: bandwidth_max must be a finite, positive number")
+    end subroutine test_kde_bandwidth_max_zero_aborts
+    !
+    subroutine test_kde_bandwidths_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidths_size", &
+            "pf_kde%bandwidths: h must have one element per retained point")
+    end subroutine test_kde_bandwidths_size_aborts
+    !
+    subroutine test_kde_bandwidths_x_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidths_x_size", &
+            "pf_kde%bandwidths: x must have one element per retained point")
+    end subroutine test_kde_bandwidths_x_size_aborts
+    !
+    subroutine test_kde_bandwidth_at_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_bandwidth_at_size", &
+            "pf_kde%bandwidth_at: h must have one element per point of x")
+    end subroutine test_kde_bandwidth_at_size_aborts
+    !
+    subroutine test_kde_pilot_not_adaptive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_pilot_not_adaptive", &
+            "pf_kde%pilot: the fit is not adaptive")
+    end subroutine test_kde_pilot_not_adaptive_aborts
+    !
+    subroutine test_kde_grid_alpha_without_pilot_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_alpha_without_pilot", &
+            "pf_kde_grid%init: alpha= and bandwidth_max= need pilot=")
+    end subroutine test_kde_grid_alpha_without_pilot_aborts
+    !
+    subroutine test_kde_grid_bandwidth_max_without_pilot_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_bandwidth_max_without_pilot", &
+            "pf_kde_grid%init: alpha= and bandwidth_max= need pilot=")
+    end subroutine test_kde_grid_bandwidth_max_without_pilot_aborts
+    !
+    subroutine test_kde_grid_alpha_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_alpha_negative", &
+            "pf_kde_grid%init: alpha must lie in [0, 1]")
+    end subroutine test_kde_grid_alpha_negative_aborts
+    !
+    subroutine test_kde_grid_bandwidth_max_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_bandwidth_max_nan", &
+            "pf_kde_grid%init: bandwidth_max must be a finite, positive number")
+    end subroutine test_kde_grid_bandwidth_max_nan_aborts
+    !
+    subroutine test_kde_grid_pilot_uninitialised_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_pilot_uninitialised", &
+            "pf_kde_grid%init: pilot must be an initialised grid with points in it")
+    end subroutine test_kde_grid_pilot_uninitialised_aborts
+    !
+    subroutine test_kde_grid_pilot_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_pilot_empty", &
+            "pf_kde_grid%init: pilot must be an initialised grid with points in it")
+    end subroutine test_kde_grid_pilot_empty_aborts
+    !
+    subroutine test_kde_grid_pilot_not_covering_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_pilot_not_covering", &
+            "pf_kde_grid%init: the pilot must cover this grid's range")
+    end subroutine test_kde_grid_pilot_not_covering_aborts
+    !
+    subroutine test_kde_grid_merge_pilot_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_pilot", &
+            "pf_kde_grid%merge: the two grids differ in pilot")
+    end subroutine test_kde_grid_merge_pilot_aborts
+    !
+    subroutine test_kde_grid_merge_fixed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_fixed", &
+            "pf_kde_grid%merge: the two grids differ in pilot")
+    end subroutine test_kde_grid_merge_fixed_aborts
+    !
+    subroutine test_kde_grid_merge_alpha_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_alpha", &
+            "pf_kde_grid%merge: the two grids differ in pilot")
+    end subroutine test_kde_grid_merge_alpha_aborts
     !
 end module test_errors

@@ -106,8 +106,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   grid. Four kernels (`gaussian`, `epanechnikov`, `bspline`, `box`), with the bandwidth the
   kernel's standard deviation; Silverman's and Scott's rules, a number, and `adjust=`; per-element
   weights and nulls under the `pf_*` family's rules, with `n_eff` in the rules; `lower=`/`upper=`
-  for a bounded support, corrected by renormalisation or reflection. `threads=` on the grid's
-  `%add`. An Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
+  for a bounded support, corrected by renormalisation or reflection. `adaptive=.true.` selects the
+  sample-point adaptive kernel (each point's bandwidth from a pilot density, sensitivity `alpha=`,
+  capped by `bandwidth_max=`, read back through `%bandwidths`, `%bandwidth_at` and `%pilot`), and
+  the streaming form takes the same rule from a `pilot=` grid. `threads=` on the grid's `%add`.
+  An Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
   [Kernel density estimation](doc/pages/utilities/kernel-density.md).
 - **A direction inside a HEALPix pixel, not just at its centre**:
   `pf_healpix_grid%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised to any position in the

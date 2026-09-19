@@ -25,6 +25,18 @@
 !! bound sits at `2*lower - x_j`, and it reaches an interior `x` only when `x_j < 2*lower - x + R*h`,
 !! which is inside the direct window whenever `x >= lower`; the same holds at the upper bound. So a
 !! point outside the window contributes exactly 0 or exactly 1 to `%cdf`, under every correction.
+!! Under the adaptive kernel the window is sized by the largest point bandwidth, `hmax`, and the
+!! same argument holds point by point, each bandwidth being at most that.
+!!
+!! **One loop serves the fixed and the adaptive estimate.** Point `j`'s reciprocal bandwidth is read
+!! from `hr(1 + (j - 1)*hstride)`: one element, one over the global bandwidth, read with stride 0,
+!! for a fixed fit, and one per point for an adaptive one, every one formed at `%fit` by the same
+!! scalar division. Each kernel is evaluated at `(t - x_j)*r` and scaled by `h/h_j` only where `r`
+!! differs from one over `h`, so an adaptive fit whose every bandwidth is the global one --
+!! `alpha = 0` -- runs the same instructions on the same values and answers the fixed estimate bit
+!! for bit. Two loops written to mirror each other would not (a compiler may hoist the reciprocal
+!! of a divisor it can see is constant in one of them and not in the other), and there is no branch
+!! on the kind of fit for a compiler to split the loop at. A query divides by nothing per kernel.
 submodule (parquet_kde) parquet_kde_fit
 
     implicit none
@@ -40,11 +52,12 @@ contains
         character(len=*), parameter :: EP = "pf_kde%fit"
         real(real64), allocatable :: keep_x(:), keep_w(:)
         integer(int64), allocatable :: perm(:)
-        integer(int64) :: nv, nnull, nnan, nout, m, i
-        real(real64) :: v, hh, adj
-        logical :: saw_nan, freq
+        integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
+        real(real64) :: v, hh, adj, a_alpha, a_bmax, one(1)
+        logical :: saw_nan, freq, want_adaptive, built
 
         call kde_clear(self)
+        kde_fit_ns = 0_int64
 
         ! ---- the caller's contract, checked before anything is read ----
         if (present(threads)) then
@@ -68,7 +81,31 @@ contains
         end if
         call kde_resolve_setup(EP, kernel, lower, upper, boundary, self%kernel_code, self%has_lower, &
             self%lo, self%has_upper, self%hi, self%boundary_code)
+        want_adaptive = .false.
+        if (present(adaptive)) want_adaptive = adaptive
+        if (present(alpha) .or. present(bandwidth_max)) then
+            if (.not. want_adaptive) call kde_abort(EP, "alpha= and bandwidth_max= need adaptive=.true.")
+        end if
+        a_alpha = KDE_ALPHA_DEFAULT
+        if (present(alpha)) then
+            ! The NaN first, as its own test: an ordered comparison raises IEEE_INVALID on one.
+            if (alpha /= alpha) call kde_abort(EP, "alpha must lie in [0, 1]")
+            if (alpha < 0.0_real64 .or. alpha > 1.0_real64) call kde_abort(EP, "alpha must lie in [0, 1]")
+            a_alpha = alpha
+        end if
+        a_bmax = 0.0_real64
+        if (present(bandwidth_max)) then
+            if (.not. kde_positive_finite(bandwidth_max)) &
+                call kde_abort(EP, "bandwidth_max must be a finite, positive number")
+            a_bmax = bandwidth_max
+        end if
         call stats_weight_kind(EP, weight_type, freq)
+        ! The rule is on from here, whatever the population turns out to be, so that `%is_adaptive`
+        ! reports what was asked for; its table is filled once there is a pilot to read.
+        self%adapt%on = want_adaptive
+        self%adapt%alpha = a_alpha
+        self%adapt%has_bmax = present(bandwidth_max)
+        self%adapt%bmax = a_bmax
 
         ! ---- the population: the family's exclusions, then the support ----
         ! `stats_compact` checks the array sizes and every weight it examines, in the family's
@@ -108,6 +145,7 @@ contains
         if (saw_nan .or. m == 0_int64) return
 
         ! ---- the retained sample, ascending, and its running weight ----
+        call system_clock(count=c0, count_rate=rate)
         call pf_argsort(keep_x(1:m), perm, threads=threads)
         allocate(self%x(m))
         do i = 1_int64, m
@@ -126,6 +164,8 @@ contains
         else
             self%w_total = real(m, real64)
         end if
+        call system_clock(count=c1)
+        call add_phase(1, c0, c1, rate)
 
         ! ---- the bandwidth ----
         if (present(bandwidth)) then
@@ -133,15 +173,70 @@ contains
         else
             call kde_rule_bandwidth(self%rule_code, self%x, freq, self%w, weight_type, threads, hh)
         end if
-        ! A rule that found no scale answers NaN, and an explicit bandwidth times `adjust` can only
-        ! fail by overflowing; either way there is no estimate to answer with.
+        ! A rule that found no scale answers NaN; an explicit bandwidth times `adjust` can fail by
+        ! overflowing, or by reaching so far that the kernel's reach does. Either way there is no
+        ! estimate to answer with, and the product is tested before it is formed: the overflow
+        ! itself would stop a program under nagfor.
         if (ieee_is_nan(hh)) return
+        if (adj > 1.0_real64) then
+            if (hh > huge(hh)/adj) return
+        end if
         hh = hh*adj
-        if (.not. kde_positive_finite(hh)) return
+        if (.not. kde_bandwidth_usable(self%kernel_code, hh)) return
         self%h = hh
+
+        ! ---- each point's bandwidth: from the pilot when adaptive, the global one otherwise ----
+        if (self%adapt%on) then
+            call system_clock(count=c0)
+            one(1) = 1.0_real64
+            if (self%weighted) then
+                call kde_build_pilot(self%pilot_grid, self%x, self%w, .true., hh, self%kernel_code, self%has_lower, &
+                    self%lo, self%has_upper, self%hi, self%boundary_code, self%w_total, threads, built)
+            else
+                call kde_build_pilot(self%pilot_grid, self%x, one, .false., hh, self%kernel_code, self%has_lower, &
+                    self%lo, self%has_upper, self%hi, self%boundary_code, self%w_total, threads, built)
+            end if
+            ! Only points beyond half the largest number leave no range to build it over.
+            if (.not. built) then
+                self%h = ieee_value(1.0_real64, ieee_quiet_nan)
+                return
+            end if
+            call kde_adapt_set(self%adapt, self%pilot_grid, a_alpha, present(bandwidth_max), a_bmax)
+            call system_clock(count=c1)
+            call add_phase(2, c0, c1, rate)
+            call system_clock(count=c0)
+            allocate(self%hb(m))
+            call kde_adapt_bandwidths(self%adapt, hh, self%x, self%hb)
+            ! A bandwidth the rule could only overflow or underflow to leaves no estimate either.
+            do i = 1_int64, m
+                if (.not. kde_bandwidth_usable(self%kernel_code, self%hb(i))) then
+                    self%h = ieee_value(1.0_real64, ieee_quiet_nan)
+                    return
+                end if
+            end do
+            self%hmax = self%hb(1)
+            do i = 2_int64, m
+                if (self%hb(i) > self%hmax) self%hmax = self%hb(i)
+            end do
+            allocate(self%hr(m))
+            do i = 1_int64, m
+                self%hr(i) = reciprocal(self%hb(i))
+            end do
+            self%hstride = 1_int64
+        else
+            call system_clock(count=c0)
+            allocate(self%hb(1), self%hr(1))
+            self%hb(1) = hh
+            self%hr(1) = reciprocal(hh)
+            self%hmax = hh
+            self%hstride = 0_int64
+        end if
+        self%hinv = reciprocal(hh)
 
         ! ---- each point's mass inside the support, where it can differ from one ----
         call build_mass(self)
+        call system_clock(count=c1)
+        call add_phase(3, c0, c1, rate)
         self%defined = .true.
         if (present(ok)) ok = .true.
 
@@ -155,8 +250,8 @@ contains
         ! the `real64` form does it.
         allocate(xw(size(x, kind=int64)))
         xw = real(x, real64)
-        call kde_fit_f64(self, xw, bandwidth, rule, adjust, kernel, lower, upper, boundary, &
-            is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
+        call kde_fit_f64(self, xw, bandwidth, rule, adjust, kernel, adaptive, alpha, bandwidth_max, lower, &
+            upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
 
     end procedure kde_fit_f32
 
@@ -275,6 +370,64 @@ contains
 
     end procedure kde_curve
 
+    module procedure kde_bandwidths
+
+        character(len=*), parameter :: EP = "pf_kde%bandwidths"
+        integer(int64) :: i
+
+        call require_fitted(self, EP)
+        if (size(h, kind=int64) /= self%cnt_valid) call kde_abort(EP, "h must have one element per retained point")
+        if (present(x)) then
+            if (size(x, kind=int64) /= self%cnt_valid) &
+                call kde_abort(EP, "x must have one element per retained point")
+            ! The points are kept whenever the population is, which a kept NaN prevents.
+            if (allocated(self%x)) then
+                do i = 1_int64, self%cnt_valid
+                    x(i) = self%x(i)
+                end do
+            else
+                x = ieee_value(1.0_real64, ieee_quiet_nan)
+            end if
+        end if
+        if (.not. self%defined) then
+            h = ieee_value(1.0_real64, ieee_quiet_nan)
+            return
+        end if
+        do i = 1_int64, self%cnt_valid
+            h(i) = self%hb(1_int64 + (i - 1_int64)*self%hstride)
+        end do
+
+    end procedure kde_bandwidths
+
+    module procedure kde_bandwidth_at_r0
+
+        real(real64) :: hs(1)
+
+        call require_fitted(self, "pf_kde%bandwidth_at")
+        call bandwidths_at(self, [x], hs)
+        h = hs(1)
+
+    end procedure kde_bandwidth_at_r0
+
+    module procedure kde_bandwidth_at_r1
+
+        call require_fitted(self, "pf_kde%bandwidth_at")
+        if (size(h, kind=int64) /= size(x, kind=int64)) &
+            call kde_abort("pf_kde%bandwidth_at", "h must have one element per point of x")
+        call bandwidths_at(self, x, h)
+
+    end procedure kde_bandwidth_at_r1
+
+    module procedure kde_pilot_copy
+
+        call require_fitted(self, "pf_kde%pilot")
+        if (.not. self%adapt%on) call kde_abort("pf_kde%pilot", "the fit is not adaptive")
+        ! An adaptive fit with nothing to build a pilot from hands back a grid never initialised,
+        ! which is what `g` is on entry.
+        if (self%pilot_grid%initialised) g = self%pilot_grid
+
+    end procedure kde_pilot_copy
+
     ! ==========================================================================================
     ! Accessors
     ! ==========================================================================================
@@ -354,7 +507,7 @@ contains
 
     module procedure kde_is_adaptive
         call require_fitted(self, "pf_kde%is_adaptive")
-        res = .false.
+        res = self%adapt%on
     end procedure kde_is_adaptive
 
     module procedure kde_print
@@ -391,6 +544,16 @@ contains
         case default
             write(u, '(2x,a,a)') "boundary    ", "none (unbounded)"
         end select
+        if (self%adapt%on) then
+            write(u, '(2x,a,es24.16e3)') "alpha       ", self%adapt%alpha
+            if (self%adapt%has_bmax) write(u, '(2x,a,es23.16e3)') "bandwidth_max", self%adapt%bmax
+            if (self%pilot_grid%initialised) write(u, '(2x,a,i0,a,es24.16e3,a,es24.16e3)') "pilot       ", &
+                self%pilot_grid%nc, " cells over", self%pilot_grid%x0, " to", self%pilot_grid%x1
+            if (self%defined) then
+                write(u, '(2x,a,es24.16e3)') "h_j min     ", minval(self%hb)
+                write(u, '(2x,a,es24.16e3)') "h_j max     ", self%hmax
+            end if
+        end if
         if (.not. self%defined) write(u, '(2x,a)') "undefined   every query answers NaN (ok = .false.)"
 
     end procedure kde_print
@@ -401,6 +564,13 @@ contains
         if (allocated(self%w)) deallocate(self%w)
         if (allocated(self%cw)) deallocate(self%cw)
         if (allocated(self%mass)) deallocate(self%mass)
+        if (allocated(self%hb)) deallocate(self%hb)
+        if (allocated(self%hr)) deallocate(self%hr)
+        self%adapt = kde_adapt()
+        self%pilot_grid = pf_kde_grid()
+        self%hmax = 0.0_real64
+        self%hinv = 0.0_real64
+        self%hstride = 0_int64
         self%fitted = .false.
         self%defined = .false.
         self%kernel_code = KDE_GAUSSIAN
@@ -508,67 +678,99 @@ contains
     end function last_at_or_below
 
     !> Point `j`'s mass at or below `t`, summed over its images: itself, and under `"reflect"` its
-    !! mirror image about each bound. Not divided by the point's mass inside the support.
-    pure function images_cdf(self, j, t) result(s)
+    !! mirror image about each bound, for the point's own bandwidth, whose reciprocal is `r`. Not
+    !! divided by the point's mass inside the support.
+    pure function images_cdf(self, j, t, r) result(s)
         class(pf_kde), intent(in)  :: self !! the fitted estimate
         integer(int64), intent(in) :: j    !! the point
         real(real64), intent(in)   :: t    !! where to evaluate
+        real(real64), intent(in)   :: r    !! one over the point's bandwidth
         real(real64)               :: s    !! the mass at or below `t`
 
         real(real64) :: xj
 
         xj = self%x(j)
-        s = kde_kernel_cdf(self%kernel_code, (t - xj)/self%h)
+        s = kde_kernel_cdf(self%kernel_code, (t - xj)*r)
         if (self%boundary_code /= KDE_BOUNDARY_REFLECT) return
-        if (self%has_lower) s = s + kde_kernel_cdf(self%kernel_code, (t - (2.0_real64*self%lo - xj))/self%h)
-        if (self%has_upper) s = s + kde_kernel_cdf(self%kernel_code, (t - (2.0_real64*self%hi - xj))/self%h)
+        if (self%has_lower) s = s + kde_kernel_cdf(self%kernel_code, (t - (2.0_real64*self%lo - xj))*r)
+        if (self%has_upper) s = s + kde_kernel_cdf(self%kernel_code, (t - (2.0_real64*self%hi - xj))*r)
 
     end function images_cdf
 
-    !> Point `j`'s kernel density at `t`, summed over its images, in standard-deviation units (not
-    !! yet divided by the bandwidth or by the point's mass inside the support).
-    pure function images_pdf(self, j, t) result(k)
+    !> Point `j`'s kernel density at `t`, summed over its images, in standard-deviation units of its
+    !! own bandwidth, whose reciprocal is `r` (not yet divided by a bandwidth or by the point's mass
+    !! inside the support).
+    pure function images_pdf(self, j, t, r) result(k)
         class(pf_kde), intent(in)  :: self !! the fitted estimate
         integer(int64), intent(in) :: j    !! the point
         real(real64), intent(in)   :: t    !! where to evaluate
+        real(real64), intent(in)   :: r    !! one over the point's bandwidth
         real(real64)               :: k    !! the density there
 
         real(real64) :: xj
 
         xj = self%x(j)
-        k = kde_kernel_pdf(self%kernel_code, (t - xj)/self%h)
+        k = kde_kernel_pdf(self%kernel_code, (t - xj)*r)
         if (self%boundary_code /= KDE_BOUNDARY_REFLECT) return
-        if (self%has_lower) k = k + kde_kernel_pdf(self%kernel_code, (t - (2.0_real64*self%lo - xj))/self%h)
-        if (self%has_upper) k = k + kde_kernel_pdf(self%kernel_code, (t - (2.0_real64*self%hi - xj))/self%h)
+        if (self%has_lower) k = k + kde_kernel_pdf(self%kernel_code, (t - (2.0_real64*self%lo - xj))*r)
+        if (self%has_upper) k = k + kde_kernel_pdf(self%kernel_code, (t - (2.0_real64*self%hi - xj))*r)
 
     end function images_pdf
 
+    !> One over point `j`'s bandwidth: its own under the adaptive kernel, the global one otherwise,
+    !! read with the stride that makes the two one loop.
+    pure function point_reciprocal(self, j) result(r)
+        class(pf_kde), intent(in)  :: self !! the fitted estimate
+        integer(int64), intent(in) :: j    !! the point
+        real(real64)               :: r    !! one over its bandwidth
+
+        r = self%hr(1_int64 + (j - 1_int64)*self%hstride)
+
+    end function point_reciprocal
+
+    !> `1/v` by one scalar division through a `volatile` operand, so that every reciprocal the fit
+    !! stores -- the global one and each point's -- is the correctly rounded quotient formed the
+    !! same way: ifx's default `-fp-model=fast` would otherwise vectorise a loop of them, or hoist
+    !! one, into a different instruction for some elements than for others, and `alpha = 0` would
+    !! no longer be the fixed estimate bit for bit.
+    function reciprocal(v) result(r)
+        real(real64), intent(in) :: v !! the bandwidth, positive
+        real(real64)             :: r !! its reciprocal
+
+        real(real64), volatile :: d
+
+        d = v
+        r = 1.0_real64/d
+
+    end function reciprocal
+
     !> Each point's mass inside the support, stored only where a correction makes it differ from
     !! one: under `"renormalise"` whenever a bound is given, and under `"reflect"` only when both
-    !! bounds are given and the kernel is wider than the range between them, which is the one case
+    !! bounds are given and a kernel is wider than the range between them, which is the one case
     !! where the images omit mass (the doubly reflected terms).
     subroutine build_mass(self)
-        class(pf_kde), intent(inout) :: self !! the estimate, sample and bandwidth set
+        class(pf_kde), intent(inout) :: self !! the estimate, sample and bandwidths set
 
         integer(int64) :: j, m
-        real(real64) :: s_lo, s_hi
+        real(real64) :: s_lo, s_hi, r
 
         select case (self%boundary_code)
         case (KDE_BOUNDARY_RENORMALISE)
             continue
         case (KDE_BOUNDARY_REFLECT)
             if (.not. (self%has_lower .and. self%has_upper)) return
-            if (KDE_RADIUS(self%kernel_code)*self%h <= self%hi - self%lo) return
+            if (KDE_RADIUS(self%kernel_code)*self%hmax <= self%hi - self%lo) return
         case default
             return
         end select
         m = size(self%x, kind=int64)
         allocate(self%mass(m))
         do j = 1_int64, m
+            r = point_reciprocal(self, j)
             s_lo = 0.0_real64
-            if (self%has_lower) s_lo = images_cdf(self, j, self%lo)
+            if (self%has_lower) s_lo = images_cdf(self, j, self%lo, r)
             if (self%has_upper) then
-                s_hi = images_cdf(self, j, self%hi)
+                s_hi = images_cdf(self, j, self%hi, r)
             else
                 s_hi = 1.0_real64
             end if
@@ -577,15 +779,16 @@ contains
 
     end subroutine build_mass
 
-    !> The density at `t`: the weighted sum of the kernels within reach, over the total weight
-    !! and the bandwidth. Zero outside the support; NaN at a NaN `t` or on an undefined estimate.
+    !> The density at `t`: the weighted sum of the kernels within reach, each over its own
+    !! bandwidth, over the total weight. Zero outside the support; NaN at a NaN `t` or on an
+    !! undefined estimate.
     pure function density_at(self, t) result(f)
         class(pf_kde), intent(in) :: self !! the fitted estimate
         real(real64), intent(in)  :: t    !! where to evaluate
         real(real64)              :: f    !! the density
 
-        integer(int64) :: j, first, last
-        real(real64) :: reach, k, acc
+        integer(int64) :: j, jb, first, last
+        real(real64) :: reach, k, acc, r
 
         f = ieee_value(1.0_real64, ieee_quiet_nan)
         if (.not. self%defined) return
@@ -597,12 +800,18 @@ contains
         if (self%has_upper) then
             if (t > self%hi) return
         end if
-        reach = KDE_RADIUS(self%kernel_code)*self%h
+        reach = KDE_RADIUS(self%kernel_code)*self%hmax
         first = first_at_or_above(self%x, t - reach)
         last = last_at_or_below(self%x, t + reach)
         acc = 0.0_real64
+        jb = 1_int64 + (first - 1_int64)*self%hstride
         do j = first, last
-            k = images_pdf(self, j, t)
+            r = self%hr(jb)
+            jb = jb + self%hstride
+            k = images_pdf(self, j, t, r)
+            ! The sum is divided by the global bandwidth below, so a kernel of any other is scaled
+            ! here by `h/h_j`, and one of the global bandwidth is left exactly as it is.
+            if (r /= self%hinv) k = k*(self%h*r)
             if (allocated(self%mass)) k = k/self%mass(j)
             if (self%weighted) k = self%w(j)*k
             acc = acc + k
@@ -619,8 +828,8 @@ contains
         real(real64), intent(in)  :: t    !! where to evaluate
         real(real64)              :: p    !! the probability at or below `t`
 
-        integer(int64) :: j, first, last
-        real(real64) :: reach, c, acc, s_lo
+        integer(int64) :: j, jb, first, last
+        real(real64) :: reach, c, acc, s_lo, r
 
         p = ieee_value(1.0_real64, ieee_quiet_nan)
         if (.not. self%defined) return
@@ -633,7 +842,7 @@ contains
             p = 1.0_real64
             if (t >= self%hi) return
         end if
-        reach = KDE_RADIUS(self%kernel_code)*self%h
+        reach = KDE_RADIUS(self%kernel_code)*self%hmax
         first = first_at_or_above(self%x, t - reach)
         last = last_at_or_below(self%x, t + reach)
         if (first <= 1_int64) then
@@ -643,10 +852,13 @@ contains
         else
             acc = real(first - 1_int64, real64)
         end if
+        jb = 1_int64 + (first - 1_int64)*self%hstride
         do j = first, last
+            r = self%hr(jb)
+            jb = jb + self%hstride
             s_lo = 0.0_real64
-            if (self%has_lower) s_lo = images_cdf(self, j, self%lo)
-            c = images_cdf(self, j, t) - s_lo
+            if (self%has_lower) s_lo = images_cdf(self, j, self%lo, r)
+            c = images_cdf(self, j, t, r) - s_lo
             if (allocated(self%mass)) c = c/self%mass(j)
             if (self%weighted) c = self%w(j)*c
             acc = acc + c
@@ -671,7 +883,7 @@ contains
 
         x = ieee_value(1.0_real64, ieee_quiet_nan)
         if (.not. self%defined) return
-        reach = KDE_RADIUS(self%kernel_code)*self%h
+        reach = KDE_RADIUS(self%kernel_code)*self%hmax
         a = self%x(1) - reach
         b = self%x(size(self%x, kind=int64)) + reach
         if (self%has_lower) a = max(a, self%lo)
@@ -712,5 +924,41 @@ contains
         x = b
 
     end function quantile_at
+
+    !> The bandwidth the rule gives each point of `x`, into `h`: the adaptive rule's look-up of the
+    !! pilot, the one `%fit` used, or the global bandwidth; NaN at a NaN point and everywhere on an
+    !! undefined estimate.
+    subroutine bandwidths_at(self, x, h)
+        class(pf_kde), intent(in) :: self !! the fitted estimate
+        real(real64), intent(in)  :: x(:) !! the points
+        real(real64), intent(out) :: h(:) !! the bandwidth at each
+
+        integer(int64) :: i
+
+        if (.not. self%defined) then
+            h = ieee_value(1.0_real64, ieee_quiet_nan)
+        else if (self%adapt%on) then
+            call kde_adapt_bandwidths(self%adapt, self%h, x, h)
+        else
+            do i = 1_int64, size(x, kind=int64)
+                h(i) = self%h
+                if (x(i) /= x(i)) h(i) = ieee_value(1.0_real64, ieee_quiet_nan)
+            end do
+        end if
+
+    end subroutine bandwidths_at
+
+    !> Records phase `k` of the fit, from clock reading `c0` to `c1`, in nanoseconds; nothing when
+    !! the processor has no clock.
+    subroutine add_phase(k, c0, c1, rate)
+        integer, intent(in)        :: k    !! the phase: 1 the sort, 2 the pilot, 3 the bandwidths
+        integer(int64), intent(in) :: c0   !! the clock at the phase's start, in its counts
+        integer(int64), intent(in) :: c1   !! the clock at its end
+        integer(int64), intent(in) :: rate !! the clock's counts per second; 0 without a clock
+
+        if (rate <= 0_int64) return
+        kde_fit_ns(k) = nint(real(c1 - c0, real64)*(1.0e9_real64/real(rate, real64)), kind=int64)
+
+    end subroutine add_phase
 
 end submodule parquet_kde_fit ! GCOVR_EXCL_LINE

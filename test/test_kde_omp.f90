@@ -1,7 +1,9 @@
 !> Threading tests for `parquet_kde`: that `pf_kde_grid%add(threads=)` opens the team it resolves,
 !> answers the same bits every time at one team size and within rounding of the serial deposit at
 !> another, and that its two limits -- a floor of survivors per thread, and a cap from the partial
-!> grids' own cost -- keep a team shut where one would not pay.
+!> grids' own cost -- keep a team shut where one would not pay; and that the pilot an adaptive
+!> `pf_kde%fit` builds answers the same bits at every thread count, its deposit cut by the sample
+!> and not by the team.
 !!
 !! **Every threaded assertion reads `parquet_debug_kde_threads_used()` beside the answer**: two
 !! team sizes differ only by rounding, and not at all against a deposit that never opened its
@@ -45,7 +47,9 @@ contains
             new_unittest("%add(threads=) opens its team and changes the answer only by rounding", &
                 test_add_team_changes_only_rounding), &
             new_unittest("%add's floor per thread and its grid cap keep a team shut", &
-                test_add_limits_decide_the_team) &
+                test_add_limits_decide_the_team), &
+            new_unittest("an adaptive %fit answers the same bits at every thread count", &
+                test_adaptive_fit_ignores_the_team) &
             ]
 
     end subroutine collect_tests_kde_omp
@@ -188,5 +192,77 @@ contains
             "would cost more than the deposit")
 
     end subroutine test_add_limits_decide_the_team
+
+    !> The pilot an adaptive `%fit` builds is deposited in pieces the sample and the pilot decide,
+    !> which the team takes in turn, so `threads=1` and `threads=4` give every point the same
+    !> bandwidth and the estimate the same bits, while the team counter shows that four threads
+    !> took the pieces. The pilot, a grid of 50000 points in dozens of pieces, is the exact fixed
+    !> estimate at its centres -- the oracle beside the A/B, which a piece deposited twice or not at
+    !> all would pass. An adaptive grid's `%add(threads=)` is the fixed grid's weaker promise: four
+    !> threads agree with one to rounding.
+    subroutine test_adaptive_fit_ignores_the_team(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k1, k4, kf
+        type(pf_kde_grid) :: p, g1, g4
+        real(real64), allocatable :: x(:), w(:), h1(:), h4(:), c(:), fc(:), fe(:)
+        real(real64) :: t(200), f1(200), f4(200), r1(400), r4(400)
+        integer :: team1, team4, team_add, i
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the pilot's pieces are always deposited on one " // &
+            "thread, so the one-thread and four-thread fits below would agree for the wrong reason")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
+                "processors available, so a process bound to one opens no team")
+            return
+        end if
+#endif
+        call team_fixture(50000_int64, x, w)
+        call k1%fit(x, bandwidth=5.0_real64, weights=w, adaptive=.true., threads=1)
+        team1 = parquet_debug_kde_threads_used()
+        call k4%fit(x, bandwidth=5.0_real64, weights=w, adaptive=.true., threads=4)
+        team4 = parquet_debug_kde_threads_used()
+        call check(error, team1 == 1, "threads=1 must build the pilot serially; the team observable says it did not")
+        if (allocated(error)) return
+        call check(error, team4 == 4, &
+            "threads=4 must build the pilot on a team of four, or the comparison below compares the " // &
+            "serial fit with itself")
+        if (allocated(error)) return
+        allocate(h1(k1%n_valid()), h4(k4%n_valid()))
+        call k1%bandwidths(h1)
+        call k4%bandwidths(h4)
+        do i = 1, 200
+            t(i) = -500.0_real64 + 5.0_real64*real(i, real64)
+        end do
+        call k1%pdf(t, f1)
+        call k4%pdf(t, f4)
+        call check(error, all(h4 == h1) .and. all(f4 == f1) .and. maxval(h1) > 1.5_real64*minval(h1), &
+            "an adaptive fit must give the same bits at every thread count")
+        if (allocated(error)) return
+
+        call k1%pilot(p)
+        allocate(c(p%ncells()), fc(p%ncells()), fe(p%ncells()))
+        call p%density(fc, x=c)
+        call kf%fit(x, bandwidth=5.0_real64, weights=w)
+        call kf%pdf(c, fe)
+        call check(error, maxval(abs(fc - fe)) <= 1.0e-6_real64*maxval(fe), &
+            "the pilot, deposited in pieces, must be the exact fixed estimate at its centres")
+        if (allocated(error)) return
+
+        call k4%pilot(p)
+        call g1%init(400, -200.0_real64, 200.0_real64, 5.0_real64, pilot=p)
+        call g1%add(x, weights=w, threads=1)
+        call g4%init(400, -200.0_real64, 200.0_real64, 5.0_real64, pilot=p)
+        call g4%add(x, weights=w, threads=4)
+        team_add = parquet_debug_kde_threads_used()
+        call g1%density(r1, normalise=.false.)
+        call g4%density(r4, normalise=.false.)
+        call check(error, team_add == 4 .and. maxval(abs(r4 - r1)) <= 1.0e-13_real64*maxval(r1), &
+            "an adaptive grid's four-thread deposit must open its team and agree with one thread's to rounding")
+
+    end subroutine test_adaptive_fit_ignores_the_team
 
 end module test_kde_omp

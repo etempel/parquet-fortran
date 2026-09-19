@@ -12,8 +12,8 @@ Emitted (COMMITTED to the repository, like every other generator's output):
 
   test/test_skycoord_vectors.f90  module `test_skycoord_vectors`: the coordinate-system selectors;
                                   rotations between every ordered pair of distinct systems;
-                                  offsets and position angles; sexagesimal fields, text written
-                                  and text read; and CMB-frame redshifts.
+                                  offsets and position angles; proper motions; sexagesimal
+                                  fields, text written and text read; and CMB-frame redshifts.
 
 Usage:  tools/generate_skycoord_reference.py [--check] [--self-test] [--verify-oracle]
 
@@ -22,17 +22,19 @@ Usage:  tools/generate_skycoord_reference.py [--check] [--self-test] [--verify-o
   --self-test      re-derive the published anchors -- the angle table and the selectors against
                    src/parquet_skycoord.f90, the dipole and the speed of light against
                    src/parquet_skycoord_rotate.f90, the ecliptic row's closed form, every row
-                   rebuilding its definition, orthonormality, round trips, the pole rules, the
-                   offset's pole convention, the text's carries, ties and grammar, and the
+                   rebuilding its definition, FK5 J2000's pole and its Galactic pair, orthonormality,
+                   round trips, the pole rules, the offset's pole convention, the proper motion's
+                   closed forms and its reversal, the text's carries, ties and grammar, and the
                    redshift's identities -- and exit 1 if any of them fails.
   --verify-oracle  cross-check the emitted rows against astropy: every rotation through
                    `SkyCoord.transform_to`, every offset through `directional_offset_by` and
-                   `separation`, every position angle through `position_angle`, every field split
-                   through `Longitude.hms` and `Angle.signed_dms`, every text written through
-                   `to_string` and every text read through astropy's own parser, and every
-                   redshift's angle to the apex through `separation`. Needs the workspace `astro`
-                   environment; the two modes above need a bare `python3`, so CI's lint image can
-                   run them.
+                   `separation`, every position angle through `position_angle`, every proper motion
+                   through `directional_offset_by` and, where the motion is small, through
+                   `apply_space_motion`, every field split through `Longitude.hms` and
+                   `Angle.signed_dms`, every text written through `to_string` and every text read
+                   through astropy's own parser, and every redshift's angle to the apex through
+                   `separation`. Needs the workspace `astro` environment; the two modes above need
+                   a bare `python3`, so CI's lint image can run them.
 
 NEVER HAND-EDIT A VECTOR. A contract change is an edit to the model below plus a regeneration.
 
@@ -55,11 +57,28 @@ source's north pole. It maps a source unit vector onto the target's.
                  is therefore closed form: (270 + gamb, 90 - phib, 90 + psib) in degrees.
   Supergalactic  de Vaucouleurs' pole at Galactic (47.37, 6.32), lon0 = 90 (`Rz(90) Ry(90 - 6.32)
                  Rz(47.37)`, `supergalactic_transforms.py`), hung off Galactic as it is defined.
+  FK5 J2000      `FK5` at its default equinox J2000: the frame bias alone, `Rx(-eta0) Ry(xi0)
+                 Rz(da0)` with USNO Circular 179's three angles above (`icrs_to_fk5`, whose
+                 precession from J2000 to J2000 is the identity).
 
-src/parquet_skycoord.f90 carries the Galactic and ecliptic rows ICRS-referred -- recovered here from
-the composite matrix at 60 digits, so the frame bias is inside them -- and the supergalactic row
-Galactic-referred, exactly as defined. `--self-test` holds each of its literals to the double
+src/parquet_skycoord.f90 carries the Galactic, ecliptic and FK5 rows ICRS-referred -- recovered here
+from the composite matrix at 60 digits, so the frame bias is inside them -- and the supergalactic
+row Galactic-referred, exactly as defined. `--self-test` holds each of its literals to the double
 nearest the model's value.
+
+THE FK5 ROW IS NEVER RECOVERED FROM A DOUBLE-PRECISION MATRIX. The FK5 pole sits 21.88 mas from the
+ICRS pole, so a pole longitude and a lon0 recovered from a rounded matrix carry about eight digits;
+recovered here from the 60-digit bias matrix, the row rebuilds that matrix to the working precision,
+and in doubles the library's three-angle product agrees with astropy to a few ulp.
+
+PROPER MOTION IS A STEP ALONG A GREAT CIRCLE. `pf_apply_pm` resolves `(pm_ra, pm_dec)` -- `pm_ra`
+being mu_alpha * cos(dec), Gaia's `pmra` and astropy's `pm_ra_cosdec` -- into a position angle and a
+separation `hypot(pm_ra, pm_dec) * |dt|`, half a turn round for a negative interval, and hands both
+to `pf_offset_radec`. astropy's `apply_space_motion` moves a source with no distance and no radial
+velocity in a straight line through space instead, which follows the same great circle but covers
+`atan(s)` of it where this covers `s` (radians); the oracle compares the two through that mapping
+where the motion is small enough for nothing else to differ, and every row through
+`directional_offset_by`.
 
 WHAT IS EXACT AND WHAT IS NOT
 
@@ -116,9 +135,9 @@ dangle = sph.dangle
 # ---------------------------------------------------------------------------------------------
 
 UNKNOWN = 0
-SELECTORS = {"ICRS": 1, "GALACTIC": 2, "ECLIPTIC": 3, "SUPERGALACTIC": 4}
-ICRS, GAL, ECL, SGAL = (SELECTORS[k] for k in ("ICRS", "GALACTIC", "ECLIPTIC", "SUPERGALACTIC"))
-SYSTEMS = [ICRS, GAL, ECL, SGAL]
+SELECTORS = {"ICRS": 1, "GALACTIC": 2, "ECLIPTIC": 3, "SUPERGALACTIC": 4, "FK5": 5}
+ICRS, GAL, ECL, SGAL, FK5 = (SELECTORS[k] for k in ("ICRS", "GALACTIC", "ECLIPTIC", "SUPERGALACTIC", "FK5"))
+SYSTEMS = [ICRS, GAL, ECL, SGAL, FK5]
 
 MAS = D(3600000)
 ARCSEC = D(3600)
@@ -206,6 +225,16 @@ def row_of(m):
 _CACHE = {}
 
 
+def icrs_to_fk5():
+    """ICRS -> FK5 J2000: the frame bias, `Rx(-eta0) Ry(xi0) Rz(da0)` (`_icrs_to_fk5_matrix`)."""
+    return mm(mm(rot("x", -BIAS_ETA0), rot("y", BIAS_XI0)), rot("z", BIAS_DA0))
+
+
+def gal_from_fk5():
+    """FK5 J2000 -> Galactic: astropy's own three angles, as `galactic.py` writes them."""
+    return three_angle(GAL_FK5_POLE[0], GAL_FK5_POLE[1], GAL_FK5_LON0)
+
+
 def definition(system):
     """The matrix taking an ICRS unit vector to `system`'s, built from the definition."""
     if system in _CACHE:
@@ -213,9 +242,10 @@ def definition(system):
     with dctx():
         if system == ICRS:
             m = identity()
+        elif system == FK5:
+            m = icrs_to_fk5()
         elif system == GAL:
-            bias = mm(mm(rot("x", -BIAS_ETA0), rot("y", BIAS_XI0)), rot("z", BIAS_DA0))
-            m = mm(three_angle(GAL_FK5_POLE[0], GAL_FK5_POLE[1], GAL_FK5_LON0), bias)
+            m = mm(gal_from_fk5(), definition(FK5))
         elif system == ECL:
             m = mm(mm(rot("z", -ECL_PSIB), rot("x", ECL_PHIB)), rot("z", ECL_GAMB))
         elif system == SGAL:
@@ -241,6 +271,7 @@ def angle_table():
         "gal": row_of(definition(GAL)),
         "ecl": row_of(definition(ECL)),
         "sgal": (SGAL_POLE[0], SGAL_POLE[1], SGAL_LON0),
+        "fk5": row_of(definition(FK5)),
     }
 
 
@@ -342,6 +373,65 @@ def pa_rows(offsets):
         # How far rounding can move the angle: an ulp or two of a direction, over the separation.
         tol = 1e-11 if coincident else max(1e-11, 16 * 2.2e-16 / math.sin(math.radians(sep_deg)) * 180 / math.pi)
         rows.append((ra1, dec1, ra2, dec2, pa, tol))
+    return rows
+
+
+# ---------------------------------------------------------------------------------------------
+# Proper motion at 60 digits
+# ---------------------------------------------------------------------------------------------
+
+
+def pm_step(pm_ra, pm_dec, dt):
+    """`pf_apply_pm`'s step: the position angle, east through `pm_ra` and north through `pm_dec`, half
+    a turn round for a negative `dt`, and the separation `hypot(pm_ra, pm_dec) * |dt|` in degrees,
+    both Decimals. No motion at all has position angle 0 by rule: `atan2(0, 0)` is prohibited."""
+    with dctx():
+        a, d = D(pm_ra), D(pm_dec)
+        pa = D(0) if a == 0 and d == 0 else rad2deg(datan2(a, d))
+        if dt < 0:
+            pa += 180
+        return pa, (a * a + d * d).sqrt() * abs(D(dt)) / MAS
+
+
+def apply_pm(ra, dec, pm_ra, pm_dec, dt):
+    """`pf_apply_pm`: the step handed to `pf_offset_radec`, which reads it in the local frame of the
+    position -- at a pole, the frame of the `ra` given."""
+    pa, sep = pm_step(pm_ra, pm_dec, dt)
+    return offset_radec(D(ra), dec, pa, sep)
+
+
+#: Proper motions `(ra, dec, pm_ra, pm_dec, dt_years)`: a Gaia-sized motion; an east-only one at
+#: declination 80, where the `cos(dec)` factor is 5.8; Barnard's star over a century; a negative
+#: interval near the south pole; the seam at `ra = 0` crossed eastward and westward; both poles, read
+#: in the frame of the `ra` given; no motion, and no time; a right ascension outside `[0, 360)`; a
+#: step of 1.5 degrees; and one of 20, which a great circle carries where a straight line in space
+#: would not.
+PM_INPUTS = [
+    (10.0, 20.0, 5.0, -3.0, 10.0),
+    (100.0, 80.0, 1000.0, 0.0, 10.0),
+    (269.4520833, 4.6933647, -801.551, 10362.394, 100.0),
+    (0.0, -89.9, 50.0, 50.0, -25.0),
+    (359.9999, 0.0, 100.0, 0.0, 36.0),
+    (0.0001, 10.0, -100.0, 0.0, 36.0),
+    (45.0, 90.0, 100.0, 0.0, 10.0),
+    (123.0, -90.0, 0.0, 100.0, 10.0),
+    (50.0, 30.0, 0.0, 0.0, 10.0),
+    (50.0, 30.0, 7.0, 8.0, 0.0),
+    (200.0, -45.0, 300.0, -400.0, -50.0),
+    (-30.0, 15.0, 20.0, 10.0, 5.0),
+    (80.0, -70.0, -2500.0, -1000.0, 2000.0),
+    (150.0, 60.0, 3.0e5, 4.0e5, 144.0),
+]
+
+
+def pm_rows():
+    """(ra, dec, pm_ra, pm_dec, dt, ra_out, dec_out)."""
+    rows = []
+    for ra, dec, pm_ra, pm_dec, dt in PM_INPUTS:
+        ra_out, dec_out = apply_pm(ra, dec, pm_ra, pm_dec, dt)
+        if float(ra_out) >= 360.0:
+            raise SystemExit("proper motion %r: the output right ascension rounds to 360" % ((ra, dec, pm_ra, pm_dec, dt),))
+        rows.append((ra, dec, pm_ra, pm_dec, dt, ra_out, dec_out))
     return rows
 
 
@@ -611,6 +701,7 @@ READ_PAIR_TEXTS = [
 ZCMB_POSITIONS = [
     (GAL, 264.021, 48.253), (GAL, 84.021, -48.253), (ICRS, 155.0, 41.0), (ICRS, 0.0, 90.0),
     (ICRS, 266.40499, -28.93617), (ECL, 100.0, 20.0), (SGAL, 200.0, -10.0), (GAL, 30.0, 0.0),
+    (FK5, 155.0, 41.0),
 ]
 #: Heliocentric redshifts, one at -1 and one below it computed as the formula says.
 ZCMB_Z = [0.0, 0.01, 0.5, 3.0, -1.0, -2.0]
@@ -710,6 +801,7 @@ def gen_module():
     rots = rotation_rows()
     offs = offset_rows()
     pas = pa_rows(offs)
+    pms = pm_rows()
     hms = [(x,) + hms_fields(x) for x in HMS_INPUTS]
     dms = [(x,) + dms_fields(x) for x in DMS_INPUTS]
     txt_ra, txt_dec = text_rows()
@@ -753,6 +845,12 @@ def gen_module():
     L += array("integer(int64)", "spa_in_bits", "4 * n_spa", [bits64(x) for r in pas for x in r[:4]])
     L += array("integer(int64)", "spa_out_bits", "n_spa", [bits64(r[4]) for r in pas])
     L += array("integer(int64)", "spa_tol_bits", "n_spa", [bits64(r[5]) for r in pas])
+    L.append("")
+
+    L.append("    ! ---- pf_apply_pm: (ra, dec, pm_ra, pm_dec, dt_years) -> (ra, dec) ----")
+    L.append("    integer, parameter :: n_spm = %d" % len(pms))
+    L += array("integer(int64)", "spm_in_bits", "5 * n_spm", [bits64(x) for r in pms for x in r[:5]])
+    L += array("integer(int64)", "spm_out_bits", "2 * n_spm", [bits64(x) for r in pms for x in r[5:]])
     L.append("")
 
     L.append("    ! ---- pf_deg2hms: deg -> (h, m, s), exactly split ----")
@@ -869,7 +967,7 @@ def self_test():
               "the ecliptic row is not (270 + gamb, 90 - phib, 90 + psib)")
 
     # Every row rebuilds its definition; every matrix is orthonormal.
-    for sysname, system in (("gal", GAL), ("ecl", ECL)):
+    for sysname, system in (("gal", GAL), ("ecl", ECL), ("fk5", FK5)):
         r = three_angle(*table[sysname])
         d = definition(system)
         check(all(tiny(r[i][j] - d[i][j]) for i in range(3) for j in range(3)),
@@ -892,9 +990,19 @@ def self_test():
                 close(c, lon, 1e-40, "round trip %d -> %d -> %d, lon" % (frm, to, frm))
                 close(e, lat, 1e-40, "round trip %d -> %d -> %d, lat" % (frm, to, frm))
 
+    # FK5 J2000 is the frame bias and nothing else: its pole sits 21.88 mas from the ICRS pole, and
+    # Galactic reached through it is astropy's FK5-referred definition, exactly.
+    with dctx():
+        check(abs((90 - table["fk5"][1]) * MAS - D("21.88196")) < D("0.00001"),
+              "the FK5 pole is not 21.88 mas from the ICRS pole")
+        p = pair_matrix(FK5, GAL)
+        g = gal_from_fk5()
+        check(all(tiny(p[i][j] - g[i][j]) for i in range(3) for j in range(3)),
+              "Galactic taken from FK5 is not astropy's FK5-referred definition")
+
     # The pole rules: the ICRS pole is (lon0, pole_lat) in each ICRS-referred system, whatever
     # longitude names it, and a pole's longitude comes out 0.
-    for sysname, system in (("gal", GAL), ("ecl", ECL)):
+    for sysname, system in (("gal", GAL), ("ecl", ECL), ("fk5", FK5)):
         for lon in (0.0, 123.4):
             a, b = convert(ICRS, system, lon, 90.0)
             close(a, table[sysname][2], 1e-40, "the ICRS pole in %s: lon" % sysname)
@@ -917,6 +1025,36 @@ def self_test():
     close(position_angle(0.0, 0.0, 0.0, 10.0), 0.0, 1e-15, "due north is 0")
     close(position_angle(0.0, 0.0, 10.0, 0.0), 90.0, 1e-12, "due east is 90")
     check(position_angle(10.0, 90.0, 250.0, 90.0) == 0, "two labels of one pole coincide")
+
+    # The proper motion. `pm_ra` is the rate in right ascension times cos(dec), so an east-only motion
+    # at declination 80 is the great circle leaving due east, `tan(dra) = tan(s) / cos(dec0)` and
+    # `sin(dec) = sin(dec0) cos(s)`: the right ascension moves 5.8 times as far as the arc. A north-only
+    # motion moves the declination by the arc and nothing else. No time, or no motion, leaves the
+    # position where it is, its right ascension wrapped.
+    with dctx():
+        s = D(1000) * 10 / MAS
+        ss, cs = dsin_cos(deg2rad(s))
+        sd, cd = dsin_cos(deg2rad(D(80)))
+        ra, dec = apply_pm(100.0, 80.0, 1000.0, 0.0, 10.0)
+        check(tiny(ra - (100 + rad2deg(datan2(ss, cd * cs)))) and tiny(dec - rad2deg(sph.dasin(sd * cs))),
+              "an east-only motion at dec 80 is not the great circle leaving due east")
+        ra, dec = apply_pm(10.0, 20.0, 0.0, 360.0, 25.0)
+        check(tiny(ra - 10) and tiny(dec - (20 + D(360) * 25 / MAS)),
+              "a north-only motion does not move the declination by the arc alone")
+        for args in ((-10.0, 20.0, 5.0, 3.0, 0.0), (-10.0, 20.0, 0.0, 0.0, 7.0)):
+            ra, dec = apply_pm(*args)
+            check(tiny(ra - 350) and tiny(dec - 20), "no time or no motion moved the position: %r" % (args,))
+        # Forward then back: the motion carried to the new position along its great circle -- the
+        # track's position angle there, the same rate -- and a negative interval return to the start.
+        # The original components would not: the track turns as it crosses the meridians, and they
+        # miss by about s**2 tan(dec), here 1e-3 degrees.
+        ra1, dec1 = apply_pm(33.0, 61.0, 4000.0, -2500.0, 150.0)
+        rate = (D(4000) ** 2 + D(2500) ** 2).sqrt()
+        sp, cp = dsin_cos(deg2rad(position_angle(ra1, dec1, D(33), D(61)) + 180))
+        ra2, dec2 = apply_pm(ra1, dec1, rate * sp, rate * cp, -150.0)
+        check(tiny(ra2 - 33) and tiny(dec2 - 61), "the motion carried along its great circle did not reverse")
+        ra2, dec2 = apply_pm(ra1, dec1, 4000.0, -2500.0, -150.0)
+        check(abs(dec2 - 61) + abs(ra2 - 33) > D("1e-4"), "the original components reversed the motion after all")
 
     # pf_zhel2zcmb's dipole and the speed of light, read back from where they are declared.
     rotate_src = ROTATE_PATH.read_text()
@@ -985,14 +1123,15 @@ def verify_oracle():
     try:
         import astropy
         import astropy.units as u
-        from astropy.coordinates import (ICRS as AICRS, BarycentricMeanEcliptic, Galactic, SkyCoord,
+        from astropy.coordinates import (FK5 as AFK5, ICRS as AICRS, BarycentricMeanEcliptic, Galactic, SkyCoord,
                                          Supergalactic)
     except ImportError as exc:
         sys.stderr.write("generate_skycoord_reference --verify-oracle needs astropy: %s\n" % exc)
         return 2
     bad = []
     counts = {"rotations": 0, "offsets": 0, "separations": 0, "position angles": 0}
-    frames = {ICRS: AICRS(), GAL: Galactic(), ECL: BarycentricMeanEcliptic(), SGAL: Supergalactic()}
+    frames = {ICRS: AICRS(), GAL: Galactic(), ECL: BarycentricMeanEcliptic(), SGAL: Supergalactic(),
+              FK5: AFK5()}
 
     def check(ok, what):
         if not ok:
@@ -1047,6 +1186,7 @@ def verify_oracle():
         check(abs(diff) < max(1e-9, 1e3 * tol), "position angle (%g, %g, %g, %g): astropy %r, model %r"
               % (ra1, dec1, ra2, dec2, got, float(pa)))
 
+    verify_proper_motion(check, counts)
     verify_text_and_redshift(check, counts, frames)
 
     if bad:
@@ -1057,6 +1197,63 @@ def verify_oracle():
     print("generate_skycoord_reference --verify-oracle: astropy %s agrees (%s)"
           % (astropy.__version__, ", ".join("%d %s" % (v, k) for k, v in counts.items())))
     return 0
+
+
+def verify_proper_motion(check, counts):
+    """The proper-motion rows against astropy, two ways.
+
+    * Every row's step through `directional_offset_by`, at the position angle and separation the
+      model resolved the motion into: the offset half of `pf_apply_pm`.
+    * Every row whose step is at most half a degree through `apply_space_motion`, which reads
+      `pm_ra_cosdec` and `pm_dec` itself -- so this is the check on the `cos(dec)` convention and on
+      the direction. A source with no distance and no radial velocity moves in a straight line
+      through space there, along the same great circle but through `atan(s)` of it where the model
+      moves `s` (radians); the comparison takes that mapping, and below half a degree nothing else
+      astropy models reaches 1e-10 degrees. A longer step is counted, not compared, and so is a
+      start at a pole, where astropy divides `pm_ra_cosdec` by `cos(dec)` and ERFA then drops the
+      motion as too fast: the library reads it in the local frame of the `ra` given instead.
+
+    astropy takes a declination as `arcsin`, which loses digits near a pole, so the tolerance widens
+    there as it does for the offsets.
+    """
+    import warnings
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+    from astropy.time import Time
+    from erfa import ErfaWarning
+
+    for key in ("proper motions", "space motions", "by design: steps past half a degree, great circle only",
+                "by design: starts at a pole, great circle only"):
+        counts[key] = 0
+    epoch = Time(2000.0, format="jyear", scale="tdb")
+    for ra, dec, pm_ra, pm_dec, dt, ra_out, dec_out in pm_rows():
+        pa, sep = pm_step(pm_ra, pm_dec, dt)
+        pa, sep = float(pa), float(sep)
+        model = SkyCoord(float(ra_out) * u.deg, float(dec_out) * u.deg)
+        one_minus = max(1e-300, 1.0 - abs(math.sin(math.radians(float(dec_out)))))
+        pole = 4.0 * 2.2e-16 / math.sqrt(2.0 * one_minus) * 180.0 / math.pi
+        o = SkyCoord(ra * u.deg, dec * u.deg).directional_offset_by(pa * u.deg, sep * u.deg)
+        counts["proper motions"] += 1
+        check(o.separation(model).deg < 1e-9 + pole, "proper motion %r: directional_offset_by (%r, %r), model (%r, %r)"
+              % ((ra, dec, pm_ra, pm_dec, dt), o.ra.deg, o.dec.deg, float(ra_out), float(dec_out)))
+        if sep > 0.5:
+            counts["by design: steps past half a degree, great circle only"] += 1
+            continue
+        if abs(dec) == 90.0:
+            counts["by design: starts at a pole, great circle only"] += 1
+            continue
+        with warnings.catch_warnings():
+            # A source with no distance has one supplied by ERFA, which says so.
+            warnings.simplefilter("ignore", ErfaWarning)
+            c = SkyCoord(ra * u.deg, dec * u.deg, pm_ra_cosdec=pm_ra * u.mas / u.yr, pm_dec=pm_dec * u.mas / u.yr,
+                         obstime=epoch)
+            moved = c.apply_space_motion(dt=dt * u.yr)
+        along = SkyCoord(ra * u.deg, dec * u.deg).directional_offset_by(
+            pa * u.deg, math.degrees(math.atan(math.radians(sep))) * u.deg)
+        counts["space motions"] += 1
+        check(SkyCoord(moved.ra, moved.dec).separation(along).deg < 1e-10 + pole,
+              "proper motion %r: apply_space_motion (%r, %r), the model's great circle through atan (%r, %r)"
+              % ((ra, dec, pm_ra, pm_dec, dt), moved.ra.deg, moved.dec.deg, along.ra.deg, along.dec.deg))
 
 
 def verify_text_and_redshift(check, counts, frames):

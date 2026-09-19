@@ -1,9 +1,9 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!> Tests for `parquet_skycoord`: the coordinate-system rotations, the selector tokens, the
-!> frame-free RA/Dec geometry -- separations, offsets and position angles -- sexagesimal fields and
-!> text, and the CMB rest frame.
+!> Tests for `parquet_skycoord`: the coordinate-system rotations and the prepared rotation object, the
+!> selector tokens, the frame-free RA/Dec geometry -- separations, offsets, position angles and
+!> proper motion -- sexagesimal fields and text, and the CMB rest frame.
 !>
 !> Three layers:
 !>
@@ -14,8 +14,9 @@
 !>     are compared character for character.
 !>  2. **Identities the contract states**: orthonormality, round trips, the pole rules, the
 !>     identity conversion as a copy, `pf_sky_convert` answering exactly what the named procedure
-!>     it calls answers, the carries at 60, the redshift's apex and antapex, and totality -- NaN
-!>     in, NaN out, no flag raised.
+!>     it calls answers and the rotation object what `pf_sky_convert` answers, FK5 moving positions
+!>     by the frame bias's own angles, the proper motion's `cos(dec)` and its reversal, the carries
+!>     at 60, the redshift's apex and antapex, and totality -- NaN in, NaN out, no flag raised.
 !>  3. **The geometry that moved in with the module** -- `pf_angdist_deg`'s 60-digit table and its
 !>     symmetries, and the offset and the position angle as inverses -- unchanged but for
 !>     `pf_offset_radec`'s NaN rule.
@@ -55,7 +56,10 @@ module test_skycoord
     !! again -- and the cheapest wrong answer, the frame bias dropped, misses by 6e-6.
     real(real64), parameter :: ROT_TOL = 1.0e-12_real64
     !> The four systems, in selector order.
-    integer, parameter :: SYSTEMS(4) = [PF_COORD_ICRS, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, PF_COORD_SUPERGALACTIC]
+    integer, parameter :: SYSTEMS(5) = [PF_COORD_ICRS, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, PF_COORD_SUPERGALACTIC, &
+                                        PF_COORD_FK5]
+    !> How many systems there are, and so how many ordered pairs of two distinct ones: `NSYS*(NSYS - 1)`.
+    integer, parameter :: NSYS = size(SYSTEMS)
     !> A field split's seconds against the exact split, seconds: the library rounds one product, a
     !! few 1e-15 seconds, where a wrong factor misses by whole seconds.
     real(real64), parameter :: FIELD_TOL = 1.0e-12_real64
@@ -89,6 +93,8 @@ contains
                          test_ecliptic_golden), &
             new_unittest("supergalactic against Galactic and ICRS, both ways, against the 60-digit model", &
                          test_supergalactic_golden), &
+            new_unittest("ICRS and FK5 J2000, both ways, against the 60-digit model of the frame bias", &
+                         test_fk5_golden), &
             new_unittest("pf_sky_convert's pairs with no named procedure against the 60-digit model", &
                          test_convert_unnamed_pairs_golden), &
             new_unittest("every rotation takes the three axes to a right-handed orthonormal set", &
@@ -109,12 +115,29 @@ contains
                          test_convert_identity), &
             new_unittest("pf_sky_convert answers exactly what the named procedure it calls answers", &
                          test_convert_dispatches_to_named), &
+            new_unittest("FK5 J2000 is not ICRS: positions move by what the frame bias's three angles say", &
+                         test_fk5_is_not_the_identity), &
+            new_unittest("a prepared pf_sky_rotation answers what pf_sky_convert answers, for every ordered pair", &
+                         test_rotation_object_matches_the_free_procedure), &
+            new_unittest("pf_sky_rotation%apply is elemental over rank-1 and rank-2 arrays", &
+                         test_rotation_object_is_elemental), &
+            new_unittest("pf_sky_rotation reports whether it is prepared, may be prepared again, and copies an identity", &
+                         test_rotation_object_negative_controls), &
             new_unittest("golden rows: pf_offset_radec and pf_position_angle_deg against the 60-digit model", &
                          test_offset_golden), &
             new_unittest("the position angle inverts the offset, at the poles and the cardinal points too", &
                          test_offset_and_position_angle), &
             new_unittest("pf_offset_radec gives NaN results for a NaN argument and raises no flag", &
                          test_offset_nan_propagates_quietly), &
+            new_unittest("golden rows: pf_apply_pm against the 60-digit model", test_pm_golden), &
+            new_unittest("at declination 80 a proper motion in right ascension moves it pm_ra / cos(dec)", &
+                         test_pm_includes_cos_dec), &
+            new_unittest("no time, or no motion, gives the position back to rounding, wrapped", &
+                         test_pm_zero_dt_is_identity), &
+            new_unittest("a proper motion over +dt and back over -dt returns to the start", &
+                         test_pm_reverses), &
+            new_unittest("pf_apply_pm gives NaN results for a NaN argument and raises no flag", &
+                         test_pm_nan_propagates_quietly), &
             new_unittest("angdist_deg reproduces a 60-digit evaluation on every edge case", &
                          test_angdist_deg_reference), &
             new_unittest("angdist_deg agrees with angdist, and keeps its four symmetries", &
@@ -166,7 +189,7 @@ contains
 
         call check(error, PF_COORD_UNKNOWN == sc_unknown .and. PF_COORD_ICRS == sc_icrs .and. &
             PF_COORD_GALACTIC == sc_galactic .and. PF_COORD_ECLIPTIC == sc_ecliptic .and. &
-            PF_COORD_SUPERGALACTIC == sc_supergalactic, &
+            PF_COORD_SUPERGALACTIC == sc_supergalactic .and. PF_COORD_FK5 == sc_fk5, &
             "the PF_COORD_* selectors are not the ones test/test_skycoord_vectors.f90 was generated for")
     end subroutine test_selectors_match_the_model
 
@@ -192,14 +215,29 @@ contains
         call golden_pair(error, PF_COORD_ICRS, PF_COORD_SUPERGALACTIC, .false.)
     end subroutine test_supergalactic_golden
 
-    !> The four ordered pairs `pf_sky_convert` serves with a pair matrix of its own -- Galactic and
-    !! ecliptic, ecliptic and supergalactic -- against the model, which composes the two definitions
-    !! at 60 digits rather than in doubles.
+    !> Every golden row between ICRS and FK5 J2000, both ways, through `pf_icrs2fk5` and
+    !! `pf_fk52icrs`. The rotation is the frame bias of USNO Circular 179 and nothing else, some 25
+    !! milliarcseconds, so a bias angle wrong in its eighth digit -- a row recovered from a rounded
+    !! matrix -- misses by a few 1e-10 degrees, a hundred times the tolerance.
+    subroutine test_fk5_golden(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        call golden_pair(error, PF_COORD_ICRS, PF_COORD_FK5, .false.)
+    end subroutine test_fk5_golden
+
+    !> The ten ordered pairs `pf_sky_convert` serves with a pair matrix of its own -- Galactic and
+    !! ecliptic, ecliptic and supergalactic, and FK5 J2000 and each system but ICRS -- against the
+    !! model, which composes the two definitions at 60 digits rather than in doubles.
     subroutine test_convert_unnamed_pairs_golden(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         call golden_pair(error, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, .true.)
         if (allocated(error)) return
         call golden_pair(error, PF_COORD_ECLIPTIC, PF_COORD_SUPERGALACTIC, .true.)
+        if (allocated(error)) return
+        call golden_pair(error, PF_COORD_GALACTIC, PF_COORD_FK5, .true.)
+        if (allocated(error)) return
+        call golden_pair(error, PF_COORD_ECLIPTIC, PF_COORD_FK5, .true.)
+        if (allocated(error)) return
+        call golden_pair(error, PF_COORD_SUPERGALACTIC, PF_COORD_FK5, .true.)
     end subroutine test_convert_unnamed_pairs_golden
 
     !> Every golden row between systems `a` and `b`, both ways, through the named procedure or through
@@ -243,10 +281,10 @@ contains
             differs = differs .or. got_lon /= want_lon .or. got_lat /= want_lat
             nrow = nrow + 1
         end do
-        ! Each unordered pair is two of the twelve ordered ones, and every ordered pair converts the
-        ! same positions, so a pair with fewer rows lost some.
+        ! Each unordered pair is two of the NSYS*(NSYS - 1) ordered ones, and every ordered pair
+        ! converts the same positions, so a pair with fewer rows lost some.
         write (msg, '(a,i0,a,i0,a,i0)') "systems ", a, " and ", b, ": golden rows found ", nrow
-        call check(error, nrow > 0 .and. nrow == n_srot / 6, trim(msg))
+        call check(error, nrow > 0 .and. nrow == 2 * n_srot / (NSYS * (NSYS - 1)), trim(msg))
         if (allocated(error)) return
         call check(error, in_range, "a rotation's longitude left [0, 360) or its latitude [-90, 90]")
         if (allocated(error)) return
@@ -274,8 +312,8 @@ contains
 
         worst = 0.0_real64
         hand = 0.0_real64
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
                 if (i == j) cycle
                 call pf_sky_convert(0.0_real64, 0.0_real64, SYSTEMS(i), SYSTEMS(j), lo, la)
                 c1 = vec_of(lo, la)
@@ -303,8 +341,8 @@ contains
 
         worst = 0.0_real64
         ncase = 0
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
                 if (i == j) cycle
                 do p = -2, 49
                     lon = 7.5_real64 * real(p, real64)
@@ -318,7 +356,7 @@ contains
                 end do
             end do
         end do
-        call check(error, ncase == 12 * 52 * 25, "the round-trip grid did not run in full")
+        call check(error, ncase == NSYS * (NSYS - 1) * 52 * 25, "the round-trip grid did not run in full")
         if (allocated(error)) return
         write (msg, '(a,es10.3,a)') "a round trip misses its start by ", worst, " degrees on the sky"
         call check(error, worst <= ROT_TOL, trim(msg))
@@ -344,8 +382,8 @@ contains
 
         same = .true.
         worst = 0.0_real64
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
                 if (i == j) cycle
                 do s = -1, 1, 2
                     call pf_sky_convert(LONS(1), real(s, real64) * 90.0_real64, SYSTEMS(i), SYSTEMS(j), a0, b0)
@@ -365,13 +403,15 @@ contains
         call check(error, worst <= 1.0e-12_real64, "a system's pole came back off latitude +/-90 -- asin, not atan2?")
     end subroutine test_poles_are_exact
 
-    !> A NaN coordinate comes back as NaN from every rotation, for every pair and through every form,
-    !! and raises no `IEEE_INVALID` doing so -- read around the calls in this test's own body, since a
-    !! flag read inside a helper reads quiet under nagfor. The identity returns its input by copy, so
-    !! there the other coordinate comes back unchanged.
+    !> A NaN coordinate comes back as NaN from every rotation, for every pair and through every form --
+    !! the named procedures, `pf_sky_convert` and a prepared `pf_sky_rotation` -- and raises no
+    !! `IEEE_INVALID` doing so, read around the calls in this test's own body, since a flag read inside
+    !! a helper reads quiet under nagfor. The identity returns its input by copy, so there the other
+    !! coordinate comes back unchanged.
     subroutine test_nan_propagates_quietly(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         real(real64) :: nan, a, b, ra(4), dec(4), l(4), bb(4)
+        type(pf_sky_rotation) :: rot
         integer :: i, j
         logical :: saved, raised, can, ok
 
@@ -384,8 +424,8 @@ contains
             call ieee_set_flag(ieee_invalid, .false.)
         end if
         ok = .true.
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
                 call pf_sky_convert(nan, 10.0_real64, SYSTEMS(i), SYSTEMS(j), a, b)
                 if (i == j) then
                     ok = ok .and. a /= a .and. b == 10.0_real64
@@ -393,6 +433,19 @@ contains
                     ok = ok .and. a /= a .and. b /= b
                 end if
                 call pf_sky_convert(10.0_real64, nan, SYSTEMS(i), SYSTEMS(j), a, b)
+                if (i == j) then
+                    ok = ok .and. a == 10.0_real64 .and. b /= b
+                else
+                    ok = ok .and. a /= a .and. b /= b
+                end if
+                call rot%init(SYSTEMS(i), SYSTEMS(j))
+                call rot%apply(nan, 10.0_real64, a, b)
+                if (i == j) then
+                    ok = ok .and. a /= a .and. b == 10.0_real64
+                else
+                    ok = ok .and. a /= a .and. b /= b
+                end if
+                call rot%apply(10.0_real64, nan, a, b)
                 if (i == j) then
                     ok = ok .and. a == 10.0_real64 .and. b /= b
                 else
@@ -416,10 +469,18 @@ contains
         ok = ok .and. a /= a .and. b /= b
         call pf_sgal2icrs(0.0_real64, nan, a, b)
         ok = ok .and. a /= a .and. b /= b
-        ! Over a column, a NaN touches its own row only.
+        call pf_icrs2fk5(nan, 0.0_real64, a, b)
+        ok = ok .and. a /= a .and. b /= b
+        call pf_fk52icrs(0.0_real64, nan, a, b)
+        ok = ok .and. a /= a .and. b /= b
+        ! Over a column, a NaN touches its own row only, through a named procedure and the object.
         ra = [10.0_real64, nan, 30.0_real64, 40.0_real64]
         dec = [0.0_real64, 0.0_real64, nan, 20.0_real64]
         call pf_icrs2gal(ra, dec, l, bb)
+        ok = ok .and. l(1) == l(1) .and. l(2) /= l(2) .and. l(3) /= l(3) .and. l(4) == l(4) .and. &
+            bb(1) == bb(1) .and. bb(2) /= bb(2) .and. bb(3) /= bb(3) .and. bb(4) == bb(4)
+        call rot%init(PF_COORD_ECLIPTIC, PF_COORD_FK5)
+        call rot%apply(ra, dec, l, bb)
         ok = ok .and. l(1) == l(1) .and. l(2) /= l(2) .and. l(3) /= l(3) .and. l(4) == l(4) .and. &
             bb(1) == bb(1) .and. bb(2) /= bb(2) .and. bb(3) /= bb(3) .and. bb(4) == bb(4)
         if (can) then
@@ -439,8 +500,8 @@ contains
         integer :: i, j
 
         worst = 0.0_real64
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
                 if (i == j) cycle
                 call pf_sky_convert(10.0_real64, 100.0_real64, SYSTEMS(i), SYSTEMS(j), a1, b1)
                 call pf_sky_convert(190.0_real64, 80.0_real64, SYSTEMS(i), SYSTEMS(j), a2, b2)
@@ -464,6 +525,7 @@ contains
         real(real64), parameter :: LATS(7) = [90.0_real64, -90.0_real64, 0.0_real64, 89.9_real64, -89.9_real64, &
                                               100.0_real64, -270.0_real64]
         real(real64) :: sink, a, b
+        type(pf_sky_rotation) :: rot
         logical :: can(3), saved(3), raised(3)
         integer :: i, j, p, q
 
@@ -478,11 +540,14 @@ contains
         if (can(2)) call ieee_set_flag(ieee_divide_by_zero, .false.)
         if (can(3)) call ieee_set_flag(ieee_overflow, .false.)
         sink = 0.0_real64
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
+                call rot%init(SYSTEMS(i), SYSTEMS(j))
                 do p = 1, size(LONS)
                     do q = 1, size(LATS)
                         call pf_sky_convert(LONS(p), LATS(q), SYSTEMS(i), SYSTEMS(j), a, b)
+                        sink = sink + a + b
+                        call rot%apply(LONS(p), LATS(q), a, b)
                         sink = sink + a + b
                     end do
                 end do
@@ -506,6 +571,15 @@ contains
             sink = sink + pf_position_angle_deg(LONS(p), 90.0_real64, 250.0_real64, 90.0_real64)
             sink = sink + pf_position_angle_deg(LONS(p), 10.0_real64, LONS(p) + 720.0_real64, 10.0_real64)
             sink = sink + pf_position_angle_deg(LONS(p), -20.0_real64, LONS(p) + 180.0_real64, 20.0_real64)
+            ! Proper motion from either pole, none at all, over no time, and backwards.
+            call pf_apply_pm(LONS(p), 90.0_real64, 100.0_real64, 0.0_real64, 10.0_real64, a, b)
+            sink = sink + a + b
+            call pf_apply_pm(LONS(p), -90.0_real64, 0.0_real64, 0.0_real64, 10.0_real64, a, b)
+            sink = sink + a + b
+            call pf_apply_pm(LONS(p), 10.0_real64, 5.0_real64, -3.0_real64, 0.0_real64, a, b)
+            sink = sink + a + b
+            call pf_apply_pm(LONS(p), -89.9_real64, -50.0_real64, 50.0_real64, -25.0_real64, a, b)
+            sink = sink + a + b
         end do
         if (can(1)) call ieee_get_flag(ieee_invalid, raised(1))
         if (can(2)) call ieee_get_flag(ieee_divide_by_zero, raised(2))
@@ -529,12 +603,12 @@ contains
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         character(len=:), allocatable :: name
         integer :: k
-        integer, parameter :: ALL5(5) = [PF_COORD_UNKNOWN, PF_COORD_ICRS, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, &
-                                         PF_COORD_SUPERGALACTIC]
+        integer, parameter :: ALL6(6) = [PF_COORD_UNKNOWN, PF_COORD_ICRS, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, &
+                                         PF_COORD_SUPERGALACTIC, PF_COORD_FK5]
 
-        do k = 1, size(ALL5)
-            call pf_coord_system_name(ALL5(k), name)
-            call check(error, pf_coord_system_from_name(name) == ALL5(k), &
+        do k = 1, size(ALL6)
+            call pf_coord_system_name(ALL6(k), name)
+            call check(error, pf_coord_system_from_name(name) == ALL6(k), &
                 "the token '" // name // "' does not name its selector back")
             if (allocated(error)) return
         end do
@@ -550,6 +624,10 @@ contains
         if (allocated(error)) return
         call check(error, pf_coord_system_from_name("BarycentricMeanEcliptic") == PF_COORD_ECLIPTIC .and. &
             pf_coord_system_from_name("ecliptic") == PF_COORD_ECLIPTIC, "astropy's ecliptic frame name was not understood")
+        if (allocated(error)) return
+        call pf_coord_system_name(PF_COORD_FK5, name)
+        call check(error, name == "fk5" .and. pf_coord_system_from_name(" FK5") == PF_COORD_FK5, &
+            "PF_COORD_FK5's token is '" // name // "', or 'FK5' did not name it")
         if (allocated(error)) return
         call check(error, pf_coord_system_from_name("fk4") == PF_COORD_UNKNOWN .and. &
             pf_coord_system_from_name("") == PF_COORD_UNKNOWN .and. &
@@ -574,7 +652,7 @@ contains
         if (allocated(error)) return
         nan = ieee_value(0.0_real64, ieee_quiet_nan)
         ok = .true.
-        do i = 1, 4
+        do i = 1, NSYS
             call pf_sky_convert(-10.0_real64, 100.0_real64, SYSTEMS(i), SYSTEMS(i), a, b)
             ok = ok .and. transfer(a, 0_int64) == transfer(-10.0_real64, 0_int64) .and. &
                 transfer(b, 0_int64) == transfer(100.0_real64, 0_int64)
@@ -598,8 +676,8 @@ contains
 
         same = .true.
         npair = 0
-        do i = 1, 4
-            do j = 1, 4
+        do i = 1, NSYS
+            do j = 1, NSYS
                 if (i == j) cycle
                 call named_rotation(SYSTEMS(i), SYSTEMS(j), 0.0_real64, 0.0_real64, a1, b1, found)
                 if (.not. found) cycle
@@ -616,10 +694,176 @@ contains
                 end do
             end do
         end do
-        call check(error, npair == 8, "the eight named rotations were not all found")
+        call check(error, npair == 10, "the ten named rotations were not all found")
         if (allocated(error)) return
         call check(error, same, "pf_sky_convert differs from the named procedure for its pair")
     end subroutine test_convert_dispatches_to_named
+
+    !> ICRS and FK5 J2000 differ, by what the frame bias's three angles say. Together the three small
+    !! rotations are one rotation by `sqrt(eta0**2 + xi0**2 + da0**2)` = 31.67 mas about one axis, so
+    !! a position moves by that times the sine of its angle from the axis -- 31.67 mas at most, which a
+    !! grid of positions 7.5 degrees apart comes within a thousandth of -- and the ICRS pole, which
+    !! only the first two tip, by `hypot(eta0, xi0)` = 21.88 mas. Each separation is measured by
+    !! `pf_angdist_deg`. FK5 shipped as a copy of ICRS, which every coarse test would pass, moves
+    !! nothing.
+    subroutine test_fk5_is_not_the_identity(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        !> Milliarcseconds per degree.
+        real(real64), parameter :: MAS = 3.6e6_real64
+        real(real64) :: theta, pole, lon, lat, a, b, worst
+        integer :: p, q
+        character(len=160) :: msg
+
+        theta = sqrt(19.9_real64**2 + 9.1_real64**2 + 22.9_real64**2)
+        pole = hypot(19.9_real64, 9.1_real64)
+        worst = 0.0_real64
+        do p = -2, 49
+            lon = 7.5_real64 * real(p, real64)
+            do q = 0, 24
+                lat = -90.0_real64 + 7.5_real64 * real(q, real64)
+                call pf_icrs2fk5(lon, lat, a, b)
+                worst = max(worst, pf_angdist_deg(lon, lat, a, b) * MAS)
+            end do
+        end do
+        write (msg, '(a,f12.6,a,f12.6,a)') "the largest move from ICRS to FK5 is ", worst, " mas, not just short of ", theta, &
+            " mas"
+        call check(error, worst <= theta + 1.0e-6_real64 .and. worst >= 0.999_real64 * theta, trim(msg))
+        if (allocated(error)) return
+        call pf_icrs2fk5(0.0_real64, 90.0_real64, a, b)
+        write (msg, '(a,f16.10,a,f16.10,a)') "the ICRS pole moves ", pf_angdist_deg(0.0_real64, 90.0_real64, a, b) * MAS, &
+            " mas into FK5, not hypot(eta0, xi0) = ", pole, " mas"
+        call check(error, abs(pf_angdist_deg(0.0_real64, 90.0_real64, a, b) * MAS - pole) <= 1.0e-6_real64, trim(msg))
+    end subroutine test_fk5_is_not_the_identity
+
+    ! ================================================================================
+    ! The rotation object
+    ! ================================================================================
+
+    !> For every ordered pair of systems, a prepared `pf_sky_rotation` answers what `pf_sky_convert`
+    !! answers -- and so, where the pair has one, the named procedure -- over a grid from pole to
+    !! pole. Off the identity the two are separate call sites of one kernel with the same matrix, and
+    !! a compiler may inline one and not the other (`fortran-gotchas.md`), so they are compared to
+    !! `SAME` rather than to the bit: the latitude within `SAME` of `max(1, |lat|)`, the longitude on
+    !! the sky, scaled by `cos(lat)`, within `SAME` of a turn, since near a pole a last-bit change in the
+    !! vector moves a longitude far more than its own ulp. A wrong matrix in `%init`'s table misses by
+    !! degrees, and FK5's by milliarcseconds, `1e8` times the tolerance. From a system to itself both
+    !! routes copy, and are compared to the bit.
+    subroutine test_rotation_object_matches_the_free_procedure(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_sky_rotation) :: rot
+        real(real64) :: lon, lat, a1, b1, a2, b2, worst
+        integer :: i, j, p, q, npair
+        logical :: copied
+        character(len=160) :: msg
+
+        worst = 0.0_real64
+        copied = .true.
+        npair = 0
+        do i = 1, NSYS
+            do j = 1, NSYS
+                call rot%init(SYSTEMS(i), SYSTEMS(j))
+                npair = npair + 1
+                do p = -1, 23
+                    lon = 17.3_real64 * real(p, real64)
+                    do q = 0, 16
+                        lat = -90.0_real64 + 11.25_real64 * real(q, real64)
+                        call rot%apply(lon, lat, a1, b1)
+                        call pf_sky_convert(lon, lat, SYSTEMS(i), SYSTEMS(j), a2, b2)
+                        if (i == j) then
+                            copied = copied .and. transfer(a1, 0_int64) == transfer(a2, 0_int64) .and. &
+                                transfer(b1, 0_int64) == transfer(b2, 0_int64)
+                        else
+                            worst = max(worst, abs(b1 - b2) / max(1.0_real64, abs(b2)), &
+                                        turn_gap(a1, a2) * cos(b2 * DEG) / 360.0_real64)
+                        end if
+                    end do
+                end do
+            end do
+        end do
+        call check(error, npair == NSYS * NSYS, "the rotation object was not built for every ordered pair")
+        if (allocated(error)) return
+        call check(error, copied, "the rotation object from a system to itself did not copy its input, as pf_sky_convert does")
+        if (allocated(error)) return
+        write (msg, '(a,es10.3,a,es10.3)') "the rotation object differs from pf_sky_convert by ", worst, &
+            " of its scale, beyond SAME = ", SAME
+        call check(error, worst <= SAME, trim(msg))
+    end subroutine test_rotation_object_matches_the_free_procedure
+
+    !> `%apply` is elemental: over a rank-1 column and over a rank-2 array it gives what a scalar loop
+    !! of `%apply` gives, element by element, to `SAME` -- two call sites again, one of which a
+    !! compiler may vectorise -- and every element is its own, not the first one's broadcast.
+    subroutine test_rotation_object_is_elemental(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_sky_rotation) :: rot
+        real(real64) :: lon(40), lat(40), a(40), b(40), lon2(5, 8), lat2(5, 8), a2(5, 8), b2(5, 8), s1, s2, worst
+        integer :: k
+        logical :: distinct
+
+        do k = 1, 40
+            lon(k) = -20.0_real64 + 9.7_real64 * real(k, real64)
+            lat(k) = -88.0_real64 + 4.4_real64 * real(k, real64)
+        end do
+        lon2 = reshape(lon, [5, 8])
+        lat2 = reshape(lat, [5, 8])
+        call rot%init(PF_COORD_SUPERGALACTIC, PF_COORD_FK5)
+        call rot%apply(lon, lat, a, b)
+        call rot%apply(lon2, lat2, a2, b2)
+        worst = 0.0_real64
+        distinct = .true.
+        do k = 1, 40
+            call rot%apply(lon(k), lat(k), s1, s2)
+            worst = max(worst, abs(b(k) - s2) / max(1.0_real64, abs(s2)), turn_gap(a(k), s1) * cos(s2 * DEG) / 360.0_real64, &
+                        abs(b2(mod(k - 1, 5) + 1, (k - 1) / 5 + 1) - s2) / max(1.0_real64, abs(s2)))
+            if (k > 1) distinct = distinct .and. b(k) /= b(1)
+        end do
+        call check(error, worst <= SAME, "the elemental %apply over an array differs from a scalar loop")
+        if (allocated(error)) return
+        call check(error, distinct, "the elemental %apply gave every element the first one's answer")
+    end subroutine test_rotation_object_is_elemental
+
+    !> A fresh rotation reports `%is_init()` false and a prepared one true; `%init` may run again and
+    !! the new rotation replaces the old, an identity included both ways; and from a system to itself
+    !! `%apply` hands back its input by copy -- a longitude below 0, a latitude beyond 90 and a
+    !! negative zero as given -- which is `pf_sky_convert`'s answer for the pair. The two refusals,
+    !! `%apply` before any `%init` and a selector that is not a system, are tested out of process
+    !! (`skycoord_rotation_apply_before_init`, `skycoord_rotation_init_unknown_system`); this is their
+    !! negative control.
+    subroutine test_rotation_object_negative_controls(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_sky_rotation) :: rot, fresh
+        real(real64) :: zero, negz, a, b, ra, dec
+        character(len=160) :: msg
+
+        call check(error, .not. fresh%is_init(), "a fresh pf_sky_rotation reports itself prepared")
+        if (allocated(error)) return
+        call rot%init(PF_COORD_ICRS, PF_COORD_GALACTIC)
+        call check(error, rot%is_init(), "a prepared pf_sky_rotation reports itself unprepared")
+        if (allocated(error)) return
+        zero = 0.0_real64
+        negz = -zero
+        call check(error, transfer(negz, 0_int64) < 0_int64, "the fixture could not build a negative zero")
+        if (allocated(error)) return
+        call rot%init(PF_COORD_FK5, PF_COORD_FK5)
+        call rot%apply(-10.0_real64, 100.0_real64, a, b)
+        call check(error, transfer(a, 0_int64) == transfer(-10.0_real64, 0_int64) .and. &
+            transfer(b, 0_int64) == transfer(100.0_real64, 0_int64), "the identity rotation changed its input")
+        if (allocated(error)) return
+        call rot%apply(725.5_real64, negz, a, b)
+        call check(error, a == 725.5_real64 .and. transfer(b, 0_int64) == transfer(negz, 0_int64), &
+            "the identity rotation lost a longitude past a turn or a negative zero")
+        if (allocated(error)) return
+        ! Prepared again, the object rotates: the identity it held is gone.
+        call rot%init(PF_COORD_GALACTIC, PF_COORD_ICRS)
+        call rot%apply(-10.0_real64, 30.0_real64, a, b)
+        call pf_gal2icrs(-10.0_real64, 30.0_real64, ra, dec)
+        write (msg, '(a,2es24.16,a,2es24.16)') "prepared again, the rotation gives ", a, b, ", not pf_gal2icrs's ", ra, dec
+        call check(error, sky_gap(a, b, ra, dec) <= SAME * 360.0_real64 .and. a >= 0.0_real64, trim(msg))
+        if (allocated(error)) return
+        ! And prepared once more as an identity, it copies again.
+        call rot%init(PF_COORD_ICRS, PF_COORD_ICRS)
+        call rot%apply(-10.0_real64, 30.0_real64, a, b)
+        call check(error, a == -10.0_real64 .and. b == 30.0_real64, "an identity prepared after a rotation rotated")
+    end subroutine test_rotation_object_negative_controls
 
     ! ================================================================================
     ! Offsets and position angles
@@ -792,6 +1036,228 @@ contains
         if (allocated(error)) return
         call check(error, ok, "a NaN argument to pf_offset_radec did not give NaN results, or touched another row")
     end subroutine test_offset_nan_propagates_quietly
+
+    ! ================================================================================
+    ! Proper motion
+    ! ================================================================================
+
+    !> Every proper-motion row of `test/test_skycoord_vectors.f90` to 1e-11 degrees on the sky, as the
+    !! offsets it is built on: a Gaia-sized motion, one east at declination 80, Barnard's star over a
+    !! century, negative intervals, the seam crossed both ways, both poles, no motion and no time, and
+    !! steps of 1.5 and 20 degrees along their great circles.
+    subroutine test_pm_golden(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: ra, dec, want_ra, want_dec, worst
+        integer :: k
+        logical :: differs, in_range
+        character(len=160) :: msg
+
+        worst = 0.0_real64
+        differs = .false.
+        in_range = .true.
+        do k = 1, n_spm
+            call pf_apply_pm(transfer(spm_in_bits(5 * k - 4), 0.0_real64), transfer(spm_in_bits(5 * k - 3), 0.0_real64), &
+                             transfer(spm_in_bits(5 * k - 2), 0.0_real64), transfer(spm_in_bits(5 * k - 1), 0.0_real64), &
+                             transfer(spm_in_bits(5 * k), 0.0_real64), ra, dec)
+            want_ra = transfer(spm_out_bits(2 * k - 1), 0.0_real64)
+            want_dec = transfer(spm_out_bits(2 * k), 0.0_real64)
+            worst = max(worst, sky_gap(ra, dec, want_ra, want_dec))
+            differs = differs .or. ra /= want_ra .or. dec /= want_dec
+            in_range = in_range .and. ra >= 0.0_real64 .and. ra < 360.0_real64 .and. abs(dec) <= 90.0_real64
+        end do
+        call check(error, n_spm > 0, "the proper-motion table lost its rows")
+        if (allocated(error)) return
+        call check(error, in_range, "a moved position's right ascension left [0, 360) or its declination [-90, 90]")
+        if (allocated(error)) return
+        write (msg, '(a,es10.3,a)') "pf_apply_pm misses the model by ", worst, " degrees on the sky (at most 1e-11)"
+        call check(error, worst <= 1.0e-11_real64, trim(msg))
+        if (allocated(error)) return
+        call check(error, differs, &
+            "not one moved position differs from its 60-digit reference by even an ulp, which is what a table " // &
+            "generated FROM the implementation would look like rather than one generated for it")
+    end subroutine test_pm_golden
+
+    !> **At declination 80**, a proper motion in right ascension alone moves the position along the
+    !! great circle leaving it due east, by the arc `s = pm_ra * dt`: `tan(dra) = tan(s) / cos(dec)`
+    !! and `sin(dec') = sin(dec) cos(s)`, derived from the offset's own construction, so the right
+    !! ascension moves `s / cos(dec)`, 5.8 times the arc. That is what `pm_ra` = mu_alpha * cos(dec)
+    !! means; a reading of `pm_ra` as mu_alpha itself moves the right ascension by `s` alone, and an
+    !! inverted one by `s cos(dec)` -- and near the equator, where `cos(dec)` is 1, no test can tell
+    !! the three apart. The same at declination -80, where the cosine is the same.
+    subroutine test_pm_includes_cos_dec(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        !> The arc: 1000 mas/yr for 10 years, in degrees.
+        real(real64), parameter :: S = 1.0e4_real64 / 3.6e6_real64
+        real(real64) :: ra, dec, dra, want_dra, want_dec, d0
+        integer :: h
+        character(len=200) :: msg
+
+        do h = -1, 1, 2
+            d0 = 80.0_real64 * real(h, real64)
+            call pf_apply_pm(100.0_real64, d0, 1000.0_real64, 0.0_real64, 10.0_real64, ra, dec)
+            dra = ra - 100.0_real64
+            want_dra = atan2(sin(S * DEG), cos(d0 * DEG) * cos(S * DEG)) / DEG
+            want_dec = asin(sin(d0 * DEG) * cos(S * DEG)) / DEG
+            write (msg, '(a,f6.1,a,es24.16,a,es24.16,a,es24.16)') "at declination ", d0, " the right ascension moved ", &
+                dra, ", not ", want_dra, "; s / cos(dec) is ", S / cos(d0 * DEG)
+            call check(error, abs(dra - want_dra) <= 1.0e-12_real64 .and. abs(dec - want_dec) <= 1.0e-12_real64, trim(msg))
+            if (allocated(error)) return
+            ! To first order the right ascension moves the arc over cos(dec); the second order is 1e-8.
+            call check(error, abs(dra * cos(d0 * DEG) / S - 1.0_real64) <= 1.0e-6_real64, trim(msg))
+            if (allocated(error)) return
+        end do
+    end subroutine test_pm_includes_cos_dec
+
+    !> No time moves nothing, and neither does no motion: the position comes back within `SAME`, its
+    !! right ascension wrapped into `[0, 360)`. It travels the offset's path -- `sin`, `cos` and
+    !! `atan2` -- so rounding is all it may gain, where an accumulating path would gain more. At a pole
+    !! it comes back as the pole, right ascension 0 by the module's rule.
+    subroutine test_pm_zero_dt_is_identity(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64), parameter :: RA0(5) = [-10.0_real64, 725.5_real64, 359.9999_real64, 123.4_real64, 0.0_real64]
+        real(real64), parameter :: DEC0(5) = [20.0_real64, -30.0_real64, 89.9_real64, -45.0_real64, 0.0_real64]
+        real(real64), parameter :: WANT_RA(5) = [350.0_real64, 5.5_real64, 359.9999_real64, 123.4_real64, 0.0_real64]
+        real(real64) :: ra, dec, zero, negz, worst
+        integer :: k
+
+        zero = 0.0_real64
+        negz = -zero
+        worst = 0.0_real64
+        do k = 1, size(RA0)
+            call pf_apply_pm(RA0(k), DEC0(k), 5.0_real64, -3.0_real64, 0.0_real64, ra, dec)
+            worst = max(worst, turn_gap(ra, WANT_RA(k)) / 360.0_real64, abs(dec - DEC0(k)) / max(1.0_real64, abs(DEC0(k))))
+            call pf_apply_pm(RA0(k), DEC0(k), 5.0_real64, -3.0_real64, negz, ra, dec)
+            worst = max(worst, turn_gap(ra, WANT_RA(k)) / 360.0_real64, abs(dec - DEC0(k)) / max(1.0_real64, abs(DEC0(k))))
+            call pf_apply_pm(RA0(k), DEC0(k), 0.0_real64, 0.0_real64, 50.0_real64, ra, dec)
+            worst = max(worst, turn_gap(ra, WANT_RA(k)) / 360.0_real64, abs(dec - DEC0(k)) / max(1.0_real64, abs(DEC0(k))))
+            call check(error, ra >= 0.0_real64 .and. ra < 360.0_real64, "no motion left a right ascension outside [0, 360)")
+            if (allocated(error)) return
+        end do
+        call check(error, worst <= SAME, "no time, or no motion, moved the position by more than rounding")
+        if (allocated(error)) return
+        call pf_apply_pm(123.4_real64, 90.0_real64, 5.0_real64, -3.0_real64, 0.0_real64, ra, dec)
+        call check(error, ra == 0.0_real64 .and. abs(dec - 90.0_real64) <= SAME * 90.0_real64, &
+            "no time at the north pole did not give the pole, right ascension 0")
+    end subroutine test_pm_zero_dt_is_identity
+
+    !> A motion over `+dt` and back over `-dt` returns to the start, to rounding, once the motion is
+    !! carried along with the position: a great circle's position angle turns as it crosses the
+    !! meridians, so at the new position the same motion points along the same circle at the angle
+    !! `pf_position_angle_deg` measures back to the start, plus half a turn -- the components a
+    !! catalogue at the new epoch holds. The original components are not that motion there, and miss
+    !! by about `s**2 tan(dec)`, 1e-3 degrees for the last row: the negative control, showing the
+    !! round trip could fail. And `+dt` and `-dt` from one position land on the one great circle, `s`
+    !! either side of it, `2 s` apart -- where a one-way reading, a negative interval moved forward,
+    !! puts both in one place.
+    subroutine test_pm_reverses(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        !> The rows: `(ra, dec, pm_ra, pm_dec, dt)`, a high northern declination last.
+        real(real64), parameter :: ROWS(5, 5) = reshape([ &
+            10.0_real64, 20.0_real64, 5.0_real64, -3.0_real64, 10.0_real64, &
+            269.4520833_real64, 4.6933647_real64, -801.551_real64, 10362.394_real64, 100.0_real64, &
+            200.0_real64, -45.0_real64, 300.0_real64, -400.0_real64, 50.0_real64, &
+            0.5_real64, -75.0_real64, -2500.0_real64, 1200.0_real64, 30.0_real64, &
+            33.0_real64, 61.0_real64, 4000.0_real64, -2500.0_real64, 150.0_real64], [5, 5])
+        real(real64) :: ra, dec, pmr, pmd, dt, ra1, dec1, ra2, dec2, rb, db, rate, pa1, s, worst, worst_sym, stale
+        integer :: k
+        character(len=160) :: msg
+
+        worst = 0.0_real64
+        worst_sym = 0.0_real64
+        stale = 0.0_real64
+        do k = 1, 5
+            ra = ROWS(1, k)
+            dec = ROWS(2, k)
+            pmr = ROWS(3, k)
+            pmd = ROWS(4, k)
+            dt = ROWS(5, k)
+            call pf_apply_pm(ra, dec, pmr, pmd, dt, ra1, dec1)
+            rate = hypot(pmr, pmd)
+            pa1 = (pf_position_angle_deg(ra1, dec1, ra, dec) + 180.0_real64) * DEG
+            call pf_apply_pm(ra1, dec1, rate * sin(pa1), rate * cos(pa1), -dt, ra2, dec2)
+            worst = max(worst, sky_gap(ra2, dec2, ra, dec))
+            call pf_apply_pm(ra, dec, pmr, pmd, -dt, rb, db)
+            s = rate * dt / 3.6e6_real64
+            worst_sym = max(worst_sym, abs(pf_angdist_deg(ra1, dec1, rb, db) - 2.0_real64 * s), &
+                            abs(pf_angdist_deg(ra, dec, rb, db) - s))
+            if (k == 5) then
+                call pf_apply_pm(ra1, dec1, pmr, pmd, -dt, ra2, dec2)
+                stale = sky_gap(ra2, dec2, ra, dec)
+            end if
+        end do
+        write (msg, '(a,es10.3,a)') "forward then back with the motion carried along misses the start by ", worst, " degrees"
+        call check(error, worst <= 1.0e-11_real64, trim(msg))
+        if (allocated(error)) return
+        write (msg, '(a,es10.3,a)') "+dt and -dt are not s either side on one great circle: off by ", worst_sym, " degrees"
+        call check(error, worst_sym <= 1.0e-11_real64, trim(msg))
+        if (allocated(error)) return
+        write (msg, '(a,es10.3,a)') "the original components reversed the motion to ", stale, &
+            " degrees, so the round trip above could not fail"
+        call check(error, stale > 1.0e-6_real64, trim(msg))
+    end subroutine test_pm_reverses
+
+    !> A NaN in any of the five arguments gives NaN results and raises no `IEEE_INVALID` -- the state of
+    !! a source with no proper motion in a Gaia column -- read around the calls in this test's own
+    !! body; over a column a NaN touches its own row only. An infinite `ra`, proper motion or interval
+    !! gives NaN results too, raising `IEEE_INVALID` as it must, so halting is held off here for
+    !! nagfor's sake. A `dec` outside `[-90, 90]` stops the program, tested out of process
+    !! (`skycoord_apply_pm_dec_out_of_range`).
+    subroutine test_pm_nan_propagates_quietly(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: nan, pinf, ninf, ra, dec, ra_o(3), dec_o(3)
+        logical :: saved, raised, can, ok, ok_inf, halting
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        pinf = ieee_value(0.0_real64, ieee_positive_inf)
+        ninf = ieee_value(0.0_real64, ieee_negative_inf)
+        can = ieee_support_flag(ieee_invalid, nan)
+        saved = .false.
+        raised = .false.
+        halting = .false.
+        if (can) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+        call pf_apply_pm(nan, 20.0_real64, 5.0_real64, 3.0_real64, 10.0_real64, ra, dec)
+        ok = ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, nan, 5.0_real64, 3.0_real64, 10.0_real64, ra, dec)
+        ok = ok .and. ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, 20.0_real64, nan, 3.0_real64, 10.0_real64, ra, dec)
+        ok = ok .and. ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, 20.0_real64, 5.0_real64, nan, 10.0_real64, ra, dec)
+        ok = ok .and. ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, 20.0_real64, 5.0_real64, 3.0_real64, nan, ra, dec)
+        ok = ok .and. ra /= ra .and. dec /= dec
+        call pf_apply_pm([10.0_real64, 20.0_real64, 30.0_real64], 20.0_real64, [5.0_real64, nan, 5.0_real64], 3.0_real64, &
+                         10.0_real64, ra_o, dec_o)
+        ok = ok .and. ra_o(1) == ra_o(1) .and. ra_o(2) /= ra_o(2) .and. ra_o(3) == ra_o(3) .and. &
+            dec_o(1) == dec_o(1) .and. dec_o(2) /= dec_o(2) .and. dec_o(3) == dec_o(3)
+        if (can) call ieee_get_flag(ieee_invalid, raised)
+        ! The infinities raise the flag on purpose: halting held off, and the caller's state restored.
+#ifndef __flang__
+        if (ieee_support_halting(ieee_invalid)) then
+            call ieee_get_halting_mode(ieee_invalid, halting)
+            call ieee_set_halting_mode(ieee_invalid, .false.)
+        end if
+#endif
+        call pf_apply_pm(pinf, 20.0_real64, 5.0_real64, 3.0_real64, 10.0_real64, ra, dec)
+        ok_inf = ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, 20.0_real64, ninf, 3.0_real64, 10.0_real64, ra, dec)
+        ok_inf = ok_inf .and. ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, 20.0_real64, 5.0_real64, 3.0_real64, pinf, ra, dec)
+        ok_inf = ok_inf .and. ra /= ra .and. dec /= dec
+        call pf_apply_pm(10.0_real64, 20.0_real64, 0.0_real64, 0.0_real64, ninf, ra, dec)
+        ok_inf = ok_inf .and. ra /= ra .and. dec /= dec
+        if (can) call ieee_set_flag(ieee_invalid, saved)
+#ifndef __flang__
+        if (ieee_support_halting(ieee_invalid)) call ieee_set_halting_mode(ieee_invalid, halting)
+#endif
+        call check(error, .not. raised, "a NaN argument raised IEEE_INVALID in pf_apply_pm")
+        if (allocated(error)) return
+        call check(error, ok, "a NaN argument to pf_apply_pm did not give NaN results, or touched another row")
+        if (allocated(error)) return
+        call check(error, ok_inf, "an infinite argument to pf_apply_pm did not give NaN results")
+    end subroutine test_pm_nan_propagates_quietly
 
     ! ================================================================================
     ! Angular separation
@@ -1679,7 +2145,7 @@ contains
         logical :: ok
 
         ok = .true.
-        do i = 1, 4
+        do i = 1, NSYS
             z = pf_zhel2zcmb(10.0_real64, 20.0_real64, 0.1_real64, SYSTEMS(i))
             ok = ok .and. abs(z - 0.1_real64) < 0.01_real64
         end do
@@ -1728,7 +2194,7 @@ contains
             "the apex's redshift is not the larger of the two frames', or the antapex's the smaller")
         if (allocated(error)) return
         worst = 0.0_real64
-        do i = 1, 4
+        do i = 1, NSYS
             call pf_sky_convert(alon, alat, PF_COORD_GALACTIC, SYSTEMS(i), a, b)
             worst = max(worst, abs(pf_zhel2zcmb(a, b, 0.1_real64, SYSTEMS(i)) - zk(0)))
         end do
@@ -1845,6 +2311,10 @@ contains
             call pf_icrs2sgal(lon, lat, lon_out, lat_out)
         else if (from == PF_COORD_SUPERGALACTIC .and. to == PF_COORD_ICRS) then
             call pf_sgal2icrs(lon, lat, lon_out, lat_out)
+        else if (from == PF_COORD_ICRS .and. to == PF_COORD_FK5) then
+            call pf_icrs2fk5(lon, lat, lon_out, lat_out)
+        else if (from == PF_COORD_FK5 .and. to == PF_COORD_ICRS) then
+            call pf_fk52icrs(lon, lat, lon_out, lat_out)
         else
             found = .false.
             lon_out = 0.0_real64

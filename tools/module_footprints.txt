@@ -131,6 +131,7 @@ parquet_ziggurat.f90
 [parquet_skycoord]
 parquet_skycoord.f90
 parquet_skycoord_geom.f90
+parquet_skycoord_object.f90
 parquet_skycoord_rotate.f90
 parquet_skycoord_text.f90
 parquet_utils.f90
@@ -624,6 +625,7 @@ parquet_settings.f90
 parquet_settings_base.f90
 parquet_skycoord.f90
 parquet_skycoord_geom.f90
+parquet_skycoord_object.f90
 parquet_skycoord_rotate.f90
 parquet_skycoord_text.f90
 parquet_sorting.f90

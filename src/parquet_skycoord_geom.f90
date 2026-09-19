@@ -1,9 +1,10 @@
 !> `parquet_skycoord`'s frame-free RA/Dec geometry: the separation of two positions, the offset by a
-!! separation at a position angle, and the position angle itself.
+!! separation at a position angle, the position angle itself, and the proper motion, which is an
+!! offset.
 !!
-!! None of the three takes a frame, because each is invariant under the reflection that separates
-!! the two declination conventions in live use: a separation is an angle between two directions, and
-!! an offset and a position angle flip their east together. Each procedure's contract is on its
+!! None of them takes a frame, because each is invariant under the reflection that separates the
+!! two declination conventions in live use: a separation is an angle between two directions, and an
+!! offset and a position angle flip their east together. Each procedure's contract is on its
 !! interface in `src/parquet_skycoord.f90`; what the comments here add is why the arithmetic is
 !! arranged as it is. The offset and the position angle use the RA/Dec helpers of
 !! `parquet_skycoord_rotate`, and with them its two rules: a declination of exactly +/-90 is the
@@ -178,6 +179,45 @@ contains
         v = cs * c + ss * (cp * north + sp * east)
         call skc_unit_radec(v, ra, dec)
     end procedure pf_offset_radec
+
+    module procedure pf_apply_pm
+        real(real64) :: pa, sep
+        character(len=:), allocatable :: t_dec
+
+        ! A NaN argument gives NaN results, handed back itself before any comparison could raise on
+        ! it: a Gaia source without a five-parameter solution has null `pmra` and `pmdec`, so a NaN is
+        ! this procedure's routine input rather than a caller's mistake.
+        if (ra /= ra .or. dec /= dec .or. pm_ra /= pm_ra .or. pm_dec /= pm_dec .or. dt_years /= dt_years) then
+            ra_out = ra
+            if (dec /= dec) ra_out = dec
+            if (pm_ra /= pm_ra) ra_out = pm_ra
+            if (pm_dec /= pm_dec) ra_out = pm_dec
+            if (dt_years /= dt_years) ra_out = dt_years
+            dec_out = ra_out
+            return
+        end if
+        ! The centre pf_offset_radec refuses, refused here in this procedure's own name, so the
+        ! message names what the caller called.
+        if (.not. (dec >= -90.0_real64 .and. dec <= 90.0_real64)) then
+            call pf_to_str(dec, t_dec, fmt='(es14.7)')
+            error stop "pf_apply_pm: dec must be in [-90, 90] (got " // trim(adjustl(t_dec)) // ")"
+        end if
+        ! `pm_ra` is already the rate along the local east, `cos(dec)` included, so the two rates are
+        ! the components of one vector on the tangent plane: its angle from north through east is the
+        ! step's position angle, and its length the rate along the great circle. No motion at all has
+        ! angle 0 by rule: `atan2(0, 0)` is prohibited, and nagfor answers it with a NaN and
+        ! IEEE_INVALID.
+        if (pm_ra == 0.0_real64 .and. pm_dec == 0.0_real64) then
+            pa = 0.0_real64
+        else
+            pa = atan2(pm_ra, pm_dec) * skc_rad2deg
+        end if
+        ! pf_offset_radec refuses a negative separation, so a negative interval turns the angle half
+        ! a turn instead. 3.6e6 milliarcseconds make a degree.
+        sep = hypot(pm_ra, pm_dec) * abs(dt_years) / 3.6e6_real64
+        if (dt_years < 0.0_real64) pa = pa + 180.0_real64
+        call pf_offset_radec(ra, dec, pa, sep, ra_out, dec_out)
+    end procedure pf_apply_pm
 
     module procedure pf_position_angle_deg
         real(real64) :: dl, sdl, cdl, sd1, cd1, sd2, cd2, y, x

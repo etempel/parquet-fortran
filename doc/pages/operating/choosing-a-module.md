@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **155** of this library's Fortran files.
+also the largest: a project that imports it compiles **156** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -49,7 +49,7 @@ in every one of them.
 | `parquet_spatial` | 15 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |
 | `parquet_healpix` | 7 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
 | `parquet_sphere` | 15 | no | `pf_sky_polygon`, `pf_random_pixel_at` and `pf_random_mask_at`: uniform random points in sky polygons and HEALPix pixels and masks, and RA/Dec conversions in a named declination frame and the Fibonacci grid |
-| `parquet_skycoord` | 5 | no | `pf_icrs2gal`, `pf_sky_convert` and the other rotations: sky positions converted between ICRS, Galactic, ecliptic and supergalactic coordinates; `pf_angdist_deg`, `pf_offset_radec` and `pf_position_angle_deg`, the RA/Dec geometry that needs no coordinate system; `pf_radec2str`, `pf_str2radec` and their kin, positions as sexagesimal text and back; and `pf_zhel2zcmb`, a redshift in the CMB rest frame |
+| `parquet_skycoord` | 6 | no | `pf_icrs2gal`, `pf_sky_convert`, `pf_sky_rotation` and the other rotations: sky positions converted between ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 coordinates; `pf_angdist_deg`, `pf_offset_radec`, `pf_position_angle_deg` and `pf_apply_pm`, the RA/Dec geometry that needs no coordinate system, proper motion included; `pf_radec2str`, `pf_str2radec` and their kin, positions as sexagesimal text and back; and `pf_zhel2zcmb`, a redshift in the CMB rest frame |
 | `parquet_index` | 13 | no | `pf_index_map`: which row holds this key, over a single integer key, a tuple of them or a string, with three storage backends, two chosen from the keys and one opt-in; `pf_index_multimap`: every row holding a key that repeats, as ranges; and `pf_index_pool`, which hands out and recycles unique index values |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
@@ -70,7 +70,7 @@ in every one of them.
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 155 | **yes** | everything above, through one `use` |
+| `parquet` | 156 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 

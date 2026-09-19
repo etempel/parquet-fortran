@@ -3,12 +3,13 @@ title: Celestial coordinate systems with parquet_skycoord
 ---
 
 `parquet_skycoord` converts sky positions between the celestial coordinate systems a catalogue is
-kept in — ICRS, Galactic, ecliptic and supergalactic — and carries the RA/Dec geometry that needs no
-coordinate system at all: the angular separation of two positions, the position a separation away
-at a position angle, and that position angle back. It also writes positions as sexagesimal text and
-reads them back, and takes a heliocentric redshift into the rest frame of the cosmic microwave
-background. Everything works in `real64` degrees, and every procedure but the three text writers is
-`pure elemental`, so a whole column converts in one call.
+kept in — ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 — by a named procedure, by two
+selectors read at run time, or by a rotation prepared once, and carries the RA/Dec geometry that
+needs no coordinate system at all: the angular separation of two positions, the position a
+separation away at a position angle, that position angle back, and a position moved by its proper
+motion. It also writes positions as sexagesimal text and reads them back, and takes a heliocentric
+redshift into the rest frame of the cosmic microwave background. Everything works in `real64`
+degrees, and every conversion is `pure elemental`, so a whole column converts in one call.
 
 ```fortran
 use parquet_skycoord
@@ -22,8 +23,8 @@ call pf_icrs2gal(ra, dec, l, b)                                   ! the whole co
 sep = pf_angdist_deg(ra, dec, 10.68458_real64, 41.26875_real64)   ! each one's distance from M31
 ```
 
-`use parquet_skycoord` compiles 5 of this library's Fortran files and never reaches this library's
-reader, its writer or its C++ bindings. Four of them are its own; the fifth is `parquet_utils`,
+`use parquet_skycoord` compiles 6 of this library's Fortran files and never reaches this library's
+reader, its writer or its C++ bindings. Five of them are its own; the sixth is `parquet_utils`,
 the small helpers every tier builds on. See [Choosing a module](../operating/choosing-a-module.html)
 for the whole table. Everything here is also available through `use parquet`.
 
@@ -41,14 +42,17 @@ defined exactly as astropy defines it:
   nutation not.
 - **`PF_COORD_SUPERGALACTIC`** — supergalactic `(sgl, sgb)`, astropy's `Supergalactic`: de
   Vaucouleurs' pole at Galactic `(47.37, 6.32)`, with the north Galactic pole at `sgl = 90`.
+- **`PF_COORD_FK5`** — FK5 J2000 `(ra, dec)`, astropy's `FK5` at its default equinox. **FK5 here is
+  FK5 J2000; precessing to another equinox is not provided.** It is ICRS turned by the frame bias of
+  USNO Circular 179 and nothing else, so the two differ by at most 32 milliarcseconds on the sky.
 
 **Each rotation is built from the three angles that define it** — the target system's north pole in
 the system it is built from, and the target longitude of that system's north pole — so it is
 orthonormal by construction, its inverse is its transpose rather than a second set of numbers, and
-every matrix is a compile-time constant: no call builds one. The Galactic and ecliptic angles are
-referred to ICRS and so carry the ICRS frame bias inside them, which is what makes the answers agree
-with astropy's `SkyCoord` to rounding rather than differ from it by some 20 milliarcseconds — an
-error too small to look like a bug.
+every matrix is a compile-time constant: no call builds one. The Galactic, ecliptic and FK5 angles
+are referred to ICRS and so carry the ICRS frame bias inside them, which is what makes the answers
+agree with astropy's `SkyCoord` to rounding rather than differ from it by some 20 milliarcseconds —
+an error too small to look like a bug.
 
 ## Converting between systems
 
@@ -61,9 +65,11 @@ call pf_gal2sgal(l, b, sgl, sgb)         ! Galactic -> supergalactic
 call pf_sgal2gal(sgl, sgb, l, b)         ! supergalactic -> Galactic
 call pf_icrs2sgal(ra, dec, sgl, sgb)     ! ICRS -> supergalactic
 call pf_sgal2icrs(sgl, sgb, ra, dec)     ! supergalactic -> ICRS
+call pf_icrs2fk5(ra, dec, ra_fk5, dec_fk5)   ! ICRS -> FK5 J2000
+call pf_fk52icrs(ra_fk5, dec_fk5, ra, dec)   ! FK5 J2000 -> ICRS
 ```
 
-All eight take degrees and give degrees: the output longitude in `[0, 360)`, the output latitude in
+All ten take degrees and give degrees: the output longitude in `[0, 360)`, the output latitude in
 `[-90, 90]`. The input longitude may be any value, including one below 0 or beyond a turn. Being
 `pure elemental`, each takes scalars or arrays of any rank alike, and a caller converting a column
 in parallel wraps the call in their own `!$omp parallel do`.
@@ -83,17 +89,17 @@ system = pf_coord_system_from_name(token)
 `pf_sky_convert` is the same conversion with the two systems given as `PF_COORD_*` selectors — for a
 system read out of a configuration file or a column's metadata. For a pair that has a named
 procedure it calls that procedure, so the two answer alike to the bit; for a pair that has none —
-Galactic and ecliptic, ecliptic and supergalactic, either way round — it applies that pair's own
-compile-time matrix, never two rotations in turn. **From a system to itself, the input comes back
-unchanged**, by copy and before any arithmetic: a longitude of `-10` stays `-10`, so the `[0, 360)`
-range applies to a real conversion only. `pf_sky_convert` is `pure elemental` like the named
-procedures.
+Galactic and ecliptic, ecliptic and supergalactic, and FK5 J2000 and any system but ICRS, either way
+round — it applies that pair's own compile-time matrix, never two rotations in turn. **From a system
+to itself, the input comes back unchanged**, by copy and before any arithmetic: a longitude of `-10`
+stays `-10`, so the `[0, 360)` range applies to a real conversion only. `pf_sky_convert` is
+`pure elemental` like the named procedures.
 
 A coordinate system written as text has a token: `pf_coord_system_name` gives `"icrs"`,
-`"galactic"`, `"ecliptic"` or `"supergalactic"` for a selector, and `"unknown"` for
+`"galactic"`, `"ecliptic"`, `"supergalactic"` or `"fk5"` for a selector, and `"unknown"` for
 `PF_COORD_UNKNOWN`. `pf_coord_system_from_name` reads one back, ignoring case and the blanks around
-it, and understands astropy's frame names too: `icrs`, `galactic` and `supergalactic` are the same
-words, and `barycentricmeanecliptic` names the ecliptic. **A token it does not know answers
+it, and understands astropy's frame names too: `icrs`, `galactic`, `supergalactic` and `fk5` are the
+same words, and `barycentricmeanecliptic` names the ecliptic. **A token it does not know answers
 `PF_COORD_UNKNOWN`** rather than stopping the program, so the caller reports the bad token in its
 own words:
 
@@ -105,6 +111,32 @@ else
     call pf_sky_convert(lon, lat, system, PF_COORD_ICRS, ra, dec)
 end if
 ```
+
+## A rotation prepared once
+
+```fortran
+type(pf_sky_rotation) :: rot
+
+call rot%init(PF_COORD_ICRS, PF_COORD_GALACTIC)   ! the two systems, read once
+call rot%apply(ra, dec, l, b)                     ! elemental over whole columns
+```
+
+`pf_sky_rotation` is `pf_sky_convert` with the two selectors read once rather than per position.
+`%init(from, to)` checks them and takes the pair's matrix, the one `pf_sky_convert` rotates by;
+`%apply` then rotates any number of positions, `pure elemental` like the named procedures and with
+their rules. It answers what `pf_sky_convert` answers to within a few units in the last place: the
+two call one routine from two places, which a compiler may round differently. From a system to
+itself `%apply` hands back its input unchanged, as `pf_sky_convert` does.
+
+`%init` may run again on the same object, replacing the rotation it held, and `%is_init()` says
+whether it has run. **`%apply` before any `%init` stops the program**, as does `%init` with a
+selector that is not one of the five systems. Once prepared the object is only read, so one built
+before a parallel region serves every thread of it.
+
+What the object saves is the reading of two selectors per position, which is small beside a
+rotation's sines and cosines: over a column it is a few per cent faster than `pf_sky_convert`, no
+more (`bench/benchmark_skycoord.sh` measures both). Its use is one rotation, checked once, carried
+through a program whose systems come from its configuration.
 
 ## This is not the HEALPix declination frame
 
@@ -155,6 +187,39 @@ labels of one pole.
 For positions as unit vectors, [`parquet_sphere`](sphere.html#positions-vectors-and-where-the-frame-enters)'s
 `pf_radec2vec` and `pf_vec2radec` convert between the two, naming the declination frame at that
 interface.
+
+## Proper motion
+
+```fortran
+call pf_apply_pm(ra, dec, pm_ra, pm_dec, dt_years, ra_out, dec_out)
+```
+
+**`pm_ra` is the proper motion in right ascension times `cos(dec)`**, in mas/yr: Gaia's `pmra`,
+astropy's `pm_ra_cosdec`. `pm_dec` is the proper motion in declination, also in mas/yr, and
+`dt_years` the interval in the same years, negative to move back. The cosine matters: a motion
+written without it moves a position near a pole several times too far in right ascension, and near
+the equator, where the cosine is about 1, nothing shows it.
+
+The two rates are resolved into a position angle, east through `pm_ra` and north through `pm_dec`,
+and the position moves `hypot(pm_ra, pm_dec) * |dt_years|` along the great circle leaving it at that
+angle, as `pf_offset_radec` moves it. At a pole the motion is read in the local frame of the `ra`
+given, as `pf_offset_radec` reads a position angle. No time, or no motion, gives the position back,
+its right ascension wrapped into `[0, 360)`. `pf_apply_pm` is `pure elemental`: one call moves a
+whole catalogue to another epoch.
+
+**It is a step along a great circle, not rigorous space motion.** Parallax, radial velocity and
+light travel time do not enter it, and the motion is the one at the starting position, held fixed.
+That is the same great circle astropy's `apply_space_motion` follows for a source with neither
+distance nor radial velocity, which moves in a straight line through space instead and so covers
+`atan(s)` of the arc where this covers `s`, in radians: the two differ by `s**3/3`, about 2
+microarcseconds for a step of an arcminute and about 6 milliarcseconds for a quarter of a degree. To
+carry a position to a new epoch and back, use the motion at the new epoch for the way back: a great
+circle's position angle turns as it crosses the meridians, so the components held at the start no
+longer point along it.
+
+A NaN argument — the proper motion of a source that has none in a Gaia column — gives NaN results
+without raising a flag, and a `dec` outside `[-90, 90]` stops the program, as `pf_offset_radec`'s
+centre does.
 
 ## Sexagesimal text
 
@@ -277,13 +342,15 @@ nulls and a conversion that stopped the program on one would be of no use on the
 
 What stops the program is a caller mistake that has no sensible reading:
 
-- `pf_sky_convert` with a selector that is not one of the four systems, `PF_COORD_UNKNOWN`
-  included, even when `from` and `to` are equal, and `pf_zhel2zcmb` with such a `system`;
+- `pf_sky_convert` with a selector that is not one of the five systems, `PF_COORD_UNKNOWN`
+  included, even when `from` and `to` are equal, and `pf_zhel2zcmb` and `pf_sky_rotation`'s
+  `%init` with such a selector;
+- `pf_sky_rotation`'s `%apply` before any `%init`;
 - `pf_coord_system_name` with an integer that is neither a system nor `PF_COORD_UNKNOWN`;
 - a text writer with a `sep` other than `":"`, `" "` or `"hms"`, or a `precision` outside `[0, 9]`;
 - `pf_offset_radec` with a `dec0` outside `[-90, 90]` — a centre beyond a pole turns the local north
-  and east around and gives a plausible wrong point — or a negative `sep_deg`. A NaN argument
-  gives NaN results.
+  and east around and gives a plausible wrong point — or a negative `sep_deg`, and `pf_apply_pm`
+  with a `dec` outside `[-90, 90]`. A NaN argument to either gives NaN results.
 
 `pf_coord_system_from_name` and the text readers never stop the program: text is user data, so an
 unknown token answers `PF_COORD_UNKNOWN`, and text a reader cannot read sets `ok` to `.false.`.
@@ -291,15 +358,17 @@ unknown token answers `PF_COORD_UNKNOWN`, and text a reader cannot read sets `ok
 ## Thread safety
 
 The module holds no state: every procedure is `pure` and every matrix a constant, so anything here
-may be called from any number of threads at once. Nothing on this page prints, and nothing reads a
-setting.
+may be called from any number of threads at once. A `pf_sky_rotation` is state you hold: `%init`
+writes it and `%apply` only reads it, so prepare it before a parallel region and apply it from every
+thread. Nothing on this page prints, and nothing reads a setting.
 
 ## Limitations
 
 - A conversion rotates a direction and nothing else: no proper motion, parallax, radial velocity,
-  aberration or light deflection enters it.
-- The ecliptic is the mean ecliptic and equinox of J2000 only, without nutation, and there is no
-  argument naming another equinox.
+  aberration or light deflection enters it. A proper motion is `pf_apply_pm`'s, as a step along a
+  great circle.
+- The ecliptic is the mean ecliptic and equinox of J2000 only, without nutation, and FK5 is FK5
+  J2000 only: no argument names another equinox, and nothing precesses.
 - The text readers take three-field sexagesimal angles in ASCII only: no two-field or decimal-hour
   forms, and no degree, minute or second symbols.
 - The CMB rest frame is a boost by the dipole and nothing more, and Planck 2018's is the one dipole

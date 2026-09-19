@@ -448,9 +448,9 @@ contains
 
 end module test_module_surface_sphere
 
-!> `parquet_skycoord` alone: every rotation, the data-driven form, the selector tokens, the
-!> frame-free RA/Dec geometry, the sexagesimal fields and text and the CMB rest frame, and no
-!> settings knob at all.
+!> `parquet_skycoord` alone: every rotation, the data-driven form and the rotation object, the
+!> selector tokens, the frame-free RA/Dec geometry and proper motion, the sexagesimal fields and text
+!> and the CMB rest frame, and no settings knob at all.
 !!
 !! **One library import, and it must stay that way.** This module's row in the entry-module table
 !! claims that `use parquet_skycoord` compiles a handful of Fortran files and re-exports no setting
@@ -465,15 +465,16 @@ module test_module_surface_skycoord
 
 contains
 
-    !> Uses every rotation, the data-driven form, both token procedures, the three geometry
-    !! procedures, the ten sexagesimal ones and `pf_zhel2zcmb` through `use parquet_skycoord` alone,
-    !! each against a value the geometry or the arithmetic fixes.
+    !> Uses every rotation, the data-driven form, the rotation object, both token procedures, the four
+    !! geometry procedures, the ten sexagesimal ones and `pf_zhel2zcmb` through `use parquet_skycoord`
+    !! alone, each against a value the geometry or the arithmetic fixes.
     subroutine check_skycoord_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
         character(len=:), allocatable :: name, text
         real(real64) :: a, b, c, d, ra, dec, s
         integer :: h, m, sgn, deg
         logical :: ok
+        type(pf_sky_rotation) :: rot
 
         what = ""
         ! The eight named rotations chained round a closed loop through all four systems: a procedure
@@ -495,6 +496,22 @@ contains
         if (what == "" .and. abs(d - 66.560718661389_real64) > 1.0e-9_real64) what = "PF_COORD_ECLIPTIC"
         call pf_sky_convert(c, d, PF_COORD_SUPERGALACTIC, PF_COORD_SUPERGALACTIC, a, b)
         if (what == "" .and. (a /= c .or. b /= d)) what = "PF_COORD_SUPERGALACTIC"
+        ! FK5 J2000: the ICRS pole moves the frame bias's 21.88 mas off 90, and comes back.
+        call pf_icrs2fk5(0.0_real64, 90.0_real64, ra, dec)
+        if (what == "" .and. abs(dec - 89.999993921679_real64) > 1.0e-9_real64) what = "pf_icrs2fk5"
+        call pf_fk52icrs(ra, dec, a, b)
+        if (what == "" .and. abs(b - 90.0_real64) > 1.0e-9_real64) what = "pf_fk52icrs"
+        call pf_sky_convert(0.0_real64, 90.0_real64, PF_COORD_ICRS, PF_COORD_FK5, a, b)
+        if (what == "" .and. abs(b - dec) > 1.0e-12_real64) what = "PF_COORD_FK5"
+        ! The rotation object, prepared once: the ICRS pole at the north Galactic pole's declination.
+        call rot%init(PF_COORD_ICRS, PF_COORD_GALACTIC)
+        call rot%apply(0.0_real64, 90.0_real64, a, b)
+        if (what == "" .and. (.not. rot%is_init() .or. abs(b - 27.128252414968_real64) > 1.0e-9_real64)) &
+            what = "pf_sky_rotation"
+        ! Proper motion: 3600 mas/yr due north for a year is a thousandth of a degree of declination.
+        call pf_apply_pm(10.0_real64, 20.0_real64, 0.0_real64, 3600.0_real64, 1.0_real64, ra, dec)
+        if (what == "" .and. (abs(ra - 10.0_real64) > 1.0e-12_real64 .or. abs(dec - 20.001_real64) > 1.0e-12_real64)) &
+            what = "pf_apply_pm"
 
         ! The tokens, the sentinel included.
         call pf_coord_system_name(PF_COORD_ECLIPTIC, name)

@@ -132,12 +132,13 @@ helpers, and the two generators meant to be copied into your own project.
   conversions that name their declination frame, and the Fibonacci grid. Every draw is addressed
   like `pf_random_at`, so a catalogue reproduces under any schedule.
 - [Celestial coordinate systems with `parquet_skycoord`](skycoord.html) — sky positions converted
-  between ICRS, Galactic, ecliptic and supergalactic coordinates, by a named procedure or by two
-  selectors read at run time, each rotation built from the three angles that define it and agreeing
-  with astropy to rounding; the RA/Dec geometry that needs no coordinate system: the separation of
-  two positions, the position a separation away at a position angle, and that angle back; positions
-  written as sexagesimal text and read back strictly; and a heliocentric redshift in the CMB rest
-  frame. All but the three text writers are `pure elemental`, so a whole column converts in one call.
+  between ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 coordinates, by a named procedure, by
+  two selectors read at run time or by a rotation prepared once, each rotation built from the three
+  angles that define it and agreeing with astropy to rounding; the RA/Dec geometry that needs no
+  coordinate system: the separation of two positions, the position a separation away at a position
+  angle, that angle back, and a position moved by its proper motion; positions written as
+  sexagesimal text and read back strictly; and a heliocentric redshift in the CMB rest frame. Every
+  conversion is `pure elemental`, so a whole column converts in one call.
 - [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key, a tuple of them when no one column
   is unique, or a string. Three storage backends behind one API — an array indexed by the key, an

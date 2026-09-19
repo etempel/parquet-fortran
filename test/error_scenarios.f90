@@ -1559,6 +1559,12 @@ program error_scenarios
         call scenario_skycoord_text_bad_separator()
     case ("skycoord_zcmb_unknown_system")
         call scenario_skycoord_zcmb_unknown_system()
+    case ("skycoord_rotation_apply_before_init")
+        call scenario_skycoord_rotation_apply_before_init()
+    case ("skycoord_rotation_init_unknown_system")
+        call scenario_skycoord_rotation_init_unknown_system()
+    case ("skycoord_apply_pm_dec_out_of_range")
+        call scenario_skycoord_apply_pm_dec_out_of_range()
     case ("sphere_fibonacci_n_not_positive")
         call scenario_sphere_fibonacci_n_not_positive()
     case ("sphere_fibonacci_bad_shape")
@@ -24373,6 +24379,42 @@ contains
         z = pf_zhel2zcmb(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_UNKNOWN)   ! -> aborts
         print '(a,es24.16)', "unexpectedly gave a redshift in the unknown system: ", z
     end subroutine scenario_skycoord_zcmb_unknown_system
+
+    !> A rotation object answers only once `%init` has named its two systems. The control prepares one
+    !! and applies it; a fresh one is then applied. The outputs are printed each time: the binding is
+    !! `pure`, and a call whose results nobody reads may be deleted.
+    subroutine scenario_skycoord_rotation_apply_before_init()
+        type(pf_sky_rotation) :: rot, fresh
+        real(real64) :: lon, lat
+        call rot%init(PF_COORD_ICRS, PF_COORD_GALACTIC)
+        call rot%apply(10.0_real64, 20.0_real64, lon, lat)
+        print '(a,2f10.4)', "rotated ICRS to Galactic: ", lon, lat
+        call fresh%apply(10.0_real64, 20.0_real64, lon, lat)   ! -> aborts
+        print '(a,2f10.4)', "unexpectedly rotated with no %init: ", lon, lat
+    end subroutine scenario_skycoord_rotation_apply_before_init
+
+    !> A rotation object is prepared between two of the five systems, as a conversion is. The control
+    !! prepares FK5 J2000 to supergalactic.
+    subroutine scenario_skycoord_rotation_init_unknown_system()
+        type(pf_sky_rotation) :: rot
+        real(real64) :: lon, lat
+        call rot%init(PF_COORD_FK5, PF_COORD_SUPERGALACTIC)
+        call rot%apply(10.0_real64, 20.0_real64, lon, lat)
+        print '(a,2f10.4)', "rotated FK5 to supergalactic: ", lon, lat
+        call rot%init(PF_COORD_GALACTIC, 6)   ! -> aborts
+        call rot%apply(10.0_real64, 20.0_real64, lon, lat)
+        print '(a,2f10.4)', "unexpectedly prepared a rotation into system 6: ", lon, lat
+    end subroutine scenario_skycoord_rotation_init_unknown_system
+
+    !> A proper motion moves a position on the sphere, whose declination is an offset's centre. The
+    !! control moves a position away from the north pole itself.
+    subroutine scenario_skycoord_apply_pm_dec_out_of_range()
+        real(real64) :: ra, dec
+        call pf_apply_pm(10.0_real64, 90.0_real64, 100.0_real64, 0.0_real64, 10.0_real64, ra, dec)
+        print '(a,2f14.8)', "moved from the pole: ", ra, dec
+        call pf_apply_pm(10.0_real64, 90.5_real64, 100.0_real64, 0.0_real64, 10.0_real64, ra, dec)   ! -> aborts
+        print '(a,2f14.8)', "unexpectedly moved from beyond the pole: ", ra, dec
+    end subroutine scenario_skycoord_apply_pm_dec_out_of_range
 
     !> A grid of no points has no answer. The control is a grid of one.
     subroutine scenario_sphere_fibonacci_n_not_positive()

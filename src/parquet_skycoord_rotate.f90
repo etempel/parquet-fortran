@@ -1,11 +1,12 @@
-!> `parquet_skycoord`'s rotations: the kernel every conversion shares, the eight named procedures,
+!> `parquet_skycoord`'s rotations: the kernel every conversion shares, the ten named procedures,
 !! `pf_sky_convert`, the selector tokens, `pf_zhel2zcmb`, and the RA/Dec helpers the geometry
 !! submodule shares.
 !!
 !! **One kernel, one matrix per call.** `skc_rotate` is handed a compile-time matrix from the
 !! module's table and does the whole conversion -- the input's unit vector, one matrix product, and
-!! back -- so a named procedure is one line and `pf_sky_convert` is a dispatch onto them. Nothing
-!! here computes a sine or cosine of a table angle at run time.
+!! back -- so a named procedure is one line and `pf_sky_convert` is a dispatch onto them; the
+!! rotation object's `%apply`, in `parquet_skycoord_object`, hands it the matrix `%init` took from
+!! the same table. Nothing here computes a sine or cosine of a table angle at run time.
 !!
 !! **Two rules run through all of it**, the same two `parquet_sphere`'s RA/Dec layer follows. A
 !! latitude of exactly +/-90 is the pole, whatever the longitude says (`skc_dec_sin_cos`):
@@ -101,21 +102,13 @@ contains
         end if
     end procedure skc_unit_radec
 
-    ! ---- The kernel ----
+    ! ---- The kernel, and the selector test (shared with parquet_skycoord_object) ----
 
-    !> Rotates one position by `m`: its unit vector, one matrix product, and back.
-    !!
-    !! A NaN coordinate is handed back itself, in both outputs, before anything touches it: composing
-    !! one (`lon + lat`) would reach `Inf - Inf` on a mixed infinite/NaN input and raise the flag the
-    !! screen exists to avoid.
-    pure subroutine skc_rotate(m, lon, lat, lon_out, lat_out)
-        real(real64), intent(in) :: m(3, 3) !! the rotation, one of the module's compile-time matrices.
-        real(real64), intent(in) :: lon !! longitude, degrees; any value.
-        real(real64), intent(in) :: lat !! latitude, degrees.
-        real(real64), intent(out) :: lon_out !! the rotated longitude, degrees, in `[0, 360)`.
-        real(real64), intent(out) :: lat_out !! the rotated latitude, degrees, in `[-90, 90]`.
+    module procedure skc_rotate
         real(real64) :: v(3), w(3)
 
+        ! A NaN coordinate is handed back itself, in both outputs: composing one (`lon + lat`) would
+        ! reach `Inf - Inf` on a mixed infinite/NaN input and raise the flag the screen exists to avoid.
         if (lon /= lon) then
             lon_out = lon
             lat_out = lon
@@ -131,16 +124,12 @@ contains
         w(2) = m(2, 1) * v(1) + m(2, 2) * v(2) + m(2, 3) * v(3)
         w(3) = m(3, 1) * v(1) + m(3, 2) * v(2) + m(3, 3) * v(3)
         call skc_unit_radec(w, lon_out, lat_out)
-    end subroutine skc_rotate
+    end procedure skc_rotate
 
-    !> Whether `system` is one of the four coordinate systems (`PF_COORD_UNKNOWN` is not).
-    pure function skc_is_system(system) result(ok)
-        integer, intent(in) :: system !! the caller's selector.
-        logical :: ok !! true for `PF_COORD_ICRS` through `PF_COORD_SUPERGALACTIC`.
-
+    module procedure skc_is_system
         ok = system == PF_COORD_ICRS .or. system == PF_COORD_GALACTIC .or. system == PF_COORD_ECLIPTIC .or. &
-            system == PF_COORD_SUPERGALACTIC
-    end function skc_is_system
+            system == PF_COORD_SUPERGALACTIC .or. system == PF_COORD_FK5
+    end procedure skc_is_system
 
     ! ---- The named rotations ----
 
@@ -176,6 +165,14 @@ contains
         call skc_rotate(skc_m_sgal2icrs, sgl, sgb, ra, dec)
     end procedure pf_sgal2icrs
 
+    module procedure pf_icrs2fk5
+        call skc_rotate(skc_m_icrs2fk5, ra, dec, ra_fk5, dec_fk5)
+    end procedure pf_icrs2fk5
+
+    module procedure pf_fk52icrs
+        call skc_rotate(skc_m_fk52icrs, ra_fk5, dec_fk5, ra, dec)
+    end procedure pf_fk52icrs
+
     ! ---- The data-driven form ----
 
     module procedure pf_sky_convert
@@ -185,7 +182,8 @@ contains
             call pf_to_str(from, tf)
             call pf_to_str(to, tt)
             error stop "pf_sky_convert: from and to must each be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
-                "PF_COORD_ECLIPTIC (3) or PF_COORD_SUPERGALACTIC (4) (got from = " // tf // ", to = " // tt // ")"
+                "PF_COORD_ECLIPTIC (3), PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got from = " // tf // &
+                ", to = " // tt // ")"
         end if
         if (from == to) then
             ! The identity is a copy, before any arithmetic: a longitude outside `[0, 360)` and a
@@ -195,7 +193,8 @@ contains
             return
         end if
         ! A pair with a named procedure CALLS it, so the two answer alike by construction rather than
-        ! by keeping two bodies in step; the four pairs without one take their own matrix.
+        ! by keeping two bodies in step; the ten pairs without one take their own matrix.
+        ! parquet_skycoord_object's `%init` chooses the same matrices: keep the two tables in step.
         select case (from)
         case (PF_COORD_ICRS)
             select case (to)
@@ -205,6 +204,8 @@ contains
                 call pf_icrs2ecl(lon_in, lat_in, lon_out, lat_out)
             case (PF_COORD_SUPERGALACTIC)
                 call pf_icrs2sgal(lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_FK5)
+                call pf_icrs2fk5(lon_in, lat_in, lon_out, lat_out)
             end select
         case (PF_COORD_GALACTIC)
             select case (to)
@@ -214,6 +215,8 @@ contains
                 call skc_rotate(skc_m_gal2ecl, lon_in, lat_in, lon_out, lat_out)
             case (PF_COORD_SUPERGALACTIC)
                 call pf_gal2sgal(lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_FK5)
+                call skc_rotate(skc_m_gal2fk5, lon_in, lat_in, lon_out, lat_out)
             end select
         case (PF_COORD_ECLIPTIC)
             select case (to)
@@ -223,6 +226,8 @@ contains
                 call skc_rotate(skc_m_ecl2gal, lon_in, lat_in, lon_out, lat_out)
             case (PF_COORD_SUPERGALACTIC)
                 call skc_rotate(skc_m_ecl2sgal, lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_FK5)
+                call skc_rotate(skc_m_ecl2fk5, lon_in, lat_in, lon_out, lat_out)
             end select
         case (PF_COORD_SUPERGALACTIC)
             select case (to)
@@ -232,6 +237,19 @@ contains
                 call pf_sgal2gal(lon_in, lat_in, lon_out, lat_out)
             case (PF_COORD_ECLIPTIC)
                 call skc_rotate(skc_m_sgal2ecl, lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_FK5)
+                call skc_rotate(skc_m_sgal2fk5, lon_in, lat_in, lon_out, lat_out)
+            end select
+        case (PF_COORD_FK5)
+            select case (to)
+            case (PF_COORD_ICRS)
+                call pf_fk52icrs(lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_GALACTIC)
+                call skc_rotate(skc_m_fk52gal, lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_ECLIPTIC)
+                call skc_rotate(skc_m_fk52ecl, lon_in, lat_in, lon_out, lat_out)
+            case (PF_COORD_SUPERGALACTIC)
+                call skc_rotate(skc_m_fk52sgal, lon_in, lat_in, lon_out, lat_out)
             end select
         end select
     end procedure pf_sky_convert
@@ -247,8 +265,8 @@ contains
         if (present(system)) sys = system
         if (.not. skc_is_system(sys)) then
             call pf_to_str(sys, t)
-            error stop "pf_zhel2zcmb: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), PF_COORD_ECLIPTIC (3) " // &
-                "or PF_COORD_SUPERGALACTIC (4) (got " // t // ")"
+            error stop "pf_zhel2zcmb: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), PF_COORD_ECLIPTIC (3), " // &
+                "PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got " // t // ")"
         end if
         alon = skc_cmb_apex_lon
         if (present(apex_lon)) alon = apex_lon
@@ -304,6 +322,8 @@ contains
             call skc_apply(skc_m_ecl2gal, v, w)
         case (PF_COORD_SUPERGALACTIC)
             call skc_apply(skc_m_sgal2gal, v, w)
+        case (PF_COORD_FK5)
+            call skc_apply(skc_m_fk52gal, v, w)
         case default
             w = v
         end select
@@ -348,6 +368,8 @@ contains
             name = "ecliptic"
         case (PF_COORD_SUPERGALACTIC)
             name = "supergalactic"
+        case (PF_COORD_FK5)
+            name = "fk5"
         case default
             call pf_to_str(system, t)
             error stop "pf_coord_system_name: system must be a PF_COORD_* selector (got " // t // ")"
@@ -367,6 +389,8 @@ contains
             system = PF_COORD_ECLIPTIC
         case ("supergalactic")
             system = PF_COORD_SUPERGALACTIC
+        case ("fk5")
+            system = PF_COORD_FK5
         case default
             system = PF_COORD_UNKNOWN
         end select

@@ -3465,6 +3465,12 @@ contains
                 test_skycoord_text_bad_separator_aborts), &
             new_unittest("pf_zhel2zcmb refuses the unknown system", &
                 test_skycoord_zcmb_unknown_system_aborts), &
+            new_unittest("pf_sky_rotation%apply refuses to run before %init", &
+                test_skycoord_rotation_apply_before_init_aborts), &
+            new_unittest("pf_sky_rotation%init refuses a selector that is not a system", &
+                test_skycoord_rotation_init_unknown_system_aborts), &
+            new_unittest("pf_apply_pm refuses a declination past a pole", &
+                test_skycoord_apply_pm_dec_out_of_range_aborts), &
             new_unittest("a Fibonacci grid refuses n below 1", &
                 test_sphere_fibonacci_n_not_positive_aborts), &
             new_unittest("a Fibonacci grid refuses an array not shaped (3, n)", &
@@ -21084,7 +21090,7 @@ contains
         call check_scenario_exit_status_and_stderr(error, "skycoord_convert_unknown_system", expect_abort=.true., &
             failure_message="a conversion out of PF_COORD_UNKNOWN was expected to abort", &
             required_stderr="pf_sky_convert: from and to must each be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
-            "PF_COORD_ECLIPTIC (3) or PF_COORD_SUPERGALACTIC (4) (got from = 0, to = 0)")
+            "PF_COORD_ECLIPTIC (3), PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got from = 0, to = 0)")
     end subroutine test_skycoord_convert_unknown_system_aborts
     !
     !> See scenario_skycoord_system_name_not_a_selector.
@@ -21117,8 +21123,33 @@ contains
         call check_scenario_exit_status_and_stderr(error, "skycoord_zcmb_unknown_system", expect_abort=.true., &
             failure_message="a redshift in PF_COORD_UNKNOWN was expected to abort", &
             required_stderr="pf_zhel2zcmb: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
-            "PF_COORD_ECLIPTIC (3) or PF_COORD_SUPERGALACTIC (4) (got 0)")
+            "PF_COORD_ECLIPTIC (3), PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got 0)")
     end subroutine test_skycoord_zcmb_unknown_system_aborts
+    !
+    !> See scenario_skycoord_rotation_apply_before_init.
+    subroutine test_skycoord_rotation_apply_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_rotation_apply_before_init", expect_abort=.true., &
+            failure_message="applying a rotation with no %init was expected to abort", &
+            required_stderr="pf_sky_rotation%apply: %init has not run")
+    end subroutine test_skycoord_rotation_apply_before_init_aborts
+    !
+    !> See scenario_skycoord_rotation_init_unknown_system.
+    subroutine test_skycoord_rotation_init_unknown_system_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_rotation_init_unknown_system", expect_abort=.true., &
+            failure_message="preparing a rotation into system 6 was expected to abort", &
+            required_stderr="pf_sky_rotation%init: from and to must each be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
+            "PF_COORD_ECLIPTIC (3), PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got from = 2, to = 6)")
+    end subroutine test_skycoord_rotation_init_unknown_system_aborts
+    !
+    !> See scenario_skycoord_apply_pm_dec_out_of_range.
+    subroutine test_skycoord_apply_pm_dec_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_apply_pm_dec_out_of_range", expect_abort=.true., &
+            failure_message="a proper motion from declination 90.5 was expected to abort", &
+            required_stderr="pf_apply_pm: dec must be in [-90, 90] (got 9.0500000E+01)")
+    end subroutine test_skycoord_apply_pm_dec_out_of_range_aborts
     !
     !> See scenario_sphere_fibonacci_n_not_positive.
     subroutine test_sphere_fibonacci_n_not_positive_aborts(error)

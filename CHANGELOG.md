@@ -164,27 +164,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   freezes the samplers' values. An Arrow-free entry module. See
   [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
 - **Celestial coordinate systems: `parquet_skycoord`.** `pf_icrs2gal`, `pf_gal2icrs`,
-  `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal` and `pf_sgal2icrs`
-  convert sky positions between the ICRS, Galactic, ecliptic and supergalactic systems as astropy
-  defines them, in degrees, `pure elemental` so a whole column converts in one call;
-  `pf_sky_convert` does the same with the systems named by `PF_COORD_*` selectors rather than by
-  the procedure, and `pf_coord_system_name` and `pf_coord_system_from_name` turn a selector into a
-  token and back for a system read out of a configuration file. Each rotation is built from the
-  three angles that define it — the target system's north pole and the target longitude of the
-  source's north pole — so it is orthonormal by construction, and the inverse is the transpose
-  rather than a second matrix. The module also holds the RA/Dec geometry that needs no coordinate
-  system: `pf_angdist_deg`, and `pf_offset_radec` and `pf_position_angle_deg`, which offset a
-  position by a separation at a position angle and recover the angle. `pf_ra2str`, `pf_dec2str` and
-  `pf_radec2str` write positions as sexagesimal text, `10:21:30.550 +41:16:09.00` or blank- or
-  letter-separated, and `pf_str2ra`, `pf_str2dec` and `pf_str2radec` read three-field text back
-  strictly, reporting what they cannot read through an `ok` flag; `pf_deg2hms`, `pf_deg2dms`,
-  `pf_hms2deg` and `pf_dms2deg` split an angle into its fields and join them, a declination's sign
-  apart from its degrees. `pf_zhel2zcmb` takes a heliocentric redshift into the rest frame of the
-  cosmic microwave background, with Planck 2018's dipole unless another is given. Total, like the
-  rest of the sky tier: a NaN argument comes back as a NaN, or as the text `nan`, raising no
-  floating-point flag, and a declination outside `[-90, 90]` is read as the direction it names,
-  except as `pf_offset_radec`'s centre, which stops the program. The declination frame of
-  `parquet_healpix` is a different thing and does not enter here. An Arrow-free entry module. See
+  `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal`, `pf_sgal2icrs`,
+  `pf_icrs2fk5` and `pf_fk52icrs` convert sky positions between the ICRS, Galactic, ecliptic,
+  supergalactic and FK5 J2000 systems as astropy defines them, in degrees, `pure elemental` so a
+  whole column converts in one call; `pf_sky_convert` does the same with the systems named by
+  `PF_COORD_*` selectors rather than by the procedure, `pf_sky_rotation` prepares such a conversion
+  once and applies it elementally (`%init`, `%apply`, `%is_init`), and `pf_coord_system_name` and
+  `pf_coord_system_from_name` turn a selector into a token and back for a system read out of a
+  configuration file. Each rotation is built from the three angles that define it — the target
+  system's north pole and the target longitude of the source's north pole — so it is orthonormal by
+  construction, and the inverse is the transpose rather than a second matrix. The module also holds
+  the RA/Dec geometry that needs no coordinate system: `pf_angdist_deg`, `pf_offset_radec` and
+  `pf_position_angle_deg`, which offset a position by a separation at a position angle and recover
+  the angle, and `pf_apply_pm`, which moves a position by its proper motion along a great circle,
+  `pm_ra` being Gaia's `pmra`, the rate in right ascension times `cos(dec)`. `pf_ra2str`,
+  `pf_dec2str` and `pf_radec2str` write positions as sexagesimal text, `10:21:30.550 +41:16:09.00`
+  or blank- or letter-separated, and `pf_str2ra`, `pf_str2dec` and `pf_str2radec` read three-field
+  text back strictly, reporting what they cannot read through an `ok` flag; `pf_deg2hms`,
+  `pf_deg2dms`, `pf_hms2deg` and `pf_dms2deg` split an angle into its fields and join them, a
+  declination's sign apart from its degrees. `pf_zhel2zcmb` takes a heliocentric redshift into the
+  rest frame of the cosmic microwave background, with Planck 2018's dipole unless another is given.
+  Total, like the rest of the sky tier: a NaN argument comes back as a NaN, or as the text `nan`,
+  raising no floating-point flag, and a declination outside `[-90, 90]` is read as the direction it
+  names, except as `pf_offset_radec`'s centre or `pf_apply_pm`'s starting position, where it stops
+  the program. The declination frame of `parquet_healpix` is a different thing and does not enter
+  here. An Arrow-free entry module. See
   [Celestial coordinate systems](doc/pages/utilities/skycoord.md).
 
 ### Changed

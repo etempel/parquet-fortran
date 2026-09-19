@@ -1,35 +1,38 @@
-!> Celestial coordinate systems -- ICRS, Galactic, ecliptic and supergalactic -- the library's
-!! frame-free RA/Dec geometry, sky angles as sexagesimal text, and the CMB rest frame of a redshift.
+!> Celestial coordinate systems -- ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 -- the
+!! library's frame-free RA/Dec geometry and proper motion, sky angles as sexagesimal text, and the
+!! CMB rest frame of a redshift.
 !!
 !! Four families, all on the sky, all in degrees and all over `real64`:
 !!
-!! * **Rotations between coordinate systems.** Eight named procedures -- `pf_icrs2gal`,
+!! * **Rotations between coordinate systems.** Ten named procedures -- `pf_icrs2gal`,
 !!   `pf_gal2icrs`, `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal`,
-!!   `pf_sgal2icrs` -- and `pf_sky_convert` for systems named at run time by `PF_COORD_*`
-!!   selectors, with `pf_coord_system_name` and `pf_coord_system_from_name` between a selector and
-!!   its token.
+!!   `pf_sgal2icrs`, `pf_icrs2fk5`, `pf_fk52icrs` -- and `pf_sky_convert` for systems named at run
+!!   time by `PF_COORD_*` selectors, with `pf_coord_system_name` and `pf_coord_system_from_name`
+!!   between a selector and its token, and `pf_sky_rotation`, a rotation between two such systems
+!!   prepared once and applied to any number of positions.
 !! * **Frame-free RA/Dec geometry**: `pf_angdist_deg`, the separation of two positions;
-!!   `pf_offset_radec`, the position a separation away at a position angle; and
-!!   `pf_position_angle_deg`, its inverse.
+!!   `pf_offset_radec`, the position a separation away at a position angle;
+!!   `pf_position_angle_deg`, its inverse; and `pf_apply_pm`, a position moved by its proper motion.
 !! * **Sexagesimal angles and text**: `pf_deg2hms`, `pf_deg2dms`, `pf_hms2deg` and `pf_dms2deg`
 !!   split an angle into its fields and join them; `pf_ra2str`, `pf_dec2str` and `pf_radec2str`
 !!   write positions as text, and `pf_str2ra`, `pf_str2dec` and `pf_str2radec` read it back.
 !! * **The CMB rest frame**: `pf_zhel2zcmb`, a heliocentric redshift boosted into the rest frame of
 !!   the cosmic microwave background, with Planck 2018's dipole by default.
 !!
-!! Every procedure is `pure`, and every one but the three text writers, whose text is an
-!! allocatable argument, is `elemental`, so one call converts whole columns.
+!! Every procedure is `pure`. Every conversion and every text reader is `elemental`, so one call
+!! converts whole columns; the three text writers are not, their text being an allocatable argument.
 !!
 !! **Every rotation is built from the three angles that define it**, `Rz(180 - lon0)
 !! Ry(90 - pole_lat) Rz(pole_lon)`: the target system's north pole in the system it is built from,
 !! and the target longitude of that system's north pole. So each matrix is orthonormal by
 !! construction and its inverse is its transpose, never a second matrix. Every matrix, every
 !! transpose and every product of two is a compile-time `parameter`; no procedure builds one per
-!! call. The Galactic and ecliptic rows are referred to ICRS and so carry the ICRS frame bias
-!! inside them, which is what makes the answers agree with astropy's `SkyCoord` rather than miss
-!! it by about 20 milliarcseconds; the supergalactic system is defined in Galactic coordinates and
-!! is built there. `tools/generate_skycoord_reference.py` derives the table at 60 digits, and its
-!! `--self-test` holds every literal below to the double nearest the derived value.
+!! call. The Galactic, ecliptic and FK5 rows are referred to ICRS and so carry the ICRS frame bias
+!! inside them -- FK5 J2000 is that bias and nothing else -- which is what makes the answers agree
+!! with astropy's `SkyCoord` rather than miss it by about 20 milliarcseconds; the supergalactic
+!! system is defined in Galactic coordinates and is built there. `tools/generate_skycoord_reference.py`
+!! derives the table at 60 digits, and its `--self-test` holds every literal below to the double
+!! nearest the derived value.
 !!
 !! **Total, not validating.** A NaN argument gives NaN results and raises no IEEE flag -- screened
 !! with `x /= x` before any comparison or transcendental, since these are per-element procedures,
@@ -37,9 +40,10 @@
 !! sine of an infinite angle must, and a latitude outside `[-90, 90]` is read as the direction it
 !! names. A latitude of exactly +/-90 is the pole whatever the longitude says, and a pole's
 !! longitude is reported as 0. What aborts is a caller mistake with no sensible reading: a
-!! selector that is not one, a text writer's `sep` or `precision` outside its set, and
-!! `pf_offset_radec`'s centre beyond a pole or negative separation. Text is user data, not a
-!! caller's mistake: a reader that cannot read it says so through its `ok` flag.
+!! selector that is not one, a `pf_sky_rotation` applied before `%init`, a text writer's `sep` or
+!! `precision` outside its set, and `pf_offset_radec`'s centre beyond a pole or negative
+!! separation, the centre `pf_apply_pm` refuses too. Text is user data, not a caller's mistake: a
+!! reader that cannot read it says so through its `ok` flag.
 !!
 !! **This is not the HEALPix declination frame.** `PF_HP_DEC_NORTH` and `PF_HP_DEC_SOUTH` in
 !! `parquet_healpix` name a sign convention for the third component of a unit vector; a coordinate
@@ -52,9 +56,10 @@
 !!
 !! **Arrow-free, settings-free and silent.** It reaches `parquet_utils` only
 !! (`check_parquet_skycoord_stays_arrow_free`), reads no knob and prints nothing, so it re-exports
-!! no setting. It has no module variable: every procedure is `pure`, and everything here may be
-!! called from any number of threads at once. The only physical constants -- the speed of light
-!! and the default dipole -- are private to `pf_zhel2zcmb`, in `src/parquet_skycoord_rotate.f90`.
+!! no setting. It has no module variable, and every procedure is `pure`: anything here may be
+!! called from any number of threads at once, and a `pf_sky_rotation`, read-only once `%init` has
+!! run, serves a whole team. The only physical constants -- the speed of light and the default
+!! dipole -- are private to `pf_zhel2zcmb`, in `src/parquet_skycoord_rotate.f90`.
 module parquet_skycoord
     use, intrinsic :: iso_fortran_env, only: real64
     implicit none
@@ -62,15 +67,19 @@ module parquet_skycoord
 
     ! ---- Coordinate systems ----
     public :: PF_COORD_UNKNOWN, PF_COORD_ICRS, PF_COORD_GALACTIC, PF_COORD_ECLIPTIC, PF_COORD_SUPERGALACTIC
+    public :: PF_COORD_FK5
     public :: pf_coord_system_name, pf_coord_system_from_name
     ! ---- Rotations ----
     public :: pf_icrs2gal, pf_gal2icrs
     public :: pf_icrs2ecl, pf_ecl2icrs
     public :: pf_gal2sgal, pf_sgal2gal
     public :: pf_icrs2sgal, pf_sgal2icrs
+    public :: pf_icrs2fk5, pf_fk52icrs
     public :: pf_sky_convert
+    public :: pf_sky_rotation
     ! ---- Frame-free RA/Dec geometry ----
     public :: pf_angdist_deg, pf_offset_radec, pf_position_angle_deg
+    public :: pf_apply_pm
     ! ---- Sexagesimal angles and text ----
     public :: pf_deg2hms, pf_deg2dms, pf_hms2deg, pf_dms2deg
     public :: pf_ra2str, pf_dec2str, pf_radec2str
@@ -96,6 +105,9 @@ module parquet_skycoord
     !> Supergalactic `(SGL, SGB)`, astropy's `Supergalactic`: de Vaucouleurs' pole at Galactic
     !! `(47.37, 6.32)`, with `SGL = 90` at the north Galactic pole.
     integer, parameter :: PF_COORD_SUPERGALACTIC = 4
+    !> FK5 J2000 `(ra, dec)`, astropy's `FK5` at its default equinox: ICRS rotated by the frame bias
+    !! of USNO Circular 179, 20 to 30 milliarcseconds. **FK5 J2000 only**: no other equinox is provided.
+    integer, parameter :: PF_COORD_FK5 = 5
 
     ! ---- Mathematical constants ----
 
@@ -138,6 +150,14 @@ module parquet_skycoord
     real(real64), parameter :: skc_sgal_pole_lat = 6.32_real64
     !> Supergalactic from Galactic: the supergalactic longitude of the north Galactic pole.
     real(real64), parameter :: skc_sgal_lon0 = 90.0_real64
+    !> FK5 J2000 from ICRS: the FK5 pole's right ascension. The row is USNO Circular 179's frame bias
+    !! and nothing else, derived at 60 digits from its three angles and never recovered from a
+    !! rounded matrix, which would leave it eight digits: the pole sits 21.88 mas from the ICRS pole.
+    real(real64), parameter :: skc_fk5_pole_lon = 294.573968875799802777_real64
+    !> FK5 J2000 from ICRS: the FK5 pole's declination, 21.88 mas short of 90 -- the bias, not rounding.
+    real(real64), parameter :: skc_fk5_pole_lat = 89.9999939216788786441_real64
+    !> FK5 J2000 from ICRS: the FK5 right ascension of the ICRS pole.
+    real(real64), parameter :: skc_fk5_lon0 = 114.573975236911035825_real64
 
     ! ---- The matrices, built at compile time ----
     !
@@ -168,6 +188,13 @@ module parquet_skycoord
                                sgal_sb = sin((90.0_real64 - skc_sgal_pole_lat) * skc_deg2rad), &
                                sgal_cc = cos(skc_sgal_pole_lon * skc_deg2rad), &
                                sgal_sc = sin(skc_sgal_pole_lon * skc_deg2rad)
+    !> The sines and cosines of the FK5 row's `a`, `b` and `c`.
+    real(real64), parameter :: fk5_ca = cos((180.0_real64 - skc_fk5_lon0) * skc_deg2rad), &
+                               fk5_sa = sin((180.0_real64 - skc_fk5_lon0) * skc_deg2rad), &
+                               fk5_cb = cos((90.0_real64 - skc_fk5_pole_lat) * skc_deg2rad), &
+                               fk5_sb = sin((90.0_real64 - skc_fk5_pole_lat) * skc_deg2rad), &
+                               fk5_cc = cos(skc_fk5_pole_lon * skc_deg2rad), &
+                               fk5_sc = sin(skc_fk5_pole_lon * skc_deg2rad)
 
     !> ICRS to Galactic.
     real(real64), parameter :: skc_m_icrs2gal(3, 3) = reshape([ &
@@ -184,6 +211,11 @@ module parquet_skycoord
         sgal_ca * sgal_cb * sgal_cc - sgal_sa * sgal_sc, -sgal_sa * sgal_cb * sgal_cc - sgal_ca * sgal_sc, sgal_sb * sgal_cc, &
         sgal_ca * sgal_cb * sgal_sc + sgal_sa * sgal_cc, -sgal_sa * sgal_cb * sgal_sc + sgal_ca * sgal_cc, sgal_sb * sgal_sc, &
         -sgal_ca * sgal_sb, sgal_sa * sgal_sb, sgal_cb], [3, 3])
+    !> ICRS to FK5 J2000.
+    real(real64), parameter :: skc_m_icrs2fk5(3, 3) = reshape([ &
+        fk5_ca * fk5_cb * fk5_cc - fk5_sa * fk5_sc, -fk5_sa * fk5_cb * fk5_cc - fk5_ca * fk5_sc, fk5_sb * fk5_cc, &
+        fk5_ca * fk5_cb * fk5_sc + fk5_sa * fk5_cc, -fk5_sa * fk5_cb * fk5_sc + fk5_ca * fk5_cc, fk5_sb * fk5_sc, &
+        -fk5_ca * fk5_sb, fk5_sa * fk5_sb, fk5_cb], [3, 3])
     !> Galactic to ICRS, the transpose.
     real(real64), parameter :: skc_m_gal2icrs(3, 3) = transpose(skc_m_icrs2gal)
     !> Ecliptic to ICRS, the transpose.
@@ -202,6 +234,56 @@ module parquet_skycoord
     real(real64), parameter :: skc_m_ecl2sgal(3, 3) = matmul(skc_m_icrs2sgal, skc_m_ecl2icrs)
     !> Supergalactic to ecliptic, the transpose.
     real(real64), parameter :: skc_m_sgal2ecl(3, 3) = transpose(skc_m_ecl2sgal)
+    !> FK5 J2000 to ICRS, the transpose.
+    real(real64), parameter :: skc_m_fk52icrs(3, 3) = transpose(skc_m_icrs2fk5)
+    !> FK5 J2000 to Galactic, for `pf_sky_convert`'s pair with no named procedure: astropy's own
+    !! FK5-referred Galactic rotation, reached through ICRS at compile time.
+    real(real64), parameter :: skc_m_fk52gal(3, 3) = matmul(skc_m_icrs2gal, skc_m_fk52icrs)
+    !> Galactic to FK5 J2000, the transpose.
+    real(real64), parameter :: skc_m_gal2fk5(3, 3) = transpose(skc_m_fk52gal)
+    !> FK5 J2000 to ecliptic, for `pf_sky_convert`'s pair with no named procedure.
+    real(real64), parameter :: skc_m_fk52ecl(3, 3) = matmul(skc_m_icrs2ecl, skc_m_fk52icrs)
+    !> Ecliptic to FK5 J2000, the transpose.
+    real(real64), parameter :: skc_m_ecl2fk5(3, 3) = transpose(skc_m_fk52ecl)
+    !> FK5 J2000 to supergalactic, for `pf_sky_convert`'s pair with no named procedure.
+    real(real64), parameter :: skc_m_fk52sgal(3, 3) = matmul(skc_m_icrs2sgal, skc_m_fk52icrs)
+    !> Supergalactic to FK5 J2000, the transpose.
+    real(real64), parameter :: skc_m_sgal2fk5(3, 3) = transpose(skc_m_fk52sgal)
+    !> The identity, which a `pf_sky_rotation` from a system to itself holds.
+    real(real64), parameter :: skc_m_identity(3, 3) = reshape([1.0_real64, 0.0_real64, 0.0_real64, &
+        0.0_real64, 1.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 1.0_real64], [3, 3])
+
+    ! ---- The rotation object ----
+
+    !> A rotation between two coordinate systems, prepared once and applied to any number of
+    !! positions: `pf_sky_convert` for a loop over a column, with the two selectors read once.
+    !!
+    !! ```fortran
+    !! type(pf_sky_rotation) :: rot
+    !! call rot%init(PF_COORD_ICRS, PF_COORD_GALACTIC)
+    !! call rot%apply(ra, dec, l, b)            ! elemental over whole columns
+    !! ```
+    !!
+    !! `%init(from, to)` resolves the selectors and takes the pair's compile-time matrix, the one
+    !! `pf_sky_convert` rotates by, so `%apply` answers what `pf_sky_convert(lon, lat, from, to, ...)`
+    !! answers, to within a few ulp: the two are separate call sites of one kernel. From a system to
+    !! itself `%apply` returns its input by copy, as `pf_sky_convert` does. `%init` may run again and
+    !! drops the rotation held; **`%apply` before any `%init` stops the program**, as does a selector
+    !! that is not one of the five systems. Every binding is `pure`, and the object is read-only once
+    !! prepared, so one rotation built before a parallel region serves the whole team.
+    type :: pf_sky_rotation
+        private
+        !> The rotation: component `j` of a unit vector in the system `from` to component `i` in `to`.
+        real(real64) :: m(3, 3) = 0.0_real64
+        !> Whether `from == to`, which `%apply` answers by copy.
+        logical :: identity = .false.
+        !> Whether `%init` has run.
+        logical :: set = .false.
+    contains
+        procedure, non_overridable :: init => skc_rotation_init        !! Prepares the rotation; may run again.
+        procedure, non_overridable :: apply => skc_rotation_apply      !! Rotates positions; `pure elemental`.
+        procedure, non_overridable :: is_init => skc_rotation_is_init  !! Whether `%init` has run.
+    end type pf_sky_rotation
 
     ! ---- Interfaces: rotations and the selector tokens ----
     !
@@ -314,29 +396,56 @@ module parquet_skycoord
             real(real64), intent(out) :: dec !! declination, ICRS, degrees, in `[-90, 90]`.
         end subroutine pf_sgal2icrs
 
+        !> ICRS `(ra, dec)` to FK5 J2000 `(ra_fk5, dec_fk5)`, in degrees, as astropy's `FK5` at its
+        !! default equinox: the frame bias of USNO Circular 179 and nothing else, 20 to 30
+        !! milliarcseconds on the sky. **FK5 here is FK5 J2000**: no other equinox is provided.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, a `dec` outside `[-90, 90]` names a direction, `dec = +/-90` is the pole whatever
+        !! `ra` says, and a result at a pole has `ra_fk5 = 0`.
+        pure elemental module subroutine pf_icrs2fk5(ra, dec, ra_fk5, dec_fk5)
+            real(real64), intent(in) :: ra !! right ascension, ICRS, degrees; any value.
+            real(real64), intent(in) :: dec !! declination, ICRS, degrees.
+            real(real64), intent(out) :: ra_fk5 !! right ascension, FK5 J2000, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec_fk5 !! declination, FK5 J2000, degrees, in `[-90, 90]`.
+        end subroutine pf_icrs2fk5
+
+        !> FK5 J2000 `(ra_fk5, dec_fk5)` to ICRS `(ra, dec)`, in degrees; the inverse of `pf_icrs2fk5`.
+        !!
+        !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a
+        !! flag, a `dec_fk5` outside `[-90, 90]` names a direction, `dec_fk5 = +/-90` is the pole
+        !! whatever `ra_fk5` says, and a result at a pole has `ra = 0`.
+        pure elemental module subroutine pf_fk52icrs(ra_fk5, dec_fk5, ra, dec)
+            real(real64), intent(in) :: ra_fk5 !! right ascension, FK5 J2000, degrees; any value.
+            real(real64), intent(in) :: dec_fk5 !! declination, FK5 J2000, degrees.
+            real(real64), intent(out) :: ra !! right ascension, ICRS, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec !! declination, ICRS, degrees, in `[-90, 90]`.
+        end subroutine pf_fk52icrs
+
         !> A position converted between two systems named at run time by `PF_COORD_*` selectors,
         !! in degrees.
         !!
         !! For a pair with a named procedure it calls that procedure, so it answers exactly what the
         !! procedure answers; for a pair without one -- Galactic and ecliptic, ecliptic and
-        !! supergalactic, either way round -- it applies that pair's own compile-time matrix, never
-        !! two rotations through angles. **`from == to` is the identity: the input comes back by
-        !! copy, before any arithmetic**, so a longitude of `-10` stays `-10` and a `-0.0` keeps its
-        !! sign; the `[0, 360)` promise on `lon_out` does not apply to it. Total in the coordinates,
-        !! with the named procedures' rules. **A selector that is not one of the four systems
-        !! aborts**, `PF_COORD_UNKNOWN` included and `from == to` included. `pure elemental`.
+        !! supergalactic, and FK5 and any system but ICRS, either way round -- it applies that pair's
+        !! own compile-time matrix, never two rotations through angles. **`from == to` is the
+        !! identity: the input comes back by copy, before any arithmetic**, so a longitude of `-10`
+        !! stays `-10` and a `-0.0` keeps its sign; the `[0, 360)` promise on `lon_out` does not apply
+        !! to it. Total in the coordinates, with the named procedures' rules. **A selector that is not
+        !! one of the five systems aborts**, `PF_COORD_UNKNOWN` included and `from == to` included.
+        !! `pure elemental`; `pf_sky_rotation` is the same conversion with the selectors read once.
         pure elemental module subroutine pf_sky_convert(lon_in, lat_in, from, to, lon_out, lat_out)
             real(real64), intent(in) :: lon_in !! longitude in the system `from`, degrees; any value.
             real(real64), intent(in) :: lat_in !! latitude in the system `from`, degrees.
-            integer, intent(in) :: from !! the input's system: `PF_COORD_ICRS`, `_GALACTIC`, `_ECLIPTIC` or `_SUPERGALACTIC`.
-            integer, intent(in) :: to !! the output's system, from the same four.
+            integer, intent(in) :: from !! the input's system: `PF_COORD_ICRS`, `_GALACTIC`, `_ECLIPTIC`, `_SUPERGALACTIC`, `_FK5`.
+            integer, intent(in) :: to !! the output's system, from the same five.
             real(real64), intent(out) :: lon_out !! longitude in the system `to`, degrees, in `[0, 360)` unless `from == to`.
             real(real64), intent(out) :: lat_out !! latitude in the system `to`, degrees.
         end subroutine pf_sky_convert
 
-        !> The token naming a coordinate system, lowercase: `"icrs"`, `"galactic"`, `"ecliptic"` or
-        !! `"supergalactic"`, and `"unknown"` for `PF_COORD_UNKNOWN`, so the sentinel round-trips
-        !! through text.
+        !> The token naming a coordinate system, lowercase: `"icrs"`, `"galactic"`, `"ecliptic"`,
+        !! `"supergalactic"` or `"fk5"`, and `"unknown"` for `PF_COORD_UNKNOWN`, so the sentinel
+        !! round-trips through text.
         !!
         !! The inverse of `pf_coord_system_from_name`. Any integer that is neither a system nor the
         !! sentinel aborts, as `pf_sky_convert` does: it is a caller mistake with no reading.
@@ -351,7 +460,7 @@ module parquet_skycoord
         !! **A token it does not know answers `PF_COORD_UNKNOWN` rather than aborting**: the text is
         !! user data, read out of a configuration file or a column's metadata, and a caller
         !! validating it reports the bad token in its own words. astropy's frame names are
-        !! understood too -- `icrs`, `galactic` and `supergalactic` are the same words, and
+        !! understood too -- `icrs`, `galactic`, `supergalactic` and `fk5` are the same words, and
         !! `barycentricmeanecliptic` names the ecliptic.
         pure module function pf_coord_system_from_name(name) result(system)
             character(len=*), intent(in) :: name !! the token.
@@ -439,6 +548,75 @@ module parquet_skycoord
             real(real64), intent(in) :: dec2 !! declination of the other position, degrees.
             real(real64) :: pa !! the position angle, degrees, in `[0, 360)`.
         end function pf_position_angle_deg
+
+        !> A position moved by its proper motion over `dt_years`, in degrees; `pm_ra` is the rate in
+        !! right ascension times `cos(dec)` -- Gaia's `pmra`, astropy's `pm_ra_cosdec` -- in mas/yr.
+        !!
+        !! The motion is resolved into a position angle, east through `pm_ra` and north through
+        !! `pm_dec`, and a separation of `hypot(pm_ra, pm_dec) * |dt_years|` milliarcseconds, and the
+        !! position moves that far along the great circle leaving it at that angle, as
+        !! `pf_offset_radec` moves it; a negative `dt_years` moves it back the other way. **A step
+        !! along a great circle, not rigorous space motion**: no parallax, radial velocity or light
+        !! time enters it, and the motion is the one at the starting position. At a pole it is read in
+        !! the local frame of the `ra` given, as `pf_offset_radec` reads a position angle. No motion
+        !! or no time gives the position back to rounding, its right ascension wrapped into
+        !! `[0, 360)`. **A NaN argument gives NaN results** without raising a flag -- the state of a
+        !! source with no proper motion in a catalogue column -- and an infinite `ra`, `pm_ra`,
+        !! `pm_dec` or `dt_years` gives NaN results and raises `IEEE_INVALID`; **a `dec` outside
+        !! `[-90, 90]` stops the program**, as `pf_offset_radec`'s centre does. `pure elemental`.
+        pure elemental module subroutine pf_apply_pm(ra, dec, pm_ra, pm_dec, dt_years, ra_out, dec_out)
+            real(real64), intent(in) :: ra !! right ascension, degrees; any value.
+            real(real64), intent(in) :: dec !! declination, degrees, in `[-90, 90]`.
+            real(real64), intent(in) :: pm_ra !! proper motion in right ascension TIMES `cos(dec)`, mas/yr: Gaia's `pmra`.
+            real(real64), intent(in) :: pm_dec !! proper motion in declination, mas/yr: Gaia's `pmdec`.
+            real(real64), intent(in) :: dt_years !! the interval, in the years of the proper motion; negative moves back.
+            real(real64), intent(out) :: ra_out !! right ascension after the motion, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: dec_out !! declination after the motion, degrees, in `[-90, 90]`.
+        end subroutine pf_apply_pm
+    end interface
+
+    ! ---- Interfaces: the rotation object ----
+    !
+    ! Implemented in submodule parquet_skycoord_object, on the rotation kernel of
+    ! parquet_skycoord_rotate.
+
+    interface
+        !> `pf_sky_rotation%init`: prepares the rotation from the system `from` to the system `to`,
+        !! both `PF_COORD_*` selectors.
+        !!
+        !! It takes the pair's compile-time matrix, the one `pf_sky_convert` rotates by -- the named
+        !! procedure's where the pair has one -- or, from a system to itself, the identity, which
+        !! `%apply` answers by copy. It may run again on the same object, and drops the rotation held.
+        !! **A selector that is not one of the five systems stops the program**, `PF_COORD_UNKNOWN`
+        !! included. `pure`; `intent(inout)` because a `pure` procedure may not take a polymorphic
+        !! `intent(out)` dummy, and every component is assigned on every path.
+        pure module subroutine skc_rotation_init(this, from, to)
+            class(pf_sky_rotation), intent(inout) :: this !! the rotation; any previous one is dropped.
+            integer, intent(in) :: from !! the input's system: `PF_COORD_ICRS`, `_GALACTIC`, `_ECLIPTIC`, `_SUPERGALACTIC`, `_FK5`.
+            integer, intent(in) :: to !! the output's system, from the same five.
+        end subroutine skc_rotation_init
+
+        !> `pf_sky_rotation%apply`: a position rotated from the system `%init` named first into the
+        !! one it named second, in degrees -- `pf_sky_convert`'s answer to within a few ulp.
+        !!
+        !! `pure elemental`, so one call rotates whole columns, with the named procedures' rules:
+        !! total in the coordinates -- NaN in gives NaN out without a flag, a latitude outside
+        !! `[-90, 90]` names a direction, a latitude of exactly +/-90 is the pole whatever the
+        !! longitude says -- `lon_out` in `[0, 360)` and a pole's longitude 0; from a system to
+        !! itself, the input back by copy. **Before any `%init` it stops the program.**
+        pure elemental module subroutine skc_rotation_apply(this, lon_in, lat_in, lon_out, lat_out)
+            class(pf_sky_rotation), intent(in) :: this !! a prepared rotation.
+            real(real64), intent(in) :: lon_in !! longitude in the system `from`, degrees; any value.
+            real(real64), intent(in) :: lat_in !! latitude in the system `from`, degrees.
+            real(real64), intent(out) :: lon_out !! longitude in the system `to`, degrees, in `[0, 360)` unless `from == to`.
+            real(real64), intent(out) :: lat_out !! latitude in the system `to`, degrees.
+        end subroutine skc_rotation_apply
+
+        !> `pf_sky_rotation%is_init`: whether `%init` has run on this rotation.
+        pure elemental module function skc_rotation_is_init(this) result(yes)
+            class(pf_sky_rotation), intent(in) :: this !! the rotation.
+            logical :: yes !! `.true.` once `%init` has run.
+        end function skc_rotation_is_init
     end interface
 
     ! ---- Interfaces: the CMB rest frame ----
@@ -461,7 +639,7 @@ module parquet_skycoord
         !! `pure elemental` and total: a NaN argument gives a NaN without raising a flag, a `z_hel` at
         !! or below -1 is computed as the formula says, an infinite `z_hel` comes back itself, and an
         !! `apex_v` of the speed of light or more, which has no reading, gives a NaN without raising
-        !! a flag. **A `system` that is not one of the four stops the program**, as in
+        !! a flag. **A `system` that is not one of the five stops the program**, as in
         !! `pf_sky_convert`.
         pure elemental module function pf_zhel2zcmb(lon, lat, z_hel, system, apex_lon, apex_lat, apex_v) &
                 result(z_cmb)
@@ -629,13 +807,29 @@ module parquet_skycoord
         end subroutine pf_str2radec
     end interface
 
-    ! ---- Interfaces: helpers shared by the two submodules ----
+    ! ---- Interfaces: helpers shared by the submodules ----
     !
-    ! Implemented in submodule parquet_skycoord_rotate, beside the rotation kernel that is their hot
-    ! caller; private. They carry the same two rules as `parquet_sphere`'s own RA/Dec helpers, which
-    ! that module keeps for its samplers: keep the two in step.
+    ! Implemented in submodule parquet_skycoord_rotate; private. The RA/Dec helpers carry the same
+    ! two rules as `parquet_sphere`'s own, which that module keeps for its samplers: keep the two in
+    ! step. The kernel and the selector test are here for the rotation object's submodule.
 
     interface
+        !> Rotates one position by `m`: its unit vector, one matrix product, and back. A NaN
+        !! coordinate is handed back itself, in both outputs, before anything touches it.
+        pure module subroutine skc_rotate(m, lon, lat, lon_out, lat_out)
+            real(real64), intent(in) :: m(3, 3) !! the rotation: a compile-time matrix, or a prepared object's.
+            real(real64), intent(in) :: lon !! longitude, degrees; any value.
+            real(real64), intent(in) :: lat !! latitude, degrees.
+            real(real64), intent(out) :: lon_out !! the rotated longitude, degrees, in `[0, 360)`.
+            real(real64), intent(out) :: lat_out !! the rotated latitude, degrees, in `[-90, 90]`.
+        end subroutine skc_rotate
+
+        !> Whether `system` is one of the five coordinate systems (`PF_COORD_UNKNOWN` is not).
+        pure module function skc_is_system(system) result(ok)
+            integer, intent(in) :: system !! the caller's selector.
+            logical :: ok !! true for `PF_COORD_ICRS` through `PF_COORD_FK5`.
+        end function skc_is_system
+
         !> The sine and cosine of a latitude in degrees, exactly `(+/-1, 0)` at `+/-90`.
         pure module subroutine skc_dec_sin_cos(lat, sl, cl)
             real(real64), intent(in) :: lat !! a latitude, degrees; not NaN.

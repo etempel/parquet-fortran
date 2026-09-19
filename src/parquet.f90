@@ -36,10 +36,14 @@
 !>                          HEALPix pixels and masks, the RA/Dec <-> vector
 !>                          conversions in a named declination frame, and the
 !>                          Fibonacci grid.
-!>   * `parquet_skycoord` -- celestial coordinate systems: ICRS, Galactic,
-!>                          ecliptic and supergalactic rotations, and the
-!>                          frame-free RA/Dec geometry (`pf_angdist_deg`,
-!>                          `pf_offset_radec`, `pf_position_angle_deg`).
+!>   * `parquet_skycoord` -- celestial coordinate systems: rotations between
+!>                          ICRS, Galactic, ecliptic, supergalactic and FK5
+!>                          J2000, named, data-driven or prepared once
+!>                          (`pf_sky_rotation`); the frame-free RA/Dec geometry
+!>                          (`pf_angdist_deg`, `pf_offset_radec`,
+!>                          `pf_position_angle_deg`) and proper motion
+!>                          (`pf_apply_pm`); sexagesimal text; and a redshift
+!>                          in the CMB rest frame (`pf_zhel2zcmb`).
 !>   * `parquet_toml`   -- `pf_toml`: reading and writing TOML configuration
 !>                          files on top of `toml-f`, with checked types, a
 !>                          report for every key nobody read, and diagnostics

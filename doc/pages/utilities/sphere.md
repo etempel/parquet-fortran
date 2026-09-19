@@ -289,7 +289,8 @@ prints, and nothing reads a setting.
   addressing every draw here follows.
 - [Sphere pixelisation with `parquet_healpix`](healpix.html) — the grid these samplers take, and the
   two declination conventions.
-- [Celestial coordinate systems with `parquet_skycoord`](skycoord.html) — separations, offsets and
-  position angles, and conversions between ICRS, Galactic, ecliptic and supergalactic coordinates.
+- [Celestial coordinate systems with `parquet_skycoord`](skycoord.html) — separations, offsets,
+  position angles and proper motion, and conversions between ICRS, Galactic, ecliptic, supergalactic
+  and FK5 J2000 coordinates.
 - [Spatial neighbour search](spatial.html#search-on-the-sky) — finding the points near a position once
   you have drawn them.

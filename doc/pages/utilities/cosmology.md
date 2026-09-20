@@ -97,13 +97,40 @@ across finds the same words; the two exceptions are forced by Fortran, which can
 | `%differential_comoving_volume(z)` | `dV_C/dz/dOmega` |
 | `%kpc_proper_per_arcmin(z)`, `%kpc_comoving_per_arcmin(z)` | transverse scale |
 | `%arcsec_per_kpc_proper(z)`, `%arcsec_per_kpc_comoving(z)` | its inverse |
+| `%lookback_distance(z)` | the lookback time as a distance, `c t_L` |
+| `%om(z)`, `%ode(z)`, `%ok(z)`, `%ogamma(z)`, `%onu(z)` | what the universe is made of at `z`; the five sum to one |
+| `%tcmb(z)` | the CMB temperature at `z`, in K |
+| `%w(z)`, `%de_density_scale(z)` | the dark-energy equation of state, and its density in units of today's |
+| `%critical_density(z)` | `rho_crit(z)` in **M_sun/Mpc³** |
 | `%z_at_comoving_distance(d)` | the redshift at which `D_C` is `d` |
 | `%z_at_lookback_time(t)` | the redshift `t` Gyr ago |
+| `%z_at_age(t)` | the redshift at which the universe was `t` Gyr old |
+| `%z_at_luminosity_distance(d)`, `%z_at_distmod(mu)` | the redshift at a `D_L` or a distance modulus |
 
 and the model itself: `%h0()`, `%little_h()`, `%om0()`, `%ode0()`, `%ok0()`, `%ogamma0()`,
-`%onu0()`, `%ob0()`, `%tcmb0()`, `%tnu0()`, `%neff()`, `%w0()`, `%wa()`, `%hubble_distance()`,
-`%hubble_time()`, `%zmax()`, `%is_flat()`, `%has_massive_nu()`, `%is_initialised()`, and the three
-subroutines `%get_name`, `%describe` and `%m_nu`, each handing back an allocatable result.
+`%onu0()`, `%ob0()`, `%odm0()`, `%tcmb0()`, `%tnu0()`, `%neff()`, `%w0()`, `%wa()`,
+`%hubble_distance()`, `%hubble_time()`, `%zmax()`, `%is_flat()`, `%has_massive_nu()`,
+`%is_initialised()`, and the three subroutines `%get_name`, `%describe` and `%m_nu`, each handing
+back an allocatable result.
+
+Three of these repay a closer look:
+
+- **The five density parameters sum to one**, because each is a term of `E(z)²` over `E(z)²`
+  formed at the same `1 + z`. `%om` excludes massive neutrinos, which are counted in `%onu`, as
+  astropy counts them; `%ogamma` is the photons alone. Setting `tcmb0` to zero — the default —
+  switches radiation and neutrinos off entirely, so `%ogamma`, `%onu` and `%tcmb` are then exactly
+  zero at every redshift whatever `m_nu` says.
+- **`%critical_density` answers in solar masses per cubic megaparsec**, not astropy's g/cm³,
+  because that is the unit a halo-mass calculation wants. The solar mass is the IAU 2015 nominal
+  `GM_sun` divided by the same `G`, which is how astropy derives its own, so the two agree once
+  the conversion is asked for.
+- **`%z_at_luminosity_distance` and `%z_at_distmod` answer a redshift at or above zero**, and the
+  smallest one at which the distance is reached. `D_L` is not one-to-one over the whole domain: a
+  blueshift carries it back towards zero as `z` approaches `-1`, and in a closed model `D_M` turns
+  over at the antipode. A negative distance therefore answers NaN rather than the blueshift that
+  shares it. `%z_at_age` has no such trouble — the age falls monotonically with redshift — and it
+  is solved on `ln(age)`, which is what lets it work at the top of the domain, where the age is
+  a fifth of an attosecond and `%age(0)` minus a lookback time would keep no digit of it.
 
 `%clear` releases the tables and returns the object to unbuilt; it is harmless on a fresh one. A
 second `%init` simply replaces the object, which is how a program switches cosmology. Intrinsic
@@ -163,10 +190,13 @@ Three admitted inputs answer a signed infinity rather than a number:
   `+Infinity`. Zero distance has no modulus and subtends no angle.
 - `%age(z)` is `+Infinity` at every redshift for a model whose age integral diverges — de Sitter
   (`om0 = 0`, `ode0 = 1`) is one. Such a universe really is infinitely old throughout, so this is
-  an answer rather than an error.
+  an answer rather than an error, and `%z_at_age` then answers NaN for every age, because none of
+  them names a redshift.
 - A "big rip" model (`wa > 0`) has a dark-energy density that diverges as `z` approaches `-1`, and
   a model with a large negative `ode0` can overflow the transverse distance. Both answer
-  `+Infinity` there, and the distances built on them stop growing.
+  `+Infinity` there, and the distances built on them stop growing. `%de_density_scale(z)` is the
+  diverging density itself, and where it has, `%ode(z)` is exactly one while the other four
+  density parameters are zero — the limit, rather than one infinity divided by another.
 
 What aborts is a mistake with no sensible reading: evaluating a cosmology that was never built or
 has been cleared, a name that is not one of the eight, a parameter outside its admitted range

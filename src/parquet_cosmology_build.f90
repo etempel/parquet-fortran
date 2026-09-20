@@ -226,13 +226,16 @@ contains
         this%d%n_massless = count(this%p%m_nu == 0.0_real64)
         this%massive_nu = this%d%n_massless /= this%d%n_nu
         this%d%tnu0 = pfc_nu_temp_ratio * this%p%tcmb0
+        h0_si = this%p%h0 * 1000.0_real64 / pfc_mpc_m
+        rho_crit0 = 3.0_real64 * h0_si ** 2 / (8.0_real64 * acos(-1.0_real64) * pfc_g_si)
+        ! Kept in M_sun/Mpc^3, which is `%critical_density`'s unit: the solar mass is the IAU 2015
+        ! nominal `GM_sun` over this module's own `G`, which is how astropy derives `M_sun` too.
+        this%d%rho_crit0 = rho_crit0 * pfc_mpc_m ** 3 / (pfc_gm_sun / pfc_g_si)
         if (this%p%tcmb0 == 0.0_real64) then
             ! `Tcmb0 = 0` switches radiation AND neutrinos off entirely, as astropy does, so the
             ! radiation term is never formed and no `0 * Infinity` arises from an undefined T_nu0.
             this%d%ogamma0 = 0.0_real64
         else
-            h0_si = this%p%h0 * 1000.0_real64 / pfc_mpc_m
-            rho_crit0 = 3.0_real64 * h0_si ** 2 / (8.0_real64 * acos(-1.0_real64) * pfc_g_si)
             rho_gamma0 = 4.0_real64 * pfc_sigma_sb * this%p%tcmb0 ** 4 / pfc_c_ms ** 3
             this%d%ogamma0 = rho_gamma0 / rho_crit0
         end if
@@ -409,6 +412,20 @@ contains
                          * cosmology_walk(this%p, this%d, PFC_INT_DISTANCE, 0.0_real64, -PFC_ZETA_CEILING)
         this%d%t_floor = this%d%th &
                          * cosmology_walk(this%p, this%d, PFC_INT_TIME, 0.0_real64, -PFC_ZETA_CEILING)
+
+        ! The age's own three bounds, which `%z_at_age` screens and brackets against. The age
+        ! DECREASES with `zeta`, so `a_ceiling` -- the age AT the ceiling, as `d_ceiling` is the
+        ! distance there -- is the SMALLEST age the domain attains and `a_floor` the largest.
+        ! Below zero the age is `age(0) - t_L` with `t_L` negative, so those two terms ADD.
+        if (this%age_diverges) then
+            this%d%a_n = ieee_value(this%d%a_n, ieee_positive_inf)
+            this%d%a_ceiling = this%d%a_n
+            this%d%a_floor = this%d%a_n
+        else
+            this%d%a_n = age(n + 1)
+            this%d%a_ceiling = this%d%th * cosmology_age_tail(this%p, this%d, PFC_ZETA_CEILING)
+            this%d%a_floor = this%d%age0 - this%d%t_floor
+        end if
 
     end subroutine cosmology_tabulate
 

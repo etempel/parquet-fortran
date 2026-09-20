@@ -77,8 +77,10 @@ helpers, and the two generators meant to be copied into your own project.
 - [Distances and times in an expanding universe with parquet_cosmology](cosmology.html) — a
   cosmology built once and evaluated over whole columns: the comoving, transverse, luminosity and
   angular diameter distances, the lookback time and the age, the comoving volume and its element,
-  the distance modulus and the transverse angular scales, with the redshift at a given distance or
-  lookback time. Eight named cosmologies, or any flat, open, closed, `wCDM` or `w0waCDM` model of
+  the distance modulus and the transverse angular scales, what the universe is made of at a
+  redshift and its critical density, with the redshift at a given distance, lookback time, age,
+  luminosity distance or distance modulus. Eight named cosmologies, or any flat, open, closed,
+  `wCDM` or `w0waCDM` model of
   your own, on astropy's `w0waCDM` definition with its literals. No redshift is ever refused: a
   query beyond the table is answered by quadrature instead, so `zmax` decides only how fast. Every
   binding that reads an object is `pure`, so one object serves a whole team of threads. Nothing is

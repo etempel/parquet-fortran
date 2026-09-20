@@ -144,9 +144,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`, `%lookback_time`, `%age`,
   `%efunc`, `%inv_efunc`, `%hubble`, `%distmod`, `%comoving_volume`,
   `%differential_comoving_volume`, `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`,
-  `%arcsec_per_kpc_proper`, `%arcsec_per_kpc_comoving`, and the inverses
-  `%z_at_comoving_distance` and `%z_at_lookback_time`; plus the model's own parameters and derived
-  values, `%is_flat`, `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu` and `%clear`.
+  `%arcsec_per_kpc_proper`, `%arcsec_per_kpc_comoving`, `%lookback_distance`, the contents of the
+  universe at a redshift — `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum to one, with
+  `%tcmb`, `%w`, `%de_density_scale` and `%critical_density` in M_sun/Mpc^3 — and the inverses
+  `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`, `%z_at_luminosity_distance` and
+  `%z_at_distmod`; plus the model's own parameters and derived values, `%is_flat`,
+  `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu` and `%clear`.
   `%init` tabulates three integrals over a grid in `zeta = ln(1+z)`; a query beyond the table is
   answered by a fixed 20-point Gauss-Legendre rule from its edge, so **no redshift is refused and
   `zmax=` decides only how fast**. The age has its own table rather than being `age(0)` minus the
@@ -154,7 +157,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   above `z = -1` to `z = 1e10`; outside it, and for a NaN, every binding answers NaN quietly
   without raising an IEEE flag, so a catalogue's `-99` sentinels pass through an elemental call.
   `%distmod(0)` is `-Infinity`, `%arcsec_per_kpc_*(0)` is `+Infinity`, and a model whose age
-  integral diverges answers `+Infinity` at every redshift. `%init` and `%clear` are the only
+  integral diverges answers `+Infinity` at every redshift. `%z_at_age` solves on `ln(age)` rather
+  than on `age(0)` minus a lookback time, and `%z_at_luminosity_distance` and `%z_at_distmod`
+  answer a redshift at or above zero, the smallest one where `D_L` takes the value given. `%init` and `%clear` are the only
   bindings that write an object, so one built cosmology may be evaluated from any number of
   threads at once. The free functions `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` need no
   cosmology and keep their digits where the obvious forms lose them. Arrow-free, settings-free and

@@ -1,5 +1,5 @@
 !> Every `pure` binding of `pf_cosmology`: the kernel, the table readers, the fallback rule, the
-!! closed forms over them, the two inverses and the three free redshift conversions.
+!! closed forms over them, the five inverses and the three free redshift conversions.
 !!
 !! Nothing here writes an object, so every procedure may be called from any number of threads at
 !! once. The screens of `feature_cosmology.md` section 4.8 live here: a NaN is tested with
@@ -50,6 +50,27 @@ submodule (parquet_cosmology) parquet_cosmology_eval
         !! The bracketed Newton's iteration cap. It converges in a handful; the cap only bounds a
         !! `pure` loop, and bisection alone would reach one ulp of a unit bracket in about 52.
 
+    ! ---- Which QUANTITY an inverse is solving for ----------------------------------------------
+    !
+    ! Deliberately NOT the `PFC_INT_*` integrand codes, which say which integrand a panel is taken
+    ! over. The two vocabularies overlap by two entries and differ by three, and one number meaning
+    ! both would be a trap: `bracket_outside` lays panels, so it maps a quantity to its integrand
+    ! itself rather than passing the caller's code through.
+
+    integer, parameter :: PFC_Q_DC = 11
+        !! Invert `D_C(zeta)`.
+    integer, parameter :: PFC_Q_TL = 12
+        !! Invert `t_L(zeta)`.
+    integer, parameter :: PFC_Q_LOG_AGE = 13
+        !! Invert `-ln(age(zeta))`, which INCREASES with `zeta` as the age falls.
+    integer, parameter :: PFC_Q_DL = 14
+        !! Invert `D_L(zeta)`.
+
+    real(real64), parameter :: PFC_LOG10_LIMIT = 300.0_real64
+        !! `10^p` is formed only for `|p|` below this: `10^309` overflows and `10^-324` is zero,
+        !! and both would raise a flag on the way. Neither end is reachable by a distance modulus
+        !! anyone means -- `mu = 1525` is `10^300 Mpc`, and `mu = -1475` is `10^-300 Mpc`.
+
     !> The series for a curved comoving volume, `V_C = (4 pi/3) D_M^3 [1 - 3u/10 + 9u^2/56 - 5u^3/48]`.
     real(real64), parameter :: PFC_VOL_C1 = -0.3_real64                 !! the `u` coefficient
     real(real64), parameter :: PFC_VOL_C2 = 9.0_real64 / 56.0_real64    !! the `u^2` coefficient
@@ -66,6 +87,16 @@ contains
         real(real64) :: total, y
         integer      :: i
 
+        ! `Tcmb0 = 0` switches radiation AND NEUTRINOS off entirely, as astropy does, and this arm
+        ! is what makes that true for a MASSIVE species as well: `y = m/(k_B T_nu0)` divides by a
+        ! zero neutrino temperature, which raises `IEEE_DIVIDE_BY_ZERO` -- fatal under nagfor's
+        ! default `-ieee=stop` -- and then `Onu0 = Ogamma0 * Infinity` is `0 * Infinity`, a NaN
+        ! that `%init` reports as an out-of-range density. `init(h0, om0, m_nu=[0, 0, 0.06])` with
+        ! `tcmb0` left at its default is the reachable call, and astropy accepts it.
+        if (d%tnu0 == 0.0_real64) then
+            v = 0.0_real64
+            return
+        end if
         ! The massless branch, which `N_nu = 0` also takes, so `neff / n_nu` is never formed.
         if (d%n_nu == 0 .or. d%n_massless == d%n_nu) then
             v = pfc_komatsu_a * p%neff
@@ -82,9 +113,69 @@ contains
 
     end procedure cosmology_nu_rel
 
+    !> The CPL dark-energy factor `f_DE = x^(3(1 + w0 + wa)) exp(-3 wa z/x)` at `x = e^zeta`.
+    !!
+    !! Formed through its LOGARITHM and screened, because it is the one term whose exponent the
+    !! caller sets and the one that blows up towards `z = -1`: `wa = 3` at `z = -0.99` already asks
+    !! for `exp(891)`. An infinite dark-energy density is the right answer there -- it does
+    !! diverge -- and it carries through as `E = +Infinity` and `1/E = 0`. Exactly 1 for a
+    !! cosmological constant, by assignment rather than by `exp(0)`.
+    !!
+    !! `zeta` IS `ln x`, so no second logarithm is taken.
+    pure function f_de_at(p, zeta, x) result(f)
+        type(cosmology_params), intent(in) :: p    !! the parameters
+        real(real64), intent(in)           :: zeta !! `ln(1 + z)`, known not to be a NaN
+        real(real64), intent(in)           :: x    !! `e^zeta`, which the caller already has
+        real(real64)                       :: f    !! `f_DE`, or `+Infinity` past the screen
+
+        real(real64) :: ell
+
+        if (p%w0 == -1.0_real64 .and. p%wa == 0.0_real64) then
+            f = 1.0_real64
+            return
+        end if
+        ell = 3.0_real64 * (1.0_real64 + p%w0 + p%wa) * zeta - 3.0_real64 * p%wa * (x - 1.0_real64) / x
+        if (ell > PFC_DE_EXP_CEILING) then
+            f = ieee_value(f, ieee_positive_inf)
+        else if (ell < -PFC_DE_EXP_CEILING) then
+            ! The screen is SYMMETRIC, and the floor is not cosmetic: `exp` of a large negative
+            ! argument underflows through the subnormals to zero, raising `IEEE_UNDERFLOW`, which
+            ! nagfor reports as one line at program exit attached to nothing and which would then
+            ! hide a later finding. `w0 = 3, wa = -3` -- both inside the admitted range -- reaches
+            ! `ell = -9e10` at the bottom of the domain, where `%init` walks to compute the stored
+            ! `d_floor` and `t_floor`. Zero is the value the dark-energy density really has there,
+            ! and it is `2.6e-302` at the floor itself, far below every other term of `E^2`.
+            f = 0.0_real64
+        else
+            f = exp(ell)
+        end if
+
+    end function f_de_at
+
+    !> `Ode0 f_DE(z)`, the dark-energy TERM of `E^2`.
+    !!
+    !! The product, never the two factors handed out separately: past the CPL screen `f_DE` is
+    !! `+Infinity`, and a model with no dark energy at all would then form `0 * Infinity` -- a NaN
+    !! and an `IEEE_INVALID` -- for a term that is simply zero. A NEGATIVE `ode0` gives
+    !! `-Infinity`, which carries through to a non-positive `E^2` and the quiet NaN every binding
+    !! answers for "no big bang".
+    pure function de_term_at(p, zeta, x) result(v)
+        type(cosmology_params), intent(in) :: p    !! the parameters
+        real(real64), intent(in)           :: zeta !! `ln(1 + z)`, known not to be a NaN
+        real(real64), intent(in)           :: x    !! `e^zeta`
+        real(real64)                       :: v    !! `Ode0 f_DE`
+
+        if (p%ode0 == 0.0_real64) then
+            v = 0.0_real64
+        else
+            v = p%ode0 * f_de_at(p, zeta, x)
+        end if
+
+    end function de_term_at
+
     module procedure cosmology_e2
 
-        real(real64) :: x, ell, f_de
+        real(real64) :: x, de
 
         ! The NaN screen comes first and stands alone: every test below it is ordered.
         if (zeta /= zeta) then
@@ -92,24 +183,16 @@ contains
             return
         end if
         x = exp(zeta)
-
-        ! The CPL factor is formed through its LOGARITHM and screened, because it is the one term
-        ! whose exponent the caller sets and the one that blows up towards z = -1: `wa = 3` at
-        ! z = -0.99 already asks for exp(891). An infinite dark-energy density is the right answer
-        ! there -- it does diverge -- and it carries through as E = +Infinity and 1/E = 0.
-        if (p%w0 == -1.0_real64 .and. p%wa == 0.0_real64) then
-            f_de = 1.0_real64
-        else
-            ! `zeta` IS `ln x`, so no second logarithm is taken.
-            ell = 3.0_real64 * (1.0_real64 + p%w0 + p%wa) * zeta - 3.0_real64 * p%wa * (x - 1.0_real64) / x
-            if (ell > PFC_EXP_CEILING) then
-                v = ieee_value(v, ieee_positive_inf)
-                return
-            end if
-            f_de = exp(ell)
+        de = de_term_at(p, zeta, x)
+        if (de > huge(de)) then
+            ! The screen inside `f_de_at` fired, so the dark-energy density has overflowed and
+            ! `E^2` is infinite whatever the other terms are. An ordered comparison is safe here:
+            ! `de` is zero, a finite product, or a signed infinity, and never a NaN.
+            v = ieee_value(v, ieee_positive_inf)
+            return
         end if
 
-        v = p%om0 * x ** 3 + d%ok0 * x ** 2 + p%ode0 * f_de
+        v = p%om0 * x ** 3 + d%ok0 * x ** 2 + de
         if (d%ogamma0 /= 0.0_real64) v = v + d%ogamma0 * x ** 4 * (1.0_real64 + cosmology_nu_rel(p, d, x))
 
     end procedure cosmology_e2
@@ -712,6 +795,209 @@ contains
     end procedure cosmology_arcsec_comoving
 
     ! =========================================================================================
+    ! What the universe is made of at z
+    ! =========================================================================================
+
+    !> One density parameter: a term of `E^2` over `E^2`.
+    !!
+    !! `term` is finite at every admitted redshift for matter, curvature, photons and neutrinos,
+    !! so where `E^2` has overflowed -- a big-rip model towards `z = -1` -- this answers exactly
+    !! zero without raising a flag. The DARK-ENERGY term does not come through here: there
+    !! `Infinity / Infinity` would be a NaN and an `IEEE_INVALID` rather than the limit, which is
+    !! one, so `%ode` tests for that regime itself.
+    pure function density_fraction(term, e2) result(v)
+        real(real64), intent(in) :: term !! the term of `E^2` this parameter counts
+        real(real64), intent(in) :: e2   !! `E^2` there
+        real(real64)             :: v    !! the density parameter
+
+        if (e2 /= e2) then
+            v = e2
+        else if (e2 <= 0.0_real64) then
+            ! `E^2 <= 0` is "no big bang", which `%efunc` answers NaN for; so does every fraction
+            ! of it.
+            v = ieee_value(v, ieee_quiet_nan)
+        else
+            v = term / e2
+        end if
+
+    end function density_fraction
+
+    module procedure cosmology_om
+
+        real(real64) :: zeta, x
+
+        if (.not. this%ready) error stop "pf_cosmology%om: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        x = exp(zeta)
+        v = density_fraction(this%p%om0 * x ** 3, cosmology_e2(this%p, this%d, zeta))
+
+    end procedure cosmology_om
+
+    module procedure cosmology_ode
+
+        real(real64) :: zeta, x, e2
+
+        if (.not. this%ready) error stop "pf_cosmology%ode: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        x = exp(zeta)
+        e2 = cosmology_e2(this%p, this%d, zeta)
+        if (e2 /= e2) then
+            v = e2
+        else if (e2 <= 0.0_real64) then
+            v = ieee_value(v, ieee_quiet_nan)
+        else if (e2 > huge(e2)) then
+            ! The CPL factor overflowed, so dark energy is ALL of `E^2` and the limit is one.
+            ! `Ode0 f_DE / E^2` would be `Infinity / Infinity` here: a NaN, and an `IEEE_INVALID`.
+            v = 1.0_real64
+        else
+            v = de_term_at(this%p, zeta, x) / e2
+        end if
+
+    end procedure cosmology_ode
+
+    module procedure cosmology_ok
+
+        real(real64) :: zeta, x
+
+        if (.not. this%ready) error stop "pf_cosmology%ok: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        x = exp(zeta)
+        ! A flat model has `ok0` exactly zero by assignment, so this is exactly zero too.
+        v = density_fraction(this%d%ok0 * x ** 2, cosmology_e2(this%p, this%d, zeta))
+
+    end procedure cosmology_ok
+
+    module procedure cosmology_ogamma
+
+        real(real64) :: zeta, x
+
+        if (.not. this%ready) error stop "pf_cosmology%ogamma: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        x = exp(zeta)
+        v = density_fraction(this%d%ogamma0 * x ** 4, cosmology_e2(this%p, this%d, zeta))
+
+    end procedure cosmology_ogamma
+
+    module procedure cosmology_onu
+
+        real(real64) :: zeta, x
+
+        if (.not. this%ready) error stop "pf_cosmology%onu: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        x = exp(zeta)
+        ! `Ogamma(z)` TIMES the fit, in that order, so that the five density parameters sum to one
+        ! to a few ulp: the radiation term of `E^2` is `Ogamma0 x^4 (1 + nu_rel)`.
+        v = density_fraction(this%d%ogamma0 * x ** 4, cosmology_e2(this%p, this%d, zeta)) &
+            * cosmology_nu_rel(this%p, this%d, x)
+
+    end procedure cosmology_onu
+
+    module procedure cosmology_tcmb
+
+        real(real64) :: zeta
+
+        if (.not. this%ready) error stop "pf_cosmology%tcmb: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+        else
+            v = this%p%tcmb0 * exp(zeta)
+        end if
+
+    end procedure cosmology_tcmb
+
+    module procedure cosmology_w
+
+        real(real64) :: zeta
+
+        if (.not. this%ready) error stop "pf_cosmology%w: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+        else if (this%p%wa == 0.0_real64) then
+            ! Exactly `w0`, with no arithmetic to round it -- and it keeps `wa * z/(1 + z)` from
+            ! being formed at all for the cosmological constant, where `z/(1 + z)` is `-1e5` at
+            ! the blueshift end and `0 * (-1e5)` is only accidentally zero.
+            v = this%p%w0
+        else
+            ! `z/(1 + z)` as astropy forms it, on the caller's own `z` rather than on `e^zeta`:
+            ! it keeps its digits at a small `z`, where `1 - e^-zeta` would cancel.
+            v = this%p%w0 + this%p%wa * z / (1.0_real64 + z)
+        end if
+
+    end procedure cosmology_w
+
+    module procedure cosmology_de_density_scale
+
+        real(real64) :: zeta
+
+        if (.not. this%ready) error stop "pf_cosmology%de_density_scale: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+        else
+            v = f_de_at(this%p, zeta, exp(zeta))
+        end if
+
+    end procedure cosmology_de_density_scale
+
+    module procedure cosmology_critical_density
+
+        real(real64) :: zeta, e2
+
+        if (.not. this%ready) error stop "pf_cosmology%critical_density: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        e2 = cosmology_e2(this%p, this%d, zeta)
+        if (e2 /= e2) then
+            v = e2
+        else if (e2 <= 0.0_real64) then
+            v = ieee_value(v, ieee_quiet_nan)
+        else
+            ! `rho_crit0` is already in M_sun/Mpc^3; `%init` did the conversion once.
+            v = this%d%rho_crit0 * e2
+        end if
+
+    end procedure cosmology_critical_density
+
+    module procedure cosmology_lookback_distance
+
+        real(real64) :: zeta
+
+        if (.not. this%ready) error stop "pf_cosmology%lookback_distance: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+        else
+            v = this%d%dh * tl_at(this, zeta) / this%d%th
+        end if
+
+    end procedure cosmology_lookback_distance
+
+    ! =========================================================================================
     ! The inverses
     ! =========================================================================================
 
@@ -754,6 +1040,56 @@ contains
 
     end function tl_slope
 
+    !> `dD_M/dD_C`: one for a flat model, `cosh` for an open one, `cos` for a closed one.
+    pure function dm_slope_of_dc(this, dc) result(s)
+        class(pf_cosmology), intent(in) :: this !! the cosmology
+        real(real64), intent(in)        :: dc   !! `D_C` in Mpc
+        real(real64)                    :: s    !! `dD_M/dD_C`, dimensionless
+
+        real(real64) :: arg
+
+        if (dc /= dc) then
+            s = dc
+        else if (this%flat) then
+            s = 1.0_real64
+        else if (this%d%ok0 > 0.0_real64) then
+            arg = sqrt(this%d%ok0) * dc / this%d%dh
+            if (abs(arg) > PFC_SINH_CEILING) then
+                ! A NaN rather than an infinity, so that the solver BISECTS here instead of taking
+                ! a zero-length Newton step and declaring itself converged where it is not.
+                s = ieee_value(s, ieee_quiet_nan)
+            else
+                s = cosh(arg)
+            end if
+        else
+            s = cos(sqrt(-this%d%ok0) * dc / this%d%dh)
+        end if
+
+    end function dm_slope_of_dc
+
+    !> `D_L(zeta) = e^zeta D_M(D_C(zeta))`, in Mpc.
+    pure function dl_at(this, zeta) result(v)
+        class(pf_cosmology), intent(in) :: this !! the cosmology, known built
+        real(real64), intent(in)        :: zeta !! `ln(1 + z)`, known inside the domain
+        real(real64)                    :: v    !! `D_L` in Mpc
+
+        v = exp(zeta) * dm_of_dc(this, dc_at(this, zeta))
+
+    end function dl_at
+
+    !> `dD_L/dzeta = e^zeta [D_M + (dD_M/dD_C)(dD_C/dzeta)]`.
+    pure function dl_slope(this, zeta) result(s)
+        class(pf_cosmology), intent(in) :: this !! the cosmology
+        real(real64), intent(in)        :: zeta !! `ln(1 + z)`
+        real(real64)                    :: s    !! `dD_L/dzeta` in Mpc
+
+        real(real64) :: dc
+
+        dc = dc_at(this, zeta)
+        s = exp(zeta) * (dm_of_dc(this, dc) + dm_slope_of_dc(this, dc) * dc_slope(this, zeta))
+
+    end function dl_slope
+
     !> A bracketed Newton solve for `zeta` where a monotone quantity equals `target`.
     !!
     !! Newton where the step stays inside the bracket, bisection where it does not, so it cannot
@@ -762,7 +1098,7 @@ contains
     !! the iteration -- the round trip is asserted in the DISTANCE, where it is stable both ways.
     pure function solve_zeta(this, which, target_value, lo_in, hi_in) result(zeta)
         class(pf_cosmology), intent(in) :: this         !! the cosmology
-        integer, intent(in)             :: which        !! `PFC_INT_DISTANCE` or `PFC_INT_TIME`
+        integer, intent(in)             :: which        !! a `PFC_Q_*` quantity code
         real(real64), intent(in)        :: target_value !! the value to invert
         real(real64), intent(in)        :: lo_in        !! a `zeta` whose value is at or below it
         real(real64), intent(in)        :: hi_in        !! a `zeta` whose value is at or above it
@@ -785,15 +1121,14 @@ contains
             else
                 hi = zeta
             end if
-            if (which == PFC_INT_DISTANCE) then
-                slope = dc_slope(this, zeta)
-            else
-                slope = tl_slope(this, zeta)
-            end if
+            slope = slope_at(this, which, zeta)
             previous = zeta
             if (slope /= slope) then
                 zeta = 0.5_real64 * (lo + hi)
-            else if (slope <= 0.0_real64) then
+            else if (slope <= 0.0_real64 .or. slope > huge(slope)) then
+                ! An INFINITE slope bisects too. A Newton step of `f/Infinity` is exactly zero,
+                ! which the convergence test below would read as "arrived" at a point the
+                ! iteration has not examined.
                 zeta = 0.5_real64 * (lo + hi)
             else
                 step = f_mid / slope
@@ -805,20 +1140,70 @@ contains
 
     end function solve_zeta
 
-    !> `D_C` or `t_L` at `zeta`, for the solver.
+    !> The quantity the solver is inverting, at `zeta`. Every one of the four INCREASES with
+    !! `zeta`, which is what lets one bracketed iteration serve them all.
     pure function value_at(this, which, zeta) result(v)
         class(pf_cosmology), intent(in) :: this  !! the cosmology
-        integer, intent(in)             :: which !! `PFC_INT_DISTANCE` or `PFC_INT_TIME`
+        integer, intent(in)             :: which !! a `PFC_Q_*` quantity code
         real(real64), intent(in)        :: zeta  !! `ln(1 + z)`
         real(real64)                    :: v     !! the quantity there
 
-        if (which == PFC_INT_DISTANCE) then
-            v = dc_at(this, zeta)
-        else
+        real(real64) :: t
+
+        select case (which)
+        case (PFC_Q_TL)
             v = tl_at(this, zeta)
-        end if
+        case (PFC_Q_DL)
+            v = dl_at(this, zeta)
+        case (PFC_Q_LOG_AGE)
+            ! The age FALLS as `zeta` rises, so its negative logarithm is the increasing quantity.
+            ! The logarithm is the point: at the top of the domain the age is `7.6e-18 Gyr` beside
+            ! an `age(0)` of `13.8`, and only a relative measure of it has any digits left.
+            t = age_at(this, zeta)
+            if (t /= t) then
+                v = t
+            else if (t <= 0.0_real64) then
+                v = ieee_value(v, ieee_quiet_nan)
+            else
+                v = -log(t)
+            end if
+        case default
+            v = dc_at(this, zeta)
+        end select
 
     end function value_at
+
+    !> The derivative of `value_at` with respect to `zeta`, for the Newton step.
+    pure function slope_at(this, which, zeta) result(s)
+        class(pf_cosmology), intent(in) :: this  !! the cosmology
+        integer, intent(in)             :: which !! a `PFC_Q_*` quantity code
+        real(real64), intent(in)        :: zeta  !! `ln(1 + z)`
+        real(real64)                    :: s     !! the derivative there
+
+        real(real64) :: t
+
+        select case (which)
+        case (PFC_Q_TL)
+            s = tl_slope(this, zeta)
+        case (PFC_Q_DL)
+            s = dl_slope(this, zeta)
+        case (PFC_Q_LOG_AGE)
+            ! `d(age)/dzeta` is exactly `-t_H/E`, because `age + t_L` is constant; so the slope of
+            ! `-ln(age)` is the lookback time's own slope over the age.
+            t = age_at(this, zeta)
+            s = tl_slope(this, zeta)
+            if (t /= t .or. s /= s) then
+                s = ieee_value(s, ieee_quiet_nan)
+            else if (t <= 0.0_real64) then
+                s = ieee_value(s, ieee_quiet_nan)
+            else
+                s = s / t
+            end if
+        case default
+            s = dc_slope(this, zeta)
+        end select
+
+    end function slope_at
 
     module procedure cosmology_z_at_distance
 
@@ -846,8 +1231,8 @@ contains
                 zeta = guess
             end if
         else
-            call bracket_outside(this, PFC_INT_DISTANCE, d, lo, hi, v_lo, v_hi)
-            zeta = solve_zeta(this, PFC_INT_DISTANCE, d, lo, hi)
+            call bracket_outside(this, PFC_Q_DC, d, lo, hi, v_lo, v_hi)
+            zeta = solve_zeta(this, PFC_Q_DC, d, lo, hi)
         end if
         z = pf_zeta2z(zeta)
 
@@ -877,18 +1262,155 @@ contains
                 zeta = guess
             end if
         else
-            call bracket_outside(this, PFC_INT_TIME, t, lo, hi, v_lo, v_hi)
-            zeta = solve_zeta(this, PFC_INT_TIME, t, lo, hi)
+            call bracket_outside(this, PFC_Q_TL, t, lo, hi, v_lo, v_hi)
+            zeta = solve_zeta(this, PFC_Q_TL, t, lo, hi)
         end if
         z = pf_zeta2z(zeta)
 
     end procedure cosmology_z_at_lookback
 
+    module procedure cosmology_z_at_age
+
+        real(real64) :: lo, hi, zeta
+
+        if (.not. this%ready) error stop "pf_cosmology%z_at_age: the cosmology is not initialised"
+        if (t /= t) then
+            z = t
+            return
+        end if
+        ! A model whose age integral diverges is infinitely old at EVERY redshift, so no age names
+        ! one: the screen is the model's own flag rather than a comparison against an infinity.
+        if (this%age_diverges .or. t <= 0.0_real64 .or. t < this%d%a_ceiling &
+            .or. t > this%d%a_floor) then
+            z = ieee_value(z, ieee_quiet_nan)
+            return
+        end if
+        ! The bracket comes from the three stored bounds, so no walk is needed to find one. The
+        ! age DECREASES with `zeta`, which is why the tests read the way round they do.
+        if (t >= this%d%age0) then
+            lo = -PFC_ZETA_CEILING
+            hi = 0.0_real64
+        else if (t >= this%d%a_n) then
+            lo = 0.0_real64
+            hi = this%d%zeta_n
+        else
+            lo = this%d%zeta_n
+            hi = PFC_ZETA_CEILING
+        end if
+        ! On `-ln(age)`, never on `age(0) - t`: at the top of the domain that difference has no
+        ! digit of the age left in it, and would answer an arbitrary redshift.
+        zeta = solve_zeta(this, PFC_Q_LOG_AGE, -log(t), lo, hi)
+        z = pf_zeta2z(zeta)
+
+    end procedure cosmology_z_at_age
+
+    !> The first unit panel of `zeta` above zero in which `D_L` reaches `target_value`.
+    !!
+    !! Only a CLOSED model needs this. There `D_M` turns over at the antipode, so `D_L` is not
+    !! one-to-one and a bracket spanning the whole domain would return whichever crossing the
+    !! bisection happened to land on; walking outward from `z = 0` returns the SMALLEST redshift,
+    !! which is what the binding promises.
+    pure subroutine bracket_upwards(this, target_value, lo, hi, found)
+        class(pf_cosmology), intent(in) :: this         !! the cosmology
+        real(real64), intent(in)        :: target_value !! the `D_L` to bracket
+        real(real64), intent(out)       :: lo           !! the lower `zeta`
+        real(real64), intent(out)       :: hi           !! the upper `zeta`
+        logical, intent(out)            :: found        !! a panel containing it was reached
+
+        real(real64) :: v_lo, v_hi
+        integer      :: i, panels
+
+        panels = int(PFC_ZETA_CEILING / PFC_PANEL) + 2
+        lo = 0.0_real64
+        v_lo = 0.0_real64
+        hi = 0.0_real64
+        found = .false.
+        do i = 1, panels
+            hi = min(lo + PFC_PANEL, PFC_ZETA_CEILING)
+            v_hi = dl_at(this, hi)
+            if (v_hi /= v_hi) return
+            if (v_lo <= target_value .and. target_value <= v_hi) then
+                found = .true.
+                return
+            end if
+            if (hi >= PFC_ZETA_CEILING) return
+            lo = hi
+            v_lo = v_hi
+        end do
+
+    end subroutine bracket_upwards
+
+    module procedure cosmology_z_at_luminosity
+
+        real(real64) :: lo, hi, zeta
+        logical      :: found
+
+        if (.not. this%ready) error stop "pf_cosmology%z_at_luminosity_distance: the cosmology is not initialised"
+        if (d /= d) then
+            z = d
+            return
+        end if
+        if (d < 0.0_real64) then
+            ! `D_L` is negative at a blueshift and returns to zero as `z -> -1`, so a negative
+            ! argument names two redshifts or none. This binding answers `z >= 0` only.
+            z = ieee_value(z, ieee_quiet_nan)
+            return
+        end if
+        if (d == 0.0_real64) then
+            z = 0.0_real64
+            return
+        end if
+        if (this%d%ok0 >= 0.0_real64) then
+            ! Flat or open: `D_L` is strictly increasing in `z >= 0`, since `e^zeta`, `D_C` and
+            ! `sinh` all are. The domain itself is then the bracket, and the ceiling is read off
+            ! the stored `D_C(zeta_ceiling)` rather than walked to.
+            if (d > exp(PFC_ZETA_CEILING) * dm_of_dc(this, this%d%d_ceiling)) then
+                z = ieee_value(z, ieee_quiet_nan)
+                return
+            end if
+            lo = 0.0_real64
+            hi = PFC_ZETA_CEILING
+        else
+            call bracket_upwards(this, d, lo, hi, found)
+            if (.not. found) then
+                z = ieee_value(z, ieee_quiet_nan)
+                return
+            end if
+        end if
+        zeta = solve_zeta(this, PFC_Q_DL, d, lo, hi)
+        z = pf_zeta2z(zeta)
+
+    end procedure cosmology_z_at_luminosity
+
+    module procedure cosmology_z_at_distmod
+
+        real(real64) :: power
+
+        if (.not. this%ready) error stop "pf_cosmology%z_at_distmod: the cosmology is not initialised"
+        if (mu /= mu) then
+            z = mu
+            return
+        end if
+        power = (mu - 25.0_real64) / 5.0_real64
+        if (power > PFC_LOG10_LIMIT) then
+            ! `10^power` would overflow. Such a distance is past every admitted model's horizon,
+            ! so the answer is the NaN `%z_at_luminosity_distance` gives beyond its own ceiling.
+            z = ieee_value(z, ieee_quiet_nan)
+        else if (power < -PFC_LOG10_LIMIT) then
+            ! `10^power` would underflow to zero, and the redshift at zero distance is zero.
+            z = 0.0_real64
+        else
+            z = cosmology_z_at_luminosity(this, 10.0_real64 ** power)
+        end if
+
+    end procedure cosmology_z_at_distmod
+
     !> Widens a bracket by unit panels from the table's edge until it contains `target_value`,
     !! and no further than the domain's ceiling.
     pure subroutine bracket_outside(this, which, target_value, lo, hi, v_lo, v_hi)
         class(pf_cosmology), intent(in) :: this         !! the cosmology
-        integer, intent(in)             :: which        !! `PFC_INT_DISTANCE` or `PFC_INT_TIME`
+        integer, intent(in)             :: which        !! `PFC_Q_DC` or `PFC_Q_TL`, the two whose
+                                                        !! quantity IS a tabulated integral
         real(real64), intent(in)        :: target_value !! the value to bracket
         real(real64), intent(out)       :: lo           !! the lower `zeta`
         real(real64), intent(out)       :: hi           !! the upper `zeta`
@@ -896,18 +1418,22 @@ contains
         real(real64), intent(out)       :: v_hi         !! the quantity at `hi`
 
         real(real64) :: edge, v_edge, scale
-        integer      :: i, panels
+        integer      :: i, panels, integrand
 
         ! The walk starts where the INVERSE table ends, which for a large `zmax` is short of the
-        ! forward table's edge (see `strictly_increasing_prefix`).
-        if (which == PFC_INT_DISTANCE) then
+        ! forward table's edge (see `strictly_increasing_prefix`). The quantity code is mapped to
+        ! the INTEGRAND code here rather than being passed through, because the two vocabularies
+        ! are not the same numbers.
+        if (which == PFC_Q_DC) then
             edge = this%d%zeta_d_inv
             v_edge = this%d%d_inv_top
             scale = this%d%dh
+            integrand = PFC_INT_DISTANCE
         else
             edge = this%d%zeta_t_inv
             v_edge = this%d%t_inv_top
             scale = this%d%th
+            integrand = PFC_INT_TIME
         end if
         panels = int(2.0_real64 * PFC_ZETA_CEILING / PFC_PANEL) + 2
         if (target_value > v_edge) then
@@ -915,7 +1441,7 @@ contains
             v_lo = v_edge
             do i = 1, panels
                 hi = min(lo + PFC_PANEL, PFC_ZETA_CEILING)
-                v_hi = v_lo + scale * cosmology_panel(this%p, this%d, which, lo, hi)
+                v_hi = v_lo + scale * cosmology_panel(this%p, this%d, integrand, lo, hi)
                 if (v_hi >= target_value .or. hi >= PFC_ZETA_CEILING) return
                 lo = hi
                 v_lo = v_hi
@@ -925,7 +1451,7 @@ contains
             v_hi = 0.0_real64
             do i = 1, panels
                 lo = max(hi - PFC_PANEL, -PFC_ZETA_CEILING)
-                v_lo = v_hi + scale * cosmology_panel(this%p, this%d, which, hi, lo)
+                v_lo = v_hi + scale * cosmology_panel(this%p, this%d, integrand, hi, lo)
                 if (v_lo <= target_value .or. lo <= -PFC_ZETA_CEILING) return
                 hi = lo
                 v_hi = v_lo
@@ -991,6 +1517,15 @@ contains
             v = ieee_value(v, ieee_quiet_nan)
         end if
     end procedure cosmology_ob0
+
+    module procedure cosmology_odm0
+        if (.not. this%ready) error stop "pf_cosmology%odm0: the cosmology is not initialised"
+        if (this%has_ob0) then
+            v = this%p%om0 - this%p%ob0
+        else
+            v = ieee_value(v, ieee_quiet_nan)
+        end if
+    end procedure cosmology_odm0
 
     module procedure cosmology_tcmb0
         if (.not. this%ready) error stop "pf_cosmology%tcmb0: the cosmology is not initialised"

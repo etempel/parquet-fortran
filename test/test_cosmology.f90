@@ -1,5 +1,5 @@
 !> Tests for `parquet_cosmology`: the model, the three tables, the fallback rule beyond them, the
-!> closed forms over them, the two inverses and the redshift conversions.
+!> closed forms over them, the density parameters, the five inverses and the redshift conversions.
 !!
 !! **Every expected value comes from `test_cosmology_vectors`**, a 30-digit `mpmath` model of
 !! astropy 8.0.1's `w0waCDM` emitted by `tools/generate_cosmology_reference.py`. Nothing here is a
@@ -61,6 +61,19 @@ module test_cosmology
     !! DISTANCE does not suffer it: `dD_C/dzeta` carries a factor `e^zeta`, which is `5e-5` at the
     !! same point, so the distance round trip stays at `4e-16` over the whole domain.
     real(real64), parameter :: BLUESHIFT_INVERSE_TOL = 1.0e-11_real64
+    !> What `%age(%z_at_age(t))` may lose at a BLUESHIFT, for the same reason and a larger one.
+    !!
+    !! `z` pins `zeta` only to `eps/(1 + z)`, which is `8e-7` at `zeta = -22`, and the age's own
+    !! relative slope there is about `0.04` per unit `zeta` -- it is four hundred Gyr and changing
+    !! by seventeen. Measured worst over all twenty models: `6.0e-7`, so this bound has a factor
+    !! of seventeen to spare. Above `z = 0` the same round trip holds `6.9e-15`.
+    real(real64), parameter :: AGE_BLUESHIFT_TOL = 1.0e-5_real64
+    !> What a round trip through `%z_at_age`, `%z_at_luminosity_distance` or `%z_at_distmod` may
+    !! lose at a redshift at or above zero. Measured worst: `6.9e-15`, `1.1e-15` and `2.6e-16`.
+    real(real64), parameter :: STAGE2_INVERSE_TOL = 1.0e-13_real64
+    !> What `%om + %ode + %ok + %ogamma + %onu` may differ from one by. Measured worst over all
+    !! twenty models and the whole domain: `2.2e-16`, which is one ulp.
+    real(real64), parameter :: DENSITY_SUM_TOL = 1.0e-14_real64
     !> `ln(1 + 1e10)`, the domain's edge, as the module carries it.
     real(real64), parameter :: CEILING_ZETA = 23.02585093004047_real64
 
@@ -132,7 +145,25 @@ contains
             new_unittest("a second init replaces the first, and clear unbuilds", &
                          test_second_init_replaces_the_first), &
             new_unittest("assignment clones the tables", &
-                         test_assignment_clones) &
+                         test_assignment_clones), &
+            new_unittest("the five density parameters sum to one at every redshift", &
+                         test_density_parameters_sum_to_one), &
+            new_unittest("each density parameter is its own term of E^2, not another", &
+                         test_density_parameters_are_the_terms_of_e2), &
+            new_unittest("no CMB switches neutrinos off, massive species included", &
+                         test_no_cmb_switches_neutrinos_off), &
+            new_unittest("w and de_density_scale are the CPL pair, exact for a constant", &
+                         test_w_and_de_density_scale_are_the_cpl_pair), &
+            new_unittest("critical_density is M_sun/Mpc^3 and lookback_distance is c t_L", &
+                         test_critical_density_and_lookback_distance), &
+            new_unittest("z_at_age round trips where age(0) minus lookback time could not", &
+                         test_z_at_age_round_trips), &
+            new_unittest("z_at_age outside its stored bounds, or for a divergent age, is NaN", &
+                         test_z_at_age_outside_its_bounds_is_nan), &
+            new_unittest("z_at_luminosity_distance and z_at_distmod round trip", &
+                         test_z_at_luminosity_and_distmod_round_trip), &
+            new_unittest("z_at_luminosity_distance answers forward redshifts only", &
+                         test_z_at_luminosity_answers_only_forward_redshifts) &
             ]
 
     end subroutine collect_tests_cosmology
@@ -250,6 +281,16 @@ contains
         v(cq_arcsec_comoving) = c%arcsec_per_kpc_comoving(z)
         v(cq_efunc) = c%efunc(z)
         v(cq_hubble) = c%hubble(z)
+        v(cq_om) = c%om(z)
+        v(cq_ode) = c%ode(z)
+        v(cq_ok) = c%ok(z)
+        v(cq_ogamma) = c%ogamma(z)
+        v(cq_onu) = c%onu(z)
+        v(cq_tcmb) = c%tcmb(z)
+        v(cq_w) = c%w(z)
+        v(cq_de_density_scale) = c%de_density_scale(z)
+        v(cq_critical_density) = c%critical_density(z)
+        v(cq_lookback_distance) = c%lookback_distance(z)
 
     end function answers
 
@@ -364,6 +405,13 @@ contains
             if (allocated(error)) return
             call check(error, agrees(c%little_h(), der(i, cd_little_h), 1.0e-14_real64), &
                        "little_h of " // trim(cmodel_label(i)))
+            if (allocated(error)) return
+            ! `%odm0()` is NaN where no `ob0` was given, and `agrees` compares a NaN as one.
+            call check(error, agrees(c%odm0(), der(i, cd_odm0), 1.0e-14_real64), &
+                       "odm0 of " // trim(cmodel_label(i)))
+            if (allocated(error)) return
+            call check(error, cmodel_has_ob0(i) .eqv. (c%ob0() == c%ob0()), &
+                       "ob0 must be NaN exactly where the model gives none: " // trim(cmodel_label(i)))
             if (allocated(error)) return
             call check(error, c%has_massive_nu() .eqv. cmodel_has_massive_nu(i), &
                        "has_massive_nu of " // trim(cmodel_label(i)))
@@ -534,6 +582,11 @@ contains
         do k = 1, 60
             term = term * z
             v = v + term / real(k, real64) * merge(1.0_real64, -1.0_real64, mod(k, 2) == 1)
+            ! Stop as soon as a term cannot change the sum. Running all sixty raises
+            ! `IEEE_UNDERFLOW` on the way -- `z = 1e-14` reaches `1e-840` by `k = 60` -- which
+            ! nagfor reports as one line at program exit attached to nothing, and which would then
+            ! hide a later finding. The series has converged twenty digits earlier.
+            if (abs(term) < 1.0e-20_real64 * abs(v)) exit
         end do
 
     end function independent_log1p
@@ -1232,6 +1285,11 @@ contains
                 got = answers(c, z)
                 v = c%z_at_comoving_distance(got(cq_dc))
                 v = c%z_at_lookback_time(got(cq_tl))
+                ! The stage-two inverses are fed their own forward answers, infinities included:
+                ! a divergent age and a big rip both arrive here.
+                v = c%z_at_age(got(cq_age))
+                v = c%z_at_luminosity_distance(got(cq_dl))
+                v = c%z_at_distmod(got(cq_mu))
             end do
         end do
         call ieee_get_flag(ieee_usual, raised)
@@ -1453,6 +1511,478 @@ contains
         call check(error, after == before, "the clone must answer the same number afterwards")
 
     end subroutine test_assignment_clones
+
+    ! =========================================================================================
+    ! What the universe is made of at z
+    ! =========================================================================================
+
+    !> `Om + Ode + Ok + Ogamma + Onu` is one, at every redshift of every model.
+    !!
+    !! The identity holds because each is a TERM of `E^2` over `E^2`, formed at the same
+    !! `x = e^zeta`. A binding that recomputed `1 + z` its own way, or that counted the neutrinos
+    !! twice, would break it while still looking plausible one parameter at a time.
+    subroutine test_density_parameters_sum_to_one(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: z, total, e, worst
+        integer            :: i, k, bad_i
+
+        worst = 0.0_real64
+        bad_i = 0
+        do i = 1, n_cmodel
+            call build(c, i)
+            do k = 0, 60
+                z = pf_zeta2z(-22.0_real64 + 45.0_real64 * real(k, real64) / 60.0_real64)
+                total = c%om(z) + c%ode(z) + c%ok(z) + c%ogamma(z) + c%onu(z)
+                e = c%efunc(z)
+                if (e /= e) cycle
+                if (.not. ieee_is_finite(e)) then
+                    ! A big rip: dark energy is ALL of `E^2`, and the limit is exact.
+                    if (total /= 1.0_real64) bad_i = i
+                else if (abs(total - 1.0_real64) > DENSITY_SUM_TOL) then
+                    bad_i = i
+                    worst = max(worst, abs(total - 1.0_real64))
+                end if
+            end do
+        end do
+        call check(error, bad_i == 0, "the five density parameters must sum to one; " // &
+                   trim(cmodel_label(max(bad_i, 1))) // " is the model that failed")
+
+    end subroutine test_density_parameters_sum_to_one
+
+    !> Each density parameter times `E^2` is the term of `E^2` it stands for, and no other.
+    !!
+    !! A wrong exponent -- `x^3` where the photons need `x^4` -- sums to one all the same once the
+    !! others absorb it, so the sum above cannot see it; this can. `%ode` is checked through
+    !! `%de_density_scale`, which ties the CPL factor to the parameter it scales.
+    subroutine test_density_parameters_are_the_terms_of_e2(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: z, x, e2
+        integer            :: i, k
+
+        do i = 1, n_cmodel
+            call build(c, i)
+            do k = 0, 12
+                z = pf_zeta2z(-10.0_real64 + 20.0_real64 * real(k, real64) / 12.0_real64)
+                x = 1.0_real64 + z
+                e2 = c%efunc(z) ** 2
+                if (e2 /= e2 .or. .not. ieee_is_finite(e2)) cycle
+                call check(error, agrees(c%om(z) * e2, c%om0() * x ** 3, 1.0e-12_real64), &
+                           "Om(z) E^2 must be Om0 (1+z)^3: " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                call check(error, agrees(c%ok(z) * e2, c%ok0() * x ** 2, 1.0e-12_real64), &
+                           "Ok(z) E^2 must be Ok0 (1+z)^2: " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                call check(error, agrees(c%ogamma(z) * e2, c%ogamma0() * x ** 4, 1.0e-12_real64), &
+                           "Ogamma(z) E^2 must be Ogamma0 (1+z)^4: " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                call check(error, agrees(c%ode(z) * e2, c%ode0() * c%de_density_scale(z), &
+                                         1.0e-12_real64), &
+                           "Ode(z) E^2 must be Ode0 f_DE(z): " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                ! The neutrinos ride on the photons, which is why they are not counted in `Om0` --
+                ! and they vanish with the photons, or with `Neff`, which `neff_zero` has at zero
+                ! while carrying a CMB.
+                if (c%ogamma(z) > 0.0_real64 .and. c%neff() > 0.0_real64) then
+                    call check(error, c%onu(z) > 0.0_real64, &
+                               "Onu must be positive where Ogamma and Neff both are: " // &
+                               trim(cmodel_label(i)))
+                else
+                    call check(error, c%onu(z) == 0.0_real64, &
+                               "Onu must be exactly zero without photons or without Neff: " // &
+                               trim(cmodel_label(i)))
+                end if
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_density_parameters_are_the_terms_of_e2
+
+    !> `Tcmb0 = 0` switches radiation AND neutrinos off, a MASSIVE species included.
+    !!
+    !! The discriminating call is `%init(h0, om0, m_nu=[0, 0, 0.06])` with `tcmb0` left at its
+    !! default of zero, which astropy accepts and answers with no radiation at all. Without the
+    !! first arm of `cosmology_nu_rel` it divides by a zero neutrino temperature: that raises
+    !! `IEEE_DIVIDE_BY_ZERO`, then `Onu0 = Ogamma0 * Infinity` is `0 * Infinity`, and `%init`
+    !! reports the resulting NaN as an out-of-range density -- so the unfixed module ABORTS here
+    !! rather than failing this assertion, and under nagfor's `-ieee=stop` it traps at the
+    !! division. Both are visible; neither is a wrong answer left standing.
+    subroutine test_no_cmb_switches_neutrinos_off(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: masses(3), z
+        integer            :: k
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        masses = [0.0_real64, 0.0_real64, 0.06_real64]
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, m_nu = masses)
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, .not. any(raised), &
+                   "a massive m_nu with no CMB must raise no IEEE flag at init")
+        if (allocated(error)) return
+        call check(error, c%is_initialised(), "such a cosmology must build")
+        if (allocated(error)) return
+        call check(error, c%tnu0() == 0.0_real64 .and. c%ogamma0() == 0.0_real64 &
+                   .and. c%onu0() == 0.0_real64, "no CMB means no radiation and no neutrinos")
+        if (allocated(error)) return
+        ! Flat by omission is still exact, which a NaN `Onu0` would have destroyed.
+        call check(error, c%ode0() == 1.0_real64 - 0.3_real64 .and. c%ok0() == 0.0_real64, &
+                   "Ode0 must be 1 - Om0 exactly when there is no radiation to subtract")
+        if (allocated(error)) return
+        do k = 0, 6
+            z = pf_zeta2z(-5.0_real64 + 20.0_real64 * real(k, real64) / 6.0_real64)
+            call check(error, c%ogamma(z) == 0.0_real64 .and. c%onu(z) == 0.0_real64 &
+                       .and. c%tcmb(z) == 0.0_real64, &
+                       "Ogamma, Onu and Tcmb must be exactly zero at every z without a CMB")
+            if (allocated(error)) return
+        end do
+        ! The masses the caller gave are still reported, and so is the flag about them.
+        call check(error, c%has_massive_nu(), "the masses given are still reported as massive")
+
+    end subroutine test_no_cmb_switches_neutrinos_off
+
+    !> `%w` and `%de_density_scale`: exact for a cosmological constant, CPL otherwise.
+    subroutine test_w_and_de_density_scale_are_the_cpl_pair(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: lam, cpl
+        real(real64)       :: z, want
+        integer            :: k
+
+        call lam%init("Planck18")
+        call cpl%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -0.9_real64, wa = 0.3_real64)
+
+        do k = 0, 20
+            z = pf_zeta2z(-15.0_real64 + 35.0_real64 * real(k, real64) / 20.0_real64)
+            ! A cosmological constant is EXACT, not merely close: no arithmetic is done on it.
+            call check(error, lam%w(z) == -1.0_real64, "w(z) must be exactly -1 for a constant")
+            if (allocated(error)) return
+            call check(error, lam%de_density_scale(z) == 1.0_real64, &
+                       "f_DE must be exactly 1 for a cosmological constant")
+            if (allocated(error)) return
+            ! `w0 + wa (1 - 1/(1+z))` is the same function written the other way round, so a
+            ! wrong sign or a missing factor shows and a last-bit difference does not.
+            want = -0.9_real64 + 0.3_real64 * (1.0_real64 - 1.0_real64 / (1.0_real64 + z))
+            call check(error, agrees(cpl%w(z), want, 1.0e-11_real64), "w(z) must be the CPL form")
+            if (allocated(error)) return
+        end do
+        call check(error, cpl%w(0.0_real64) == -0.9_real64, "w(0) must be exactly w0")
+        if (allocated(error)) return
+        call check(error, cpl%de_density_scale(0.0_real64) == 1.0_real64, &
+                   "f_DE(0) must be exactly 1")
+        if (allocated(error)) return
+        ! As `z -> infinity` the CPL equation of state tends to `w0 + wa`.
+        call check(error, abs(cpl%w(1.0e10_real64) - (-0.6_real64)) < 1.0e-9_real64, &
+                   "w must tend to w0 + wa at large z")
+
+    end subroutine test_w_and_de_density_scale_are_the_cpl_pair
+
+    !> `%critical_density` in M_sun/Mpc^3, and `%lookback_distance` as `c` times the lookback time.
+    subroutine test_critical_density_and_lookback_distance(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        ! The textbook critical density, `2.7754e11 h^2 M_sun/Mpc^3`, carries about four digits and
+        ! the constants behind it are not quite this module's; it is here as an order-of-magnitude
+        ! anchor on the UNIT, which the reference rows then pin to thirty digits.
+        real(real64), parameter :: RHO_CRIT_TEXTBOOK = 2.7758e11_real64
+        ! `c t_L` by the physical route rather than through `D_H / t_H`: km/s times Gyr in seconds
+        ! over km in a Mpc. The library forms it as `D_H t_L / t_H`, in which `H0` cancels.
+        real(real64), parameter :: MPC_PER_GYR = 299792.458_real64 * 3.15576e16_real64 &
+                                                 / 3.0856775814913673e19_real64
+
+        type(pf_cosmology) :: c
+        real(real64)       :: z, rho0
+        integer            :: i, k
+
+        call c%init("Planck18")
+        rho0 = c%critical_density(0.0_real64)
+        call check(error, abs(rho0 - RHO_CRIT_TEXTBOOK * c%little_h() ** 2) &
+                   < 1.0e-3_real64 * rho0, &
+                   "critical_density(0) must be the textbook 2.7758e11 h^2 M_sun/Mpc^3")
+        if (allocated(error)) return
+
+        do i = 1, n_cmodel
+            call build(c, i)
+            rho0 = c%critical_density(0.0_real64)
+            do k = 0, 12
+                z = pf_zeta2z(-10.0_real64 + 25.0_real64 * real(k, real64) / 12.0_real64)
+                if (.not. ieee_is_finite(c%efunc(z))) cycle
+                call check(error, agrees(c%critical_density(z), rho0 * c%efunc(z) ** 2, &
+                                         1.0e-13_real64), &
+                           "critical_density must scale as E^2: " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                call check(error, agrees(c%lookback_distance(z), MPC_PER_GYR * c%lookback_time(z), &
+                                         1.0e-13_real64), &
+                           "lookback_distance must be c times the lookback time: " // &
+                           trim(cmodel_label(i)))
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_critical_density_and_lookback_distance
+
+    ! =========================================================================================
+    ! The stage-two inverses
+    ! =========================================================================================
+
+    !> `%z_at_age` over every model, asserted in the AGE, where it is conditioned both ways.
+    !!
+    !! The discriminating point is the TOP of the domain. At `z = 1e10` the age is `7.6e-18 Gyr`
+    !! beside an `age(0)` of `13.8`, so an inverse written as `%z_at_lookback_time(%age(0) - t)`
+    !! answers whatever redshift the saturated lookback time happens to name; solving on
+    !! `ln(age)` recovers `1e10` to fifteen digits.
+    subroutine test_z_at_age_round_trips(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: z, t, back, tol
+        integer            :: i, k, bad_i, bad_k
+
+        bad_i = 0
+        bad_k = 0
+        do i = 1, n_cmodel
+            if (cmodel_age_diverges(i)) cycle
+            call build(c, i)
+            do k = 0, 60
+                z = pf_zeta2z(-22.0_real64 + 45.0_real64 * real(k, real64) / 60.0_real64)
+                t = c%age(z)
+                back = c%z_at_age(t)
+                if (z >= 0.0_real64) then
+                    tol = STAGE2_INVERSE_TOL
+                else
+                    tol = AGE_BLUESHIFT_TOL
+                end if
+                if (.not. agrees(c%age(back), t, tol)) then
+                    bad_i = i
+                    bad_k = k
+                end if
+                ! Where the forward function is well conditioned, the REDSHIFT comes back too.
+                if (z > 1.0e-3_real64 .and. z < 1.0e3_real64) then
+                    if (.not. agrees(back, z, STAGE2_INVERSE_TOL)) then
+                        bad_i = i
+                        bad_k = k
+                    end if
+                end if
+            end do
+        end do
+        call check(error, bad_i == 0, "z_at_age must round trip; " // &
+                   trim(cmodel_label(max(bad_i, 1))) // " failed at sweep index " // itoa(bad_k))
+        if (allocated(error)) return
+
+        call c%init("Planck18")
+        t = c%age(1.0e10_real64)
+        call check(error, t > 0.0_real64 .and. t < 1.0e-16_real64, &
+                   "the age at the top of the domain should be of order 1e-17 Gyr")
+        if (allocated(error)) return
+        call check(error, abs(c%z_at_age(t) - 1.0e10_real64) < 1.0e-4_real64 * 1.0e10_real64, &
+                   "z_at_age must recover the top of the domain, where age(0) - t cannot")
+        if (allocated(error)) return
+        ! The difference form, spelled out, to show what this test is protecting against.
+        call check(error, c%age(0.0_real64) - t == c%age(0.0_real64), &
+                   "age(0) - age(1e10) must be age(0) to the bit, which is why it is never used")
+
+    end subroutine test_z_at_age_round_trips
+
+    !> Beyond the stored age bounds, and for a model with no finite age, `%z_at_age` is NaN.
+    subroutine test_z_at_age_outside_its_bounds_is_nan(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c, ds
+        real(real64)       :: nan, small, big
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        call c%init("Planck18")
+        call ds%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 1.0_real64)
+        nan = ieee_value(nan, ieee_quiet_nan)
+        small = c%age(1.0e10_real64)
+        big = c%age(pf_zeta2z(-CEILING_ZETA))
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+
+        call check(error, c%z_at_age(nan) /= c%z_at_age(nan), "a NaN age must answer NaN")
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_age(0.0_real64) /= c%z_at_age(0.0_real64), &
+                       "a zero age must answer NaN")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_age(-1.0_real64) /= c%z_at_age(-1.0_real64), &
+                       "a negative age must answer NaN")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_age(0.5_real64 * small) /= c%z_at_age(0.5_real64 * small), &
+                       "an age below the smallest the domain attains must answer NaN")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_age(2.0_real64 * big) /= c%z_at_age(2.0_real64 * big), &
+                       "an age above the largest the domain attains must answer NaN")
+        end if
+        ! ... and just inside those bounds it is a number, which is the negative control.
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_age(small) == c%z_at_age(small), &
+                       "the smallest age the domain attains must answer a number")
+        end if
+        ! A de Sitter universe is infinitely old at every redshift, so no age names one.
+        if (.not. allocated(error)) then
+            call check(error, ds%z_at_age(1.0_real64) /= ds%z_at_age(1.0_real64), &
+                       "a divergent age must answer NaN at every t")
+        end if
+
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+        if (allocated(error)) return
+        call check(error, .not. any(raised), "a refused age must raise no IEEE flag")
+
+    end subroutine test_z_at_age_outside_its_bounds_is_nan
+
+    !> `%z_at_luminosity_distance` and `%z_at_distmod`, asserted in `D_L` and in `mu`.
+    !!
+    !! The closed models in the grid go through the panel walk rather than the monotone bracket,
+    !! so both paths are covered. The round trip is asserted in the QUANTITY, as stage one's are:
+    !! at the top of the domain a `D_L` carrying one ulp fixes the redshift only loosely, and that
+    !! is the mathematics rather than the iteration.
+    subroutine test_z_at_luminosity_and_distmod_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: z, d, mu, back
+        integer            :: i, k, bad_i, bad_k
+
+        bad_i = 0
+        bad_k = 0
+        do i = 1, n_cmodel
+            call build(c, i)
+            do k = 0, 50
+                z = pf_zeta2z(45.0_real64 * real(k, real64) / 50.0_real64 * 0.5_real64)
+                d = c%luminosity_distance(z)
+                if (.not. (d > 0.0_real64)) cycle
+                back = c%z_at_luminosity_distance(d)
+                if (.not. agrees(c%luminosity_distance(back), d, STAGE2_INVERSE_TOL)) then
+                    bad_i = i
+                    bad_k = k
+                end if
+                mu = c%distmod(z)
+                back = c%z_at_distmod(mu)
+                if (.not. agrees(c%distmod(back), mu, STAGE2_INVERSE_TOL)) then
+                    bad_i = i
+                    bad_k = k
+                end if
+            end do
+        end do
+        call check(error, bad_i == 0, "the luminosity-distance inverses must round trip; " // &
+                   trim(cmodel_label(max(bad_i, 1))) // " failed at sweep index " // itoa(bad_k))
+        if (allocated(error)) return
+
+        ! The redshift itself, where the forward function is well conditioned.
+        call c%init("Planck18")
+        do k = 1, 5
+            z = 0.1_real64 * real(k, real64)
+            call check(error, agrees(c%z_at_luminosity_distance(c%luminosity_distance(z)), z, &
+                                     1.0e-12_real64), "z must come back from its D_L")
+            if (allocated(error)) return
+            call check(error, agrees(c%z_at_distmod(c%distmod(z)), z, 1.0e-12_real64), &
+                       "z must come back from its distance modulus")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_z_at_luminosity_and_distmod_round_trip
+
+    !> A negative `D_L`, one past the ceiling, and a distance modulus that would overflow.
+    subroutine test_z_at_luminosity_answers_only_forward_redshifts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: nan, top
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        call c%init("Planck18")
+        nan = ieee_value(nan, ieee_quiet_nan)
+        top = c%luminosity_distance(1.0e10_real64)
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+
+        call check(error, c%z_at_luminosity_distance(nan) /= c%z_at_luminosity_distance(nan), &
+                   "a NaN D_L must answer NaN")
+        if (.not. allocated(error)) then
+            ! `D_L` is negative at a blueshift and returns to zero as z -> -1, so a negative
+            ! value names two redshifts or none; this binding answers z >= 0 only.
+            call check(error, c%z_at_luminosity_distance(-1.0_real64) &
+                       /= c%z_at_luminosity_distance(-1.0_real64), &
+                       "a negative D_L must answer NaN, not the blueshift that shares it")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_luminosity_distance(0.0_real64) == 0.0_real64, &
+                       "a zero D_L must answer z = 0 exactly")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_luminosity_distance(2.0_real64 * top) &
+                       /= c%z_at_luminosity_distance(2.0_real64 * top), &
+                       "a D_L past the domain's ceiling must answer NaN")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_luminosity_distance(top) == c%z_at_luminosity_distance(top), &
+                       "the D_L at the ceiling itself must answer a number")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_distmod(nan) /= c%z_at_distmod(nan), &
+                       "a NaN distance modulus must answer NaN")
+        end if
+        if (.not. allocated(error)) then
+            ! `10^((mu - 25)/5)` would overflow well before this.
+            call check(error, c%z_at_distmod(1.0e6_real64) /= c%z_at_distmod(1.0e6_real64), &
+                       "a distance modulus whose D_L would overflow must answer NaN")
+        end if
+        if (.not. allocated(error)) then
+            call check(error, c%z_at_distmod(-1.0e6_real64) == 0.0_real64, &
+                       "a distance modulus whose D_L underflows must answer z = 0")
+        end if
+
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+        if (allocated(error)) return
+        call check(error, .not. any(raised), "a refused luminosity distance must raise no flag")
+
+    end subroutine test_z_at_luminosity_answers_only_forward_redshifts
 
 #ifndef __flang__
     !> Can overflow, invalid and divide-by-zero all be held off around a call?

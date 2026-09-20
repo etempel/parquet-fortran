@@ -1966,8 +1966,8 @@ contains
 
 end module test_module_surface_prima
 
-!> `parquet_cosmology` alone: both `%init` forms, one binding of each family, the three free
-!! functions, and the statement that the module re-exports no setting.
+!> `parquet_cosmology` alone: both `%init` forms, one binding of each of the five families, the
+!! three free functions, and the statement that the module re-exports no setting.
 module test_module_surface_cosmology
     use parquet_cosmology                ! THE ONLY library import.
     use iso_fortran_env, only : real64
@@ -2018,6 +2018,27 @@ contains
             what = "%z_at_comoving_distance"
         if (what == "" .and. abs(c%z_at_lookback_time(c%lookback_time(2.0_real64)) - 2.0_real64) &
             > 1.0e-9_real64) what = "%z_at_lookback_time"
+
+        ! What the universe is made of at a redshift, and the three further inverses.
+        if (what == "" .and. abs(c%om(0.0_real64) - c%om0()) > 1.0e-12_real64) what = "%om"
+        if (what == "" .and. abs(c%om(2.0_real64) + c%ode(2.0_real64) + c%ok(2.0_real64) &
+            + c%ogamma(2.0_real64) + c%onu(2.0_real64) - 1.0_real64) > 1.0e-12_real64) &
+            what = "%om/%ode/%ok/%ogamma/%onu"
+        if (what == "" .and. abs(c%tcmb(1.0_real64) - 2.0_real64 * c%tcmb0()) > 1.0e-12_real64) &
+            what = "%tcmb"
+        if (what == "" .and. c%w(1.0_real64) /= -1.0_real64) what = "%w"
+        if (what == "" .and. c%de_density_scale(1.0_real64) /= 1.0_real64) what = "%de_density_scale"
+        if (what == "" .and. abs(c%critical_density(0.0_real64) - 1.2705e11_real64) &
+            > 1.0e8_real64) what = "%critical_density"
+        if (what == "" .and. abs(c%lookback_distance(1.0_real64) - 2433.05_real64) > 1.0_real64) &
+            what = "%lookback_distance"
+        if (what == "" .and. abs(c%odm0() - (c%om0() - c%ob0())) > 1.0e-15_real64) what = "%odm0"
+        if (what == "" .and. abs(c%z_at_age(c%age(2.0_real64)) - 2.0_real64) > 1.0e-9_real64) &
+            what = "%z_at_age"
+        if (what == "" .and. abs(c%z_at_luminosity_distance(c%luminosity_distance(1.5_real64)) &
+            - 1.5_real64) > 1.0e-9_real64) what = "%z_at_luminosity_distance"
+        if (what == "" .and. abs(c%z_at_distmod(c%distmod(1.5_real64)) - 1.5_real64) &
+            > 1.0e-9_real64) what = "%z_at_distmod"
 
         ! The parameter form, and the parameter queries.
         call sim%init(h0 = 70.0_real64, om0 = 0.3_real64, name = "my_sim")

@@ -10,22 +10,25 @@
 !! dl = cosmo%luminosity_distance(z)                    ! Mpc, a whole column in one call
 !! ```
 !!
-!! Four families, all over `real64`:
+!! Five families, all over `real64`:
 !!
 !! * **Distances** -- `%comoving_distance`, `%comoving_transverse_distance`,
 !!   `%luminosity_distance`, `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`,
-!!   `%comoving_volume`, `%differential_comoving_volume` and `%distmod`, with
-!!   `%comoving_distance_zeta` taking the table's own coordinate directly.
+!!   `%comoving_volume`, `%differential_comoving_volume`, `%lookback_distance` and `%distmod`,
+!!   with `%comoving_distance_zeta` taking the table's own coordinate directly.
 !! * **Times** -- `%lookback_time` and `%age`, in Gyr.
 !! * **The expansion** -- `%efunc`, `%inv_efunc`, `%hubble`, and the transverse scales
 !!   `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`, `%arcsec_per_kpc_proper` and
 !!   `%arcsec_per_kpc_comoving`.
-!! * **Inverses** -- `%z_at_comoving_distance` and `%z_at_lookback_time`.
+!! * **The contents of the universe at `z`** -- `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum
+!!   to one, with `%tcmb`, `%w`, `%de_density_scale` and `%critical_density`.
+!! * **Inverses** -- `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`,
+!!   `%z_at_luminosity_distance` and `%z_at_distmod`.
 !!
 !! plus the parameter queries (`%h0`, `%om0`, `%ode0`, `%ok0`, `%ogamma0`, `%onu0`, `%ob0`,
-!! `%tcmb0`, `%tnu0`, `%neff`, `%w0`, `%wa`, `%little_h`, `%hubble_distance`, `%hubble_time`,
-!! `%zmax`), the flags (`%is_flat`, `%has_massive_nu`, `%is_initialised`), the three subroutines
-!! `%get_name`, `%describe` and `%m_nu`, and `%clear`.
+!! `%odm0`, `%tcmb0`, `%tnu0`, `%neff`, `%w0`, `%wa`, `%little_h`, `%hubble_distance`,
+!! `%hubble_time`, `%zmax`), the flags (`%is_flat`, `%has_massive_nu`, `%is_initialised`), the
+!! three subroutines `%get_name`, `%describe` and `%m_nu`, and `%clear`.
 !!
 !! Three free functions need no cosmology: `pf_z2zeta` and `pf_zeta2z` between a redshift and
 !! `zeta = ln(1 + z)`, each exact to rounding at every argument where `log(1 + z)` and
@@ -120,6 +123,11 @@ module parquet_cosmology
         !! A gigayear in seconds, on the Julian year. For `t_H`.
     real(real64), parameter :: pfc_nu_temp_ratio = 0.7137658555036082_real64
         !! `(4/11)^(1/3)`, the neutrino-to-photon temperature ratio. For `T_nu0`.
+    real(real64), parameter :: pfc_gm_sun = 1.3271244e20_real64
+        !! The IAU 2015 nominal solar mass parameter `GM_sun` in m^3 s^-2, exact as resolution B3
+        !! writes it. The solar mass `%critical_density` reports in is this over `pfc_g_si`, which
+        !! is how astropy derives its own `M_sun`; the choice is named in that binding's
+        !! doc-comment because a critical density is quoted in three different units in the wild.
 
     real(real64), parameter :: pfc_komatsu_a = 0.22710731766_real64
         !! astropy's per-species relativistic neutrino density in units of the photon density.
@@ -198,6 +206,13 @@ module parquet_cosmology
         !! `|w0|` and `|wa|` are admitted up to this, which bounds the CPL exponent by 15.
     real(real64), parameter :: PFC_EXP_CEILING = 709.0_real64
         !! Above this an `exp` would overflow, so the answer is `+Infinity` instead.
+    real(real64), parameter :: PFC_DE_EXP_CEILING = 695.0_real64
+        !! The CPL exponent's own ceiling, fourteen below `PFC_EXP_CEILING`. What has to stay
+        !! finite is `Ode0 f_DE`, not `f_DE`, and `ode0` is admitted up to `PFC_DENSITY_CEILING`,
+        !! whose logarithm is 13.8. Screening `f_DE` alone at 709 leaves the PRODUCT free to
+        !! overflow, which answers the same `+Infinity` but raises `IEEE_OVERFLOW` on the way --
+        !! fatal under nagfor's default `-ieee=stop`. No model reaches between the two ceilings by
+        !! accident: the exponent passes both within a hair's breadth of `z = -1`.
     real(real64), parameter :: PFC_SINH_CEILING = 700.0_real64
         !! Above this a `sinh` would overflow, so the answer is `+Infinity` instead.
     real(real64), parameter :: PFC_Z1P_EXACT = 0.5_real64
@@ -269,6 +284,10 @@ module parquet_cosmology
         real(real64) :: t_inv_top = 0.0_real64 !! the largest `t_L` the inverse table covers
         real(real64) :: zeta_d_inv = 0.0_real64 !! the `zeta` at `d_inv_top`
         real(real64) :: zeta_t_inv = 0.0_real64 !! the `zeta` at `t_inv_top`
+        real(real64) :: rho_crit0 = 0.0_real64 !! `rho_crit(0)` in M_sun/Mpc^3
+        real(real64) :: a_n       = 0.0_real64 !! `age(zeta_n)`, where the age's own fallback starts
+        real(real64) :: a_ceiling = 0.0_real64 !! `age(+PFC_ZETA_CEILING)`: the SMALLEST age attained
+        real(real64) :: a_floor   = 0.0_real64 !! `age(-PFC_ZETA_CEILING)`: the LARGEST
         integer      :: n_nu      = 0          !! `floor(neff)`: the number of species
         integer      :: n_massless = 0         !! how many of them have zero mass
     end type cosmology_derived
@@ -329,8 +348,21 @@ module parquet_cosmology
         procedure :: kpc_comoving_per_arcmin => cosmology_kpc_comoving !! Comoving kpc per arcminute.
         procedure :: arcsec_per_kpc_proper => cosmology_arcsec_proper !! Arcseconds per proper kpc.
         procedure :: arcsec_per_kpc_comoving => cosmology_arcsec_comoving !! Arcseconds per comoving kpc.
+        procedure :: om => cosmology_om                 !! `Om(z)`, the matter density parameter at `z`.
+        procedure :: ode => cosmology_ode               !! `Ode(z)`, the dark-energy density parameter.
+        procedure :: ok => cosmology_ok                 !! `Ok(z)`, the curvature density parameter.
+        procedure :: ogamma => cosmology_ogamma         !! `Ogamma(z)`, the photon density parameter.
+        procedure :: onu => cosmology_onu               !! `Onu(z)`, the neutrino density parameter.
+        procedure :: tcmb => cosmology_tcmb             !! `T_CMB(z)` in K.
+        procedure :: w => cosmology_w                   !! `w(z)`, the dark-energy equation of state.
+        procedure :: de_density_scale => cosmology_de_density_scale !! `f_DE(z)`, the CPL factor.
+        procedure :: critical_density => cosmology_critical_density !! `rho_crit(z)` in M_sun/Mpc^3.
+        procedure :: lookback_distance => cosmology_lookback_distance !! `c t_L(z)` in Mpc.
         procedure :: z_at_comoving_distance => cosmology_z_at_distance !! The redshift at a `D_C`.
         procedure :: z_at_lookback_time => cosmology_z_at_lookback !! The redshift at a `t_L`.
+        procedure :: z_at_age => cosmology_z_at_age     !! The redshift at which the universe was `t` old.
+        procedure :: z_at_luminosity_distance => cosmology_z_at_luminosity !! The redshift at a `D_L`.
+        procedure :: z_at_distmod => cosmology_z_at_distmod !! The redshift at a distance modulus.
         procedure :: hubble_distance => cosmology_hubble_distance !! `D_H` in Mpc.
         procedure :: hubble_time => cosmology_hubble_time !! `t_H` in Gyr.
         procedure :: h0 => cosmology_h0                 !! `H0` in km/s/Mpc.
@@ -341,6 +373,7 @@ module parquet_cosmology
         procedure :: ogamma0 => cosmology_ogamma0       !! `Ogamma0`.
         procedure :: onu0 => cosmology_onu0             !! `Onu0`.
         procedure :: ob0 => cosmology_ob0               !! `Ob0`, or NaN when none was given.
+        procedure :: odm0 => cosmology_odm0             !! `Odm0 = Om0 - Ob0`, or NaN.
         procedure :: tcmb0 => cosmology_tcmb0           !! `Tcmb0` in K.
         procedure :: tnu0 => cosmology_tnu0             !! `T_nu0` in K.
         procedure :: neff => cosmology_neff             !! `Neff`.
@@ -629,6 +662,112 @@ module parquet_cosmology
 
     end interface
 
+    ! ---- The density parameters at a redshift, and what goes with them ------------------------
+    !
+    ! Each is a term of `E^2` over `E^2`, formed at the SAME `x = e^zeta` the kernel uses, so
+    ! `%om + %ok + %ogamma + %onu + %ode` is one to within a few ulp at every redshift. Where the
+    ! CPL factor has overflowed -- a big-rip model approaching `z = -1` -- `E^2` is `+Infinity` and
+    ! the five answer the limit, `%ode(z) = 1` and the other four zero, rather than `Infinity /
+    ! Infinity`, which would be a NaN and an `IEEE_INVALID`.
+
+    interface
+
+        !> `Om(z) = Om0 (1+z)^3 / E(z)^2`, the matter density parameter at `z`.
+        !!
+        !! Massive neutrinos are NOT counted here; they are in `%onu`, as astropy counts them.
+        pure elemental module function cosmology_om(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Om(z)`
+        end function cosmology_om
+
+        !> `Ode(z) = Ode0 f_DE(z) / E(z)^2`, the dark-energy density parameter at `z`.
+        pure elemental module function cosmology_ode(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Ode(z)`
+        end function cosmology_ode
+
+        !> `Ok(z) = Ok0 (1+z)^2 / E(z)^2`. Exactly zero at every `z` for a flat model.
+        pure elemental module function cosmology_ok(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Ok(z)`
+        end function cosmology_ok
+
+        !> `Ogamma(z) = Ogamma0 (1+z)^4 / E(z)^2`, the PHOTON density parameter: neutrinos are
+        !! `%onu`. Exactly zero at every `z` when `Tcmb0` is zero.
+        pure elemental module function cosmology_ogamma(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Ogamma(z)`
+        end function cosmology_ogamma
+
+        !> `Onu(z) = Ogamma(z) nu_rel(z)`, the neutrino density parameter at `z`.
+        !!
+        !! `nu_rel` is Komatsu's fit, so a massive species crosses over from `x^4` scaling to `x^3`
+        !! as it becomes non-relativistic. Exactly zero at every `z` when `Tcmb0` is zero, which
+        !! switches neutrinos off entirely whatever `m_nu` says.
+        pure elemental module function cosmology_onu(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Onu(z)`
+        end function cosmology_onu
+
+        !> `T_CMB(z) = Tcmb0 (1+z)`, in K. Zero at every `z` when `Tcmb0` is zero.
+        pure elemental module function cosmology_tcmb(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `T_CMB(z)` in K
+        end function cosmology_tcmb
+
+        !> `w(z) = w0 + wa z / (1 + z)`, the dark-energy equation of state. Exactly `w0` at `z = 0`.
+        !!
+        !! Formed on `z/(1 + z)` as astropy forms it, which keeps its digits at a small `z` where
+        !! `1 - e^-zeta` would not. It is LARGE at a deep blueshift -- `z/(1 + z)` is `-1e5` at
+        !! `z = -0.99999` -- which is the equation of state that model really has there.
+        pure elemental module function cosmology_w(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `w(z)`
+        end function cosmology_w
+
+        !> `f_DE(z) = (1+z)^(3(1 + w0 + wa)) exp(-3 wa z/(1+z))`: the dark-energy density in units
+        !! of its value today. Exactly 1 at every `z` for a cosmological constant.
+        !!
+        !! `+Infinity` where the CPL exponent passes 709, which a big-rip model reaches as
+        !! `z -> -1`; the density really does diverge there, and `%ode(z)` answers 1.
+        pure elemental module function cosmology_de_density_scale(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `f_DE(z)`
+        end function cosmology_de_density_scale
+
+        !> `rho_crit(z) = rho_crit(0) E(z)^2`, in **solar masses per cubic megaparsec**.
+        !!
+        !! astropy reports this one in g/cm^3; M_sun/Mpc^3 is what a halo-mass calculation wants,
+        !! so that is the unit here and the conversion is never implicit. The solar mass is the IAU
+        !! 2015 nominal `GM_sun = 1.3271244e20 m^3 s^-2` divided by this module's own
+        !! `G = 6.6743e-11`, which is how astropy derives `M_sun` too, so the two agree to rounding
+        !! once the units are matched. `+Infinity` where `E^2` is.
+        pure elemental module function cosmology_critical_density(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `rho_crit(z)` in M_sun/Mpc^3
+        end function cosmology_critical_density
+
+        !> `c t_L(z) = D_H t_L(z) / t_H`, in Mpc: the lookback time as a distance.
+        !!
+        !! NOT a distance to anything -- it is smaller than `D_C` at every positive redshift -- and
+        !! NEGATIVE at a blueshift, where the lookback time is.
+        pure elemental module function cosmology_lookback_distance(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `c t_L` in Mpc
+        end function cosmology_lookback_distance
+
+    end interface
+
     ! ---- The inverses -------------------------------------------------------------------------
 
     interface
@@ -652,6 +791,48 @@ module parquet_cosmology
             real(real64), intent(in)        :: t    !! lookback time in Gyr
             real(real64)                    :: z    !! the redshift there
         end function cosmology_z_at_lookback
+
+        !> The redshift at which the universe was `t` Gyr old.
+        !!
+        !! Solved on `ln(age)`, never on `%age(0) - t`: the age is a fifth of an attosecond at the
+        !! top of the domain while `%age(0)` is fourteen billion years, so the difference form
+        !! answers an arbitrary redshift there while the logarithm keeps every digit.
+        !!
+        !! NaN for a `t` outside `[age(zeta_ceiling), age(-zeta_ceiling)]`, the two bounds `%init`
+        !! stores, and NaN at every `t` for a model whose age integral diverges -- such a universe
+        !! is infinitely old at every redshift, so no age names one.
+        pure elemental module function cosmology_z_at_age(this, t) result(z)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: t    !! the age in Gyr
+            real(real64)                    :: z    !! the redshift there
+        end function cosmology_z_at_age
+
+        !> The redshift at which the luminosity distance is `d`.
+        !!
+        !! **Answers a redshift at or above zero only**, and the SMALLEST one where `d` is reached.
+        !! `D_L` is not one-to-one over the whole domain: it is strictly increasing in `z >= 0` for
+        !! a flat or open model, but a blueshift carries it back to zero as `z -> -1` (the factor
+        !! `1 + z` vanishes while `D_M` stays finite), and in a closed model `D_M` turns over at the
+        !! antipode. So a negative `d` answers NaN rather than the blueshift that shares it, a `d`
+        !! above `D_L(zeta_ceiling)` answers NaN, and a closed model is searched outward in unit
+        !! panels of `zeta` from `z = 0` so that the first crossing is the one returned.
+        pure elemental module function cosmology_z_at_luminosity(this, d) result(z)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: d    !! `D_L` in Mpc, at or above zero
+            real(real64)                    :: z    !! the redshift there
+        end function cosmology_z_at_luminosity
+
+        !> The redshift at which the distance modulus is `mu`.
+        !!
+        !! `%z_at_luminosity_distance(10^((mu - 25)/5))`, so it carries that binding's contract
+        !! exactly: a redshift at or above zero, the smallest one, NaN where there is none. A `mu`
+        !! so large that `10^((mu - 25)/5)` would overflow answers NaN, and one so small that it
+        !! would underflow answers zero.
+        pure elemental module function cosmology_z_at_distmod(this, mu) result(z)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: mu   !! the distance modulus in magnitudes
+            real(real64)                    :: z    !! the redshift there
+        end function cosmology_z_at_distmod
 
     end interface
 
@@ -718,6 +899,14 @@ module parquet_cosmology
             class(pf_cosmology), intent(in) :: this !! the cosmology
             real(real64)                    :: v    !! `Ob0`, or NaN
         end function cosmology_ob0
+
+        !> `Odm0 = Om0 - Ob0`, the cold dark matter density today, or NaN when no `ob0` was given.
+        !!
+        !! `Om0` here is astropy's: it excludes massive neutrinos, so this does too.
+        pure module function cosmology_odm0(this) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64)                    :: v    !! `Odm0`, or NaN
+        end function cosmology_odm0
 
         !> `Tcmb0` in K, as given.
         pure module function cosmology_tcmb0(this) result(v)

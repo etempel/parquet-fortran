@@ -134,6 +134,7 @@ MPC_KM = mp.mpf("3.0856775814913673e19")        # IAU 2015 parsec
 MPC_M = mp.mpf("3.0856775814913673e22")
 GYR_S = mp.mpf("3.15576e16")                    # Julian year
 NU_TEMP_RATIO = mp.mpf("0.7137658555036082")    # (4/11)^(1/3)
+GM_SUN = mp.mpf("1.3271244e20")                 # IAU 2015 nominal GM_sun, m^3 s^-2
 
 KOM_A = mp.mpf("0.22710731766")                 # astropy's per-species relativistic density
 KOM_B = mp.mpf("1.83")                          # KOMATSU_P
@@ -151,6 +152,7 @@ SPEC_CONSTANTS = {
     "pfc_mpc_m": MPC_M,
     "pfc_gyr_s": GYR_S,
     "pfc_nu_temp_ratio": NU_TEMP_RATIO,
+    "pfc_gm_sun": GM_SUN,
     "pfc_komatsu_a": KOM_A,
     "pfc_komatsu_p": KOM_B,
     "pfc_komatsu_invp": KOM_INVP,
@@ -158,7 +160,12 @@ SPEC_CONSTANTS = {
 }
 
 #: `exp(L)` is `+Infinity` above this, and `sinh` is screened one unit lower (section 4.8).
+#: The CPL exponent is screened FOURTEEN lower again, because what has to stay finite is
+#: `Ode0 f_DE` and `Ode0` is admitted up to 1e6, whose logarithm is 13.8: screening `f_DE` alone at
+#: 709 leaves the product free to overflow, which raises `IEEE_OVERFLOW` on its way to the same
+#: `+Infinity`. No model in the grid has an exponent between the two ceilings.
 EXP_CEILING = mp.mpf(709)
+DE_EXP_CEILING = mp.mpf(695)
 SINH_CEILING = mp.mpf(700)
 
 
@@ -197,11 +204,14 @@ class Cosmology(object):
         self.has_massive_nu = self.n_massless != self.n_nu
 
         self.tnu0 = NU_TEMP_RATIO * self.tcmb0
+        h0_si = self.h0 * 1000 / MPC_M
+        rho_crit0 = 3 * h0_si ** 2 / (8 * mp.pi * G_SI)
+        # In M_sun/Mpc^3, which is `%critical_density`'s unit: the solar mass is the IAU 2015
+        # nominal `GM_sun` over this model's own `G`, which is how astropy derives `M_sun` too.
+        self.rho_crit0 = rho_crit0 * MPC_M ** 3 / (GM_SUN / G_SI)
         if self.tcmb0 == 0:
             self.ogamma0 = mp.mpf(0)
         else:
-            h0_si = self.h0 * 1000 / MPC_M
-            rho_crit0 = 3 * h0_si ** 2 / (8 * mp.pi * G_SI)
             rho_gamma0 = 4 * SIGMA_SB * self.tcmb0 ** 4 / C_MS ** 3
             self.ogamma0 = rho_gamma0 / rho_crit0
         self.onu0 = self.ogamma0 * self.nu_rel(mp.mpf(1))
@@ -227,7 +237,13 @@ class Cosmology(object):
     # -- the expansion function ----------------------------------------------------------------
 
     def nu_rel(self, x):
-        """The relativistic neutrino density in units of the photon density, at `x = 1 + z`."""
+        """The relativistic neutrino density in units of the photon density, at `x = 1 + z`.
+
+        `Tcmb0 = 0` switches radiation AND NEUTRINOS off entirely, as astropy does; without that
+        first arm a massive species divides by a zero neutrino temperature.
+        """
+        if self.tnu0 == 0:
+            return mp.mpf(0)
         if self.n_nu == 0 or not self.has_massive_nu:
             return KOM_A * self.neff
         total = mp.mpf(self.n_massless)
@@ -248,14 +264,29 @@ class Cosmology(object):
         ell = self.f_de_log(x)
         if ell is None:
             return mp.mpf(1)
-        if screened and ell > EXP_CEILING:
+        if screened and ell > DE_EXP_CEILING:
             return mp.inf
+        if screened and ell < -DE_EXP_CEILING:
+            # Symmetric with the ceiling. mpmath's exponent range is unbounded, so nothing here
+            # underflows; the floor is the library's contract restated, where `exp(ell)` would
+            # otherwise run down through the subnormals and raise `IEEE_UNDERFLOW`.
+            return mp.mpf(0)
         return mp.exp(ell)
+
+    def de_term(self, x, screened=True):
+        """`Ode0 f_DE`, the dark-energy TERM of `E^2`.
+
+        The product, never the two factors separately: past the CPL screen `f_DE` is `+Infinity`,
+        and a model with no dark energy at all would form `0 * Infinity` for a term that is zero.
+        """
+        if self.ode0 == 0:
+            return mp.mpf(0)
+        return self.ode0 * self.f_de(x, screened)
 
     def e2(self, zeta, screened=True):
         """`E^2` at `zeta = ln(1 + z)`."""
         x = mp.exp(zeta)
-        total = self.om0 * x ** 3 + self.ok0 * x ** 2 + self.ode0 * self.f_de(x, screened)
+        total = self.om0 * x ** 3 + self.ok0 * x ** 2 + self.de_term(x, screened)
         if self.ogamma0 != 0:
             total += self.ogamma0 * x ** 4 * (1 + self.nu_rel(x))
         return total
@@ -344,7 +375,27 @@ class Cosmology(object):
         kpc_c = 1000 * dm * rad_min
         arc_p = mp.inf if da == 0 else 1 / (1000 * da * rad_sec)
         arc_c = mp.inf if dm == 0 else 1 / (1000 * dm * rad_sec)
-        return [dc, dm, dl, da, tl, age, vc, dv, mu, kpc_p, kpc_c, arc_p, arc_c, ev, self.h0 * ev]
+
+        # The density parameters are terms of `E^2` over `E^2`, formed at the same `x`, so the
+        # five of them sum to one. Where the CPL factor has overflowed, `E^2` is infinite and the
+        # LIMIT is taken -- dark energy is all of it -- rather than `Infinity / Infinity`.
+        e2 = self.e2(zeta)
+        if e2 == mp.inf:
+            om_z, ok_z, og_z, onu_z, ode_z = (mp.mpf(0),) * 4 + (mp.mpf(1),)
+            rho_z = mp.inf
+        elif e2 != e2 or e2 <= 0:
+            om_z = ok_z = og_z = onu_z = ode_z = rho_z = mp.nan
+        else:
+            om_z = self.om0 * x ** 3 / e2
+            ok_z = self.ok0 * x ** 2 / e2
+            og_z = self.ogamma0 * x ** 4 / e2
+            onu_z = og_z * self.nu_rel(x)
+            ode_z = self.de_term(x) / e2
+            rho_z = self.rho_crit0 * e2
+        w_z = self.w0 if self.wa == 0 else self.w0 + self.wa * z / x
+        return [dc, dm, dl, da, tl, age, vc, dv, mu, kpc_p, kpc_c, arc_p, arc_c, ev, self.h0 * ev,
+                om_z, ode_z, ok_z, og_z, onu_z, self.tcmb0 * x, w_z, self.f_de(x), rho_z,
+                self.dh * tl / self.th]
 
     def angular_diameter_z1z2(self, z1, z2):
         """astropy's transverse-of-the-difference form; NEGATIVE when `z2 < z1`."""
@@ -356,7 +407,9 @@ class Cosmology(object):
 
 #: The quantities of each row, in the order the emitted arrays carry them.
 CQ_NAMES = ["dc", "dm", "dl", "da", "tl", "age", "vc", "dv", "mu",
-            "kpc_proper", "kpc_comoving", "arcsec_proper", "arcsec_comoving", "efunc", "hubble"]
+            "kpc_proper", "kpc_comoving", "arcsec_proper", "arcsec_comoving", "efunc", "hubble",
+            "om", "ode", "ok", "ogamma", "onu", "tcmb", "w", "de_density_scale",
+            "critical_density", "lookback_distance"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -586,15 +639,17 @@ def gen_module():
                [bits64(v) for v in par_values])
     L.append("")
 
-    der_names = ["ok0", "ogamma0", "onu0", "tnu0", "dh", "th", "age0", "little_h"]
+    der_names = ["ok0", "ogamma0", "onu0", "tnu0", "dh", "th", "age0", "little_h", "odm0"]
     L.append("    ! ---- The values `%init` must derive from them ----")
     L.append("    integer, parameter :: n_cderived = %d !! Derived values per model." % len(der_names))
     for n, name in enumerate(der_names, start=1):
         L.append("    integer, parameter :: cd_%s = %d !! Derived `%s`." % (name, n, name))
-    L.append("    !> `age0` is `+Infinity` where `cmodel_age_diverges` is `.true.`.")
+    L.append("    !> `age0` is `+Infinity` where `cmodel_age_diverges` is `.true.`; `odm0` is NaN")
+    L.append("    !! where `cmodel_has_ob0` is `.false.`.")
     der_values = []
     for m in ms:
-        der_values += [m.ok0, m.ogamma0, m.onu0, m.tnu0, m.dh, m.th, m.age0, m.h0 / 100]
+        der_values += [m.ok0, m.ogamma0, m.onu0, m.tnu0, m.dh, m.th, m.age0, m.h0 / 100,
+                       mp.nan if m.ob0 is None else m.om0 - m.ob0]
     L += big_array("integer(int64)", "cmodel_derived_bits", "n_cderived * n_cmodel",
                [bits64(v) for v in der_values])
     L.append("")
@@ -804,6 +859,26 @@ def self_test():
             close(m.age_of_zeta(zeta) + m.lookback_time_zeta(zeta), m.age0, 1e-24,
                   "%s age(%s) + t_L(%s) against age(0)" % (label, z, z))
 
+    # -- the identity the density family is built to keep -------------------------------------
+    for label in ("Planck18", "flat_no_rad", "open", "closed", "w0wacdm", "two_massive"):
+        m = by_label[label]
+        for z in ("0", "0.5", "10", "1100", "-0.5"):
+            row = dict(zip(CQ_NAMES, m.row(z)))
+            total = row["om"] + row["ode"] + row["ok"] + row["ogamma"] + row["onu"]
+            close(total, mp.mpf(1), 1e-26,
+                  "%s Om + Ode + Ok + Ogamma + Onu at z=%s" % (label, z))
+        # `Onu` is `Ogamma` times the fit, so the radiation term of `E^2` is their sum.
+        row = dict(zip(CQ_NAMES, m.row("3")))
+        if m.ogamma0 != 0:
+            close(row["onu"] / row["ogamma"], m.nu_rel(mp.mpf(4)), 1e-26,
+                  "%s Onu/Ogamma is nu_rel at z=3" % label)
+    for label in ("Planck18", "einstein_de_sitter"):
+        m = by_label[label]
+        for z in ("0.5", "1100"):
+            row = dict(zip(CQ_NAMES, m.row(z)))
+            check(row["de_density_scale"] == 1 and row["w"] == -1,
+                  "%s is a cosmological constant, so f_DE is 1 and w is -1 at z=%s" % (label, z))
+
     # -- every emitted literal round-trips ----------------------------------------------------
     for m in ms:
         for z in REDSHIFTS:
@@ -823,7 +898,9 @@ def self_test():
 
 #: Quantities astropy defines the same way at a BLUESHIFT. `distmod` and the angular scales are
 #: left out: their sign conventions are fixed by feature_cosmology.md section 4.2, not inherited.
-NEGATIVE_SAFE = {"dc", "dm", "dl", "da", "tl", "age", "efunc", "hubble"}
+NEGATIVE_SAFE = {"dc", "dm", "dl", "da", "tl", "age", "efunc", "hubble",
+                 "om", "ode", "ok", "ogamma", "onu", "tcmb", "w", "de_density_scale",
+                 "critical_density", "lookback_distance"}
 
 #: The tolerance each quantity is compared at. These are ASTROPY's accuracy, not this model's: the
 #: model is exact to 30 digits and astropy integrates in double precision, so every number here was
@@ -910,6 +987,19 @@ def verify_oracle():
                     "dv": ap.differential_comoving_volume(zf).to_value(u.Mpc ** 3 / u.sr),
                     "efunc": ap.efunc(zf),
                     "hubble": ap.H(zf).to_value(u.km / u.s / u.Mpc),
+                    "om": ap.Om(zf),
+                    "ode": ap.Ode(zf),
+                    "ok": ap.Ok(zf),
+                    "ogamma": ap.Ogamma(zf),
+                    "onu": ap.Onu(zf),
+                    "tcmb": ap.Tcmb(zf).to_value(u.K),
+                    "w": ap.w(zf),
+                    "de_density_scale": ap.de_density_scale(zf),
+                    # astropy reports this one in g/cm^3; M_sun/Mpc^3 is the unit the library
+                    # answers in, and astropy's own `M_sun` is the IAU 2015 `GM_sun` over `G`,
+                    # so the two agree once the conversion is asked for explicitly.
+                    "critical_density": ap.critical_density(zf).to_value(u.Msun / u.Mpc ** 3),
+                    "lookback_distance": ap.lookback_distance(zf).to_value(u.Mpc),
                 }
                 if zf > 0:
                     got["mu"] = ap.distmod(zf).to_value(u.mag)
